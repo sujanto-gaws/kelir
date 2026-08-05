@@ -1,0 +1,1 @@
+-- 0010_notification.sql migration placeholder

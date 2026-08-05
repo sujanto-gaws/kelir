@@ -1,0 +1,1 @@
+-- 0011_integration.sql migration placeholder

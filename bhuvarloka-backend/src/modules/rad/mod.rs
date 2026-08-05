@@ -1,0 +1,1 @@
+// rad module scaffold.

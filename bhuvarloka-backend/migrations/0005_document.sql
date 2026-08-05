@@ -1,0 +1,1 @@
+-- 0005_document.sql migration placeholder

@@ -1,0 +1,1 @@
+-- 0003_master_data.sql migration placeholder

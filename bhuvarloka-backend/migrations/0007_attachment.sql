@@ -1,0 +1,1 @@
+-- 0007_attachment.sql migration placeholder

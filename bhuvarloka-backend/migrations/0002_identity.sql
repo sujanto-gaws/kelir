@@ -1,0 +1,1 @@
+-- 0002_identity.sql migration placeholder

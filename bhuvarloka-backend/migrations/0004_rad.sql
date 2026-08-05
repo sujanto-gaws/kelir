@@ -1,0 +1,1 @@
+-- 0004_rad.sql migration placeholder

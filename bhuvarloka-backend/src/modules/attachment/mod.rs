@@ -1,0 +1,1 @@
+// attachment module scaffold.

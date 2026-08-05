@@ -1,0 +1,1 @@
+-- 0008_comment.sql migration placeholder
