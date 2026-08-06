@@ -1,22 +1,22 @@
-# Bhuvarloka Initial Documents
+# Kelir Initial Documents
 
-Below are the initial documents for **Bhuvarloka**:
+Below are the initial documents for **Kelir**:
 
-1. **Bhuvarloka Software Requirements Specification (SRS)**
-2. **Bhuvarloka Solution Blueprint**
+1. **Kelir Software Requirements Specification (SRS)**
+2. **Kelir Solution Blueprint**
 
 These documents are intended as version **0.1** and can be expanded into formal project documentation before development starts.
 
 ---
 
-# Document 1: Bhuvarloka Software Requirements Specification
+# Document 1: Kelir Software Requirements Specification
 
 ## Document Control
 
 | Item | Detail |
 |---|---|
-| Document Name | Bhuvarloka Software Requirements Specification |
-| Framework Name | Bhuvarloka |
+| Document Name | Kelir Software Requirements Specification |
+| Framework Name | Kelir |
 | Version | 0.1 |
 | Status | Initial Draft |
 | Date | 2026-08-05 |
@@ -32,9 +32,9 @@ These documents are intended as version **0.1** and can be expanded into formal 
 
 ## 1.1 Purpose
 
-The purpose of this document is to define the initial functional and non-functional requirements for **Bhuvarloka**, a document-based business application framework with workflow-driven processing and rapid application development capabilities.
+The purpose of this document is to define the initial functional and non-functional requirements for **Kelir**, a document-based business application framework with workflow-driven processing and rapid application development capabilities.
 
-Bhuvarloka is intended to provide a foundation for building business applications such as:
+Kelir is intended to provide a foundation for building business applications such as:
 
 - Document approval systems
 - Procurement workflows
@@ -51,7 +51,7 @@ Bhuvarloka is intended to provide a foundation for building business application
 
 ## 1.2 Scope
 
-Bhuvarloka is a full-stack framework that provides:
+Kelir is a full-stack framework that provides:
 
 ```text
 Document management
@@ -98,14 +98,14 @@ Implementation teams
 
 | Term | Meaning |
 |---|---|
-| Bhuvarloka | The framework name |
+| Kelir | The framework name |
 | Document | A business transaction object such as request, form, approval, contract, invoice |
 | Document Type | Definition of a class of documents, form, numbering, workflow, rules |
 | Workflow | Controlled process flow with states, tasks, transitions, and approvals |
 | Task | Work item assigned to user or role |
 | Master Data | Core reference data such as employee, supplier, customer, facility, product |
 | RAD | Rapid Application Development |
-| Plugin | Extension that adds features to Bhuvarloka |
+| Plugin | Extension that adds features to Kelir |
 | Integration | Connection with external systems |
 | Audit Trail | Immutable record of business and system actions |
 | RBAC | Role-Based Access Control |
@@ -118,7 +118,7 @@ Implementation teams
 
 ## 2.1 Product Perspective
 
-Bhuvarloka is a document-centric business application framework.
+Kelir is a document-centric business application framework.
 
 The core concept is:
 
@@ -145,7 +145,7 @@ Additional features can be added through configuration, extensions, and plugins.
 | Auditor | Views audit trail, activity logs, and compliance reports |
 | System Integrator | Manages integration with external systems |
 | Plugin Developer | Develops extensions or plugins |
-| Developer | Extends Bhuvarloka core or custom modules |
+| Developer | Extends Kelir core or custom modules |
 
 ---
 
@@ -170,7 +170,7 @@ Deployment: Docker Compose or Kubernetes
 The following assumptions apply to the initial version:
 
 ```text
-Bhuvarloka will start as a modular monolith.
+Kelir will start as a modular monolith.
 PostgreSQL will be the primary database.
 MariaDB support is optional and may require compatibility limitations.
 Workflow engine will be a lightweight internal engine first.
@@ -799,14 +799,14 @@ Machine learning analytics
 
 ---
 
-# Document 2: Bhuvarloka Solution Blueprint
+# Document 2: Kelir Solution Blueprint
 
 ## Document Control
 
 | Item | Detail |
 |---|---|
-| Document Name | Bhuvarloka Solution Blueprint |
-| Framework Name | Bhuvarloka |
+| Document Name | Kelir Solution Blueprint |
+| Framework Name | Kelir |
 | Version | 0.1 |
 | Status | Initial Draft |
 | Date | 2026-08-05 |
@@ -819,7 +819,7 @@ Machine learning analytics
 
 # 1. Blueprint Purpose
 
-This document defines the initial architecture and technical blueprint for **Bhuvarloka**.
+This document defines the initial architecture and technical blueprint for **Kelir**.
 
 It describes:
 
@@ -842,7 +842,7 @@ Development roadmap
 
 # 2. Architecture Style
 
-Bhuvarloka will use:
+Kelir will use:
 
 ```text
 Modular Monolith Backend
@@ -883,7 +883,7 @@ Event streaming
 
 ```text
 +---------------------------------------------------------------+
-|                      Bhuvarloka Frontend                      |
+|                      Kelir Frontend                      |
 |                                                               |
 |  Vue 3 + Vite + TypeScript                                    |
 |  Pinia + Vue Router                                           |
@@ -899,7 +899,7 @@ Event streaming
                               | REST / JSON
                               v
 +---------------------------------------------------------------+
-|                       Bhuvarloka Backend                      |
+|                       Kelir Backend                      |
 |                                                               |
 |  Rust + Axum + Tokio                                          |
 |                                                               |
@@ -1062,7 +1062,7 @@ BhuvarlokaOpenApiModule
 Initial simple structure:
 
 ```text
-bhuvarloka-backend/
+kelir-backend/
 ├── Cargo.toml
 ├── migrations/
 │   ├── 0001_core.sql
@@ -1186,7 +1186,7 @@ BhuvarlokaTypeModule
 ## 6.3 Frontend Folder Blueprint
 
 ```text
-bhuvarloka-frontend/
+kelir-frontend/
 ├── package.json
 ├── vite.config.ts
 ├── tsconfig.json
@@ -1567,7 +1567,7 @@ External system called
         ↓
 Response logged
         ↓
-Bhuvarloka state updated
+Kelir state updated
 ```
 
 ---
@@ -1855,7 +1855,7 @@ Login page
 Deliverable:
 
 ```text
-Running Bhuvarloka skeleton
+Running Kelir skeleton
 ```
 
 ---
@@ -1877,7 +1877,7 @@ Role CRUD
 Deliverable:
 
 ```text
-Authenticated Bhuvarloka application
+Authenticated Kelir application
 ```
 
 ---
@@ -2023,7 +2023,7 @@ Plugin manager UI
 Deliverable:
 
 ```text
-Extensible Bhuvarloka platform foundation
+Extensible Kelir platform foundation
 ```
 
 ---
@@ -2074,8 +2074,8 @@ The next practical steps are:
 ```text
 1. Approve SRS v0.1 and Blueprint v0.1.
 2. Finalize repository structure.
-3. Initialize Bhuvarloka backend skeleton using Rust and Axum.
-4. Initialize Bhuvarloka frontend skeleton using Vue, Vite, TypeScript, shadcn-vue, Tailwind CSS v4.
+3. Initialize Kelir backend skeleton using Rust and Axum.
+4. Initialize Kelir frontend skeleton using Vue, Vite, TypeScript, shadcn-vue, Tailwind CSS v4.
 5. Prepare Docker Compose for PostgreSQL, backend, frontend, MinIO, and Mailpit.
 6. Create initial database migrations.
 7. Implement health endpoint.
@@ -2090,7 +2090,7 @@ The next practical steps are:
 
 # 19. Final Statement
 
-**Bhuvarloka** will be a document-based, workflow-driven, rapid application development framework with the following foundation:
+**Kelir** will be a document-based, workflow-driven, rapid application development framework with the following foundation:
 
 ```text
 Rust backend

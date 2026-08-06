@@ -6,7 +6,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            app_name: String::from("Bhuvarloka"),
+            app_name: String::from("Kelir"),
         }
     }
 }

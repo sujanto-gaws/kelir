@@ -10,5 +10,5 @@ mod utils;
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
-    println!("Bhuvarloka backend skeleton is ready");
+    println!("Kelir backend skeleton is ready");
 }

@@ -1,6 +1,6 @@
-# Bhuvarloka
+# Kelir
 
-Bhuvarloka is a document-based business application framework with workflow-driven processing and rapid application development (RAD) capabilities.
+Kelir is a document-based business application framework with workflow-driven processing and rapid application development (RAD) capabilities.
 
 This repository is initialized from the SRS and solution blueprint in docs/requirements/srs.md (v0.1, dated 2026-08-05).
 
@@ -37,7 +37,7 @@ The MVP focuses on:
 ├── docs/
 │   └── requirements/
 │       └── srs.md
-├── bhuvarloka-backend/
+├── kelir-backend/
 │   ├── Cargo.toml
 │   ├── migrations/
 │   │   ├── 0001_core.sql
@@ -81,7 +81,7 @@ The MVP focuses on:
 │       │   ├── integration/
 │       │   └── plugin/
 │       └── utils/
-├── bhuvarloka-frontend/
+├── kelir-frontend/
 │   ├── package.json
 │   ├── vite.config.ts
 │   ├── tsconfig.json
@@ -139,14 +139,14 @@ Services provided:
 Backend:
 
 ```bash
-cd bhuvarloka-backend
+cd kelir-backend
 cargo run
 ```
 
 Frontend:
 
 ```bash
-cd bhuvarloka-frontend
+cd kelir-frontend
 npm install
 npm run dev
 ```
