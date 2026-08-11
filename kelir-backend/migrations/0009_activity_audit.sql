@@ -1,1 +1,0 @@
--- 0009_activity_audit.sql migration placeholder

@@ -192,7 +192,20 @@ Services provided:
 - minio: object storage for attachments
 - mailpit: local SMTP capture
 
-> **Note:** the backend does not serve an API yet — `src/main.rs` prints one line and exits, so its container stops right after starting. The other four services run. This closes in Phase 1, when the router and health endpoints land.
+Once up, `GET http://localhost:8080/health` returns `{"status":"ok"}`, and the generated OpenAPI document is at `http://localhost:8080/api/docs/openapi.json`.
+
+### Port conflicts
+
+Every host port is configurable, because the defaults collide with common local services. Override any of them in the environment or in a `.env` beside `docker-compose.yml`:
+
+```bash
+KELIR_POSTGRES_PORT=55433 KELIR_MINIO_PORT=9100 KELIR_MINIO_CONSOLE_PORT=9101 \
+  docker compose -f deploy/docker/docker-compose.yml up
+```
+
+The full set is `KELIR_FRONTEND_PORT`, `KELIR_BACKEND_PORT`, `KELIR_POSTGRES_PORT`, `KELIR_MINIO_PORT`, `KELIR_MINIO_CONSOLE_PORT`, `KELIR_SMTP_PORT`, `KELIR_MAILPIT_UI_PORT` — see `deploy/env/.env.example`.
+
+> **A natively installed PostgreSQL is the trap to watch for.** If one is running as a Windows service, it also listens on 5432. Both it and Docker can bind the port, and a host process connecting to `localhost:5432` may reach either — which surfaces as `password authentication failed` rather than a connection error. Publish the container on a free port and point `KELIR_DATABASE_URL` at that instead.
 
 ### Option B: Run Individually
 

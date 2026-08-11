@@ -4,34 +4,71 @@ mod error;
 mod health;
 mod middleware;
 mod modules;
+mod response;
 mod router;
+mod state;
 mod utils;
 
-use std::net::SocketAddr;
+use std::process::ExitCode;
 
 use config::AppConfig;
-
-/// Address the API binds to. Phase 1 replaces this with `KELIR_*` configuration
-/// loading; until then the port matches the compose port mapping.
-const BIND_ADDR: SocketAddr =
-    SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 8080);
+use state::AppState;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]
-async fn main() {
-    tracing_subscriber::fmt::init();
+async fn main() -> ExitCode {
+    init_tracing();
 
-    let config = AppConfig::default();
-    let app = router::create_router();
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            // Startup failures are reported and exit non-zero so the container
+            // orchestrator restarts or reports, rather than a silent no-op.
+            tracing::error!(error = %error, "kelir backend failed to start");
+            ExitCode::FAILURE
+        }
+    }
+}
 
-    // Startup failures are unrecoverable and must stop the process with a clear
-    // message; the coding standard (2.3) permits expect() here but not in handlers.
-    let listener = tokio::net::TcpListener::bind(BIND_ADDR)
-        .await
-        .expect("failed to bind the API listen address");
+/// Tracing is configured before anything else so startup failures are visible.
+/// `KELIR_LOG` overrides the default filter; `info` keeps business-significant
+/// events without SQL noise (coding standard §2.7).
+fn init_tracing() {
+    let filter = EnvFilter::try_from_env("KELIR_LOG")
+        .unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn,tower_http=info"));
 
-    tracing::info!(app_name = %config.app_name, address = %BIND_ADDR, "kelir backend listening");
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+}
 
-    axum::serve(listener, app)
-        .await
-        .expect("the API server stopped unexpectedly");
+async fn run() -> anyhow::Result<()> {
+    let config = AppConfig::from_env()?;
+
+    tracing::info!(
+        app_name = %config.app_name,
+        environment = %config.app_env,
+        version = health::VERSION,
+        "starting kelir backend"
+    );
+
+    let pool = db::create_pool(&config.database_url)?;
+
+    // Migrations run at startup so a fresh compose stack is usable immediately.
+    // This is safe while deployments are single-instance; once several replicas
+    // start together, migration moves to a release step (release process §5).
+    db::run_migrations(&pool).await?;
+    tracing::info!("database migrations applied");
+
+    let bind_address = config.bind_address.clone();
+    let state = AppState::new(pool, config);
+    let app = router::create_router(state);
+
+    let listener = tokio::net::TcpListener::bind(&bind_address).await?;
+    tracing::info!(address = %bind_address, "listening");
+
+    axum::serve(listener, app).await?;
+
+    Ok(())
 }

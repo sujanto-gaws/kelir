@@ -1,1 +1,0 @@
--- 0006_workflow.sql migration placeholder

@@ -1,1 +1,0 @@
--- 0012_plugin.sql migration placeholder
