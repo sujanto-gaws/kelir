@@ -1,0 +1,36 @@
+# Normalize everything to LF in the repository, and check out LF in the
+# working tree regardless of platform. The backend and frontend sources are
+# volume-mounted into Linux containers by the compose stack, where CRLF in a
+# shell script or entrypoint fails at runtime.
+* text=auto eol=lf
+
+# Windows-only scripts must keep CRLF to run under cmd.exe / PowerShell.
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# Explicit text types (documentation, source, config, fixtures).
+*.md    text
+*.rs    text
+*.sql   text
+*.toml  text
+*.ts    text
+*.vue   text
+*.js    text
+*.json  text
+*.css   text
+*.html  text
+*.yml   text
+*.yaml  text
+*.sh    text eol=lf
+
+# Binary assets — never converted, never diffed as text.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.woff  binary
+*.woff2 binary
+*.zip   binary
