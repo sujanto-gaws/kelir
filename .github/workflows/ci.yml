@@ -1,0 +1,101 @@
+name: CI
+
+# The gates that make a pull request mergeable (git workflow section 4):
+# fmt, clippy, backend tests, frontend lint + type-check + tests, and builds.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (Rust)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: kelir-backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install rustfmt and clippy
+        run: rustup component add rustfmt clippy
+
+      - name: Cache cargo registry and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            kelir-backend/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('kelir-backend/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Formatting
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test
+
+      - name: Build
+        run: cargo build --release
+
+  frontend:
+    name: Frontend (Vue)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: kelir-frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: kelir-frontend/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Formatting
+        run: npm run format:check
+
+      - name: Type check
+        run: npm run type-check
+
+      - name: Tests
+        run: npm run test
+
+      - name: Build
+        run: npm run build
+
+  commit-messages:
+    name: Commit messages
+    runs-on: ubuntu-latest
+    # Only meaningful on pull requests: the branch's commits are checked against
+    # the commit message convention before they can be squashed onto main.
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate headers against the commit convention
+        run: |
+          ./scripts/check-commit-messages.sh \
+            "origin/${{ github.base_ref }}" \
+            "${{ github.event.pull_request.head.sha }}"
