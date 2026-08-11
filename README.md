@@ -230,11 +230,12 @@ Use deploy/env/.env.example as the baseline for configuration values.
 
 ## Current Status
 
-**Phase 1 is in progress: the backend foundation is built, the frontend is next.** Sprints 0 and 1 are closed — see [projects/status/02. Sprint 1 Status.md](projects/status/02.%20Sprint%201%20Status.md) for current state.
+**Phase 1 is nearly complete: both halves of the skeleton run.** Sprints 0–2 are closed apart from staging — see [projects/status/03. Sprint 2 Status.md](projects/status/03.%20Sprint%202%20Status.md) for current state.
 
 Done:
 
 - **Backend foundation** (Sprint 1) — `KELIR_*` configuration, SQLx pool and migration runner, `0001_core.sql` (tenants, system settings, system tenant), `/health`, `/health/live`, `/health/ready`, `/version`, the standard response envelope and `AppError`, pagination, and a generated OpenAPI document at `/api/docs/openapi.json`
+- **Frontend foundation** (Sprint 2) — app shell with navigation and a dark theme, a typed API client that unwraps the response envelope and normalises every failure into an `ApiError`, a login page, and the Tailwind v4 + shadcn-vue baseline
 - **Working repository** (Sprint 0) — protected `main`, CI running fmt, clippy, tests and builds on both stacks plus commit-message validation, and 29 tracked issues across two phase milestones
 
 - **Documentation set** — 26 documents: SRS v0.5, System Design Document v0.1, the column-level database schema (94 tables across 12 migrations), 8 JSON standards, 5 architecture documents, 5 engineering standards, 4 concept documents
@@ -247,18 +248,14 @@ Done:
 
 Not done:
 
-- **The frontend is still the scaffold** — Vue, Vite, Pinia and the router are wired, but there is no app shell, no envelope-aware API client and no login page. That is Sprint 2 (issues #8–#12)
-- **No staging environment**, and no host named for one — needed before Phase 1 can exit at `v0.1.0`
+- **No staging environment**, and no host named for one — the only thing blocking Phase 1 from tagging `v0.1.0` (issue #12)
+- **No authentication.** The login page is presentation only; sign-in arrives in Phase 2 with the identity module
 - **No business endpoints yet.** `/api/v1` is mounted and empty; the module trees under `src/modules/` are still stubs, filled in from Phase 2 onward
 
 ## Next Implementation Steps
 
-Work is tracked as [GitHub issues](https://github.com/sujanto-gaws/kelir/issues), grouped into phase milestones. Next up is Sprint 2, finishing Phase 1:
+Work is tracked as [GitHub issues](https://github.com/sujanto-gaws/kelir/issues), grouped into phase milestones.
 
-1. App shell layout, router and Pinia (#8).
-2. API client that unwraps the `{success, data}` envelope and normalizes errors into a typed `ApiError` (#9) — the contract is fixed in `kelir-backend/src/response.rs` and published in the OpenAPI document.
-3. Login page, UI only until Phase 2 wires it (#10).
-4. Tailwind v4 and shadcn-vue baseline (#11).
-5. Staging environment and a release-checklist dry run (#12), then tag `v0.1.0`.
+To close Phase 1: stand up a staging environment and dry-run the release checklist (#12), then tag `v0.1.0`.
 
-Phase 2 (Sprints 3–4) follows: `0002_identity.sql`, Argon2 authentication, permission middleware, and user/role management.
+Phase 2 (Sprints 3–4) follows: `0002_identity.sql`, Argon2 authentication, the JWT-or-session decision, permission middleware, and user/role management.

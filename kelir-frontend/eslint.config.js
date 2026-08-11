@@ -37,6 +37,17 @@ export default tseslint.config(
     },
   },
 
+  {
+    // shadcn-vue primitives are single-word by convention (Button, Input) and
+    // are added by its generator. Renaming them to satisfy the rule would break
+    // `shadcn-vue add` and diverge from every upstream example, so the rule is
+    // scoped off here rather than fought file by file.
+    files: ['src/components/ui/**/*.vue'],
+    rules: {
+      'vue/multi-word-component-names': 'off',
+    },
+  },
+
   // Must stay last: turns off the stylistic rules Prettier owns.
   prettier,
 )

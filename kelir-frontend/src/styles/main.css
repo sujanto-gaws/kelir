@@ -1,7 +1,88 @@
 /*
  * Tailwind CSS v4 entrypoint.
  *
- * Configuration is CSS-first via `@theme` (coding standard 3.4) — there is no
- * tailwind.config.ts. Design tokens are added here as the UI takes shape.
+ * Configuration is CSS-first via `@theme` (coding standard §3.4) — there is no
+ * tailwind.config.ts. The token names follow the shadcn-vue convention so its
+ * generated components work unmodified.
  */
 @import 'tailwindcss';
+
+/* Tailwind v4 needs to be told which class toggles dark mode. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --color-background: oklch(1 0 0);
+  --color-foreground: oklch(0.21 0.006 285.9);
+
+  --color-card: oklch(1 0 0);
+  --color-card-foreground: oklch(0.21 0.006 285.9);
+
+  --color-primary: oklch(0.55 0.16 253);
+  --color-primary-foreground: oklch(0.98 0.003 247.9);
+
+  --color-secondary: oklch(0.967 0.001 286.4);
+  --color-secondary-foreground: oklch(0.21 0.006 285.9);
+
+  --color-muted: oklch(0.967 0.001 286.4);
+  --color-muted-foreground: oklch(0.552 0.016 285.9);
+
+  --color-destructive: oklch(0.577 0.245 27.3);
+  --color-destructive-foreground: oklch(0.98 0.003 247.9);
+
+  --color-border: oklch(0.92 0.004 286.3);
+  --color-input: oklch(0.92 0.004 286.3);
+  --color-ring: oklch(0.55 0.16 253);
+
+  --radius: 0.5rem;
+}
+
+/*
+ * Dark palette. Only the tokens change; every component reads them by name, so
+ * nothing else needs a dark variant.
+ */
+.dark {
+  --color-background: oklch(0.21 0.006 285.9);
+  --color-foreground: oklch(0.985 0 0);
+
+  --color-card: oklch(0.21 0.006 285.9);
+  --color-card-foreground: oklch(0.985 0 0);
+
+  --color-primary: oklch(0.65 0.16 253);
+  --color-primary-foreground: oklch(0.21 0.006 285.9);
+
+  --color-secondary: oklch(0.274 0.006 286);
+  --color-secondary-foreground: oklch(0.985 0 0);
+
+  --color-muted: oklch(0.274 0.006 286);
+  --color-muted-foreground: oklch(0.712 0.013 286.1);
+
+  --color-destructive: oklch(0.704 0.191 22.2);
+  --color-destructive-foreground: oklch(0.985 0 0);
+
+  --color-border: oklch(1 0 0 / 12%);
+  --color-input: oklch(1 0 0 / 15%);
+  --color-ring: oklch(0.65 0.16 253);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family:
+      system-ui,
+      -apple-system,
+      'Segoe UI',
+      Roboto,
+      sans-serif;
+  }
+
+  /* Visible focus is a usability requirement (NFR-USE), not decoration. */
+  :focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
+}

@@ -146,6 +146,24 @@ impl AppConfig {
     }
 }
 
+impl AppConfig {
+    /// Configuration for tests, with the placeholder secret and a fixed
+    /// frontend origin. Kept beside the real loader so the two cannot drift.
+    #[cfg(test)]
+    pub fn test_default() -> Self {
+        Self {
+            app_name: "Kelir".to_owned(),
+            app_env: AppEnv::Test,
+            bind_address: "127.0.0.1:0".to_owned(),
+            database_url: "postgres://postgres:postgres@localhost:5432/kelir".to_owned(),
+            jwt_secret: "test-secret".to_owned(),
+            storage_driver: "local".to_owned(),
+            smtp_host: "localhost".to_owned(),
+            frontend_url: "http://localhost:5173".to_owned(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

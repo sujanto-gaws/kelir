@@ -127,4 +127,4 @@ When documents disagree, precedence is explicit:
 | Schema standards | JFSS Final; rule registries Active; JWSS / LHCS / PMS / EES / DTDS Draft |
 | Standards (coding, naming, git) | Draft, in effect |
 | Planning | Complete — sprint plan and product backlog cover all 164 FRs; scope decisions D-1…D-5 resolved 2026-08-11 |
-| Implementation | Phase 1 in progress. Backend foundation done (Sprint 1): config, SQLx pool and `0001_core.sql`, health and version endpoints, response envelope and `AppError`, pagination, generated OpenAPI. Frontend is still the scaffold — Sprint 2. See [Sprint 1 Status](../projects/status/02.%20Sprint%201%20Status.md) |
+| Implementation | Phase 1 nearly complete. Backend (Sprint 1): config, SQLx pool and `0001_core.sql`, health and version endpoints, response envelope and `AppError`, pagination, generated OpenAPI. Frontend (Sprint 2): app shell, envelope-aware API client, login page, Tailwind v4 and shadcn-vue baseline. Outstanding: a staging environment, which is all that blocks `v0.1.0`. See [Sprint 2 Status](../projects/status/03.%20Sprint%202%20Status.md) |

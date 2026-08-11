@@ -1,1 +1,5 @@
-// Middleware modules will be added in Phase 2 (auth, tracing, RBAC).
+//! Cross-cutting request middleware.
+//!
+//! Authentication, RBAC and the correlation-ID span arrive in Phase 2.
+
+pub mod cors;

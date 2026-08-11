@@ -4,6 +4,7 @@ use utoipa::OpenApi;
 
 use crate::error::ValidationDetail;
 use crate::health;
+use crate::middleware::cors::cors_layer;
 use crate::response::{ErrorBody, ErrorEnvelope, PageMeta};
 use crate::state::AppState;
 
@@ -52,6 +53,9 @@ pub fn create_router(state: AppState) -> Router {
         .route("/version", get(health::version))
         .route("/api/docs/openapi.json", get(openapi_document))
         .nest("/api/v1", api_v1_router())
+        // Applied last so it wraps every route, including the 404 fallback and
+        // the preflight requests the browser sends before anything else.
+        .layer(cors_layer(&state.config.frontend_url))
         .with_state(state)
 }
 
@@ -77,20 +81,7 @@ mod tests {
         let pool = crate::db::create_pool("postgres://postgres:postgres@localhost:5432/kelir")
             .expect("lazy pool builds without a server");
 
-        // from_source is private, so build the config through the public path
-        // with the one required variable present.
-        let config = AppConfig {
-            app_name: "Kelir".to_owned(),
-            app_env: crate::config::AppEnv::Test,
-            bind_address: "127.0.0.1:0".to_owned(),
-            database_url: "postgres://postgres:postgres@localhost:5432/kelir".to_owned(),
-            jwt_secret: "test-secret".to_owned(),
-            storage_driver: "local".to_owned(),
-            smtp_host: "localhost".to_owned(),
-            frontend_url: "http://localhost:5173".to_owned(),
-        };
-
-        AppState::new(pool, config)
+        AppState::new(pool, AppConfig::test_default())
     }
 
     async fn get(uri: &str) -> (StatusCode, serde_json::Value) {
