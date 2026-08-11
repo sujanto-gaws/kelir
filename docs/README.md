@@ -127,4 +127,4 @@ When documents disagree, precedence is explicit:
 | Schema standards | JFSS Final; rule registries Active; JWSS / LHCS / PMS / EES / DTDS Draft |
 | Standards (coding, naming, git) | Draft, in effect |
 | Planning | Complete — sprint plan and product backlog cover all 164 FRs; scope decisions D-1…D-5 resolved 2026-08-11 |
-| Implementation | Not started — `kelir-backend` and `kelir-frontend` hold scaffolds only (19 module stubs, 12 placeholder migrations, no `sqlx`). Sprint 0 is open and blocked: the tree is not yet a git repository and there is no CI. See [Sprint 0 Status](../projects/status/01.%20Sprint%200%20Status.md) |
+| Implementation | Phase 1 in progress. Backend foundation done (Sprint 1): config, SQLx pool and `0001_core.sql`, health and version endpoints, response envelope and `AppError`, pagination, generated OpenAPI. Frontend is still the scaffold — Sprint 2. See [Sprint 1 Status](../projects/status/02.%20Sprint%201%20Status.md) |

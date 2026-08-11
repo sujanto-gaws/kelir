@@ -230,9 +230,12 @@ Use deploy/env/.env.example as the baseline for configuration values.
 
 ## Current Status
 
-**Documentation and planning are complete; implementation has not started.** Sprint 0 is open — see [projects/status/01. Sprint 0 Status.md](projects/status/01.%20Sprint%200%20Status.md) for the full baseline.
+**Phase 1 is in progress: the backend foundation is built, the frontend is next.** Sprints 0 and 1 are closed — see [projects/status/02. Sprint 1 Status.md](projects/status/02.%20Sprint%201%20Status.md) for current state.
 
 Done:
+
+- **Backend foundation** (Sprint 1) — `KELIR_*` configuration, SQLx pool and migration runner, `0001_core.sql` (tenants, system settings, system tenant), `/health`, `/health/live`, `/health/ready`, `/version`, the standard response envelope and `AppError`, pagination, and a generated OpenAPI document at `/api/docs/openapi.json`
+- **Working repository** (Sprint 0) — protected `main`, CI running fmt, clippy, tests and builds on both stacks plus commit-message validation, and 29 tracked issues across two phase milestones
 
 - **Documentation set** — 26 documents: SRS v0.5, System Design Document v0.1, the column-level database schema (94 tables across 12 migrations), 8 JSON standards, 5 architecture documents, 5 engineering standards, 4 concept documents
 - **Planning** — sprint plan mapping SDD §14 onto 21 sprints, and a product backlog assigning all 164 functional requirements to epics, items and sprints (149 scheduled, 15 explicitly unscheduled)
@@ -244,23 +247,18 @@ Done:
 
 Not done:
 
-- **Not a git repository** — no `.git`, so no commits, branches, PRs or branch protection. This blocks the rest of Sprint 0
-- **No CI pipeline** — and the toolchains it must run are incomplete (no backend test dependencies or `sqlx`; no frontend `lint`/`type-check`/`test` scripts, Tailwind v4 or shadcn-vue)
-- **Backend and frontend are scaffolds** — 19 module stubs of one comment line each, 12 placeholder migrations, and a `main.rs` that prints one line and exits; the compose stack therefore starts without a working API
-- Issue tracker not chosen or seeded
+- **The frontend is still the scaffold** — Vue, Vite, Pinia and the router are wired, but there is no app shell, no envelope-aware API client and no login page. That is Sprint 2 (issues #8–#12)
+- **No staging environment**, and no host named for one — needed before Phase 1 can exit at `v0.1.0`
+- **No business endpoints yet.** `/api/v1` is mounted and empty; the module trees under `src/modules/` are still stubs, filled in from Phase 2 onward
 
 ## Next Implementation Steps
 
-Sprint 0 first — the numbered steps below cannot be merged the standard way until it closes:
+Work is tracked as [GitHub issues](https://github.com/sujanto-gaws/kelir/issues), grouped into phase milestones. Next up is Sprint 2, finishing Phase 1:
 
-1. `git init`, commit the documentation baseline, set the remote, apply branch protection per the [git workflow](docs/standards/05.%20Git%20Workflow.md).
-2. Complete the backend and frontend toolchains, then add the CI pipeline and prove it green on a trivial PR.
-3. Seed the issue tracker from [product backlog](projects/planning/02.%20Product%20Backlog.md) §4, Phase 1–2 items first.
+1. App shell layout, router and Pinia (#8).
+2. API client that unwraps the `{success, data}` envelope and normalizes errors into a typed `ApiError` (#9) — the contract is fixed in `kelir-backend/src/response.rs` and published in the OpenAPI document.
+3. Login page, UI only until Phase 2 wires it (#10).
+4. Tailwind v4 and shadcn-vue baseline (#11).
+5. Staging environment and a release-checklist dry run (#12), then tag `v0.1.0`.
 
-Then Phase 1 (Sprints 1–2):
-
-4. Wire the backend Axum router, config, tracing, and the health endpoints.
-5. Add the SQLx pool and migration runner, and write `0001_core.sql` for real.
-6. Add the frontend app shell, API client with envelope unwrapping, and the login page.
-7. Implement authentication (login/logout/me), then identity and role management APIs.
-8. Start master data CRUD: the Party model (persons, party groups, roles, and supplier/customer/employee profiles), plus facility.
+Phase 2 (Sprints 3–4) follows: `0002_identity.sql`, Argon2 authentication, permission middleware, and user/role management.

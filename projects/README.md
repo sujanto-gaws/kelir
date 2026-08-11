@@ -30,13 +30,15 @@ Each folder is a numbered series (`NN. Title Case.md`); `00.` files are template
 | Document | Content |
 |---|---|
 | [00. Status Report Template.md](status/00.%20Status%20Report%20Template.md) | One-page end-of-sprint report: goal verdict, scope status per FR with evidence, blockers with recommendations, scope changes, next-sprint entry criteria |
-| [01. Sprint 0 Status.md](status/01.%20Sprint%200%20Status.md) | Project baseline, 2026-08-11: documentation and planning complete; Sprint 0 blocked at activity 1 (the tree is not yet a git repository); backend and frontend are scaffolds |
+| [01. Sprint 0 Status.md](status/01.%20Sprint%200%20Status.md) | Sprint 0, closed 2026-08-11: repository, branch protection, CI, compose stack, tracker seeded. Retained as the baseline record |
+| [02. Sprint 1 Status.md](status/02.%20Sprint%201%20Status.md) | Sprint 1, closed 2026-08-12: the Phase 1 backend — config, pool and migrations, health endpoints, response envelope and `AppError`, pagination, generated OpenAPI |
 
 ### retrospectives/
 
 | Document | Content |
 |---|---|
 | [00. Retrospective Template.md](retrospectives/00.%20Retrospective%20Template.md) | Per-sprint and per-phase retrospective: worked/didn't/root causes, committed actions with owners, previous-actions review. Convention changes flow into `docs/standards/`, plan changes re-baseline the sprint plan |
+| [01. Sprints 0-1 Retrospective.md](retrospectives/01.%20Sprints%200-1%20Retrospective.md) | Combined, because the two sprints ran without a boundary and their lessons interleave. Six committed actions, chiefly: scaffolds must run rather than merely compile, and acceptance criteria state outcomes rather than mechanisms |
 
 ### releases/
 
