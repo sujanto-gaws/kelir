@@ -1,10 +1,17 @@
 services:
   frontend:
-    image: node:22-alpine
+    image: node:24-alpine
     working_dir: /app
     volumes:
       - ../../kelir-frontend:/app
-    command: sh -c "npm install && npm run dev -- --host"
+      # Keep node_modules inside the container. The host tree is mounted over
+      # /app, and host and container install different platform binaries; a
+      # shared node_modules corrupts whichever ran second.
+      - kelir-frontend-node-modules:/app/node_modules
+    # npm ci, not npm install: install rewrites package-lock.json, and the
+    # container's npm drops metadata the host's npm writes, so every run left
+    # the committed lock file modified.
+    command: sh -c "npm ci && npm run dev -- --host"
     ports:
       - "${KELIR_FRONTEND_PORT:-5173}:5173"
     environment:
@@ -17,6 +24,10 @@ services:
     working_dir: /app
     volumes:
       - ../../kelir-backend:/app
+      # Same reason as the frontend: host and container build for different
+      # targets into the same target/, so each invalidates the other's cache.
+      # A named volume also keeps the container's build cache across restarts.
+      - kelir-backend-target:/app/target
     command: sh -c "cargo run"
     ports:
       - "${KELIR_BACKEND_PORT:-8080}:8080"
@@ -60,3 +71,5 @@ services:
 
 volumes:
   kelir-postgres-data:
+  kelir-frontend-node-modules:
+  kelir-backend-target:
