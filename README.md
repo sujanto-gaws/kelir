@@ -2,13 +2,28 @@
 
 Kelir is a document-based business application framework with workflow-driven processing and rapid application development (RAD) capabilities.
 
-This repository is initialized from the SRS and solution blueprint in docs/requirements/srs.md (v0.1, dated 2026-08-05).
+This repository is driven by the requirements in [docs/requirements/srs.md](docs/requirements/srs.md) (SRS v0.5) and the design in [docs/design/01. System Design Document.md](docs/design/01.%20System%20Design%20Document.md) (SDD v0.1).
 
 ## Vision
 
 Every business transaction is treated as a document, and every document progresses through a controlled workflow. The framework is designed to support business domains such as approvals, procurement, onboarding, compliance, and master data governance.
 
-## MVP Scope (Phase 1-5)
+## Documentation
+
+The `docs/` folder contains the full design documentation set (see [docs/README.md](docs/README.md) for the complete index, reading order, and authority rules):
+
+- `docs/concepts/` — conceptual foundation: the document-based platform concept, attachments/comments/activity-log design, master data governance (hybrid golden-record + workflow model), and a consolidated sample data structure.
+- `docs/architectures/` — architecture decisions: framework concept, the Kelir module breakdown (backend and frontend), the external-system integration layer, the plugin/extension platform, and the OFBiz-style Party master-data model (adopted for supplier, customer, and employee master data).
+- `docs/requirements/srs.md` — the Software Requirements Specification (FR/NFR IDs, MVP acceptance criteria), v0.5.
+- `docs/design/` — the System Design Document (architecture, stack, module structure, database design, workflow/RAD/integration/plugin/security/API/deployment design, roadmap), v0.1 — the successor of the Solution Blueprint formerly bundled in srs.md — and the Database Schema (column-level DDL for all 94 tables across 12 migrations).
+- `docs/schema/` — the JSON standards family: the JSON Form Schema Standard (JFSS v2.0.1) with its normative meta-schema and rule registries (Calculation v1.2.0, Validation v1.1.0), plus the Workflow Schema (JWSS), Lifecycle Hook Contract (LHCS), Plugin Manifest Schema (PMS), Event Envelope Schema (EES), and Document Type Definition Schema (DTDS), each v1.0.0.
+- `docs/standards/` — the coding standard (Rust backend, Vue 3 frontend, SQL, git), the naming convention (code, database, API, permissions, events, identifiers), the commit message convention (Conventional Commits), the release process (SemVer, changelog, deploy, rollback), and the git workflow (trunk-based branches, PRs, review, squash merges).
+
+Project management lives in `projects/` (see [projects/README.md](projects/README.md)):
+
+- `projects/planning/` — the sprint plan mapping the SRS roadmap phases onto a 2-week sprint cadence with per-phase releases, and the product backlog mapping every requirement to an epic, backlog item and sprint.
+
+## MVP Scope (Phases 1-6)
 
 The MVP focuses on:
 
@@ -35,8 +50,51 @@ The MVP focuses on:
 ```text
 .
 ├── docs/
-│   └── requirements/
-│       └── srs.md
+│   ├── README.md
+│   ├── concepts/
+│   │   ├── 01. Concept.md
+│   │   ├── 02. Handling Attachments Comments and Activity Log.md
+│   │   ├── 03. Handling Master Data.md
+│   │   └── 04. Sample Data Structure for System Overview.md
+│   ├── architectures/
+│   │   ├── 01. Basic Framework Concept and Architecture.md
+│   │   ├── 02. Kelir Framework.md
+│   │   ├── 03. Kelir Modules for Interfacing with External Systems.md
+│   │   ├── 04. Kelir Plugin and Extension Management Concept.md
+│   │   └── 05. Core - Master Data - Party.md
+│   ├── requirements/
+│   │   └── srs.md
+│   ├── design/
+│   │   ├── 01. System Design Document.md
+│   │   └── 02. Database Schema.md
+│   ├── schema/
+│   │   ├── JSON Form Schema.md
+│   │   ├── jfss-meta-v2.0.1.json
+│   │   ├── JFSS Calculation Rule Registry.md
+│   │   ├── JFSS Validation Rule Registry.md
+│   │   ├── JSON Workflow Schema.md
+│   │   ├── Lifecycle Hook Contract.md
+│   │   ├── Plugin Manifest Schema.md
+│   │   ├── Event Envelope Schema.md
+│   │   └── Document Type Definition Schema.md
+│   └── standards/
+│       ├── 01. Coding Standard.md
+│       ├── 02. Naming Convention.md
+│       ├── 03. Commit Message Convention.md
+│       ├── 04. Release Process.md
+│       └── 05. Git Workflow.md
+├── projects/
+│   ├── README.md
+│   ├── planning/
+│   │   ├── 01. Sprint Plan.md
+│   │   └── 02. Product Backlog.md
+│   ├── status/
+│   │   ├── 00. Status Report Template.md
+│   │   └── 01. Sprint 0 Status.md
+│   ├── retrospectives/
+│   │   └── 00. Retrospective Template.md
+│   └── releases/
+│       └── 00. Release Checklist Template.md
 ├── kelir-backend/
 │   ├── Cargo.toml
 │   ├── migrations/
@@ -110,10 +168,10 @@ The MVP focuses on:
 │       ├── types/
 │       └── lib/
 └── deploy/
-	├── docker/
-	│   └── docker-compose.yml
-	└── env/
-		└── .env.example
+    ├── docker/
+    │   └── docker-compose.yml
+    └── env/
+        └── .env.example
 ```
 
 ## Local Development
@@ -133,6 +191,8 @@ Services provided:
 - postgres: primary relational database
 - minio: object storage for attachments
 - mailpit: local SMTP capture
+
+> **Note:** the backend does not serve an API yet — `src/main.rs` prints one line and exits, so its container stops right after starting. The other four services run. This closes in Phase 1, when the router and health endpoints land.
 
 ### Option B: Run Individually
 
@@ -157,18 +217,37 @@ Use deploy/env/.env.example as the baseline for configuration values.
 
 ## Current Status
 
-Initialized project skeleton for Phase 1 (foundation):
+**Documentation and planning are complete; implementation has not started.** Sprint 0 is open — see [projects/status/01. Sprint 0 Status.md](projects/status/01.%20Sprint%200%20Status.md) for the full baseline.
 
-- Repository structure aligned with SRS blueprint
-- Backend module and migration placeholders
-- Frontend feature-based folder scaffolding
-- Docker Compose services for local development baseline
+Done:
+
+- **Documentation set** — 26 documents: SRS v0.5, System Design Document v0.1, the column-level database schema (94 tables across 12 migrations), 8 JSON standards, 5 architecture documents, 5 engineering standards, 4 concept documents
+- **Planning** — sprint plan mapping SDD §14 onto 21 sprints, and a product backlog assigning all 164 functional requirements to epics, items and sprints (149 scheduled, 15 explicitly unscheduled)
+- **Scope decisions D-1…D-5 resolved** (2026-08-11) — MVP milestone moved to `v0.6.0` to satisfy SRS §9; RAD split so its metadata and form renderer land in Phase 4; priority separated from MVP scope in SRS v0.5; ClamAV chosen for attachment scanning; six proposed NFR targets baselined
+- Documentation consistency audit (2026-08-05): unified naming (Kelir), permission format `module:resource:action`, dotted event names, `mdm_*` tables, aligned health endpoints
+- Supplier, customer, and employee master data unified under the Party model (SRS v0.3): parties with roles, role-specific profiles, identifications, relationships, and contact mechanisms; facility, product, and service remain dedicated entities
+- Repository structure aligned with the SRS and System Design Document; `.env.example` complete
+- Docker Compose services defined for the local development baseline
+
+Not done:
+
+- **Not a git repository** — no `.git`, so no commits, branches, PRs or branch protection. This blocks the rest of Sprint 0
+- **No CI pipeline** — and the toolchains it must run are incomplete (no backend test dependencies or `sqlx`; no frontend `lint`/`type-check`/`test` scripts, Tailwind v4 or shadcn-vue)
+- **Backend and frontend are scaffolds** — 19 module stubs of one comment line each, 12 placeholder migrations, and a `main.rs` that prints one line and exits; the compose stack therefore starts without a working API
+- Issue tracker not chosen or seeded
 
 ## Next Implementation Steps
 
-1. Wire backend Axum router and health endpoint.
-2. Add SQLx database connection and migration execution.
-3. Add frontend app shell, auth page, and route guards.
-4. Implement authentication module (login/logout/me).
-5. Implement identity and role management APIs.
-6. Start master data CRUD (supplier, customer, employee, facility).
+Sprint 0 first — the numbered steps below cannot be merged the standard way until it closes:
+
+1. `git init`, commit the documentation baseline, set the remote, apply branch protection per the [git workflow](docs/standards/05.%20Git%20Workflow.md).
+2. Complete the backend and frontend toolchains, then add the CI pipeline and prove it green on a trivial PR.
+3. Seed the issue tracker from [product backlog](projects/planning/02.%20Product%20Backlog.md) §4, Phase 1–2 items first.
+
+Then Phase 1 (Sprints 1–2):
+
+4. Wire the backend Axum router, config, tracing, and the health endpoints.
+5. Add the SQLx pool and migration runner, and write `0001_core.sql` for real.
+6. Add the frontend app shell, API client with envelope unwrapping, and the login page.
+7. Implement authentication (login/logout/me), then identity and role management APIs.
+8. Start master data CRUD: the Party model (persons, party groups, roles, and supplier/customer/employee profiles), plus facility.
