@@ -1,1 +1,7 @@
-/* Tailwind CSS v4 entrypoint placeholder */
+/*
+ * Tailwind CSS v4 entrypoint.
+ *
+ * Configuration is CSS-first via `@theme` (coding standard 3.4) — there is no
+ * tailwind.config.ts. Design tokens are added here as the UI takes shape.
+ */
+@import 'tailwindcss';
