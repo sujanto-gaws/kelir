@@ -1,11 +1,8 @@
-# Kelir Initial Documents
+# Kelir Software Requirements Specification
 
-Below are the initial documents for **Kelir**:
+**Status:** Draft · **Last updated:** 2026-08-11
 
-1. **Kelir Software Requirements Specification (SRS)**
-2. **Kelir Solution Blueprint**
-
-These documents are intended as version **0.1** and can be expanded into formal project documentation before development starts.
+The companion Solution Blueprint formerly bundled in this file now lives in the System Design Document: `docs/design/01. System Design Document.md`.
 
 ---
 
@@ -17,7 +14,7 @@ These documents are intended as version **0.1** and can be expanded into formal 
 |---|---|
 | Document Name | Kelir Software Requirements Specification |
 | Framework Name | Kelir |
-| Version | 0.1 |
+| Version | 0.5 |
 | Status | Initial Draft |
 | Date | 2026-08-05 |
 | Document Type | SRS |
@@ -25,6 +22,18 @@ These documents are intended as version **0.1** and can be expanded into formal 
 | Backend | Rust |
 | Frontend | Vue + Vite + Axios + shadcn-vue + Tailwind CSS v4 |
 | Database | PostgreSQL, optional MariaDB compatibility |
+
+Revision history:
+
+```text
+0.1 (2026-08-05): initial draft.
+0.2 (2026-08-05): consistency refinements from documentation audit.
+0.3 (2026-08-05): adopted the unified Party model for supplier, customer, and employee master data (see docs/architectures/05. Core - Master Data - Party.md).
+0.4 (2026-08-06): split the Solution Blueprint out into the System Design Document (docs/design/01. System Design Document.md); this file now contains the SRS only.
+0.5 (2026-08-11): separated priority from MVP scope — Must now means "required for 1.0" and §9 is the sole MVP gate (§4 preamble); raised FR-API-004 (OpenAPI) from Should to Must, since §9 criterion 14 requires documented APIs; baselined the six proposed targets in FR-ATT-004, NFR-PERF-001, NFR-AVA-004 and NFR-SEC-008/009/010. Recorded as decisions D-3 and D-5 in projects/planning/02. Product Backlog.md.
+```
+
+> **Note:** As of v0.4 this file contains only the SRS. The Solution Blueprint has been split out into the System Design Document (`docs/design/01. System Design Document.md`), which is versioned independently.
 
 ---
 
@@ -103,7 +112,8 @@ Implementation teams
 | Document Type | Definition of a class of documents, form, numbering, workflow, rules |
 | Workflow | Controlled process flow with states, tasks, transitions, and approvals |
 | Task | Work item assigned to user or role |
-| Master Data | Core reference data such as employee, supplier, customer, facility, product |
+| Master Data | Core reference data: parties (suppliers, customers, employees) plus facilities, products, and services |
+| Party | Unified master-data entity representing a person or an organization (party group); suppliers, customers, and employees are parties holding the corresponding role with a role-specific profile (see docs/architectures/05. Core - Master Data - Party.md) |
 | RAD | Rapid Application Development |
 | Plugin | Extension that adds features to Kelir |
 | Integration | Connection with external systems |
@@ -111,6 +121,18 @@ Implementation teams
 | RBAC | Role-Based Access Control |
 | ABAC | Attribute-Based Access Control |
 | MDM | Master Data Management |
+| Multi-tenant mode | A deployment configuration flag; when enabled, all business data is partitioned by tenant_id and tenant administrators manage users within their tenant. Single-tenant deployments run with a single default tenant |
+| JWT | JSON Web Token, a signed token format used for stateless authentication |
+| SSO | Single Sign-On, authenticating once to access multiple applications |
+| OAuth2 | An authorization framework for delegated access to resources |
+| OIDC | OpenID Connect, an identity layer on top of OAuth2 |
+| MVP | Minimum Viable Product, the smallest feature set acceptable for first release |
+| CRUD | Create, Read, Update, Delete operations |
+| JSONB | PostgreSQL binary JSON column type supporting indexing and querying |
+| MoSCoW | Prioritization scheme: Must, Should, Could, Won't |
+| MinIO | S3-compatible object storage server used for attachments |
+| Mailpit | Local SMTP server with web UI used for email testing in development |
+| Outbox pattern | Persisting outbound events in a database table within the same transaction as the business change, for reliable asynchronous delivery |
 
 ---
 
@@ -218,10 +240,12 @@ Requirements are labeled with IDs and initial priority.
 Priority:
 
 ```text
-Must = Required for MVP
-Should = Important but can follow shortly after MVP
-Could = Optional or future phase
+Must   = Required for the 1.0 release; not tradeable against Should or Could work
+Should = Important; may follow the release that first needs it
+Could  = Optional or future phase
 ```
+
+**Priority is not the MVP gate.** §9 is: a requirement is MVP scope if and only if it is named by an acceptance criterion there. The two are deliberately independent — some `Must` requirements (the rule engines, the dashboard) are required for 1.0 but are not part of the minimum viable release, and one requirement named by §9 (FR-API-004, OpenAPI documentation) was `Should` until v0.5 raised it. When planning, read §9 for *what ships first* and this column for *what may be cut*.
 
 ---
 
@@ -235,8 +259,10 @@ Could = Optional or future phase
 | FR-AUTH-004 | The system shall allow users to logout | Must |
 | FR-AUTH-005 | The system shall allow users to change password | Should |
 | FR-AUTH-006 | The system shall support forgot password and reset password flow | Should |
-| FR-AUTH-007 | The system shall support external SSO/OAuth2/OpenID Connect in later phase | Could |
+| FR-AUTH-007 | The system should support external SSO/OAuth2/OpenID Connect | Could |
 | FR-AUTH-008 | The system shall record login activity in audit log | Must |
+
+Note: FR-AUTH-007 is planned for a later phase.
 
 ---
 
@@ -272,9 +298,9 @@ Could = Optional or future phase
 
 | ID | Requirement | Priority |
 |---|---|---|
-| FR-MDM-001 | The system shall manage supplier master data | Must |
-| FR-MDM-002 | The system shall manage customer master data | Must |
-| FR-MDM-003 | The system shall manage employee master data | Must |
+| FR-MDM-001 | The system shall manage party master data (persons and party groups) using a unified Party model | Must |
+| FR-MDM-002 | The system shall support party roles (supplier, customer, employee, contact) with role-specific profiles | Must |
+| FR-MDM-003 | The system shall support party identifications, relationships, statuses, and contact mechanisms | Must |
 | FR-MDM-004 | The system shall manage facility master data | Must |
 | FR-MDM-005 | The system shall manage product master data | Should |
 | FR-MDM-006 | The system shall manage service master data | Should |
@@ -283,6 +309,8 @@ Could = Optional or future phase
 | FR-MDM-009 | The system shall record master data changes in audit log | Must |
 | FR-MDM-010 | The system shall allow master data changes through controlled document workflows | Should |
 | FR-MDM-011 | The system shall store external source references for synchronized master data | Should |
+
+Note: supplier, customer, and employee master data follow the OFBiz-style Party model defined in docs/architectures/05. Core - Master Data - Party.md — a party is a person or party group holding one or more roles, each with a role-specific profile. Facility, product, and service remain dedicated master-data entities.
 
 ---
 
@@ -360,7 +388,9 @@ Could = Optional or future phase
 | FR-WF-013 | The system shall update document status based on workflow transition | Must |
 | FR-WF-014 | The system shall support workflow variables | Must |
 | FR-WF-015 | The system shall support conditional routing | Should |
-| FR-WF-016 | The system shall support parallel approval in later phase | Could |
+| FR-WF-016 | The system should support parallel approval | Could |
+
+Note: FR-WF-016 is planned for a later phase.
 
 ---
 
@@ -371,8 +401,8 @@ Could = Optional or future phase
 | FR-TASK-001 | The system shall show tasks assigned to current user | Must |
 | FR-TASK-002 | The system shall show tasks assigned to user roles | Must |
 | FR-TASK-003 | The system shall allow user to open task detail | Must |
-| FR-TASK-004 | The system shall allow user to approve task | Must |
-| FR-TASK-005 | The system shall allow user to reject task | Must |
+| FR-TASK-004 | The system shall allow user to approve task (see FR-WF-006 — same capability surfaced in the workflow area) | Must |
+| FR-TASK-005 | The system shall allow user to reject task (see FR-WF-007 — same capability surfaced in the workflow area) | Must |
 | FR-TASK-006 | The system shall allow user to add comment during approval | Must |
 | FR-TASK-007 | The system shall show overdue tasks | Should |
 | FR-TASK-008 | The system shall allow task delegation | Should |
@@ -394,6 +424,8 @@ Could = Optional or future phase
 | FR-ATT-008 | The system shall record attachment activity | Must |
 | FR-ATT-009 | The system shall support attachment deletion with soft delete | Should |
 | FR-ATT-010 | The system shall support external document references | Should |
+
+Note: FR-ATT-004 — the maximum file size is configurable, with a default limit of 25 MB per file. Baselined 2026-08-11.
 
 ---
 
@@ -421,7 +453,7 @@ Could = Optional or future phase
 | FR-ACT-004 | The system shall record activity events for workflow actions | Must |
 | FR-ACT-005 | The system shall provide activity timeline per document | Must |
 | FR-AUD-001 | The system shall record formal audit events | Must |
-| FR-AUD-002 | The system shall store old and new values for important changes | Should |
+| FR-AUD-002 | The system shall store old and new values for all create, update, delete, status-transition, permission, and configuration changes | Should |
 | FR-AUD-003 | The system shall prevent audit records from being modified | Must |
 | FR-AUD-004 | The system shall provide audit search for authorized users | Must |
 | FR-AUD-005 | The system shall record IP address and actor for audit events | Should |
@@ -461,8 +493,8 @@ Could = Optional or future phase
 
 | ID | Requirement | Priority |
 |---|---|---|
-| FR-SRH-001 | The system shall support document search | Must |
-| FR-SRH-002 | The system shall support master data search | Must |
+| FR-SRH-001 | The system shall support document search (see FR-DOC-013 — same capability surfaced in the document area) | Must |
+| FR-SRH-002 | The system shall support master data search (see FR-MDM-008 — same capability surfaced in the master data area) | Must |
 | FR-SRH-003 | The system shall support task search | Should |
 | FR-SRH-004 | The system shall support global search | Could |
 
@@ -507,7 +539,7 @@ Could = Optional or future phase
 | FR-API-001 | The system shall provide REST API | Must |
 | FR-API-002 | The system shall use JSON format | Must |
 | FR-API-003 | The system shall version APIs under /api/v1 | Must |
-| FR-API-004 | The system shall provide OpenAPI documentation | Should |
+| FR-API-004 | The system shall provide OpenAPI documentation | Must |
 | FR-API-005 | The system shall provide standard error response format | Must |
 | FR-API-006 | The system shall support pagination | Must |
 | FR-API-007 | The system shall support sorting and filtering | Should |
@@ -521,7 +553,7 @@ Could = Optional or future phase
 
 | ID | Requirement |
 |---|---|
-| NFR-PERF-001 | List pages should load within acceptable time for normal dataset |
+| NFR-PERF-001 | List views should load within 1 second and detail views within 2 seconds at P95, with 10,000 documents and 50 concurrent users |
 | NFR-PERF-002 | API endpoints should support pagination to avoid large payloads |
 | NFR-PERF-003 | Workflow transitions should complete without blocking UI unnecessarily |
 | NFR-PERF-004 | File upload should support streaming where possible |
@@ -554,6 +586,7 @@ File upload: depends on network and file size
 | NFR-AVA-001 | System should support containerized deployment |
 | NFR-AVA-002 | System should support health checks |
 | NFR-AVA-003 | System should support graceful shutdown |
+| NFR-AVA-004 | Production deployments should achieve 99.5% monthly uptime, with RPO ≤ 24 hours, RTO ≤ 4 hours, and daily automated backups |
 
 ---
 
@@ -568,6 +601,9 @@ File upload: depends on network and file size
 | NFR-SEC-005 | File uploads must be validated |
 | NFR-SEC-006 | Audit trail must be protected from unauthorized modification |
 | NFR-SEC-007 | Secrets must not be hardcoded |
+| NFR-SEC-008 | Authentication endpoints must be rate limited: 5 failed logins trigger a 15-minute lockout |
+| NFR-SEC-009 | Attachments and backups must be encrypted at rest |
+| NFR-SEC-010 | Data in transit must use TLS 1.2 or higher |
 
 ---
 
@@ -575,7 +611,7 @@ File upload: depends on network and file size
 
 | ID | Requirement |
 |---|---|
-| NFR-AUD-001 | All important business actions must be auditable |
+| NFR-AUD-001 | All create, update, delete, status-transition, permission, and configuration changes must be auditable |
 | NFR-AUD-002 | Audit log must include actor, timestamp, action, and object |
 | NFR-AUD-003 | Document approval history must be traceable |
 | NFR-AUD-004 | Master data changes must be traceable |
@@ -799,1311 +835,11 @@ Machine learning analytics
 
 ---
 
-# Document 2: Kelir Solution Blueprint
+# Part 2: Solution Blueprint (moved)
 
-## Document Control
+The "Kelir Solution Blueprint" formerly embedded here as Document 2 has been moved to the
+System Design Document: `docs/design/01. System Design Document.md` (SDD v0.1).
 
-| Item | Detail |
-|---|---|
-| Document Name | Kelir Solution Blueprint |
-| Framework Name | Kelir |
-| Version | 0.1 |
-| Status | Initial Draft |
-| Date | 2026-08-05 |
-| Document Type | Architecture Blueprint |
-| Backend | Rust |
-| Frontend | Vue + Vite + Axios + shadcn-vue + Tailwind CSS v4 |
-| Database | PostgreSQL, optional MariaDB |
-
----
-
-# 1. Blueprint Purpose
-
-This document defines the initial architecture and technical blueprint for **Kelir**.
-
-It describes:
-
-```text
-Architecture style
-Technology stack
-Backend structure
-Frontend structure
-Database design approach
-Workflow engine design
-RAD engine design
-Integration design
-Plugin/extension design
-Security design
-Deployment design
-Development roadmap
-```
-
----
-
-# 2. Architecture Style
-
-Kelir will use:
-
-```text
-Modular Monolith Backend
-Single Page Application Frontend
-REST API
-Relational Database
-Object/File Storage
-Background Worker
-Event Outbox
-```
-
-Initial architecture:
-
-```text
-Frontend SPA
-    ↓ HTTPS/JSON
-Rust Backend API
-    ↓
-PostgreSQL Database
-File/Object Storage
-Background Worker / Scheduler
-```
-
-Future evolution:
-
-```text
-Microservices if needed
-Message queue
-External workflow engine
-Plugin services
-API gateway
-Event streaming
-```
-
----
-
-# 3. High-Level Architecture
-
-```text
-+---------------------------------------------------------------+
-|                      Kelir Frontend                      |
-|                                                               |
-|  Vue 3 + Vite + TypeScript                                    |
-|  Pinia + Vue Router                                           |
-|  Axios + shadcn-vue + Tailwind CSS v4                         |
-|                                                               |
-|  Dynamic Form Renderer                                        |
-|  Dynamic List Renderer                                        |
-|  Document Workspace                                           |
-|  Task Inbox                                                   |
-|  Admin Console                                                |
-+---------------------------------------------------------------+
-                              |
-                              | REST / JSON
-                              v
-+---------------------------------------------------------------+
-|                       Kelir Backend                      |
-|                                                               |
-|  Rust + Axum + Tokio                                          |
-|                                                               |
-|  Authentication                                               |
-|  Authorization                                                |
-|  API Controllers                                              |
-|  Application Services                                         |
-|  Domain Modules                                               |
-|  Workflow Engine                                              |
-|  RAD Engine                                                   |
-|  Integration Layer                                            |
-|  Plugin Runtime                                               |
-|  Event Dispatcher                                             |
-+---------------------------------------------------------------+
-                              |
-        +---------------------+---------------------+
-        |                     |                     |
-        v                     v                     v
-+--------------+      +----------------+     +----------------+
-| PostgreSQL   |      | Object Storage |     | Worker / Queue |
-| or MariaDB   |      | Local / MinIO  |     | Outbox / Jobs  |
-|              |      | / S3           |     |                |
-+--------------+      +----------------+     +----------------+
-```
-
----
-
-# 4. Technology Stack Blueprint
-
-## 4.1 Backend Stack
-
-| Layer | Technology |
-|---|---|
-| Language | Rust |
-| Web Framework | Axum |
-| Async Runtime | Tokio |
-| Middleware | Tower / Tower-HTTP |
-| Serialization | Serde |
-| Validation | Validator or Zod-like server validation |
-| Database Access | SQLx |
-| Migration | SQLx Migrate |
-| Authentication | JWT or secure session |
-| Password Hashing | Argon2 |
-| API Docs | Utoipa / OpenAPI |
-| Logging | Tracing |
-| Error Handling | ThisError / Anyhow |
-| Background Jobs | Tokio tasks + outbox, later queue |
-| Storage | Local, MinIO, S3-compatible |
-
----
-
-## 4.2 Frontend Stack
-
-| Layer | Technology |
-|---|---|
-| Framework | Vue 3 |
-| Build Tool | Vite |
-| Language | TypeScript |
-| State | Pinia |
-| Router | Vue Router |
-| HTTP Client | Axios |
-| UI Components | shadcn-vue |
-| Styling | Tailwind CSS v4 |
-| Form Validation | VeeValidate + Zod |
-| Utilities | VueUse |
-| Icons | Lucide Vue Next |
-| Server State | TanStack Query Vue, optional |
-
----
-
-## 4.3 Database Strategy
-
-Primary database:
-
-```text
-PostgreSQL
-```
-
-Reason:
-
-```text
-JSONB support
-GIN indexing
-Full-text search
-Strong integrity
-Row-level security potential
-Better fit for metadata and audit logs
-```
-
-Optional:
-
-```text
-MariaDB
-```
-
-MariaDB support requires:
-
-```text
-SQLx MySQL dialect
-Avoid PostgreSQL-specific JSONB features
-Test migration compatibility
-Use generated columns if indexing JSON fields
-```
-
----
-
-# 5. Backend Blueprint
-
-## 5.1 Backend Layering
-
-```text
-HTTP Layer
-    ↓
-Application Layer
-    ↓
-Domain Layer
-    ↓
-Infrastructure Layer
-```
-
----
-
-## 5.2 Backend Modules
-
-```text
-BhuvarlokaCoreModule
-BhuvarlokaConfigModule
-BhuvarlokaDatabaseModule
-BhuvarlokaHealthModule
-BhuvarlokaSecurityModule
-BhuvarlokaIdentityModule
-BhuvarlokaRolePermissionModule
-BhuvarlokaOrganizationModule
-BhuvarlokaMasterDataModule
-BhuvarlokaRadModule
-BhuvarlokaDocumentTypeModule
-BhuvarlokaDocumentModule
-BhuvarlokaWorkflowModule
-BhuvarlokaTaskInboxModule
-BhuvarlokaAttachmentModule
-BhuvarlokaStorageModule
-BhuvarlokaCommentModule
-BhuvarlokaActivityModule
-BhuvarlokaAuditModule
-BhuvarlokaNotificationModule
-BhuvarlokaReportingModule
-BhuvarlokaSearchModule
-BhuvarlokaSchedulerModule
-BhuvarlokaEventModule
-BhuvarlokaIntegrationModule
-BhuvarlokaPluginModule
-BhuvarlokaApiModule
-BhuvarlokaOpenApiModule
-```
-
----
-
-## 5.3 Backend Folder Blueprint
-
-Initial simple structure:
-
-```text
-kelir-backend/
-├── Cargo.toml
-├── migrations/
-│   ├── 0001_core.sql
-│   ├── 0002_identity.sql
-│   ├── 0003_master_data.sql
-│   ├── 0004_rad.sql
-│   ├── 0005_document.sql
-│   ├── 0006_workflow.sql
-│   ├── 0007_attachment.sql
-│   ├── 0008_comment.sql
-│   ├── 0009_activity_audit.sql
-│   ├── 0010_notification.sql
-│   ├── 0011_integration.sql
-│   └── 0012_plugin.sql
-│
-└── src/
-    ├── main.rs
-    ├── config.rs
-    ├── error.rs
-    ├── router.rs
-    ├── db.rs
-    ├── health.rs
-    ├── middleware/
-    ├── modules/
-    │   ├── auth/
-    │   ├── identity/
-    │   ├── roles/
-    │   ├── organization/
-    │   ├── master_data/
-    │   ├── rad/
-    │   ├── document_type/
-    │   ├── document/
-    │   ├── workflow/
-    │   ├── task_inbox/
-    │   ├── attachment/
-    │   ├── comment/
-    │   ├── activity/
-    │   ├── audit/
-    │   ├── notification/
-    │   ├── reporting/
-    │   ├── search/
-    │   ├── integration/
-    │   └── plugin/
-    └── utils/
-```
-
-Later can evolve into Rust workspace crates:
-
-```text
-crates/
-├── api
-├── app
-├── domain
-├── infrastructure
-├── workflow
-├── rad
-├── integration
-├── plugin
-└── security
-```
-
----
-
-# 6. Frontend Blueprint
-
-## 6.1 Frontend Architecture
-
-```text
-App Shell
-    ↓
-Layout
-    ↓
-Router
-    ↓
-Feature Modules
-    ↓
-API Client
-    ↓
-Backend REST API
-```
-
----
-
-## 6.2 Frontend Modules
-
-```text
-BhuvarlokaAppShellModule
-BhuvarlokaLayoutModule
-BhuvarlokaRouterModule
-BhuvarlokaStoreModule
-BhuvarlokaApiClientModule
-BhuvarlokaAuthFeatureModule
-BhuvarlokaDashboardFeatureModule
-BhuvarlokaTaskInboxFeatureModule
-BhuvarlokaDocumentFeatureModule
-BhuvarlokaDocumentWorkspaceModule
-BhuvarlokaAttachmentFeatureModule
-BhuvarlokaCommentFeatureModule
-BhuvarlokaActivityFeatureModule
-BhuvarlokaAuditFeatureModule
-BhuvarlokaMasterDataFeatureModule
-BhuvarlokaRadRendererModule
-BhuvarlokaFormEngineModule
-BhuvarlokaTableModule
-BhuvarlokaWorkflowFeatureModule
-BhuvarlokaAdminFeatureModule
-BhuvarlokaRadBuilderModule
-BhuvarlokaNotificationFeatureModule
-BhuvarlokaSearchFeatureModule
-BhuvarlokaReportingFeatureModule
-BhuvarlokaSettingsFeatureModule
-BhuvarlokaUiModule
-BhuvarlokaThemeModule
-BhuvarlokaErrorHandlingModule
-BhuvarlokaUtilityModule
-BhuvarlokaTypeModule
-```
-
----
-
-## 6.3 Frontend Folder Blueprint
-
-```text
-kelir-frontend/
-├── package.json
-├── vite.config.ts
-├── tsconfig.json
-├── index.html
-└── src/
-    ├── main.ts
-    ├── App.vue
-    ├── api/
-    ├── components/
-    ├── composables/
-    ├── features/
-    │   ├── auth/
-    │   ├── dashboard/
-    │   ├── documents/
-    │   ├── workflow/
-    │   ├── tasks/
-    │   ├── master-data/
-    │   ├── admin/
-    │   ├── notifications/
-    │   └── settings/
-    ├── layouts/
-    ├── pages/
-    ├── router/
-    ├── stores/
-    ├── styles/
-    ├── types/
-    └── lib/
-```
-
----
-
-# 7. Database Blueprint
-
-## 7.1 Table Groups
-
-```text
-Core and configuration
-Identity and security
-Organization
-Master data
-RAD metadata
-Document type
-Document
-Attachment
-Comment
-Workflow
-Activity and audit
-Notification
-Integration
-Plugin
-```
-
----
-
-## 7.2 Core Tables
-
-```text
-tenants
-departments
-users
-roles
-permissions
-role_permissions
-user_roles
-delegations
-```
-
----
-
-## 7.3 Master Data Tables
-
-```text
-mdm_suppliers
-mdm_customers
-mdm_employees
-mdm_facilities
-mdm_products
-mdm_services
-master_data_source_references
-```
-
----
-
-## 7.4 RAD Tables
-
-```text
-rad_entities
-rad_fields
-rad_forms
-rad_form_sections
-rad_form_fields
-rad_lists
-rad_list_columns
-rad_list_filters
-rad_menus
-rad_actions
-rad_validation_rules
-rad_lookup_definitions
-```
-
----
-
-## 7.5 Document Tables
-
-```text
-document_types
-document_type_workflows
-document_type_numbering_rules
-document_type_attachment_rules
-documents
-document_versions
-document_metadata
-document_status_history
-document_relations
-```
-
----
-
-## 7.6 Workflow Tables
-
-```text
-workflow_definitions
-workflow_states
-workflow_transitions
-workflow_instances
-workflow_variables
-workflow_tasks
-workflow_task_history
-approval_decisions
-workflow_escalations
-```
-
----
-
-## 7.7 Collaboration Tables
-
-```text
-attachments
-attachment_versions
-attachment_categories
-comments
-comment_mentions
-comment_attachments
-```
-
----
-
-## 7.8 Activity and Audit Tables
-
-```text
-activity_events
-audit_events
-audit_snapshots
-```
-
----
-
-## 7.9 Notification Tables
-
-```text
-notifications
-notification_templates
-notification_channels
-notification_logs
-```
-
----
-
-## 7.10 Integration Tables
-
-```text
-external_systems
-integration_endpoints
-integration_credentials
-integration_logs
-integration_mappings
-webhook_subscriptions
-webhook_events
-outbox_events
-inbox_events
-```
-
----
-
-## 7.11 Plugin Tables
-
-```text
-plugins
-plugin_versions
-plugin_installations
-plugin_permissions
-plugin_settings
-plugin_migrations
-plugin_audit_logs
-plugin_error_logs
-```
-
----
-
-# 8. Workflow Engine Blueprint
-
-## 8.1 Workflow Model
-
-Initial workflow model:
-
-```text
-Workflow Definition
-    ↓
-States
-    ↓
-Transitions
-    ↓
-Actions
-    ↓
-Process Instance
-    ↓
-Tasks
-    ↓
-History
-```
-
----
-
-## 8.2 Workflow States Example
-
-```text
-DRAFT
-SUBMITTED
-MANAGER_APPROVAL
-FINANCE_APPROVAL
-DIRECTOR_APPROVAL
-COMPLETED
-REJECTED
-RETURNED
-CANCELLED
-ARCHIVED
-```
-
----
-
-## 8.3 Workflow Actions
-
-```text
-SUBMIT
-APPROVE
-REJECT
-RETURN
-DELEGATE
-ESCALATE
-CANCEL
-COMPLETE
-```
-
----
-
-## 8.4 Workflow Processing Flow
-
-```text
-Document submitted
-        ↓
-Workflow engine selects workflow definition
-        ↓
-Process instance created
-        ↓
-First transition evaluated
-        ↓
-Task created if human action required
-        ↓
-Task assigned to user/role/group
-        ↓
-User completes task
-        ↓
-Transition evaluated
-        ↓
-Document status updated
-        ↓
-Next task created or process completed
-        ↓
-History and audit recorded
-```
-
----
-
-# 9. RAD Engine Blueprint
-
-## 9.1 RAD Concept
-
-```text
-Entity Definition
-    ↓
-Form Definition
-    ↓
-List Definition
-    ↓
-Document Type
-    ↓
-Workflow Assignment
-    ↓
-UI Renderer
-```
-
----
-
-## 9.2 RAD Metadata Objects
-
-```text
-Entity
-Field
-Form
-Form Section
-Form Field
-List
-List Column
-List Filter
-Menu
-Action
-Lookup
-Validation Rule
-```
-
----
-
-## 9.3 RAD Rendering Flow
-
-```text
-Frontend requests metadata
-        ↓
-Backend returns form/list/document type metadata
-        ↓
-Frontend FormRenderer renders form
-        ↓
-Frontend ListRenderer renders table
-        ↓
-User submits data
-        ↓
-Backend validates using schema
-        ↓
-Document or master data saved
-```
-
----
-
-# 10. Integration Blueprint
-
-## 10.1 Integration Layer Components
-
-```text
-Integration Core
-Connector/Adapter
-Outbound API Client
-Inbound API
-Webhook Module
-Event Bus / Outbox
-Mapping Module
-Scheduler
-Retry Module
-Secret Management
-Integration Log
-Integration Audit
-```
-
----
-
-## 10.2 Integration Flow
-
-```text
-Business event occurs
-        ↓
-Integration event created
-        ↓
-Outbox stores event
-        ↓
-Worker processes event
-        ↓
-Connector maps payload
-        ↓
-External system called
-        ↓
-Response logged
-        ↓
-Kelir state updated
-```
-
----
-
-# 11. Plugin / Extension Blueprint
-
-## 11.1 Extension Strategy
-
-Phase 1:
-
-```text
-Configuration-based extensions
-```
-
-Phase 2:
-
-```text
-Compiled-in official plugins
-```
-
-Phase 3:
-
-```text
-Dynamic plugins or external plugin services
-```
-
----
-
-## 11.2 Plugin Management Components
-
-```text
-Plugin Registry
-Plugin Loader
-Plugin Lifecycle Manager
-Plugin Permission Manager
-Plugin Hook Manager
-Plugin Settings Manager
-Plugin Asset Manager
-Plugin Audit Manager
-Plugin Manager UI
-```
-
----
-
-## 11.3 Plugin Extension Points
-
-Backend:
-
-```text
-API routes
-Workflow handlers
-Document validators
-Integration connectors
-Notification channels
-Storage drivers
-Auth providers
-Background jobs
-Event subscribers
-```
-
-Frontend:
-
-```text
-Sidebar menu
-Dashboard widget
-Document tab
-Task action
-Master data tab
-Admin page
-Report widget
-Form field renderer
-Table column renderer
-Theme
-Localization
-```
-
----
-
-# 12. Security Blueprint
-
-## 12.1 Authentication
-
-```text
-Username/email + password
-Argon2 password hashing
-JWT access token or secure session
-Refresh token or session renewal
-Logout and token invalidation
-```
-
----
-
-## 12.2 Authorization
-
-```text
-RBAC first
-Permission format: module:resource:action
-Backend enforcement
-Frontend visibility control
-```
-
-Example permissions:
-
-```text
-document:create
-document:read
-document:update
-document:submit
-document:approve
-attachment:upload
-attachment:delete
-master-data:supplier:update
-audit:read
-integration:manage
-plugin:manage
-```
-
----
-
-## 12.3 Audit and Logging
-
-```text
-Activity log for user-friendly timeline
-Audit log for formal compliance record
-Integration log for external calls
-Plugin audit log for extension actions
-Security log for authentication and authorization failures
-```
-
----
-
-# 13. API Blueprint
-
-## 13.1 Base API
-
-```text
-/api/v1
-```
-
----
-
-## 13.2 Core Endpoints
-
-```text
-POST /auth/login
-POST /auth/logout
-GET  /auth/me
-
-GET  /users
-POST /users
-GET  /users/{id}
-PUT  /users/{id}
-
-GET  /roles
-POST /roles
-
-GET  /master-data/suppliers
-GET  /master-data/customers
-GET  /master-data/employees
-GET  /master-data/facilities
-GET  /master-data/products
-GET  /master-data/services
-
-GET  /document-types
-POST /document-types
-
-GET  /documents
-POST /documents
-GET  /documents/{id}
-PUT  /documents/{id}
-POST /documents/{id}/submit
-
-GET  /tasks
-GET  /tasks/{id}
-POST /tasks/{id}/approve
-POST /tasks/{id}/reject
-POST /tasks/{id}/return
-POST /tasks/{id}/delegate
-
-GET  /notifications
-GET  /activity
-GET  /audit
-```
-
----
-
-## 13.3 Standard Response
-
-```json
-{
-  "success": true,
-  "data": {},
-  "meta": {}
-}
-```
-
-Standard error:
-
-```json
-{
-  "success": false,
-  "error": {
-    "code": "VALIDATION_ERROR",
-    "message": "Validation failed",
-    "details": []
-  }
-}
-```
-
----
-
-# 14. Deployment Blueprint
-
-## 14.1 Development Deployment
-
-```text
-Docker Compose
-├── frontend
-├── backend
-├── postgres
-├── mailpit
-└── minio
-```
-
----
-
-## 14.2 Production Deployment
-
-```text
-Nginx / Reverse Proxy
-├── Static frontend
-└── Proxy to backend API
-
-Backend container
-PostgreSQL managed database
-Object storage / MinIO / S3
-Optional queue / worker
-Secret management
-Backup strategy
-Monitoring
-```
-
----
-
-## 14.3 Environment Variables
-
-Backend:
-
-```text
-BHUVARLOKA_APP_NAME
-BHUVARLOKA_APP_ENV
-BHUVARLOKA_DATABASE_URL
-BHUVARLOKA_JWT_SECRET
-BHUVARLOKA_STORAGE_DRIVER
-BHUVARLOKA_SMTP_HOST
-BHUVARLOKA_FRONTEND_URL
-```
-
-Frontend:
-
-```text
-VITE_BHUVARLOKA_API_BASE_URL
-VITE_BHUVARLOKA_APP_TITLE
-```
-
----
-
-# 15. Development Roadmap
-
-## Phase 1: Foundation
-
-```text
-Project skeleton
-Docker Compose
-Backend Axum skeleton
-Frontend Vue skeleton
-Database connection
-Health endpoint
-Configuration loading
-Logging
-Basic layout
-Login page
-```
-
-Deliverable:
-
-```text
-Running Kelir skeleton
-```
-
----
-
-## Phase 2: Authentication and User Management
-
-```text
-Users
-Roles
-Permissions
-Login
-Logout
-JWT/session
-Route guards
-User CRUD
-Role CRUD
-```
-
-Deliverable:
-
-```text
-Authenticated Kelir application
-```
-
----
-
-## Phase 3: Master Data
-
-```text
-Supplier
-Customer
-Employee
-Facility
-Product
-Service
-Master data list
-Master data form
-Search and pagination
-Audit logging
-```
-
-Deliverable:
-
-```text
-Master data management module
-```
-
----
-
-## Phase 4: Document Core
-
-```text
-Document types
-Document numbering
-Document creation
-Document editing
-Document submission
-Document list
-Document detail
-Document metadata
-Document versions
-```
-
-Deliverable:
-
-```text
-Working document management module
-```
-
----
-
-## Phase 5: Workflow Engine
-
-```text
-Workflow definitions
-Process instances
-Tasks
-Approve
-Reject
-Return
-Task inbox
-Workflow history
-Document status synchronization
-```
-
-Deliverable:
-
-```text
-Approval workflow working end-to-end
-```
-
----
-
-## Phase 6: Attachments, Comments, Activity
-
-```text
-File upload
-File download
-Attachment list
-Comments
-Threaded comments
-Activity timeline
-Basic audit trail
-```
-
-Deliverable:
-
-```text
-Collaborative document workspace
-```
-
----
-
-## Phase 7: RAD Engine
-
-```text
-Entity definitions
-Form definitions
-List definitions
-Dynamic form renderer
-Dynamic list renderer
-Document type builder
-Menu builder
-```
-
-Deliverable:
-
-```text
-Configurable rapid application development capability
-```
-
----
-
-## Phase 8: Reporting and Dashboard
-
-```text
-Dashboard summary
-Pending tasks
-Recent documents
-Document status chart
-Overdue tasks
-Approval reports
-```
-
-Deliverable:
-
-```text
-Management dashboard
-```
-
----
-
-## Phase 9: Integration and Plugin Foundation
-
-```text
-Integration core
-External system registry
-Integration logs
-Outbox events
-Plugin registry
-Plugin settings
-Plugin manager UI
-```
-
-Deliverable:
-
-```text
-Extensible Kelir platform foundation
-```
-
----
-
-# 16. Traceability Matrix
-
-| Requirement Area | Related Blueprint Modules |
-|---|---|
-| Authentication | SecurityModule, AuthFeatureModule |
-| Users and Roles | IdentityModule, RolePermissionModule, AdminFeatureModule |
-| Master Data | MasterDataModule, MasterDataFeatureModule |
-| RAD | RadModule, RadRendererModule, RadBuilderModule |
-| Document Type | DocumentTypeModule, AdminFeatureModule |
-| Documents | DocumentModule, DocumentFeatureModule, DocumentWorkspaceModule |
-| Workflow | WorkflowModule, WorkflowFeatureModule |
-| Tasks | TaskInboxModule, TaskInboxFeatureModule |
-| Attachments | AttachmentModule, StorageModule, AttachmentFeatureModule |
-| Comments | CommentModule, CommentFeatureModule |
-| Activity | ActivityModule, ActivityFeatureModule |
-| Audit | AuditModule, AuditFeatureModule |
-| Notifications | NotificationModule, NotificationFeatureModule |
-| Reporting | ReportingModule, DashboardFeatureModule |
-| Integration | IntegrationModule, IntegrationAdminModule |
-| Plugins | PluginModule, PluginManagerUIModule |
-
----
-
-# 17. Risks and Mitigation
-
-| Risk | Mitigation |
-|---|---|
-| Workflow engine becomes too complex | Start with lightweight state-transition engine before BPMN |
-| Multi-database compatibility complexity | Use PostgreSQL first, MariaDB later with compatibility layer |
-| Dynamic plugins introduce security risk | Start with configuration-based and compiled-in plugins |
-| RAD metadata becomes unstable | Version metadata and validate schema strictly |
-| Frontend dynamic rendering complexity | Build reusable FormRenderer and ListRenderer incrementally |
-| Audit log grows large | Partition/archive audit tables and define retention policy |
-| File storage grows | Use object storage and metadata tracking |
-| Integration failures | Use outbox, retry, dead-letter, and integration logs |
-| Permission complexity | Start with RBAC before ABAC |
-
----
-
-# 18. Immediate Next Steps
-
-The next practical steps are:
-
-```text
-1. Approve SRS v0.1 and Blueprint v0.1.
-2. Finalize repository structure.
-3. Initialize Kelir backend skeleton using Rust and Axum.
-4. Initialize Kelir frontend skeleton using Vue, Vite, TypeScript, shadcn-vue, Tailwind CSS v4.
-5. Prepare Docker Compose for PostgreSQL, backend, frontend, MinIO, and Mailpit.
-6. Create initial database migrations.
-7. Implement health endpoint.
-8. Implement authentication.
-9. Implement user and role management.
-10. Implement master data CRUD.
-11. Implement document core.
-12. Implement workflow engine.
-```
-
----
-
-# 19. Final Statement
-
-**Kelir** will be a document-based, workflow-driven, rapid application development framework with the following foundation:
-
-```text
-Rust backend
-Vue frontend
-PostgreSQL database
-REST API
-Modular monolith architecture
-Metadata-driven RAD engine
-Lightweight workflow engine
-Attachment and collaboration features
-Audit-ready document processing
-Integration-ready architecture
-Plugin-ready extension model
-```
-
-The SRS and Blueprint above provide the initial baseline for starting design refinement, repository initialization, database migration design, API design, and development implementation.
+The SDD covers: architecture style and overview, technology stack, backend/frontend structure,
+database design, workflow engine, RAD engine, integration, plugins, security, API, deployment,
+the development roadmap, traceability, and risks.
