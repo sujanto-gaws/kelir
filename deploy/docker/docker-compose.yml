@@ -8,7 +8,7 @@ services:
     ports:
       - "5173:5173"
     environment:
-      - VITE_BHUVARLOKA_API_BASE_URL=http://localhost:8080/api/v1
+      - VITE_KELIR_API_BASE_URL=http://localhost:8080/api/v1
     depends_on:
       - backend
 
@@ -21,13 +21,13 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - BHUVARLOKA_APP_NAME=Kelir
-      - BHUVARLOKA_APP_ENV=development
-      - BHUVARLOKA_DATABASE_URL=postgres://postgres:postgres@postgres:5432/kelir
-      - BHUVARLOKA_JWT_SECRET=change-me
-      - BHUVARLOKA_STORAGE_DRIVER=local
-      - BHUVARLOKA_SMTP_HOST=mailpit
-      - BHUVARLOKA_FRONTEND_URL=http://localhost:5173
+      - KELIR_APP_NAME=Kelir
+      - KELIR_APP_ENV=development
+      - KELIR_DATABASE_URL=postgres://postgres:postgres@postgres:5432/kelir
+      - KELIR_JWT_SECRET=change-me
+      - KELIR_STORAGE_DRIVER=local
+      - KELIR_SMTP_HOST=mailpit
+      - KELIR_FRONTEND_URL=http://localhost:5173
     depends_on:
       - postgres
 
