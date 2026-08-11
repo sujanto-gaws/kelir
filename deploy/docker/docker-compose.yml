@@ -6,9 +6,9 @@ services:
       - ../../kelir-frontend:/app
     command: sh -c "npm install && npm run dev -- --host"
     ports:
-      - "5173:5173"
+      - "${KELIR_FRONTEND_PORT:-5173}:5173"
     environment:
-      - VITE_KELIR_API_BASE_URL=http://localhost:8080/api/v1
+      - VITE_KELIR_API_BASE_URL=http://localhost:${KELIR_BACKEND_PORT:-8080}/api/v1
     depends_on:
       - backend
 
@@ -19,7 +19,7 @@ services:
       - ../../kelir-backend:/app
     command: sh -c "cargo run"
     ports:
-      - "8080:8080"
+      - "${KELIR_BACKEND_PORT:-8080}:8080"
     environment:
       - KELIR_APP_NAME=Kelir
       - KELIR_APP_ENV=development
@@ -38,7 +38,7 @@ services:
       - POSTGRES_PASSWORD=postgres
       - POSTGRES_DB=kelir
     ports:
-      - "5432:5432"
+      - "${KELIR_POSTGRES_PORT:-5432}:5432"
     volumes:
       - kelir-postgres-data:/var/lib/postgresql/data
 
@@ -49,14 +49,14 @@ services:
       - MINIO_ROOT_USER=minioadmin
       - MINIO_ROOT_PASSWORD=minioadmin
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "${KELIR_MINIO_PORT:-9000}:9000"
+      - "${KELIR_MINIO_CONSOLE_PORT:-9001}:9001"
 
   mailpit:
     image: axllent/mailpit:latest
     ports:
-      - "1025:1025"
-      - "8025:8025"
+      - "${KELIR_SMTP_PORT:-1025}:1025"
+      - "${KELIR_MAILPIT_UI_PORT:-8025}:8025"
 
 volumes:
   kelir-postgres-data:
