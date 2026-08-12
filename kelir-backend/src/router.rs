@@ -186,6 +186,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_tenant_code_is_visible_in_the_published_contract() {
+        // The reason tenancy travels in the request body rather than a header
+        // (FR-IDM-009): a header carries the same trust as a body field while
+        // being invisible to every client generated from this document. If the
+        // field ever stops appearing here, that rationale has quietly lapsed.
+        let (_, body) = get("/api/docs/openapi.json").await;
+
+        let properties = &body["components"]["schemas"]["SignInRequest"]["properties"];
+
+        assert!(
+            properties["tenantCode"].is_object(),
+            "tenantCode is missing from the published SignInRequest: {properties}"
+        );
+
+        // Optional in the contract, so single-tenant clients that never send it
+        // remain conformant.
+        let required = &body["components"]["schemas"]["SignInRequest"]["required"];
+        assert!(
+            !required
+                .as_array()
+                .is_some_and(|names| names.iter().any(|name| name == "tenantCode")),
+            "tenantCode must stay optional; existing clients do not send it"
+        );
+    }
+
+    #[tokio::test]
     async fn unknown_routes_are_not_found() {
         let (status, _) = get("/api/v1/does-not-exist").await;
 

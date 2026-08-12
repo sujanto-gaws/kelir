@@ -5,11 +5,11 @@ use super::password::verify_password;
 use super::token::{
     generate_refresh_token, hash_refresh_token, issue_access_token, ACCESS_TOKEN_TTL_MINUTES,
 };
-use crate::db::SYSTEM_TENANT_ID;
 use crate::error::AppError;
 use crate::modules::audit::{self, AuditEntry};
 use crate::modules::identity::domain::UserStatus;
 use crate::modules::identity::repository as identity_repo;
+use crate::modules::organization::service::{self as organization, TenantResolutionError};
 use crate::state::AppState;
 
 /// What a successful sign-in returns.
@@ -29,13 +29,37 @@ pub const MAX_FAILED_LOGINS: i32 = 5;
 /// from "wrong password" would turn the login endpoint into a way to enumerate
 /// accounts, so the difference is recorded in the audit trail instead, where
 /// only an administrator sees it.
+///
+/// `tenant_code` names the tenant to authenticate against (FR-IDM-009). It is
+/// ignored unless the deployment runs in multi-tenant mode, where it is
+/// required; the resolved tenant scopes every query below and becomes the JWT
+/// `tenant_id` claim that the rest of the system trusts.
 pub async fn sign_in(
     state: &AppState,
+    tenant_code: Option<&str>,
     username: &str,
     password: &str,
     ip_address: Option<&str>,
 ) -> Result<SignedIn, AppError> {
-    let tenant_id = SYSTEM_TENANT_ID;
+    let tenant =
+        match organization::resolve_for_sign_in(&state.pool, &state.config, tenant_code).await {
+            Ok(tenant) => tenant,
+            Err(error @ (TenantResolutionError::Unknown | TenantResolutionError::NotActive)) => {
+                // Same refusal, and the same cost, as a wrong password. An
+                // unknown tenant that answered instantly would be as good an
+                // enumeration oracle as a distinct error code.
+                tracing::warn!(reason = %error, "sign-in refused: tenant did not resolve");
+                let _ = verify_password(password, DUMMY_HASH);
+
+                // No audit row: `audit_events.tenant_id` references `tenants`,
+                // and there is no tenant here to reference. The warning above
+                // is the operator-facing record.
+                return Err(AppError::Unauthorized);
+            }
+            Err(error) => return Err(error.into()),
+        };
+
+    let tenant_id = tenant.id;
 
     let Some(credentials) =
         identity_repo::find_credentials_by_username(&state.pool, tenant_id, username).await?
@@ -97,7 +121,8 @@ pub async fn sign_in(
         })?;
 
     if !verified {
-        let failures = identity_repo::record_failed_login(&state.pool, credentials.id).await?;
+        let failures =
+            identity_repo::record_failed_login(&state.pool, tenant_id, credentials.id).await?;
 
         if failures >= MAX_FAILED_LOGINS {
             identity_repo::update_user_fields(
@@ -144,7 +169,7 @@ pub async fn sign_in(
     )
     .await?;
 
-    identity_repo::record_successful_login(&state.pool, credentials.id).await?;
+    identity_repo::record_successful_login(&state.pool, tenant_id, credentials.id).await?;
 
     // FR-AUTH-008: successful sign-in is an audited event.
     audit::record_or_warn(
@@ -256,22 +281,25 @@ pub async fn sign_out(
     presented_token: Option<&str>,
     ip_address: Option<&str>,
 ) -> Result<(), AppError> {
-    let mut actor_user_id = None;
+    // The tenant comes from the stored token, not from configuration: the
+    // session already knows which tenant it belongs to, and that is the tenant
+    // the audit row belongs in.
+    let mut actor = None;
 
     if let Some(token) = presented_token {
         let hash = hash_refresh_token(token);
 
         if let Some(stored) = identity_repo::find_refresh_token(&state.pool, &hash).await? {
             identity_repo::revoke_refresh_token(&state.pool, stored.id, "signed out").await?;
-            actor_user_id = Some(stored.user_id);
+            actor = Some((stored.tenant_id, stored.user_id));
         }
     }
 
-    if let Some(user_id) = actor_user_id {
+    if let Some((tenant_id, user_id)) = actor {
         audit::record_or_warn(
             &state.pool,
             AuditEntry {
-                tenant_id: SYSTEM_TENANT_ID,
+                tenant_id,
                 event_type: "Security.SignedOut",
                 action: "LOGOUT",
                 object_type: "USER",
@@ -335,8 +363,13 @@ async fn issue_session(
 /// Requires the current password even though the caller is authenticated: an
 /// access token left open on a shared machine should not be enough to take the
 /// account over permanently.
+///
+/// `tenant_id` comes from the caller's own access token, so the account being
+/// changed is always the one the session was issued for — there is no tenant to
+/// resolve here and nothing the caller can supply to point it elsewhere.
 pub async fn change_own_password(
     state: &AppState,
+    tenant_id: Uuid,
     user_id: Uuid,
     current_password: &str,
     new_password: &str,
@@ -344,7 +377,7 @@ pub async fn change_own_password(
     crate::modules::identity::domain::validate_password_value(new_password)?;
 
     let Some(credentials) =
-        identity_repo::find_credentials_by_id(&state.pool, SYSTEM_TENANT_ID, user_id).await?
+        identity_repo::find_credentials_by_id(&state.pool, tenant_id, user_id).await?
     else {
         return Err(AppError::Unauthorized);
     };
@@ -375,7 +408,7 @@ pub async fn change_own_password(
             source: anyhow::anyhow!("password hashing task failed: {error}"),
         })??;
 
-    identity_repo::set_password_hash(&state.pool, SYSTEM_TENANT_ID, user_id, &hash).await?;
+    identity_repo::set_password_hash(&state.pool, tenant_id, user_id, &hash).await?;
 
     // Every other session ends: if the change was prompted by a suspected
     // compromise, leaving them alive defeats the point. The caller signs in
@@ -387,7 +420,7 @@ pub async fn change_own_password(
     audit::record_or_warn(
         &state.pool,
         AuditEntry {
-            tenant_id: SYSTEM_TENANT_ID,
+            tenant_id,
             event_type: "User.PasswordChanged",
             action: "UPDATE",
             object_type: "USER",
