@@ -5,9 +5,12 @@
 #   1. It runs released images by tag, never source mounts. Deploys are
 #      `KELIR_VERSION=v0.1.0 docker compose up -d` — the same immutable
 #      artifacts that go to production (release process §4 step 8).
-#   2. Only Caddy publishes ports. The backend, database and object storage are
-#      reachable only on the internal network, so the database is not exposed to
-#      the internet by a stray firewall rule.
+#   2. Only Caddy publishes ports. Object storage and mail are reachable only on
+#      the internal network, and PostgreSQL runs natively on the host rather
+#      than in a container — its data directory is an ordinary host path, so the
+#      NFR-AVA-004 restore drill is a real exercise. provision-ubuntu-24.sh
+#      installs it, restricts pg_hba to the Docker address pool, and keeps
+#      PostgreSQL off the firewall's open ports.
 #   3. Secrets come from the environment, never from this file. The backend
 #      refuses to start in staging on a placeholder JWT secret.
 #
@@ -38,33 +41,23 @@ services:
       KELIR_APP_NAME: Kelir
       KELIR_APP_ENV: staging
       KELIR_BIND_ADDRESS: 0.0.0.0:8080
-      KELIR_DATABASE_URL: postgres://kelir:${KELIR_DB_PASSWORD:?set KELIR_DB_PASSWORD}@postgres:5432/kelir
+      # host.docker.internal resolves to the Docker bridge gateway via the
+      # extra_hosts entry below, which is how a container reaches a service
+      # listening on the host.
+      KELIR_DATABASE_URL: postgres://kelir:${KELIR_DB_PASSWORD:?set KELIR_DB_PASSWORD}@host.docker.internal:5432/kelir
       KELIR_JWT_SECRET: ${KELIR_JWT_SECRET:?set KELIR_JWT_SECRET to a generated value}
       KELIR_STORAGE_DRIVER: s3
       KELIR_SMTP_HOST: mailpit
       # Single origin: the browser only ever talks to the Caddy hostname.
       KELIR_FRONTEND_URL: https://staging.kelir.gawshub.com
       KELIR_LOG: info,sqlx=warn
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  postgres:
-    image: postgres:16
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: kelir
-      POSTGRES_PASSWORD: ${KELIR_DB_PASSWORD:?set KELIR_DB_PASSWORD}
-      POSTGRES_DB: kelir
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      # The backend runs migrations at startup, so it must not start before the
-      # database accepts connections.
-      test: ['CMD-SHELL', 'pg_isready -U kelir -d kelir']
-      interval: 5s
-      timeout: 3s
-      retries: 10
+    # Docker does not provide host.docker.internal on Linux by default; this
+    # maps it to the bridge gateway so the same URL works on every platform.
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    # There is no depends_on for PostgreSQL because it is not a compose service.
+    # The backend runs migrations at startup and exits if the database is not
+    # reachable; the restart policy retries until it is.
 
   minio:
     image: minio/minio:latest
@@ -84,7 +77,6 @@ services:
     restart: unless-stopped
 
 volumes:
-  postgres-data:
   minio-data:
   caddy-data:
   caddy-config:
