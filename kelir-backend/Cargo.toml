@@ -5,7 +5,15 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
-axum = "0.8"
+# Argon2id password hashing (SRS NFR-SEC-001, coding standard 2.8).
+argon2 = "0.5"
+axum = { version = "0.8", features = ["macros"] }
+chrono = { version = "0.4", features = ["serde"] }
+# JWT access tokens (architecture 01 section 18.1).
+jsonwebtoken = "9"
+rand = "0.8"
+# Refresh tokens are stored as a SHA-256 digest, never in the clear.
+sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # "log" bridges sqlx's statement logging into tracing; "migrate" provides the
@@ -29,5 +37,7 @@ utoipa = { version = "5", features = ["axum_extras", "uuid", "chrono"] }
 uuid = { version = "1", features = ["v7", "serde"] }
 
 [dev-dependencies]
+# Integration tests drive the API against a real PostgreSQL.
+serde_urlencoded = "0.7"
 # Drives the router in tests via ServiceExt::oneshot, without binding a port.
 tower = { version = "0.5", features = ["util"] }

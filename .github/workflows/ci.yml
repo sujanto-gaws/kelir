@@ -22,6 +22,29 @@ jobs:
     defaults:
       run:
         working-directory: kelir-backend
+
+    # sqlx's query! macros verify every SQL statement against a real schema at
+    # compile time (coding standard 2.5), so the build needs a database — not
+    # only the tests. The alternative, committing `cargo sqlx prepare` output,
+    # is a generated artifact that silently goes stale when a migration lands.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: kelir
+          POSTGRES_PASSWORD: kelir
+          POSTGRES_DB: kelir
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kelir -d kelir"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://kelir:kelir@localhost:5432/kelir
+
     steps:
       - uses: actions/checkout@v7
 
@@ -37,6 +60,17 @@ jobs:
             kelir-backend/target
           key: cargo-${{ runner.os }}-${{ hashFiles('kelir-backend/Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
+
+      - name: Apply migrations
+        # Applied with psql, which the runner already has, rather than by
+        # installing sqlx-cli — that compiles from source and would add minutes
+        # to every run for the same result. The macros need the schema, not the
+        # _sqlx_migrations bookkeeping; the binary still creates that at startup.
+        run: |
+          for migration in migrations/*.sql; do
+            echo "applying $migration"
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$migration"
+          done
 
       - name: Formatting
         run: cargo fmt --check

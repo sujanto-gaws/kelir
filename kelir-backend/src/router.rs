@@ -5,6 +5,7 @@ use utoipa::OpenApi;
 use crate::error::ValidationDetail;
 use crate::health;
 use crate::middleware::cors::cors_layer;
+use crate::modules::{auth, identity};
 use crate::response::{ErrorBody, ErrorEnvelope, PageMeta};
 use crate::state::AppState;
 
@@ -19,18 +20,51 @@ use crate::state::AppState;
         health::liveness,
         health::readiness,
         health::version,
+        auth::handlers::sign_in,
+        auth::handlers::refresh,
+        auth::handlers::sign_out,
+        auth::handlers::me,
+        identity::handlers::list_users,
+        identity::handlers::get_user,
+        identity::handlers::create_user,
+        identity::handlers::update_user,
+        identity::handlers::deactivate_user,
+        identity::handlers::set_password,
+        identity::handlers::list_roles,
+        identity::handlers::get_role,
+        identity::handlers::create_role,
+        identity::handlers::update_role,
+        identity::handlers::delete_role,
+        identity::handlers::list_permissions,
     ),
     components(schemas(
         health::HealthBody,
         health::ReadyBody,
         health::VersionBody,
+        auth::handlers::SignInRequest,
+        auth::handlers::RefreshRequest,
+        auth::handlers::SignOutRequest,
+        auth::handlers::SessionResponse,
+        auth::handlers::CurrentUser,
+        identity::domain::User,
+        identity::domain::UserStatus,
+        identity::domain::RoleSummary,
+        identity::domain::Role,
+        identity::domain::Permission,
+        identity::domain::CreateUserRequest,
+        identity::domain::UpdateUserRequest,
+        identity::domain::CreateRoleRequest,
+        identity::domain::UpdateRoleRequest,
+        identity::handlers::SetPasswordRequest,
         ErrorEnvelope,
         ErrorBody,
         ValidationDetail,
         PageMeta,
     )),
     tags(
-        (name = "operations", description = "Health, readiness and build information")
+        (name = "operations", description = "Health, readiness and build information"),
+        (name = "auth", description = "Sign in, sign out, session refresh"),
+        (name = "identity", description = "Users, roles and permissions")
     ),
     info(
         title = "Kelir API",
@@ -59,10 +93,17 @@ pub fn create_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// The versioned API surface. Empty in Phase 1 — module routers land here as
-/// each is built.
+/// The versioned API surface. Module routers mount here as each is built.
+///
+/// Authentication is per-route rather than a blanket layer: `/auth/login` and
+/// `/auth/refresh` must stay reachable without a token, and a handler that takes
+/// `Authenticated` cannot be reached without one (FR-API-008). Making the rule
+/// visible in each handler's signature beats a layer whose exceptions live
+/// somewhere else.
 fn api_v1_router() -> Router<AppState> {
     Router::new()
+        .nest("/auth", auth::handlers::routes())
+        .nest("/identity", identity::handlers::routes())
 }
 
 async fn openapi_document() -> Json<utoipa::openapi::OpenApi> {
