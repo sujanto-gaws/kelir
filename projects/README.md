@@ -32,6 +32,7 @@ Each folder is a numbered series (`NN. Title Case.md`); `00.` files are template
 | [00. Status Report Template.md](status/00.%20Status%20Report%20Template.md) | One-page end-of-sprint report: goal verdict, scope status per FR with evidence, blockers with recommendations, scope changes, next-sprint entry criteria |
 | [01. Sprint 0 Status.md](status/01.%20Sprint%200%20Status.md) | Sprint 0, closed 2026-08-11: repository, branch protection, CI, compose stack, tracker seeded. Retained as the baseline record |
 | [02. Sprint 1 Status.md](status/02.%20Sprint%201%20Status.md) | Sprint 1, closed 2026-08-12: the Phase 1 backend — config, pool and migrations, health endpoints, response envelope and `AppError`, pagination, generated OpenAPI |
+| [04. Sprint 3 Status.md](status/04.%20Sprint%203%20Status.md) | Sprint 3, closed 2026-08-12: the Phase 2 backend — authentication with rotating refresh tokens, users, roles, permission enforcement, and the audit write path |
 | [03. Sprint 2 Status.md](status/03.%20Sprint%202%20Status.md) | Sprint 2, 2026-08-12: the Phase 1 frontend — app shell, envelope-aware API client, login page, UI baseline, plus the CORS layer without which the two halves could not talk. #12 (staging) still open |
 
 ### retrospectives/
