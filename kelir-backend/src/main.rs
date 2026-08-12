@@ -61,6 +61,10 @@ async fn run() -> anyhow::Result<()> {
     db::run_migrations(&pool).await?;
     tracing::info!("database migrations applied");
 
+    // After migrations, so the seeded role exists; before serving, so the
+    // instance is never reachable without a way to sign in.
+    modules::auth::bootstrap::ensure_administrator(&pool, &config).await?;
+
     let bind_address = config.bind_address.clone();
     let state = AppState::new(pool, config);
     let app = router::create_router(state);

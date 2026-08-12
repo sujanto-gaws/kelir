@@ -41,6 +41,25 @@ pub async fn find_credentials_by_username(
     .await
 }
 
+pub async fn find_credentials_by_id(
+    executor: impl PgExecutor<'_>,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<Option<UserCredentials>, sqlx::Error> {
+    sqlx::query_as!(
+        UserCredentials,
+        r#"
+        SELECT id, username, password_hash, status
+        FROM users
+        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+        "#,
+        tenant_id,
+        id
+    )
+    .fetch_optional(executor)
+    .await
+}
+
 pub async fn record_successful_login(
     executor: impl PgExecutor<'_>,
     user_id: Uuid,

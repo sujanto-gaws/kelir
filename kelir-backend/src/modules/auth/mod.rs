@@ -5,6 +5,7 @@
 //! implements. Access tokens are short-lived and carry the caller's permissions;
 //! refresh tokens are opaque, stored only as a digest, and rotate on use.
 
+pub mod bootstrap;
 pub mod handlers;
 pub mod password;
 pub mod service;

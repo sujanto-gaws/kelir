@@ -52,13 +52,28 @@ impl ValidationDetail {
 /// the human-readable message.
 #[derive(Debug)]
 pub enum AppError {
-    NotFound { resource: &'static str },
-    Validation { details: Vec<ValidationDetail> },
-    BadRequest { message: String },
+    NotFound {
+        resource: &'static str,
+    },
+    Validation {
+        details: Vec<ValidationDetail>,
+    },
+    BadRequest {
+        message: String,
+    },
     Unauthorized,
     Forbidden,
-    Conflict { message: String },
-    Internal { source: anyhow::Error },
+    Conflict {
+        message: String,
+    },
+    /// Rate limited. Carries the wait so a legitimate client can back off
+    /// rather than retry blindly.
+    TooManyRequests {
+        retry_after_seconds: u64,
+    },
+    Internal {
+        source: anyhow::Error,
+    },
 }
 
 impl AppError {
@@ -91,6 +106,7 @@ impl AppError {
             Self::Unauthorized => "UNAUTHORIZED",
             Self::Forbidden => "FORBIDDEN",
             Self::Conflict { .. } => "CONFLICT",
+            Self::TooManyRequests { .. } => "TOO_MANY_REQUESTS",
             Self::Internal { .. } => "INTERNAL_ERROR",
         }
     }
@@ -103,6 +119,7 @@ impl AppError {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Forbidden => StatusCode::FORBIDDEN,
             Self::Conflict { .. } => StatusCode::CONFLICT,
+            Self::TooManyRequests { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -114,6 +131,9 @@ impl AppError {
             Self::NotFound { resource } => format!("{resource} not found"),
             Self::Validation { .. } => "Validation failed".to_owned(),
             Self::BadRequest { message } | Self::Conflict { message } => message.clone(),
+            Self::TooManyRequests {
+                retry_after_seconds,
+            } => format!("Too many attempts. Try again in {retry_after_seconds} seconds."),
             Self::Unauthorized => "Authentication required".to_owned(),
             Self::Forbidden => "You do not have permission to perform this action".to_owned(),
             Self::Internal { .. } => "An unexpected error occurred".to_owned(),

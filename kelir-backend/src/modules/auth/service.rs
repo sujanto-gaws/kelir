@@ -330,6 +330,80 @@ async fn issue_session(
     })
 }
 
+/// Changes the signed-in user's own password (FR-AUTH-005).
+///
+/// Requires the current password even though the caller is authenticated: an
+/// access token left open on a shared machine should not be enough to take the
+/// account over permanently.
+pub async fn change_own_password(
+    state: &AppState,
+    user_id: Uuid,
+    current_password: &str,
+    new_password: &str,
+) -> Result<(), AppError> {
+    crate::modules::identity::domain::validate_password_value(new_password)?;
+
+    let Some(credentials) =
+        identity_repo::find_credentials_by_id(&state.pool, SYSTEM_TENANT_ID, user_id).await?
+    else {
+        return Err(AppError::Unauthorized);
+    };
+
+    let stored = credentials.password_hash.clone();
+    let candidate = current_password.to_owned();
+    let verified = tokio::task::spawn_blocking(move || verify_password(&candidate, &stored))
+        .await
+        .map_err(|error| AppError::Internal {
+            source: anyhow::anyhow!("password verification task failed: {error}"),
+        })?;
+
+    if !verified {
+        return Err(AppError::validation(vec![
+            crate::error::ValidationDetail::new(
+                "currentPassword",
+                "incorrect",
+                "INCORRECT_PASSWORD",
+                "That is not your current password",
+            ),
+        ]));
+    }
+
+    let new_password = new_password.to_owned();
+    let hash = tokio::task::spawn_blocking(move || super::password::hash_password(&new_password))
+        .await
+        .map_err(|error| AppError::Internal {
+            source: anyhow::anyhow!("password hashing task failed: {error}"),
+        })??;
+
+    identity_repo::set_password_hash(&state.pool, SYSTEM_TENANT_ID, user_id, &hash).await?;
+
+    // Every other session ends: if the change was prompted by a suspected
+    // compromise, leaving them alive defeats the point. The caller signs in
+    // again like everyone else.
+    let revoked =
+        identity_repo::revoke_all_for_user(&state.pool, user_id, "password changed").await?;
+    tracing::info!(user_id = %user_id, revoked, "password changed; sessions revoked");
+
+    audit::record_or_warn(
+        &state.pool,
+        AuditEntry {
+            tenant_id: SYSTEM_TENANT_ID,
+            event_type: "User.PasswordChanged",
+            action: "UPDATE",
+            object_type: "USER",
+            object_id: user_id,
+            actor_user_id: Some(user_id),
+            ip_address: None,
+            reason: Some("changed by the account holder"),
+            old_value: None,
+            new_value: None,
+        },
+    )
+    .await;
+
+    Ok(())
+}
+
 /// A real Argon2id hash of a value nobody knows, verified against when the user
 /// does not exist so that path costs the same as a wrong password.
 const DUMMY_HASH: &str =

@@ -9,6 +9,7 @@ use uuid::Uuid;
 use super::service;
 use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
+use crate::middleware::rate_limit::Decision;
 use crate::modules::identity::repository as identity_repo;
 use crate::response::ItemEnvelope;
 use crate::state::AppState;
@@ -45,6 +46,13 @@ pub struct SignOutRequest {
     pub refresh_token: Option<String>,
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangePasswordRequest {
+    pub current_password: String,
+    pub new_password: String,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CurrentUser {
@@ -62,6 +70,7 @@ pub fn routes() -> Router<AppState> {
         .route("/logout", post(sign_out))
         .route("/refresh", post(refresh))
         .route("/me", get(me))
+        .route("/change-password", post(change_password))
 }
 
 /// Sign in with a username or email and a password.
@@ -82,8 +91,29 @@ async fn sign_in(
 ) -> Result<Json<ItemEnvelope<SessionResponse>>, AppError> {
     let ip = client_ip(&headers);
 
+    // Keyed on the source address, not the username: an attacker chooses the
+    // username freely, so keying on it would let them sidestep the limit by
+    // varying it — which is exactly the credential-stuffing shape that account
+    // lockout already misses.
+    let limiter_key = ip.clone().unwrap_or_else(|| "unknown".to_owned());
+
+    if let Decision::Block {
+        retry_after_seconds,
+    } = state.rate_limiter.check(&limiter_key)
+    {
+        tracing::warn!(key = %limiter_key, "sign-in rate limit exceeded");
+
+        return Err(AppError::TooManyRequests {
+            retry_after_seconds,
+        });
+    }
+
     let signed_in =
         service::sign_in(&state, &request.username, &request.password, ip.as_deref()).await?;
+
+    // Succeeded, so this source is not the problem: forget its count rather
+    // than letting an earlier typo streak count against it.
+    state.rate_limiter.reset(&limiter_key);
 
     Ok(Json(ItemEnvelope::new(SessionResponse {
         access_token: signed_in.access_token,
@@ -177,6 +207,34 @@ async fn me(
         roles: caller.claims.roles.clone(),
         permissions: caller.claims.permissions.clone(),
     })))
+}
+
+/// Change your own password (FR-AUTH-005).
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/change-password",
+    tag = "auth",
+    request_body = ChangePasswordRequest,
+    responses(
+        (status = 204, description = "Changed; every session for the account ends"),
+        (status = 422, description = "The current password is wrong, or the new one is too short")
+    ),
+    security(("bearer" = []))
+)]
+async fn change_password(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Json(request): Json<ChangePasswordRequest>,
+) -> Result<axum::http::StatusCode, AppError> {
+    service::change_own_password(
+        &state,
+        caller.user_id(),
+        &request.current_password,
+        &request.new_password,
+    )
+    .await?;
+
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 /// Best-effort client address for the audit trail (FR-AUD-005).

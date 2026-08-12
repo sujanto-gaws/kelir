@@ -26,6 +26,62 @@ pub struct AppConfig {
     pub storage_driver: String,
     pub smtp_host: String,
     pub frontend_url: String,
+    /// Credentials for the first administrator, used only when the instance has
+    /// no users at all. Absent means "do not create one".
+    pub bootstrap_admin: Option<BootstrapAdmin>,
+}
+
+/// The first-run administrator (see `modules::auth::bootstrap`).
+#[derive(Debug, Clone)]
+pub struct BootstrapAdmin {
+    pub username: String,
+    pub email: String,
+    pub password: String,
+}
+
+/// Reads the first-run administrator, if configured.
+///
+/// All three values are required together: a username with no password is a
+/// misconfiguration, and defaulting either would put a known credential on an
+/// account that holds every permission.
+fn bootstrap_admin<F>(get: &F, app_env: AppEnv) -> Result<Option<BootstrapAdmin>, ConfigError>
+where
+    F: Fn(&'static str) -> Result<String, VarError>,
+{
+    let read = |key: &'static str| {
+        get(key)
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+    };
+
+    let username = read("KELIR_BOOTSTRAP_ADMIN_USERNAME");
+    let password = read("KELIR_BOOTSTRAP_ADMIN_PASSWORD");
+    let email = read("KELIR_BOOTSTRAP_ADMIN_EMAIL");
+
+    match (username, password) {
+        (None, None) => Ok(None),
+        (Some(username), Some(password)) => {
+            if app_env.requires_real_secrets() && PLACEHOLDER_SECRETS.contains(&password.as_str()) {
+                return Err(ConfigError::Invalid {
+                    key: "KELIR_BOOTSTRAP_ADMIN_PASSWORD",
+                    reason: format!("the development placeholder cannot be used in {app_env}"),
+                });
+            }
+
+            Ok(Some(BootstrapAdmin {
+                email: email.unwrap_or_else(|| format!("{username}@localhost")),
+                username,
+                password,
+            }))
+        }
+        (Some(_), None) => Err(ConfigError::Missing {
+            key: "KELIR_BOOTSTRAP_ADMIN_PASSWORD",
+        }),
+        (None, Some(_)) => Err(ConfigError::Missing {
+            key: "KELIR_BOOTSTRAP_ADMIN_USERNAME",
+        }),
+    }
 }
 
 /// Secrets shipped in `.env.example` and the compose stack. Never valid in
@@ -146,6 +202,7 @@ impl AppConfig {
             storage_driver: optional("KELIR_STORAGE_DRIVER", "local"),
             smtp_host: optional("KELIR_SMTP_HOST", "localhost"),
             frontend_url: optional("KELIR_FRONTEND_URL", "http://localhost:5173"),
+            bootstrap_admin: bootstrap_admin(&get, app_env)?,
         })
     }
 }
@@ -164,6 +221,7 @@ impl AppConfig {
             storage_driver: "local".to_owned(),
             smtp_host: "localhost".to_owned(),
             frontend_url: "http://localhost:5173".to_owned(),
+            bootstrap_admin: None,
         }
     }
 }
@@ -226,6 +284,68 @@ mod tests {
             error,
             ConfigError::Invalid {
                 key: "KELIR_APP_ENV",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn no_bootstrap_admin_unless_configured() {
+        let config =
+            AppConfig::from_source(source(&[("KELIR_JWT_SECRET", "s3cret")])).expect("loads");
+
+        assert!(config.bootstrap_admin.is_none());
+    }
+
+    #[test]
+    fn a_bootstrap_username_without_a_password_is_a_misconfiguration() {
+        // Defaulting the password would put a known credential on an account
+        // holding every permission.
+        let error = AppConfig::from_source(source(&[
+            ("KELIR_JWT_SECRET", "s3cret"),
+            ("KELIR_BOOTSTRAP_ADMIN_USERNAME", "admin"),
+        ]))
+        .expect_err("incomplete");
+
+        assert!(matches!(
+            error,
+            ConfigError::Missing {
+                key: "KELIR_BOOTSTRAP_ADMIN_PASSWORD"
+            }
+        ));
+    }
+
+    #[test]
+    fn reads_a_complete_bootstrap_admin() {
+        let config = AppConfig::from_source(source(&[
+            ("KELIR_JWT_SECRET", "s3cret"),
+            ("KELIR_BOOTSTRAP_ADMIN_USERNAME", "admin"),
+            (
+                "KELIR_BOOTSTRAP_ADMIN_PASSWORD",
+                "a-real-bootstrap-password",
+            ),
+        ]))
+        .expect("loads");
+
+        let admin = config.bootstrap_admin.expect("present");
+        assert_eq!(admin.username, "admin");
+        assert_eq!(admin.email, "admin@localhost", "defaults when unset");
+    }
+
+    #[test]
+    fn refuses_a_placeholder_bootstrap_password_in_staging() {
+        let error = AppConfig::from_source(source(&[
+            ("KELIR_JWT_SECRET", "a-real-secret"),
+            ("KELIR_APP_ENV", "staging"),
+            ("KELIR_BOOTSTRAP_ADMIN_USERNAME", "admin"),
+            ("KELIR_BOOTSTRAP_ADMIN_PASSWORD", "change-me"),
+        ]))
+        .expect_err("placeholder refused");
+
+        assert!(matches!(
+            error,
+            ConfigError::Invalid {
+                key: "KELIR_BOOTSTRAP_ADMIN_PASSWORD",
                 ..
             }
         ));

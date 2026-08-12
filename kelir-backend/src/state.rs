@@ -3,6 +3,7 @@ use std::sync::Arc;
 use sqlx::PgPool;
 
 use crate::config::AppConfig;
+use crate::middleware::rate_limit::RateLimiter;
 
 /// Shared application state handed to every handler.
 ///
@@ -12,6 +13,9 @@ use crate::config::AppConfig;
 pub struct AppState {
     pub pool: PgPool,
     pub config: Arc<AppConfig>,
+    /// Shared so every request sees the same counters; in-memory, so per
+    /// instance (see `middleware::rate_limit`).
+    pub rate_limiter: Arc<RateLimiter>,
 }
 
 impl AppState {
@@ -19,6 +23,7 @@ impl AppState {
         Self {
             pool,
             config: Arc::new(config),
+            rate_limiter: Arc::new(RateLimiter::new()),
         }
     }
 }
