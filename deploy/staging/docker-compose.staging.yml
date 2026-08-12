@@ -25,8 +25,14 @@ services:
     image: kelir-frontend:${KELIR_VERSION:?set KELIR_VERSION to the release being deployed}
     restart: unless-stopped
     ports:
-      - '80:80'
-      - '443:443'
+      # Defaults are the real deployment. Local testing by IP overrides
+      # KELIR_HTTP_PORT and reaches the stack at http://<host-ip>:<port>.
+      - '${KELIR_HTTP_PORT:-80}:80'
+      - '${KELIR_HTTPS_PORT:-443}:443'
+    environment:
+      # Consumed by the Caddyfile. A bare port such as :8080 serves plain HTTP;
+      # a hostname triggers automatic TLS.
+      KELIR_SITE_ADDRESS: ${KELIR_SITE_ADDRESS:-staging.kelir.gawshub.com}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data # certificates and ACME state — losing this re-issues
@@ -39,17 +45,24 @@ services:
     restart: unless-stopped
     environment:
       KELIR_APP_NAME: Kelir
-      KELIR_APP_ENV: staging
+      # staging by default; deploy-local.sh sets development, because the
+      # placeholder-secret rule that protects an internet-facing host is only
+      # friction on a laptop.
+      KELIR_APP_ENV: ${KELIR_APP_ENV:-staging}
       KELIR_BIND_ADDRESS: 0.0.0.0:8080
       # host.docker.internal resolves to the Docker bridge gateway via the
       # extra_hosts entry below, which is how a container reaches a service
       # listening on the host.
-      KELIR_DATABASE_URL: postgres://kelir:${KELIR_DB_PASSWORD:?set KELIR_DB_PASSWORD}@host.docker.internal:5432/kelir
+      # Host and port are configurable because PostgreSQL is not part of this
+      # stack: the defaults address the host's native install over the Docker
+      # bridge, but a test rig may run it elsewhere or on another port.
+      KELIR_DATABASE_URL: postgres://kelir:${KELIR_DB_PASSWORD:?set KELIR_DB_PASSWORD}@${KELIR_DB_HOST:-host.docker.internal}:${KELIR_DB_PORT:-5432}/kelir
       KELIR_JWT_SECRET: ${KELIR_JWT_SECRET:?set KELIR_JWT_SECRET to a generated value}
       KELIR_STORAGE_DRIVER: s3
       KELIR_SMTP_HOST: mailpit
-      # Single origin: the browser only ever talks to the Caddy hostname.
-      KELIR_FRONTEND_URL: https://staging.kelir.gawshub.com
+      # Single origin: the browser only ever talks to the Caddy address, so this
+      # is used for redirects and links rather than for CORS.
+      KELIR_FRONTEND_URL: ${KELIR_PUBLIC_URL:-https://staging.kelir.gawshub.com}
       KELIR_LOG: info,sqlx=warn
     # Docker does not provide host.docker.internal on Linux by default; this
     # maps it to the bridge gateway so the same URL works on every platform.

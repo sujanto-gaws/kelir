@@ -19,13 +19,35 @@ VERSION="${1:-}"
 KELIR_APP_DIR="${KELIR_APP_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 KELIR_REPO_URL="${KELIR_REPO_URL:-https://github.com/sujanto-gaws/kelir.git}"
 KELIR_BUILD_DIR="${KELIR_BUILD_DIR:-/opt/kelir-build}"
-KELIR_HOSTNAME="${KELIR_HOSTNAME:-staging.kelir.gawshub.com}"
+# Where the stack is reachable once deployed. Overridden by deploy-local.sh to
+# an http://<ip>:<port> address; the smoke test below uses it verbatim.
+KELIR_PUBLIC_URL="${KELIR_PUBLIC_URL:-https://staging.kelir.gawshub.com}"
 COMPOSE_FILE="${KELIR_APP_DIR}/docker-compose.staging.yml"
 
 log() { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 [[ -n "${VERSION}" ]] || die "usage: $0 <version>   e.g. $0 0.1.0"
+
+for required_command in docker curl; do
+    command -v "${required_command}" >/dev/null 2>&1 \
+        || die "${required_command} is required but not installed"
+done
+
+# Reads one top-level string field out of a JSON object. jq when it is present,
+# otherwise a plain-text fallback: this script also runs on developer machines
+# that never had jq installed, and a missing tool should not stop a deploy the
+# rest of which works.
+json_field() {
+    local json="$1" field="$2"
+
+    if command -v jq >/dev/null 2>&1; then
+        printf '%s' "${json}" | jq -r ".${field} // empty"
+    else
+        printf '%s' "${json}" \
+            | sed -n "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"
+    fi
+}
 [[ -f "${COMPOSE_FILE}" ]] || die "compose file not found: ${COMPOSE_FILE}"
 [[ -f "${KELIR_APP_DIR}/.env" ]] || die "${KELIR_APP_DIR}/.env not found — copy .env.staging.example and fill it in"
 
@@ -63,31 +85,44 @@ if [[ -n "${KELIR_IMAGE_REGISTRY:-}" ]]; then
     docker pull "${KELIR_IMAGE_REGISTRY}/kelir-frontend:${VERSION}"
     docker tag "${KELIR_IMAGE_REGISTRY}/kelir-backend:${VERSION}" "kelir-backend:${VERSION}"
     docker tag "${KELIR_IMAGE_REGISTRY}/kelir-frontend:${VERSION}" "kelir-frontend:${VERSION}"
-else
-    log "No registry configured — building ${VERSION} on this host from v${VERSION}"
 
-    if [[ -d "${KELIR_BUILD_DIR}/.git" ]]; then
-        git -C "${KELIR_BUILD_DIR}" fetch --tags --quiet origin
+elif [[ -z "${KELIR_FORCE_BUILD:-}" ]]     && docker image inspect "kelir-backend:${VERSION}" >/dev/null 2>&1     && docker image inspect "kelir-frontend:${VERSION}" >/dev/null 2>&1; then
+
+    # Both images are already present at this tag. Rebuilding them would produce
+    # a different artifact from the one that may already have been tested, which
+    # is the opposite of what a release deploy should do. KELIR_FORCE_BUILD=1
+    # overrides when the tag is being reused deliberately, as during local
+    # iteration.
+    log "Using the ${VERSION} images already on this host"
+
+else
+    # Build from a source tree. KELIR_SOURCE_DIR points at an existing checkout —
+    # how local testing builds the working tree before any tag exists. Without
+    # it, the tag is fetched, which is the release path.
+    if [[ -n "${KELIR_SOURCE_DIR:-}" ]]; then
+        [[ -d "${KELIR_SOURCE_DIR}" ]] || die "KELIR_SOURCE_DIR does not exist: ${KELIR_SOURCE_DIR}"
+        SOURCE_DIR="${KELIR_SOURCE_DIR}"
+        BUILD_SHA="$(git -C "${SOURCE_DIR}" rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
+        log "Building ${VERSION} from the checkout at ${SOURCE_DIR} (${BUILD_SHA})"
     else
-        git clone --quiet "${KELIR_REPO_URL}" "${KELIR_BUILD_DIR}"
+        log "No registry configured — building ${VERSION} from tag v${VERSION}"
+
+        if [[ -d "${KELIR_BUILD_DIR}/.git" ]]; then
+            git -C "${KELIR_BUILD_DIR}" fetch --tags --quiet origin
+        else
+            git clone --quiet "${KELIR_REPO_URL}" "${KELIR_BUILD_DIR}"
+        fi
+
+        git -C "${KELIR_BUILD_DIR}" checkout --quiet "v${VERSION}"             || die "tag v${VERSION} not found in ${KELIR_REPO_URL}"
+
+        SOURCE_DIR="${KELIR_BUILD_DIR}"
+        BUILD_SHA="$(git -C "${SOURCE_DIR}" rev-parse --short HEAD)"
+        log "Building from v${VERSION} (${BUILD_SHA})"
     fi
 
-    git -C "${KELIR_BUILD_DIR}" checkout --quiet "v${VERSION}" \
-        || die "tag v${VERSION} not found in ${KELIR_REPO_URL}"
+    docker build         -f "${SOURCE_DIR}/deploy/docker/backend.Dockerfile"         --build-arg "KELIR_BUILD_SHA=${BUILD_SHA}"         -t "kelir-backend:${VERSION}"         "${SOURCE_DIR}/kelir-backend"
 
-    BUILD_SHA="$(git -C "${KELIR_BUILD_DIR}" rev-parse --short HEAD)"
-    log "Building from v${VERSION} (${BUILD_SHA})"
-
-    docker build \
-        -f "${KELIR_BUILD_DIR}/deploy/docker/backend.Dockerfile" \
-        --build-arg "KELIR_BUILD_SHA=${BUILD_SHA}" \
-        -t "kelir-backend:${VERSION}" \
-        "${KELIR_BUILD_DIR}/kelir-backend"
-
-    docker build \
-        -f "${KELIR_BUILD_DIR}/deploy/docker/frontend.Dockerfile" \
-        -t "kelir-frontend:${VERSION}" \
-        "${KELIR_BUILD_DIR}/kelir-frontend"
+    docker build         -f "${SOURCE_DIR}/deploy/docker/frontend.Dockerfile"         -t "kelir-frontend:${VERSION}"         "${SOURCE_DIR}/kelir-frontend"
 fi
 
 # ---------------------------------------------------------------------------
@@ -105,7 +140,13 @@ fi
 
 log "Starting ${VERSION}"
 cd "${KELIR_APP_DIR}"
-KELIR_VERSION="${VERSION}" docker compose -f "${COMPOSE_FILE}" up -d --remove-orphans
+
+# Exported, not scoped to the up command: every later compose invocation
+# interpolates it too, including the log dump on the failure path below. A
+# diagnostic that fails when it is needed is worse than no diagnostic.
+export KELIR_VERSION="${VERSION}"
+
+docker compose -f "${COMPOSE_FILE}" up -d --remove-orphans
 
 # ---------------------------------------------------------------------------
 # 4. Smoke test (release process §4 step 7)
@@ -115,7 +156,7 @@ log "Waiting for the backend to report ready"
 
 ready=""
 for _ in $(seq 1 30); do
-    if curl -fsS --max-time 5 "https://${KELIR_HOSTNAME}/health/ready" >/dev/null 2>&1; then
+    if curl -fsS --max-time 5 "${KELIR_PUBLIC_URL}/health/ready" >/dev/null 2>&1; then
         ready=1
         break
     fi
@@ -132,25 +173,26 @@ log "Smoke test"
 
 for path in /health /health/live /health/ready; do
     printf '  %-16s ' "${path}"
-    curl -fsS --max-time 5 "https://${KELIR_HOSTNAME}${path}" || die "${path} failed"
+    curl -fsS --max-time 5 "${KELIR_PUBLIC_URL}${path}" || die "${path} failed"
     printf '\n'
 done
 
 printf '  %-16s ' "/version"
-version_body="$(curl -fsS --max-time 5 "https://${KELIR_HOSTNAME}/version")"
+version_body="$(curl -fsS --max-time 5 "${KELIR_PUBLIC_URL}/version")"
 printf '%s\n' "${version_body}"
 
-reported="$(printf '%s' "${version_body}" | jq -r '.version')"
+reported="$(json_field "${version_body}" version)"
 [[ "${reported}" == "${VERSION}" ]] \
     || die "/version reports ${reported}, expected ${VERSION} — the wrong image is running"
 
-environment="$(printf '%s' "${version_body}" | jq -r '.environment')"
-[[ "${environment}" == "staging" ]] \
-    || die "/version reports environment ${environment}, expected staging"
+expected_env="${KELIR_EXPECTED_ENV:-staging}"
+environment="$(json_field "${version_body}" environment)"
+[[ "${environment}" == "${expected_env}" ]] \
+    || die "/version reports environment ${environment}, expected ${expected_env}"
 
 cat <<EOF
 
-$(printf '\033[1;32m==> %s is live at https://%s\033[0m' "${VERSION}" "${KELIR_HOSTNAME}")
+$(printf '\033[1;32m==> %s is live at %s\033[0m' "${VERSION}" "${KELIR_PUBLIC_URL}")
 
 Still to verify by hand, as each phase delivers it (release process §4 step 7):
   login · document submission · one workflow approval

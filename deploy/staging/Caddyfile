@@ -1,19 +1,31 @@
-# Staging reverse proxy — kelir-staging-01.
+# Reverse proxy for a deployed Kelir stack.
 #
 # One origin for the whole application: the static bundle at `/`, and the API
-# paths proxied to the backend container. Because the browser only ever sees
-# staging.kelir.gawshub.com, CORS does not apply here at all — it remains a
+# paths proxied to the backend container. Because the browser only ever sees one
+# host, CORS does not apply to a deployed environment at all — it remains a
 # local-development concern only — and Phase 2's session cookies stay same-site.
 #
-# Caddy obtains and renews the certificate automatically, which satisfies
-# NFR-SEC-010 (TLS 1.2+) without a manual renewal step.
+# The site address comes from the environment so the same file serves both
+# deployment shapes:
+#
+#   KELIR_SITE_ADDRESS=staging.kelir.gawshub.com   a real hostname; Caddy obtains
+#                                                  and renews the certificate
+#                                                  automatically (NFR-SEC-010)
+#   KELIR_SITE_ADDRESS=:8080                       an IP-reachable port for local
+#                                                  testing; Caddy serves plain
+#                                                  HTTP, because certificates
+#                                                  cannot be issued for an IP
+#
+# Caddy decides between the two on the shape of the address — a bare port never
+# triggers ACME — so no separate configuration is needed.
 
 {
-	# Where Let's Encrypt sends expiry and problem notices.
+	# Where Let's Encrypt sends expiry and problem notices. Unused when the site
+	# address is a bare port, since no certificate is requested.
 	email ops@gawshub.com
 }
 
-staging.kelir.gawshub.com {
+{$KELIR_SITE_ADDRESS:staging.kelir.gawshub.com} {
 	encode zstd gzip
 
 	# API and operational endpoints go to the backend. These paths must match
@@ -34,6 +46,10 @@ staging.kelir.gawshub.com {
 
 	# Baseline hardening. A stricter Content-Security-Policy belongs with the
 	# security pass in Sprint 19, once the asset origins are settled.
+	#
+	# HSTS is sent unconditionally: browsers ignore it on a plain-HTTP response
+	# by specification, so it costs nothing when the site address is a bare port
+	# and protects the real hostname when it is not.
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
