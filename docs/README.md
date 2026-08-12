@@ -16,6 +16,7 @@ New to the project? Read in this order:
 4. [design/01. System Design Document.md](design/01.%20System%20Design%20Document.md) — how the requirements are realized.
 5. [design/02. Database Schema.md](design/02.%20Database%20Schema.md) — the column-level schema, when you start touching data.
 6. [projects/planning/01. Sprint Plan.md](../projects/planning/01.%20Sprint%20Plan.md) — what gets built when.
+7. [operations/01. Installation and Deployment.md](operations/01.%20Installation%20and%20Deployment.md) — how to run it, when you need it running.
 
 Everything else is reference material you pull in when working on that area.
 
@@ -71,6 +72,12 @@ The JSON standards family. Each specification carries its own version, RFC 2119 
 | [Plugin Manifest Schema.md](schema/Plugin%20Manifest%20Schema.md) (PMS) | 1.0.0 | `plugin.json`: identity, entrypoints, permissions, hooks, events, settings, dependencies |
 | [Event Envelope Schema.md](schema/Event%20Envelope%20Schema.md) (EES) | 1.0.0 | The event envelope for outbox, plugin subscriptions, and webhook deliveries |
 | [Document Type Definition Schema.md](schema/Document%20Type%20Definition%20Schema.md) (DTDS) | 1.0.0 | The document type aggregate: form/list/workflow bindings, numbering, attachment rules, hooks |
+
+### operations/
+
+| Document | Content |
+|---|---|
+| [01. Installation and Deployment.md](operations/01.%20Installation%20and%20Deployment.md) | Running Kelir: the development stack, deploying to an IP for testing, provisioning and deploying staging on Ubuntu 24.04, the full configuration reference, backup and restore, troubleshooting |
 
 ### standards/
 

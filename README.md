@@ -176,6 +176,10 @@ The MVP focuses on:
 
 ## Local Development
 
+Full instructions — including deploying to an IP for testing and provisioning a
+staging host — are in
+[docs/operations/01. Installation and Deployment.md](docs/operations/01.%20Installation%20and%20Deployment.md).
+
 ### Option A: Docker Compose
 
 Run from the repository root:
