@@ -1,6 +1,6 @@
 # Kelir Project Management
 
-**Status:** Living index · **Last updated:** 2026-08-11
+**Status:** Living · **Last updated:** 2026-08-12
 
 This folder holds Kelir's **project management artifacts** — the documents that govern *when and in what order* things get built. They live outside [docs/](../docs/) deliberately: `docs/` describes the system (requirements, architecture, design, standards — see its [README](../docs/README.md) for the full index and authority rules); `projects/` describes the work.
 
@@ -61,5 +61,6 @@ Each folder is a numbered series (`NN. Title Case.md`); `00.` files are template
 ## Conventions
 
 - Documents are numbered per subfolder (`NN. Title Case.md`) and carry the standard header line `**Status:** … · **Last updated:** YYYY-MM-DD`, same as `docs/` (naming convention §10). `00.` is reserved for the folder's template.
+- `Status` takes a value from the [vocabulary](../docs/standards/02.%20Naming%20Convention.md) (naming convention §10.1). Three of them do the work here: `Living` for the plan and the backlog, which are revised every sprint; `Final` for a status report or retrospective, which records a moment and is never revised afterwards; `Template` for the `00.` files. A later report does not supersede an earlier one — it follows it.
 - Relative links to documentation use `../../docs/…` from inside a subfolder (one level deeper than this file).
 - New document types get their own numbered-series subfolder and a row in this index; don't mix types within a folder.
