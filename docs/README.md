@@ -1,6 +1,6 @@
 # Kelir Documentation
 
-**Status:** Living index · **Last updated:** 2026-08-11
+**Status:** Living · **Last updated:** 2026-08-12
 
 Kelir is a metadata-driven, document-centric, workflow-enabled full-stack framework for building enterprise business applications rapidly — Rust (Axum + SQLx + PostgreSQL) on the backend, Vue 3 (Vite + Pinia + shadcn-vue + Tailwind CSS v4) on the frontend. This folder is the complete documentation set; this file is its map.
 
@@ -118,6 +118,7 @@ When documents disagree, precedence is explicit:
 
 - Documentation files are numbered per folder: `NN. Title Case.md`; new documents continue their folder's numbering (naming convention §10).
 - Every document carries `**Status:** … · **Last updated:** YYYY-MM-DD` under its H1. Schema specifications use the JFSS house style (`**Version:** … / **Status:** … / **Target Stack:** …`) instead, with the spec version doubling as the change marker.
+- `Status` takes one of the values defined in [naming convention §10.1](standards/02.%20Naming%20Convention.md) — `Draft`, `Adopted`, `Living`, `Superseded`, `Retired`, `Template`, `Final`, plus the `… Standard` variants for `schema/`. It answers one question: how much can a reader rely on this? A value needing a qualifier to be understood is the wrong value.
 - Cross-references cite the target as `document NN §X` (within a folder) or a relative markdown link with URL-encoded spaces (`[SDD](design/01.%20System%20Design%20Document.md)`).
 - Schema meta-schema artifacts are named `<acronym>-meta-vX.Y.Z.json`; until extracted as files, the embedded block in each specification is the artifact.
 
@@ -127,11 +128,12 @@ When documents disagree, precedence is explicit:
 
 | Area | Status |
 |---|---|
-| Requirements (SRS v0.5) | Draft, scope authority; §9 is the MVP gate |
-| Architecture 01–05 | Draft, stable |
-| System Design Document v0.1 | Draft |
-| Database Schema | Draft, 94 tables / 12 migrations |
-| Schema standards | JFSS Final; rule registries Active; JWSS / LHCS / PMS / EES / DTDS Draft |
-| Standards (coding, naming, git) | Draft, in effect |
+| Requirements (SRS v0.5) | **Draft** — the scope authority, and §9 is the MVP gate, but approval is still an open action (SDD §16 step 1) |
+| Architecture 01–05 | **Adopted** |
+| System Design Document v0.1 | **Draft** — approval open, as above |
+| Database Schema | **Draft** — 94 tables / 12 migrations; adopted with the SDD |
+| Schema standards | JFSS **Final Standard**; rule registries **Active Standard**; JWSS / LHCS / PMS / EES / DTDS **Draft Standard** |
+| Standards 01–05 | **Adopted** — CI enforces the coding standard, branch protection implements the git workflow |
+| Concepts 01–04 | **Superseded** — background and intent only (authority rule 7) |
 | Planning | Complete — sprint plan and product backlog cover all 164 FRs; scope decisions D-1…D-5 resolved 2026-08-11 |
 | Implementation | Phase 1 nearly complete. Backend (Sprint 1): config, SQLx pool and `0001_core.sql`, health and version endpoints, response envelope and `AppError`, pagination, generated OpenAPI. Frontend (Sprint 2): app shell, envelope-aware API client, login page, Tailwind v4 and shadcn-vue baseline. Outstanding: a staging environment, which is all that blocks `v0.1.0`. See [Sprint 2 Status](../projects/status/03.%20Sprint%202%20Status.md) |
