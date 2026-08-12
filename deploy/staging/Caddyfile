@@ -1,0 +1,49 @@
+# Staging reverse proxy — kelir-staging-01.
+#
+# One origin for the whole application: the static bundle at `/`, and the API
+# paths proxied to the backend container. Because the browser only ever sees
+# staging.kelir.gawshub.com, CORS does not apply here at all — it remains a
+# local-development concern only — and Phase 2's session cookies stay same-site.
+#
+# Caddy obtains and renews the certificate automatically, which satisfies
+# NFR-SEC-010 (TLS 1.2+) without a manual renewal step.
+
+{
+	# Where Let's Encrypt sends expiry and problem notices.
+	email ops@gawshub.com
+}
+
+staging.kelir.gawshub.com {
+	encode zstd gzip
+
+	# API and operational endpoints go to the backend. These paths must match
+	# the backend router: /api/v1 plus the root-level operational endpoints
+	# (naming convention §5).
+	@backend path /api/* /health /health/* /version
+	handle @backend {
+		reverse_proxy backend:8080
+	}
+
+	# Everything else is the single-page app. try_files sends unknown paths to
+	# index.html so client-side routes such as /login survive a page refresh.
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+
+	# Baseline hardening. A stricter Content-Security-Policy belongs with the
+	# security pass in Sprint 19, once the asset origins are settled.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

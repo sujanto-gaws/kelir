@@ -1,0 +1,90 @@
+# Staging stack — kelir-staging-01, serving https://staging.kelir.gawshub.com
+#
+# Differs from the development stack in three ways that matter:
+#
+#   1. It runs released images by tag, never source mounts. Deploys are
+#      `KELIR_VERSION=v0.1.0 docker compose up -d` — the same immutable
+#      artifacts that go to production (release process §4 step 8).
+#   2. Only Caddy publishes ports. The backend, database and object storage are
+#      reachable only on the internal network, so the database is not exposed to
+#      the internet by a stray firewall rule.
+#   3. Secrets come from the environment, never from this file. The backend
+#      refuses to start in staging on a placeholder JWT secret.
+#
+# Usage on the host:
+#   cd /opt/kelir && cp .env.staging.example .env && $EDITOR .env
+#   KELIR_VERSION=0.1.0 docker compose -f docker-compose.staging.yml up -d
+
+name: kelir-staging
+
+services:
+  caddy:
+    image: kelir-frontend:${KELIR_VERSION:?set KELIR_VERSION to the release being deployed}
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data # certificates and ACME state — losing this re-issues
+      - caddy-config:/config
+    depends_on:
+      - backend
+
+  backend:
+    image: kelir-backend:${KELIR_VERSION:?set KELIR_VERSION to the release being deployed}
+    restart: unless-stopped
+    environment:
+      KELIR_APP_NAME: Kelir
+      KELIR_APP_ENV: staging
+      KELIR_BIND_ADDRESS: 0.0.0.0:8080
+      KELIR_DATABASE_URL: postgres://kelir:${KELIR_DB_PASSWORD:?set KELIR_DB_PASSWORD}@postgres:5432/kelir
+      KELIR_JWT_SECRET: ${KELIR_JWT_SECRET:?set KELIR_JWT_SECRET to a generated value}
+      KELIR_STORAGE_DRIVER: s3
+      KELIR_SMTP_HOST: mailpit
+      # Single origin: the browser only ever talks to the Caddy hostname.
+      KELIR_FRONTEND_URL: https://staging.kelir.gawshub.com
+      KELIR_LOG: info,sqlx=warn
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: kelir
+      POSTGRES_PASSWORD: ${KELIR_DB_PASSWORD:?set KELIR_DB_PASSWORD}
+      POSTGRES_DB: kelir
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # The backend runs migrations at startup, so it must not start before the
+      # database accepts connections.
+      test: ['CMD-SHELL', 'pg_isready -U kelir -d kelir']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${KELIR_MINIO_USER:?set KELIR_MINIO_USER}
+      MINIO_ROOT_PASSWORD: ${KELIR_MINIO_PASSWORD:?set KELIR_MINIO_PASSWORD}
+    volumes:
+      - minio-data:/data
+
+  # Staging captures mail rather than sending it, so testing notifications in
+  # Phase 6 cannot reach real recipients. Its UI is deliberately not published —
+  # reach it over an SSH tunnel.
+  mailpit:
+    image: axllent/mailpit:latest
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  minio-data:
+  caddy-data:
+  caddy-config:

@@ -10,6 +10,10 @@ use crate::state::AppState;
 /// Build version, reported by `/version`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Commit the binary was built from, baked in by `build.rs`. The release
+/// smoke test checks this against the tag being released (release process §4).
+pub const BUILD_SHA: &str = env!("KELIR_BUILD_SHA");
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct HealthBody {
     /// `ok` when serving, `degraded` when a dependency is unavailable.
@@ -28,6 +32,7 @@ pub struct ReadyBody {
 pub struct VersionBody {
     pub name: String,
     pub version: &'static str,
+    pub commit: &'static str,
     pub environment: String,
 }
 
@@ -101,6 +106,7 @@ pub async fn version(State(state): State<AppState>) -> Json<VersionBody> {
     Json(VersionBody {
         name: state.config.app_name.clone(),
         version: VERSION,
+        commit: BUILD_SHA,
         environment: state.config.app_env.to_string(),
     })
 }
@@ -127,5 +133,12 @@ mod tests {
     fn version_is_the_crate_version() {
         assert_eq!(VERSION, env!("CARGO_PKG_VERSION"));
         assert!(!VERSION.is_empty());
+    }
+
+    #[test]
+    fn build_sha_is_always_populated() {
+        // The release smoke test compares this against the released tag, so an
+        // empty value would make that check silently pass.
+        assert!(!BUILD_SHA.is_empty());
     }
 }

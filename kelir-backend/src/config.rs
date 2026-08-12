@@ -56,9 +56,13 @@ impl AppEnv {
         }
     }
 
-    /// Production must not run on development defaults for anything sensitive.
-    pub fn is_production(self) -> bool {
-        matches!(self, Self::Production)
+    /// Environments that are reachable from outside the developer's machine.
+    ///
+    /// Staging is internet-facing and holds real-shaped data, so it is held to
+    /// the same secret rules as production — a forgeable token there is a real
+    /// exposure, not a development convenience.
+    pub fn requires_real_secrets(self) -> bool {
+        matches!(self, Self::Staging | Self::Production)
     }
 }
 
@@ -123,10 +127,10 @@ impl AppConfig {
         // `.env.example` and the compose stack ship a placeholder secret so
         // local development works out of the box. Shipping that placeholder to
         // production would make every token forgeable, so refuse to start.
-        if app_env.is_production() && PLACEHOLDER_SECRETS.contains(&jwt_secret.as_str()) {
+        if app_env.requires_real_secrets() && PLACEHOLDER_SECRETS.contains(&jwt_secret.as_str()) {
             return Err(ConfigError::Invalid {
                 key: "KELIR_JWT_SECRET",
-                reason: "the development placeholder cannot be used in production".to_owned(),
+                reason: format!("the development placeholder cannot be used in {app_env}"),
             });
         }
 
@@ -245,9 +249,27 @@ mod tests {
     }
 
     #[test]
-    fn allows_the_placeholder_secret_outside_production() {
+    fn refuses_the_placeholder_secret_in_staging() {
+        // Staging is internet-facing; the same rule as production applies.
+        let error = AppConfig::from_source(source(&[
+            ("KELIR_JWT_SECRET", "change-me"),
+            ("KELIR_APP_ENV", "staging"),
+        ]))
+        .expect_err("staging must not run on the placeholder either");
+
+        assert!(matches!(
+            error,
+            ConfigError::Invalid {
+                key: "KELIR_JWT_SECRET",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn allows_the_placeholder_secret_only_on_a_developer_machine() {
         // Local development and CI rely on the placeholder working.
-        for env in ["development", "test", "staging"] {
+        for env in ["development", "test"] {
             AppConfig::from_source(source(&[
                 ("KELIR_JWT_SECRET", "change-me"),
                 ("KELIR_APP_ENV", env),
@@ -264,7 +286,7 @@ mod tests {
         ]))
         .expect("a non-placeholder secret is accepted");
 
-        assert!(config.app_env.is_production());
+        assert_eq!(config.app_env, AppEnv::Production);
     }
 
     #[test]
