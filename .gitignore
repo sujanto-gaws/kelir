@@ -16,9 +16,13 @@ coverage/
 .nyc_output/
 
 # Env
+# Real env files never; the *.example templates always. The second negation
+# covers per-environment templates such as .env.staging.example, which the
+# first does not match.
 .env
 .env.*
 !.env.example
+!.env.*.example
 
 # Logs
 *.log
