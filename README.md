@@ -234,7 +234,7 @@ Use deploy/env/.env.example as the baseline for configuration values.
 
 ## Current Status
 
-**Phase 1 is nearly complete: both halves of the skeleton run.** Sprints 0–2 are closed apart from staging — see [projects/status/03. Sprint 2 Status.md](projects/status/03.%20Sprint%202%20Status.md) for current state.
+**Phase 1 is released as `v0.1.0`, and not yet verified on staging.** Both halves of the skeleton run; the one remaining step is deploying to a staging host, which does not exist yet. See the [release record](projects/releases/01.%20Release%20v0.1.0.md) and [Sprint 2 status](projects/status/03.%20Sprint%202%20Status.md).
 
 Done:
 
@@ -260,6 +260,6 @@ Not done:
 
 Work is tracked as [GitHub issues](https://github.com/sujanto-gaws/kelir/issues), grouped into phase milestones.
 
-To close Phase 1: stand up a staging environment and dry-run the release checklist (#12), then tag `v0.1.0`.
+To close Phase 1: stand up a staging environment, deploy `v0.1.0` to it and pass the smoke tests (#12). The tag and the images already exist.
 
 Phase 2 (Sprints 3–4) follows: `0002_identity.sql`, Argon2 authentication, the JWT-or-session decision, permission middleware, and user/role management.
