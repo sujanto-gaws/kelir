@@ -46,6 +46,7 @@ Each folder is a numbered series (`NN. Title Case.md`); `00.` files are template
 | Document | Content |
 |---|---|
 | [00. Release Checklist Template.md](releases/00.%20Release%20Checklist%20Template.md) | Per-release evidence record for the [release process](../docs/standards/04.%20Release%20Process.md): pre-flight (scope, tests, migrations, docs, version), staging pass with rollback rehearsal, ship steps, aftermath |
+| [01. Release v0.1.0.md](releases/01.%20Release%20v0.1.0.md) | Phase 1. Cut 2026-08-12 — pre-flight and ship steps done, staging deploy outstanding and blocking |
 
 ---
 
