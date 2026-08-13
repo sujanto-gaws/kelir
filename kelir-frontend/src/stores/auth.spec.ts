@@ -42,6 +42,54 @@ const unauthorized: FakeReply = {
 }
 
 /**
+ * Installs a working exclusive mutex at `navigator.locks`, because jsdom has
+ * none.
+ *
+ * **What this does and does not establish.** It is a real mutex — FIFO, one
+ * holder at a time, released on rejection as well as resolution — so the test
+ * using it genuinely exercises the serialisation: remove the `locks.request`
+ * call from the store and both tabs present the same refresh token, and the
+ * test fails on the request count rather than on a recorded string.
+ *
+ * What it cannot establish is that the *browser's* Web Locks implementation
+ * behaves this way, or that the lock spans real tabs — a single jsdom realm has
+ * one module instance, so the store's module-level state is shared here where
+ * in a browser it would not be. Those rest on the specification. The narrower
+ * claim the tests support is: given a lock manager that behaves like the spec
+ * says, this store serialises correctly and the loser adopts.
+ */
+function installLockManager(): { requested: string[]; restore: () => void } {
+  const requested: string[] = []
+  const tails = new Map<string, Promise<unknown>>()
+
+  const manager = {
+    request<T>(name: string, callback: () => Promise<T>): Promise<T> {
+      requested.push(name)
+
+      const previous = tails.get(name) ?? Promise.resolve()
+      const result = previous.then(() => callback())
+
+      // The next waiter runs whether this one succeeded or threw, the way a
+      // released lock does. Swallowing here would otherwise reject the tail and
+      // wedge the queue.
+      tails.set(
+        name,
+        result.then(
+          () => undefined,
+          () => undefined,
+        ),
+      )
+
+      return result
+    },
+  }
+
+  Object.defineProperty(window.navigator, 'locks', { value: manager, configurable: true })
+
+  return { requested, restore: () => Reflect.deleteProperty(window.navigator, 'locks') }
+}
+
+/**
  * These are integration tests on purpose: the real store, the real API client
  * and the real interceptors, with only the network replaced. The invariant that
  * matters most — one refresh across concurrent 401s — is a property of the
@@ -349,5 +397,234 @@ describe('useAuthStore', () => {
 
   it('grants nothing before a profile is loaded', () => {
     expect(useAuthStore().can('document:read')).toBe(false)
+  })
+
+  /**
+   * Only the server may end a session.
+   *
+   * Clearing on any failure meant a two-second connectivity drop wiped valid
+   * tokens and forced a re-authentication. These pin the distinction: only a
+   * refusal of the credentials — 401 or 403 — ends a session, and everything
+   * else is retryable.
+   */
+  describe('a server that cannot be reached', () => {
+    const offline: FakeReply = { status: 0, networkError: true }
+
+    beforeEach(() => {
+      window.localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({ accessToken: 'access-1', refreshToken: 'refresh-1' }),
+      )
+    })
+
+    it('keeps the session when the profile call never arrives', async () => {
+      handler = () => offline
+      const store = useAuthStore()
+
+      await expect(store.ensureProfile()).resolves.toBe(false)
+
+      expect(store.isAuthenticated).toBe(true)
+      expect(store.refreshToken).toBe('refresh-1')
+      expect(window.localStorage.getItem(STORAGE_KEY)).not.toBeNull()
+    })
+
+    it('keeps the session when the refresh never arrives', async () => {
+      handler = () => offline
+      const store = useAuthStore()
+
+      await expect(store.refresh()).resolves.toBe(false)
+
+      expect(store.isAuthenticated).toBe(true)
+      expect(store.refreshToken).toBe('refresh-1')
+    })
+
+    it('keeps the session when the server fails to process the refresh', async () => {
+      // A 5xx is the backend falling over, not a judgement on the token.
+      handler = () => ({ status: 500, body: errorBody('INTERNAL_ERROR', 'boom') })
+      const store = useAuthStore()
+
+      await expect(store.refresh()).resolves.toBe(false)
+
+      expect(store.isAuthenticated).toBe(true)
+    })
+
+    it('keeps the session when the refresh times out server-side', async () => {
+      // 408 is the exact class of failure this distinction exists to survive.
+      // A range over 4xx would treat it as a refusal.
+      handler = () => ({ status: 408, body: errorBody('TIMEOUT', 'Request timeout') })
+      const store = useAuthStore()
+
+      await expect(store.refresh()).resolves.toBe(false)
+
+      expect(store.isAuthenticated).toBe(true)
+      expect(store.refreshToken).toBe('refresh-1')
+    })
+
+    it('keeps the session when the refresh is rate limited', async () => {
+      // The authentication rate limiter reaches /auth/refresh, so signing out
+      // here would punish the user for being throttled.
+      handler = () => ({
+        status: 429,
+        body: errorBody('TOO_MANY_REQUESTS', 'Too many attempts. Try again in 60 seconds'),
+      })
+      const store = useAuthStore()
+
+      await expect(store.refresh()).resolves.toBe(false)
+
+      expect(store.isAuthenticated).toBe(true)
+      expect(store.refreshToken).toBe('refresh-1')
+    })
+
+    it('signs out when the profile call is forbidden', async () => {
+      // 403 is the other genuine refusal: the account is no longer allowed in.
+      handler = () => ({ status: 403, body: errorBody('FORBIDDEN', 'Forbidden') })
+      const store = useAuthStore()
+
+      await expect(store.ensureProfile()).resolves.toBe(false)
+
+      expect(store.isAuthenticated).toBe(false)
+      expect(window.localStorage.getItem(STORAGE_KEY)).toBeNull()
+    })
+
+    it('still signs out when the server rejects the refresh', async () => {
+      handler = () => unauthorized
+      const store = useAuthStore()
+
+      await expect(store.refresh()).resolves.toBe(false)
+
+      expect(store.isAuthenticated).toBe(false)
+    })
+
+    it('recovers once the server is reachable again', async () => {
+      // The point of keeping the tokens: the caller retries and is back in,
+      // with no credentials retyped.
+      let reachable = false
+      handler = () => (reachable ? { status: 200, body: itemBody(profile) } : offline)
+      const store = useAuthStore()
+
+      await expect(store.ensureProfile()).resolves.toBe(false)
+
+      reachable = true
+
+      await expect(store.ensureProfile()).resolves.toBe(true)
+      expect(store.user).toEqual(profile)
+    })
+  })
+
+  /**
+   * The in-process latch covers one store instance, and every tab has its own.
+   * Without these, tab A rotates, tab B presents the token A has already spent,
+   * and the backend correctly reads the replay as theft — killing both.
+   */
+  describe('another tab', () => {
+    function storeSession(generation: number): void {
+      window.localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({
+          accessToken: `access-${generation}`,
+          refreshToken: `refresh-${generation}`,
+        }),
+      )
+    }
+
+    function announceStorageChange(): void {
+      // The listener re-reads storage rather than trusting `newValue`, so the
+      // event only has to name the key.
+      window.dispatchEvent(new StorageEvent('storage', { key: STORAGE_KEY }))
+    }
+
+    beforeEach(() => {
+      storeSession(1)
+    })
+
+    it('adopts a pair another tab has rotated', async () => {
+      const store = useAuthStore()
+      expect(store.refreshToken).toBe('refresh-1')
+
+      storeSession(2)
+      announceStorageChange()
+
+      expect(store.accessToken).toBe('access-2')
+      expect(store.refreshToken).toBe('refresh-2')
+    })
+
+    it('does not spend a token another tab has already replaced', async () => {
+      const store = useAuthStore()
+
+      // The other tab rotated between this tab's 401 and its refresh.
+      storeSession(2)
+
+      await expect(store.refresh()).resolves.toBe(true)
+
+      // Presenting refresh-1 here is what would have killed the family.
+      expect(backend.countOf('/auth/refresh')).toBe(0)
+      expect(store.refreshToken).toBe('refresh-2')
+    })
+
+    it('signs out here when another tab signs out', async () => {
+      const store = useAuthStore()
+
+      window.localStorage.clear()
+      announceStorageChange()
+
+      expect(store.isAuthenticated).toBe(false)
+      expect(store.user).toBeNull()
+    })
+
+    it('ignores a change to somebody else’s storage key', async () => {
+      const store = useAuthStore()
+
+      window.localStorage.setItem('unrelated', 'value')
+      window.dispatchEvent(new StorageEvent('storage', { key: 'unrelated' }))
+
+      expect(store.refreshToken).toBe('refresh-1')
+    })
+
+    it('lets one tab rotate and the other adopt, rather than both spending', async () => {
+      const lock = installLockManager()
+      storeSession(1)
+
+      let generation = 1
+      handler = (request) =>
+        request.url === '/auth/refresh'
+          ? { status: 200, body: itemBody(session(++generation)) }
+          : { status: 200, body: itemBody(profile) }
+
+      try {
+        // Two stores over one localStorage is as close to two tabs as a single
+        // jsdom realm gets. Each has its own in-process latch, which is exactly
+        // the thing that did not reach far enough.
+        const tabA = useAuthStore(createPinia())
+        const tabB = useAuthStore(createPinia())
+
+        const [rotatedA, rotatedB] = await Promise.all([tabA.refresh(), tabB.refresh()])
+
+        expect(rotatedA).toBe(true)
+        expect(rotatedB).toBe(true)
+
+        // The assertion the fix exists for: refresh-1 is presented once. Twice
+        // is what the backend reads as theft, and it kills the family.
+        expect(backend.countOf('/auth/refresh')).toBe(1)
+        expect(backend.requests[0]).toMatchObject({ body: { refreshToken: 'refresh-1' } })
+
+        // The tab that lost the race took on the winner's pair.
+        expect(tabA.refreshToken).toBe('refresh-2')
+        expect(tabB.refreshToken).toBe('refresh-2')
+        expect(lock.requested).toEqual(['kelir.auth.refresh', 'kelir.auth.refresh'])
+      } finally {
+        lock.restore()
+      }
+    })
+
+    it('still rotates when the browser has no lock manager', async () => {
+      // Older Safari and jsdom. The rotation must not depend on the lock
+      // existing — it degrades to the storage listener, it does not stop.
+      expect(window.navigator.locks).toBeUndefined()
+      handler = () => ({ status: 200, body: itemBody(session(2)) })
+
+      await expect(useAuthStore().refresh()).resolves.toBe(true)
+
+      expect(backend.countOf('/auth/refresh')).toBe(1)
+    })
   })
 })

@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
 import * as authApi from '@/api/auth'
+import { ApiError } from '@/api/error'
 import { registerSessionBridge } from '@/api/session'
 import type { CurrentUser, SessionResponse } from '@/types/auth'
 
@@ -19,6 +20,17 @@ import type { CurrentUser, SessionResponse } from '@/types/auth'
  * a stale cache.
  */
 const STORAGE_KEY = 'kelir.auth'
+
+/**
+ * Name of the cross-tab mutex held while `/auth/refresh` is in flight.
+ *
+ * The in-process latch below only covers one store instance, and every tab has
+ * its own. Two tabs refreshing in parallel is not merely wasteful: the backend
+ * revokes a refresh token as it is spent and reads a replay of an already
+ * rotated one as theft, killing the whole session family — so the loser of that
+ * race signs both tabs out.
+ */
+const REFRESH_LOCK = 'kelir.auth.refresh'
 
 interface PersistedSession {
   accessToken: string
@@ -48,6 +60,65 @@ function readPersistedSession(): PersistedSession | null {
   }
 }
 
+/**
+ * The only statuses that mean the credentials themselves were refused.
+ *
+ * Enumerated rather than expressed as a range. "Any 4xx" reads like the same
+ * rule and is not: 408 Request Timeout is precisely the failure this whole
+ * distinction exists to survive, and 429 is reachable on `/auth/refresh` once
+ * the authentication rate limiter covers it — so a range would sign out the
+ * user who was merely rate limited, which is the outcome being prevented,
+ * arriving through a different door.
+ *
+ * A new status is retryable here until somebody decides otherwise, which is the
+ * safe direction: the cost of keeping a dead session is one more rejected
+ * request, and the cost of dropping a live one is lost work.
+ */
+const SESSION_ENDING_STATUSES: readonly number[] = [401, 403]
+
+/**
+ * Whether a failure is the server refusing the credentials, rather than a
+ * statement about the transport or the server's own health.
+ *
+ * Anything else — a response that never arrived (`status` 0: offline, DNS,
+ * timeout), a 5xx, a timeout, a rate limit — says nothing about whether the
+ * token is still good. Treating those as a refusal turns a two-second
+ * connectivity drop into a forced re-authentication: tokens wiped from storage,
+ * credentials retyped, work in progress lost.
+ *
+ * An error that is not an `ApiError` at all reached us from somewhere
+ * unexpected, so it is not treated as a verdict either. The session is left for
+ * the server to refuse on the next call — which it will, if it is genuinely
+ * dead.
+ */
+function endsSession(error: unknown): boolean {
+  return error instanceof ApiError && SESSION_ENDING_STATUSES.includes(error.status)
+}
+
+/**
+ * Run `rotate` while holding the cross-tab lock, so exactly one tab presents a
+ * given refresh token.
+ *
+ * Web Locks is unavailable in jsdom and in older Safari. There the call runs
+ * unguarded and the `storage` listener is what narrows the window — a tab that
+ * sees a newer pair land adopts it instead of spending its own.
+ */
+async function withRefreshLock(rotate: () => Promise<boolean>): Promise<boolean> {
+  const locks: LockManager | undefined =
+    typeof navigator === 'undefined' ? undefined : navigator.locks
+
+  if (!locks) {
+    return rotate()
+  }
+
+  // `request` types its result as `Promise<T>` with `T` inferred as the
+  // callback's own promise, so this awaits the nesting the runtime has already
+  // flattened.
+  const rotated = await locks.request(REFRESH_LOCK, rotate)
+
+  return rotated
+}
+
 function writePersistedSession(session: PersistedSession | null): void {
   try {
     if (session) {
@@ -60,6 +131,9 @@ function writePersistedSession(session: PersistedSession | null): void {
     // this tab, so a failure to persist must not break signing in.
   }
 }
+
+/** The `storage` listener belonging to the live store, so it can be replaced. */
+let activeStorageListener: ((event: StorageEvent) => void) | null = null
 
 /**
  * The session: tokens, the signed-in principal, and the operations that change
@@ -152,8 +226,14 @@ export const useAuthStore = defineStore('auth', () => {
       // retries. Reaching this catch means that failed too.
       user.value = await authApi.fetchCurrentUser()
       return true
-    } catch {
-      clearSession()
+    } catch (error) {
+      // Only a refusal of the credentials ends a session. If the server never
+      // answered, or answered with something that is not about the token, the
+      // tokens are still good and the caller can try again — see `endsSession`.
+      if (endsSession(error)) {
+        clearSession()
+      }
+
       return false
     }
   }
@@ -164,7 +244,7 @@ export const useAuthStore = defineStore('auth', () => {
    * an interceptor whose own failure path is the original request's error.
    */
   function refresh(): Promise<boolean> {
-    refreshInFlight ??= rotateTokens().finally(() => {
+    refreshInFlight ??= withRefreshLock(rotateTokens).finally(() => {
       refreshInFlight = null
     })
 
@@ -172,6 +252,13 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   async function rotateTokens(): Promise<boolean> {
+    // Another tab may have rotated the pair while this one waited for the lock.
+    // Adopting its result is the whole point of holding the lock: presenting a
+    // token that tab has already spent is what trips replay detection.
+    if (adoptPersistedSession()) {
+      return true
+    }
+
     const presented = refreshToken.value
 
     if (!presented) {
@@ -182,12 +269,37 @@ export const useAuthStore = defineStore('auth', () => {
     try {
       applySession(await authApi.refreshSession(presented))
       return true
-    } catch {
-      // The token was unknown, expired or already spent. Retrying would present
-      // it again and revoke the session family, so stop here and sign out.
-      clearSession()
+    } catch (error) {
+      // A refusal means the token was unknown, expired or already spent, and
+      // presenting it again would revoke the session family — so stop and sign
+      // out. Anything else says nothing about the token, so the session
+      // survives and the caller can retry.
+      if (endsSession(error)) {
+        clearSession()
+      }
+
       return false
     }
+  }
+
+  /**
+   * Take on a token pair another tab has written, returning whether there was
+   * one worth taking.
+   *
+   * Never writes back: the pair is already in storage, and re-writing it would
+   * only add noise to the other tabs' listeners.
+   */
+  function adoptPersistedSession(): boolean {
+    const persisted = readPersistedSession()
+
+    if (!persisted || persisted.refreshToken === refreshToken.value) {
+      return false
+    }
+
+    accessToken.value = persisted.accessToken
+    refreshToken.value = persisted.refreshToken
+
+    return true
   }
 
   /** Sign out here and on the server. Local state is cleared either way. */
@@ -223,7 +335,41 @@ export const useAuthStore = defineStore('auth', () => {
     return permissions.value.has(permission)
   }
 
+  /**
+   * Follow what other tabs do to the session.
+   *
+   * A tab that signs in, refreshes or signs out writes to `localStorage`, and
+   * every other tab hears about it here. Without this a tab keeps the pair it
+   * read at start-up, and eventually presents a refresh token another tab has
+   * already spent — which the backend correctly reads as theft.
+   */
+  function onExternalSessionChange(event: StorageEvent): void {
+    // A null key means the whole store was cleared.
+    if (event.key !== null && event.key !== STORAGE_KEY) {
+      return
+    }
+
+    if (readPersistedSession()) {
+      adoptPersistedSession()
+      return
+    }
+
+    // Another tab signed out. Drop the session here too, without writing back.
+    accessToken.value = null
+    refreshToken.value = null
+    user.value = null
+  }
+
   restore()
+
+  // Replace the listener from any previous store instance rather than stacking
+  // another one; tests build several pinias over the same window.
+  if (activeStorageListener) {
+    window.removeEventListener('storage', activeStorageListener)
+  }
+
+  activeStorageListener = onExternalSessionChange
+  window.addEventListener('storage', activeStorageListener)
 
   // Hand the client the two things it needs, rather than letting it import this
   // store and create a cycle.
