@@ -78,16 +78,23 @@ impl FromRequestParts<AppState> for ClientAddress {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         let Some(ConnectInfo(peer)) = parts.extensions.get::<ConnectInfo<SocketAddr>>() else {
-            // Only reachable if the service was built without connect info; the
-            // binary always installs it. Failing closed beats inventing a shared
-            // key that would silently re-open the defect this type exists to fix.
+            // Only reachable when the service was built without connect info;
+            // `main` always installs it and the integration harness supplies it
+            // per request. Failing closed beats inventing a shared key, which
+            // would silently re-open the defect this type exists to fix — but it
+            // is a 500 with nothing useful in the envelope, so the remedy goes in
+            // the log and in the error's own source text, which is where anyone
+            // debugging it will look.
             tracing::error!(
-                "no peer address on the request: the service must be served with \
-                 into_make_service_with_connect_info"
+                "no peer address on the request: serve the router with \
+                 into_make_service_with_connect_info::<SocketAddr>(), or insert a \
+                 ConnectInfo extension when driving it directly"
             );
 
             return Err(AppError::Internal {
-                source: anyhow::anyhow!("the client address is unavailable"),
+                source: anyhow::anyhow!(
+                    "the client address is unavailable: the service was built without connect info"
+                ),
             });
         };
 
@@ -269,5 +276,36 @@ mod tests {
 
         assert_eq!(client.rate_limit_key(), "203.0.113.7");
         assert_eq!(client.to_string(), "203.0.113.7");
+    }
+
+    #[tokio::test]
+    async fn a_request_with_no_peer_address_is_refused_rather_than_shared() {
+        // Pinning the decision, not the convenience. Without connect info there
+        // is no address that is true, and the tempting fallback — one shared
+        // key — is the defect: eleven failures from anyone would then return 429
+        // to everyone. A caller driving the router directly must supply it.
+        use crate::config::AppConfig;
+        use crate::router::create_router;
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let pool = crate::db::create_pool("postgres://postgres:postgres@localhost:5432/kelir")
+            .expect("lazy pool builds without a server");
+        let state = AppState::new(pool, AppConfig::test_default());
+
+        let response = create_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/login")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .expect("the request builds"),
+            )
+            .await
+            .expect("the router responds");
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }
