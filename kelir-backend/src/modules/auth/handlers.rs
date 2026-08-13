@@ -1,6 +1,6 @@
 use axum::extract::State;
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{middleware, Json, Router};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -9,9 +9,8 @@ use super::service;
 use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
 use crate::middleware::client_address::ClientAddress;
-use crate::middleware::rate_limit::Decision;
+use crate::middleware::rate_limit;
 use crate::modules::identity::repository as identity_repo;
-use crate::modules::organization::service as organization;
 use crate::response::ItemEnvelope;
 use crate::state::AppState;
 
@@ -72,13 +71,30 @@ pub struct CurrentUser {
     pub permissions: Vec<String>,
 }
 
-pub fn routes() -> Router<AppState> {
-    Router::new()
+/// The auth routes, with the rate limit applied where it belongs.
+///
+/// Login, refresh and change-password are metered (NFR-SEC-008): all three are
+/// reachable without a valid credential and all three cost real work — a
+/// database round trip, or an Argon2id verification on the blocking pool.
+/// Logout and me are not: logout is idempotent and reveals nothing, and me
+/// already requires an access token, so there is nothing to guess at.
+///
+/// `route_layer` rather than `layer`, so a 404 under `/auth` is not metered as
+/// though it were a failed credential.
+pub fn routes(state: AppState) -> Router<AppState> {
+    let metered = Router::new()
         .route("/login", post(sign_in))
-        .route("/logout", post(sign_out))
         .route("/refresh", post(refresh))
-        .route("/me", get(me))
         .route("/change-password", post(change_password))
+        .route_layer(middleware::from_fn_with_state(
+            state,
+            rate_limit::limit_authentication_attempts,
+        ));
+
+    Router::new()
+        .route("/logout", post(sign_out))
+        .route("/me", get(me))
+        .merge(metered)
 }
 
 /// Sign in with a username or email and a password.
@@ -89,7 +105,8 @@ pub fn routes() -> Router<AppState> {
     request_body = SignInRequest,
     responses(
         (status = 200, description = "Signed in", body = SessionResponse),
-        (status = 401, description = "Invalid credentials or inactive account")
+        (status = 401, description = "Invalid credentials or inactive account"),
+        (status = 429, description = "Too many failed attempts from this address; see Retry-After")
     )
 )]
 async fn sign_in(
@@ -97,33 +114,11 @@ async fn sign_in(
     client: ClientAddress,
     Json(request): Json<SignInRequest>,
 ) -> Result<Json<ItemEnvelope<SessionResponse>>, AppError> {
-    // Keyed on the source address, not the username: an attacker chooses the
-    // username freely, so keying on it would let them sidestep the limit by
-    // varying it — which is exactly the credential-stuffing shape that account
-    // lockout already misses.
-    //
-    // Scoped by tenant as well, so one tenant's traffic cannot exhaust another
-    // tenant's budget for the same source address. The scope is computed the way
-    // resolution computes it, which in single-tenant mode is a constant — the
-    // tenant code is a caller-supplied field, and honouring it here while
-    // resolution ignores it would hand an attacker a fresh bucket per request.
-    let limiter_key = format!(
-        "{}|{}",
-        organization::sign_in_scope(&state.config, request.tenant_code.as_deref()),
-        client.rate_limit_key()
-    );
-
-    if let Decision::Block {
-        retry_after_seconds,
-    } = state.rate_limiter.check(&limiter_key)
-    {
-        tracing::warn!(client = %client, "sign-in rate limit exceeded");
-
-        return Err(AppError::TooManyRequests {
-            retry_after_seconds,
-        });
-    }
-
+    // Rate limiting is the layer in `routes`, keyed on the source address rather
+    // than the username or the tenant: an attacker chooses both freely, so
+    // keying on either would let them sidestep the limit by varying it — which
+    // is exactly the credential-stuffing shape that account lockout already
+    // misses.
     let ip = client.to_string();
     let signed_in = service::sign_in(
         &state,
@@ -133,10 +128,6 @@ async fn sign_in(
         Some(&ip),
     )
     .await?;
-
-    // Succeeded, so this source is not the problem: forget its count rather
-    // than letting an earlier typo streak count against it.
-    state.rate_limiter.reset(&limiter_key);
 
     Ok(Json(ItemEnvelope::new(SessionResponse {
         access_token: signed_in.access_token,
@@ -156,7 +147,8 @@ async fn sign_in(
     request_body = RefreshRequest,
     responses(
         (status = 200, description = "Rotated", body = SessionResponse),
-        (status = 401, description = "Unknown, expired or already-used token")
+        (status = 401, description = "Unknown, expired or already-used token"),
+        (status = 429, description = "Too many failed attempts from this address; see Retry-After")
     )
 )]
 async fn refresh(
@@ -240,7 +232,8 @@ async fn me(
     request_body = ChangePasswordRequest,
     responses(
         (status = 204, description = "Changed; every session for the account ends"),
-        (status = 422, description = "The current password is wrong, or the new one is too short")
+        (status = 422, description = "The current password is wrong, or the new one is too short"),
+        (status = 429, description = "Too many failed attempts from this address; see Retry-After")
     ),
     security(("bearer" = []))
 )]

@@ -50,6 +50,15 @@ impl ClientAddress {
     /// The address alone, so every metered authentication endpoint shares one
     /// bucket per source: an attacker must not get a fresh allowance by moving
     /// from `/auth/login` to `/auth/refresh`.
+    ///
+    /// Not scoped by tenant, even in multi-tenant mode. Nothing about the caller
+    /// is known before they authenticate except where they are talking from —
+    /// the tenant code is a field in the request body, so scoping by it would
+    /// hand a caller a fresh bucket for every code they invent, which is the
+    /// defect this type exists to close wearing a different hat. One tenant's
+    /// traffic can therefore spend another's allowance from a shared egress
+    /// address; that is the same trade-off any address-keyed limiter makes, and
+    /// the alternative is no limit at all.
     pub fn rate_limit_key(self) -> String {
         self.0.to_string()
     }
