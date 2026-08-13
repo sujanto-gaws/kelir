@@ -88,7 +88,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/health/ready", get(health::readiness))
         .route("/version", get(health::version))
         .route("/api/docs/openapi.json", get(openapi_document))
-        .nest("/api/v1", api_v1_router())
+        .nest("/api/v1", api_v1_router(state.clone()))
         // Applied last so it wraps every route, including the 404 fallback and
         // the preflight requests the browser sends before anything else.
         .layer(cors_layer(&state.config.frontend_url))
@@ -102,9 +102,12 @@ pub fn create_router(state: AppState) -> Router {
 /// `Authenticated` cannot be reached without one (FR-API-008). Making the rule
 /// visible in each handler's signature beats a layer whose exceptions live
 /// somewhere else.
-fn api_v1_router() -> Router<AppState> {
+///
+/// The state is passed in as well as applied at the end, because the auth module
+/// puts a stateful layer over its metered routes.
+fn api_v1_router(state: AppState) -> Router<AppState> {
     Router::new()
-        .nest("/auth", auth::handlers::routes())
+        .nest("/auth", auth::handlers::routes(state))
         .nest("/identity", identity::handlers::routes())
 }
 

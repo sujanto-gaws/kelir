@@ -1,7 +1,6 @@
 use axum::extract::State;
-use axum::http::HeaderMap;
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{middleware, Json, Router};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -9,9 +8,9 @@ use uuid::Uuid;
 use super::service;
 use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
-use crate::middleware::rate_limit::Decision;
+use crate::middleware::client_address::ClientAddress;
+use crate::middleware::rate_limit;
 use crate::modules::identity::repository as identity_repo;
-use crate::modules::organization::service as organization;
 use crate::response::ItemEnvelope;
 use crate::state::AppState;
 
@@ -72,13 +71,30 @@ pub struct CurrentUser {
     pub permissions: Vec<String>,
 }
 
-pub fn routes() -> Router<AppState> {
-    Router::new()
+/// The auth routes, with the rate limit applied where it belongs.
+///
+/// Login, refresh and change-password are metered (NFR-SEC-008): all three are
+/// reachable without a valid credential and all three cost real work — a
+/// database round trip, or an Argon2id verification on the blocking pool.
+/// Logout and me are not: logout is idempotent and reveals nothing, and me
+/// already requires an access token, so there is nothing to guess at.
+///
+/// `route_layer` rather than `layer`, so a 404 under `/auth` is not metered as
+/// though it were a failed credential.
+pub fn routes(state: AppState) -> Router<AppState> {
+    let metered = Router::new()
         .route("/login", post(sign_in))
-        .route("/logout", post(sign_out))
         .route("/refresh", post(refresh))
-        .route("/me", get(me))
         .route("/change-password", post(change_password))
+        .route_layer(middleware::from_fn_with_state(
+            state,
+            rate_limit::limit_authentication_attempts,
+        ));
+
+    Router::new()
+        .route("/logout", post(sign_out))
+        .route("/me", get(me))
+        .merge(metered)
 }
 
 /// Sign in with a username or email and a password.
@@ -89,55 +105,29 @@ pub fn routes() -> Router<AppState> {
     request_body = SignInRequest,
     responses(
         (status = 200, description = "Signed in", body = SessionResponse),
-        (status = 401, description = "Invalid credentials or inactive account")
+        (status = 401, description = "Invalid credentials or inactive account"),
+        (status = 429, description = "Too many failed attempts from this address; see Retry-After")
     )
 )]
 async fn sign_in(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    client: ClientAddress,
     Json(request): Json<SignInRequest>,
 ) -> Result<Json<ItemEnvelope<SessionResponse>>, AppError> {
-    let ip = client_ip(&headers);
-
-    // Keyed on the source address, not the username: an attacker chooses the
-    // username freely, so keying on it would let them sidestep the limit by
-    // varying it — which is exactly the credential-stuffing shape that account
-    // lockout already misses.
-    //
-    // Scoped by tenant as well, so one tenant's traffic cannot exhaust another
-    // tenant's budget for the same source address. The scope is computed the way
-    // resolution computes it, which in single-tenant mode is a constant — the
-    // tenant code is a caller-supplied field, and honouring it here while
-    // resolution ignores it would hand an attacker a fresh bucket per request.
-    let source = ip.clone().unwrap_or_else(|| "unknown".to_owned());
-    let limiter_key = format!(
-        "{}|{source}",
-        organization::sign_in_scope(&state.config, request.tenant_code.as_deref())
-    );
-
-    if let Decision::Block {
-        retry_after_seconds,
-    } = state.rate_limiter.check(&limiter_key)
-    {
-        tracing::warn!(key = %limiter_key, "sign-in rate limit exceeded");
-
-        return Err(AppError::TooManyRequests {
-            retry_after_seconds,
-        });
-    }
-
+    // Rate limiting is the layer in `routes`, keyed on the source address rather
+    // than the username or the tenant: an attacker chooses both freely, so
+    // keying on either would let them sidestep the limit by varying it — which
+    // is exactly the credential-stuffing shape that account lockout already
+    // misses.
+    let ip = client.to_string();
     let signed_in = service::sign_in(
         &state,
         request.tenant_code.as_deref(),
         &request.username,
         &request.password,
-        ip.as_deref(),
+        Some(&ip),
     )
     .await?;
-
-    // Succeeded, so this source is not the problem: forget its count rather
-    // than letting an earlier typo streak count against it.
-    state.rate_limiter.reset(&limiter_key);
 
     Ok(Json(ItemEnvelope::new(SessionResponse {
         access_token: signed_in.access_token,
@@ -157,16 +147,17 @@ async fn sign_in(
     request_body = RefreshRequest,
     responses(
         (status = 200, description = "Rotated", body = SessionResponse),
-        (status = 401, description = "Unknown, expired or already-used token")
+        (status = 401, description = "Unknown, expired or already-used token"),
+        (status = 429, description = "Too many failed attempts from this address; see Retry-After")
     )
 )]
 async fn refresh(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    client: ClientAddress,
     Json(request): Json<RefreshRequest>,
 ) -> Result<Json<ItemEnvelope<SessionResponse>>, AppError> {
-    let ip = client_ip(&headers);
-    let signed_in = service::refresh(&state, &request.refresh_token, ip.as_deref()).await?;
+    let ip = client.to_string();
+    let signed_in = service::refresh(&state, &request.refresh_token, Some(&ip)).await?;
 
     Ok(Json(ItemEnvelope::new(SessionResponse {
         access_token: signed_in.access_token,
@@ -188,15 +179,15 @@ async fn refresh(
 )]
 async fn sign_out(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    client: ClientAddress,
     Json(request): Json<SignOutRequest>,
 ) -> Result<axum::http::StatusCode, AppError> {
-    let ip = client_ip(&headers);
+    let ip = client.to_string();
 
     // The caller is identified from the token being revoked rather than from an
     // access token: signing out must work when the access token has already
     // expired, which is exactly when a client is most likely to try.
-    service::sign_out(&state, request.refresh_token.as_deref(), ip.as_deref()).await?;
+    service::sign_out(&state, request.refresh_token.as_deref(), Some(&ip)).await?;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -241,7 +232,8 @@ async fn me(
     request_body = ChangePasswordRequest,
     responses(
         (status = 204, description = "Changed; every session for the account ends"),
-        (status = 422, description = "The current password is wrong, or the new one is too short")
+        (status = 422, description = "The current password is wrong, or the new one is too short"),
+        (status = 429, description = "Too many failed attempts from this address; see Retry-After")
     ),
     security(("bearer" = []))
 )]
@@ -260,57 +252,4 @@ async fn change_password(
     .await?;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
-}
-
-/// Best-effort client address for the audit trail (FR-AUD-005).
-///
-/// `X-Forwarded-For` is trusted only because the deployed topology puts Caddy in
-/// front and nothing else can reach the backend (deployment §4.1). Exposed
-/// directly, this header is caller-controlled and must not be trusted.
-///
-/// Absent behind no proxy — a local run records no address rather than the
-/// socket's, because `ConnectInfo` would require the whole service to be built
-/// with connect info for a value that is meaningless behind a reverse proxy.
-fn client_ip(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::http::HeaderValue;
-
-    #[test]
-    fn reads_the_forwarded_address() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.7"));
-
-        assert_eq!(client_ip(&headers), Some("203.0.113.7".to_owned()));
-    }
-
-    #[test]
-    fn takes_the_first_hop_from_a_forwarded_chain() {
-        // The client is leftmost; the rest are proxies.
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-forwarded-for",
-            HeaderValue::from_static("203.0.113.7, 198.51.100.2"),
-        );
-
-        assert_eq!(client_ip(&headers), Some("203.0.113.7".to_owned()));
-    }
-
-    #[test]
-    fn reports_nothing_when_no_proxy_supplied_an_address() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", HeaderValue::from_static("   "));
-
-        assert_eq!(client_ip(&headers), None);
-        assert_eq!(client_ip(&HeaderMap::new()), None);
-    }
 }

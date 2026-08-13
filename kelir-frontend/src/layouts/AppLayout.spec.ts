@@ -63,6 +63,8 @@ describe('AppLayout', () => {
       routes: [
         { path: '/', name: 'dashboard', component: blank },
         { path: '/login', name: 'login', component: blank },
+        { path: '/admin/users', name: 'admin-users', component: blank },
+        { path: '/admin/roles', name: 'admin-roles', component: blank },
       ],
     })
   })
@@ -93,6 +95,22 @@ describe('AppLayout', () => {
     const wrapper = await renderSignedIn()
 
     expect(wrapper.text()).toContain('Master Data')
+  })
+
+  it('hides the administration entries from a caller who cannot use them', async () => {
+    const wrapper = await renderSignedIn()
+
+    expect(wrapper.find('a[href="/admin/users"]').exists()).toBe(false)
+    expect(wrapper.find('a[href="/admin/roles"]').exists()).toBe(false)
+  })
+
+  it('links to each administration screen the caller may read', async () => {
+    // The two are separate grants, so holding one must not reveal the other.
+    permissions = ['identity:user:read']
+    const wrapper = await renderSignedIn()
+
+    expect(wrapper.find('a[href="/admin/users"]').exists()).toBe(true)
+    expect(wrapper.find('a[href="/admin/roles"]').exists()).toBe(false)
   })
 
   it('names the signed-in user', async () => {

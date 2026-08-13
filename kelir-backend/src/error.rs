@@ -9,7 +9,7 @@
     reason = "error variants are raised by the module services from Phase 2"
 )]
 
-use axum::http::StatusCode;
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
@@ -182,8 +182,21 @@ impl IntoResponse for AppError {
 
         let status = self.status();
         let body = ErrorEnvelope::new(self.code(), self.message(), self.details());
+        let mut response = (status, Json(body)).into_response();
 
-        (status, Json(body)).into_response()
+        // RFC 6585 §4: a 429 SHOULD say how long to wait. The message carries the
+        // same number in prose, which is for a person; this is for the client
+        // library that has to decide when to retry.
+        if let Self::TooManyRequests {
+            retry_after_seconds,
+        } = &self
+        {
+            if let Ok(value) = HeaderValue::from_str(&retry_after_seconds.to_string()) {
+                response.headers_mut().insert(header::RETRY_AFTER, value);
+            }
+        }
+
+        response
     }
 }
 
@@ -254,6 +267,31 @@ mod tests {
             !body.to_string().contains("hunter2"),
             "the cause must not reach the client"
         );
+    }
+
+    #[tokio::test]
+    async fn a_rate_limited_response_carries_retry_after() {
+        // A machine client cannot parse "Try again in 900 seconds" out of prose.
+        let response = AppError::TooManyRequests {
+            retry_after_seconds: 900,
+        }
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::RETRY_AFTER)
+                .expect("a 429 carries Retry-After"),
+            "900"
+        );
+    }
+
+    #[tokio::test]
+    async fn other_errors_do_not_carry_retry_after() {
+        let response = AppError::Unauthorized.into_response();
+
+        assert!(response.headers().get(header::RETRY_AFTER).is_none());
     }
 
     #[test]
