@@ -21,6 +21,17 @@ import type { CurrentUser, SessionResponse } from '@/types/auth'
  */
 const STORAGE_KEY = 'kelir.auth'
 
+/**
+ * Name of the cross-tab mutex held while `/auth/refresh` is in flight.
+ *
+ * The in-process latch below only covers one store instance, and every tab has
+ * its own. Two tabs refreshing in parallel is not merely wasteful: the backend
+ * revokes a refresh token as it is spent and reads a replay of an already
+ * rotated one as theft, killing the whole session family — so the loser of that
+ * race signs both tabs out.
+ */
+const REFRESH_LOCK = 'kelir.auth.refresh'
+
 interface PersistedSession {
   accessToken: string
   refreshToken: string
@@ -68,6 +79,30 @@ function isServerRejection(error: unknown): boolean {
   return error instanceof ApiError && error.status >= 400 && error.status < 500
 }
 
+/**
+ * Run `rotate` while holding the cross-tab lock, so exactly one tab presents a
+ * given refresh token.
+ *
+ * Web Locks is unavailable in jsdom and in older Safari. There the call runs
+ * unguarded and the `storage` listener is what narrows the window — a tab that
+ * sees a newer pair land adopts it instead of spending its own.
+ */
+async function withRefreshLock(rotate: () => Promise<boolean>): Promise<boolean> {
+  const locks: LockManager | undefined =
+    typeof navigator === 'undefined' ? undefined : navigator.locks
+
+  if (!locks) {
+    return rotate()
+  }
+
+  // `request` types its result as `Promise<T>` with `T` inferred as the
+  // callback's own promise, so this awaits the nesting the runtime has already
+  // flattened.
+  const rotated = await locks.request(REFRESH_LOCK, rotate)
+
+  return rotated
+}
+
 function writePersistedSession(session: PersistedSession | null): void {
   try {
     if (session) {
@@ -80,6 +115,9 @@ function writePersistedSession(session: PersistedSession | null): void {
     // this tab, so a failure to persist must not break signing in.
   }
 }
+
+/** The `storage` listener belonging to the live store, so it can be replaced. */
+let activeStorageListener: ((event: StorageEvent) => void) | null = null
 
 /**
  * The session: tokens, the signed-in principal, and the operations that change
@@ -190,7 +228,7 @@ export const useAuthStore = defineStore('auth', () => {
    * an interceptor whose own failure path is the original request's error.
    */
   function refresh(): Promise<boolean> {
-    refreshInFlight ??= rotateTokens().finally(() => {
+    refreshInFlight ??= withRefreshLock(rotateTokens).finally(() => {
       refreshInFlight = null
     })
 
@@ -198,6 +236,13 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   async function rotateTokens(): Promise<boolean> {
+    // Another tab may have rotated the pair while this one waited for the lock.
+    // Adopting its result is the whole point of holding the lock: presenting a
+    // token that tab has already spent is what trips replay detection.
+    if (adoptPersistedSession()) {
+      return true
+    }
+
     const presented = refreshToken.value
 
     if (!presented) {
@@ -219,6 +264,26 @@ export const useAuthStore = defineStore('auth', () => {
 
       return false
     }
+  }
+
+  /**
+   * Take on a token pair another tab has written, returning whether there was
+   * one worth taking.
+   *
+   * Never writes back: the pair is already in storage, and re-writing it would
+   * only add noise to the other tabs' listeners.
+   */
+  function adoptPersistedSession(): boolean {
+    const persisted = readPersistedSession()
+
+    if (!persisted || persisted.refreshToken === refreshToken.value) {
+      return false
+    }
+
+    accessToken.value = persisted.accessToken
+    refreshToken.value = persisted.refreshToken
+
+    return true
   }
 
   /** Sign out here and on the server. Local state is cleared either way. */
@@ -254,7 +319,41 @@ export const useAuthStore = defineStore('auth', () => {
     return permissions.value.has(permission)
   }
 
+  /**
+   * Follow what other tabs do to the session.
+   *
+   * A tab that signs in, refreshes or signs out writes to `localStorage`, and
+   * every other tab hears about it here. Without this a tab keeps the pair it
+   * read at start-up, and eventually presents a refresh token another tab has
+   * already spent — which the backend correctly reads as theft.
+   */
+  function onExternalSessionChange(event: StorageEvent): void {
+    // A null key means the whole store was cleared.
+    if (event.key !== null && event.key !== STORAGE_KEY) {
+      return
+    }
+
+    if (readPersistedSession()) {
+      adoptPersistedSession()
+      return
+    }
+
+    // Another tab signed out. Drop the session here too, without writing back.
+    accessToken.value = null
+    refreshToken.value = null
+    user.value = null
+  }
+
   restore()
+
+  // Replace the listener from any previous store instance rather than stacking
+  // another one; tests build several pinias over the same window.
+  if (activeStorageListener) {
+    window.removeEventListener('storage', activeStorageListener)
+  }
+
+  activeStorageListener = onExternalSessionChange
+  window.addEventListener('storage', activeStorageListener)
 
   // Hand the client the two things it needs, rather than letting it import this
   // store and create a cycle.
