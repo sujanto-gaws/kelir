@@ -357,6 +357,27 @@ mod tests {
     }
 
     #[test]
+    fn a_bootstrap_password_without_a_username_is_a_misconfiguration() {
+        // The mirror of the case above. Defaulting the username would decide on
+        // the operator's behalf which account the configured password unlocks.
+        let error = AppConfig::from_source(source(&[
+            ("KELIR_JWT_SECRET", "s3cret"),
+            (
+                "KELIR_BOOTSTRAP_ADMIN_PASSWORD",
+                "a-real-bootstrap-password",
+            ),
+        ]))
+        .expect_err("incomplete");
+
+        assert!(matches!(
+            error,
+            ConfigError::Missing {
+                key: "KELIR_BOOTSTRAP_ADMIN_USERNAME"
+            }
+        ));
+    }
+
+    #[test]
     fn reads_a_complete_bootstrap_admin() {
         let config = AppConfig::from_source(source(&[
             ("KELIR_JWT_SECRET", "s3cret"),

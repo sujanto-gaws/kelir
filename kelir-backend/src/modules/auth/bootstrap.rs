@@ -15,6 +15,7 @@ use super::password::hash_password;
 use crate::config::AppConfig;
 use crate::error::AppError;
 use crate::modules::audit::{self, AuditEntry};
+use crate::modules::identity::domain::validate_password_value;
 use crate::modules::identity::repository as identity_repo;
 use crate::modules::organization::service as organization;
 
@@ -97,6 +98,13 @@ pub async fn ensure_administrator(pool: &sqlx::PgPool, config: &AppConfig) -> Re
         );
         return Ok(());
     };
+
+    // The same rule the API applies to every password it sets. The account that
+    // holds every permission should not be the one account whose password is
+    // unchecked. Checked here rather than at configuration load so that an
+    // instance which already has its administrator still starts with a stale
+    // variable left in its environment.
+    validate_password_value(&credentials.password).map_err(unusable_bootstrap_password)?;
 
     let username = credentials.username.clone();
     let password = credentials.password.clone();
@@ -186,6 +194,27 @@ pub async fn ensure_administrator(pool: &sqlx::PgPool, config: &AppConfig) -> Re
     Ok(())
 }
 
+/// Reshapes a password validation failure into a startup failure.
+///
+/// `AppError::Validation` renders as "Validation failed" with the reason in a
+/// field only an HTTP client sees, and the reader here is an operator watching
+/// a container refuse to start. So the reason is lifted into the message and
+/// the variable that carries the bad value is named.
+fn unusable_bootstrap_password(error: AppError) -> AppError {
+    let reason = match error {
+        AppError::Validation { details } => details
+            .into_iter()
+            .map(|detail| detail.message)
+            .collect::<Vec<_>>()
+            .join("; "),
+        other => other.to_string(),
+    };
+
+    AppError::Internal {
+        source: anyhow::anyhow!("KELIR_BOOTSTRAP_ADMIN_PASSWORD is not usable: {reason}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use sqlx::PgPool;
@@ -196,6 +225,7 @@ mod tests {
     // default configuration: the tenant seeded by 0001_core.sql.
     use crate::db::SYSTEM_TENANT_ID;
     use crate::modules::auth::password::verify_password;
+    use crate::modules::identity::domain::MIN_PASSWORD_LENGTH;
 
     const BOOTSTRAP_PASSWORD: &str = "a-real-bootstrap-password";
 
@@ -414,6 +444,26 @@ mod tests {
         defined.sort();
         assert!(!defined.is_empty());
         assert_eq!(held, defined);
+    }
+
+    #[sqlx::test]
+    async fn refuses_a_bootstrap_password_below_the_minimum(pool: PgPool) {
+        let too_short = "a".repeat(MIN_PASSWORD_LENGTH - 1);
+
+        let error = ensure_administrator(&pool, &config_with_admin(&too_short))
+            .await
+            .expect_err("the account holding every permission is not exempt");
+
+        let AppError::Internal { source } = error else {
+            panic!("a misconfigured bootstrap password must fail startup");
+        };
+        assert!(
+            source
+                .to_string()
+                .contains("KELIR_BOOTSTRAP_ADMIN_PASSWORD"),
+            "the operator must be told which variable to fix: {source}"
+        );
+        assert_eq!(live_users(&pool).await, 0);
     }
 
     #[sqlx::test]
