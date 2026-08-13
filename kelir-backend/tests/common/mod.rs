@@ -366,6 +366,8 @@ fn test_config(database_url: &str) -> AppConfig {
         storage_driver: "local".to_owned(),
         smtp_host: "localhost".to_owned(),
         frontend_url: "http://localhost:5173".to_owned(),
+        multi_tenant: false,
+        default_tenant_code: "SYSTEM".to_owned(),
         bootstrap_admin: Some(BootstrapAdmin {
             username: ADMIN_USERNAME.to_owned(),
             email: "admin@kelir.test".to_owned(),
