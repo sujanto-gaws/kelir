@@ -2,7 +2,8 @@
 //! through `service` (coding standard §2.2).
 //!
 //! Every query filters by `tenant_id` (database schema §1.5) and excludes
-//! soft-deleted rows.
+//! soft-deleted rows. [`any_user_exists`] is the one deliberate exception, and
+//! says why.
 
 use chrono::{DateTime, Utc};
 use sqlx::{PgExecutor, PgPool};
@@ -235,6 +236,21 @@ pub async fn revoke_all_for_user(
 // ---------------------------------------------------------------------------
 // Users
 // ---------------------------------------------------------------------------
+
+/// Whether this database holds any user row at all.
+///
+/// The one query in this module that filters neither `tenant_id` nor
+/// `deleted_at`, because the question the first-run bootstrap asks is about the
+/// deployment and not about a tenant: has this database *ever* had a user? A
+/// tenant-scoped or live-only answer would let the bootstrap fire again on a
+/// database that already has accounts — see `modules::auth::bootstrap` for what
+/// that costs. It returns a boolean and no row data, so answering it across
+/// tenants discloses nothing.
+pub async fn any_user_exists(executor: impl PgExecutor<'_>) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM users) AS "exists!""#)
+        .fetch_one(executor)
+        .await
+}
 
 pub async fn count_users(pool: &PgPool, tenant_id: Uuid) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar!(
