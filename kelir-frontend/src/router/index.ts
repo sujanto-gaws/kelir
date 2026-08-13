@@ -1,11 +1,12 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 
+import { registerGuards } from './guards'
+
 /**
  * Route table.
  *
- * `meta.requiresAuth` is declared now and enforced in Phase 2, when the auth
- * store exists — declaring it here keeps the guard's contract in one place
- * rather than scattered through the router when it lands.
+ * `meta.requiresAuth` is the only thing the guard reads: a route opts into
+ * protection by declaring it, and `guards.ts` needs no edit to follow.
  */
 export const routes: RouteRecordRaw[] = [
   {
@@ -38,6 +39,8 @@ const router = createRouter({
   history: createWebHistory(),
   routes,
 })
+
+registerGuards(router)
 
 router.afterEach((to) => {
   const title = typeof to.meta.title === 'string' ? to.meta.title : undefined

@@ -6,9 +6,16 @@ use sqlx::{ConnectOptions, PgPool};
 /// The reserved system tenant (database schema §1.5). Platform-level rows that
 /// belong to no customer tenant carry this id.
 ///
-/// Referenced by seed data and tenant-scoped queries from Phase 2; defined here
-/// so the constant and `0001_core.sql` are checked against each other by test.
-#[allow(dead_code, reason = "referenced by tenant-scoped queries from Phase 2")]
+/// Not used to scope queries. Runtime code resolves its tenant through
+/// `modules::organization::service` (FR-IDM-009), so that a deployment which
+/// renames or repoints its default tenant is not silently overridden by a
+/// hardcoded id. What this constant is still for is pinning the UUID that
+/// `0001_core.sql` seeds, so a migration that changed it would fail the test
+/// below rather than orphan every platform-level row.
+#[allow(
+    dead_code,
+    reason = "pins the seeded system-tenant UUID against 0001_core.sql; asserted by test"
+)]
 pub const SYSTEM_TENANT_ID: uuid::Uuid = uuid::uuid!("00000000-0000-0000-0000-000000000001");
 
 /// Opens the connection pool.
