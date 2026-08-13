@@ -40,7 +40,62 @@ pub struct AppConfig {
     /// Credentials for the first administrator, used only when the instance has
     /// no users at all. Absent means "do not create one".
     pub bootstrap_admin: Option<BootstrapAdmin>,
+    /// How many reverse-proxy hops sit in front of this instance
+    /// (`KELIR_TRUSTED_PROXY_HOPS`). See [`trusted_proxy_hops`].
+    pub trusted_proxy_hops: usize,
 }
+
+/// Reverse-proxy hops the deployment puts in front of the backend.
+///
+/// **The default is zero: trust nothing.** An unconfigured deployment takes the
+/// client address from the socket peer and ignores `X-Forwarded-For` entirely,
+/// because that header is written by whoever is talking to us. Trusting it by
+/// default would let any caller choose their own rate-limit bucket and their own
+/// audit `ip_address` (NFR-SEC-008, FR-AUD-005).
+///
+/// Set it to the number of proxies the request really traverses before reaching
+/// this process — `1` for the staging topology, where Caddy is the only hop. The
+/// resolver then reads the address immediately to the left of those hops rather
+/// than the leftmost element of the chain, so values a caller prepends are
+/// skipped over (see `middleware::client_address`).
+///
+/// Counting hops assumes the backend is reachable *only* through those proxies,
+/// which the deployment enforces by publishing no backend port (deployment §4.1).
+/// A topology where that stops holding needs a CIDR allow-list instead.
+fn trusted_proxy_hops<F>(get: &F) -> Result<usize, ConfigError>
+where
+    F: Fn(&'static str) -> Result<String, VarError>,
+{
+    const KEY: &str = "KELIR_TRUSTED_PROXY_HOPS";
+
+    let Some(raw) = get("KELIR_TRUSTED_PROXY_HOPS")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(0);
+    };
+
+    let hops: usize = raw.parse().map_err(|_| ConfigError::Invalid {
+        key: KEY,
+        reason: format!("expected a whole number of proxy hops; found '{raw}'"),
+    })?;
+
+    // A silly value is a misconfiguration, and a large one would walk far enough
+    // left in the chain to reach caller-supplied entries.
+    if hops > MAX_TRUSTED_PROXY_HOPS {
+        return Err(ConfigError::Invalid {
+            key: KEY,
+            reason: format!("at most {MAX_TRUSTED_PROXY_HOPS} hops are supported; found {hops}"),
+        });
+    }
+
+    Ok(hops)
+}
+
+/// Upper bound on `KELIR_TRUSTED_PROXY_HOPS`. No real Kelir topology stacks more
+/// than a load balancer, a CDN and an ingress.
+const MAX_TRUSTED_PROXY_HOPS: usize = 8;
 
 /// The first-run administrator (see `modules::auth::bootstrap`).
 #[derive(Debug, Clone)]
@@ -242,6 +297,7 @@ impl AppConfig {
                 .trim()
                 .to_ascii_uppercase(),
             bootstrap_admin: bootstrap_admin(&get, app_env)?,
+            trusted_proxy_hops: trusted_proxy_hops(&get)?,
         })
     }
 }
@@ -263,6 +319,7 @@ impl AppConfig {
             multi_tenant: false,
             default_tenant_code: "SYSTEM".to_owned(),
             bootstrap_admin: None,
+            trusted_proxy_hops: 0,
         }
     }
 }
@@ -536,6 +593,67 @@ mod tests {
         .expect("loads");
 
         assert_eq!(config.default_tenant_code, "ACME");
+    }
+
+    #[test]
+    fn trusts_no_proxy_unless_one_is_configured() {
+        // The whole point of the default: an unconfigured deployment must not
+        // believe X-Forwarded-For, because the caller writes it.
+        let config =
+            AppConfig::from_source(source(&[("KELIR_JWT_SECRET", "s3cret")])).expect("loads");
+
+        assert_eq!(config.trusted_proxy_hops, 0);
+    }
+
+    #[test]
+    fn reads_the_configured_proxy_hop_count() {
+        let config = AppConfig::from_source(source(&[
+            ("KELIR_JWT_SECRET", "s3cret"),
+            ("KELIR_TRUSTED_PROXY_HOPS", "1"),
+        ]))
+        .expect("loads");
+
+        assert_eq!(config.trusted_proxy_hops, 1);
+    }
+
+    #[test]
+    fn rejects_a_proxy_hop_count_that_is_not_a_number() {
+        // Falling back to a default on a typo would silently change the trust
+        // model, which is exactly the class of mistake this variable governs.
+        for raw in ["one", "-1", "1.5", "1,2"] {
+            let result = AppConfig::from_source(source(&[
+                ("KELIR_JWT_SECRET", "s3cret"),
+                ("KELIR_TRUSTED_PROXY_HOPS", raw),
+            ]));
+
+            assert!(
+                matches!(
+                    result,
+                    Err(ConfigError::Invalid {
+                        key: "KELIR_TRUSTED_PROXY_HOPS",
+                        ..
+                    })
+                ),
+                "{raw} is not a hop count"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_an_implausible_proxy_hop_count() {
+        let error = AppConfig::from_source(source(&[
+            ("KELIR_JWT_SECRET", "s3cret"),
+            ("KELIR_TRUSTED_PROXY_HOPS", "99"),
+        ]))
+        .expect_err("99 hops is a misconfiguration");
+
+        assert!(matches!(
+            error,
+            ConfigError::Invalid {
+                key: "KELIR_TRUSTED_PROXY_HOPS",
+                ..
+            }
+        ));
     }
 
     #[test]

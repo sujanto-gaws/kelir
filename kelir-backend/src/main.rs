@@ -5,6 +5,7 @@
 //! Keeping it thin is what lets `tests/` drive exactly the router the binary
 //! serves rather than a reconstruction of it.
 
+use std::net::SocketAddr;
 use std::process::ExitCode;
 
 use kelir_backend::config::AppConfig;
@@ -69,7 +70,14 @@ async fn run() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&bind_address).await?;
     tracing::info!(address = %bind_address, "listening");
 
-    axum::serve(listener, app).await?;
+    // With connect info, so the socket peer address reaches the handlers. It is
+    // the only address a caller cannot forge, and both the rate limiter and the
+    // audit trail are keyed on it (see `middleware::client_address`).
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }

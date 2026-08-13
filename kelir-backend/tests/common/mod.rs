@@ -50,7 +50,10 @@
 
 pub mod fixtures;
 
+use std::net::SocketAddr;
+
 use axum::body::{to_bytes, Body};
+use axum::extract::ConnectInfo;
 use axum::http::{header, Method, Request, StatusCode};
 use axum::Router;
 use serde_json::Value;
@@ -72,6 +75,17 @@ pub const ADMIN_PASSWORD: &str = "bootstrap-administrator-password";
 /// Signing secret for the harness. Fixed so a token minted in one place in a
 /// test verifies in another.
 pub const JWT_SECRET: &str = "integration-test-signing-secret";
+
+/// The socket peer every request appears to come from.
+///
+/// `oneshot` binds no socket, so there is no real peer to report; the router
+/// still needs one, because that address is the caller's identity to the
+/// authentication rate limiter and to the audit trail. TEST-NET-1
+/// (RFC 5737) — never routable, so it cannot be mistaken for a real client.
+pub const TEST_PEER: SocketAddr = SocketAddr::new(
+    std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 1)),
+    41234,
+);
 
 /// A running application over a private database.
 pub struct TestApp {
@@ -152,6 +166,9 @@ impl TestApp {
 
     /// The application router. Rebuilt per call because `oneshot` consumes the
     /// service; the state behind it is shared, so this is not a fresh app.
+    ///
+    /// A caller driving this directly must put a [`ConnectInfo`] in the
+    /// request's extensions, as [`TestApp::send`] does — see [`TEST_PEER`].
     pub fn router(&self) -> Router {
         router::create_router(self.state.clone())
     }
@@ -165,19 +182,43 @@ impl TestApp {
         token: Option<&str>,
         body: Option<Value>,
     ) -> TestResponse {
+        self.send_from(TEST_PEER, method, uri, token, body).await
+    }
+
+    /// As [`TestApp::send`], from a chosen peer address.
+    ///
+    /// The address is what the authentication rate limiter keys on, so a test
+    /// that needs two callers distinguishes them here rather than by sending a
+    /// header — `X-Forwarded-For` is deliberately ignored unless the deployment
+    /// says how many proxies wrote it (`middleware::client_address`).
+    pub async fn send_from(
+        &self,
+        peer: SocketAddr,
+        method: Method,
+        uri: &str,
+        token: Option<&str>,
+        body: Option<Value>,
+    ) -> TestResponse {
         let mut builder = Request::builder().method(method).uri(uri);
 
         if let Some(token) = token {
             builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
         }
 
-        let request = match body {
+        let mut request = match body {
             Some(json) => builder
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(json.to_string())),
             None => builder.body(Body::empty()),
         }
         .unwrap_or_else(|error| harness_failure("build a test request", &error.to_string(), uri));
+
+        // What `axum::serve` supplies through `into_make_service_with_connect_info`
+        // and `oneshot` does not. Handlers on `/auth` resolve the caller's
+        // address from it and fail closed without it, deliberately: there is no
+        // safe fallback, and inventing a shared one is the defect that made the
+        // login rate limit steerable in the first place.
+        request.extensions_mut().insert(ConnectInfo(peer));
 
         let response = self
             .router()
@@ -368,6 +409,10 @@ fn test_config(database_url: &str) -> AppConfig {
         frontend_url: "http://localhost:5173".to_owned(),
         multi_tenant: false,
         default_tenant_code: "SYSTEM".to_owned(),
+        // Nothing sits in front of the router here, so the peer address below is
+        // the whole truth and X-Forwarded-For must not be read. This is also the
+        // production default (see `middleware::client_address`).
+        trusted_proxy_hops: 0,
         bootstrap_admin: Some(BootstrapAdmin {
             username: ADMIN_USERNAME.to_owned(),
             email: "admin@kelir.test".to_owned(),
