@@ -423,4 +423,96 @@ describe('useAuthStore', () => {
       expect(store.user).toEqual(profile)
     })
   })
+
+  /**
+   * The in-process latch covers one store instance, and every tab has its own.
+   * Without these, tab A rotates, tab B presents the token A has already spent,
+   * and the backend correctly reads the replay as theft — killing both.
+   */
+  describe('another tab', () => {
+    function storeSession(generation: number): void {
+      window.localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({
+          accessToken: `access-${generation}`,
+          refreshToken: `refresh-${generation}`,
+        }),
+      )
+    }
+
+    function announceStorageChange(): void {
+      // The listener re-reads storage rather than trusting `newValue`, so the
+      // event only has to name the key.
+      window.dispatchEvent(new StorageEvent('storage', { key: STORAGE_KEY }))
+    }
+
+    beforeEach(() => {
+      storeSession(1)
+    })
+
+    it('adopts a pair another tab has rotated', async () => {
+      const store = useAuthStore()
+      expect(store.refreshToken).toBe('refresh-1')
+
+      storeSession(2)
+      announceStorageChange()
+
+      expect(store.accessToken).toBe('access-2')
+      expect(store.refreshToken).toBe('refresh-2')
+    })
+
+    it('does not spend a token another tab has already replaced', async () => {
+      const store = useAuthStore()
+
+      // The other tab rotated between this tab's 401 and its refresh.
+      storeSession(2)
+
+      await expect(store.refresh()).resolves.toBe(true)
+
+      // Presenting refresh-1 here is what would have killed the family.
+      expect(backend.countOf('/auth/refresh')).toBe(0)
+      expect(store.refreshToken).toBe('refresh-2')
+    })
+
+    it('signs out here when another tab signs out', async () => {
+      const store = useAuthStore()
+
+      window.localStorage.clear()
+      announceStorageChange()
+
+      expect(store.isAuthenticated).toBe(false)
+      expect(store.user).toBeNull()
+    })
+
+    it('ignores a change to somebody else’s storage key', async () => {
+      const store = useAuthStore()
+
+      window.localStorage.setItem('unrelated', 'value')
+      window.dispatchEvent(new StorageEvent('storage', { key: 'unrelated' }))
+
+      expect(store.refreshToken).toBe('refresh-1')
+    })
+
+    it('serialises the rotation across tabs when Web Locks is available', async () => {
+      // jsdom has no lock manager, so this asserts the store asks for one by
+      // name — the mutual exclusion itself is the browser's job.
+      const requested: string[] = []
+      const locks = {
+        request: (name: string, callback: () => Promise<boolean>) => {
+          requested.push(name)
+          return callback()
+        },
+      }
+      Object.defineProperty(window.navigator, 'locks', { value: locks, configurable: true })
+
+      handler = () => ({ status: 200, body: itemBody(session(2)) })
+
+      try {
+        await expect(useAuthStore().refresh()).resolves.toBe(true)
+        expect(requested).toEqual(['kelir.auth.refresh'])
+      } finally {
+        Reflect.deleteProperty(window.navigator, 'locks')
+      }
+    })
+  })
 })
