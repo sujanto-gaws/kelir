@@ -11,6 +11,7 @@ use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
 use crate::middleware::rate_limit::Decision;
 use crate::modules::identity::repository as identity_repo;
+use crate::modules::organization::service as organization;
 use crate::response::ItemEnvelope;
 use crate::state::AppState;
 
@@ -20,6 +21,13 @@ pub struct SignInRequest {
     /// Username or email address (FR-AUTH-001).
     pub username: String,
     pub password: String,
+    /// Which tenant to authenticate against (FR-IDM-009).
+    ///
+    /// Required only when the deployment runs in multi-tenant mode. Single-tenant
+    /// deployments resolve their configured default tenant and ignore this
+    /// field, so existing clients need not send it.
+    #[serde(default)]
+    pub tenant_code: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -95,7 +103,17 @@ async fn sign_in(
     // username freely, so keying on it would let them sidestep the limit by
     // varying it — which is exactly the credential-stuffing shape that account
     // lockout already misses.
-    let limiter_key = ip.clone().unwrap_or_else(|| "unknown".to_owned());
+    //
+    // Scoped by tenant as well, so one tenant's traffic cannot exhaust another
+    // tenant's budget for the same source address. The scope is computed the way
+    // resolution computes it, which in single-tenant mode is a constant — the
+    // tenant code is a caller-supplied field, and honouring it here while
+    // resolution ignores it would hand an attacker a fresh bucket per request.
+    let source = ip.clone().unwrap_or_else(|| "unknown".to_owned());
+    let limiter_key = format!(
+        "{}|{source}",
+        organization::sign_in_scope(&state.config, request.tenant_code.as_deref())
+    );
 
     if let Decision::Block {
         retry_after_seconds,
@@ -108,8 +126,14 @@ async fn sign_in(
         });
     }
 
-    let signed_in =
-        service::sign_in(&state, &request.username, &request.password, ip.as_deref()).await?;
+    let signed_in = service::sign_in(
+        &state,
+        request.tenant_code.as_deref(),
+        &request.username,
+        &request.password,
+        ip.as_deref(),
+    )
+    .await?;
 
     // Succeeded, so this source is not the problem: forget its count rather
     // than letting an earlier typo streak count against it.
@@ -228,6 +252,7 @@ async fn change_password(
 ) -> Result<axum::http::StatusCode, AppError> {
     service::change_own_password(
         &state,
+        caller.tenant_id(),
         caller.user_id(),
         &request.current_password,
         &request.new_password,

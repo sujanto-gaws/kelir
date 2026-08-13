@@ -62,10 +62,16 @@ pub async fn find_credentials_by_id(
 
 pub async fn record_successful_login(
     executor: impl PgExecutor<'_>,
+    tenant_id: Uuid,
     user_id: Uuid,
 ) -> Result<(), sqlx::Error> {
     sqlx::query!(
-        "UPDATE users SET last_login_at = now(), failed_login_count = 0, updated_at = now() WHERE id = $1",
+        r#"
+        UPDATE users
+        SET last_login_at = now(), failed_login_count = 0, updated_at = now()
+        WHERE tenant_id = $1 AND id = $2
+        "#,
+        tenant_id,
         user_id
     )
     .execute(executor)
@@ -73,8 +79,14 @@ pub async fn record_successful_login(
     .map(|_| ())
 }
 
+/// Increments the account's failure counter and returns the new value.
+///
+/// Tenant-scoped like every other identity write (FR-IDM-009): the counter
+/// belongs to a user *within* a tenant, so the same user id may only ever be
+/// touched through the tenant the sign-in resolved to.
 pub async fn record_failed_login(
     executor: impl PgExecutor<'_>,
+    tenant_id: Uuid,
     user_id: Uuid,
 ) -> Result<i32, sqlx::Error> {
     // Returns the new count so the caller can decide about locking (NFR-SEC-008).
@@ -82,9 +94,10 @@ pub async fn record_failed_login(
         r#"
         UPDATE users
         SET failed_login_count = failed_login_count + 1, updated_at = now()
-        WHERE id = $1
+        WHERE tenant_id = $1 AND id = $2
         RETURNING failed_login_count
         "#,
+        tenant_id,
         user_id
     )
     .fetch_one(executor)
@@ -682,4 +695,132 @@ pub async fn set_password_hash(
     .execute(executor)
     .await
     .map(|result| result.rows_affected())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// See the note in `modules::organization::service::tests`: the URL the
+    /// SQLx macros compiled against, so the schema under test is the schema the
+    /// queries were verified against.
+    const TEST_DATABASE_URL: Option<&str> = option_env!("DATABASE_URL");
+
+    async fn transaction() -> Option<sqlx::Transaction<'static, sqlx::Postgres>> {
+        let url = TEST_DATABASE_URL?;
+        let pool = crate::db::create_pool(url).expect("test database url parses");
+
+        match pool.begin().await {
+            Ok(transaction) => Some(transaction),
+            Err(error) => {
+                eprintln!("skipping: no database at {url}: {error}");
+                None
+            }
+        }
+    }
+
+    /// A tenant and one user inside it, both rolled back with the transaction.
+    async fn given_user(transaction: &mut sqlx::PgConnection, code: &str) -> (Uuid, Uuid) {
+        let tenant_id = Uuid::now_v7();
+
+        sqlx::query!(
+            "INSERT INTO tenants (id, tenant_code, name, status) VALUES ($1, $2, $3, 'ACTIVE')",
+            tenant_id,
+            code,
+            format!("Tenant {code}")
+        )
+        .execute(&mut *transaction)
+        .await
+        .expect("tenant inserted");
+
+        let user_id = Uuid::now_v7();
+
+        insert_user(
+            &mut *transaction,
+            user_id,
+            tenant_id,
+            &format!("user-{code}"),
+            &format!("user-{code}@example.test"),
+            "not-a-real-hash",
+            "Test User",
+            None,
+            None,
+        )
+        .await
+        .expect("user inserted");
+
+        (tenant_id, user_id)
+    }
+
+    async fn failure_count(transaction: &mut sqlx::PgConnection, user_id: Uuid) -> i32 {
+        sqlx::query_scalar!(
+            "SELECT failed_login_count FROM users WHERE id = $1",
+            user_id
+        )
+        .fetch_one(&mut *transaction)
+        .await
+        .expect("user exists")
+    }
+
+    #[tokio::test]
+    async fn the_lockout_counter_only_moves_within_its_own_tenant() {
+        let Some(mut tx) = transaction().await else {
+            return;
+        };
+
+        let (tenant_id, user_id) = given_user(&mut tx, "LOCKOUT-A").await;
+        let (other_tenant_id, _) = given_user(&mut tx, "LOCKOUT-B").await;
+
+        assert_eq!(
+            record_failed_login(&mut *tx, tenant_id, user_id)
+                .await
+                .expect("the owning tenant increments the counter"),
+            1
+        );
+
+        // FR-IDM-009: the same user id presented under a different tenant must
+        // match no row, so one tenant cannot drive another tenant's account
+        // into lockout.
+        let cross_tenant = record_failed_login(&mut *tx, other_tenant_id, user_id).await;
+
+        assert!(
+            matches!(cross_tenant, Err(sqlx::Error::RowNotFound)),
+            "expected no row to match, got {cross_tenant:?}"
+        );
+        assert_eq!(
+            failure_count(&mut tx, user_id).await,
+            1,
+            "the counter must not have moved"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_successful_login_clears_the_counter_only_within_its_tenant() {
+        let Some(mut tx) = transaction().await else {
+            return;
+        };
+
+        let (tenant_id, user_id) = given_user(&mut tx, "SUCCESS-A").await;
+        let (other_tenant_id, _) = given_user(&mut tx, "SUCCESS-B").await;
+
+        record_failed_login(&mut *tx, tenant_id, user_id)
+            .await
+            .expect("counted");
+
+        record_successful_login(&mut *tx, other_tenant_id, user_id)
+            .await
+            .expect("the statement runs, but must match nothing");
+
+        assert_eq!(
+            failure_count(&mut tx, user_id).await,
+            1,
+            "another tenant must not be able to clear the counter"
+        );
+
+        record_successful_login(&mut *tx, tenant_id, user_id)
+            .await
+            .expect("cleared");
+
+        assert_eq!(failure_count(&mut tx, user_id).await, 0);
+    }
 }

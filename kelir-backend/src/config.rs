@@ -26,6 +26,17 @@ pub struct AppConfig {
     pub storage_driver: String,
     pub smtp_host: String,
     pub frontend_url: String,
+    /// Whether this deployment serves more than one tenant (SRS §2, FR-IDM-009).
+    ///
+    /// Tenancy is a deployment property, not a per-request one. Off, every
+    /// sign-in resolves [`AppConfig::default_tenant_code`] and the login
+    /// contract is unchanged; on, the caller names its tenant and that name is
+    /// looked up. A flag rather than always-on keeps single-tenant deployments —
+    /// which is every deployment today — free of a field nobody would fill in.
+    pub multi_tenant: bool,
+    /// The tenant every sign-in resolves to when [`AppConfig::multi_tenant`] is
+    /// off, and the tenant the first-run administrator is created in either way.
+    pub default_tenant_code: String,
     /// Credentials for the first administrator, used only when the instance has
     /// no users at all. Absent means "do not create one".
     pub bootstrap_admin: Option<BootstrapAdmin>,
@@ -87,6 +98,25 @@ where
 /// Secrets shipped in `.env.example` and the compose stack. Never valid in
 /// production.
 const PLACEHOLDER_SECRETS: &[&str] = &["change-me", "changeme", "secret", "test-secret"];
+
+/// Parses a boolean deployment flag.
+///
+/// Refuses anything it does not recognise rather than treating it as `false`.
+/// A flag that silently reads `KELIR_MULTI_TENANT=yes` as "off" would leave an
+/// operator believing tenancy is enforced when every sign-in is landing in the
+/// default tenant, which is the one failure mode this flag must not have.
+fn flag(raw: &str, key: &'static str) -> Result<bool, ConfigError> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        other => Err(ConfigError::Invalid {
+            key,
+            reason: format!(
+                "expected a boolean (true/false, 1/0, yes/no, on/off); found '{other}'"
+            ),
+        }),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppEnv {
@@ -202,6 +232,15 @@ impl AppConfig {
             storage_driver: optional("KELIR_STORAGE_DRIVER", "local"),
             smtp_host: optional("KELIR_SMTP_HOST", "localhost"),
             frontend_url: optional("KELIR_FRONTEND_URL", "http://localhost:5173"),
+            multi_tenant: flag(
+                &optional("KELIR_MULTI_TENANT", "false"),
+                "KELIR_MULTI_TENANT",
+            )?,
+            // Uppercased on the way in so the configured value and the codes
+            // callers send normalise identically (organization::domain).
+            default_tenant_code: optional("KELIR_DEFAULT_TENANT_CODE", "SYSTEM")
+                .trim()
+                .to_ascii_uppercase(),
             bootstrap_admin: bootstrap_admin(&get, app_env)?,
         })
     }
@@ -221,6 +260,8 @@ impl AppConfig {
             storage_driver: "local".to_owned(),
             smtp_host: "localhost".to_owned(),
             frontend_url: "http://localhost:5173".to_owned(),
+            multi_tenant: false,
+            default_tenant_code: "SYSTEM".to_owned(),
             bootstrap_admin: None,
         }
     }
@@ -407,6 +448,73 @@ mod tests {
         .expect("a non-placeholder secret is accepted");
 
         assert_eq!(config.app_env, AppEnv::Production);
+    }
+
+    #[test]
+    fn is_single_tenant_unless_the_flag_is_set() {
+        // FR-IDM-009: multi-tenancy is opt-in, so an existing deployment that
+        // sets neither variable keeps today's behaviour exactly.
+        let config =
+            AppConfig::from_source(source(&[("KELIR_JWT_SECRET", "s3cret")])).expect("loads");
+
+        assert!(!config.multi_tenant);
+        assert_eq!(config.default_tenant_code, "SYSTEM");
+    }
+
+    #[test]
+    fn reads_the_multi_tenant_flag_in_every_documented_spelling() {
+        for (raw, expected) in [
+            ("true", true),
+            ("1", true),
+            ("yes", true),
+            ("on", true),
+            ("TRUE", true),
+            ("false", false),
+            ("0", false),
+            ("no", false),
+            ("off", false),
+        ] {
+            let config = AppConfig::from_source(source(&[
+                ("KELIR_JWT_SECRET", "s3cret"),
+                ("KELIR_MULTI_TENANT", raw),
+            ]))
+            .unwrap_or_else(|_| panic!("{raw} parses"));
+
+            assert_eq!(config.multi_tenant, expected, "for {raw}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_multi_tenant_flag_it_does_not_understand() {
+        // Reading an unrecognised value as "off" would leave an operator
+        // believing tenancy is enforced while every sign-in lands in the
+        // default tenant.
+        let error = AppConfig::from_source(source(&[
+            ("KELIR_JWT_SECRET", "s3cret"),
+            ("KELIR_MULTI_TENANT", "enabled"),
+        ]))
+        .expect_err("only booleans are accepted");
+
+        assert!(matches!(
+            error,
+            ConfigError::Invalid {
+                key: "KELIR_MULTI_TENANT",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn normalises_the_default_tenant_code() {
+        // The configured code and the codes callers send must normalise the
+        // same way, or the default tenant would fail to resolve against itself.
+        let config = AppConfig::from_source(source(&[
+            ("KELIR_JWT_SECRET", "s3cret"),
+            ("KELIR_DEFAULT_TENANT_CODE", "  acme  "),
+        ]))
+        .expect("loads");
+
+        assert_eq!(config.default_tenant_code, "ACME");
     }
 
     #[test]

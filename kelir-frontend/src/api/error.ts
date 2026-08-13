@@ -11,13 +11,22 @@ export class ApiError extends Error {
   readonly code: string
   readonly status: number
   readonly details: ValidationDetail[]
+  /** Seconds to wait before retrying, when the server said how long. */
+  readonly retryAfterSeconds?: number
 
-  constructor(code: string, message: string, status: number, details: ValidationDetail[] = []) {
+  constructor(
+    code: string,
+    message: string,
+    status: number,
+    details: ValidationDetail[] = [],
+    retryAfterSeconds?: number,
+  ) {
     super(message)
     this.name = 'ApiError'
     this.code = code
     this.status = status
     this.details = details
+    this.retryAfterSeconds = retryAfterSeconds
   }
 
   /** True when the failure is field-level and can be shown against inputs. */
@@ -38,6 +47,11 @@ export class ApiError extends Error {
   /** Nothing reached the server, so retrying may genuinely help. */
   get isNetwork(): boolean {
     return this.status === 0
+  }
+
+  /** Too many attempts — the caller must wait, not retry immediately. */
+  get isRateLimited(): boolean {
+    return this.status === 429
   }
 
   /** Field errors keyed by path, for binding to form inputs. */

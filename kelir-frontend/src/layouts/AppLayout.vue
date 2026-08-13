@@ -1,29 +1,71 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import { RouterLink, RouterView, useRoute } from 'vue-router'
-import { FileText, Inbox, LayoutDashboard, Menu, Moon, Sun, Users } from 'lucide-vue-next'
+import { computed, ref } from 'vue'
+import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
+import { FileText, Inbox, LayoutDashboard, LogOut, Menu, Moon, Sun, Users } from 'lucide-vue-next'
 
 import { Button } from '@/components/ui/button'
+import { LOGIN_ROUTE_NAME } from '@/router/guards'
 import { useAppStore } from '@/stores/app'
+import { useAuthStore } from '@/stores/auth'
 
 const appStore = useAppStore()
+const auth = useAuthStore()
 const route = useRoute()
+const router = useRouter()
 
 /**
  * The navigation rail. Destinations beyond the dashboard are disabled until
  * their phase lands — showing them communicates the shape of the product, but
  * a link that 404s would not.
+ *
+ * `permission` hides an entry the user could never open. Hiding is cosmetic:
+ * the backend re-checks every request and is the only thing that decides.
  */
 const navigation = [
   { name: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, enabled: true },
-  { name: 'tasks', label: 'My Tasks', icon: Inbox, enabled: false },
-  { name: 'documents', label: 'Documents', icon: FileText, enabled: false },
-  { name: 'master-data', label: 'Master Data', icon: Users, enabled: false },
+  {
+    name: 'tasks',
+    label: 'My Tasks',
+    icon: Inbox,
+    enabled: false,
+    permission: 'workflow:task:read',
+  },
+  {
+    name: 'documents',
+    label: 'Documents',
+    icon: FileText,
+    enabled: false,
+    permission: 'document:read',
+  },
+  {
+    name: 'master-data',
+    label: 'Master Data',
+    icon: Users,
+    enabled: false,
+    permission: 'master-data:party:read',
+  },
 ] as const
+
+const visibleNavigation = computed(() =>
+  navigation.filter((item) => !('permission' in item) || auth.can(item.permission)),
+)
 
 const currentTitle = computed(() =>
   typeof route.meta.title === 'string' ? route.meta.title : 'Kelir',
 )
+
+const isSigningOut = ref(false)
+
+async function signOut(): Promise<void> {
+  isSigningOut.value = true
+
+  try {
+    await auth.signOut()
+    await router.replace({ name: LOGIN_ROUTE_NAME })
+  } finally {
+    isSigningOut.value = false
+  }
+}
 </script>
 
 <template>
@@ -38,7 +80,7 @@ const currentTitle = computed(() =>
       </div>
 
       <nav class="space-y-1 p-3">
-        <template v-for="item in navigation" :key="item.name">
+        <template v-for="item in visibleNavigation" :key="item.name">
           <RouterLink
             v-if="item.enabled"
             :to="{ name: item.name }"
@@ -74,15 +116,29 @@ const currentTitle = computed(() =>
 
         <h1 class="text-sm font-medium">{{ currentTitle }}</h1>
 
+        <span v-if="auth.displayName" class="ml-auto text-sm text-muted-foreground">
+          {{ auth.displayName }}
+        </span>
+
         <Button
           variant="ghost"
           size="icon"
-          class="ml-auto"
+          :class="auth.displayName ? '' : 'ml-auto'"
           :aria-label="appStore.isDark ? 'Switch to light theme' : 'Switch to dark theme'"
           @click="appStore.toggleTheme()"
         >
           <Sun v-if="appStore.isDark" class="size-4" aria-hidden="true" />
           <Moon v-else class="size-4" aria-hidden="true" />
+        </Button>
+
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="Sign out"
+          :loading="isSigningOut"
+          @click="signOut()"
+        >
+          <LogOut class="size-4" aria-hidden="true" />
         </Button>
       </header>
 
