@@ -13,10 +13,10 @@ use uuid::Uuid;
 
 use super::password::hash_password;
 use crate::config::AppConfig;
-use crate::db::SYSTEM_TENANT_ID;
 use crate::error::AppError;
 use crate::modules::audit::{self, AuditEntry};
 use crate::modules::identity::repository as identity_repo;
+use crate::modules::organization::service as organization;
 
 /// The role every bootstrap administrator is granted, seeded by 0002.
 const ADMIN_ROLE_ID: Uuid = uuid::uuid!("00000000-0000-0000-0002-000000000001");
@@ -26,7 +26,16 @@ const ADMIN_ROLE_ID: Uuid = uuid::uuid!("00000000-0000-0000-0002-000000000001");
 /// Does nothing once any user exists, so it is safe on every start and cannot
 /// resurrect an account that was deliberately removed.
 pub async fn ensure_administrator(pool: &sqlx::PgPool, config: &AppConfig) -> Result<(), AppError> {
-    let existing = identity_repo::count_users(pool, SYSTEM_TENANT_ID).await?;
+    // The first administrator belongs to the deployment's default tenant in
+    // both modes: a multi-tenant deployment still needs one account before any
+    // tenant can be created. Resolving it here rather than assuming the seeded
+    // system tenant means `KELIR_DEFAULT_TENANT_CODE` is honoured at startup
+    // too, and a code pointing at no tenant fails the boot instead of silently
+    // creating the account somewhere else.
+    let tenant = organization::resolve_default(pool, config).await?;
+    let tenant_id = tenant.id;
+
+    let existing = identity_repo::count_users(pool, tenant_id).await?;
 
     if existing > 0 {
         return Ok(());
@@ -57,7 +66,7 @@ pub async fn ensure_administrator(pool: &sqlx::PgPool, config: &AppConfig) -> Re
     identity_repo::insert_user(
         &mut *transaction,
         id,
-        SYSTEM_TENANT_ID,
+        tenant_id,
         &credentials.username,
         &credentials.email,
         &password_hash,
@@ -67,8 +76,7 @@ pub async fn ensure_administrator(pool: &sqlx::PgPool, config: &AppConfig) -> Re
     )
     .await?;
 
-    identity_repo::replace_user_roles(&mut transaction, SYSTEM_TENANT_ID, id, &[ADMIN_ROLE_ID])
-        .await?;
+    identity_repo::replace_user_roles(&mut transaction, tenant_id, id, &[ADMIN_ROLE_ID]).await?;
 
     transaction.commit().await?;
 
@@ -77,7 +85,7 @@ pub async fn ensure_administrator(pool: &sqlx::PgPool, config: &AppConfig) -> Re
     audit::record_or_warn(
         pool,
         AuditEntry {
-            tenant_id: SYSTEM_TENANT_ID,
+            tenant_id,
             event_type: "User.Created",
             action: "CREATE",
             object_type: "USER",
