@@ -107,17 +107,40 @@ describe('UserFormDialog', () => {
 
   it('round-trips a user created with two roles through GET /users/{id}', async () => {
     // FR-IDM-003: the grants have to survive the write, not merely be sent.
-    const created: User = {
-      ...existingUser,
-      id: 'u-9',
-      username: 'bima',
-      roles: [clerkRole, approverRole],
-    }
+    //
+    // The fake backend resolves the ids the POST actually carried and serves
+    // that back, rather than a canned reply. That is the difference between
+    // testing the round trip and testing the fixture: strip `roleIds` from the
+    // outbound request and the fetched user returns with no roles.
+    const catalogue = new Map([
+      [clerkRole.id, clerkRole],
+      [approverRole.id, approverRole],
+    ])
+    let stored: User | null = null
 
-    handler = (request) =>
-      request.method === 'post'
-        ? { status: 201, body: itemBody({ ...created, roles: [] }) }
-        : { status: 200, body: itemBody(created) }
+    handler = (request) => {
+      if (request.method === 'post') {
+        const body = request.body as { username?: string; roleIds?: string[] }
+
+        stored = {
+          ...existingUser,
+          id: 'u-9',
+          username: body.username ?? '',
+          roles: (body.roleIds ?? []).flatMap((id) => {
+            const role = catalogue.get(id)
+            return role ? [role] : []
+          }),
+        }
+
+        // The create response deliberately omits the roles, so nothing but the
+        // subsequent read can satisfy the assertion below.
+        return { status: 201, body: itemBody({ ...stored, roles: [] }) }
+      }
+
+      return stored === null
+        ? { status: 404, body: errorBody('NOT_FOUND', 'No such user') }
+        : { status: 200, body: itemBody(stored) }
+    }
 
     const wrapper = mountDialog(null)
 
@@ -129,6 +152,7 @@ describe('UserFormDialog', () => {
 
     const fetched = await getUser('u-9')
 
+    expect(fetched.username).toBe('bima')
     expect(fetched.roles.map((role) => role.roleCode)).toEqual(['ROLE-CLERK', 'ROLE-APPROVER'])
   })
 
