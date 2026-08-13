@@ -15,7 +15,7 @@ The `docs/` folder contains the full design documentation set (see [docs/README.
 - `docs/concepts/` — conceptual foundation: the document-based platform concept, attachments/comments/activity-log design, master data governance (hybrid golden-record + workflow model), and a consolidated sample data structure.
 - `docs/architectures/` — architecture decisions: framework concept, the Kelir module breakdown (backend and frontend), the external-system integration layer, the plugin/extension platform, and the OFBiz-style Party master-data model (adopted for supplier, customer, and employee master data).
 - `docs/requirements/srs.md` — the Software Requirements Specification (FR/NFR IDs, MVP acceptance criteria), v0.5.
-- `docs/design/` — the System Design Document (architecture, stack, module structure, database design, workflow/RAD/integration/plugin/security/API/deployment design, roadmap), v0.1 — the successor of the Solution Blueprint formerly bundled in srs.md — and the Database Schema (column-level DDL for all 94 tables across 12 migrations).
+- `docs/design/` — the System Design Document (architecture, stack, module structure, database design, workflow/RAD/integration/plugin/security/API/deployment design, roadmap), v0.1 — the successor of the Solution Blueprint formerly bundled in srs.md — and the Database Schema (column-level DDL for all 95 tables across 16 migrations).
 - `docs/schema/` — the JSON standards family: the JSON Form Schema Standard (JFSS v2.0.1) with its normative meta-schema and rule registries (Calculation v1.2.0, Validation v1.1.0), plus the Workflow Schema (JWSS), Lifecycle Hook Contract (LHCS), Plugin Manifest Schema (PMS), Event Envelope Schema (EES), and Document Type Definition Schema (DTDS), each v1.0.0.
 - `docs/standards/` — the coding standard (Rust backend, Vue 3 frontend, SQL, git), the naming convention (code, database, API, permissions, events, identifiers), the commit message convention (Conventional Commits), the release process (SemVer, changelog, deploy, rollback), and the git workflow (trunk-based branches, PRs, review, squash merges).
 
@@ -100,16 +100,20 @@ The MVP focuses on:
 │   ├── migrations/
 │   │   ├── 0001_core.sql
 │   │   ├── 0002_identity.sql
-│   │   ├── 0003_master_data.sql
-│   │   ├── 0004_rad.sql
-│   │   ├── 0005_document.sql
-│   │   ├── 0006_workflow.sql
-│   │   ├── 0007_attachment.sql
-│   │   ├── 0008_comment.sql
-│   │   ├── 0009_activity_audit.sql
-│   │   ├── 0010_notification.sql
-│   │   ├── 0011_integration.sql
-│   │   └── 0012_plugin.sql
+│   │   ├── 0003_audit.sql
+│   │   ├── 0004_string_lengths.sql
+│   │   ├── 0005_delegation_tenant_permissions.sql
+│   │   ├── 0006_password_reset_tokens.sql
+│   │   ├── 0007_master_data.sql
+│   │   ├── 0008_rad.sql
+│   │   ├── 0009_document.sql
+│   │   ├── 0010_workflow.sql
+│   │   ├── 0011_attachment.sql
+│   │   ├── 0012_comment.sql
+│   │   ├── 0013_activity_audit.sql
+│   │   ├── 0014_notification.sql
+│   │   ├── 0015_integration.sql
+│   │   └── 0016_plugin.sql
 │   └── src/
 │       ├── main.rs
 │       ├── config.rs
@@ -173,6 +177,12 @@ The MVP focuses on:
     └── env/
         └── .env.example
 ```
+
+Migrations `0001`–`0006` exist; `0007` onward are planned. The authoritative
+migration list is the mapping table at the top of
+[docs/design/02. Database Schema.md](docs/design/02.%20Database%20Schema.md) —
+numbers follow the order migrations are applied, so an early arrival shifts
+every later file down.
 
 ## Local Development
 
@@ -242,7 +252,7 @@ Done:
 - **Frontend foundation** (Sprint 2) — app shell with navigation and a dark theme, a typed API client that unwraps the response envelope and normalises every failure into an `ApiError`, a login page, and the Tailwind v4 + shadcn-vue baseline
 - **Working repository** (Sprint 0) — protected `main`, CI running fmt, clippy, tests and builds on both stacks plus commit-message validation, and 29 tracked issues across two phase milestones
 
-- **Documentation set** — 26 documents: SRS v0.5, System Design Document v0.1, the column-level database schema (94 tables across 12 migrations), 8 JSON standards, 5 architecture documents, 5 engineering standards, 4 concept documents
+- **Documentation set** — 26 documents: SRS v0.5, System Design Document v0.1, the column-level database schema (95 tables across 16 migrations), 8 JSON standards, 5 architecture documents, 5 engineering standards, 4 concept documents
 - **Planning** — sprint plan mapping SDD §14 onto 21 sprints, and a product backlog assigning all 164 functional requirements to epics, items and sprints (149 scheduled, 15 explicitly unscheduled)
 - **Scope decisions D-1…D-5 resolved** (2026-08-11) — MVP milestone moved to `v0.6.0` to satisfy SRS §9; RAD split so its metadata and form renderer land in Phase 4; priority separated from MVP scope in SRS v0.5; ClamAV chosen for attachment scanning; six proposed NFR targets baselined
 - Documentation consistency audit (2026-08-05): unified naming (Kelir), permission format `module:resource:action`, dotted event names, `mdm_*` tables, aligned health endpoints

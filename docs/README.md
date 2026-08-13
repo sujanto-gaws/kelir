@@ -1,6 +1,6 @@
 # Kelir Documentation
 
-**Status:** Living · **Last updated:** 2026-08-12
+**Status:** Living · **Last updated:** 2026-08-13
 
 Kelir is a metadata-driven, document-centric, workflow-enabled full-stack framework for building enterprise business applications rapidly — Rust (Axum + SQLx + PostgreSQL) on the backend, Vue 3 (Vite + Pinia + shadcn-vue + Tailwind CSS v4) on the frontend. This folder is the complete documentation set; this file is its map.
 
@@ -56,7 +56,7 @@ Early exploratory documents. Still valid for intent and examples, but **supersed
 | Document | Content |
 |---|---|
 | [01. System Design Document.md](design/01.%20System%20Design%20Document.md) | The SDD: architecture overview, stacks, module map, table groups, workflow/RAD/integration/plugin/security design, roadmap |
-| [02. Database Schema.md](design/02.%20Database%20Schema.md) | Column-level DDL for all 94 tables across 12 migrations, with conventions, indexes, and enum vocabularies |
+| [02. Database Schema.md](design/02.%20Database%20Schema.md) | Column-level DDL for all 95 tables across 16 migrations, with conventions, indexes, and enum vocabularies |
 
 ### schema/
 
@@ -131,7 +131,7 @@ When documents disagree, precedence is explicit:
 | Requirements (SRS v0.5) | **Draft** — the scope authority, and §9 is the MVP gate, but approval is still an open action (SDD §16 step 1) |
 | Architecture 01–05 | **Adopted** |
 | System Design Document v0.1 | **Draft** — approval open, as above |
-| Database Schema | **Draft** — 94 tables / 12 migrations; adopted with the SDD |
+| Database Schema | **Draft** — 95 tables / 16 migrations; adopted with the SDD |
 | Schema standards | JFSS **Final Standard**; rule registries **Active Standard**; JWSS / LHCS / PMS / EES / DTDS **Draft Standard** |
 | Standards 01–05 | **Adopted** — CI enforces the coding standard, branch protection implements the git workflow |
 | Concepts 01–04 | **Superseded** — background and intent only (authority rule 7) |
