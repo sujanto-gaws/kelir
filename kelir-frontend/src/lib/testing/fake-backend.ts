@@ -28,6 +28,12 @@ export interface FakeReply {
   status: number
   /** Response body, already in the envelope the endpoint would return. */
   body?: unknown
+  /**
+   * Fail the way an unreachable server fails: a rejection carrying no response
+   * at all, which is what axios produces when offline, and what separates a
+   * transport failure from the server's verdict. `status` is ignored.
+   */
+  networkError?: boolean
 }
 
 export type FakeHandler = (request: RecordedRequest) => FakeReply
@@ -93,6 +99,13 @@ export function installFakeBackend(handler: FakeHandler): FakeBackendHandle {
     requests.push(recorded)
 
     const reply = handler(recorded)
+
+    if (reply.networkError) {
+      // No `response` property: that absence is exactly what `toApiError` reads
+      // to classify a failure as a network error rather than a status.
+      return Promise.reject(new AxiosError('Network Error', AxiosError.ERR_NETWORK, config))
+    }
+
     const response: AxiosResponse = {
       status: reply.status,
       statusText: '',

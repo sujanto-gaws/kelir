@@ -30,6 +30,47 @@ const isSubmitting = ref(false)
 const formError = ref('')
 const serverFieldErrors = ref<Record<string, string>>({})
 
+/**
+ * Tokens are present but the profile behind them could not be fetched.
+ *
+ * Two different failures send a caller to this page: the server rejected the
+ * session, or it could not be reached. The guard cannot tell them apart — it
+ * only knows the profile did not load — but the surviving tokens can, because
+ * only a rejection clears them.
+ *
+ * So a transport failure looks like this: the session is intact, and asking for
+ * credentials that are still perfectly good would be wrong. Offer the retry
+ * instead, and keep the form for whoever genuinely needs it.
+ */
+const hasUnverifiedSession = computed(() => auth.isAuthenticated && auth.user === null)
+const isRetrying = ref(false)
+
+async function retrySession(): Promise<void> {
+  isRetrying.value = true
+  formError.value = ''
+
+  try {
+    if (await auth.ensureProfile()) {
+      await router.replace(safeReturnPath(route.query) ?? { name: HOME_ROUTE_NAME })
+      return
+    }
+
+    // Still here with tokens intact means the server is still unreachable. A
+    // rejection would have cleared them, and the form below takes over.
+    if (auth.isAuthenticated) {
+      formError.value = 'Still could not reach the server. Try again in a moment.'
+    }
+  } finally {
+    isRetrying.value = false
+  }
+}
+
+/** Abandon the stored session and sign in as somebody else. */
+function discardSession(): void {
+  auth.clearSession()
+  formError.value = ''
+}
+
 /** Seconds left on a rate limit; counts down so the button re-enables itself. */
 const retryAfter = ref(0)
 let retryTimer: ReturnType<typeof setInterval> | undefined
@@ -150,7 +191,20 @@ async function submit(): Promise<void> {
 
       <Alert v-if="formError" variant="destructive" class="mb-4">{{ formError }}</Alert>
 
-      <form class="space-y-4" novalidate @submit.prevent="submit">
+      <div v-if="hasUnverifiedSession" class="mb-4 rounded-md border border-border bg-card p-4">
+        <p class="text-sm font-medium">You are still signed in</p>
+        <p class="mt-1 text-sm text-muted-foreground">
+          We could not reach the server to confirm your session. Your sign-in has not been lost.
+        </p>
+        <div class="mt-3 flex gap-2">
+          <Button size="sm" :loading="isRetrying" @click="retrySession()">Try again</Button>
+          <Button size="sm" variant="ghost" :disabled="isRetrying" @click="discardSession()">
+            Sign in as someone else
+          </Button>
+        </div>
+      </div>
+
+      <form v-if="!hasUnverifiedSession" class="space-y-4" novalidate @submit.prevent="submit">
         <div class="space-y-2">
           <Label for="username">Username or email</Label>
           <Input

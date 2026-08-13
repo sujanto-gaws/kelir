@@ -350,4 +350,77 @@ describe('useAuthStore', () => {
   it('grants nothing before a profile is loaded', () => {
     expect(useAuthStore().can('document:read')).toBe(false)
   })
+
+  /**
+   * Only the server may end a session.
+   *
+   * Clearing on any failure meant a two-second connectivity drop wiped valid
+   * tokens and forced a re-authentication. These pin the distinction: a 4xx is
+   * the server's verdict, everything else is not.
+   */
+  describe('a server that cannot be reached', () => {
+    const offline: FakeReply = { status: 0, networkError: true }
+
+    beforeEach(() => {
+      window.localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({ accessToken: 'access-1', refreshToken: 'refresh-1' }),
+      )
+    })
+
+    it('keeps the session when the profile call never arrives', async () => {
+      handler = () => offline
+      const store = useAuthStore()
+
+      await expect(store.ensureProfile()).resolves.toBe(false)
+
+      expect(store.isAuthenticated).toBe(true)
+      expect(store.refreshToken).toBe('refresh-1')
+      expect(window.localStorage.getItem(STORAGE_KEY)).not.toBeNull()
+    })
+
+    it('keeps the session when the refresh never arrives', async () => {
+      handler = () => offline
+      const store = useAuthStore()
+
+      await expect(store.refresh()).resolves.toBe(false)
+
+      expect(store.isAuthenticated).toBe(true)
+      expect(store.refreshToken).toBe('refresh-1')
+    })
+
+    it('keeps the session when the server fails to process the refresh', async () => {
+      // A 5xx is the backend falling over, not a judgement on the token.
+      handler = () => ({ status: 500, body: errorBody('INTERNAL_ERROR', 'boom') })
+      const store = useAuthStore()
+
+      await expect(store.refresh()).resolves.toBe(false)
+
+      expect(store.isAuthenticated).toBe(true)
+    })
+
+    it('still signs out when the server rejects the refresh', async () => {
+      handler = () => unauthorized
+      const store = useAuthStore()
+
+      await expect(store.refresh()).resolves.toBe(false)
+
+      expect(store.isAuthenticated).toBe(false)
+    })
+
+    it('recovers once the server is reachable again', async () => {
+      // The point of keeping the tokens: the caller retries and is back in,
+      // with no credentials retyped.
+      let reachable = false
+      handler = () => (reachable ? { status: 200, body: itemBody(profile) } : offline)
+      const store = useAuthStore()
+
+      await expect(store.ensureProfile()).resolves.toBe(false)
+
+      reachable = true
+
+      await expect(store.ensureProfile()).resolves.toBe(true)
+      expect(store.user).toEqual(profile)
+    })
+  })
 })

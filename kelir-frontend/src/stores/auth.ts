@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
 import * as authApi from '@/api/auth'
+import { ApiError } from '@/api/error'
 import { registerSessionBridge } from '@/api/session'
 import type { CurrentUser, SessionResponse } from '@/types/auth'
 
@@ -46,6 +47,25 @@ function readPersistedSession(): PersistedSession | null {
     // failing the whole app on start-up.
     return null
   }
+}
+
+/**
+ * Whether a failure is the server's verdict on the credentials, rather than a
+ * statement about the transport.
+ *
+ * Only a 4xx is the server judging the request. A response that never arrived
+ * (`status` 0 — offline, DNS, timeout) or a 5xx says nothing about whether the
+ * token is still good, and treating those as a rejection turns a two-second
+ * connectivity drop into a forced re-authentication: tokens wiped from storage,
+ * credentials retyped, work in progress lost.
+ *
+ * An error that is not an `ApiError` at all reached us from somewhere
+ * unexpected, so it is not treated as a verdict either. The session is left for
+ * the server to reject on the next call — which it will, if it is genuinely
+ * dead.
+ */
+function isServerRejection(error: unknown): boolean {
+  return error instanceof ApiError && error.status >= 400 && error.status < 500
 }
 
 function writePersistedSession(session: PersistedSession | null): void {
@@ -152,8 +172,14 @@ export const useAuthStore = defineStore('auth', () => {
       // retries. Reaching this catch means that failed too.
       user.value = await authApi.fetchCurrentUser()
       return true
-    } catch {
-      clearSession()
+    } catch (error) {
+      // Only the server may end a session. If it never answered, the tokens are
+      // still whatever they were a moment ago, and the caller can try again —
+      // see `isServerRejection`.
+      if (isServerRejection(error)) {
+        clearSession()
+      }
+
       return false
     }
   }
@@ -182,10 +208,15 @@ export const useAuthStore = defineStore('auth', () => {
     try {
       applySession(await authApi.refreshSession(presented))
       return true
-    } catch {
-      // The token was unknown, expired or already spent. Retrying would present
-      // it again and revoke the session family, so stop here and sign out.
-      clearSession()
+    } catch (error) {
+      // A rejection means the token was unknown, expired or already spent, and
+      // presenting it again would revoke the session family — so stop and sign
+      // out. A transport failure says nothing about the token, so the session
+      // survives and the caller can retry.
+      if (isServerRejection(error)) {
+        clearSession()
+      }
+
       return false
     }
   }
