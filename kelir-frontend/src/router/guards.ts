@@ -6,6 +6,9 @@ import { useAuthStore } from '@/stores/auth'
 export const LOGIN_ROUTE_NAME = 'login'
 export const HOME_ROUTE_NAME = 'dashboard'
 
+/** Where a signed-in caller lands when they lack a route's permission. */
+export const FORBIDDEN_ROUTE_NAME = 'forbidden'
+
 /** Query parameter carrying where the caller was headed before being stopped. */
 export const RETURN_QUERY_KEY = 'redirect'
 
@@ -32,9 +35,10 @@ export function safeReturnPath(query: LocationQuery): string | null {
 /**
  * The single navigation guard.
  *
- * Protection is driven only by `meta.requiresAuth`, so a new route opts in by
- * declaring it and nothing here needs to change. Vue Router merges `meta` down
- * the matched chain, so a flag on a parent covers its children.
+ * Protection is driven by route meta alone — `meta.requiresAuth` for a session,
+ * `meta.permission` for a specific grant — so a new route opts in by declaring
+ * them and nothing here needs to change. Vue Router merges `meta` down the
+ * matched chain, so a flag on a parent covers its children.
  */
 export async function authGuard(to: RouteLocationNormalized): Promise<boolean | RouteLocationRaw> {
   const auth = useAuthStore()
@@ -45,6 +49,16 @@ export async function authGuard(to: RouteLocationNormalized): Promise<boolean | 
     // `/auth/me` — refreshing once through the client if the access token has
     // expired, and clearing the session when even that fails.
     if (auth.isAuthenticated && (await auth.ensureProfile())) {
+      const required = to.meta.permission
+
+      // Hiding a link is not enough: a pasted URL reaches the route directly.
+      // This is still only cosmetic — the backend re-checks every request and
+      // is what actually decides — but it means the caller gets an explanation
+      // instead of a page of failed calls.
+      if (typeof required === 'string' && !auth.can(required)) {
+        return { name: FORBIDDEN_ROUTE_NAME }
+      }
+
       return true
     }
 

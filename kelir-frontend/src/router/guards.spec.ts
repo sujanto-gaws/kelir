@@ -172,3 +172,84 @@ describe('authGuard', () => {
     expect(window.localStorage.getItem(STORAGE_KEY)).toBeNull()
   })
 })
+
+describe('authGuard permission gate', () => {
+  let backend: FakeBackendHandle
+  let handler: FakeHandler
+
+  function gatedRouter(): Router {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/login', name: 'login', component: blank, meta: { requiresAuth: false } },
+        { path: '/', name: 'dashboard', component: blank, meta: { requiresAuth: true } },
+        { path: '/forbidden', name: 'forbidden', component: blank, meta: { requiresAuth: true } },
+        {
+          path: '/admin/users',
+          name: 'admin-users',
+          component: blank,
+          meta: { requiresAuth: true, permission: 'identity:user:read' },
+        },
+      ],
+    })
+
+    registerGuards(router)
+
+    return router
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    window.localStorage.clear()
+
+    handler = () => ({ status: 200, body: itemBody(profile) })
+    backend = installFakeBackend((request) => handler(request))
+  })
+
+  afterEach(() => {
+    backend.restore()
+    registerSessionBridge(null)
+  })
+
+  it('lets a caller holding the permission through', async () => {
+    storeSession()
+    handler = () => ({
+      status: 200,
+      body: itemBody({ ...profile, permissions: ['identity:user:read'] }),
+    })
+
+    const router = gatedRouter()
+    await router.push('/admin/users')
+
+    expect(router.currentRoute.value.name).toBe('admin-users')
+  })
+
+  it('stops a caller who lacks it, even on a pasted url', async () => {
+    // Hiding the nav entry is not enough: the route is reachable by typing it.
+    storeSession()
+
+    const router = gatedRouter()
+    await router.push('/admin/users')
+
+    expect(router.currentRoute.value.name).toBe('forbidden')
+  })
+
+  it('leaves a protected route without a permission requirement alone', async () => {
+    storeSession()
+
+    const router = gatedRouter()
+    await router.push('/')
+
+    expect(router.currentRoute.value.name).toBe('dashboard')
+  })
+
+  it('asks an unauthenticated caller to sign in before judging permissions', async () => {
+    // Order matters: sending them to /forbidden would tell them to ask for a
+    // role when what they actually need is to sign in.
+    const router = gatedRouter()
+    await router.push('/admin/users')
+
+    expect(router.currentRoute.value.name).toBe('login')
+    expect(router.currentRoute.value.query.redirect).toBe('/admin/users')
+  })
+})
