@@ -2,7 +2,8 @@
 //! through `service` (coding standard §2.2).
 //!
 //! Every query filters by `tenant_id` (database schema §1.5) and excludes
-//! soft-deleted rows.
+//! soft-deleted rows. [`any_user_exists`] is the one deliberate exception, and
+//! says why.
 
 use chrono::{DateTime, Utc};
 use sqlx::{PgExecutor, PgPool};
@@ -236,6 +237,21 @@ pub async fn revoke_all_for_user(
 // Users
 // ---------------------------------------------------------------------------
 
+/// Whether this database holds any user row at all.
+///
+/// The one query in this module that filters neither `tenant_id` nor
+/// `deleted_at`, because the question the first-run bootstrap asks is about the
+/// deployment and not about a tenant: has this database *ever* had a user? A
+/// tenant-scoped or live-only answer would let the bootstrap fire again on a
+/// database that already has accounts — see `modules::auth::bootstrap` for what
+/// that costs. It returns a boolean and no row data, so answering it across
+/// tenants discloses nothing.
+pub async fn any_user_exists(executor: impl PgExecutor<'_>) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM users) AS "exists!""#)
+        .fetch_one(executor)
+        .await
+}
+
 pub async fn count_users(pool: &PgPool, tenant_id: Uuid) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar!(
         "SELECT count(*) FROM users WHERE tenant_id = $1 AND deleted_at IS NULL",
@@ -354,12 +370,15 @@ pub async fn insert_user(
     password_hash: &str,
     display_name: &str,
     department_id: Option<Uuid>,
+    must_change_password: bool,
     created_by: Option<Uuid>,
 ) -> Result<(), sqlx::Error> {
+    // must_change_password is set in the INSERT rather than by a follow-up
+    // UPDATE, so the row is never briefly readable without the obligation.
     sqlx::query!(
         r#"
-        INSERT INTO users (id, tenant_id, username, email, password_hash, display_name, department_id, created_by)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        INSERT INTO users (id, tenant_id, username, email, password_hash, display_name, department_id, must_change_password, created_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         "#,
         id,
         tenant_id,
@@ -368,6 +387,7 @@ pub async fn insert_user(
         password_hash,
         display_name,
         department_id,
+        must_change_password,
         created_by
     )
     .execute(executor)
@@ -744,6 +764,7 @@ mod tests {
             "not-a-real-hash",
             "Test User",
             None,
+            false,
             None,
         )
         .await
