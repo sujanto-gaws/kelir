@@ -259,4 +259,71 @@ describe('LoginPage', () => {
       expect(backend.requests).toHaveLength(afterFirstAttempt)
     })
   })
+
+  /**
+   * A transport failure now leaves the tokens in place, so the guard can land a
+   * caller here whose session is perfectly good. Asking them to retype
+   * credentials they never lost would be the wrong remedy.
+   */
+  describe('arriving with a session that could not be confirmed', () => {
+    beforeEach(() => {
+      window.localStorage.setItem(
+        'kelir.auth',
+        JSON.stringify({ accessToken: 'access-1', refreshToken: 'refresh-1' }),
+      )
+    })
+
+    it('offers a retry instead of the sign-in form', async () => {
+      const wrapper = await renderAt()
+
+      expect(wrapper.text()).toContain('You are still signed in')
+      expect(wrapper.find('form').exists()).toBe(false)
+    })
+
+    it('goes where the caller was headed once the server answers', async () => {
+      handler = () => ({ status: 200, body: profileBody })
+      const wrapper = await renderAt('/login?redirect=/documents/7')
+
+      await wrapper.findAll('button')[0].trigger('click')
+      await flushPromises()
+
+      expect(router.currentRoute.value.fullPath).toBe('/documents/7')
+    })
+
+    it('says so and stays put when the server is still unreachable', async () => {
+      handler = () => ({ status: 0, networkError: true })
+      const wrapper = await renderAt()
+
+      await wrapper.findAll('button')[0].trigger('click')
+      await flushPromises()
+
+      expect(wrapper.text()).toContain('Still could not reach the server')
+      expect(useAuthStore().isAuthenticated).toBe(true)
+    })
+
+    it('falls back to the form when the server rejects the session', async () => {
+      handler = () => ({
+        status: 401,
+        body: errorBody('UNAUTHORIZED', 'Authentication required'),
+      })
+      const wrapper = await renderAt()
+
+      await wrapper.findAll('button')[0].trigger('click')
+      await flushPromises()
+
+      // The tokens are gone, so this is a genuine sign-in again.
+      expect(useAuthStore().isAuthenticated).toBe(false)
+      expect(wrapper.find('form').exists()).toBe(true)
+    })
+
+    it('lets the caller abandon the session and sign in as somebody else', async () => {
+      const wrapper = await renderAt()
+
+      await wrapper.findAll('button')[1].trigger('click')
+      await wrapper.vm.$nextTick()
+
+      expect(useAuthStore().isAuthenticated).toBe(false)
+      expect(wrapper.find('form').exists()).toBe(true)
+    })
+  })
 })

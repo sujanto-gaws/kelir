@@ -48,6 +48,10 @@ export async function authGuard(to: RouteLocationNormalized): Promise<boolean | 
       return true
     }
 
+    // Two different failures land here: the server rejected the session, or it
+    // could not be reached. The login page tells them apart by whether the
+    // tokens survived, and offers a retry rather than a form in the second
+    // case — so the destination is the same and the explanation is not.
     return { name: LOGIN_ROUTE_NAME, query: { [RETURN_QUERY_KEY]: to.fullPath } }
   }
 
