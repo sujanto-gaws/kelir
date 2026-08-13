@@ -179,33 +179,6 @@ async fn find_live(
     }
 }
 
-/// The rate-limiter scope a sign-in attempt counts against.
-///
-/// Resolution happens after rate limiting — it touches the database, and the
-/// limiter exists to keep unauthenticated volume away from it — so this derives
-/// the scope from configuration and the request alone.
-///
-/// When the flag is off the answer is always the default code, never the
-/// supplied one. Honouring a caller-supplied code in single-tenant mode would
-/// let an attacker mint a fresh bucket per request by varying a field that
-/// resolution then ignores, which would defeat the limiter entirely.
-pub fn sign_in_scope(config: &AppConfig, requested_code: Option<&str>) -> String {
-    if !config.multi_tenant {
-        return config.default_tenant_code.clone();
-    }
-
-    requested_code
-        .map(normalize_tenant_code)
-        .filter(|code| !code.is_empty())
-        // Truncated for the same reason resolution refuses over-long codes: the
-        // key is a map key and must not be caller-sized.
-        .map(|mut code| {
-            code.truncate(MAX_TENANT_CODE_LEN);
-            code
-        })
-        .unwrap_or_else(|| "unknown".to_owned())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,48 +423,6 @@ mod tests {
             .expect_err("cannot match");
 
         assert_eq!(error, TenantResolutionError::Unknown);
-    }
-
-    #[test]
-    fn single_tenant_scopes_every_attempt_to_the_default() {
-        // The supplied code is ignored, so it cannot be used to sidestep the
-        // limiter by varying it.
-        let config = config(false);
-
-        assert_eq!(sign_in_scope(&config, None), "SYSTEM");
-        assert_eq!(sign_in_scope(&config, Some("acme")), "SYSTEM");
-        assert_eq!(sign_in_scope(&config, Some("anything-at-all")), "SYSTEM");
-    }
-
-    #[test]
-    fn multi_tenant_scopes_per_tenant() {
-        let config = config(true);
-
-        assert_eq!(sign_in_scope(&config, Some("acme")), "ACME");
-        assert_eq!(sign_in_scope(&config, Some("  Acme ")), "ACME");
-        assert_ne!(
-            sign_in_scope(&config, Some("acme")),
-            sign_in_scope(&config, Some("globex")),
-            "distinct tenants must not share a bucket"
-        );
-    }
-
-    #[test]
-    fn an_unnamed_tenant_still_gets_a_bucket() {
-        // A request with no code is refused, but it must still be counted, or
-        // omitting the field would be a free pass past the limiter.
-        let config = config(true);
-
-        assert_eq!(sign_in_scope(&config, None), "unknown");
-        assert_eq!(sign_in_scope(&config, Some("   ")), "unknown");
-    }
-
-    #[test]
-    fn the_scope_key_is_bounded() {
-        let config = config(true);
-        let key = sign_in_scope(&config, Some(&"A".repeat(10_000)));
-
-        assert_eq!(key.len(), MAX_TENANT_CODE_LEN);
     }
 
     #[test]

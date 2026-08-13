@@ -23,6 +23,19 @@
 	# Where Let's Encrypt sends expiry and problem notices. Unused when the site
 	# address is a bare port, since no certificate is requested.
 	email ops@gawshub.com
+
+	servers {
+		# Caddy is the edge: nothing sits in front of it, so no X-Forwarded-For
+		# arriving from outside may be believed. Naming only loopback — which
+		# nothing but Caddy itself can connect from — means every incoming chain
+		# is discarded and replaced with the address Caddy actually saw.
+		#
+		# Stated rather than left to the default because the default has changed:
+		# Caddy appended to the incoming header before 2.7, which let a caller
+		# plant the leftmost entry the backend read. `caddy:2-alpine` floats, so
+		# the trust boundary is written down instead of inherited.
+		trusted_proxies static 127.0.0.1/32 ::1/128
+	}
 }
 
 {$KELIR_SITE_ADDRESS:staging.kelir.gawshub.com} {
@@ -33,6 +46,10 @@
 	# (naming convention §5).
 	@backend path /api/* /health /health/* /version
 	handle @backend {
+		# X-Forwarded-For reaching the backend holds exactly one entry — the
+		# address Caddy saw — because no upstream is trusted (see the global
+		# block). The backend is configured with KELIR_TRUSTED_PROXY_HOPS=1 to
+		# match: one hop, this one.
 		reverse_proxy backend:8080
 	}
 

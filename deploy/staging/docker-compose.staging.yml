@@ -63,6 +63,10 @@ services:
       # Single origin: the browser only ever talks to the Caddy address, so this
       # is used for redirects and links rather than for CORS.
       KELIR_FRONTEND_URL: ${KELIR_PUBLIC_URL:-https://staging.kelir.gawshub.com}
+      # Caddy is the only hop, and no backend port is published, so the last
+      # entry Caddy writes into X-Forwarded-For is the real caller. Raising this
+      # without adding a real proxy hands callers control of their own address.
+      KELIR_TRUSTED_PROXY_HOPS: ${KELIR_TRUSTED_PROXY_HOPS:-1}
       KELIR_LOG: info,sqlx=warn
     # Docker does not provide host.docker.internal on Linux by default; this
     # maps it to the bridge gateway so the same URL works on every platform.
