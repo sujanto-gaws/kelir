@@ -1,7 +1,18 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
-import { FileText, Inbox, LayoutDashboard, LogOut, Menu, Moon, Sun, Users } from 'lucide-vue-next'
+import {
+  FileText,
+  Inbox,
+  LayoutDashboard,
+  LogOut,
+  Menu,
+  Moon,
+  ShieldCheck,
+  Sun,
+  UserCog,
+  Users,
+} from 'lucide-vue-next'
 
 import { Button } from '@/components/ui/button'
 import { LOGIN_ROUTE_NAME } from '@/router/guards'
@@ -43,6 +54,20 @@ const navigation = [
     icon: Users,
     enabled: false,
     permission: 'master-data:party:read',
+  },
+  {
+    name: 'admin-users',
+    label: 'Users',
+    icon: UserCog,
+    enabled: true,
+    permission: 'identity:user:read',
+  },
+  {
+    name: 'admin-roles',
+    label: 'Roles',
+    icon: ShieldCheck,
+    enabled: true,
+    permission: 'identity:role:read',
   },
 ] as const
 
