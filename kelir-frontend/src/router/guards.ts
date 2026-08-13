@@ -33,6 +33,16 @@ export function safeReturnPath(query: LocationQuery): string | null {
 }
 
 /**
+ * The permission a route requires, or null when it names none.
+ *
+ * Exported so the route table can be checked against it rather than against a
+ * second copy of the same rule.
+ */
+export function requiredPermission(meta: RouteLocationNormalized['meta']): string | null {
+  return typeof meta.permission === 'string' && meta.permission !== '' ? meta.permission : null
+}
+
+/**
  * The single navigation guard.
  *
  * Protection is driven by route meta alone — `meta.requiresAuth` for a session,
@@ -42,20 +52,25 @@ export function safeReturnPath(query: LocationQuery): string | null {
  */
 export async function authGuard(to: RouteLocationNormalized): Promise<boolean | RouteLocationRaw> {
   const auth = useAuthStore()
-  const requiresAuth = to.meta.requiresAuth === true
+  const required = requiredPermission(to.meta)
+
+  // A route naming a permission requires a session by definition — there is
+  // nobody to hold a permission otherwise. Deriving that rather than trusting
+  // two independent flags to agree is what stops a route being left wide open
+  // by declaring only one of them: the pair cannot disagree if only one is
+  // written down.
+  const requiresAuth = to.meta.requiresAuth === true || required !== null
 
   if (requiresAuth) {
     // A stored token is only a claim. `ensureProfile` settles it against
     // `/auth/me` — refreshing once through the client if the access token has
     // expired, and clearing the session when even that fails.
     if (auth.isAuthenticated && (await auth.ensureProfile())) {
-      const required = to.meta.permission
-
       // Hiding a link is not enough: a pasted URL reaches the route directly.
       // This is still only cosmetic — the backend re-checks every request and
       // is what actually decides — but it means the caller gets an explanation
       // instead of a page of failed calls.
-      if (typeof required === 'string' && !auth.can(required)) {
+      if (required !== null && !auth.can(required)) {
         return { name: FORBIDDEN_ROUTE_NAME }
       }
 

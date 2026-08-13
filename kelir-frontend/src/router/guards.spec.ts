@@ -190,6 +190,15 @@ describe('authGuard permission gate', () => {
           component: blank,
           meta: { requiresAuth: true, permission: 'identity:user:read' },
         },
+        {
+          // Deliberately misconfigured: a permission with no `requiresAuth`.
+          // This is the shape a new admin route is most likely to arrive in,
+          // and it used to fall straight through the guard to `return true`.
+          path: '/admin/misconfigured',
+          name: 'admin-misconfigured',
+          component: blank,
+          meta: { permission: 'identity:role:read' },
+        },
       ],
     })
 
@@ -251,5 +260,47 @@ describe('authGuard permission gate', () => {
 
     expect(router.currentRoute.value.name).toBe('login')
     expect(router.currentRoute.value.query.redirect).toBe('/admin/users')
+  })
+
+  /**
+   * A route naming a permission but omitting `requiresAuth` is a
+   * misconfiguration, and it used to be an open door: the guard only consulted
+   * `meta.permission` inside the `requiresAuth` branch, so such a route fell
+   * through to `return true` and rendered for anyone — silently, and with a
+   * green suite.
+   *
+   * The guard now derives the session requirement from the permission, so the
+   * mistake fails closed instead.
+   */
+  describe('a route naming a permission without requiresAuth', () => {
+    it('still demands a session', async () => {
+      const router = gatedRouter()
+      await router.push('/admin/misconfigured')
+
+      expect(router.currentRoute.value.name).toBe('login')
+      expect(router.currentRoute.value.query.redirect).toBe('/admin/misconfigured')
+    })
+
+    it('still refuses a caller who lacks the permission', async () => {
+      storeSession()
+
+      const router = gatedRouter()
+      await router.push('/admin/misconfigured')
+
+      expect(router.currentRoute.value.name).toBe('forbidden')
+    })
+
+    it('admits a caller who holds it', async () => {
+      storeSession()
+      handler = () => ({
+        status: 200,
+        body: itemBody({ ...profile, permissions: ['identity:role:read'] }),
+      })
+
+      const router = gatedRouter()
+      await router.push('/admin/misconfigured')
+
+      expect(router.currentRoute.value.name).toBe('admin-misconfigured')
+    })
   })
 })
