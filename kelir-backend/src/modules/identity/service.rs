@@ -79,6 +79,9 @@ pub async fn create_user(
         &password_hash,
         request.display_name.trim(),
         request.department_id,
+        // The API does not force a first-sign-in password change: the caller
+        // chose this password for the account and hands it over out of band.
+        false,
         Some(caller.user_id()),
     )
     .await

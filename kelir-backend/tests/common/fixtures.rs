@@ -59,6 +59,9 @@ pub async fn create_user(
         &hash,
         username,
         None,
+        // A fixture user signs in and exercises endpoints; a pending password
+        // change is a state a test asks for deliberately, never a default.
+        false,
         None,
     )
     .await

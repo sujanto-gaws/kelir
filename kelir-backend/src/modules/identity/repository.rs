@@ -370,12 +370,15 @@ pub async fn insert_user(
     password_hash: &str,
     display_name: &str,
     department_id: Option<Uuid>,
+    must_change_password: bool,
     created_by: Option<Uuid>,
 ) -> Result<(), sqlx::Error> {
+    // must_change_password is set in the INSERT rather than by a follow-up
+    // UPDATE, so the row is never briefly readable without the obligation.
     sqlx::query!(
         r#"
-        INSERT INTO users (id, tenant_id, username, email, password_hash, display_name, department_id, created_by)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        INSERT INTO users (id, tenant_id, username, email, password_hash, display_name, department_id, must_change_password, created_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         "#,
         id,
         tenant_id,
@@ -384,6 +387,7 @@ pub async fn insert_user(
         password_hash,
         display_name,
         department_id,
+        must_change_password,
         created_by
     )
     .execute(executor)
@@ -760,6 +764,7 @@ mod tests {
             "not-a-real-hash",
             "Test User",
             None,
+            false,
             None,
         )
         .await

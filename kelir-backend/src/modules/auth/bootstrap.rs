@@ -145,6 +145,10 @@ pub async fn ensure_administrator(pool: &sqlx::PgPool, config: &AppConfig) -> Re
         &password_hash,
         "Administrator",
         None,
+        // This password came out of an environment variable, which lives in the
+        // deployment's compose file and in whatever shell history set it. It is
+        // a way in, not a credential to keep.
+        true,
         None,
     )
     .await?;
@@ -217,6 +221,7 @@ mod tests {
             "$argon2id$not-a-real-hash",
             "Existing",
             None,
+            false,
             None,
         )
         .await
@@ -250,6 +255,10 @@ mod tests {
 
         assert_eq!(users.len(), 1);
         assert_eq!(users[0].username, "admin");
+        assert!(
+            users[0].must_change_password,
+            "a password read from the environment must be rotated after first sign-in"
+        );
         assert!(verify_password(
             BOOTSTRAP_PASSWORD,
             &administrator(&pool).await.password_hash
@@ -296,6 +305,7 @@ mod tests {
             "$argon2id$not-a-real-hash",
             "Elsewhere",
             None,
+            false,
             None,
         )
         .await
