@@ -1,6 +1,12 @@
-import axios, { AxiosError, type AxiosInstance, type AxiosRequestConfig } from 'axios'
+import axios, {
+  AxiosError,
+  type AxiosInstance,
+  type AxiosRequestConfig,
+  type InternalAxiosRequestConfig,
+} from 'axios'
 
 import { ApiError, CLIENT_ERROR_CODES } from './error'
+import { currentSessionBridge } from './session'
 import type { ErrorEnvelope, ItemEnvelope, ListEnvelope, Page, PageQuery } from '@/types/api'
 
 /**
@@ -16,6 +22,85 @@ export const apiClient: AxiosInstance = axios.create({
   headers: { Accept: 'application/json' },
 })
 
+/**
+ * Marks a request that has already spent its one refresh attempt.
+ *
+ * A string key, not a symbol: axios rebuilds the config through `mergeConfig`
+ * on the retry, and that walks `Object.keys`, which omits symbols. A symbol
+ * flag would silently vanish and the request would refresh forever. Unknown
+ * string keys survive the merge and are never put on the wire.
+ */
+const REFRESH_ATTEMPTED = 'kelirRefreshAttempted'
+
+interface RetryableConfig extends InternalAxiosRequestConfig {
+  [REFRESH_ATTEMPTED]?: boolean
+}
+
+/**
+ * Endpoints that must never trigger a refresh-and-retry.
+ *
+ * A 401 from any of these *is* the answer — bad credentials, a dead refresh
+ * token — so retrying would either loop or, worse, present an already-rotated
+ * refresh token and take the whole session family down with it.
+ */
+const NO_REFRESH_PATHS = ['/auth/login', '/auth/refresh', '/auth/logout'] as const
+
+function isRefreshableRequest(url: string | undefined): boolean {
+  const path = (url ?? '').split('?')[0]
+
+  return !NO_REFRESH_PATHS.some((excluded) => path === excluded || path.endsWith(excluded))
+}
+
+// Attach the bearer token on every request, including retries: a retry re-enters
+// this interceptor, so it picks up the token the refresh just installed rather
+// than replaying the expired one.
+apiClient.interceptors.request.use((config) => {
+  const token = currentSessionBridge()?.accessToken() ?? null
+
+  if (token) {
+    config.headers.set('Authorization', `Bearer ${token}`)
+  } else {
+    config.headers.delete('Authorization')
+  }
+
+  return config
+})
+
+/**
+ * Refresh once on 401, then retry the original request.
+ *
+ * Two invariants matter here and are covered by tests:
+ *
+ * 1. **At most one refresh per request.** The request is flagged before the
+ *    retry, so a second 401 propagates instead of refreshing again.
+ * 2. **At most one refresh in flight.** Concurrent 401s all await the same
+ *    promise, which the bridge (the auth store) owns. The backend revokes a
+ *    refresh token as it is used and treats a replay as theft by killing the
+ *    session family — so a parallel second refresh would sign the user out.
+ */
+apiClient.interceptors.response.use(undefined, async (error: unknown) => {
+  if (!(error instanceof AxiosError) || error.response?.status !== 401) {
+    throw error
+  }
+
+  const config = error.config as RetryableConfig | undefined
+  const bridge = currentSessionBridge()
+
+  if (!config || config[REFRESH_ATTEMPTED] || !bridge || !isRefreshableRequest(config.url)) {
+    throw error
+  }
+
+  config[REFRESH_ATTEMPTED] = true
+
+  // A failed refresh has already cleared the session inside the bridge; the
+  // original 401 travels on so the caller sees why the request failed.
+  if (!(await bridge.refresh())) {
+    throw error
+  }
+
+  return apiClient.request(config)
+})
+
 function isErrorEnvelope(body: unknown): body is ErrorEnvelope {
   if (typeof body !== 'object' || body === null) {
     return false
@@ -24,6 +109,31 @@ function isErrorEnvelope(body: unknown): body is ErrorEnvelope {
   const candidate = body as Partial<ErrorEnvelope>
 
   return candidate.success === false && typeof candidate.error?.code === 'string'
+}
+
+/**
+ * How long to wait after a 429.
+ *
+ * `Retry-After` is preferred and is where a future backend change would put it.
+ * Today the wait is only in the message, so it is read from there as a
+ * fallback — and read defensively: an unparsed message simply yields no
+ * countdown, and the message itself is what the user is shown either way.
+ */
+function retryAfterFrom(error: AxiosError, status: number, message: string): number | undefined {
+  if (status !== 429) {
+    return undefined
+  }
+
+  const header = error.response?.headers?.['retry-after']
+  const fromHeader = typeof header === 'string' || typeof header === 'number' ? Number(header) : NaN
+
+  if (Number.isFinite(fromHeader) && fromHeader >= 0) {
+    return fromHeader
+  }
+
+  const match = /(\d+)\s*second/i.exec(message)
+
+  return match ? Number(match[1]) : undefined
 }
 
 /** Turns anything axios throws into an ApiError with a stable code. */
@@ -38,7 +148,13 @@ export function toApiError(error: unknown): ApiError {
 
     // The backend's error envelope is the best source when present.
     if (isErrorEnvelope(body)) {
-      return new ApiError(body.error.code, body.error.message, status, body.error.details ?? [])
+      return new ApiError(
+        body.error.code,
+        body.error.message,
+        status,
+        body.error.details ?? [],
+        retryAfterFrom(error, status, body.error.message),
+      )
     }
 
     if (error.code === 'ECONNABORTED') {
@@ -130,6 +246,22 @@ export async function postItem<T>(
   try {
     const response = await apiClient.post<unknown>(url, body, config)
     return unwrapItem<T>(response.data)
+  } catch (error) {
+    throw toApiError(error)
+  }
+}
+
+/**
+ * POST a body to an endpoint that answers 204 with no envelope — sign-out and
+ * change-password, where there is nothing to return.
+ */
+export async function postVoid(
+  url: string,
+  body?: unknown,
+  config?: AxiosRequestConfig,
+): Promise<void> {
+  try {
+    await apiClient.post<unknown>(url, body, config)
   } catch (error) {
     throw toApiError(error)
   }
