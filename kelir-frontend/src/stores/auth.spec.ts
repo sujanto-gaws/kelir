@@ -355,8 +355,9 @@ describe('useAuthStore', () => {
    * Only the server may end a session.
    *
    * Clearing on any failure meant a two-second connectivity drop wiped valid
-   * tokens and forced a re-authentication. These pin the distinction: a 4xx is
-   * the server's verdict, everything else is not.
+   * tokens and forced a re-authentication. These pin the distinction: only a
+   * refusal of the credentials — 401 or 403 — ends a session, and everything
+   * else is retryable.
    */
   describe('a server that cannot be reached', () => {
     const offline: FakeReply = { status: 0, networkError: true }
@@ -397,6 +398,44 @@ describe('useAuthStore', () => {
       await expect(store.refresh()).resolves.toBe(false)
 
       expect(store.isAuthenticated).toBe(true)
+    })
+
+    it('keeps the session when the refresh times out server-side', async () => {
+      // 408 is the exact class of failure this distinction exists to survive.
+      // A range over 4xx would treat it as a refusal.
+      handler = () => ({ status: 408, body: errorBody('TIMEOUT', 'Request timeout') })
+      const store = useAuthStore()
+
+      await expect(store.refresh()).resolves.toBe(false)
+
+      expect(store.isAuthenticated).toBe(true)
+      expect(store.refreshToken).toBe('refresh-1')
+    })
+
+    it('keeps the session when the refresh is rate limited', async () => {
+      // The authentication rate limiter reaches /auth/refresh, so signing out
+      // here would punish the user for being throttled.
+      handler = () => ({
+        status: 429,
+        body: errorBody('TOO_MANY_REQUESTS', 'Too many attempts. Try again in 60 seconds'),
+      })
+      const store = useAuthStore()
+
+      await expect(store.refresh()).resolves.toBe(false)
+
+      expect(store.isAuthenticated).toBe(true)
+      expect(store.refreshToken).toBe('refresh-1')
+    })
+
+    it('signs out when the profile call is forbidden', async () => {
+      // 403 is the other genuine refusal: the account is no longer allowed in.
+      handler = () => ({ status: 403, body: errorBody('FORBIDDEN', 'Forbidden') })
+      const store = useAuthStore()
+
+      await expect(store.ensureProfile()).resolves.toBe(false)
+
+      expect(store.isAuthenticated).toBe(false)
+      expect(window.localStorage.getItem(STORAGE_KEY)).toBeNull()
     })
 
     it('still signs out when the server rejects the refresh', async () => {

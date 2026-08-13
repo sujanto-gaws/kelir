@@ -61,22 +61,38 @@ function readPersistedSession(): PersistedSession | null {
 }
 
 /**
- * Whether a failure is the server's verdict on the credentials, rather than a
- * statement about the transport.
+ * The only statuses that mean the credentials themselves were refused.
  *
- * Only a 4xx is the server judging the request. A response that never arrived
- * (`status` 0 — offline, DNS, timeout) or a 5xx says nothing about whether the
- * token is still good, and treating those as a rejection turns a two-second
+ * Enumerated rather than expressed as a range. "Any 4xx" reads like the same
+ * rule and is not: 408 Request Timeout is precisely the failure this whole
+ * distinction exists to survive, and 429 is reachable on `/auth/refresh` once
+ * the authentication rate limiter covers it — so a range would sign out the
+ * user who was merely rate limited, which is the outcome being prevented,
+ * arriving through a different door.
+ *
+ * A new status is retryable here until somebody decides otherwise, which is the
+ * safe direction: the cost of keeping a dead session is one more rejected
+ * request, and the cost of dropping a live one is lost work.
+ */
+const SESSION_ENDING_STATUSES: readonly number[] = [401, 403]
+
+/**
+ * Whether a failure is the server refusing the credentials, rather than a
+ * statement about the transport or the server's own health.
+ *
+ * Anything else — a response that never arrived (`status` 0: offline, DNS,
+ * timeout), a 5xx, a timeout, a rate limit — says nothing about whether the
+ * token is still good. Treating those as a refusal turns a two-second
  * connectivity drop into a forced re-authentication: tokens wiped from storage,
  * credentials retyped, work in progress lost.
  *
  * An error that is not an `ApiError` at all reached us from somewhere
  * unexpected, so it is not treated as a verdict either. The session is left for
- * the server to reject on the next call — which it will, if it is genuinely
+ * the server to refuse on the next call — which it will, if it is genuinely
  * dead.
  */
-function isServerRejection(error: unknown): boolean {
-  return error instanceof ApiError && error.status >= 400 && error.status < 500
+function endsSession(error: unknown): boolean {
+  return error instanceof ApiError && SESSION_ENDING_STATUSES.includes(error.status)
 }
 
 /**
@@ -211,10 +227,10 @@ export const useAuthStore = defineStore('auth', () => {
       user.value = await authApi.fetchCurrentUser()
       return true
     } catch (error) {
-      // Only the server may end a session. If it never answered, the tokens are
-      // still whatever they were a moment ago, and the caller can try again —
-      // see `isServerRejection`.
-      if (isServerRejection(error)) {
+      // Only a refusal of the credentials ends a session. If the server never
+      // answered, or answered with something that is not about the token, the
+      // tokens are still good and the caller can try again — see `endsSession`.
+      if (endsSession(error)) {
         clearSession()
       }
 
@@ -254,11 +270,11 @@ export const useAuthStore = defineStore('auth', () => {
       applySession(await authApi.refreshSession(presented))
       return true
     } catch (error) {
-      // A rejection means the token was unknown, expired or already spent, and
+      // A refusal means the token was unknown, expired or already spent, and
       // presenting it again would revoke the session family — so stop and sign
-      // out. A transport failure says nothing about the token, so the session
+      // out. Anything else says nothing about the token, so the session
       // survives and the caller can retry.
-      if (isServerRejection(error)) {
+      if (endsSession(error)) {
         clearSession()
       }
 
