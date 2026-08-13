@@ -27,6 +27,32 @@ const ADMIN_ROLE_ID: Uuid = uuid::uuid!("00000000-0000-0000-0002-000000000001");
 /// another advisory lock in the same database.
 const BOOTSTRAP_LOCK_KEY: i64 = 0x4B45_4C49_5242_5421;
 
+/// What a bootstrap attempt did.
+///
+/// Startup discards it — it is reported for the tests, and for a reason worth
+/// stating. [`ensure_administrator`] asks "does a user exist?" twice: once
+/// cheaply before opening a transaction, once inside the advisory lock. Through
+/// the `users` table the two are indistinguishable, because the second catches
+/// anything the first lets through; a pre-check quietly narrowed back to a
+/// tenant-scoped or live-only count leaves every row-count assertion green.
+/// Naming the outcome separates them: the pre-check answers
+/// [`Self::AlreadyBootstrapped`] and the locked re-read answers
+/// [`Self::Deferred`], so a test can tell which guard did the work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootstrapOutcome {
+    /// The first administrator was created by this call.
+    Created,
+    /// A user row already existed, so this deployment was bootstrapped before —
+    /// possibly in another tenant, possibly one since deleted.
+    AlreadyBootstrapped,
+    /// No user exists and no credentials are configured. Warned about, not an
+    /// error: a deployment may create its first user another way.
+    NotConfigured,
+    /// Another instance holds the lock, or committed while this one was
+    /// preparing. Reachable only when instances start together.
+    Deferred,
+}
+
 /// Creates the first administrator when this database holds no user at all.
 ///
 /// The guard is deliberately not tenant-scoped, and deliberately counts
@@ -72,7 +98,10 @@ const BOOTSTRAP_LOCK_KEY: i64 = 0x4B45_4C49_5242_5421;
 /// Replicas starting together are serialised by an advisory lock and the re-read
 /// it protects, so exactly one of them creates the account and the others stand
 /// down rather than failing their startup.
-pub async fn ensure_administrator(pool: &sqlx::PgPool, config: &AppConfig) -> Result<(), AppError> {
+pub async fn ensure_administrator(
+    pool: &sqlx::PgPool,
+    config: &AppConfig,
+) -> Result<BootstrapOutcome, AppError> {
     // The first administrator belongs to the deployment's default tenant in
     // both modes: a multi-tenant deployment still needs one account before any
     // tenant can be created. Resolving it here rather than assuming the seeded
@@ -84,8 +113,16 @@ pub async fn ensure_administrator(pool: &sqlx::PgPool, config: &AppConfig) -> Re
     let tenant = organization::resolve_default(pool, config).await?;
     let tenant_id = tenant.id;
 
+    // First of the two guards, and the one that answers on every start after
+    // the first. It is an optimisation: the locked re-read below asks the same
+    // question and is the one that must be right. Narrowing this one — back to
+    // a tenant, or to live rows only — would leave that re-read to catch what
+    // it missed, so the `users` table would look identical either way and every
+    // row-count assertion would stay green. That is why the outcome is
+    // reported rather than swallowed: `AlreadyBootstrapped` here and
+    // `Deferred` there are what make the two sites separable by test.
     if identity_repo::any_user_exists(pool).await? {
-        return Ok(());
+        return Ok(BootstrapOutcome::AlreadyBootstrapped);
     }
 
     let Some(credentials) = config.bootstrap_admin.as_ref() else {
@@ -96,7 +133,7 @@ pub async fn ensure_administrator(pool: &sqlx::PgPool, config: &AppConfig) -> Re
             "no users exist and KELIR_BOOTSTRAP_ADMIN_USERNAME/PASSWORD are unset — \
              nobody can sign in; set them and restart to create the first administrator"
         );
-        return Ok(());
+        return Ok(BootstrapOutcome::NotConfigured);
     };
 
     // The same rule the API applies to every password it sets. The account that
@@ -133,15 +170,18 @@ pub async fn ensure_administrator(pool: &sqlx::PgPool, config: &AppConfig) -> Re
     if !acquired {
         transaction.rollback().await?;
         tracing::info!("another instance is creating the first administrator; standing down");
-        return Ok(());
+        return Ok(BootstrapOutcome::Deferred);
     }
 
-    // Re-read under the lock: the first check ran before the transaction began,
-    // so another instance may have committed in between.
+    // Second of the two guards, and the load-bearing one: the pre-check above
+    // ran before this transaction began, so another instance may have
+    // committed in between, and nothing outside this lock can be trusted about
+    // an empty table. It must ask the deployment-wide question — any tenant,
+    // deleted rows included — whatever the pre-check happens to ask.
     if identity_repo::any_user_exists(&mut *transaction).await? {
         transaction.rollback().await?;
         tracing::info!("another instance created the first administrator; standing down");
-        return Ok(());
+        return Ok(BootstrapOutcome::Deferred);
     }
 
     identity_repo::insert_user(
@@ -191,7 +231,7 @@ pub async fn ensure_administrator(pool: &sqlx::PgPool, config: &AppConfig) -> Re
         "created the first administrator; it must change its password after signing in"
     );
 
-    Ok(())
+    Ok(BootstrapOutcome::Created)
 }
 
 /// Reshapes a password validation failure into a startup failure.
@@ -275,9 +315,11 @@ mod tests {
 
     #[sqlx::test]
     async fn creates_the_administrator_when_no_user_exists(pool: PgPool) {
-        ensure_administrator(&pool, &config_with_admin(BOOTSTRAP_PASSWORD))
+        let outcome = ensure_administrator(&pool, &config_with_admin(BOOTSTRAP_PASSWORD))
             .await
             .expect("bootstraps");
+
+        assert_eq!(outcome, BootstrapOutcome::Created);
 
         let users = identity_repo::list_users(&pool, SYSTEM_TENANT_ID, 10, 0)
             .await
@@ -299,9 +341,13 @@ mod tests {
     async fn creates_nothing_when_a_user_already_exists(pool: PgPool) {
         seed_user(&pool, "existing").await;
 
-        ensure_administrator(&pool, &config_with_admin(BOOTSTRAP_PASSWORD))
+        let outcome = ensure_administrator(&pool, &config_with_admin(BOOTSTRAP_PASSWORD))
             .await
             .expect("stands down");
+
+        // The pre-check answered, not the locked re-read: no transaction was
+        // opened at all.
+        assert_eq!(outcome, BootstrapOutcome::AlreadyBootstrapped);
 
         let users = identity_repo::list_users(&pool, SYSTEM_TENANT_ID, 10, 0)
             .await
@@ -341,10 +387,15 @@ mod tests {
         .await
         .expect("seeds a user in another tenant");
 
-        ensure_administrator(&pool, &config_with_admin(BOOTSTRAP_PASSWORD))
+        let outcome = ensure_administrator(&pool, &config_with_admin(BOOTSTRAP_PASSWORD))
             .await
             .expect("stands down");
 
+        // The pre-check has to see the other tenant's row itself. A
+        // tenant-scoped pre-check would fall through to the locked re-read,
+        // which would catch it and report Deferred — same empty table, and
+        // this assertion is what tells the two apart.
+        assert_eq!(outcome, BootstrapOutcome::AlreadyBootstrapped);
         assert_eq!(live_users(&pool).await, 0);
     }
 
@@ -352,13 +403,49 @@ mod tests {
     async fn running_the_bootstrap_twice_creates_one_administrator(pool: PgPool) {
         let config = config_with_admin(BOOTSTRAP_PASSWORD);
 
-        ensure_administrator(&pool, &config)
+        let first = ensure_administrator(&pool, &config)
             .await
             .expect("first run");
-        ensure_administrator(&pool, &config)
+        let second = ensure_administrator(&pool, &config)
             .await
             .expect("second run");
 
+        assert_eq!(first, BootstrapOutcome::Created);
+        assert_eq!(second, BootstrapOutcome::AlreadyBootstrapped);
+        assert_eq!(live_users(&pool).await, 1);
+    }
+
+    #[sqlx::test]
+    async fn concurrent_starts_create_one_administrator(pool: PgPool) {
+        // Replicas start together, share a database and share their
+        // configuration, so they all read an empty table at once. Exactly one
+        // may create the account; the rest must stand down rather than fail
+        // their startup on the unique index.
+        let mut starts = Vec::new();
+        for _ in 0..4 {
+            let pool = pool.clone();
+            let config = config_with_admin(BOOTSTRAP_PASSWORD);
+            starts.push(tokio::spawn(async move {
+                ensure_administrator(&pool, &config).await
+            }));
+        }
+
+        let mut created = 0;
+        for start in starts {
+            match start
+                .await
+                .expect("the start task joins")
+                .expect("no instance fails its startup")
+            {
+                BootstrapOutcome::Created => created += 1,
+                // Which of the two it is depends on who wins the lock, and both
+                // mean "someone else is doing it".
+                BootstrapOutcome::Deferred | BootstrapOutcome::AlreadyBootstrapped => {}
+                other => panic!("unexpected outcome {other:?}"),
+            }
+        }
+
+        assert_eq!(created, 1);
         assert_eq!(live_users(&pool).await, 1);
     }
 
@@ -373,10 +460,14 @@ mod tests {
             .await
             .expect("soft deletes");
 
-        ensure_administrator(&pool, &config_with_admin(BOOTSTRAP_PASSWORD))
+        let outcome = ensure_administrator(&pool, &config_with_admin(BOOTSTRAP_PASSWORD))
             .await
             .expect("stands down");
 
+        // As above: a live-only pre-check would fall through to the locked
+        // re-read and report Deferred, leaving the row count unchanged either
+        // way.
+        assert_eq!(outcome, BootstrapOutcome::AlreadyBootstrapped);
         assert_eq!(
             live_users(&pool).await,
             0,
@@ -393,10 +484,12 @@ mod tests {
 
         // A deployment that edits the variable after first run must not have
         // its administrator's password reset from configuration on restart.
-        ensure_administrator(&pool, &config_with_admin("a-different-bootstrap-password"))
-            .await
-            .expect("second run");
+        let outcome =
+            ensure_administrator(&pool, &config_with_admin("a-different-bootstrap-password"))
+                .await
+                .expect("second run");
 
+        assert_eq!(outcome, BootstrapOutcome::AlreadyBootstrapped);
         assert_eq!(administrator(&pool).await.password_hash, original);
         assert!(verify_password(BOOTSTRAP_PASSWORD, &original));
     }
@@ -468,10 +561,11 @@ mod tests {
 
     #[sqlx::test]
     async fn creates_nothing_when_no_credentials_are_configured(pool: PgPool) {
-        ensure_administrator(&pool, &AppConfig::test_default())
+        let outcome = ensure_administrator(&pool, &AppConfig::test_default())
             .await
             .expect("warns rather than failing startup");
 
+        assert_eq!(outcome, BootstrapOutcome::NotConfigured);
         assert_eq!(live_users(&pool).await, 0);
     }
 }
