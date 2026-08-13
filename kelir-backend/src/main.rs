@@ -1,18 +1,15 @@
-mod config;
-mod db;
-mod error;
-mod health;
-mod middleware;
-mod modules;
-mod response;
-mod router;
-mod state;
-mod utils;
+//! Binary entry point.
+//!
+//! The application itself lives in the library crate (`src/lib.rs`); this file
+//! only loads configuration, opens the pool, migrates, bootstraps and serves.
+//! Keeping it thin is what lets `tests/` drive exactly the router the binary
+//! serves rather than a reconstruction of it.
 
 use std::process::ExitCode;
 
-use config::AppConfig;
-use state::AppState;
+use kelir_backend::config::AppConfig;
+use kelir_backend::state::AppState;
+use kelir_backend::{db, health, modules, router};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]
