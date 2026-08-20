@@ -1,6 +1,6 @@
 # Kelir Software Requirements Specification
 
-**Status:** Draft · **Last updated:** 2026-08-11
+**Status:** Draft · **Last updated:** 2026-08-20
 
 The companion Solution Blueprint formerly bundled in this file now lives in the System Design Document: `docs/design/01. System Design Document.md`.
 
@@ -14,7 +14,7 @@ The companion Solution Blueprint formerly bundled in this file now lives in the 
 |---|---|
 | Document Name | Kelir Software Requirements Specification |
 | Framework Name | Kelir |
-| Version | 0.5 |
+| Version | 0.6 |
 | Status | Initial Draft |
 | Date | 2026-08-05 |
 | Document Type | SRS |
@@ -31,6 +31,7 @@ Revision history:
 0.3 (2026-08-05): adopted the unified Party model for supplier, customer, and employee master data (see docs/architectures/05. Core - Master Data - Party.md).
 0.4 (2026-08-06): split the Solution Blueprint out into the System Design Document (docs/design/01. System Design Document.md); this file now contains the SRS only.
 0.5 (2026-08-11): separated priority from MVP scope — Must now means "required for 1.0" and §9 is the sole MVP gate (§4 preamble); raised FR-API-004 (OpenAPI) from Should to Must, since §9 criterion 14 requires documented APIs; baselined the six proposed targets in FR-ATT-004, NFR-PERF-001, NFR-AVA-004 and NFR-SEC-008/009/010. Recorded as decisions D-3 and D-5 in projects/planning/02. Product Backlog.md.
+0.6 (2026-08-20): narrowed FR-IDM-004 from "manage permissions" to maintaining the permission catalogue, which is system-defined rather than administrator-editable; the administrative surface is role–permission mapping (FR-IDM-005). No requirement added or removed, and MVP scope is unchanged — §9 names neither. Recorded as decision D-6 in projects/planning/02. Product Backlog.md.
 ```
 
 > **Note:** As of v0.4 this file contains only the SRS. The Solution Blueprint has been split out into the System Design Document (`docs/design/01. System Design Document.md`), which is versioned independently.
@@ -273,12 +274,14 @@ Note: FR-AUTH-007 is planned for a later phase.
 | FR-IDM-001 | The system shall manage users | Must |
 | FR-IDM-002 | The system shall manage roles | Must |
 | FR-IDM-003 | The system shall assign roles to users | Must |
-| FR-IDM-004 | The system shall manage permissions | Must |
+| FR-IDM-004 | The system shall maintain the permission catalogue that authorization checks resolve against | Must |
 | FR-IDM-005 | The system shall support role-permission mapping | Must |
 | FR-IDM-006 | The system shall support user delegation | Should |
 | FR-IDM-007 | The system shall support user status active/inactive | Must |
 | FR-IDM-008 | The system shall support department and position management | Should |
 | FR-IDM-009 | The system shall support multi-tenant user isolation if multi-tenant mode is enabled | Should |
+
+Note: FR-IDM-004 read "the system shall manage permissions" until v0.6, which was taken to promise administrator CRUD over permission rows. It does not. A permission is an identifier the code checks — `identity:user:create` — so the set of meaningful permissions is fixed by the code, and a row an administrator invents at runtime is inert while a check whose row an administrator deletes becomes ungrantable. The catalogue is therefore **system-defined**: seeded by migration for core modules, and extended at installation time from a plugin's manifest (FR-PLG-005; `plugin_permissions`, [Database Schema](../design/02.%20Database%20Schema.md) §13.4). Administrators read it and decide which of its entries each role holds, which is FR-IDM-005. Recorded as decision **D-6**.
 
 ---
 
