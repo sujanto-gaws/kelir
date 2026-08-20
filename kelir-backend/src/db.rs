@@ -42,9 +42,34 @@ pub fn create_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
 /// SQLx records applied migrations and their checksums in `_sqlx_migrations`,
 /// so an edited migration fails loudly rather than silently diverging — which
 /// is the mechanism behind "migrations are immutable once merged"
-/// (coding standard §2.5).
+/// (coding standard §2.5). That check is untouched by the tolerance below:
+/// every migration this binary *does* know is still verified by checksum.
+///
+/// # Migrations from a newer release are tolerated (#76)
+///
+/// By default SQLx refuses to start when the database holds an applied
+/// migration the binary cannot resolve. That default makes application
+/// rollback impossible: the previous image, redeployed against a database the
+/// newer image has already migrated, dies with "migration N was previously
+/// applied but is missing in the resolved migrations" — which is exactly what
+/// the `v0.2.0` rollback rehearsal hit.
+///
+/// The [release process](../../docs/standards/04.%20Release%20Process.md) §6
+/// requires the opposite: rollback is "always possible because images are
+/// immutable", and every migration must be backward-compatible with the
+/// previous release. Additive DDL satisfies that rule and the migrator still
+/// refused, so the rule was being met in the columns and broken in the
+/// bookkeeping.
+///
+/// What is given up is detection of a migration file that has gone missing
+/// from the directory. That is an acceptable trade because migrations are
+/// forward-only and immutable once merged, so a file disappearing is a
+/// mistake caught in review, while the failure it was preventing here is a
+/// deployment that cannot be rolled back.
 pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
-    sqlx::migrate!("./migrations").run(pool).await
+    let mut migrator = sqlx::migrate!("./migrations");
+    migrator.set_ignore_missing(true);
+    migrator.run(pool).await
 }
 
 /// Cheap liveness probe for the database, used by `/health/ready`.

@@ -16,10 +16,11 @@ Nothing yet.
 Phase 2: the application signs in, an administrator manages users and roles, and
 every identity route is enforced server-side against its own permission.
 
-**Neither staging nor rollback is verified.** `kelir-staging-01` is still
-unprovisioned, so release checklist item 7 is outstanding for the second release
-running. Item 2 is outstanding too, and newly so: the N−1 rollback rehearsal was
-performed for the first time at this release and it failed — see *Known
+**Staging is not verified, and rolling back to `0.1.0` still needs manual work.**
+`kelir-staging-01` is still unprovisioned, so release checklist item 7 is
+outstanding for the second release running. Item 2, N−1 compatibility, was
+rehearsed for the first time at this release and failed; the cause is fixed here,
+but the fix cannot reach `0.1.0`, which was tagged without it — see *Known
 limitations*. Treat `0.2.0`, like `0.1.0`, as cut rather than proven.
 
 ### Added
@@ -65,6 +66,11 @@ limitations*. Treat `0.2.0`, like `0.1.0`, as cut rather than proven.
   tripped replay detection and signed both tabs out (#66).
 - Bounded string columns carried no explicit lengths, so an oversized value
   succeeded or failed depending on how compressible it was.
+- The startup migrator refused to run against a database holding migrations it
+  did not recognise, so a redeployed previous image could not start — rollback
+  was impossible without editing `_sqlx_migrations` by hand. Unknown *newer*
+  migrations are now tolerated; an edited migration is still refused by
+  checksum (#76).
 
 ### Changed
 
@@ -80,14 +86,15 @@ limitations*. Treat `0.2.0`, like `0.1.0`, as cut rather than proven.
 
 ### Known limitations
 
-- **Rolling back to `0.1.0` requires manual database work.** The `0.1.0` binary
-  refuses to start against a `0.2.0` database: sqlx treats applied migrations it
-  does not know about as fatal (`migration 2 was previously applied but is
+- **Rolling back to `0.1.0` still requires manual database work**, despite the
+  migrator fix above. The `0.1.0` binary was tagged without it, so it refuses to
+  start against a `0.2.0` database (`migration 2 was previously applied but is
   missing in the resolved migrations`). The *schema* is N−1 compatible — every
   change is additive and the `0.1.0` code compiles and queries against it — so
   the obstacle is migration bookkeeping, not the columns. Recovery is to delete
   the rows above the old version's highest migration from `_sqlx_migrations`
-  before starting the old image.
+  before starting the old image. Rollback from the *next* release needs none of
+  this.
 - **Staging is still unprovisioned** (#12), so nothing here has run anywhere but
   a developer machine and CI.
 - **Multi-tenant mode is not usable from the UI.** Enabling
