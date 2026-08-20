@@ -559,6 +559,137 @@ mod tests {
         assert_eq!(live_users(&pool).await, 0);
     }
 
+    /// Registers a global subscriber interested in every callsite, once per
+    /// test binary.
+    ///
+    /// It records nothing. Its whole job is to keep `tracing` from caching a
+    /// callsite as permanently disabled, so that a *scoped* capture installed
+    /// later still receives the event.
+    fn enable_all_callsites() {
+        use std::sync::Once;
+
+        struct Interested;
+
+        impl tracing::Subscriber for Interested {
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::Id {
+                tracing::Id::from_u64(1)
+            }
+
+            fn record(&self, _: &tracing::Id, _: &tracing::span::Record<'_>) {}
+
+            fn record_follows_from(&self, _: &tracing::Id, _: &tracing::Id) {}
+
+            fn event(&self, _: &tracing::Event<'_>) {}
+
+            fn enter(&self, _: &tracing::Id) {}
+
+            fn exit(&self, _: &tracing::Id) {}
+        }
+
+        static ONCE: Once = Once::new();
+
+        ONCE.call_once(|| {
+            // Ignored on purpose: another test binary or harness may already
+            // have installed one, and any global subscriber at all is enough
+            // for the caching problem this solves.
+            let _ = tracing::subscriber::set_global_default(Interested);
+            // Clears entries poisoned before the line above ran.
+            tracing::callsite::rebuild_interest_cache();
+        });
+    }
+
+    /// Captures everything the subscriber writes, so a test can read it back.
+    #[derive(Clone, Default)]
+    struct LogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl LogCapture {
+        fn contents(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().expect("lock")).into_owned()
+        }
+    }
+
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("lock").extend_from_slice(buffer);
+
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[sqlx::test]
+    async fn the_bootstrap_password_never_appears_in_the_log(pool: PgPool) {
+        // Coding standard §2.7: a credential in a log outlives the credential.
+        // The bootstrap password is the one that matters most, because it opens
+        // the account holding every permission and it is typed into an
+        // environment variable an operator is likely to leave behind.
+        let capture = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+
+        let password = "a-password-that-must-not-be-logged";
+
+        // Two mechanisms, and both are needed.
+        //
+        // `enable_all_callsites` deals with a global: `tracing` caches each
+        // callsite's interest process-wide, and a callsite first reached while
+        // no subscriber exists is cached as *disabled* and stays silent for the
+        // rest of the run. Whether that happened depended on which test ran
+        // first, so this test passed alone and failed in the full suite.
+        //
+        // `with_subscriber` attaches the capture to the future rather than to
+        // the thread, because the runtime moves this task across threads at
+        // every await and a thread-local default caught nothing.
+        //
+        // Both failures looked identical — an empty capture — and the control
+        // assertion below is what surfaced them rather than letting the test
+        // pass while proving nothing.
+        use tracing::instrument::WithSubscriber;
+
+        enable_all_callsites();
+
+        ensure_administrator(&pool, &config_with_admin(password))
+            .with_subscriber(subscriber)
+            .await
+            .expect("bootstraps");
+
+        let logged = capture.contents();
+
+        // The control. Without it this test would also pass if the capture
+        // silently recorded nothing at all, which is the failure mode a log
+        // assertion is most prone to.
+        assert!(
+            logged.contains("created the first administrator"),
+            "nothing was captured, so the assertion below proves nothing: {logged:?}"
+        );
+
+        assert!(
+            !logged.contains(password),
+            "the bootstrap password was written to the log: {logged}"
+        );
+        assert!(
+            logged.contains("admin"),
+            "the username is what the operator needs to see: {logged:?}"
+        );
+    }
+
     #[sqlx::test]
     async fn creates_nothing_when_no_credentials_are_configured(pool: PgPool) {
         let outcome = ensure_administrator(&pool, &AppConfig::test_default())
