@@ -189,6 +189,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_openapi_document_lists_every_auth_route() {
+        // The Definition of Done says "API changes reflected in OpenAPI", and
+        // `publishes_the_openapi_document` checks `/health` only — so the auth
+        // surface could vanish from the document without a test noticing
+        // (#60). Every path is listed, and the operation carries the method
+        // that serves it.
+        //
+        // **What this cannot catch:** a route added to the router and
+        // documented nowhere. `axum::Router` exposes no list of its paths, so
+        // the expectation below is written by hand, and a new route reaches it
+        // only when someone adds it. What it does catch is the reverse and more
+        // likely direction — a documented route quietly losing its annotation.
+        let (_, body) = get("/api/docs/openapi.json").await;
+
+        let expected = [
+            ("/api/v1/auth/login", "post"),
+            ("/api/v1/auth/refresh", "post"),
+            ("/api/v1/auth/logout", "post"),
+            ("/api/v1/auth/me", "get"),
+            ("/api/v1/auth/change-password", "post"),
+        ];
+
+        for (path, method) in expected {
+            assert!(
+                body["paths"][path][method].is_object(),
+                "{method} {path} is missing from the published document"
+            );
+        }
+
+        let documented: Vec<&str> = body["paths"]
+            .as_object()
+            .expect("paths is an object")
+            .keys()
+            .filter(|path| path.starts_with("/api/v1/auth/"))
+            .map(String::as_str)
+            .collect();
+
+        assert_eq!(
+            documented.len(),
+            expected.len(),
+            "the document has auth paths this test does not know about: {documented:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_change_password_contract_does_not_promise_more_than_it_delivers() {
+        // #60: the 204 read "every session for the account ends", while only
+        // refresh tokens are revoked — false for up to fifteen minutes, in the
+        // shared-machine case the doc comment gives as its justification. The
+        // wording was narrowed rather than the behaviour changed
+        // (architecture 01 §18.1 keeps authorization off the database), and
+        // `an_access_token_issued_before_a_password_change_still_works` pins
+        // the behaviour this description now matches.
+        let (_, body) = get("/api/docs/openapi.json").await;
+
+        let description = body["paths"]["/api/v1/auth/change-password"]["post"]["responses"]["204"]
+            ["description"]
+            .as_str()
+            .expect("the 204 carries a description");
+
+        assert!(
+            description.contains("refresh token"),
+            "the description no longer says which tokens are revoked: {description}"
+        );
+        assert!(
+            !description.contains("every session"),
+            "the overstated wording is back: {description}"
+        );
+    }
+
+    #[tokio::test]
     async fn the_tenant_code_is_visible_in_the_published_contract() {
         // The reason tenancy travels in the request body rather than a header
         // (FR-IDM-009): a header carries the same trust as a body field while

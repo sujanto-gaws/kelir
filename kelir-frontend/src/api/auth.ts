@@ -42,7 +42,14 @@ export function fetchCurrentUser(): Promise<CurrentUser> {
   return getItem<CurrentUser>('/auth/me')
 }
 
-/** Change the password. Succeeds with 204 and ends every session for the account. */
+/**
+ * Change the password. Succeeds with 204.
+ *
+ * Every refresh token for the account is revoked, so no session can be
+ * extended. An access token already issued stays valid until it expires — up
+ * to fifteen minutes — because access tokens are stateless and checked against
+ * no revocation list. The wording used to claim every session ended (#60).
+ */
 export function changePassword(request: ChangePasswordRequest): Promise<void> {
   return postVoid('/auth/change-password', request)
 }

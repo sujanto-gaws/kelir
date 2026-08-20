@@ -441,6 +441,27 @@ pub async fn change_own_password(
         })?;
 
     if !verified {
+        // Audited like a failed sign-in, and for the same reason: someone
+        // holding a live session and guessing at the password is the shape a
+        // hijacked session takes, and it is invisible in the login record
+        // because no login is happening.
+        audit::record_or_warn(
+            &state.pool,
+            AuditEntry {
+                tenant_id,
+                event_type: "Security.PasswordChangeFailed",
+                action: "UPDATE_FAILED",
+                object_type: "USER",
+                object_id: user_id,
+                actor_user_id: Some(user_id),
+                ip_address: None,
+                reason: Some("current password did not match"),
+                old_value: None,
+                new_value: None,
+            },
+        )
+        .await;
+
         return Err(AppError::validation(vec![
             crate::error::ValidationDetail::new(
                 "currentPassword",
@@ -460,9 +481,20 @@ pub async fn change_own_password(
 
     identity_repo::set_password_hash(&state.pool, tenant_id, user_id, &hash).await?;
 
-    // Every other session ends: if the change was prompted by a suspected
+    // Every refresh token is revoked: if the change was prompted by a suspected
     // compromise, leaving them alive defeats the point. The caller signs in
     // again like everyone else.
+    //
+    // **This does not end an access token already issued.** Access tokens are
+    // stateless JWTs checked against no revocation list — that is the trade
+    // architecture 01 §18.1 makes to keep authorization off the database — so
+    // one issued a moment before this call stays valid until it expires, up to
+    // `token::ACCESS_TOKEN_TTL_MINUTES`. What a password change guarantees is
+    // that the session cannot be *extended*: the window is bounded and short,
+    // not zero. The contract used to claim otherwise; #60 found it, and the
+    // wording here and in the OpenAPI response now says what the code does.
+    // Closing the window for real needs a per-request revocation check, which
+    // is the design decision §18.1 declines.
     let revoked =
         identity_repo::revoke_all_for_user(&state.pool, user_id, "password changed").await?;
     tracing::info!(user_id = %user_id, revoked, "password changed; sessions revoked");

@@ -232,7 +232,7 @@ async fn me(
     tag = "auth",
     request_body = ChangePasswordRequest,
     responses(
-        (status = 204, description = "Changed; every session for the account ends"),
+        (status = 204, description = "Changed; every refresh token for the account is revoked. An access token already issued remains valid until it expires."),
         (status = 422, description = "The current password is wrong, or the new one is too short"),
         (status = 429, description = "Too many failed attempts from this address; see Retry-After")
     ),
