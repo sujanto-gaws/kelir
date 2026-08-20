@@ -11,6 +11,93 @@ While the major version is `0`, the public API may change in any release.
 
 Nothing yet.
 
+## [0.2.0] — 2026-08-20
+
+Phase 2: the application signs in, an administrator manages users and roles, and
+every identity route is enforced server-side against its own permission.
+
+**Neither staging nor rollback is verified.** `kelir-staging-01` is still
+unprovisioned, so release checklist item 7 is outstanding for the second release
+running. Item 2 is outstanding too, and newly so: the N−1 rollback rehearsal was
+performed for the first time at this release and it failed — see *Known
+limitations*. Treat `0.2.0`, like `0.1.0`, as cut rather than proven.
+
+### Added
+
+- **Authentication (FR-AUTH-001..005).** Password sign-in with Argon2id hashing,
+  JWT access tokens and rotating refresh tokens; logout, `/auth/me`, refresh and
+  change-password. Reuse of a rotated refresh token is detected and revokes the
+  family. Sign-in resolves its tenant from deployment config (FR-IDM-009,
+  single-tenant default).
+- **Identity administration (FR-IDM-001..005, 007).** User and role CRUD,
+  role assignment, active/inactive status, and the role–permission editor, with
+  Vue screens over all of it.
+- **Server-side authorization (FR-IDM-005, FR-API-008).** An `Authenticated`
+  extractor on every protected route and a `module:resource:action` permission
+  named by each service function. Matching is exact — a prefix never grants a
+  longer permission.
+- **First-run bootstrap.** One administrator is created at startup when `users`
+  is empty, once, under an advisory lock, holding the same password rules the
+  API enforces and required to change it at first sign-in.
+- **Authentication rate limiting and account lockout (NFR-SEC-008).** Ten failed
+  attempts per address per minute, then a fifteen-minute block; five failed
+  logins lock the account for fifteen minutes. The address is taken from the
+  socket unless the deployment declares how many proxies sit in front.
+- **Audit trail for identity and authentication.** Sign-in, sign-in failure,
+  password change, and every identity write, hash-chained per tenant.
+- **Integration test harness.** A private, freshly migrated PostgreSQL database
+  per test, driving the real router over the real state. It cannot silently
+  skip: a missing database fails as a harness error, not a passed test.
+
+### Fixed
+
+- The login rate limit keyed on a caller-supplied `X-Forwarded-For`, so it was
+  evadable by rotation and could be aimed at a third party's address (#54), and
+  it covered only `/auth/login` (#56).
+- The account lockout was permanent, against a requirement baselining fifteen
+  minutes. Five wrong passwords against a known username left an account
+  unusable, and a single-administrator deployment unadministrable, with no
+  in-product recovery (#55).
+- The first-run bootstrap was not one-shot against a soft-deleted administrator,
+  its password bypassed the validation every API-set password gets, and it never
+  set `must_change_password` (#57).
+- A transport failure cleared the browser session, and a cross-tab token refresh
+  tripped replay detection and signed both tabs out (#66).
+- Bounded string columns carried no explicit lengths, so an oversized value
+  succeeded or failed depending on how compressible it was.
+
+### Changed
+
+- **FR-IDM-004 narrowed** from "manage permissions" to maintaining the permission
+  catalogue that authorization checks resolve against. The catalogue is
+  system-defined — seeded by migration, extended at plugin-installation time —
+  because a permission is an identifier the code checks: a row an administrator
+  invents is inert, and a check whose row is deleted becomes ungrantable. The
+  administrative surface is role–permission mapping (FR-IDM-005). SRS v0.6,
+  decision D-6.
+- Migration numbering shifted twice as unplanned migrations landed ahead of
+  master data. The mapping table in the Database Schema is authoritative.
+
+### Known limitations
+
+- **Rolling back to `0.1.0` requires manual database work.** The `0.1.0` binary
+  refuses to start against a `0.2.0` database: sqlx treats applied migrations it
+  does not know about as fatal (`migration 2 was previously applied but is
+  missing in the resolved migrations`). The *schema* is N−1 compatible — every
+  change is additive and the `0.1.0` code compiles and queries against it — so
+  the obstacle is migration bookkeeping, not the columns. Recovery is to delete
+  the rows above the old version's highest migration from `_sqlx_migrations`
+  before starting the old image.
+- **Staging is still unprovisioned** (#12), so nothing here has run anywhere but
+  a developer machine and CI.
+- **Multi-tenant mode is not usable from the UI.** Enabling
+  `KELIR_MULTI_TENANT` makes sign-in impossible, because the login form has no
+  tenant field (#67). The single-tenant default is the supported configuration.
+- Forgot/reset password over email, delegation, department and position
+  management, and tenant management are Phase 2 scope that moved to Sprint 5.
+- Request payloads ignore unknown fields, so a misspelled property is silently
+  dropped rather than rejected (#62).
+
 ## [0.1.0] — 2026-08-12
 
 First tagged release: the Phase 1 skeleton — a backend that serves and migrates,
@@ -82,5 +169,6 @@ outstanding. Treat `0.1.0` as cut, not proven.
 - No business endpoints. `/api/v1` is mounted and empty.
 - No production environment, image registry, or rehearsed database restore.
 
-[Unreleased]: https://github.com/sujanto-gaws/kelir/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/sujanto-gaws/kelir/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/sujanto-gaws/kelir/releases/tag/v0.2.0
 [0.1.0]: https://github.com/sujanto-gaws/kelir/releases/tag/v0.1.0
