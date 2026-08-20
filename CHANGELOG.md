@@ -16,10 +16,11 @@ Nothing yet.
 Phase 2: the application signs in, an administrator manages users and roles, and
 every identity route is enforced server-side against its own permission.
 
-**Neither staging nor rollback is verified.** `kelir-staging-01` is still
-unprovisioned, so release checklist item 7 is outstanding for the second release
-running. Item 2 is outstanding too, and newly so: the N−1 rollback rehearsal was
-performed for the first time at this release and it failed — see *Known
+**Staging is not verified, and rolling back to `0.1.0` still needs manual work.**
+`kelir-staging-01` is still unprovisioned, so release checklist item 7 is
+outstanding for the second release running. Item 2, N−1 compatibility, was
+rehearsed for the first time at this release and failed; the cause is fixed here,
+but the fix cannot reach `0.1.0`, which was tagged without it — see *Known
 limitations*. Treat `0.2.0`, like `0.1.0`, as cut rather than proven.
 
 ### Added
