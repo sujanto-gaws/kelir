@@ -11,12 +11,13 @@ use super::domain::{
 };
 use super::service;
 use crate::error::AppError;
+use crate::extract::JsonBody;
 use crate::middleware::auth::Authenticated;
 use crate::response::{ItemEnvelope, ListEnvelope, Pagination};
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetPasswordRequest {
     pub password: String,
 }
@@ -79,7 +80,7 @@ async fn get_user(
 async fn create_user(
     State(state): State<AppState>,
     caller: Authenticated,
-    Json(request): Json<CreateUserRequest>,
+    JsonBody(request): JsonBody<CreateUserRequest>,
 ) -> Result<(axum::http::StatusCode, Json<ItemEnvelope<User>>), AppError> {
     let user = service::create_user(&state, &caller, request).await?;
 
@@ -99,7 +100,7 @@ async fn update_user(
     State(state): State<AppState>,
     caller: Authenticated,
     Path(id): Path<Uuid>,
-    Json(request): Json<UpdateUserRequest>,
+    JsonBody(request): JsonBody<UpdateUserRequest>,
 ) -> Result<Json<ItemEnvelope<User>>, AppError> {
     Ok(Json(ItemEnvelope::new(
         service::update_user(&state, &caller, id, request).await?,
@@ -134,7 +135,7 @@ async fn set_password(
     State(state): State<AppState>,
     caller: Authenticated,
     Path(id): Path<Uuid>,
-    Json(request): Json<SetPasswordRequest>,
+    JsonBody(request): JsonBody<SetPasswordRequest>,
 ) -> Result<axum::http::StatusCode, AppError> {
     service::set_password(&state, &caller, id, &request.password).await?;
 
@@ -181,7 +182,7 @@ async fn get_role(
 async fn create_role(
     State(state): State<AppState>,
     caller: Authenticated,
-    Json(request): Json<CreateRoleRequest>,
+    JsonBody(request): JsonBody<CreateRoleRequest>,
 ) -> Result<(axum::http::StatusCode, Json<ItemEnvelope<Role>>), AppError> {
     let role = service::create_role(&state, &caller, request).await?;
 
@@ -201,7 +202,7 @@ async fn update_role(
     State(state): State<AppState>,
     caller: Authenticated,
     Path(id): Path<Uuid>,
-    Json(request): Json<UpdateRoleRequest>,
+    JsonBody(request): JsonBody<UpdateRoleRequest>,
 ) -> Result<Json<ItemEnvelope<Role>>, AppError> {
     Ok(Json(ItemEnvelope::new(
         service::update_role(&state, &caller, id, request).await?,

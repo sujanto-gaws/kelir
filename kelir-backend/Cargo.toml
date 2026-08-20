@@ -16,6 +16,10 @@ rand = "0.8"
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Reports which field a deserialization error came from. serde_json alone says
+# only what went wrong, so a type error could not name the field it was on and
+# the envelope had nothing to put in ValidationDetail.path.
+serde_path_to_error = "0.1"
 # "log" bridges sqlx's statement logging into tracing; "migrate" provides the
 # embedded migration runner; uuid/chrono map the BASE columns.
 sqlx = { version = "0.8", default-features = false, features = [

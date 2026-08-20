@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use super::service;
 use crate::error::AppError;
+use crate::extract::JsonBody;
 use crate::middleware::auth::Authenticated;
 use crate::middleware::client_address::ClientAddress;
 use crate::middleware::rate_limit;
@@ -15,7 +16,7 @@ use crate::response::ItemEnvelope;
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SignInRequest {
     /// Username or email address (FR-AUTH-001).
     pub username: String,
@@ -42,19 +43,19 @@ pub struct SessionResponse {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RefreshRequest {
     pub refresh_token: String,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SignOutRequest {
     pub refresh_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChangePasswordRequest {
     pub current_password: String,
     pub new_password: String,
@@ -112,7 +113,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
 async fn sign_in(
     State(state): State<AppState>,
     client: ClientAddress,
-    Json(request): Json<SignInRequest>,
+    JsonBody(request): JsonBody<SignInRequest>,
 ) -> Result<Json<ItemEnvelope<SessionResponse>>, AppError> {
     // Rate limiting is the layer in `routes`, keyed on the source address rather
     // than the username or the tenant: an attacker chooses both freely, so
@@ -154,7 +155,7 @@ async fn sign_in(
 async fn refresh(
     State(state): State<AppState>,
     client: ClientAddress,
-    Json(request): Json<RefreshRequest>,
+    JsonBody(request): JsonBody<RefreshRequest>,
 ) -> Result<Json<ItemEnvelope<SessionResponse>>, AppError> {
     let ip = client.to_string();
     let signed_in = service::refresh(&state, &request.refresh_token, Some(&ip)).await?;
@@ -180,7 +181,7 @@ async fn refresh(
 async fn sign_out(
     State(state): State<AppState>,
     client: ClientAddress,
-    Json(request): Json<SignOutRequest>,
+    JsonBody(request): JsonBody<SignOutRequest>,
 ) -> Result<axum::http::StatusCode, AppError> {
     let ip = client.to_string();
 
@@ -240,7 +241,7 @@ async fn me(
 async fn change_password(
     State(state): State<AppState>,
     caller: Authenticated,
-    Json(request): Json<ChangePasswordRequest>,
+    JsonBody(request): JsonBody<ChangePasswordRequest>,
 ) -> Result<axum::http::StatusCode, AppError> {
     service::change_own_password(
         &state,
