@@ -90,6 +90,92 @@ pub async fn create_user(
     id
 }
 
+/// Creates a role holding exactly the permissions named, and returns its id.
+///
+/// Takes permission *codes* rather than ids for two reasons. A test that says
+/// `identity:user:create` says what it means; and a code that is not in the
+/// catalogue fails here, loudly, instead of quietly granting nothing — which is
+/// precisely the failure that would make an authorization test pass for the
+/// wrong reason. The lookup goes through `list_permissions`, the same catalogue
+/// read the API serves, so a test cannot grant a permission the product does
+/// not have.
+pub async fn create_role_with_permissions(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    role_code: &str,
+    permission_codes: &[&str],
+) -> Uuid {
+    let catalogue = identity_repo::list_permissions(pool)
+        .await
+        .unwrap_or_else(|error| {
+            harness_failure(
+                "read the permission catalogue",
+                &error.to_string(),
+                role_code,
+            )
+        });
+
+    let permission_ids: Vec<Uuid> = permission_codes
+        .iter()
+        .map(|code| {
+            catalogue
+                .iter()
+                .find(|permission| permission.permission_code == *code)
+                .unwrap_or_else(|| {
+                    harness_failure(
+                        "find a permission in the catalogue",
+                        &format!("'{code}' is not a seeded permission"),
+                        role_code,
+                    )
+                })
+                .id
+        })
+        .collect();
+
+    let id = Uuid::now_v7();
+    let mut transaction = pool.begin().await.unwrap_or_else(|error| {
+        harness_failure("open a fixture transaction", &error.to_string(), role_code)
+    });
+
+    identity_repo::insert_role(
+        &mut *transaction,
+        id,
+        tenant_id,
+        role_code,
+        role_code,
+        None,
+        None,
+    )
+    .await
+    .unwrap_or_else(|error| {
+        harness_failure(
+            &format!("insert the fixture role '{role_code}'"),
+            &error.to_string(),
+            role_code,
+        )
+    });
+
+    identity_repo::replace_role_permissions(&mut transaction, tenant_id, id, &permission_ids)
+        .await
+        .unwrap_or_else(|error| {
+            harness_failure(
+                &format!("grant permissions to the fixture role '{role_code}'"),
+                &error.to_string(),
+                role_code,
+            )
+        });
+
+    transaction.commit().await.unwrap_or_else(|error| {
+        harness_failure(
+            "commit a fixture transaction",
+            &error.to_string(),
+            role_code,
+        )
+    });
+
+    id
+}
+
 /// Creates a second tenant, so tenant-scoped queries can be probed with another
 /// tenant's data actually present rather than assumed absent.
 pub async fn create_tenant(pool: &PgPool, tenant_code: &str, name: &str) -> Uuid {
