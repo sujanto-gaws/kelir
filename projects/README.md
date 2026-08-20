@@ -1,6 +1,6 @@
 # Kelir Project Management
 
-**Status:** Living · **Last updated:** 2026-08-13
+**Status:** Living · **Last updated:** 2026-08-20
 
 This folder holds Kelir's **project management artifacts** — the documents that govern *when and in what order* things get built. They live outside [docs/](../docs/) deliberately: `docs/` describes the system (requirements, architecture, design, standards — see its [README](../docs/README.md) for the full index and authority rules); `projects/` describes the work.
 
@@ -50,6 +50,7 @@ Each folder is a numbered series (`NN. Title Case.md`); `00.` files are template
 |---|---|
 | [00. Release Checklist Template.md](releases/00.%20Release%20Checklist%20Template.md) | Per-release evidence record for the [release process](../docs/standards/04.%20Release%20Process.md): pre-flight (scope, tests, migrations, docs, version), staging pass with rollback rehearsal, ship steps, aftermath |
 | [01. Release v0.1.0.md](releases/01.%20Release%20v0.1.0.md) | Phase 1. Cut 2026-08-12 — pre-flight and ship steps done, staging deploy outstanding and blocking |
+| [02. Release v0.2.0.md](releases/02.%20Release%20v0.2.0.md) | Phase 2, cut 2026-08-20. Two blocking checklist items outstanding: staging (#12) for the second release running, and the N−1 rollback rehearsal, run for the first time here and failed (#76) |
 
 ---
 
