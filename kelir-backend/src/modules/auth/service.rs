@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use super::password::verify_password;
@@ -22,6 +22,27 @@ pub struct SignedIn {
 
 /// Failed attempts before the account is locked (NFR-SEC-008).
 pub const MAX_FAILED_LOGINS: i32 = 5;
+
+/// How long that lock lasts (NFR-SEC-008).
+///
+/// The requirement baselines both numbers in one sentence — "5 failed logins
+/// trigger a 15-minute lockout" — so the lockout expires rather than standing
+/// until an administrator clears it. A permanent lock would be a stronger
+/// control on paper and a denial-of-service lever in practice: five wrong
+/// passwords fit inside the rate limiter's per-minute budget, so anyone with a
+/// username list could disable every account in the deployment, and a
+/// single-administrator deployment would have no way back in (#55).
+pub const LOCKOUT_MINUTES: i32 = 15;
+
+/// Whether a `locked_until` value means the account is locked out *now*.
+///
+/// `None` is an account that has never been locked; a timestamp already past is
+/// one whose lockout has expired. Expiry is a comparison rather than a scheduled
+/// job, so there is nothing to sweep and nothing to miss: a deployment that was
+/// down while a lockout elapsed comes back with it already elapsed.
+pub fn is_locked_out(locked_until: Option<DateTime<Utc>>) -> bool {
+    locked_until.is_some_and(|until| until > Utc::now())
+}
 
 /// Authenticates a username-or-email and password (FR-AUTH-001..003).
 ///
@@ -110,6 +131,34 @@ pub async fn sign_in(
         return Err(AppError::Unauthorized);
     }
 
+    // A lockout in force refuses before the password is even looked at, so the
+    // attempts an attacker gets are bounded by the clock rather than by how fast
+    // they can send them. Like the branch above it this returns early without
+    // paying the hashing cost, and for the same reason: the caller learns
+    // nothing from the timing that the refusal itself does not already tell
+    // them, and paying Argon2 on a request that cannot succeed would make the
+    // lockout a way to spend the server's CPU rather than a way to protect it.
+    if is_locked_out(credentials.locked_until) {
+        audit::record_or_warn(
+            &state.pool,
+            AuditEntry {
+                tenant_id,
+                event_type: "Security.SignInFailed",
+                action: "LOGIN_FAILED",
+                object_type: "USER",
+                object_id: credentials.id,
+                actor_user_id: Some(credentials.id),
+                ip_address,
+                reason: Some("account is locked out after repeated failures"),
+                old_value: None,
+                new_value: None,
+            },
+        )
+        .await;
+
+        return Err(AppError::Unauthorized);
+    }
+
     // Hashing is CPU-bound and deliberately slow; running it on the async
     // runtime would stall other requests (coding standard §2.4).
     let stored_hash = credentials.password_hash.clone();
@@ -121,23 +170,24 @@ pub async fn sign_in(
         })?;
 
     if !verified {
-        let failures =
-            identity_repo::record_failed_login(&state.pool, tenant_id, credentials.id).await?;
+        // Counting the failure and locking on the fifth are one statement in the
+        // repository, so concurrent attempts cannot each see a count below the
+        // threshold and let all of them through.
+        let outcome = identity_repo::record_failed_login(
+            &state.pool,
+            tenant_id,
+            credentials.id,
+            MAX_FAILED_LOGINS,
+            LOCKOUT_MINUTES,
+        )
+        .await?;
 
-        if failures >= MAX_FAILED_LOGINS {
-            identity_repo::update_user_fields(
-                &state.pool,
-                tenant_id,
-                credentials.id,
-                None,
-                None,
-                Some(UserStatus::Locked.as_db()),
-                None,
-                None,
-            )
-            .await?;
-
-            tracing::warn!(user_id = %credentials.id, failures, "account locked after repeated failures");
+        if let Some(locked_until) = outcome.locked_until.filter(|until| *until > Utc::now()) {
+            tracing::warn!(
+                user_id = %credentials.id,
+                %locked_until,
+                "account locked out after repeated failures"
+            );
         }
 
         audit::record_or_warn(
@@ -449,6 +499,8 @@ pub fn access_token_ttl_seconds() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use chrono::Duration;
+
     use super::*;
 
     #[test]
@@ -460,9 +512,21 @@ mod tests {
     }
 
     #[test]
-    fn lockout_threshold_matches_the_requirement() {
-        // NFR-SEC-008 baselined 5 failed logins.
-        assert_eq!(MAX_FAILED_LOGINS, 5);
+    fn a_lockout_expires_and_an_absent_one_never_started() {
+        // The entire expiry mechanism is this comparison: nothing sweeps the
+        // table, so a lockout ends because time passed rather than because
+        // something ran. An `is_locked_out` that ignored the timestamp would
+        // reinstate the permanent lock of #55, and this is what sees it.
+        //
+        // That the numbers are 5 and 15 is not asserted here. A constant
+        // compared against itself passes whatever the login path does with it —
+        // which is how the permanent lockout shipped under a green suite. The
+        // threshold and the duration are proved in `tests/auth_lockout.rs`, by
+        // driving real requests until the lock goes on and past the expiry until
+        // it comes off.
+        assert!(is_locked_out(Some(Utc::now() + Duration::minutes(1))));
+        assert!(!is_locked_out(Some(Utc::now() - Duration::minutes(1))));
+        assert!(!is_locked_out(None));
     }
 
     #[test]

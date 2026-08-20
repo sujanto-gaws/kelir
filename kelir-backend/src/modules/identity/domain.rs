@@ -53,6 +53,12 @@ pub struct User {
     pub department_id: Option<Uuid>,
     pub must_change_password: bool,
     pub last_login_at: Option<DateTime<Utc>>,
+    /// When a failed-login lockout ends (NFR-SEC-008). `None` or a time already
+    /// past means the account is not locked out. Distinct from
+    /// [`UserStatus::Locked`], which is an administrator's decision and does not
+    /// expire — an administrator seeing `ACTIVE` here needs this field to
+    /// explain why the account is still refusing to sign in.
+    pub locked_until: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub roles: Vec<RoleSummary>,
 }
