@@ -92,7 +92,7 @@ pub struct Permission {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateUserRequest {
     pub username: String,
     pub email: String,
@@ -104,7 +104,7 @@ pub struct CreateUserRequest {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateUserRequest {
     pub email: Option<String>,
     pub display_name: Option<String>,
@@ -114,7 +114,7 @@ pub struct UpdateUserRequest {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateRoleRequest {
     pub role_code: String,
     pub name: String,
@@ -124,7 +124,7 @@ pub struct CreateRoleRequest {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateRoleRequest {
     pub name: Option<String>,
     pub description: Option<String>,

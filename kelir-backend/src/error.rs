@@ -61,6 +61,9 @@ pub enum AppError {
     BadRequest {
         message: String,
     },
+    /// The body did not arrive as JSON. Distinct from `BadRequest` because the
+    /// fix is a header rather than a payload, and 415 says so.
+    UnsupportedMediaType,
     Unauthorized,
     Forbidden,
     Conflict {
@@ -103,6 +106,7 @@ impl AppError {
             Self::NotFound { .. } => "NOT_FOUND",
             Self::Validation { .. } => "VALIDATION_ERROR",
             Self::BadRequest { .. } => "BAD_REQUEST",
+            Self::UnsupportedMediaType => "UNSUPPORTED_MEDIA_TYPE",
             Self::Unauthorized => "UNAUTHORIZED",
             Self::Forbidden => "FORBIDDEN",
             Self::Conflict { .. } => "CONFLICT",
@@ -116,6 +120,7 @@ impl AppError {
             Self::NotFound { .. } => StatusCode::NOT_FOUND,
             Self::Validation { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             Self::BadRequest { .. } => StatusCode::BAD_REQUEST,
+            Self::UnsupportedMediaType => StatusCode::UNSUPPORTED_MEDIA_TYPE,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Forbidden => StatusCode::FORBIDDEN,
             Self::Conflict { .. } => StatusCode::CONFLICT,
@@ -134,6 +139,9 @@ impl AppError {
             Self::TooManyRequests {
                 retry_after_seconds,
             } => format!("Too many attempts. Try again in {retry_after_seconds} seconds."),
+            Self::UnsupportedMediaType => {
+                "Request body must be JSON with a Content-Type of application/json".to_owned()
+            }
             Self::Unauthorized => "Authentication required".to_owned(),
             Self::Forbidden => "You do not have permission to perform this action".to_owned(),
             Self::Internal { .. } => "An unexpected error occurred".to_owned(),
