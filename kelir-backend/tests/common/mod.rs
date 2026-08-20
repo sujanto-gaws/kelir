@@ -76,6 +76,16 @@ pub const ADMIN_PASSWORD: &str = "bootstrap-administrator-password";
 /// test verifies in another.
 pub const JWT_SECRET: &str = "integration-test-signing-secret";
 
+/// Connections one test instance may hold.
+///
+/// Each test spawns its own application and so its own pool, and they run
+/// concurrently against one PostgreSQL. At the production ceiling of ten, a
+/// runner wide enough for twenty tests asks for two hundred connections from a
+/// server that allows a hundred by default, and the failure surfaces as an
+/// acquire timeout in an unrelated test. Five is above what any single test
+/// here uses at once and low enough to keep the arithmetic safe.
+pub const TEST_POOL_MAX_CONNECTIONS: u32 = 5;
+
 /// The socket peer every request appears to come from.
 ///
 /// `oneshot` binds no socket, so there is no real peer to report; the router
@@ -123,13 +133,14 @@ impl TestApp {
         create_database(&maintenance_url, &database_name).await;
 
         let database_url = with_database(&maintenance_url, &database_name);
-        let pool = db::create_pool(&database_url).unwrap_or_else(|error| {
-            harness_failure(
-                "build a connection pool for the test database",
-                &error.to_string(),
-                &database_url,
-            )
-        });
+        let pool = db::create_pool_with_max_connections(&database_url, TEST_POOL_MAX_CONNECTIONS)
+            .unwrap_or_else(|error| {
+                harness_failure(
+                    "build a connection pool for the test database",
+                    &error.to_string(),
+                    &database_url,
+                )
+            });
 
         // The real migration runner over the real migration directory: whatever
         // a developer's database has drifted to is irrelevant, this is the
@@ -259,8 +270,11 @@ impl TestApp {
 
     /// Signs in through `POST /api/v1/auth/login` and returns the access token.
     ///
-    /// A fixture step, so a failure here is a harness failure: the test that
-    /// called it has not reached its assertion yet.
+    /// **A failure here is not a harness failure.** Every test in this suite
+    /// gets its token this way, so a broken login path breaks all of them at
+    /// this line — and the harness banner's claim that "nothing about the code
+    /// under test has been proven or disproven" would then be flatly false. It
+    /// panics through [`sign_in_failure`] instead, which says so (#59).
     pub async fn sign_in(&self, username: &str, password: &str) -> String {
         let response = self
             .post(
@@ -271,14 +285,7 @@ impl TestApp {
             .await;
 
         if response.status != StatusCode::OK {
-            harness_failure(
-                &format!("sign in the fixture user '{username}'"),
-                &format!(
-                    "expected 200, got {} with body {}",
-                    response.status, response.body
-                ),
-                &self.database_name,
-            );
+            sign_in_failure(username, &response);
         }
 
         response.body["data"]["accessToken"]
@@ -517,6 +524,31 @@ pub fn redact(url: &str) -> String {
 /// Deliberately loud and deliberately distinct from an assertion: the failure
 /// is in the setup, so nothing about the code under test has been proven either
 /// way, and reading it as a product defect would be wrong.
+/// A fixture sign-in was refused.
+///
+/// Deliberately not a [`harness_failure`]: the login endpoint is application
+/// code, and it just answered wrongly. Reporting that as a setup problem would
+/// send a reader to check their PostgreSQL while the auth path is broken.
+fn sign_in_failure(username: &str, response: &TestResponse) -> ! {
+    panic!(
+        "
+         ==================== SIGN-IN REFUSED ====================
+         This is a real failure of POST /api/v1/auth/login, not a setup
+         problem. Every test takes its token through this call, so expect the
+         rest of the suite to fail here too.
+         
+         username: {username}
+         status:   {}
+         body:     {}
+         
+         If the credentials are right, look at the authentication path before
+         looking at the harness.
+         =========================================================
+",
+        response.status, response.body
+    )
+}
+
 fn harness_failure(step: &str, cause: &str, context: &str) -> ! {
     panic!(
         "\n\
