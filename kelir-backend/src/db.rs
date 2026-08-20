@@ -24,6 +24,25 @@ pub const SYSTEM_TENANT_ID: uuid::Uuid = uuid::uuid!("00000000-0000-0000-0000-00
 /// the API can start and serve `/health/live` while PostgreSQL is still coming
 /// up. Readiness is what reports the real state (`/health/ready`).
 pub fn create_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
+    create_pool_with_max_connections(database_url, DEFAULT_MAX_CONNECTIONS)
+}
+
+/// The pool size one running instance takes.
+pub const DEFAULT_MAX_CONNECTIONS: u32 = 10;
+
+/// [`create_pool`], with the ceiling chosen by the caller.
+///
+/// Exists for the integration harness, which spawns one application — and so
+/// one pool — per test, all against the same PostgreSQL. At the default
+/// ceiling, a runner with enough cores to run twenty tests at once asks for two
+/// hundred connections from a server whose own default limit is a hundred, and
+/// the failure lands as an acquire timeout in whichever test was unlucky. The
+/// production path keeps the default; nothing else about the pool differs, so
+/// the harness still exercises the same connection options the binary uses.
+pub fn create_pool_with_max_connections(
+    database_url: &str,
+    max_connections: u32,
+) -> Result<PgPool, sqlx::Error> {
     let options: sqlx::postgres::PgConnectOptions = database_url
         .parse::<sqlx::postgres::PgConnectOptions>()?
         // Statement logging at debug would echo parameter values, which can
@@ -32,7 +51,7 @@ pub fn create_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
         .ssl_mode(PgSslMode::Prefer);
 
     Ok(PgPoolOptions::new()
-        .max_connections(10)
+        .max_connections(max_connections)
         .acquire_timeout(Duration::from_secs(5))
         .connect_lazy_with(options))
 }
