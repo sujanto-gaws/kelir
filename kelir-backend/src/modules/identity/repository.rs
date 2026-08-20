@@ -18,6 +18,10 @@ pub struct UserCredentials {
     pub username: String,
     pub password_hash: String,
     pub status: String,
+    /// Failed-login lockout expiry (NFR-SEC-008). `None`, or a time already
+    /// past, means the account is not locked out; `status` carries the separate
+    /// administrative lock.
+    pub locked_until: Option<DateTime<Utc>>,
 }
 
 pub async fn find_credentials_by_username(
@@ -29,7 +33,7 @@ pub async fn find_credentials_by_username(
     sqlx::query_as!(
         UserCredentials,
         r#"
-        SELECT id, username, password_hash, status
+        SELECT id, username, password_hash, status, locked_until
         FROM users
         WHERE tenant_id = $1
           AND (lower(username) = lower($2) OR lower(email) = lower($2))
@@ -50,7 +54,7 @@ pub async fn find_credentials_by_id(
     sqlx::query_as!(
         UserCredentials,
         r#"
-        SELECT id, username, password_hash, status
+        SELECT id, username, password_hash, status, locked_until
         FROM users
         WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
         "#,
@@ -69,7 +73,7 @@ pub async fn record_successful_login(
     sqlx::query!(
         r#"
         UPDATE users
-        SET last_login_at = now(), failed_login_count = 0, updated_at = now()
+        SET last_login_at = now(), failed_login_count = 0, locked_until = NULL, updated_at = now()
         WHERE tenant_id = $1 AND id = $2
         "#,
         tenant_id,
@@ -80,7 +84,27 @@ pub async fn record_successful_login(
     .map(|_| ())
 }
 
-/// Increments the account's failure counter and returns the new value.
+/// What recording a failed sign-in left behind.
+#[derive(Debug)]
+pub struct FailedLogin {
+    /// Failures counted since the last success, password change or lockout.
+    pub failed_login_count: i32,
+    /// When the lockout ends, if the account is under one.
+    pub locked_until: Option<DateTime<Utc>>,
+}
+
+/// Counts a failed sign-in and locks the account once `threshold` failures have
+/// accumulated, for `lockout_minutes` (NFR-SEC-008).
+///
+/// Counting and locking are one statement because they are one decision. As two
+/// writes they race: concurrent attempts each read a count below the threshold,
+/// each increments, and none of them locks.
+///
+/// The counter resets as the lock goes on, so the next lockout needs a fresh run
+/// of `threshold` failures rather than a single failure against a counter left
+/// sitting at the threshold. `locked_until` is returned rather than a flag
+/// because the caller cannot otherwise tell a lock this attempt applied from an
+/// expired one left by an earlier run.
 ///
 /// Tenant-scoped like every other identity write (FR-IDM-009): the counter
 /// belongs to a user *within* a tenant, so the same user id may only ever be
@@ -89,17 +113,27 @@ pub async fn record_failed_login(
     executor: impl PgExecutor<'_>,
     tenant_id: Uuid,
     user_id: Uuid,
-) -> Result<i32, sqlx::Error> {
-    // Returns the new count so the caller can decide about locking (NFR-SEC-008).
-    sqlx::query_scalar!(
+    threshold: i32,
+    lockout_minutes: i32,
+) -> Result<FailedLogin, sqlx::Error> {
+    sqlx::query_as!(
+        FailedLogin,
         r#"
         UPDATE users
-        SET failed_login_count = failed_login_count + 1, updated_at = now()
+        SET failed_login_count =
+                CASE WHEN failed_login_count + 1 >= $3 THEN 0
+                     ELSE failed_login_count + 1 END,
+            locked_until =
+                CASE WHEN failed_login_count + 1 >= $3 THEN now() + make_interval(mins => $4::int)
+                     ELSE locked_until END,
+            updated_at = now()
         WHERE tenant_id = $1 AND id = $2
-        RETURNING failed_login_count
+        RETURNING failed_login_count, locked_until
         "#,
         tenant_id,
-        user_id
+        user_id,
+        threshold,
+        lockout_minutes
     )
     .fetch_one(executor)
     .await
@@ -271,7 +305,7 @@ pub async fn list_users(
     let rows = sqlx::query!(
         r#"
         SELECT id, username, email, display_name, status, department_id,
-               must_change_password, last_login_at, created_at
+               must_change_password, last_login_at, locked_until, created_at
         FROM users
         WHERE tenant_id = $1 AND deleted_at IS NULL
         ORDER BY username
@@ -295,6 +329,7 @@ pub async fn list_users(
             department_id: row.department_id,
             must_change_password: row.must_change_password,
             last_login_at: row.last_login_at,
+            locked_until: row.locked_until,
             created_at: row.created_at,
             roles: roles_of_user(pool, row.id).await?,
         });
@@ -311,7 +346,7 @@ pub async fn find_user(
     let Some(row) = sqlx::query!(
         r#"
         SELECT id, username, email, display_name, status, department_id,
-               must_change_password, last_login_at, created_at
+               must_change_password, last_login_at, locked_until, created_at
         FROM users
         WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
         "#,
@@ -333,6 +368,7 @@ pub async fn find_user(
         department_id: row.department_id,
         must_change_password: row.must_change_password,
         last_login_at: row.last_login_at,
+        locked_until: row.locked_until,
         created_at: row.created_at,
         roles: roles_of_user(pool, row.id).await?,
     }))
@@ -411,6 +447,13 @@ pub async fn update_user_fields(
 ) -> Result<u64, sqlx::Error> {
     // COALESCE keeps every unsupplied field at its current value, so a partial
     // update cannot blank a column it did not mention.
+    //
+    // Setting the status to ACTIVE also clears any failed-login lockout, which
+    // is the administrative unlock path (NFR-SEC-008): without it, an
+    // administrator could set an account active and watch it keep refusing to
+    // sign in until the lockout expired on its own. `$5 = 'ACTIVE'` is NULL when
+    // no status was supplied, so the CASE falls through to ELSE and an update
+    // that does not mention status leaves the lockout alone.
     sqlx::query!(
         r#"
         UPDATE users
@@ -418,6 +461,7 @@ pub async fn update_user_fields(
             display_name = COALESCE($4, display_name),
             status = COALESCE($5, status),
             department_id = COALESCE($6, department_id),
+            locked_until = CASE WHEN $5 = 'ACTIVE' THEN NULL ELSE locked_until END,
             updated_by = $7,
             updated_at = now()
         WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
@@ -705,7 +749,8 @@ pub async fn set_password_hash(
     sqlx::query!(
         r#"
         UPDATE users
-        SET password_hash = $3, must_change_password = false, failed_login_count = 0, updated_at = now()
+        SET password_hash = $3, must_change_password = false, failed_login_count = 0,
+            locked_until = NULL, updated_at = now()
         WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
         "#,
         tenant_id,
@@ -783,6 +828,13 @@ mod tests {
         .expect("user exists")
     }
 
+    async fn lockout(transaction: &mut sqlx::PgConnection, user_id: Uuid) -> Option<DateTime<Utc>> {
+        sqlx::query_scalar!("SELECT locked_until FROM users WHERE id = $1", user_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .expect("user exists")
+    }
+
     #[tokio::test]
     async fn the_lockout_counter_only_moves_within_its_own_tenant() {
         let Some(mut tx) = transaction().await else {
@@ -793,16 +845,21 @@ mod tests {
         let (other_tenant_id, _) = given_user(&mut tx, "LOCKOUT-B").await;
 
         assert_eq!(
-            record_failed_login(&mut *tx, tenant_id, user_id)
+            record_failed_login(&mut *tx, tenant_id, user_id, 5, 15)
                 .await
-                .expect("the owning tenant increments the counter"),
+                .expect("the owning tenant increments the counter")
+                .failed_login_count,
             1
         );
 
         // FR-IDM-009: the same user id presented under a different tenant must
         // match no row, so one tenant cannot drive another tenant's account
         // into lockout.
-        let cross_tenant = record_failed_login(&mut *tx, other_tenant_id, user_id).await;
+        //
+        // The threshold is 1 here so that a row matching at all would lock the
+        // account outright: an assertion that only watched the counter would
+        // pass even if the lock had escaped the tenant guard.
+        let cross_tenant = record_failed_login(&mut *tx, other_tenant_id, user_id, 1, 15).await;
 
         assert!(
             matches!(cross_tenant, Err(sqlx::Error::RowNotFound)),
@@ -812,6 +869,11 @@ mod tests {
             failure_count(&mut tx, user_id).await,
             1,
             "the counter must not have moved"
+        );
+        assert_eq!(
+            lockout(&mut tx, user_id).await,
+            None,
+            "another tenant must not be able to lock the account"
         );
     }
 
@@ -824,7 +886,7 @@ mod tests {
         let (tenant_id, user_id) = given_user(&mut tx, "SUCCESS-A").await;
         let (other_tenant_id, _) = given_user(&mut tx, "SUCCESS-B").await;
 
-        record_failed_login(&mut *tx, tenant_id, user_id)
+        record_failed_login(&mut *tx, tenant_id, user_id, 5, 15)
             .await
             .expect("counted");
 

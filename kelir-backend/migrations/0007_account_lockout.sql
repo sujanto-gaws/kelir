@@ -1,0 +1,36 @@
+-- 0007_account_lockout.sql — give the failed-login lockout an expiry.
+--
+-- NFR-SEC-008 baselines "5 failed logins trigger a 15-minute lockout" (SRS
+-- v0.5, decision D-5). What Sprint 4 shipped had the five and not the fifteen:
+-- the fifth failure set status = 'LOCKED' and nothing ever cleared it. There
+-- was no expiry column, no scheduled sweep, and set_password_hash reset
+-- failed_login_count while leaving status alone, so even an administrator
+-- resetting the password did not restore sign-in. Five wrong passwords against
+-- a known username — comfortably inside the rate limiter's 10-per-minute
+-- budget — permanently disabled the account, and on a single-administrator
+-- deployment permanently disabled the deployment: the only account that could
+-- unlock it was the locked one (#55).
+--
+-- The expiry lands in its own column rather than being read out of `status`,
+-- because the two are different facts. `status` is administrative intent — an
+-- administrator disabled this account — and it holds until an administrator
+-- changes it. A failed-login lockout is transient and clears itself. Sharing
+-- one column is what left set_password_hash unable to tell whether clearing the
+-- lock was safe, and what made a locked account indistinguishable from a
+-- deactivated one in the admin screens.
+--
+-- NULL means never locked; a timestamp in the past means the lockout has
+-- expired. Both are "not locked", so nothing has to sweep the table — every
+-- check compares against now(). No index: the column is only ever read from a
+-- row already fetched by (tenant_id, username) during sign-in.
+
+-- Rows already sitting at status = 'LOCKED' are left alone. This migration
+-- cannot tell one that an administrator locked from one the old failed-login
+-- path locked, and guessing wrong would silently reactivate an account somebody
+-- disabled on purpose. From here 'LOCKED' means only the administrative lock, so
+-- any account carrying it from before is cleared the same way as any other:
+-- an administrator sets it active again. No deployment is affected today —
+-- staging is unprovisioned (#12) and nothing has been tagged — but a database
+-- that predates this migration keeps whatever locks it already had.
+
+ALTER TABLE users ADD COLUMN locked_until TIMESTAMPTZ;

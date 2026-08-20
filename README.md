@@ -104,16 +104,17 @@ The MVP focuses on:
 │   │   ├── 0004_string_lengths.sql
 │   │   ├── 0005_delegation_tenant_permissions.sql
 │   │   ├── 0006_password_reset_tokens.sql
-│   │   ├── 0007_master_data.sql
-│   │   ├── 0008_rad.sql
-│   │   ├── 0009_document.sql
-│   │   ├── 0010_workflow.sql
-│   │   ├── 0011_attachment.sql
-│   │   ├── 0012_comment.sql
-│   │   ├── 0013_activity_audit.sql
-│   │   ├── 0014_notification.sql
-│   │   ├── 0015_integration.sql
-│   │   └── 0016_plugin.sql
+│   │   ├── 0007_account_lockout.sql
+│   │   ├── 0008_master_data.sql
+│   │   ├── 0009_rad.sql
+│   │   ├── 0010_document.sql
+│   │   ├── 0011_workflow.sql
+│   │   ├── 0012_attachment.sql
+│   │   ├── 0013_comment.sql
+│   │   ├── 0014_activity_audit.sql
+│   │   ├── 0015_notification.sql
+│   │   ├── 0016_integration.sql
+│   │   └── 0017_plugin.sql
 │   └── src/
 │       ├── main.rs
 │       ├── config.rs
