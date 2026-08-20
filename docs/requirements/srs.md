@@ -14,7 +14,7 @@ The companion Solution Blueprint formerly bundled in this file now lives in the 
 |---|---|
 | Document Name | Kelir Software Requirements Specification |
 | Framework Name | Kelir |
-| Version | 0.6 |
+| Version | 0.7 |
 | Status | Initial Draft |
 | Date | 2026-08-05 |
 | Document Type | SRS |
@@ -32,6 +32,7 @@ Revision history:
 0.4 (2026-08-06): split the Solution Blueprint out into the System Design Document (docs/design/01. System Design Document.md); this file now contains the SRS only.
 0.5 (2026-08-11): separated priority from MVP scope — Must now means "required for 1.0" and §9 is the sole MVP gate (§4 preamble); raised FR-API-004 (OpenAPI) from Should to Must, since §9 criterion 14 requires documented APIs; baselined the six proposed targets in FR-ATT-004, NFR-PERF-001, NFR-AVA-004 and NFR-SEC-008/009/010. Recorded as decisions D-3 and D-5 in projects/planning/02. Product Backlog.md.
 0.6 (2026-08-20): narrowed FR-IDM-004 from "manage permissions" to maintaining the permission catalogue, which is system-defined rather than administrator-editable; the administrative surface is role–permission mapping (FR-IDM-005). No requirement added or removed, and MVP scope is unchanged — §9 names neither. Recorded as decision D-6 in projects/planning/02. Product Backlog.md.
+0.7 (2026-08-20): re-scoped FR-IDM-008 to department assignment, leaving department management to FR-ORG-002 and positions to FR-ORG-003, which the three requirements had been claiming between them; recorded that multi-tenant mode (FR-IDM-009) is not exercised before 1.0 and that a deployment serves one tenant, added to §10. No requirement added or removed, and MVP scope is unchanged — §9 names neither departments nor tenants. Recorded as decisions D-7 and D-8 in projects/planning/02. Product Backlog.md.
 ```
 
 > **Note:** As of v0.4 this file contains only the SRS. The Solution Blueprint has been split out into the System Design Document (`docs/design/01. System Design Document.md`), which is versioned independently.
@@ -278,10 +279,14 @@ Note: FR-AUTH-007 is planned for a later phase.
 | FR-IDM-005 | The system shall support role-permission mapping | Must |
 | FR-IDM-006 | The system shall support user delegation | Should |
 | FR-IDM-007 | The system shall support user status active/inactive | Must |
-| FR-IDM-008 | The system shall support department and position management | Should |
+| FR-IDM-008 | The system shall support assigning users to a department | Should |
 | FR-IDM-009 | The system shall support multi-tenant user isolation if multi-tenant mode is enabled | Should |
 
 Note: FR-IDM-004 read "the system shall manage permissions" until v0.6, which was taken to promise administrator CRUD over permission rows. It does not. A permission is an identifier the code checks — `identity:user:create` — so the set of meaningful permissions is fixed by the code, and a row an administrator invents at runtime is inert while a check whose row an administrator deletes becomes ungrantable. The catalogue is therefore **system-defined**: seeded by migration for core modules, and extended at installation time from a plugin's manifest (FR-PLG-005; `plugin_permissions`, [Database Schema](../design/02.%20Database%20Schema.md) §13.4). Administrators read it and decide which of its entries each role holds, which is FR-IDM-005. Recorded as decision **D-6**.
+
+Note: FR-IDM-008 read "department and position management" until v0.7, which duplicated FR-ORG-002 (departments) and FR-ORG-003 (positions) — three requirements over one existing table, `departments`, with no way to tell which of them an implementation had satisfied. Positions have no table at all; FR-ORG-003 is `Could` and unscheduled. The organization requirements own the entities; identity owns only the edge from a user to a department, which is the half that lives on `users.department_id` rather than on `departments`. Recorded as decision **D-8**.
+
+Note: FR-IDM-009 is conditional — it obliges isolation *if multi-tenant mode is enabled* — and as of v0.7 no deployment enables it. Identity queries are tenant-scoped already, but nothing resolves a tenant per request, so the mode has no state in which it is true. A deployment serves one tenant until per-request resolution is designed (§10), and the backend refuses to start with the mode switched on rather than presenting a sign-in nobody can complete. The requirement stands and is partly delivered; what is deferred is exercising it. Recorded as decision **D-7**.
 
 ---
 
@@ -294,6 +299,8 @@ Note: FR-IDM-004 read "the system shall manage permissions" until v0.6, which wa
 | FR-ORG-003 | The system shall manage positions | Could |
 | FR-ORG-004 | The system shall manage workgroups | Could |
 | FR-ORG-005 | The system shall support organizational hierarchy | Could |
+
+FR-ORG-002 is the sole administrative surface for departments and FR-ORG-003 for positions, as of v0.7 (decision **D-8**); FR-IDM-008 covers only assigning a user to a department.
 
 ---
 
@@ -831,6 +838,7 @@ Real-time WebSocket collaboration
 Advanced AI classification
 Complex ABAC policies
 Multi-region high availability
+Multiple tenants served by one deployment (FR-IDM-009 stands; the mode is not exercised before 1.0)
 Payment processing
 E-signature legal integration
 Machine learning analytics
