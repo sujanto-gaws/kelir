@@ -2,11 +2,24 @@ name: CI
 
 # The gates that make a pull request mergeable (git workflow section 4):
 # fmt, clippy, backend tests, frontend lint + type-check + tests, and builds.
+#
+# `pull_request` carries no branch filter, deliberately. It read
+# `branches: [main]`, which is correct only where every pull request targets
+# main -- and a branch split for reviewability does not. Both of Sprint 5's
+# stacked pull requests sat green-untested until their base merged and they
+# were retargeted, and the second also carried a defect the missing run would
+# have caught: the migration went into the base pull request and the test its
+# rows break into the stacked one, so the base failed CI on a test that was
+# already fixed one commit away.
+#
+# The cost is that a stacked pull request is tested twice -- once against its
+# base and again after retargeting -- which is the point rather than a waste:
+# rebasing onto a moved base is where composition defects hide, and this
+# project has already lost a release rehearsal to one.
 on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
 
 permissions:
   contents: read
