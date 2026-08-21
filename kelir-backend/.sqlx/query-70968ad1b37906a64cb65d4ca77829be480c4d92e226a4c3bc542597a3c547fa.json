@@ -1,0 +1,71 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT l.contact_mech_id,\n               m.contact_mech_type,\n               m.detail_json,\n               l.purpose_type,\n               l.starts_at,\n               l.ends_at,\n               l.is_primary,\n               l.allow_solicitation,\n               l.attributes_json\n        FROM mdm_party_contact_mechs l\n        JOIN mdm_contact_mechs m ON m.id = l.contact_mech_id AND m.deleted_at IS NULL\n        WHERE l.tenant_id = $1 AND l.party_id = $2 AND l.deleted_at IS NULL\n        ORDER BY l.is_primary DESC, l.starts_at, l.id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "contact_mech_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "contact_mech_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "detail_json",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 3,
+        "name": "purpose_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "starts_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 5,
+        "name": "ends_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "is_primary",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 7,
+        "name": "allow_solicitation",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 8,
+        "name": "attributes_json",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "70968ad1b37906a64cb65d4ca77829be480c4d92e226a4c3bc542597a3c547fa"
+}

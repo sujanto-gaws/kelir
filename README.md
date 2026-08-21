@@ -266,8 +266,9 @@ Done:
 Not done:
 
 - **No staging environment**, and none scheduled — retired by decision **D-9**; releases are verified against the compose stack built from release images (#12 closed as not planned)
-- **No authentication.** The login page is presentation only; sign-in arrives in Phase 2 with the identity module
-- **No business endpoints yet.** `/api/v1` is mounted and empty; the module trees under `src/modules/` are still stubs, filled in from Phase 2 onward
+- **No master-data UI.** The party endpoints exist; the list and detail screens over them are Sprint 6 with FR-MDM-008
+- **No party roles or role profiles.** A party can be created and read, but not yet given a SUPPLIER or CUSTOMER role — that is #81, in the same sprint
+- **Most module trees under `src/modules/` are still stubs**, filled in phase by phase. `auth`, `identity`, `organization`, `audit` and `master_data` are real; the rest are not
 
 ## Next Implementation Steps
 

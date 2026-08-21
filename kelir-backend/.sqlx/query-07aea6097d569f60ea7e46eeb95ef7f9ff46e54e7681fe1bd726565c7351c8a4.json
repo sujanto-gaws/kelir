@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO mdm_party_statuses (id, tenant_id, party_id, status, status_at, changed_by, comments)\n        VALUES ($1, $2, $3, $4, now(), $5, $6)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "07aea6097d569f60ea7e46eeb95ef7f9ff46e54e7681fe1bd726565c7351c8a4"
+}

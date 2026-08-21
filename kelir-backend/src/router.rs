@@ -5,7 +5,7 @@ use utoipa::OpenApi;
 use crate::error::ValidationDetail;
 use crate::health;
 use crate::middleware::cors::cors_layer;
-use crate::modules::{auth, identity};
+use crate::modules::{auth, identity, master_data};
 use crate::response::{ErrorBody, ErrorEnvelope, PageMeta};
 use crate::state::AppState;
 
@@ -37,6 +37,11 @@ use crate::state::AppState;
         identity::handlers::update_role,
         identity::handlers::delete_role,
         identity::handlers::list_permissions,
+        master_data::handlers::list_parties,
+        master_data::handlers::get_party,
+        master_data::handlers::create_party,
+        master_data::handlers::update_party,
+        master_data::handlers::delete_party,
     ),
     components(schemas(
         health::HealthBody,
@@ -58,6 +63,30 @@ use crate::state::AppState;
         identity::domain::CreateRoleRequest,
         identity::domain::UpdateRoleRequest,
         identity::handlers::SetPasswordRequest,
+        master_data::domain::PartyAggregate,
+        master_data::domain::PartySummary,
+        master_data::domain::PartyType,
+        master_data::domain::PartyStatusCode,
+        master_data::domain::Gender,
+        master_data::domain::ContactMechType,
+        master_data::domain::Person,
+        master_data::domain::PartyGroup,
+        master_data::domain::PartyIdentification,
+        master_data::domain::PartyStatus,
+        master_data::domain::PartyRelationship,
+        master_data::domain::PartyClassification,
+        master_data::domain::PartyContactMech,
+        master_data::domain::ContactMechDetail,
+        master_data::domain::PostalAddress,
+        master_data::domain::TelecomNumber,
+        master_data::domain::CreatePartyRequest,
+        master_data::domain::UpdatePartyRequest,
+        master_data::domain::PersonInput,
+        master_data::domain::PartyGroupInput,
+        master_data::domain::PartyIdentificationInput,
+        master_data::domain::PartyRelationshipInput,
+        master_data::domain::PartyClassificationInput,
+        master_data::domain::PartyContactMechInput,
         ErrorEnvelope,
         ErrorBody,
         ValidationDetail,
@@ -66,7 +95,8 @@ use crate::state::AppState;
     tags(
         (name = "operations", description = "Health, readiness and build information"),
         (name = "auth", description = "Sign in, sign out, session refresh"),
-        (name = "identity", description = "Users, roles and permissions")
+        (name = "identity", description = "Users, roles and permissions"),
+        (name = "master-data", description = "Parties and their attributes")
     ),
     info(
         title = "Kelir API",
@@ -109,6 +139,7 @@ fn api_v1_router(state: AppState) -> Router<AppState> {
     Router::new()
         .nest("/auth", auth::handlers::routes(state))
         .nest("/identity", identity::handlers::routes())
+        .nest("/master-data", master_data::handlers::routes())
 }
 
 async fn openapi_document() -> Json<utoipa::openapi::OpenApi> {
@@ -231,6 +262,52 @@ mod tests {
             expected.len(),
             "the document has auth paths this test does not know about: {documented:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn the_openapi_document_lists_every_party_route() {
+        // The Definition of Done says "API changes reflected in OpenAPI". The
+        // party surface is the first module added since that document started
+        // being checked, and a handler that loses its `#[utoipa::path]`
+        // annotation still routes — it just stops existing for every client
+        // generated from the spec.
+        let (_, body) = get("/api/docs/openapi.json").await;
+
+        let expected = [
+            ("/api/v1/master-data/parties", "get"),
+            ("/api/v1/master-data/parties", "post"),
+            ("/api/v1/master-data/parties/{id}", "get"),
+            ("/api/v1/master-data/parties/{id}", "put"),
+            ("/api/v1/master-data/parties/{id}", "delete"),
+        ];
+
+        for (path, method) in expected {
+            assert!(
+                body["paths"][path][method].is_object(),
+                "{method} {path} is missing from the published document"
+            );
+        }
+
+        // The aggregate is the payload shape (architecture 05), so the schema a
+        // client generates from has to carry its collections — a response type
+        // trimmed to the party row would document a contract the API does not
+        // serve.
+        let aggregate = &body["components"]["schemas"]["PartyAggregate"]["properties"];
+        for property in [
+            "partyId",
+            "partyTypeId",
+            "identifications",
+            "statuses",
+            "relationshipsFrom",
+            "relationshipsTo",
+            "classifications",
+            "contactMechanisms",
+        ] {
+            assert!(
+                aggregate[property].is_object(),
+                "PartyAggregate is missing {property}: {aggregate}"
+            );
+        }
     }
 
     #[tokio::test]

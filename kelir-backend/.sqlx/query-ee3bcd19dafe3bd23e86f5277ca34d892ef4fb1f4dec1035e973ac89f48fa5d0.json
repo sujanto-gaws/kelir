@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        DELETE FROM mdm_party_relationships\n        WHERE tenant_id = $1\n          AND (($3 AND from_party_id = $2) OR (NOT $3 AND to_party_id = $2))\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ee3bcd19dafe3bd23e86f5277ca34d892ef4fb1f4dec1035e973ac89f48fa5d0"
+}

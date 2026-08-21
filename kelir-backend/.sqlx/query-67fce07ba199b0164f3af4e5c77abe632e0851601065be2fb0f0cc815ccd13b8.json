@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO mdm_party_groups (\n            id, tenant_id, party_id, group_name, local_name, office_site_name,\n            annual_revenue, num_employees, ticker_symbol, comments, created_by\n        )\n        VALUES ($1, $2, $3, $4, $5, $6, ($7::text)::numeric, $8, $9, $10, $11)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Text",
+        "Int4",
+        "Varchar",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "67fce07ba199b0164f3af4e5c77abe632e0851601065be2fb0f0cc815ccd13b8"
+}

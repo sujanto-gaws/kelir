@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE mdm_party_groups\n        SET group_name = COALESCE($3, group_name),\n            local_name = COALESCE($4, local_name),\n            office_site_name = COALESCE($5, office_site_name),\n            annual_revenue = COALESCE(($6::text)::numeric, annual_revenue),\n            num_employees = COALESCE($7, num_employees),\n            ticker_symbol = COALESCE($8, ticker_symbol),\n            comments = COALESCE($9, comments),\n            updated_by = $10,\n            updated_at = now()\n        WHERE tenant_id = $1 AND party_id = $2 AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Text",
+        "Int4",
+        "Varchar",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d075f545776b6827a289d3eee1d638eb680199e612c4eeb2f85f934fe0a1a0cf"
+}
