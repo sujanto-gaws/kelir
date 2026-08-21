@@ -1,23 +1,14 @@
-//! SQLx access for the master-data module. Private to the module: other modules
-//! go through `service` (coding standard §2.2).
+//! Queries for the party itself and everything §4.1-4.11 hangs off it.
 //!
-//! Every query filters by `tenant_id` (Database Schema §1.5) and excludes
-//! soft-deleted rows.
-//!
-//! **Decimal columns travel as text.** `sqlx` is built here without
-//! `bigdecimal` or `rust_decimal`, so `query!` cannot decode `NUMERIC` at all.
-//! `annual_revenue` is therefore selected as `::text` and bound as
-//! `($n::text)::numeric` — the inner cast is what tells the macro the parameter
-//! is text, which a bare `CAST($n AS NUMERIC)` does not. That is not only a
-//! workaround: a JSON number is an IEEE double and `NUMERIC(18,2)` has values it
-//! cannot hold exactly, so the string is the honest wire shape either way.
+//! The conventions these follow — tenant scoping, soft delete, and why decimal
+//! columns travel as text — are on the parent module.
 
 use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::Value;
 use sqlx::{PgExecutor, PgPool};
 use uuid::Uuid;
 
-use super::domain::{
+use crate::modules::master_data::domain::{
     ContactMechType, Gender, PartyClassification, PartyContactMech, PartyGroup,
     PartyIdentification, PartyRelationship, PartyStatus, PartyStatusCode, PartySummary, PartyType,
     Person,
