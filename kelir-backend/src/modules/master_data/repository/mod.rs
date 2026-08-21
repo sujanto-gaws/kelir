@@ -14,9 +14,11 @@
 
 pub mod party;
 pub mod role;
+pub mod role_view;
 
 // Re-exported flat, so the service keeps addressing these as `repo::find_party`
 // — which file a query lives in is a question about this module's size, not
 // about its interface.
 pub use party::*;
 pub use role::*;
+pub use role_view::*;

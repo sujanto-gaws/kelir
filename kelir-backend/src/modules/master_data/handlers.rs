@@ -4,8 +4,8 @@ use axum::{Json, Router};
 use uuid::Uuid;
 
 use super::domain::{
-    AssignRoleRequest, CreatePartyRequest, PartyAggregate, PartyRoles, PartySummary,
-    UpdatePartyRequest,
+    AssignRoleRequest, CreatePartyRequest, PartyAggregate, PartyRoles, PartySummary, RoleView,
+    RoleViewQuery, RoleViewRow, UpdatePartyRequest,
 };
 use super::service;
 use crate::error::AppError;
@@ -28,6 +28,13 @@ pub fn routes() -> Router<AppState> {
             "/parties/{id}/roles/{roleTypeId}",
             axum::routing::put(assign_role).delete(remove_role),
         )
+        // The role views (SDD §12.2). Three paths rather than
+        // `/parties?role=SUPPLIER` because that is how the design names them,
+        // and because a client that asked for suppliers should not be able to
+        // ask for them wrongly — there is no role parameter to get wrong.
+        .route("/suppliers", get(list_suppliers))
+        .route("/customers", get(list_customers))
+        .route("/employees", get(list_employees))
 }
 
 #[utoipa::path(
@@ -203,4 +210,76 @@ async fn remove_role(
     service::remove_role(&state, &caller, id, &role_type_id).await?;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// Role views (FR-MDM-002, FR-MDM-008)
+// ---------------------------------------------------------------------------
+
+/// The three views differ only in which role they are over, so they share one
+/// body. The [`RoleView`] is chosen here, by the route — never taken from the
+/// request.
+async fn list_role_view(
+    state: &AppState,
+    caller: &Authenticated,
+    view: RoleView,
+    query: &RoleViewQuery,
+) -> Result<Json<ListEnvelope<RoleViewRow>>, AppError> {
+    let (rows, meta) = service::list_role_view(state, caller, view, query).await?;
+
+    Ok(Json(ListEnvelope::new(rows, meta)))
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/master-data/suppliers", tag = "master-data",
+    params(RoleViewQuery),
+    responses(
+        (status = 200, description = "Parties holding the SUPPLIER role", body = [RoleViewRow]),
+        (status = 403, description = "Missing master-data:party:read or master-data:party-role:read"),
+        (status = 422, description = "A filter names a value outside its vocabulary")
+    ),
+    security(("bearer" = []))
+)]
+async fn list_suppliers(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Query(query): Query<RoleViewQuery>,
+) -> Result<Json<ListEnvelope<RoleViewRow>>, AppError> {
+    list_role_view(&state, &caller, RoleView::Supplier, &query).await
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/master-data/customers", tag = "master-data",
+    params(RoleViewQuery),
+    responses(
+        (status = 200, description = "Parties holding the CUSTOMER role", body = [RoleViewRow]),
+        (status = 403, description = "Missing master-data:party:read or master-data:party-role:read"),
+        (status = 422, description = "A filter names a value outside its vocabulary")
+    ),
+    security(("bearer" = []))
+)]
+async fn list_customers(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Query(query): Query<RoleViewQuery>,
+) -> Result<Json<ListEnvelope<RoleViewRow>>, AppError> {
+    list_role_view(&state, &caller, RoleView::Customer, &query).await
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/master-data/employees", tag = "master-data",
+    params(RoleViewQuery),
+    responses(
+        (status = 200, description = "Parties holding the EMPLOYEE role", body = [RoleViewRow]),
+        (status = 403, description = "Missing master-data:party:read or master-data:party-role:read"),
+        (status = 422, description = "A filter names a value outside its vocabulary")
+    ),
+    security(("bearer" = []))
+)]
+async fn list_employees(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Query(query): Query<RoleViewQuery>,
+) -> Result<Json<ListEnvelope<RoleViewRow>>, AppError> {
+    list_role_view(&state, &caller, RoleView::Employee, &query).await
 }

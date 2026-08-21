@@ -38,6 +38,17 @@ While the major version is `0`, the public API may change in any release.
   party aggregate omits `roles` and `profiles` entirely for a caller holding
   `master-data:party:read` without `master-data:party-role:read`. Absent means
   not visible; `[]` means the party holds no roles.
+- **Role views (FR-MDM-002, FR-MDM-008).** `GET /api/v1/master-data/suppliers`,
+  `/customers` and `/employees` list the parties holding that role, each row
+  carrying the supplier, customer or employee number that makes it one — a
+  supplier list without supplier numbers would be a party list with a filter on
+  it. Search runs over the party code, the party name and the role number;
+  `statusId`, `partyTypeId` and `roleStatusId` filter; paging is the standard
+  envelope, with the page size clamped rather than refused. Removing a role
+  takes the party out of the view while keeping the assignment as history.
+  **No new permission:** a view requires both `master-data:party:read` and
+  `master-data:party-role:read`, because a row is made of both surfaces and a
+  view needing only one would be a way around the other.
 
 ### Changed
 
