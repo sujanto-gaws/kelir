@@ -803,3 +803,49 @@ async fn a_tenant_role_type_is_audited_under_the_name_the_tenant_gave_it() {
     // code column holds.
     assert_eq!(event_type, "OrganizationUnitLead.Created");
 }
+
+#[tokio::test]
+async fn a_role_type_from_another_tenant_does_not_resolve() {
+    // Separate from the party-scoping case above, which this does not cover:
+    // there, all three routes refuse at the party lookup and never reach the
+    // role type. Here the party is the caller's own, so the only thing standing
+    // between it and another tenant's vocabulary is the scoping on
+    // `find_role_type_id` — and a role type that crossed the boundary would be
+    // a foreign key from this tenant's data into that one's.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let party = create_party(&app, &token, party_group("PARTY-ACME", "Acme")).await;
+
+    let other_tenant = fixtures::create_tenant(&app.pool, "TNT-002", "Other").await;
+    sqlx::query(
+        "INSERT INTO mdm_role_types (id, tenant_id, role_type_code, name, is_system)
+         VALUES ($1, $2, 'FOREIGN_ROLE', 'Foreign Role', false)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(other_tenant)
+    .execute(&app.pool)
+    .await
+    .expect("insert the other tenant's role type");
+
+    let assigned = app
+        .put(
+            &role_path(party, "FOREIGN_ROLE"),
+            Some(&token),
+            json!({ "fromDate": "2026-01-01T00:00:00Z" }),
+        )
+        .await;
+
+    assert_eq!(
+        assigned.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "another tenant's role type resolved: {}",
+        assigned.body
+    );
+    assert_eq!(assigned.body["error"]["details"][0]["path"], "roleTypeId");
+
+    let roles: i64 = sqlx::query_scalar("SELECT count(*) FROM mdm_party_roles")
+        .fetch_one(&app.pool)
+        .await
+        .expect("query runs");
+    assert_eq!(roles, 0, "the role was assigned across a tenant boundary");
+}
