@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT s.status, s.status_at, s.comments, u.username AS \"username?\"\n        FROM mdm_party_statuses s\n        LEFT JOIN users u ON u.id = s.changed_by\n        WHERE s.tenant_id = $1 AND s.party_id = $2\n        ORDER BY s.status_at, s.id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "status_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 2,
+        "name": "comments",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "username?",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "4a17d2ed21ce3f912708898ab5ae18d9222a9d67cdc589bc0134c16beed78e34"
+}

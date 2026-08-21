@@ -1,0 +1,71 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT first_name, middle_name, last_name, personal_title, suffix,\n               gender, birth_date, marital_status, comments\n        FROM mdm_persons\n        WHERE tenant_id = $1 AND party_id = $2 AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "first_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "middle_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "last_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "personal_title",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "suffix",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "gender",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "birth_date",
+        "type_info": "Date"
+      },
+      {
+        "ordinal": 7,
+        "name": "marital_status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "comments",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "25a79d248f4a0295c4eb625b8543c72a0e8e10787e2dde25c75e9341c2abf755"
+}

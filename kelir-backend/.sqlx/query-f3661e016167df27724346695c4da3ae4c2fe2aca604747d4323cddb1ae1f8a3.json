@@ -1,0 +1,66 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT p.id,\n               p.party_code,\n               p.party_type,\n               p.status,\n               p.external_id,\n               p.created_at,\n               p.updated_at,\n               COALESCE(\n                   g.group_name,\n                   NULLIF(btrim(concat_ws(' ', pe.first_name, pe.middle_name, pe.last_name)), ''),\n                   p.party_code\n               ) AS \"name!\"\n        FROM mdm_parties p\n        LEFT JOIN mdm_persons pe ON pe.party_id = p.id AND pe.deleted_at IS NULL\n        LEFT JOIN mdm_party_groups g ON g.party_id = p.id AND g.deleted_at IS NULL\n        WHERE p.tenant_id = $1 AND p.deleted_at IS NULL\n        ORDER BY p.party_code\n        LIMIT $2 OFFSET $3\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "party_code",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "party_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "external_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "name!",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "f3661e016167df27724346695c4da3ae4c2fe2aca604747d4323cddb1ae1f8a3"
+}

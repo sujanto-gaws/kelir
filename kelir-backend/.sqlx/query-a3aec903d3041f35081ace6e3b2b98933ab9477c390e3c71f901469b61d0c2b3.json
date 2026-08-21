@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                    INSERT INTO mdm_contact_mechs (\n                        id, tenant_id, contact_mech_type, display_value, detail_json, created_by\n                    )\n                    VALUES ($1, $2, $3, $4, $5, $6)\n                    ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Text",
+        "Jsonb",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a3aec903d3041f35081ace6e3b2b98933ab9477c390e3c71f901469b61d0c2b3"
+}

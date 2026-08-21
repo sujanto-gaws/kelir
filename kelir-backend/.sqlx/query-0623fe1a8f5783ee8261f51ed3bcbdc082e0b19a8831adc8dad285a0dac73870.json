@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE mdm_persons\n        SET first_name = COALESCE($3, first_name),\n            middle_name = COALESCE($4, middle_name),\n            last_name = COALESCE($5, last_name),\n            personal_title = COALESCE($6, personal_title),\n            suffix = COALESCE($7, suffix),\n            gender = COALESCE($8, gender),\n            birth_date = COALESCE($9, birth_date),\n            marital_status = COALESCE($10, marital_status),\n            comments = COALESCE($11, comments),\n            updated_by = $12,\n            updated_at = now()\n        WHERE tenant_id = $1 AND party_id = $2 AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Date",
+        "Varchar",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0623fe1a8f5783ee8261f51ed3bcbdc082e0b19a8831adc8dad285a0dac73870"
+}

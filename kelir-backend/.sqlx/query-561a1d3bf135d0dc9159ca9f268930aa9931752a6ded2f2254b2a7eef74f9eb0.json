@@ -1,0 +1,90 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT r.id,\n               f.party_code AS party_id_from,\n               t.party_code AS party_id_to,\n               rf.role_type_code AS \"role_type_id_from?\",\n               rt.role_type_code AS \"role_type_id_to?\",\n               r.relationship_type,\n               r.starts_at,\n               r.ends_at,\n               r.status,\n               r.priority,\n               r.comments,\n               r.attributes_json\n        FROM mdm_party_relationships r\n        JOIN mdm_parties f ON f.id = r.from_party_id\n        JOIN mdm_parties t ON t.id = r.to_party_id\n        LEFT JOIN mdm_role_types rf ON rf.id = r.from_role_type_id\n        LEFT JOIN mdm_role_types rt ON rt.id = r.to_role_type_id\n        WHERE r.tenant_id = $1\n          AND r.deleted_at IS NULL\n          AND (($3 AND r.from_party_id = $2) OR (NOT $3 AND r.to_party_id = $2))\n        ORDER BY r.starts_at, r.id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "party_id_from",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "party_id_to",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "role_type_id_from?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "role_type_id_to?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "relationship_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "starts_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "ends_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 9,
+        "name": "priority",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 10,
+        "name": "comments",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 11,
+        "name": "attributes_json",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "561a1d3bf135d0dc9159ca9f268930aa9931752a6ded2f2254b2a7eef74f9eb0"
+}

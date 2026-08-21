@@ -1,0 +1,53 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT identification_type, id_value, issued_by, issue_date, expire_date, attributes_json\n        FROM mdm_party_identifications\n        WHERE tenant_id = $1 AND party_id = $2 AND deleted_at IS NULL\n        ORDER BY identification_type, id_value\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "identification_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "id_value",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "issued_by",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "issue_date",
+        "type_info": "Date"
+      },
+      {
+        "ordinal": 4,
+        "name": "expire_date",
+        "type_info": "Date"
+      },
+      {
+        "ordinal": 5,
+        "name": "attributes_json",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "9016789132911b6d81de6554a23aa6081874c12300b648bd088b850d93174f81"
+}
