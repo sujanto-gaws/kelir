@@ -1,6 +1,6 @@
 # Kelir Project Management
 
-**Status:** Living · **Last updated:** 2026-08-20
+**Status:** Living · **Last updated:** 2026-08-21
 
 This folder holds Kelir's **project management artifacts** — the documents that govern *when and in what order* things get built. They live outside [docs/](../docs/) deliberately: `docs/` describes the system (requirements, architecture, design, standards — see its [README](../docs/README.md) for the full index and authority rules); `projects/` describes the work.
 
@@ -13,7 +13,8 @@ projects/
 ├── planning/           what gets built, in what order
 ├── status/             per-sprint status reports (decision-oriented, one page)
 ├── retrospectives/     per-sprint and per-phase retrospectives with committed actions
-└── releases/           one evidence checklist per tagged release
+├── releases/           one evidence checklist per tagged release
+└── spikes/             one finding per time-boxed investigation
 ```
 
 Each folder is a numbered series (`NN. Title Case.md`); `00.` files are templates — copy them and continue the numbering from `01.`.
@@ -51,6 +52,14 @@ Each folder is a numbered series (`NN. Title Case.md`); `00.` files are template
 | [00. Release Checklist Template.md](releases/00.%20Release%20Checklist%20Template.md) | Per-release evidence record for the [release process](../docs/standards/04.%20Release%20Process.md): pre-flight (scope, tests, migrations, docs, version), staging pass with rollback rehearsal, ship steps, aftermath |
 | [01. Release v0.1.0.md](releases/01.%20Release%20v0.1.0.md) | Phase 1. Cut 2026-08-12 — pre-flight and ship steps done, staging deploy outstanding and blocking |
 | [02. Release v0.2.0.md](releases/02.%20Release%20v0.2.0.md) | Phase 2, cut 2026-08-20. Two blocking checklist items outstanding: staging (#12) for the second release running, and the N−1 rollback rehearsal, run for the first time here and failed (#76) |
+
+### spikes/
+
+A spike is time-boxed and its deliverable is a **finding**, not code — what was measured, what it disproved, and what each gap costs to close. The evidence lives outside `projects/` (a spike often needs a runnable harness); the finding links to it, and any decision it raises goes to the [Product Backlog](planning/02.%20Product%20Backlog.md) §6 rather than being settled inside the finding.
+
+| Document | Content |
+|---|---|
+| [01. JFSS Operator Parity.md](spikes/01.%20JFSS%20Operator%20Parity.md) | Issue #31, 2026-08-21. Whether the JSON Logic operators the JFSS registries require are supported in Rust, and whether client and server evaluate them identically. Found the registry naming a crate that does not exist, and the crate it meant returning unknown operators instead of rejecting them — inverting the Tamper-Proof Pattern. Evidence in [`spikes/jfss-operator-parity/`](../spikes/jfss-operator-parity/); adoption raised as **D-10** |
 
 ---
 

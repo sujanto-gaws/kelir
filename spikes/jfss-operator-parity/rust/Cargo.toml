@@ -1,0 +1,14 @@
+[package]
+name = "parity"
+version = "0.0.0"
+edition = "2021"
+publish = false
+default-run = "parity"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+jsonlogic-rs = "0.5.0"
+datalogic-rs = { version = "5.2.0", features = ["serde_json"] }
+bumpalo = "3"
+regex = "1"

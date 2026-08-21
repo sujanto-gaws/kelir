@@ -1,0 +1,10 @@
+{
+  "name": "jfss-parity-harness",
+  "private": true,
+  "type": "module",
+  "description": "Spike scaffolding for issue #31. Not part of the frontend build.",
+  "dependencies": {
+    "@goplasmatic/datalogic-wasm": "5.2.0",
+    "json-logic-js": "2.0.5"
+  }
+}

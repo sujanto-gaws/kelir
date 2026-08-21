@@ -1,7 +1,7 @@
 # JFSS Validation Rule Registry
-**Version:** 1.1.0  
+**Version:** 1.2.0  
 **Status:** Active Standard  
-**Last updated:** 2026-08-05  
+**Last updated:** 2026-08-21  
 **Pairs with:** JFSS v2.0.1  
 **Maintainers:** Full-Stack Engineering Team
 
@@ -69,6 +69,21 @@ Applies a custom regular expression. (Use this when the base `validation.pattern
 * **Implementation Notes:**
   * **Vue:** `new RegExp(params.pattern, params.flags).test(value)`
   * **Go:** `regexp.MustCompile(params.Pattern).MatchString(value)` *(Note: Go does not support all JS regex flags; ensure the pattern is cross-compatible).*
+  * **Rust:** `regex::Regex::new(&params.pattern)?.is_match(value)` — **but see the warning below. The Rust `regex` crate cannot honour the full ECMA-262 params schema, and the divergences are not all loud.**
+
+> ⚠️ **"ECMA 262 regex" is not a cross-language contract.** This rule is scoped `both`, so the frontend and the backend each decide it. Measured by the [operator-parity spike](../../projects/spikes/01.%20JFSS%20Operator%20Parity.md) §2.7 on 2026-08-21:
+>
+> | Pattern | ECMA-262 | Rust `regex` 1.x |
+> |---|---|---|
+> | `^[A-Z]{3}-\d{4}$` | matches | matches |
+> | `(?i)^abc$` | matches | matches |
+> | `^(?=.*[A-Z])(?=.*\d).{8,}$` — password complexity | matches | **refuses to compile** |
+> | `^(\w+)-\1$` — backreference | matches | **refuses to compile** |
+> | `^\d+$` against `٣٤٥` | **false** | **true** |
+>
+> Lookahead and backreferences fail loudly: the Rust `regex` crate rejects them by design, and a password-complexity pattern — the commonest custom `regex` rule there is — cannot be compiled at all. The character-class divergence fails **silently**: ECMA-262 `\d` is ASCII-only, Rust's `\d` is Unicode `Nd`, so the same rule rejects Arabic-Indic digits in the browser and accepts them on the server with no error on either side.
+>
+> Until this is resolved, prefer `validation.pattern` with a plainly ASCII, non-lookahead pattern, and pin digit classes explicitly (`[0-9]`, not `\d`). Two resolutions are open: constrain this rule's params schema to a cross-compatible subset and validate it when the schema is saved, or adopt a backtracking engine (`fancy-regex`) on the backend — which restores lookahead and backreferences but leaves the `\d` divergence needing an explicit pin either way.
 
 #### `oneOf`
 Ensures the value is strictly within a provided array.
@@ -220,6 +235,7 @@ The Vue submission handler must catch the `400` response, iterate through the `d
 
 ## 6. Changelog
 
+- **1.2.0 (2026-08-21):** Recorded the [operator-parity spike](../../projects/spikes/01.%20JFSS%20Operator%20Parity.md) (#31) finding against the `regex` rule: the "ECMA 262 regex" params schema is not honourable by the Rust `regex` crate — lookahead and backreferences are rejected at compile time, and `\d` diverges silently between the ASCII ECMA-262 class and Rust's Unicode `Nd`, which for a `scope: "both"` rule means the two sides reach opposite verdicts on the same input. Added Rust implementation notes and interim guidance; the two candidate resolutions are open.
 - **1.1.0 (2026-08-05):** Aligned the Section 5 error-response contract with JFSS v2.0.1 Section 10.3 (`path` with dot-notation, plus `rule`, `code`, `message`); added the document header and title; added examples for `notMatchesField`, `oneOf`, `notOneOf`, and `exists` (with the SQL-injection allow-list warning); split `oneOf`/`notOneOf` into separate entries; clarified `oneOf`/`notOneOf` vs. `validation.enum`; defined the `async` rule's request/response contract and Zod async-parse note; fixed the stale `jfss-meta.json` filename reference.
 - **1.0.0:** Initial release.
 
