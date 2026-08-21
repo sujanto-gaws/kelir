@@ -289,6 +289,139 @@ async fn the_aggregate_hides_roles_and_profiles_without_the_read_permission() {
 }
 
 #[tokio::test]
+async fn assigning_a_role_does_not_hand_back_the_profiles() {
+    // #104. `the_aggregate_hides_roles_and_profiles_without_the_read_permission`
+    // covers `GET` and provably does not cover `PUT`: the assign route
+    // answered with every role and every profile the party held while
+    // requiring only `master-data:party-role:assign`, so a caller who could
+    // write a role could read a bank account and a credit limit — the exact
+    // data `master-data:party-role:read` was introduced to gate.
+    //
+    // A caller restating a role the party already holds sends no profile and
+    // needs none back to know the write happened.
+    let app = TestApp::spawn().await;
+    let administrator = app.administrator_token().await;
+    let party = target_party(&app, 65).await;
+
+    app.put(
+        &format!("/api/v1/master-data/parties/{party}/roles/SUPPLIER"),
+        Some(&administrator),
+        json!({
+            "fromDate": "2026-01-01T00:00:00Z",
+            "profile": {
+                "supplier": { "supplierNumber": "SUP-0065", "bankAccount": "1234567890" }
+            },
+        }),
+    )
+    .await;
+    app.put(
+        &format!("/api/v1/master-data/parties/{party}/roles/CUSTOMER"),
+        Some(&administrator),
+        json!({
+            "fromDate": "2026-01-01T00:00:00Z",
+            "profile": {
+                "customer": { "customerNumber": "CUS-0065", "creditLimit": "50000000.00" }
+            },
+        }),
+    )
+    .await;
+
+    // A caller who may assign a role and nothing else.
+    let assigner = caller_holding(&app, &["master-data:party-role:assign"], 65).await;
+    let restated = app
+        .put(
+            &format!("/api/v1/master-data/parties/{party}/roles/SUPPLIER"),
+            Some(&assigner),
+            json!({ "fromDate": "2026-01-01T00:00:00Z" }),
+        )
+        .await;
+
+    assert_eq!(restated.status, StatusCode::OK, "{}", restated.body);
+
+    // The write happened, and the response says which assignment it was.
+    assert_eq!(
+        restated.data()["roleTypeId"],
+        "SUPPLIER",
+        "{}",
+        restated.body
+    );
+
+    for secret in ["1234567890", "SUP-0065", "50000000.00", "CUS-0065"] {
+        assert!(
+            !restated.body.to_string().contains(secret),
+            "assigning a role handed back {secret} to a caller without              master-data:party-role:read: {}",
+            restated.body
+        );
+    }
+
+    assert!(
+        restated.data().get("profiles").is_none(),
+        "the assign response still carries a profiles member: {}",
+        restated.body
+    );
+    assert!(
+        restated.data().get("roles").is_none(),
+        "the assign response still carries every role the party holds: {}",
+        restated.body
+    );
+
+    // And the route that does gate them still refuses this caller outright,
+    // so there is no second way round.
+    let refused = app
+        .get(
+            &format!("/api/v1/master-data/parties/{party}/roles"),
+            Some(&assigner),
+        )
+        .await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+}
+
+#[tokio::test]
+async fn a_first_assignment_does_not_hand_back_the_profiles_either() {
+    // The 201 path, not only the 200 one. A caller assigning a role for the
+    // first time sends the profile, so echoing it back leaks nothing it did
+    // not already know — but it would still carry the *other* roles' profiles,
+    // which is the half that matters.
+    let app = TestApp::spawn().await;
+    let administrator = app.administrator_token().await;
+    let party = target_party(&app, 66).await;
+
+    app.put(
+        &format!("/api/v1/master-data/parties/{party}/roles/CUSTOMER"),
+        Some(&administrator),
+        json!({
+            "fromDate": "2026-01-01T00:00:00Z",
+            "profile": {
+                "customer": { "customerNumber": "CUS-0066", "creditLimit": "90000000.00" }
+            },
+        }),
+    )
+    .await;
+
+    let assigner = caller_holding(&app, &["master-data:party-role:assign"], 66).await;
+    let created = app
+        .put(
+            &format!("/api/v1/master-data/parties/{party}/roles/SUPPLIER"),
+            Some(&assigner),
+            json!({
+                "fromDate": "2026-01-01T00:00:00Z",
+                "profile": { "supplier": { "supplierNumber": "SUP-0066" } },
+            }),
+        )
+        .await;
+
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+    for secret in ["CUS-0066", "90000000.00"] {
+        assert!(
+            !created.body.to_string().contains(secret),
+            "a first assignment handed back another role's {secret}: {}",
+            created.body
+        );
+    }
+}
+
+#[tokio::test]
 async fn an_empty_roles_list_is_not_the_same_as_a_hidden_one() {
     // `[]` says this party holds no roles; absence says you cannot see. A
     // client that could not tell them apart would render "no roles" to someone

@@ -232,7 +232,15 @@ async fn an_employee_profile_links_a_department_and_a_manager() {
         .await;
     assert_eq!(assigned.status, StatusCode::CREATED, "{}", assigned.body);
 
-    let profile = assigned.data()["profiles"]["employee"].clone();
+    // The assignment answers with the assignment; the profile is read back
+    // under the permission that gates it (#104).
+    assert_eq!(assigned.data()["roleTypeId"], "EMPLOYEE");
+
+    let profile = app
+        .get(&format!("{PARTIES}/{employee}/roles"), Some(&token))
+        .await
+        .data()["profiles"]["employee"]
+        .clone();
     assert_eq!(profile["employeeNumber"], "EMP-0001");
     assert_eq!(profile["departmentId"], department.to_string());
     // The manager comes back as a partyId, not a UUID: the aggregate speaks in
@@ -290,19 +298,26 @@ async fn assigning_a_role_the_party_already_holds_updates_it_rather_than_doublin
         again.body
     );
 
-    let roles = again.data()["roles"].as_array().expect("roles is a list");
+    // The response is the assignment that was written, and the collection is
+    // read back to prove there is still only one of it.
+    assert_eq!(again.data()["roleTypeId"], "SUPPLIER");
+    assert_eq!(again.data()["fromDate"], "2026-03-01T00:00:00Z");
+    assert_eq!(again.data()["comments"], "renegotiated");
+
+    let held = app
+        .get(&format!("{PARTIES}/{party}/roles"), Some(&token))
+        .await;
+    let roles = held.data()["roles"].as_array().expect("roles is a list");
     assert_eq!(
         roles.len(),
         1,
         "the party holds SUPPLIER twice: {}",
-        again.body
+        held.body
     );
-    assert_eq!(roles[0]["fromDate"], "2026-03-01T00:00:00Z");
-    assert_eq!(roles[0]["comments"], "renegotiated");
 
     // The profile was updated in place: the number it was not asked to change
     // is still there, and the field it was asked to change moved.
-    let supplier = &again.data()["profiles"]["supplier"];
+    let supplier = &held.data()["profiles"]["supplier"];
     assert_eq!(supplier["approvalStatus"], "BLACKLISTED");
     assert_eq!(
         supplier["supplierNumber"], "SUP-0001",
@@ -463,7 +478,9 @@ async fn a_role_can_be_assigned_again_after_it_was_removed() {
 
     assert_eq!(again.status, StatusCode::CREATED, "{}", again.body);
     assert_eq!(
-        again.data()["profiles"]["supplier"]["supplierNumber"],
+        app.get(&format!("{PARTIES}/{party}/roles"), Some(&token))
+            .await
+            .data()["profiles"]["supplier"]["supplierNumber"],
         "SUP-0001"
     );
 }
@@ -516,11 +533,16 @@ async fn a_tenant_role_type_can_be_added_without_a_migration_and_assigned() {
         .await;
 
     assert_eq!(assigned.status, StatusCode::CREATED, "{}", assigned.body);
-    assert_eq!(assigned.data()["roles"][0]["roleTypeId"], "AUDITOR");
+    assert_eq!(assigned.data()["roleTypeId"], "AUDITOR");
+
     // A role type with no profile table carries no profile.
-    assert!(assigned.data()["profiles"]
+    let held = app
+        .get(&format!("{PARTIES}/{party}/roles"), Some(&token))
+        .await;
+    assert_eq!(held.data()["roles"][0]["roleTypeId"], "AUDITOR");
+    assert!(held.data()["profiles"]
         .as_object()
-        .is_some_and(|p| p.is_empty()));
+        .is_some_and(|profiles| profiles.is_empty()));
 }
 
 #[tokio::test]

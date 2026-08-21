@@ -8,9 +8,9 @@ use super::domain::{
     validate_assign_role, validate_create_party, validate_update_party, AssignRoleRequest,
     ContactMechType, CreatePartyRequest, EmploymentType, PartyAggregate, PartyClassificationInput,
     PartyContactMechInput, PartyIdentificationInput, PartyProfiles, PartyRelationshipInput,
-    PartyRoleStatus, PartyRoles, PartyStatusCode, PartySummary, PartyType, RoleProfileInput,
-    RoleView, RoleViewQuery, RoleViewRow, SupplierApprovalStatus, UpdatePartyRequest,
-    PROFILED_ROLE_TYPES,
+    PartyRole, PartyRoleStatus, PartyRoles, PartyStatusCode, PartySummary, PartyType,
+    RoleProfileInput, RoleView, RoleViewQuery, RoleViewRow, SupplierApprovalStatus,
+    UpdatePartyRequest, PROFILED_ROLE_TYPES,
 };
 use super::repository::{
     self as repo, ClassificationFields, ContactMechFields, ContactProfileFields,
@@ -947,7 +947,7 @@ pub async fn assign_role(
     party_id: Uuid,
     role_type_code: &str,
     request: AssignRoleRequest,
-) -> Result<(bool, PartyRoles), AppError> {
+) -> Result<(bool, PartyRole), AppError> {
     caller.require("master-data:party-role:assign")?;
 
     let tenant_id = caller.tenant_id();
@@ -1056,9 +1056,24 @@ pub async fn assign_role(
     )
     .await;
 
-    let roles = load_roles(state, tenant_id, party_id, &party.party_code).await?;
+    // The assignment that was written, and only it.
+    //
+    // This route used to answer with `load_roles` — every role the party holds
+    // and every profile behind them — while requiring only
+    // `master-data:party-role:assign`. That handed a caller the bank account
+    // and the credit limit that `master-data:party-role:read` exists to gate,
+    // one route away from the aggregate that withholds them (#104).
+    //
+    // Gating the collection here would have closed the leak too. Returning the
+    // assignment the URL addresses closes it without a second gate to keep in
+    // step with the first — and it is the smaller contract: a caller who wants
+    // the profiles asks `GET .../roles`, under the permission that governs
+    // them.
+    let assignment = repo::find_party_role(&state.pool, tenant_id, party_id, role_type)
+        .await?
+        .ok_or_else(|| AppError::not_found("Party role"))?;
 
-    Ok((creating, roles))
+    Ok((creating, assignment))
 }
 
 /// Ends a role assignment and closes the profile behind it.
