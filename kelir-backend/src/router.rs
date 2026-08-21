@@ -45,6 +45,9 @@ use crate::state::AppState;
         master_data::handlers::get_party_roles,
         master_data::handlers::assign_role,
         master_data::handlers::remove_role,
+        master_data::handlers::list_suppliers,
+        master_data::handlers::list_customers,
+        master_data::handlers::list_employees,
     ),
     components(schemas(
         health::HealthBody,
@@ -106,6 +109,7 @@ use crate::state::AppState;
         master_data::domain::CustomerProfileInput,
         master_data::domain::EmployeeProfileInput,
         master_data::domain::ContactProfileInput,
+        master_data::domain::RoleViewRow,
         ErrorEnvelope,
         ErrorBody,
         ValidationDetail,
@@ -304,12 +308,43 @@ mod tests {
                 "/api/v1/master-data/parties/{id}/roles/{roleTypeId}",
                 "delete",
             ),
+            ("/api/v1/master-data/suppliers", "get"),
+            ("/api/v1/master-data/customers", "get"),
+            ("/api/v1/master-data/employees", "get"),
         ];
 
         for (path, method) in expected {
             assert!(
                 body["paths"][path][method].is_object(),
                 "{method} {path} is missing from the published document"
+            );
+        }
+
+        // The role views are the API half of FR-MDM-008, so the parameters that
+        // make them searchable have to be in the document a client generates
+        // from: an endpoint published without them reads as a list that cannot
+        // be filtered, and #101 is written against this spec.
+        let parameters = body["paths"]["/api/v1/master-data/suppliers"]["get"]["parameters"]
+            .as_array()
+            .map(|parameters| {
+                parameters
+                    .iter()
+                    .filter_map(|parameter| parameter["name"].as_str().map(str::to_owned))
+                    .collect::<Vec<String>>()
+            })
+            .unwrap_or_default();
+
+        for parameter in [
+            "page",
+            "pageSize",
+            "search",
+            "statusId",
+            "partyTypeId",
+            "roleStatusId",
+        ] {
+            assert!(
+                parameters.iter().any(|name| name == parameter),
+                "the supplier view is published without {parameter}: {parameters:?}"
             );
         }
 

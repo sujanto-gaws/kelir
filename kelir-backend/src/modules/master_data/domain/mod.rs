@@ -29,12 +29,14 @@
 
 pub mod party;
 pub mod role;
+pub mod role_view;
 
 // Re-exported flat, so the rest of the module keeps addressing these as
 // `domain::PartyAggregate` — where the type is declared is a question about this
 // file's size, not about the module's interface.
 pub use party::*;
 pub use role::*;
+pub use role_view::*;
 
 use crate::error::{AppError, ValidationDetail};
 

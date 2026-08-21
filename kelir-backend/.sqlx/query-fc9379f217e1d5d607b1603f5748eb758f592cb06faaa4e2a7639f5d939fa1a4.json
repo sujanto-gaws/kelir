@@ -1,0 +1,27 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH matched AS (\n            SELECT p.party_code,\n                   COALESCE(\n                       g.group_name,\n                       NULLIF(btrim(concat_ws(' ', pe.first_name, pe.middle_name, pe.last_name)), ''),\n                       p.party_code\n                   ) AS name,\n                   COALESCE(sp.supplier_number, cp.customer_number, ep.employee_number) AS role_number\n            FROM mdm_party_roles r\n            JOIN mdm_role_types t\n              ON t.id = r.role_type_id AND t.tenant_id = r.tenant_id AND t.deleted_at IS NULL\n            JOIN mdm_parties p\n              ON p.id = r.party_id AND p.tenant_id = r.tenant_id AND p.deleted_at IS NULL\n            LEFT JOIN mdm_persons pe\n              ON pe.party_id = p.id AND pe.tenant_id = p.tenant_id AND pe.deleted_at IS NULL\n            LEFT JOIN mdm_party_groups g\n              ON g.party_id = p.id AND g.tenant_id = p.tenant_id AND g.deleted_at IS NULL\n            LEFT JOIN mdm_supplier_profiles sp\n              ON $2 = 'SUPPLIER' AND sp.party_id = p.id AND sp.tenant_id = p.tenant_id\n                 AND sp.deleted_at IS NULL\n            LEFT JOIN mdm_customer_profiles cp\n              ON $2 = 'CUSTOMER' AND cp.party_id = p.id AND cp.tenant_id = p.tenant_id\n                 AND cp.deleted_at IS NULL\n            LEFT JOIN mdm_employee_profiles ep\n              ON $2 = 'EMPLOYEE' AND ep.party_id = p.id AND ep.tenant_id = p.tenant_id\n                 AND ep.deleted_at IS NULL\n            WHERE r.tenant_id = $1\n              AND t.role_type_code = $2\n              AND r.deleted_at IS NULL\n              AND ($3::text IS NULL OR p.status = $3)\n              AND ($4::text IS NULL OR p.party_type = $4)\n              AND ($5::text IS NULL OR r.status = $5)\n        )\n        SELECT count(*) FROM matched\n        WHERE $6::text IS NULL\n           OR party_code ILIKE $6\n           OR name ILIKE $6\n           OR role_number ILIKE $6\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "fc9379f217e1d5d607b1603f5748eb758f592cb06faaa4e2a7639f5d939fa1a4"
+}

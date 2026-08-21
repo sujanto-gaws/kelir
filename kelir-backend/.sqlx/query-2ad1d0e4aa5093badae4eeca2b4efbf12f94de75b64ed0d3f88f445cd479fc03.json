@@ -1,0 +1,95 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH matched AS (\n            SELECT p.id,\n                   p.party_code,\n                   p.party_type,\n                   p.status AS party_status,\n                   p.external_id,\n                   p.created_at,\n                   p.updated_at,\n                   r.starts_at,\n                   r.ends_at,\n                   r.status AS role_status,\n                   COALESCE(\n                       g.group_name,\n                       NULLIF(btrim(concat_ws(' ', pe.first_name, pe.middle_name, pe.last_name)), ''),\n                       p.party_code\n                   ) AS name,\n                   COALESCE(sp.supplier_number, cp.customer_number, ep.employee_number) AS role_number\n            FROM mdm_party_roles r\n            JOIN mdm_role_types t\n              ON t.id = r.role_type_id AND t.tenant_id = r.tenant_id AND t.deleted_at IS NULL\n            JOIN mdm_parties p\n              ON p.id = r.party_id AND p.tenant_id = r.tenant_id AND p.deleted_at IS NULL\n            LEFT JOIN mdm_persons pe\n              ON pe.party_id = p.id AND pe.tenant_id = p.tenant_id AND pe.deleted_at IS NULL\n            LEFT JOIN mdm_party_groups g\n              ON g.party_id = p.id AND g.tenant_id = p.tenant_id AND g.deleted_at IS NULL\n            LEFT JOIN mdm_supplier_profiles sp\n              ON $2 = 'SUPPLIER' AND sp.party_id = p.id AND sp.tenant_id = p.tenant_id\n                 AND sp.deleted_at IS NULL\n            LEFT JOIN mdm_customer_profiles cp\n              ON $2 = 'CUSTOMER' AND cp.party_id = p.id AND cp.tenant_id = p.tenant_id\n                 AND cp.deleted_at IS NULL\n            LEFT JOIN mdm_employee_profiles ep\n              ON $2 = 'EMPLOYEE' AND ep.party_id = p.id AND ep.tenant_id = p.tenant_id\n                 AND ep.deleted_at IS NULL\n            WHERE r.tenant_id = $1\n              AND t.role_type_code = $2\n              AND r.deleted_at IS NULL\n              AND ($3::text IS NULL OR p.status = $3)\n              AND ($4::text IS NULL OR p.party_type = $4)\n              AND ($5::text IS NULL OR r.status = $5)\n        )\n        SELECT id AS \"id!\",\n               party_code AS \"party_code!\",\n               party_type AS \"party_type!\",\n               party_status AS \"party_status!\",\n               external_id,\n               created_at AS \"created_at!\",\n               updated_at AS \"updated_at!\",\n               starts_at AS \"starts_at!\",\n               ends_at,\n               role_status AS \"role_status!\",\n               name AS \"name!\",\n               role_number\n        FROM matched\n        WHERE $6::text IS NULL\n           OR party_code ILIKE $6\n           OR name ILIKE $6\n           OR role_number ILIKE $6\n        ORDER BY party_code\n        LIMIT $7 OFFSET $8\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "party_code!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "party_type!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "party_status!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "external_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "created_at!",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "updated_at!",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "starts_at!",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "ends_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "role_status!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 10,
+        "name": "name!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 11,
+        "name": "role_number",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "2ad1d0e4aa5093badae4eeca2b4efbf12f94de75b64ed0d3f88f445cd479fc03"
+}
