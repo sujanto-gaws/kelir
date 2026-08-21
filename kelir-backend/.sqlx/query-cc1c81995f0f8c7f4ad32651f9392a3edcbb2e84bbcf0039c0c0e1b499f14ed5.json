@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE roles\n        SET deleted_at = now(), updated_by = $3, updated_at = now()\n        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL AND is_system = false\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cc1c81995f0f8c7f4ad32651f9392a3edcbb2e84bbcf0039c0c0e1b499f14ed5"
+}

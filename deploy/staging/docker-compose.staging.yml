@@ -67,6 +67,15 @@ services:
       # entry Caddy writes into X-Forwarded-For is the real caller. Raising this
       # without adding a real proxy hands callers control of their own address.
       KELIR_TRUSTED_PROXY_HOPS: ${KELIR_TRUSTED_PROXY_HOPS:-1}
+      # The first-run administrator. Without these a fresh deployment migrates
+      # its database, warns that nobody can sign in, and serves an application
+      # no one can enter -- which is what it did, unnoticed, until the release
+      # stack was actually run for the first time. They are read from .env and
+      # left empty on a deployment that already has users; the bootstrap is a
+      # no-op once any user exists.
+      KELIR_BOOTSTRAP_ADMIN_USERNAME: ${KELIR_BOOTSTRAP_ADMIN_USERNAME:-}
+      KELIR_BOOTSTRAP_ADMIN_PASSWORD: ${KELIR_BOOTSTRAP_ADMIN_PASSWORD:-}
+      KELIR_BOOTSTRAP_ADMIN_EMAIL: ${KELIR_BOOTSTRAP_ADMIN_EMAIL:-}
       KELIR_LOG: info,sqlx=warn
     # Docker does not provide host.docker.internal on Linux by default; this
     # maps it to the bridge gateway so the same URL works on every platform.

@@ -25,6 +25,6 @@ Quick reference:
 | Task | Command |
 |---|---|
 | Develop | `docker compose -f deploy/docker/docker-compose.yml up` |
-| Test a build by IP | `cd deploy/staging && ./deploy-local.sh 0.1.0` |
-| Provision a staging host | `sudo ./provision-ubuntu-24.sh` |
-| Deploy to staging | `./deploy.sh 0.1.0` |
+| **Release check** — bring the stack up from release images and smoke-test it | `cd deploy/staging && ./deploy-local.sh 0.1.0` |
+| Provision a staging host — **unused, no host exists** ([why](staging/README.md)) | `sudo ./provision-ubuntu-24.sh` |
+| Deploy to staging — **unused, no host exists** ([why](staging/README.md)) | `./deploy.sh 0.1.0` |
