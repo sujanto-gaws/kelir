@@ -10,6 +10,7 @@ use super::domain::{
     PartyContactMechInput, PartyIdentificationInput, PartyProfiles, PartyRelationshipInput,
     PartyRoleStatus, PartyRoles, PartyStatusCode, PartySummary, PartyType, RoleProfileInput,
     RoleView, RoleViewQuery, RoleViewRow, SupplierApprovalStatus, UpdatePartyRequest,
+    PROFILED_ROLE_TYPES,
 };
 use super::repository::{
     self as repo, ClassificationFields, ContactMechFields, ContactProfileFields,
@@ -470,11 +471,32 @@ pub async fn delete_party(
 
     let tenant_id = caller.tenant_id();
     let actor = Some(caller.user_id());
-    let removed = repo::soft_delete_party(&state.pool, tenant_id, id, actor).await?;
+
+    // The party and everything it holds close together, or nothing does. A
+    // party soft-deleted while its roles stayed live is what left a supplier
+    // number occupied by a row no route could reach (#103): the unique index
+    // on `supplier_number` is partial on `deleted_at IS NULL`, so the orphan
+    // kept the number while `remove_role` had stopped being able to find it.
+    let mut transaction = state.pool.begin().await?;
+
+    let removed = repo::soft_delete_party(&mut *transaction, tenant_id, id, actor).await?;
 
     if removed == 0 {
         return Err(AppError::not_found("Party"));
     }
+
+    repo::soft_delete_party_roles(&mut *transaction, tenant_id, id, actor).await?;
+
+    // Every profile table, rather than only the ones behind the roles just
+    // closed. A profile can only exist where its role did, so the extra
+    // statements match nothing in the ordinary case — and in the case this
+    // change exists for, an orphan left by an earlier delete, matching nothing
+    // is not what we want.
+    for role_type in PROFILED_ROLE_TYPES {
+        repo::soft_delete_role_profile(&mut transaction, tenant_id, id, role_type, actor).await?;
+    }
+
+    transaction.commit().await?;
 
     // Append to the history before the audit event, for the same reason the
     // create path writes one: `deleted_at` records that it happened, and this

@@ -50,6 +50,17 @@ While the major version is `0`, the public API may change in any release.
   `master-data:party-role:read`, because a row is made of both surfaces and a
   view needing only one would be a way around the other.
 
+### Fixed
+
+- **Deleting a party burned the supplier, customer or employee number it held,
+  permanently (#103).** `delete_party` soft-deleted only the `mdm_parties` row,
+  and the unique indexes on those numbers are partial on `deleted_at IS NULL` —
+  so the profile kept the number while no route could reach it to release it
+  (`remove_role` refuses at the party lookup). The party code *was* released, so
+  a re-created party could take the old code and then be refused its old number.
+  The delete now closes the party, its live roles and its profiles in one
+  transaction, keeping them as closed history rather than erasing them.
+
 ### Changed
 
 - The planned migrations shift down by one: `0009_party_role_permissions.sql`
