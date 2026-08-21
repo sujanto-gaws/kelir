@@ -150,6 +150,37 @@ where
     }
 }
 
+/// Reads `KELIR_MULTI_TENANT`, and refuses to start when it is on.
+///
+/// **The flag is parsed but not honoured, on purpose.** Tenancy is half-built:
+/// `tenant_id` is in the BASE column set and every identity read is scoped by
+/// it, but nothing resolves a tenant per request. With the flag on,
+/// `resolve_for_sign_in` demands a tenant code, the login form has no field for
+/// one, and the deployment reaches a state where **nobody can sign in at all**
+/// (#67) — discovered on first use, by a person who cannot fix it from the UI.
+///
+/// Refusing at startup turns that into a container that does not start and says
+/// which variable to unset. It is the same trade the deployment already makes
+/// for a placeholder `KELIR_JWT_SECRET` in production: a setting whose
+/// consequence is discovered late is better refused early.
+///
+/// Decision **D-7** (2026-08-20) keeps a deployment single-tenant until
+/// per-request resolution is designed, which is deferred past 1.0. The
+/// resolution code stays and stays tested — this guard is on the deployment
+/// path, not the code path — so removing it is all that stands between here and
+/// multi-tenant mode once the missing half exists.
+fn multi_tenant(raw: &str) -> Result<bool, ConfigError> {
+    if flag(raw, "KELIR_MULTI_TENANT")? {
+        return Err(ConfigError::Invalid {
+            key: "KELIR_MULTI_TENANT",
+            reason: "multi-tenant mode is not supported yet: no per-request tenant                      resolution exists, so sign-in would demand a tenant code that no                      client can send and nobody could sign in. Unset it or set it to                      false. See decision D-7 in projects/planning/02. Product Backlog.md"
+                .to_owned(),
+        });
+    }
+
+    Ok(false)
+}
+
 /// Secrets shipped in `.env.example` and the compose stack. Never valid in
 /// production.
 const PLACEHOLDER_SECRETS: &[&str] = &["change-me", "changeme", "secret", "test-secret"];
@@ -287,10 +318,7 @@ impl AppConfig {
             storage_driver: optional("KELIR_STORAGE_DRIVER", "local"),
             smtp_host: optional("KELIR_SMTP_HOST", "localhost"),
             frontend_url: optional("KELIR_FRONTEND_URL", "http://localhost:5173"),
-            multi_tenant: flag(
-                &optional("KELIR_MULTI_TENANT", "false"),
-                "KELIR_MULTI_TENANT",
-            )?,
+            multi_tenant: multi_tenant(&optional("KELIR_MULTI_TENANT", "false"))?,
             // Uppercased on the way in so the configured value and the codes
             // callers send normalise identically (organization::domain).
             default_tenant_code: optional("KELIR_DEFAULT_TENANT_CODE", "SYSTEM")
@@ -541,25 +569,65 @@ mod tests {
 
     #[test]
     fn reads_the_multi_tenant_flag_in_every_documented_spelling() {
-        for (raw, expected) in [
-            ("true", true),
-            ("1", true),
-            ("yes", true),
-            ("on", true),
-            ("TRUE", true),
-            ("false", false),
-            ("0", false),
-            ("no", false),
-            ("off", false),
-        ] {
+        for raw in ["false", "0", "no", "off", "FALSE"] {
             let config = AppConfig::from_source(source(&[
                 ("KELIR_JWT_SECRET", "s3cret"),
                 ("KELIR_MULTI_TENANT", raw),
             ]))
             .unwrap_or_else(|_| panic!("{raw} parses"));
 
-            assert_eq!(config.multi_tenant, expected, "for {raw}");
+            assert!(!config.multi_tenant, "for {raw}");
         }
+    }
+
+    #[test]
+    fn refuses_to_start_in_multi_tenant_mode_however_the_flag_is_spelled() {
+        // Every spelling `flag` accepts, not only the literal "true": a guard
+        // that matched one of them would let `KELIR_MULTI_TENANT=1` start a
+        // deployment nobody can sign in to (#67), which is the whole failure
+        // it exists to prevent.
+        for raw in ["true", "1", "yes", "on", "TRUE"] {
+            let error = AppConfig::from_source(source(&[
+                ("KELIR_JWT_SECRET", "s3cret"),
+                ("KELIR_MULTI_TENANT", raw),
+            ]))
+            .unwrap_err();
+
+            let ConfigError::Invalid { key, reason } = error else {
+                panic!("{raw} must be refused as invalid configuration");
+            };
+
+            assert_eq!(key, "KELIR_MULTI_TENANT");
+            assert!(
+                reason.contains("not supported yet"),
+                "for {raw}, the operator is not told why: {reason}"
+            );
+            assert!(
+                reason.contains("false"),
+                "for {raw}, the operator is not told what to do instead: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unrecognised_multi_tenant_value_is_refused_as_a_typo_not_as_the_guard() {
+        // Both refusals carry the same key, and they mean different things: one
+        // says "this deployment cannot run yet", the other says "that is not a
+        // boolean". An operator who reads the wrong one edits the wrong thing.
+        let error = AppConfig::from_source(source(&[
+            ("KELIR_JWT_SECRET", "s3cret"),
+            ("KELIR_MULTI_TENANT", "enabled"),
+        ]))
+        .unwrap_err();
+
+        let ConfigError::Invalid { reason, .. } = error else {
+            panic!("an unparseable flag is invalid configuration");
+        };
+
+        assert!(
+            reason.contains("expected a boolean"),
+            "a typo was reported as the tenancy guard: {reason}"
+        );
     }
 
     #[test]

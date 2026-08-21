@@ -184,6 +184,14 @@ mod tests {
     use super::*;
     use crate::modules::organization::domain::TenantStatus;
 
+    /// Built as a struct literal rather than through `AppConfig::from_env`,
+    /// which refuses `multi_tenant: true` outright (#67, decision **D-7**).
+    ///
+    /// That guard sits on the deployment path, not on this one, precisely so
+    /// the resolution below stays exercised while no deployment runs it. These
+    /// are not dead tests waiting to be deleted: they are what makes removing
+    /// the guard, once per-request resolution exists, a one-line change rather
+    /// than an archaeology exercise.
     fn config(multi_tenant: bool) -> AppConfig {
         AppConfig {
             multi_tenant,
