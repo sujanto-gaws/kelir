@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE mdm_employee_profiles\n        SET employee_number = COALESCE($3, employee_number),\n            department_id = COALESCE($4, department_id),\n            manager_party_id = COALESCE($5, manager_party_id),\n            position = COALESCE($6, position),\n            job_grade = COALESCE($7, job_grade),\n            employment_type = COALESCE($8, employment_type),\n            join_date = COALESCE($9, join_date),\n            resign_date = COALESCE($10, resign_date),\n            status = COALESCE($11, status),\n            attributes_json = COALESCE($12, attributes_json),\n            updated_by = $13,\n            updated_at = now()\n        WHERE tenant_id = $1 AND party_id = $2 AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Date",
+        "Date",
+        "Varchar",
+        "Jsonb",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a86b602da6d29b2ad974788df886c907d72d0e1089511febee1fed9d071c4f98"
+}

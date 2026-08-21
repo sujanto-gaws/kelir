@@ -42,6 +42,9 @@ use crate::state::AppState;
         master_data::handlers::create_party,
         master_data::handlers::update_party,
         master_data::handlers::delete_party,
+        master_data::handlers::get_party_roles,
+        master_data::handlers::assign_role,
+        master_data::handlers::remove_role,
     ),
     components(schemas(
         health::HealthBody,
@@ -87,6 +90,22 @@ use crate::state::AppState;
         master_data::domain::PartyRelationshipInput,
         master_data::domain::PartyClassificationInput,
         master_data::domain::PartyContactMechInput,
+        master_data::domain::PartyRoles,
+        master_data::domain::PartyRole,
+        master_data::domain::PartyRoleStatus,
+        master_data::domain::PartyProfiles,
+        master_data::domain::SupplierProfile,
+        master_data::domain::CustomerProfile,
+        master_data::domain::EmployeeProfile,
+        master_data::domain::ContactProfile,
+        master_data::domain::SupplierApprovalStatus,
+        master_data::domain::EmploymentType,
+        master_data::domain::AssignRoleRequest,
+        master_data::domain::RoleProfileInput,
+        master_data::domain::SupplierProfileInput,
+        master_data::domain::CustomerProfileInput,
+        master_data::domain::EmployeeProfileInput,
+        master_data::domain::ContactProfileInput,
         ErrorEnvelope,
         ErrorBody,
         ValidationDetail,
@@ -279,6 +298,12 @@ mod tests {
             ("/api/v1/master-data/parties/{id}", "get"),
             ("/api/v1/master-data/parties/{id}", "put"),
             ("/api/v1/master-data/parties/{id}", "delete"),
+            ("/api/v1/master-data/parties/{id}/roles", "get"),
+            ("/api/v1/master-data/parties/{id}/roles/{roleTypeId}", "put"),
+            (
+                "/api/v1/master-data/parties/{id}/roles/{roleTypeId}",
+                "delete",
+            ),
         ];
 
         for (path, method) in expected {
@@ -302,12 +327,34 @@ mod tests {
             "relationshipsTo",
             "classifications",
             "contactMechanisms",
+            "roles",
+            "profiles",
         ] {
             assert!(
                 aggregate[property].is_object(),
                 "PartyAggregate is missing {property}: {aggregate}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn assigning_a_role_documents_both_of_its_outcomes() {
+        // `PUT` is idempotent here: the first call creates the assignment and
+        // the rest update it. A generated client that only knew about 201 would
+        // treat every repeat as a failure.
+        let (_, body) = get("/api/docs/openapi.json").await;
+
+        let responses = &body["paths"]["/api/v1/master-data/parties/{id}/roles/{roleTypeId}"]
+            ["put"]["responses"];
+
+        assert!(
+            responses["201"].is_object(),
+            "the created outcome is undocumented: {responses}"
+        );
+        assert!(
+            responses["200"].is_object(),
+            "the already-held outcome is undocumented: {responses}"
+        );
     }
 
     #[tokio::test]

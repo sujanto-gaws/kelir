@@ -1,0 +1,27 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO mdm_customer_profiles (\n            id, tenant_id, party_id, customer_number, customer_category, customer_since_date,\n            credit_limit, payment_term_days, default_currency_uom, tax_number,\n            billing_party_id, status, attributes_json, created_by\n        )\n        VALUES ($1, $2, $3, $4, $5, $6, ($7::text)::numeric, $8, $9, $10, $11, $12,\n                COALESCE($13, '{}'::jsonb), $14)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Date",
+        "Text",
+        "Int4",
+        "Varchar",
+        "Varchar",
+        "Uuid",
+        "Varchar",
+        "Jsonb",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d0a938c175c8d4feecd74aa6494ae1eacbf62f97817cdec493c1a53e30473d57"
+}

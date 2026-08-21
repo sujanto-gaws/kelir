@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE mdm_contact_profiles\n        SET contact_type = COALESCE($3, contact_type),\n            preferred_contact_mech_type = COALESCE($4, preferred_contact_mech_type),\n            do_not_contact = COALESCE($5, do_not_contact),\n            assistant_party_id = COALESCE($6, assistant_party_id),\n            attributes_json = COALESCE($7, attributes_json),\n            updated_by = $8,\n            updated_at = now()\n        WHERE tenant_id = $1 AND party_id = $2 AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Bool",
+        "Uuid",
+        "Jsonb",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c3dbd44df19352450fcecf3939823becbcdea7e27709d93eb92f25ba05b00b6c"
+}

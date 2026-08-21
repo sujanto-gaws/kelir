@@ -24,9 +24,28 @@ While the major version is `0`, the public API may change in any release.
   classifications and contact mechanisms in one document. Create, update and
   delete are audited; a status change is audited as a status change rather than
   as an ordinary update.
+- **Party roles and role profiles (FR-MDM-002).** A party is given a role, with
+  its role-specific profile, through
+  `PUT /api/v1/master-data/parties/{id}/roles/{roleTypeId}`; the same party can
+  hold SUPPLIER and CUSTOMER at once without being stored twice. Assignment is
+  idempotent — 201 the first time, 200 after, updating the assignment and its
+  profile in place. Removing a role leaves the party and its other roles alone,
+  keeps the assignment as history rather than erasing it, and closes the profile
+  with it. Role types stay open: a tenant adds one by inserting a row, with no
+  migration.
+- **Role and profile data is separately permissioned.** A supplier profile
+  carries a bank account number and a customer profile a credit limit, so the
+  party aggregate omits `roles` and `profiles` entirely for a caller holding
+  `master-data:party:read` without `master-data:party-role:read`. Absent means
+  not visible; `[]` means the party holds no roles.
 
 ### Changed
 
+- The planned migrations shift down by one: `0009_party_role_permissions.sql`
+  took the next free number, so RAD is now `0010_rad.sql` and the plugin
+  migration `0018_plugin.sql`. Nothing merged was renumbered. Four inline
+  forward references in the Database Schema were already pointing at the wrong
+  migration and are corrected rather than mechanically bumped.
 - Bounded string columns in Database Schema §4 take a `§1.3.1` length instead of
   `TEXT`. The section had `status VARCHAR(40)` beside `party_type TEXT`, and six
   of the affected columns sit inside unique indexes — the failure

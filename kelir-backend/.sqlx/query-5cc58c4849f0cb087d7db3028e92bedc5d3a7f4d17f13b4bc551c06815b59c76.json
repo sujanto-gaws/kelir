@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE mdm_party_roles\n        SET starts_at = $2,\n            ends_at = $3,\n            status = COALESCE($4, status),\n            comments = COALESCE($5, comments),\n            attributes_json = COALESCE($6, attributes_json),\n            updated_by = $7,\n            updated_at = now()\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz",
+        "Timestamptz",
+        "Varchar",
+        "Text",
+        "Jsonb",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5cc58c4849f0cb087d7db3028e92bedc5d3a7f4d17f13b4bc551c06815b59c76"
+}

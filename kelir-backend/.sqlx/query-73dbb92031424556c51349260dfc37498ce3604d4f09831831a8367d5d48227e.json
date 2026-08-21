@@ -1,0 +1,77 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT e.employee_number, e.department_id, e.position, e.job_grade,\n               e.employment_type, e.join_date, e.resign_date, e.status, e.attributes_json,\n               m.party_code AS \"manager_party_id?\"\n        FROM mdm_employee_profiles e\n        LEFT JOIN mdm_parties m ON m.id = e.manager_party_id\n        WHERE e.tenant_id = $1 AND e.party_id = $2 AND e.deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "employee_number",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "department_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "position",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "job_grade",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "employment_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "join_date",
+        "type_info": "Date"
+      },
+      {
+        "ordinal": 6,
+        "name": "resign_date",
+        "type_info": "Date"
+      },
+      {
+        "ordinal": 7,
+        "name": "status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "attributes_json",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 9,
+        "name": "manager_party_id?",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "73dbb92031424556c51349260dfc37498ce3604d4f09831831a8367d5d48227e"
+}

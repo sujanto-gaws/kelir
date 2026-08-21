@@ -268,7 +268,7 @@ Not done:
 
 - **No staging environment**, and none scheduled — retired by decision **D-9**; releases are verified against the compose stack built from release images (#12 closed as not planned)
 - **No master-data UI.** The party endpoints exist; the list and detail screens over them are Sprint 6 with FR-MDM-008
-- **No party roles or role profiles.** A party can be created and read, but not yet given a SUPPLIER or CUSTOMER role — that is #81, in the same sprint
+- **No role-filtered endpoints.** A party can be given a SUPPLIER role with a supplier profile, but `/master-data/suppliers`, `/customers` and `/employees` — the views that list parties by role — are Sprint 6, with the list UI that consumes them
 - **Most module trees under `src/modules/` are still stubs**, filled in phase by phase. `auth`, `identity`, `organization`, `audit` and `master_data` are real; the rest are not
 
 ## Next Implementation Steps
