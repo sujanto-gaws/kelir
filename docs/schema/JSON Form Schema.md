@@ -1,7 +1,8 @@
 # JSON Form Schema Specification (JFSS)
 **Version:** 2.0.1  
 **Status:** Final Standard  
-**Target Stack:** Vue.js (Frontend), Golang / Rust (Backend)
+**Target Stack:** Vue.js (Frontend), Rust (Backend)  
+**Last updated:** 2026-08-21 (errata E-1; see Section 13)
 
 ---
 
@@ -16,7 +17,7 @@ The JSON Form Schema Specification (JFSS) is a deeply nested, component-driven d
 - **Scoped Validation:** Validation rules are co-located with UI components, utilizing a strict scope taxonomy (`client`, `server`, `both`) to balance UX performance with backend security.
 - **Tamper-Proof Calculations:** Mathematical aggregations and derived fields are defined via JSON Logic, evaluated reactively on the frontend, and strictly recalculated/overwritten on the backend.
 - **Deterministic State Resolution:** A strict priority precedence governs how field values are initialized, computed, and persisted, eliminating ambiguity between default values, existing payloads, and calculations.
-- **Polyglot Compatible:** The schema relies on standard data types, JSON Schema-aligned validation keywords, and JSON Logic for conditionals and calculations, ensuring identical parsing in statically typed backends (Go, Rust) and reactive frontends (Vue).
+- **Polyglot Compatible:** The schema relies on standard data types, JSON Schema-aligned validation keywords, and JSON Logic for conditionals and calculations, ensuring identical parsing in a statically typed backend (Rust) and a reactive frontend (Vue).
 
 ### 1.2 Definitions, Acronyms, and Abbreviations
 
@@ -40,7 +41,7 @@ To ensure semantic clarity across all frontend and backend implementations, the 
 | **Component** | The fundamental, discrete building block of the form schema. Every visual element, layout container, or data input is a Component. |
 | **Role** | A strict categorical tag (`data`, `layout`, `display`, `action`) assigned to every Component, dictating how it is processed by the rendering engine and the backend parser. |
 | **Node** | A single instance of a Component within the deeply nested JSON tree. |
-| **Polyglot Parity** | The architectural guarantee that a schema definition yields the exact same behavioral and security outcomes whether evaluated in JavaScript (Vue), Go, or Rust. |
+| **Polyglot Parity** | The architectural guarantee that a schema definition yields the exact same behavioral and security outcomes whether evaluated in JavaScript (Vue) or Rust. Two runtimes, not three — but the guarantee is unchanged: the language boundary is where a schema silently means two different things. |
 | **Single Source of Truth** | The principle that the JFSS JSON file is the only authoritative definition for both the UI layout and the data validation contract. |
 
 #### 1.2.3 State and Data Definitions
@@ -60,7 +61,7 @@ To ensure semantic clarity across all frontend and backend implementations, the 
 | :--- | :--- |
 | **Scope Taxonomy** | The classification of validation rules into `client`, `server`, or `both` to optimize performance and enforce security boundaries. |
 | **Tamper-Proof Pattern** | The security mechanism where the backend re-evaluates the `calculate` JSON Logic using raw payload data and overwrites the result before database insertion. |
-| **Custom Operator** | A non-standard JSON Logic operator registered in the runtime libraries. Requires explicit implementation in all backend languages. |
+| **Custom Operator** | A non-standard JSON Logic operator registered in the runtime libraries. Requires an explicit implementation on both sides — the Vue evaluator and the Rust one — or the expression means one thing in the browser and another in the database. |
 
 ### 1.3 Conformance
 
@@ -145,7 +146,7 @@ Every component must declare a `role`. This dictates how the frontend renderer p
 
 #### 4.2.3 Value Resolution Precedence
 
-Resolution is **not** a single ordered list: a field's behaviour depends on whether it carries a `calculate` expression, and if so, in which mode. Implementations MUST apply the following decision procedure. It is written as a procedure precisely so that a Vue, Go, and Rust implementation cannot diverge.
+Resolution is **not** a single ordered list: a field's behaviour depends on whether it carries a `calculate` expression, and if so, in which mode. Implementations MUST apply the following decision procedure. It is written as a procedure precisely so that a Vue and a Rust implementation cannot diverge.
 
 **Case A - `calculate` absent.** The field is user-editable. Resolve once, on mount, taking the first available of:
 
@@ -306,7 +307,7 @@ JSON Logic uses **dot-notation** for array access (zero-indexed). Array aggregat
 - **Validation:** Filter the `rules` array by `scope`. Build dynamic Zod/Yup schemas.
 - **Array Sequencing & Uniqueness:** Intercept array mutations to enforce `sequenceKey` and real-time `uniqueBy` checks.
 
-### 9.2 Backend (Golang / Rust)
+### 9.2 Backend (Rust)
 
 - **Parsing:** Ignore `layout`, `display`, and `action` roles during payload validation.
 - **Default Merging & Sequence Overwrite:** Apply `defaultValue` for missing keys. Overwrite `sequenceKey` values to guarantee sequential integrity.
@@ -373,10 +374,20 @@ A third artefact is normative per S1.3: the **Meta-Schema**, `docs/schema/jfss-m
 1. **Strict Identity Separation:** Never confuse `id` (UI instance) with `key` (data payload). Layout components must have an `id` but never a `key`.
 2. **Circular Dependency Prevention:** A schema whose `calculate` or `conditional` expressions form a dependency cycle is **invalid**. Implementations MUST build the graph from every `{"var": ...}` reference in both properties and MUST reject a cyclic schema; authoring tools SHOULD surface the cycle before it is saved.
 3. **Dynamic Option Generation:** If a `select` has an `enum` in `validation`, the Vue component should auto-generate its `options` array if `options` is omitted.
-4. **Handle Missing Variables:** Because the frontend submits every data `key` (S10.1), a missing variable indicates a schema/payload mismatch rather than a hidden field. Go/Rust backends MUST still initialize the payload map with default zero-values before running JSON Logic evaluation so that evaluation cannot panic - but MUST NOT rely on zero-filling to stand in for a hidden field, as that is precisely the substitution that breaks Polyglot Parity.
-5. **Standard Operators Only:** Do not register custom operations in JSON Logic unless implemented in all backend languages.
+4. **Handle Missing Variables:** Because the frontend submits every data `key` (S10.1), a missing variable indicates a schema/payload mismatch rather than a hidden field. The Rust backend MUST still resolve a missing key to a defined value before running JSON Logic evaluation, so that evaluation cannot panic; with `serde_json` that is `Value::Null` rather than a typed zero, and the normalization rule in the Calculation Rule Registry S7.3 is what turns it into a number. It MUST NOT rely on that filling to stand in for a hidden field, as that is precisely the substitution that breaks Polyglot Parity.
+5. **Standard Operators Only:** Do not register a custom JSON Logic operation unless it is implemented in **both** runtimes — Vue and Rust — and registered in the Calculation Rule Registry. An operator only one side knows is not an extension; it is a divergence with a name.
 6. **Separation of System vs. User Data:** System-generated fields (e.g., `Invoice#`) should be `role: "data"`, `readOnly: true`, and populated via non-deterministic `calculate` operators. Non-deterministic operators such as `generateInvoiceId` are defined in the Calculation Rule Registry's "Generated (Non-Deterministic) Operators" tier and may appear only in `calculateMode: "generated"` fields.
 7. **Avoid Circular Sequencing:** Never use `sequenceKey` in combination with a `calculate` property on the *same* child field.
+
+---
+
+## 13. Errata
+
+This specification is a **Final Standard**: frozen at v2.0.1, errata only, and a successor takes a new major version ([naming convention](../standards/02.%20Naming%20Convention.md) §10.1). Errata correct statements about the specification without changing what it specifies. None of the entries below alter a component, property, validation keyword, or the meta-schema, so `jfss-meta-v2.0.1.json` is unchanged and documents declaring `"version": "2.0.1"` are unaffected.
+
+| # | Date | Correction |
+|---|---|---|
+| **E-1** | 2026-08-21 | **The target stack named two backend languages; there is one.** Every reference to Go or Golang is replaced with Rust — the header target stack, the §1 polyglot-compatibility claim, the §2 Polyglot Parity definition and the Custom Operator entry, the §4.2.3 decision-procedure rationale, the §9.2 backend heading, and guardrails 4 and 5 in §12. Guardrail 4's "initialize the payload map with default zero-values" was a Go idiom and is restated for `serde_json`, where a missing key resolves to `Value::Null` rather than a typed zero. Kelir's backend is Rust ([SDD](../design/01.%20System%20Design%20Document.md) §2, [architecture 01](../architectures/01.%20Basic%20Framework%20Concept%20and%20Architecture.md)); no Go service exists or is planned, and a parity claim for a language nobody compiles is how the companion registries' Rust column came to be wrong (see the [operator-parity spike](../../projects/spikes/01.%20JFSS%20Operator%20Parity.md) §2.8). **Polyglot Parity is not weakened by this** — it was never about the count of languages. One JavaScript runtime and one Rust runtime evaluate the same schema, and the boundary between them is still where a schema can silently mean two different things. |
 
 ---
 *End of Specification v2.0.1*

@@ -1,6 +1,6 @@
 # Kelir Documentation
 
-**Status:** Living · **Last updated:** 2026-08-13
+**Status:** Living · **Last updated:** 2026-08-21
 
 Kelir is a metadata-driven, document-centric, workflow-enabled full-stack framework for building enterprise business applications rapidly — Rust (Axum + SQLx + PostgreSQL) on the backend, Vue 3 (Vite + Pinia + shadcn-vue + Tailwind CSS v4) on the frontend. This folder is the complete documentation set; this file is its map.
 
@@ -64,9 +64,9 @@ The JSON standards family. Each specification carries its own version, RFC 2119 
 
 | Standard | Version | Defines |
 |---|---|---|
-| [JSON Form Schema.md](schema/JSON%20Form%20Schema.md) (JFSS) | 2.0.1 | Dynamic form definitions: components, validation, conditional logic, calculations |
-| [JFSS Validation Rule Registry.md](schema/JFSS%20Validation%20Rule%20Registry.md) | 1.1.0 | Registered validation rules usable in JFSS `rules` |
-| [JFSS Calculation Rule Registry.md](schema/JFSS%20Calculation%20Rule%20Registry.md) | 1.2.0 | Registered JSON Logic operators for calculations and all platform conditions |
+| [JSON Form Schema.md](schema/JSON%20Form%20Schema.md) (JFSS) | 2.0.1 (errata E-1) | Dynamic form definitions: components, validation, conditional logic, calculations |
+| [JFSS Validation Rule Registry.md](schema/JFSS%20Validation%20Rule%20Registry.md) | 1.3.0 | Registered validation rules usable in JFSS `rules` |
+| [JFSS Calculation Rule Registry.md](schema/JFSS%20Calculation%20Rule%20Registry.md) | 1.4.0 | Registered JSON Logic operators for calculations and all platform conditions |
 | [JSON Workflow Schema.md](schema/JSON%20Workflow%20Schema.md) (JWSS) | 1.0.0 | Workflow definitions: states, transitions, tasks, assignment rules, guards/actions |
 | [Lifecycle Hook Contract.md](schema/Lifecycle%20Hook%20Contract.md) (LHCS) | 1.0.0 | The hook ABI: registration entry, invocation payload, CONTINUE/MODIFY/REJECT result |
 | [Plugin Manifest Schema.md](schema/Plugin%20Manifest%20Schema.md) (PMS) | 1.0.0 | `plugin.json`: identity, entrypoints, permissions, hooks, events, settings, dependencies |

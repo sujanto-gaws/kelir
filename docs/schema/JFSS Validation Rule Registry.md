@@ -1,5 +1,5 @@
 # JFSS Validation Rule Registry
-**Version:** 1.2.0  
+**Version:** 1.3.0  
 **Status:** Active Standard  
 **Last updated:** 2026-08-21  
 **Pairs with:** JFSS v2.0.1  
@@ -9,11 +9,13 @@
 The JFSS Validation Rule Registry defines the standardized, advanced validation rules that can be utilized within the `rules` array of any `role: "data"` component. 
 
 ### 1.1 The Polyglot Contract
-Because this application utilizes a Vue frontend and Golang/Rust backends, adding a new rule to this registry is a **binding architectural commitment**. 
+Kelir runs a Vue frontend and a **Rust** backend, so adding a new rule to this registry is a **binding architectural commitment** across exactly two runtimes. Two, not three: earlier versions named Go alongside Rust, for a backend that does not exist and is not planned (decision **D-11**).
+
 Before adding a new rule to this document, the engineering team must ensure:
 1. **Frontend Parity:** The rule can be evaluated using Vue/Zod/Yup.
-2. **Backend Parity:** The rule can be evaluated natively in Golang and Rust without relying on external JavaScript engines.
-3. **Security Boundary:** The rule's `scope` correctly reflects whether it is a UX enhancement (`client`), a strict security boundary (`server`), or a shared data-integrity check (`both`).
+2. **Backend Parity:** The rule can be evaluated natively in Rust without relying on an embedded JavaScript engine.
+3. **Semantic Parity:** For a rule scoped `both`, the two implementations agree on the **edge cases**, not just the happy path — a rule that both sides evaluate but decide differently is worse than one only the server enforces, because nothing surfaces the disagreement. See the `regex` warning below for a live example.
+4. **Security Boundary:** The rule's `scope` correctly reflects whether it is a UX enhancement (`client`), a strict security boundary (`server`), or a shared data-integrity check (`both`).
 
 ---
 
@@ -48,7 +50,7 @@ Ensures the current field's value exactly matches the value of another data comp
   ```
 * **Implementation Notes:**
   * **Vue:** Use Zod's `superRefine` or Yup's `oneOf([Yup.ref('target')])` to access the global form context.
-  * **Go/Rust:** Compare `payload[currentKey] == payload[params.target]`.
+  * **Rust:** Compare `payload[current_key] == payload[&params.target]` on `serde_json::Value`, whose `PartialEq` is structural — note that a missing key and an explicit `null` are both `Value::Null` and therefore compare equal, which is the correct outcome here only because S10.1 requires every data `key` to be submitted.
 
 #### `notMatchesField`
 Ensures the current field's value does *not* match another field.
@@ -68,7 +70,6 @@ Applies a custom regular expression. (Use this when the base `validation.pattern
   ```
 * **Implementation Notes:**
   * **Vue:** `new RegExp(params.pattern, params.flags).test(value)`
-  * **Go:** `regexp.MustCompile(params.Pattern).MatchString(value)` *(Note: Go does not support all JS regex flags; ensure the pattern is cross-compatible).*
   * **Rust:** `regex::Regex::new(&params.pattern)?.is_match(value)` — **but see the warning below. The Rust `regex` crate cannot honour the full ECMA-262 params schema, and the divergences are not all loud.**
 
 > ⚠️ **"ECMA 262 regex" is not a cross-language contract.** This rule is scoped `both`, so the frontend and the backend each decide it. Measured by the [operator-parity spike](../../projects/spikes/01.%20JFSS%20Operator%20Parity.md) §2.7 on 2026-08-21:
@@ -119,7 +120,7 @@ Evaluates the complexity of a password for a visual strength meter.
   ```
 * **Implementation Notes:**
   * **Vue:** Use a library like `zxcvbn` to calculate the score. If `score < params.minScore`, trigger the error message.
-  * **Go/Rust:** Ignored. The backend relies on the base `validation.minLength` and `validation.pattern` for actual password security.
+  * **Rust:** Ignored. The backend relies on the base `validation.minLength` and `validation.pattern` for actual password security.
 
 #### `async`
 Triggers a debounced, read-only API call to provide real-time UX feedback.
@@ -148,7 +149,7 @@ Triggers a debounced, read-only API call to provide real-time UX feedback.
 ---
 
 ### 3.3 Scope: `server` (Security & Business Logic)
-*These rules contain sensitive business logic or require database access. They are evaluated exclusively by the Golang/Rust backend. The frontend will only display the error message if the backend returns a `400 Bad Request` upon form submission.*
+*These rules contain sensitive business logic or require database access. They are evaluated exclusively by the Rust backend. The frontend will only display the error message if the backend returns a `400 Bad Request` upon form submission.*
 
 #### `unique`
 Verifies that the submitted value does not already exist in a specific database table/column.
@@ -162,7 +163,7 @@ Verifies that the submitted value does not already exist in a specific database 
   { "rule": "unique", "scope": "server", "params": { "table": "users", "column": "email" }, "message": "This email is already registered." }
   ```
 * **Implementation Notes:**
-  * **Go/Rust:** Execute a parameterized `SELECT COUNT(*)` query. *Never* concatenate the `table` or `column` strings directly into the SQL query to prevent SQL injection; map them to an allow-list of known tables/columns first.
+  * **Rust:** Execute a parameterized `SELECT COUNT(*)`. *Never* interpolate the `table` or `column` strings into the SQL; map them to an allow-list of known tables and columns first. The [coding standard](../standards/01.%20Coding%20Standard.md) §2.5 requires compile-time-verified queries, and `sqlx::query!` cannot take a runtime table name at all — so the allow-list is not merely advice here, it is the only shape that compiles: match the pair to a fixed `sqlx::query_scalar!` per known target.
 
 #### `exists` (Foreign Key Validation)
 Verifies that the submitted value corresponds to a valid primary key in a related database table.
@@ -173,7 +174,7 @@ Verifies that the submitted value corresponds to a valid primary key in a relate
   { "rule": "exists", "scope": "server", "params": { "table": "departments", "column": "id" }, "message": "The selected department does not exist." }
   ```
 * **Implementation Notes:**
-  * **Go/Rust:** Execute a parameterized `SELECT COUNT(*)` query. *Never* concatenate the `table` or `column` strings directly into the SQL query to prevent SQL injection; map them to an allow-list of known tables/columns first.
+  * **Rust:** Execute a parameterized `SELECT COUNT(*)`. *Never* interpolate the `table` or `column` strings into the SQL; map them to an allow-list of known tables and columns first. The [coding standard](../standards/01.%20Coding%20Standard.md) §2.5 requires compile-time-verified queries, and `sqlx::query!` cannot take a runtime table name at all — so the allow-list is not merely advice here, it is the only shape that compiles: match the pair to a fixed `sqlx::query_scalar!` per known target.
 
 #### `authorized` (RBAC / Permission Check)
 Verifies that the currently authenticated user session has the required permissions to submit the specific value for this field.
@@ -183,7 +184,7 @@ Verifies that the currently authenticated user session has the required permissi
   { "requiredPermission": "string", "allowedValues": ["array", "of", "values"] }
   ```
 * **Implementation Notes:**
-  * **Go/Rust:** Extract the user's role/permissions from the JWT/Session context. If `payload[currentKey]` is not in `allowedValues` (or if the user lacks `requiredPermission`), reject the payload.
+  * **Rust:** Take the caller's permissions from the request's authenticated claims — the same `Authenticated` extractor every protected route uses, never a value read out of the payload. If `payload[current_key]` is not in `allowedValues`, or the caller lacks `requiredPermission`, reject the payload.
 
 ---
 
@@ -194,7 +195,7 @@ If a developer needs to introduce a new validation rule (e.g., `validateCryptoAd
 1. **Draft the Rule:** Define the `rule` name, `scope`, and `params` schema.
 2. **Update this Registry:** Add the rule to the appropriate scope section in this document.
 3. **Implement in Vue:** Add the logic to the `zodBuilder.ts` (or equivalent) switch statement.
-4. **Implement in Go/Rust:** Add the logic to the backend `EvaluateServerRules` (or equivalent) switch statement.
+4. **Implement in Rust:** Add the logic to the backend's server-rule evaluator (`evaluate_server_rules` or equivalent) as a new `match` arm. An unrecognised rule name MUST be an error, not a skipped arm — a rule the backend silently ignores is a `server`-scoped check that does not run.
 5. **Update Meta-Schema (Optional):** If the rule requires strict parameter validation, update the `advancedRule` definition in `jfss-meta-v2.0.1.json` to include an `if/then` block for the new `rule` string.
 6. **Code Review:** The PR must be reviewed by at least one frontend and one backend engineer to ensure parity.
 
@@ -235,6 +236,7 @@ The Vue submission handler must catch the `400` response, iterate through the `d
 
 ## 6. Changelog
 
+- **1.3.0 (2026-08-21):** **Removed Go.** Decision **D-11**: Kelir's backend is Rust, and this registry had been naming Go alongside it throughout. Restated §1.1 for two runtimes and added a **Semantic Parity** requirement — for a `scope: "both"` rule the two implementations must agree on the edge cases, which is what the `regex` entry had been quietly failing. Converted every `Go/Rust` implementation note to Rust and made them concrete rather than generic: `matchesField` gains the `serde_json::Value` equality caveat; `unique` and `exists` state why the allow-list is the only shape that compiles under `sqlx::query!`; `authorized` names the authenticated claims rather than "the JWT/Session context"; §4 step 4 requires an unrecognised rule name to be an error rather than a skipped `match` arm. No rule is added, removed, or re-scoped.
 - **1.2.0 (2026-08-21):** Recorded the [operator-parity spike](../../projects/spikes/01.%20JFSS%20Operator%20Parity.md) (#31) finding against the `regex` rule: the "ECMA 262 regex" params schema is not honourable by the Rust `regex` crate — lookahead and backreferences are rejected at compile time, and `\d` diverges silently between the ASCII ECMA-262 class and Rust's Unicode `Nd`, which for a `scope: "both"` rule means the two sides reach opposite verdicts on the same input. Added Rust implementation notes and interim guidance; the two candidate resolutions are open.
 - **1.1.0 (2026-08-05):** Aligned the Section 5 error-response contract with JFSS v2.0.1 Section 10.3 (`path` with dot-notation, plus `rule`, `code`, `message`); added the document header and title; added examples for `notMatchesField`, `oneOf`, `notOneOf`, and `exists` (with the SQL-injection allow-list warning); split `oneOf`/`notOneOf` into separate entries; clarified `oneOf`/`notOneOf` vs. `validation.enum`; defined the `async` rule's request/response contract and Zod async-parse note; fixed the stale `jfss-meta.json` filename reference.
 - **1.0.0:** Initial release.
