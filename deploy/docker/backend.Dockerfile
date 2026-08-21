@@ -28,6 +28,15 @@ RUN mkdir src \
 COPY build.rs ./
 COPY migrations ./migrations
 COPY src ./src
+# The compile-time query cache. `sqlx::query!` verifies every statement against a
+# real schema while compiling, and there is no database here — so without this
+# directory and the flag below, the release image cannot be built at all. It was
+# not: the image last built during Phase 1, before the identity module brought
+# the first `query!` macros, and nothing noticed for two releases because the
+# step that consumes the image was never performed. Regenerate with
+# `cargo sqlx prepare -- --all-targets` whenever a query changes; CI checks it.
+COPY .sqlx ./.sqlx
+ENV SQLX_OFFLINE=true
 
 ARG KELIR_BUILD_SHA=unknown
 ENV KELIR_BUILD_SHA=${KELIR_BUILD_SHA}

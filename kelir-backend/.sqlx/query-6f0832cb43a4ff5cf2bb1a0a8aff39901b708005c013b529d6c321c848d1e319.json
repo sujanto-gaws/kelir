@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT p.id, p.permission_code, p.module, p.description\n        FROM role_permissions rp\n        JOIN permissions p ON p.id = rp.permission_id AND p.deleted_at IS NULL\n        WHERE rp.role_id = $1 AND rp.deleted_at IS NULL\n        ORDER BY p.permission_code\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "permission_code",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "module",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "description",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "6f0832cb43a4ff5cf2bb1a0a8aff39901b708005c013b529d6c321c848d1e319"
+}

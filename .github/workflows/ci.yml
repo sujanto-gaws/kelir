@@ -25,8 +25,13 @@ jobs:
 
     # sqlx's query! macros verify every SQL statement against a real schema at
     # compile time (coding standard 2.5), so the build needs a database — not
-    # only the tests. The alternative, committing `cargo sqlx prepare` output,
-    # is a generated artifact that silently goes stale when a migration lands.
+    # only the tests.
+    #
+    # The committed `cargo sqlx prepare` output in kelir-backend/.sqlx exists for
+    # the release image, which has no database and could not be built at all
+    # without it. This job used to argue against committing that cache because it
+    # goes stale silently; the "Offline query cache is current" step below is the
+    # answer to that, and it is why the cache can be trusted.
     services:
       postgres:
         image: postgres:16
@@ -77,6 +82,22 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
+
+      - name: Offline query cache is current
+        # The release image builds with SQLX_OFFLINE=true against the committed
+        # .sqlx directory, so a query added or changed without re-running
+        # `cargo sqlx prepare -- --all-targets` makes the image unbuildable. That
+        # happened: the backend image last built during Phase 1 and was broken by
+        # the first identity queries, unnoticed for two releases because the
+        # release step that consumes the image was never performed.
+        #
+        # Compiling against the cache rather than running `sqlx prepare --check`
+        # keeps sqlx-cli out of CI, which compiles from source and would add
+        # minutes to every run. A missing entry fails here; a stale leftover
+        # entry is harmless.
+        env:
+          SQLX_OFFLINE: "true"
+        run: cargo check --all-targets
 
       - name: Tests
         run: cargo test

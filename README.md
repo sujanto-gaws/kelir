@@ -187,8 +187,8 @@ every later file down.
 
 ## Local Development
 
-Full instructions — including deploying to an IP for testing and provisioning a
-staging host — are in
+Full instructions — including bringing the release stack up locally from the
+release images — are in
 [docs/operations/01. Installation and Deployment.md](docs/operations/01.%20Installation%20and%20Deployment.md).
 
 ### Option A: Docker Compose
@@ -245,7 +245,9 @@ Use deploy/env/.env.example as the baseline for configuration values.
 
 ## Current Status
 
-**Phase 1 is released as `v0.1.0`, and not yet verified on staging.** Both halves of the skeleton run; the one remaining step is deploying to a staging host, which does not exist yet. See the [release record](projects/releases/01.%20Release%20v0.1.0.md) and [Sprint 2 status](projects/status/03.%20Sprint%202%20Status.md).
+**Phase 1 is released as `v0.1.0` and closed**, as is Phase 2 at `v0.2.0`. Both were held open for a staging host that never existed; decision **D-9** (2026-08-21) retired that environment for want of infrastructure and replaced the release step with the Docker Compose stack brought up from the release images. See the release records for [v0.1.0](projects/releases/01.%20Release%20v0.1.0.md) and [v0.2.0](projects/releases/02.%20Release%20v0.2.0.md).
+
+> The rest of this section is a Sprint 2 snapshot and understates what exists — Phase 2 shipped authentication, users, roles and permissions. It is due a pass of its own.
 
 Done:
 
@@ -263,7 +265,7 @@ Done:
 
 Not done:
 
-- **No staging environment**, and no host named for one — the only thing blocking Phase 1 from tagging `v0.1.0` (issue #12)
+- **No staging environment**, and none scheduled — retired by decision **D-9**; releases are verified against the compose stack built from release images (#12 closed as not planned)
 - **No authentication.** The login page is presentation only; sign-in arrives in Phase 2 with the identity module
 - **No business endpoints yet.** `/api/v1` is mounted and empty; the module trees under `src/modules/` are still stubs, filled in from Phase 2 onward
 
@@ -271,6 +273,6 @@ Not done:
 
 Work is tracked as [GitHub issues](https://github.com/sujanto-gaws/kelir/issues), grouped into phase milestones.
 
-To close Phase 1: stand up a staging environment, deploy `v0.1.0` to it and pass the smoke tests (#12). The tag and the images already exist.
+Phase 1 and Phase 2 are closed. Sprint 5 is in progress: the Phase 2 exit debt first, then the Party model opens Phase 3 ([sprint plan](projects/planning/01.%20Sprint%20Plan.md) §5).
 
 Phase 2 (Sprints 3–4) follows: `0002_identity.sql`, Argon2 authentication, the JWT-or-session decision, permission middleware, and user/role management.
