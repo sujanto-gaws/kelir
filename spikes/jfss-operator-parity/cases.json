@@ -1,0 +1,991 @@
+[
+ {
+  "id": "var-simple",
+  "tier": "base",
+  "expr": {
+   "var": "a"
+  },
+  "data": {
+   "a": 5
+  },
+  "note": "Registry 3.1 var"
+ },
+ {
+  "id": "var-dot-index",
+  "tier": "base",
+  "expr": {
+   "var": "items.0.unit_price"
+  },
+  "data": {
+   "items": [
+    {
+     "unit_price": 12.5,
+     "quantity": 3
+    }
+   ]
+  },
+  "note": "Registry 3.1 dot-notation example"
+ },
+ {
+  "id": "var-missing",
+  "tier": "base",
+  "expr": {
+   "var": "nope"
+  },
+  "data": {
+   "a": 1
+  },
+  "note": "JFSS S12.4 missing variable"
+ },
+ {
+  "id": "var-default",
+  "tier": "base",
+  "expr": {
+   "var": [
+    "nope",
+    0
+   ]
+  },
+  "data": {},
+  "note": "var with default"
+ },
+ {
+  "id": "mul",
+  "tier": "base",
+  "expr": {
+   "*": [
+    {
+     "var": "unit_price"
+    },
+    {
+     "var": "quantity"
+    }
+   ]
+  },
+  "data": {
+   "unit_price": 12.5,
+   "quantity": 3
+  },
+  "note": "Registry 3.1 line item total"
+ },
+ {
+  "id": "add-weighted",
+  "tier": "base",
+  "expr": {
+   "+": [
+    {
+     "*": [
+      {
+       "var": "a.0"
+      },
+      1
+     ]
+    },
+    {
+     "*": [
+      {
+       "var": "a.1"
+      },
+      2
+     ]
+    },
+    {
+     "*": [
+      {
+       "var": "a.2"
+      },
+      3
+     ]
+    }
+   ]
+  },
+  "data": {
+   "a": [
+    1,
+    2,
+    3
+   ]
+  },
+  "note": "Registry 3.1 weighted sum"
+ },
+ {
+  "id": "sub",
+  "tier": "base",
+  "expr": {
+   "-": [
+    10,
+    3
+   ]
+  },
+  "data": {},
+  "note": "Registry 2.1"
+ },
+ {
+  "id": "div",
+  "tier": "base",
+  "expr": {
+   "/": [
+    {
+     "var": "total_score"
+    },
+    {
+     "var": "score_count"
+    }
+   ]
+  },
+  "data": {
+   "total_score": 90,
+   "score_count": 4
+  },
+  "note": "Registry 3.1 average"
+ },
+ {
+  "id": "mod",
+  "tier": "base",
+  "expr": {
+   "%": [
+    10,
+    3
+   ]
+  },
+  "data": {},
+  "note": "Registry 2.1"
+ },
+ {
+  "id": "min-cap",
+  "tier": "base",
+  "expr": {
+   "min": [
+    {
+     "*": [
+      {
+       "var": "subtotal"
+      },
+      0.2
+     ]
+    },
+    100
+   ]
+  },
+  "data": {
+   "subtotal": 1000
+  },
+  "note": "Registry 3.1 discount cap"
+ },
+ {
+  "id": "max",
+  "tier": "base",
+  "expr": {
+   "max": [
+    {
+     "var": "a"
+    },
+    {
+     "var": "b"
+    },
+    7
+   ]
+  },
+  "data": {
+   "a": 3,
+   "b": 9
+  },
+  "note": "Registry 2.1"
+ },
+ {
+  "id": "div-by-zero",
+  "tier": "normalization",
+  "expr": {
+   "/": [
+    10,
+    0
+   ]
+  },
+  "data": {},
+  "note": "Registry 3.1: MUST normalize to 0"
+ },
+ {
+  "id": "mul-null",
+  "tier": "normalization",
+  "expr": {
+   "*": [
+    null,
+    5
+   ]
+  },
+  "data": {},
+  "note": "Registry 3.1/7.3: MUST normalize to 0"
+ },
+ {
+  "id": "mul-missing-var",
+  "tier": "normalization",
+  "expr": {
+   "*": [
+    {
+     "var": "unit_price"
+    },
+    5
+   ]
+  },
+  "data": {
+   "quantity": 5
+  },
+  "note": "Registry 7.3 typing race"
+ },
+ {
+  "id": "add-null",
+  "tier": "normalization",
+  "expr": {
+   "+": [
+    null,
+    5
+   ]
+  },
+  "data": {},
+  "note": "Registry 7.3"
+ },
+ {
+  "id": "add-string",
+  "tier": "normalization",
+  "expr": {
+   "+": [
+    "3",
+    4
+   ]
+  },
+  "data": {},
+  "note": "string coercion in arithmetic"
+ },
+ {
+  "id": "float-repr",
+  "tier": "normalization",
+  "expr": {
+   "+": [
+    0.1,
+    0.2
+   ]
+  },
+  "data": {},
+  "note": "f64 representation across languages"
+ },
+ {
+  "id": "map-line-totals",
+  "tier": "array",
+  "expr": {
+   "map": [
+    {
+     "var": "items"
+    },
+    {
+     "*": [
+      {
+       "var": "unit_price"
+      },
+      {
+       "var": "quantity"
+      }
+     ]
+    }
+   ]
+  },
+  "data": {
+   "items": [
+    {
+     "unit_price": 10,
+     "quantity": 2
+    },
+    {
+     "unit_price": 5.5,
+     "quantity": 4
+    }
+   ]
+  },
+  "note": "Registry 3.1 map, lambda scoping"
+ },
+ {
+  "id": "map-empty",
+  "tier": "array",
+  "expr": {
+   "map": [
+    {
+     "var": "items"
+    },
+    {
+     "*": [
+      {
+       "var": "unit_price"
+      },
+      {
+       "var": "quantity"
+      }
+     ]
+    }
+   ]
+  },
+  "data": {
+   "items": []
+  },
+  "note": "Registry 2.1 empty-array edge case"
+ },
+ {
+  "id": "map-missing-array",
+  "tier": "array",
+  "expr": {
+   "map": [
+    {
+     "var": "items"
+    },
+    {
+     "var": "x"
+    }
+   ]
+  },
+  "data": {},
+  "note": "map over a missing variable"
+ },
+ {
+  "id": "filter",
+  "tier": "array",
+  "expr": {
+   "filter": [
+    {
+     "var": "items"
+    },
+    {
+     ">": [
+      {
+       "var": "quantity"
+      },
+      2
+     ]
+    }
+   ]
+  },
+  "data": {
+   "items": [
+    {
+     "quantity": 1
+    },
+    {
+     "quantity": 3
+    },
+    {
+     "quantity": 5
+    }
+   ]
+  },
+  "note": "Registry 2.1 filter"
+ },
+ {
+  "id": "reduce",
+  "tier": "array",
+  "expr": {
+   "reduce": [
+    {
+     "var": "n"
+    },
+    {
+     "+": [
+      {
+       "var": "current"
+      },
+      {
+       "var": "accumulator"
+      }
+     ]
+    },
+    0
+   ]
+  },
+  "data": {
+   "n": [
+    1,
+    2,
+    3,
+    4
+   ]
+  },
+  "note": "Registry 2.1 reduce, accumulator naming"
+ },
+ {
+  "id": "reduce-empty",
+  "tier": "array",
+  "expr": {
+   "reduce": [
+    {
+     "var": "n"
+    },
+    {
+     "+": [
+      {
+       "var": "current"
+      },
+      {
+       "var": "accumulator"
+      }
+     ]
+    },
+    0
+   ]
+  },
+  "data": {
+   "n": []
+  },
+  "note": "reduce over empty array returns the initial value"
+ },
+ {
+  "id": "all",
+  "tier": "array",
+  "expr": {
+   "all": [
+    {
+     "var": "n"
+    },
+    {
+     ">": [
+      {
+       "var": ""
+      },
+      0
+     ]
+    }
+   ]
+  },
+  "data": {
+   "n": [
+    1,
+    2,
+    3
+   ]
+  },
+  "note": "Registry 2.1 all"
+ },
+ {
+  "id": "all-empty",
+  "tier": "array",
+  "expr": {
+   "all": [
+    {
+     "var": "n"
+    },
+    {
+     ">": [
+      {
+       "var": ""
+      },
+      0
+     ]
+    }
+   ]
+  },
+  "data": {
+   "n": []
+  },
+  "note": "spec: all over empty is false"
+ },
+ {
+  "id": "some",
+  "tier": "array",
+  "expr": {
+   "some": [
+    {
+     "var": "n"
+    },
+    {
+     ">": [
+      {
+       "var": ""
+      },
+      2
+     ]
+    }
+   ]
+  },
+  "data": {
+   "n": [
+    1,
+    2,
+    3
+   ]
+  },
+  "note": "Registry 2.1 some"
+ },
+ {
+  "id": "some-empty",
+  "tier": "array",
+  "expr": {
+   "some": [
+    {
+     "var": "n"
+    },
+    {
+     ">": [
+      {
+       "var": ""
+      },
+      2
+     ]
+    }
+   ]
+  },
+  "data": {
+   "n": []
+  },
+  "note": "spec: some over empty is false"
+ },
+ {
+  "id": "none-empty",
+  "tier": "array",
+  "expr": {
+   "none": [
+    {
+     "var": "n"
+    },
+    {
+     ">": [
+      {
+       "var": ""
+      },
+      2
+     ]
+    }
+   ]
+  },
+  "data": {
+   "n": []
+  },
+  "note": "Registry 2.1 note: none is in this tier if needed"
+ },
+ {
+  "id": "sum",
+  "tier": "extended",
+  "expr": {
+   "sum": [
+    {
+     "var": "line_totals"
+    }
+   ]
+  },
+  "data": {
+   "line_totals": [
+    20,
+    22
+   ]
+  },
+  "note": "Registry 3.2: custom operator required in ALL THREE"
+ },
+ {
+  "id": "sum-empty",
+  "tier": "extended",
+  "expr": {
+   "sum": [
+    {
+     "var": "line_totals"
+    }
+   ]
+  },
+  "data": {
+   "line_totals": []
+  },
+  "note": "Registry 3.2: empty array returns 0"
+ },
+ {
+  "id": "invoice-pattern",
+  "tier": "extended",
+  "expr": {
+   "sum": [
+    {
+     "map": [
+      {
+       "var": "items"
+      },
+      {
+       "*": [
+        {
+         "var": "unit_price"
+        },
+        {
+         "var": "quantity"
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  "data": {
+   "items": [
+    {
+     "unit_price": 10,
+     "quantity": 2
+    },
+    {
+     "unit_price": 5.5,
+     "quantity": 4
+    }
+   ]
+  },
+  "note": "Registry 6.1 flagship invoice pattern"
+ },
+ {
+  "id": "unknown-operator",
+  "tier": "extended",
+  "expr": {
+   "generateInvoiceId": [
+    "invoice_default"
+   ]
+  },
+  "data": {},
+  "note": "JFSS S8.1.1: unknown operator MUST be rejected, not silently ignored"
+ },
+ {
+  "id": "eq-loose",
+  "tier": "conditional",
+  "expr": {
+   "==": [
+    1,
+    "1"
+   ]
+  },
+  "data": {},
+  "note": "loose equality across the type boundary"
+ },
+ {
+  "id": "eq-strict",
+  "tier": "conditional",
+  "expr": {
+   "===": [
+    1,
+    "1"
+   ]
+  },
+  "data": {},
+  "note": "strict equality"
+ },
+ {
+  "id": "neq",
+  "tier": "conditional",
+  "expr": {
+   "!=": [
+    {
+     "var": "status"
+    },
+    "draft"
+   ]
+  },
+  "data": {
+   "status": "posted"
+  },
+  "note": "conditional visibility"
+ },
+ {
+  "id": "gt",
+  "tier": "conditional",
+  "expr": {
+   ">": [
+    {
+     "var": "total"
+    },
+    1000
+   ]
+  },
+  "data": {
+   "total": 1500
+  },
+  "note": "conditional visibility"
+ },
+ {
+  "id": "between",
+  "tier": "conditional",
+  "expr": {
+   "<": [
+    1,
+    {
+     "var": "n"
+    },
+    10
+   ]
+  },
+  "data": {
+   "n": 5
+  },
+  "note": "three-argument between form"
+ },
+ {
+  "id": "and-or",
+  "tier": "conditional",
+  "expr": {
+   "and": [
+    {
+     "or": [
+      {
+       "==": [
+        {
+         "var": "type"
+        },
+        "invoice"
+       ]
+      },
+      {
+       "==": [
+        {
+         "var": "type"
+        },
+        "credit"
+       ]
+      }
+     ]
+    },
+    {
+     ">": [
+      {
+       "var": "total"
+      },
+      0
+     ]
+    }
+   ]
+  },
+  "data": {
+   "type": "credit",
+   "total": 5
+  },
+  "note": "JFSS S7 conditional.logic"
+ },
+ {
+  "id": "not-empty-string",
+  "tier": "conditional",
+  "expr": {
+   "!": [
+    {
+     "var": "name"
+    }
+   ]
+  },
+  "data": {
+   "name": ""
+  },
+  "note": "JS falsiness of empty string"
+ },
+ {
+  "id": "not-empty-array",
+  "tier": "conditional",
+  "expr": {
+   "!": [
+    {
+     "var": "rows"
+    }
+   ]
+  },
+  "data": {
+   "rows": []
+  },
+  "note": "JSON Logic treats [] as falsy; JS does not"
+ },
+ {
+  "id": "if",
+  "tier": "conditional",
+  "expr": {
+   "if": [
+    {
+     ">": [
+      {
+       "var": "n"
+      },
+      10
+     ]
+    },
+    "high",
+    "low"
+   ]
+  },
+  "data": {
+   "n": 11
+  },
+  "note": "forbidden in calculate, required in conditional"
+ },
+ {
+  "id": "in-array",
+  "tier": "conditional",
+  "expr": {
+   "in": [
+    {
+     "var": "code"
+    },
+    [
+     "A",
+     "B"
+    ]
+   ]
+  },
+  "data": {
+   "code": "B"
+  },
+  "note": "membership"
+ },
+ {
+  "id": "in-string",
+  "tier": "conditional",
+  "expr": {
+   "in": [
+    "ell",
+    "hello"
+   ]
+  },
+  "data": {},
+  "note": "substring form of in"
+ },
+ {
+  "id": "cat",
+  "tier": "conditional",
+  "expr": {
+   "cat": [
+    "INV-",
+    {
+     "var": "n"
+    }
+   ]
+  },
+  "data": {
+   "n": 42
+  },
+  "note": "forbidden in calculate; used in display"
+ },
+ {
+  "id": "missing",
+  "tier": "conditional",
+  "expr": {
+   "missing": [
+    "a",
+    "b"
+   ]
+  },
+  "data": {
+   "a": 1
+  },
+  "note": "missing"
+ },
+ {
+  "id": "missing-some",
+  "tier": "conditional",
+  "expr": {
+   "missing_some": [
+    1,
+    [
+     "a",
+     "b",
+     "c"
+    ]
+   ]
+  },
+  "data": {
+   "a": 1
+  },
+  "note": "missing_some"
+ },
+ {
+  "id": "div-by-zero-float",
+  "tier": "normalization",
+  "expr": {
+   "/": [
+    10.5,
+    0
+   ]
+  },
+  "data": {},
+  "note": "fractional dividend takes datalogic's configurable path"
+ },
+ {
+  "id": "div-zero-by-zero",
+  "tier": "normalization",
+  "expr": {
+   "/": [
+    {
+     "var": "a"
+    },
+    {
+     "var": "b"
+    }
+   ]
+  },
+  "data": {
+   "a": 0,
+   "b": 0
+  },
+  "note": "indeterminate form"
+ },
+ {
+  "id": "sub-null",
+  "tier": "normalization",
+  "expr": {
+   "-": [
+    {
+     "var": "gross"
+    },
+    {
+     "var": "discount"
+    }
+   ]
+  },
+  "data": {
+   "gross": 100
+  },
+  "note": "S7.3 typing race on subtraction"
+ },
+ {
+  "id": "min-null",
+  "tier": "normalization",
+  "expr": {
+   "min": [
+    {
+     "var": "a"
+    },
+    {
+     "var": "b"
+    }
+   ]
+  },
+  "data": {
+   "a": 5
+  },
+  "note": "variadic min with a missing operand"
+ },
+ {
+  "id": "datagrid-typing-race",
+  "tier": "normalization",
+  "expr": {
+   "sum": [
+    {
+     "map": [
+      {
+       "var": "items"
+      },
+      {
+       "*": [
+        {
+         "var": "unit_price"
+        },
+        {
+         "var": "quantity"
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  "data": {
+   "items": [
+    {
+     "unit_price": 10,
+     "quantity": 2
+    },
+    {
+     "unit_price": null,
+     "quantity": 4
+    }
+   ]
+  },
+  "note": "Registry 6.1 invoice while the user is still typing row 2"
+ }
+]
