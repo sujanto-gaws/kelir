@@ -260,16 +260,18 @@ async fn every_party_route_refuses_a_request_with_no_token() {
 
 #[tokio::test]
 async fn the_administrator_role_holds_the_new_permissions() {
-    // The migration seeds four rows and grants them to ROLE-ADMIN. A grant that
+    // `0008` seeds four rows and grants them to ROLE-ADMIN. A grant that
     // silently failed would leave the bootstrap administrator unable to reach
     // any of these routes on a fresh deployment — the worst place to find out.
+    // Scoped to `master-data:party:` so the party-role rows `0009` adds are
+    // this file's neighbour's business, not a reason for this test to churn.
     let app = TestApp::spawn().await;
 
     let granted: Vec<String> = sqlx::query_scalar(
         "SELECT p.permission_code
            FROM role_permissions rp
            JOIN permissions p ON p.id = rp.permission_id
-          WHERE rp.role_id = $1 AND p.module = 'master-data'
+          WHERE rp.role_id = $1 AND p.permission_code LIKE 'master-data:party:%'
           ORDER BY p.permission_code",
     )
     .bind(fixtures::ADMIN_ROLE_ID)

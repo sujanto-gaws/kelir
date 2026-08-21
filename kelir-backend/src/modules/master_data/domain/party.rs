@@ -1,26 +1,9 @@
-//! Party domain types — the `PartyAggregate` of [architectures/05] in Rust.
+//! The party itself: its type, its person or party-group detail, and the
+//! identifications, statuses, relationships, classifications and contact
+//! mechanisms that hang off it.
 //!
-//! The aggregate is the API payload shape; Database Schema §4 is its storage.
-//! Three things about the mapping are decisions rather than transcriptions, and
-//! each is stated where it applies below:
-//!
-//! * **`id` is added to the response.** The aggregate is
-//!   `additionalProperties: false` and carries no surrogate key — its `partyId`
-//!   is the business code. Every route addresses a party by `{id}` (naming
-//!   convention §5), so a client that had only seen `partyId` could not build a
-//!   URL. Nothing else is added: `recordStatus` and the two document references
-//!   exist in the schema (AC5) and stay off the wire until Phase 5 gives them a
-//!   consumer, because a field nothing can change reads as a control that
-//!   exists.
-//! * **`roles`, `profiles`, `notes` and `tenantPartyId` are absent.** Roles and
-//!   profiles are #81, in this sprint. `notes` and `tenantPartyId` have no
-//!   storage in §4 at all — recorded as deviation #16 there.
-//! * **Request types carry only writable fields.** A `GET` body posted back
-//!   into a `PUT` is refused with a 422 naming the extra field, which is what
-//!   `deny_unknown_fields` is for (#62): a request struct that quietly accepted
-//!   and ignored `createdStamp` is the shape of defect that change closed.
-//!
-//! [architectures/05]: ../../../../docs/architectures/05.%20Core%20-%20Master%20Data%20-%20Party.md
+//! The aggregate this builds up to, and the three decisions behind how it maps
+//! onto Database Schema §4, are documented on the parent module.
 
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
@@ -28,18 +11,11 @@ use serde_json::Value;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use super::{
+    bound_name, echoed_party_id, finish, non_empty, require_code, require_name, MAX_CODE_LENGTH,
+    MAX_PARTY_CODE_LENGTH,
+};
 use crate::error::{AppError, ValidationDetail};
-
-/// Longest `partyId` the aggregate allows, and the bound
-/// `ck_mdm_parties_party_code_len` holds in the database.
-pub const MAX_PARTY_CODE_LENGTH: usize = 60;
-
-/// Longest value for the code columns of the child tables — `VARCHAR(64)` in
-/// §4, so a longer value is a 422 rather than a database error.
-pub const MAX_CODE_LENGTH: usize = 64;
-
-/// Longest human name or title — `VARCHAR(200)` in §4.
-pub const MAX_NAME_LENGTH: usize = 200;
 
 // ---------------------------------------------------------------------------
 // Vocabularies
@@ -895,27 +871,6 @@ fn validate_party_group(
     }
 }
 
-/// The aggregate repeats `partyId` inside `person` and `partyGroup`. A value
-/// that disagrees with the party's own code is a mistake worth naming rather
-/// than a field to ignore.
-fn echoed_party_id(
-    echoed: Option<&str>,
-    party_code: &str,
-    path: &str,
-    details: &mut Vec<ValidationDetail>,
-) {
-    if let Some(value) = non_empty(echoed) {
-        if value != party_code.trim() {
-            details.push(ValidationDetail::new(
-                format!("{path}.partyId"),
-                "consistency",
-                "MISMATCH",
-                "partyId must match the party it belongs to",
-            ));
-        }
-    }
-}
-
 fn validate_party_code(party_code: &str, details: &mut Vec<ValidationDetail>) {
     let trimmed = party_code.trim();
 
@@ -933,63 +888,6 @@ fn validate_party_code(party_code: &str, details: &mut Vec<ValidationDetail>) {
             "TOO_LONG",
             format!("partyId must be at most {MAX_PARTY_CODE_LENGTH} characters"),
         ));
-    }
-}
-
-fn require_code(value: &str, path: &str, max: usize, details: &mut Vec<ValidationDetail>) {
-    let trimmed = value.trim();
-
-    if trimmed.is_empty() {
-        details.push(ValidationDetail::new(
-            path,
-            "required",
-            "REQUIRED",
-            "This field is required",
-        ));
-    } else if trimmed.chars().count() > max {
-        details.push(ValidationDetail::new(
-            path,
-            "maxLength",
-            "TOO_LONG",
-            format!("Must be at most {max} characters"),
-        ));
-    }
-}
-
-fn require_name(value: Option<&str>, path: &str, details: &mut Vec<ValidationDetail>) {
-    match non_empty(value) {
-        None => details.push(ValidationDetail::new(
-            path,
-            "required",
-            "REQUIRED",
-            "This field is required",
-        )),
-        Some(name) => bound_name(Some(name), path, details),
-    }
-}
-
-fn bound_name(value: Option<&str>, path: &str, details: &mut Vec<ValidationDetail>) {
-    if let Some(name) = non_empty(value) {
-        if name.chars().count() > MAX_NAME_LENGTH {
-            details.push(ValidationDetail::new(
-                path,
-                "maxLength",
-                "TOO_LONG",
-                format!("Must be at most {MAX_NAME_LENGTH} characters"),
-            ));
-        }
-    }
-}
-
-fn non_empty(value: Option<&str>) -> Option<&str> {
-    value.map(str::trim).filter(|value| !value.is_empty())
-}
-
-fn finish(details: Vec<ValidationDetail>) -> Result<(), AppError> {
-    if details.is_empty() {
-        Ok(())
-    } else {
-        Err(AppError::validation(details))
     }
 }
 
