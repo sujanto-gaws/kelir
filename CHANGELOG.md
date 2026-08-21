@@ -9,7 +9,29 @@ While the major version is `0`, the public API may change in any release.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **Master-data schema (Database Schema §4).** `0008_master_data.sql` creates the
+  whole master-data table group in one file — the party model, role types and
+  party roles, the four role profiles, facilities, products, services and
+  external source references — and adds the two foreign keys `0002` deferred
+  until `mdm_parties` existed. Seeds the six system role types and the four
+  `master-data:party:*` permissions, granted to `ROLE-ADMIN`.
+- **Party master data (FR-MDM-001, FR-MDM-003).** `/api/v1/master-data/parties`
+  creates, lists, reads, updates and soft-deletes parties. The payload is the
+  `PartyAggregate` of architecture document 05: a person or a party group with
+  its identifications, status history, relationships in both directions,
+  classifications and contact mechanisms in one document. Create, update and
+  delete are audited; a status change is audited as a status change rather than
+  as an ordinary update.
+
+### Changed
+
+- Bounded string columns in Database Schema §4 take a `§1.3.1` length instead of
+  `TEXT`. The section had `status VARCHAR(40)` beside `party_type TEXT`, and six
+  of the affected columns sit inside unique indexes — the failure
+  `0004_string_lengths.sql` was written to fix. Applied at `CREATE TABLE` time,
+  so no existing table is rewritten; recorded as §14 deviation #15.
 
 ## [0.2.0] — 2026-08-20
 
