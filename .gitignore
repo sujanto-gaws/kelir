@@ -41,3 +41,6 @@ desktop.ini
 .vscode/
 .idea/
 .claude/settings.local.json
+# Scratch git worktrees the agent tooling creates. `.claude/agents/` and the
+# skills beside it are shared project configuration and stay tracked.
+.claude/worktrees/
