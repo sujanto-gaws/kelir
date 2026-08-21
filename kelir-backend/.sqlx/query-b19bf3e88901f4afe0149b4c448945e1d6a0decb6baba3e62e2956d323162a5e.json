@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE mdm_party_roles\n        SET deleted_at = now(),\n            ends_at = COALESCE(ends_at, now()),\n            status = 'INACTIVE',\n            updated_by = $4,\n            updated_at = now()\n        WHERE tenant_id = $1 AND party_id = $2 AND role_type_id = $3 AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b19bf3e88901f4afe0149b4c448945e1d6a0decb6baba3e62e2956d323162a5e"
+}

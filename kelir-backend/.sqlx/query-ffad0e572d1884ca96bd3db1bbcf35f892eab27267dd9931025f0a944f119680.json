@@ -1,0 +1,83 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT supplier_number, supplier_category, payment_term_days, default_currency_uom,\n               tax_number, bank_name, bank_account, bank_account_name, approval_status,\n               status, attributes_json\n        FROM mdm_supplier_profiles\n        WHERE tenant_id = $1 AND party_id = $2 AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "supplier_number",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "supplier_category",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "payment_term_days",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "default_currency_uom",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "tax_number",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "bank_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "bank_account",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "bank_account_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "approval_status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 9,
+        "name": "status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 10,
+        "name": "attributes_json",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "ffad0e572d1884ca96bd3db1bbcf35f892eab27267dd9931025f0a944f119680"
+}

@@ -12,8 +12,8 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::{
-    bound_name, echoed_party_id, finish, non_empty, require_code, require_name, MAX_CODE_LENGTH,
-    MAX_PARTY_CODE_LENGTH,
+    bound_name, echoed_party_id, finish, non_empty, require_code, require_name, PartyProfiles,
+    PartyRole, MAX_CODE_LENGTH, MAX_PARTY_CODE_LENGTH,
 };
 use crate::error::{AppError, ValidationDetail};
 
@@ -265,6 +265,15 @@ pub struct PartyAggregate {
     pub relationships_to: Vec<PartyRelationship>,
     pub classifications: Vec<PartyClassification>,
     pub contact_mechanisms: Vec<PartyContactMech>,
+    /// The roles this party holds, and the profiles behind them.
+    ///
+    /// Absent — not empty — for a caller who holds `master-data:party:read`
+    /// without `master-data:party-role:read`. The distinction is the point:
+    /// `[]` says this party holds no roles, and absence says you cannot see.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub roles: Option<Vec<PartyRole>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profiles: Option<PartyProfiles>,
     pub additional_attributes: Value,
     pub created_stamp: DateTime<Utc>,
     pub last_updated_stamp: DateTime<Utc>,

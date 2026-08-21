@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO mdm_contact_profiles (\n            id, tenant_id, party_id, contact_type, preferred_contact_mech_type,\n            do_not_contact, assistant_party_id, attributes_json, created_by\n        )\n        VALUES ($1, $2, $3, $4, $5, COALESCE($6, false), $7, COALESCE($8, '{}'::jsonb), $9)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Bool",
+        "Uuid",
+        "Jsonb",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2106f801f4dd90e44bfb886b596a379ef98e965cfd3f6c467d0ccd003738eefe"
+}

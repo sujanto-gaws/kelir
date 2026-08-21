@@ -13,8 +13,10 @@
 //! cannot hold exactly, so the string is the honest wire shape either way.
 
 pub mod party;
+pub mod role;
 
 // Re-exported flat, so the service keeps addressing these as `repo::find_party`
 // — which file a query lives in is a question about this module's size, not
 // about its interface.
 pub use party::*;
+pub use role::*;

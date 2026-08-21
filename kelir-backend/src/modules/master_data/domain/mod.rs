@@ -12,9 +12,14 @@
 //!   exist in the schema (AC5) and stay off the wire until Phase 5 gives them a
 //!   consumer, because a field nothing can change reads as a control that
 //!   exists.
-//! * **`roles`, `profiles`, `notes` and `tenantPartyId` are absent.** Roles and
-//!   profiles are #81, in this sprint. `notes` and `tenantPartyId` have no
-//!   storage in §4 at all — recorded as deviation #16 there.
+//! * **`roles` and `profiles` are present but permissioned.** They carry bank
+//!   accounts and credit limits, so seeing that a party exists and seeing what
+//!   it is worth are different permissions: both members are omitted entirely
+//!   for a caller who holds `master-data:party:read` without
+//!   `master-data:party-role:read`. Absent means *not visible to you*; `[]`
+//!   means *this party holds no roles*.
+//! * **`notes` and `tenantPartyId` are absent.** Neither has storage in §4 at
+//!   all — recorded as deviation #16 there.
 //! * **Request types carry only writable fields.** A `GET` body posted back
 //!   into a `PUT` is refused with a 422 naming the extra field, which is what
 //!   `deny_unknown_fields` is for (#62): a request struct that quietly accepted
@@ -23,11 +28,13 @@
 //! [architectures/05]: ../../../../../docs/architectures/05.%20Core%20-%20Master%20Data%20-%20Party.md
 
 pub mod party;
+pub mod role;
 
 // Re-exported flat, so the rest of the module keeps addressing these as
 // `domain::PartyAggregate` — where the type is declared is a question about this
 // file's size, not about the module's interface.
 pub use party::*;
+pub use role::*;
 
 use crate::error::{AppError, ValidationDetail};
 

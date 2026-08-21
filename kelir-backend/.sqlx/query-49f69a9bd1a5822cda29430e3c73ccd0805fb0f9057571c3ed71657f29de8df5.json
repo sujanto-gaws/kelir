@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO mdm_party_roles (\n            id, tenant_id, party_id, role_type_id, starts_at, ends_at,\n            status, comments, attributes_json, created_by\n        )\n        VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, 'ACTIVE'), $8, COALESCE($9, '{}'::jsonb), $10)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Timestamptz",
+        "Timestamptz",
+        "Text",
+        "Text",
+        "Jsonb",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "49f69a9bd1a5822cda29430e3c73ccd0805fb0f9057571c3ed71657f29de8df5"
+}

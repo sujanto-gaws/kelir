@@ -1,0 +1,27 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE mdm_supplier_profiles\n        SET supplier_number = COALESCE($3, supplier_number),\n            supplier_category = COALESCE($4, supplier_category),\n            payment_term_days = COALESCE($5, payment_term_days),\n            default_currency_uom = COALESCE($6, default_currency_uom),\n            tax_number = COALESCE($7, tax_number),\n            bank_name = COALESCE($8, bank_name),\n            bank_account = COALESCE($9, bank_account),\n            bank_account_name = COALESCE($10, bank_account_name),\n            approval_status = COALESCE($11, approval_status),\n            status = COALESCE($12, status),\n            attributes_json = COALESCE($13, attributes_json),\n            updated_by = $14,\n            updated_at = now()\n        WHERE tenant_id = $1 AND party_id = $2 AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Int4",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Jsonb",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "eb9c8f42eacc948e632badc1da300bb7f2a124c29eea66ab7f59ca08e1e9d59b"
+}

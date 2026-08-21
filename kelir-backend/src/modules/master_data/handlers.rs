@@ -3,7 +3,10 @@ use axum::routing::get;
 use axum::{Json, Router};
 use uuid::Uuid;
 
-use super::domain::{CreatePartyRequest, PartyAggregate, PartySummary, UpdatePartyRequest};
+use super::domain::{
+    AssignRoleRequest, CreatePartyRequest, PartyAggregate, PartyRoles, PartySummary,
+    UpdatePartyRequest,
+};
 use super::service;
 use crate::error::AppError;
 use crate::extract::JsonBody;
@@ -19,6 +22,11 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/parties/{id}",
             get(get_party).put(update_party).delete(delete_party),
+        )
+        .route("/parties/{id}/roles", get(get_party_roles))
+        .route(
+            "/parties/{id}/roles/{roleTypeId}",
+            axum::routing::put(assign_role).delete(remove_role),
         )
 }
 
@@ -117,6 +125,82 @@ async fn delete_party(
     Path(id): Path<Uuid>,
 ) -> Result<axum::http::StatusCode, AppError> {
     service::delete_party(&state, &caller, id).await?;
+
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// Roles and role profiles (FR-MDM-002)
+// ---------------------------------------------------------------------------
+
+#[utoipa::path(
+    get, path = "/api/v1/master-data/parties/{id}/roles", tag = "master-data",
+    responses(
+        (status = 200, description = "The party's roles and their profiles", body = PartyRoles),
+        (status = 403, description = "Missing master-data:party-role:read"),
+        (status = 404, description = "No such party")
+    ),
+    security(("bearer" = []))
+)]
+async fn get_party_roles(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ItemEnvelope<PartyRoles>>, AppError> {
+    Ok(Json(ItemEnvelope::new(
+        service::get_party_roles(&state, &caller, id).await?,
+    )))
+}
+
+/// `PUT` rather than `POST`: assigning a role is idempotent — a party either
+/// holds SUPPLIER or it does not — and the role type is what identifies the
+/// assignment, so it belongs in the path rather than repeated in the body.
+#[utoipa::path(
+    put, path = "/api/v1/master-data/parties/{id}/roles/{roleTypeId}", tag = "master-data",
+    request_body = AssignRoleRequest,
+    responses(
+        (status = 200, description = "The party already held this role; it and its profile are updated", body = PartyRoles),
+        (status = 201, description = "Role assigned", body = PartyRoles),
+        (status = 403, description = "Missing master-data:party-role:assign"),
+        (status = 404, description = "No such party"),
+        (status = 409, description = "That profile number is already in use"),
+        (status = 422, description = "Validation failed, or no such role type")
+    ),
+    security(("bearer" = []))
+)]
+async fn assign_role(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path((id, role_type_id)): Path<(Uuid, String)>,
+    JsonBody(request): JsonBody<AssignRoleRequest>,
+) -> Result<(axum::http::StatusCode, Json<ItemEnvelope<PartyRoles>>), AppError> {
+    let (created, roles) =
+        service::assign_role(&state, &caller, id, &role_type_id, request).await?;
+
+    let status = if created {
+        axum::http::StatusCode::CREATED
+    } else {
+        axum::http::StatusCode::OK
+    };
+
+    Ok((status, Json(ItemEnvelope::new(roles))))
+}
+
+#[utoipa::path(
+    delete, path = "/api/v1/master-data/parties/{id}/roles/{roleTypeId}", tag = "master-data",
+    responses(
+        (status = 204, description = "Role removed; the party and its other roles are untouched"),
+        (status = 403, description = "Missing master-data:party-role:remove"),
+        (status = 404, description = "No such party, or it does not hold that role")
+    ),
+    security(("bearer" = []))
+)]
+async fn remove_role(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path((id, role_type_id)): Path<(Uuid, String)>,
+) -> Result<axum::http::StatusCode, AppError> {
+    service::remove_role(&state, &caller, id, &role_type_id).await?;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
