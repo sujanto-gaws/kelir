@@ -106,15 +106,16 @@ The MVP focuses on:
 │   │   ├── 0006_password_reset_tokens.sql
 │   │   ├── 0007_account_lockout.sql
 │   │   ├── 0008_master_data.sql
-│   │   ├── 0009_rad.sql
-│   │   ├── 0010_document.sql
-│   │   ├── 0011_workflow.sql
-│   │   ├── 0012_attachment.sql
-│   │   ├── 0013_comment.sql
-│   │   ├── 0014_activity_audit.sql
-│   │   ├── 0015_notification.sql
-│   │   ├── 0016_integration.sql
-│   │   └── 0017_plugin.sql
+│   │   ├── 0009_party_role_permissions.sql
+│   │   ├── 0010_rad.sql
+│   │   ├── 0011_document.sql
+│   │   ├── 0012_workflow.sql
+│   │   ├── 0013_attachment.sql
+│   │   ├── 0014_comment.sql
+│   │   ├── 0015_activity_audit.sql
+│   │   ├── 0016_notification.sql
+│   │   ├── 0017_integration.sql
+│   │   └── 0018_plugin.sql
 │   └── src/
 │       ├── main.rs
 │       ├── config.rs
