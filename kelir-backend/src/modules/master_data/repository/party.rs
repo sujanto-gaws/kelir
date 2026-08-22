@@ -180,6 +180,54 @@ pub async fn list_parties(
         .collect())
 }
 
+/// [`find_party`], holding the row until the transaction ends.
+///
+/// Takes `&mut PgConnection` rather than an executor because `FOR UPDATE`
+/// outside a transaction locks nothing worth having: the lock would be released
+/// with the statement. The caller must be inside one.
+///
+/// This is how "a party holds a role once" is kept true under concurrency
+/// (#105). Assigning a role is check-then-act — read whether the party already
+/// holds it, then insert or update — and the two halves ran on different
+/// connections with nothing between them, so two requests both read *no* and
+/// both inserted. The party row is what they contend on; taking it first means
+/// the second request reads what the first wrote.
+///
+/// It also re-asks a question the caller answered before the transaction began:
+/// a party soft-deleted in between is gone by the time this runs, and the role
+/// is not written onto it.
+pub async fn lock_party(
+    connection: &mut sqlx::PgConnection,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<Option<PartyRow>, sqlx::Error> {
+    let row = sqlx::query!(
+        r#"
+        SELECT id, party_code, party_type, status, external_id, description,
+               attributes_json, created_at, updated_at
+        FROM mdm_parties
+        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+        FOR UPDATE
+        "#,
+        tenant_id,
+        id
+    )
+    .fetch_optional(connection)
+    .await?;
+
+    Ok(row.map(|row| PartyRow {
+        id: row.id,
+        party_code: row.party_code,
+        party_type: PartyType::from_db(&row.party_type),
+        status: PartyStatusCode::from_db(&row.status),
+        external_id: row.external_id,
+        description: row.description,
+        attributes_json: row.attributes_json,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    }))
+}
+
 pub async fn find_party(
     executor: impl PgExecutor<'_>,
     tenant_id: Uuid,

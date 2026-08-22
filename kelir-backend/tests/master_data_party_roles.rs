@@ -48,6 +48,17 @@ fn supplier_profile(number: &str) -> Value {
     })
 }
 
+/// [`supplier_profile`] with a chosen `fromDate`.
+///
+/// Two assignments that differ only in their date are the shape a concurrency
+/// test needs: the role's unique index includes `starts_at`, so identical dates
+/// collide in the database and hide whatever the service did or did not do.
+fn supplier_profile_from(number: &str, from_date: &str) -> Value {
+    let mut body = supplier_profile(number);
+    body["fromDate"] = json!(from_date);
+    body
+}
+
 fn customer_profile(number: &str) -> Value {
     json!({
         "fromDate": "2026-01-01T00:00:00Z",
@@ -1094,4 +1105,243 @@ async fn a_delete_that_finds_nothing_writes_nothing() {
         .delete(&format!("{PARTIES}/{}", Uuid::now_v7()), Some(&token))
         .await;
     assert_eq!(missing.status, StatusCode::NOT_FOUND, "{}", missing.body);
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency (#105)
+// ---------------------------------------------------------------------------
+
+/// A role type this tenant defines, with **no profile table behind it**.
+///
+/// That is deliberate and is #105 acceptance criterion 2. For the four profiled
+/// roles the duplicate is masked into a different symptom: the profile's
+/// `uq_…_party_id` index rejects the second insert, so the race surfaces as a
+/// spurious 409 rather than as two live roles. A concurrency test written
+/// against SUPPLIER would be watching the mask, not the defect.
+async fn given_role_type_without_a_profile(app: &TestApp, code: &str) {
+    sqlx::query(
+        "INSERT INTO mdm_role_types (id, tenant_id, role_type_code, name, is_system)
+         VALUES ($1, $2, $3, $4, false)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .bind(code)
+    .bind(code)
+    .execute(&app.pool)
+    .await
+    .expect("insert the tenant role type");
+}
+
+async fn live_roles(app: &TestApp, party: Uuid) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM mdm_party_roles WHERE party_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(party)
+    .fetch_one(&app.pool)
+    .await
+    .expect("query runs")
+}
+
+#[tokio::test]
+async fn two_concurrent_assignments_leave_the_party_holding_the_role_once() {
+    // #105, and the reason it is written as a loop rather than as one attempt:
+    // the verifier's first single-shot probe passed. The defect surfaced on the
+    // thirtieth run. **A concurrency test that runs once and goes green is not
+    // evidence**, so this runs the race twenty times and every round has to
+    // hold.
+    //
+    // The two requests carry different `fromDate` values on purpose. The unique
+    // index includes `starts_at`, so identical dates would collide in the
+    // database and the service would look correct for a reason that is not the
+    // one under test.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    given_role_type_without_a_profile(&app, "DISTRIBUTOR").await;
+
+    const ROUNDS: usize = 20;
+
+    for round in 0..ROUNDS {
+        let party = create_party(
+            &app,
+            &token,
+            party_group(&format!("PARTY-{round:04}"), "Acme Distribution"),
+        )
+        .await;
+        let path = role_path(party, "DISTRIBUTOR");
+
+        let (first, second) = tokio::join!(
+            app.put(
+                &path,
+                Some(&token),
+                json!({ "fromDate": "2026-01-01T00:00:00Z" }),
+            ),
+            app.put(
+                &path,
+                Some(&token),
+                json!({ "fromDate": "2026-02-01T00:00:00Z" }),
+            ),
+        );
+
+        assert_eq!(
+            live_roles(&app, party).await,
+            1,
+            "round {round}: the party holds DISTRIBUTOR twice — {} and {}",
+            first.body,
+            second.body
+        );
+
+        // Both requests succeeded: one created the assignment and the other
+        // updated it. Serialising the two must not turn a legitimate request
+        // into an error.
+        for (label, response) in [("first", &first), ("second", &second)] {
+            assert!(
+                response.status == StatusCode::CREATED || response.status == StatusCode::OK,
+                "round {round}: the {label} request failed with {} — {}",
+                response.status,
+                response.body
+            );
+        }
+
+        // Exactly one of them created it. Two 201s would mean two inserts even
+        // if one was later cleaned up, and two 200s would mean neither reported
+        // the create that must have happened.
+        let created = [&first, &second]
+            .iter()
+            .filter(|response| response.status == StatusCode::CREATED)
+            .count();
+        assert_eq!(
+            created, 1,
+            "round {round}: {created} of the two requests reported a create — {} and {}",
+            first.body, second.body
+        );
+    }
+}
+
+#[tokio::test]
+async fn concurrent_assignment_of_a_profiled_role_is_not_a_conflict() {
+    // #105 acceptance criterion 3. Before the fix the profile's unique index
+    // caught what the service missed, and the loser got
+    // `409 That profile number is already in use` — a misleading answer to a
+    // request that did nothing wrong, about a number it was entitled to send.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    const ROUNDS: usize = 10;
+
+    for round in 0..ROUNDS {
+        let party = create_party(
+            &app,
+            &token,
+            party_group(&format!("PARTY-{round:04}"), "Acme Supplies"),
+        )
+        .await;
+        let path = role_path(party, "SUPPLIER");
+        let number = format!("SUP-{round:04}");
+
+        // Different `fromDate`s, for the same reason as the test above: with
+        // identical ones the *role* index collides and the profile index never
+        // gets the chance to produce the spurious 409 this is about. The first
+        // version of this test sent the same date twice and could not fail —
+        // the mutation that restores the defect left it green.
+        let (first, second) = tokio::join!(
+            app.put(
+                &path,
+                Some(&token),
+                supplier_profile_from(&number, "2026-01-01T00:00:00Z"),
+            ),
+            app.put(
+                &path,
+                Some(&token),
+                supplier_profile_from(&number, "2026-02-01T00:00:00Z"),
+            ),
+        );
+
+        for (label, response) in [("first", &first), ("second", &second)] {
+            assert!(
+                response.status == StatusCode::CREATED || response.status == StatusCode::OK,
+                "round {round}: the {label} request answered {} — {}",
+                response.status,
+                response.body
+            );
+        }
+
+        let created = [&first, &second]
+            .iter()
+            .filter(|response| response.status == StatusCode::CREATED)
+            .count();
+        assert_eq!(
+            created, 1,
+            "round {round}: {created} of the two requests reported a create — {} and {}",
+            first.body, second.body
+        );
+
+        assert_eq!(
+            live_roles(&app, party).await,
+            1,
+            "round {round}: the party holds SUPPLIER twice"
+        );
+
+        let profiles: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM mdm_supplier_profiles
+              WHERE party_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(party)
+        .fetch_one(&app.pool)
+        .await
+        .expect("query runs");
+        assert_eq!(
+            profiles, 1,
+            "round {round}: the party has two live profiles"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_party_deleted_mid_assignment_does_not_get_the_role() {
+    // The second race the lock closes. The party is read inside the
+    // transaction that writes, so a delete that commits first is seen: the
+    // assignment answers 404 rather than writing a live role onto a party that
+    // no longer exists — which #103 has just finished cleaning up after.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    given_role_type_without_a_profile(&app, "DISTRIBUTOR").await;
+
+    for round in 0..10 {
+        let party = create_party(
+            &app,
+            &token,
+            party_group(&format!("PARTY-{round:04}"), "Acme Distribution"),
+        )
+        .await;
+
+        let delete_path = format!("{PARTIES}/{party}");
+        let assign_path = role_path(party, "DISTRIBUTOR");
+
+        let (deleted, assigned) = tokio::join!(
+            app.delete(&delete_path, Some(&token)),
+            app.put(
+                &assign_path,
+                Some(&token),
+                json!({ "fromDate": "2026-01-01T00:00:00Z" }),
+            ),
+        );
+
+        assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
+
+        // Either order is legal — the assignment may win the race and be
+        // closed by the delete, or lose it and be refused. What must not
+        // happen is a live role on a deleted party.
+        assert!(
+            assigned.status == StatusCode::CREATED || assigned.status == StatusCode::NOT_FOUND,
+            "round {round}: unexpected {} — {}",
+            assigned.status,
+            assigned.body
+        );
+        assert_eq!(
+            live_roles(&app, party).await,
+            0,
+            "round {round}: a deleted party kept a live role, assigned answered {}",
+            assigned.status
+        );
+    }
 }
