@@ -4,6 +4,21 @@
 //! a supplier and a customer is one party with two roles, not two records. A
 //! test that only assigned one role would pass against a design that stored a
 //! second party behind the scenes, so the two-role case is the first one here.
+//!
+//! # What the scoping tests here reach (#106)
+//!
+//! `list_party_roles`, `find_live_party_role`, `soft_delete_party_role` and all
+//! four `find_*_profile` queries were mutated on both `tenant_id` and
+//! `deleted_at`, and every mutation turned a named test red;
+//! `find_role_type_id` likewise on `tenant_id`.
+//!
+//! `a_party_in_another_tenant_has_no_roles_to_reach` is kept, and now claims
+//! only what it covers: mutating `find_party` is the one thing that turns it
+//! red, because the gate refuses ahead of every query it appears to exercise.
+//!
+//! Not reached: `soft_delete_party_roles` and `soft_delete_role_profile`, the
+//! party-delete cascade's two queries. The delete tests below exercise them,
+//! but their scoping sits behind the same gate and is not isolated from it.
 
 mod common;
 
@@ -750,6 +765,302 @@ async fn a_party_in_another_tenant_has_no_roles_to_reach() {
             .status,
         StatusCode::NOT_FOUND
     );
+}
+
+// ---------------------------------------------------------------------------
+// Scoping probed past the party gate (#106 F7)
+// ---------------------------------------------------------------------------
+//
+// `a_party_in_another_tenant_has_no_roles_to_reach` above states something
+// true, and covers one query while appearing to cover six: every route it
+// drives refuses at `find_party`, so nothing below the gate ever runs and every
+// mutation beneath it is absorbed. The tests here put the party in the caller's
+// own tenant, so the request gets past the gate and the child query's own
+// filters are the only thing left standing.
+
+/// The four profile tables, and the aggregate member each is read back into.
+const PROFILE_TABLES: [(&str, &str); 4] = [
+    ("mdm_supplier_profiles", "supplier"),
+    ("mdm_customer_profiles", "customer"),
+    ("mdm_employee_profiles", "employee"),
+    ("mdm_contact_profiles", "contact"),
+];
+
+/// A party of the caller's own holding all four profiled roles, with the
+/// business numbers suffixed so two of these can coexist in one tenant.
+async fn party_holding_every_profiled_role(app: &TestApp, token: &str, suffix: &str) -> Uuid {
+    let party = create_party(
+        app,
+        token,
+        person(&format!("PARTY-{suffix}"), "Multi", "Role"),
+    )
+    .await;
+
+    let bodies = [
+        ("SUPPLIER", supplier_profile(&format!("SUP-{suffix}"))),
+        ("CUSTOMER", customer_profile(&format!("CUS-{suffix}"))),
+        (
+            "EMPLOYEE",
+            json!({
+                "fromDate": "2026-01-01T00:00:00Z",
+                "profile": { "employee": { "employeeNumber": format!("EMP-{suffix}") } },
+            }),
+        ),
+        (
+            "CONTACT",
+            json!({
+                "fromDate": "2026-01-01T00:00:00Z",
+                "profile": { "contact": { "contactType": "PRIMARY", "doNotContact": true } },
+            }),
+        ),
+    ];
+
+    for (role_type, body) in bodies {
+        let response = app
+            .put(&role_path(party, role_type), Some(token), body)
+            .await;
+        assert_eq!(
+            response.status,
+            StatusCode::CREATED,
+            "{role_type} was refused: {}",
+            response.body
+        );
+    }
+
+    party
+}
+
+/// The role type this tenant knows by `code`.
+async fn role_type_id(app: &TestApp, code: &str) -> Uuid {
+    sqlx::query_scalar("SELECT id FROM mdm_role_types WHERE tenant_id = $1 AND role_type_code = $2")
+        .bind(fixtures::SYSTEM_TENANT_ID)
+        .bind(code)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap_or_else(|error| panic!("the tenant has no {code} role type: {error}"))
+}
+
+/// Whether a role row has been soft-deleted.
+async fn is_closed(app: &TestApp, role: Uuid) -> bool {
+    sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(
+        "SELECT deleted_at FROM mdm_party_roles WHERE id = $1",
+    )
+    .bind(role)
+    .fetch_one(&app.pool)
+    .await
+    .expect("query runs")
+    .is_some()
+}
+
+/// The role codes a party's roles route lists.
+async fn listed_roles(app: &TestApp, token: &str, party: Uuid) -> Vec<String> {
+    let response = app
+        .get(&format!("{PARTIES}/{party}/roles"), Some(token))
+        .await;
+
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+
+    response.data()["roles"]
+        .as_array()
+        .unwrap_or_else(|| panic!("roles is not a list: {}", response.body))
+        .iter()
+        .map(|role| {
+            role["roleTypeId"]
+                .as_str()
+                .unwrap_or_else(|| panic!("a role carries no roleTypeId: {}", response.body))
+                .to_owned()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_role_row_stamped_with_another_tenant_is_not_mine_to_read_or_remove() {
+    // The row differs from one this tenant could hold only by its `tenant_id`:
+    // same party, same role type. Nothing can write that row today - role types
+    // and parties are both tenant-scoped - which is exactly why the filters
+    // that would exclude it need a probe. Defence in depth that nothing tests
+    // is indistinguishable from defence in depth that does not work.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let party = create_party(&app, &token, party_group("PARTY-ACME", "Acme")).await;
+
+    let other_tenant = fixtures::create_tenant(&app.pool, "TNT-002", "Other").await;
+    let supplier = role_type_id(&app, "SUPPLIER").await;
+    let foreign_role = Uuid::now_v7();
+
+    // A `starts_at` of its own: `uq_mdm_party_roles_party_id_role_type_id_starts_at`
+    // does not include the tenant, so a row sharing this party's date would
+    // collide with the assignment below and hide what the service did.
+    sqlx::query(
+        "INSERT INTO mdm_party_roles (id, tenant_id, party_id, role_type_id, starts_at)
+         VALUES ($1, $2, $3, $4, TIMESTAMPTZ '2025-01-01T00:00:00Z')",
+    )
+    .bind(foreign_role)
+    .bind(other_tenant)
+    .bind(party)
+    .bind(supplier)
+    .execute(&app.pool)
+    .await
+    .expect("insert the other tenant's role row");
+
+    // `list_party_roles`: the party holds nothing, and that row is not a role
+    // of its.
+    assert!(
+        listed_roles(&app, &token, party).await.is_empty(),
+        "another tenant's role row was listed as this party's"
+    );
+
+    // `soft_delete_party_role`: there is nothing here to remove, and the other
+    // tenant's row is not what the close may reach for instead.
+    assert_eq!(
+        app.delete(&role_path(party, "SUPPLIER"), Some(&token))
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+    assert!(
+        !is_closed(&app, foreign_role).await,
+        "removing a role this party does not hold closed another tenant's row"
+    );
+
+    // `find_live_party_role`: assigning is a create, because what exists is not
+    // this tenant's. A 200 here would mean the service had updated their row.
+    let assigned = app
+        .put(
+            &role_path(party, "SUPPLIER"),
+            Some(&token),
+            supplier_profile("SUP-0001"),
+        )
+        .await;
+    assert_eq!(
+        assigned.status,
+        StatusCode::CREATED,
+        "the assignment updated another tenant's role row: {}",
+        assigned.body
+    );
+    assert_eq!(listed_roles(&app, &token, party).await, vec!["SUPPLIER"]);
+    assert!(
+        !is_closed(&app, foreign_role).await,
+        "the assignment rewrote another tenant's role row"
+    );
+}
+
+#[tokio::test]
+async fn removing_a_role_twice_is_a_404_the_second_time() {
+    // `soft_delete_party_role` counts the rows it closed and the service turns
+    // zero into the 404. Without its `deleted_at` filter the second call would
+    // close an already-closed row, report one, and answer 204.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let party = create_party(&app, &token, party_group("PARTY-ACME", "Acme")).await;
+
+    app.put(
+        &role_path(party, "SUPPLIER"),
+        Some(&token),
+        supplier_profile("SUP-0001"),
+    )
+    .await;
+
+    assert_eq!(
+        app.delete(&role_path(party, "SUPPLIER"), Some(&token))
+            .await
+            .status,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        app.delete(&role_path(party, "SUPPLIER"), Some(&token))
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn a_profile_row_stamped_with_another_tenant_is_not_read_back() {
+    // The role stays this tenant's, so `load_roles` asks for all four profiles
+    // and each profile query answers for itself. Restamping the role instead
+    // would take `holds()` to false and the profile would be absent because it
+    // was never asked for - which is the shape this issue is about.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let party = party_holding_every_profiled_role(&app, &token, "0001").await;
+
+    let other_tenant = fixtures::create_tenant(&app.pool, "TNT-002", "Other").await;
+
+    for (table, _) in PROFILE_TABLES {
+        // Table names interpolated from the constant above, never from data;
+        // the values are still bound (coding standard §2.5).
+        let moved = sqlx::query(&format!(
+            "UPDATE {table} SET tenant_id = $1 WHERE party_id = $2"
+        ))
+        .bind(other_tenant)
+        .bind(party)
+        .execute(&app.pool)
+        .await
+        .unwrap_or_else(|error| panic!("restamp {table}: {error}"))
+        .rows_affected();
+
+        assert_eq!(moved, 1, "{table} had no profile row to restamp");
+    }
+
+    let response = app
+        .get(&format!("{PARTIES}/{party}/roles"), Some(&token))
+        .await;
+    let data = response.data();
+
+    assert_eq!(
+        listed_roles(&app, &token, party).await,
+        vec!["CONTACT", "CUSTOMER", "EMPLOYEE", "SUPPLIER"],
+        "the roles went with the profiles: {data}"
+    );
+
+    for (table, member) in PROFILE_TABLES {
+        assert!(
+            data["profiles"][member].is_null(),
+            "{table} was read across a tenant boundary: {data}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_soft_deleted_profile_row_is_not_read_back() {
+    // The mirror of the test above, for the other filter each profile query
+    // carries. Removing the role closes both rows together, so this closes the
+    // profile alone: it is the profile query's own filter under test.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let party = party_holding_every_profiled_role(&app, &token, "0001").await;
+
+    for (table, _) in PROFILE_TABLES {
+        let closed = sqlx::query(&format!(
+            "UPDATE {table} SET deleted_at = now() WHERE party_id = $1"
+        ))
+        .bind(party)
+        .execute(&app.pool)
+        .await
+        .unwrap_or_else(|error| panic!("soft-delete {table}: {error}"))
+        .rows_affected();
+
+        assert_eq!(closed, 1, "{table} had no profile row to soft-delete");
+    }
+
+    let response = app
+        .get(&format!("{PARTIES}/{party}/roles"), Some(&token))
+        .await;
+    let data = response.data();
+
+    assert_eq!(
+        listed_roles(&app, &token, party).await,
+        vec!["CONTACT", "CUSTOMER", "EMPLOYEE", "SUPPLIER"],
+        "the roles went with the profiles: {data}"
+    );
+
+    for (table, member) in PROFILE_TABLES {
+        assert!(
+            data["profiles"][member].is_null(),
+            "a soft-deleted {table} row was read: {data}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

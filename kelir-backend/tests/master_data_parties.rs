@@ -5,6 +5,26 @@
 //! mechanisms and relationships in one payload, and every one of them has to
 //! come back off `GET`. A create path that silently dropped a collection would
 //! pass a test that only checked the status code.
+//!
+//! # What the scoping tests here reach (#106)
+//!
+//! Stated because two of them used to reach almost nothing. Both filters of
+//! every query the aggregate reads through were mutated, and each mutation
+//! turned a named test red: `find_party`, `list_parties`, `find_person`,
+//! `find_party_group`, `list_identifications`, `list_classifications`,
+//! `list_contact_mechs` and `list_relationships` on `tenant_id` and on
+//! `deleted_at`; `list_statuses` on `tenant_id` alone, because
+//! `mdm_party_statuses` is append-only and has no `deleted_at` to filter.
+//! `count_parties` was probed on both filters too. It was the *only* thing the
+//! two list tests reached before this, which is what #106 is about.
+//!
+//! Not reached, and left so knowingly: the write-path queries — `insert_*`,
+//! `update_*`, `replace_*`, `soft_delete_party` — and `find_party_id_by_code`.
+//! The relationship half of `a_party_in_another_tenant_is_not_visible` asserts
+//! that a foreign party code does not resolve, but that assertion was not
+//! mutation-probed here. Isolating any of them from the `find_party` gate that
+//! refuses ahead of them needs a party whose own tenant stamp disagrees with
+//! the caller's, which is a different fixture from the ones below.
 
 mod common;
 
@@ -74,6 +94,25 @@ fn party_group(party_code: &str, name: &str) -> Value {
         "partyTypeId": "PARTY_GROUP",
         "partyGroup": { "groupName": name, "annualRevenue": "1234567.89", "numEmployees": 42 },
     })
+}
+
+/// The `partyId` of every row a list response actually returned.
+///
+/// The rows, not `meta.total` — they come from different statements, and a test
+/// that only reads the total is reporting on `count_parties` while claiming to
+/// cover `list_parties` (#106 F6).
+fn party_codes(body: &Value) -> Vec<String> {
+    body["data"]
+        .as_array()
+        .unwrap_or_else(|| panic!("data is not a list: {body}"))
+        .iter()
+        .map(|row| {
+            row["partyId"]
+                .as_str()
+                .unwrap_or_else(|| panic!("a list row carries no partyId: {body}"))
+                .to_owned()
+        })
+        .collect()
 }
 
 async fn create(app: &TestApp, token: &str, body: Value) -> (StatusCode, Value) {
@@ -540,6 +579,9 @@ async fn a_deleted_party_leaves_the_list_and_the_detail_route() {
     let token = app.administrator_token().await;
 
     let id = create_ok(&app, &token, full_person("PARTY-0001")).await;
+    // A survivor, so "the deleted party is gone" is distinguishable from "the
+    // list returns nothing at all" (#106 F6).
+    create_ok(&app, &token, party_group("PARTY-ACME", "Acme Supplies")).await;
 
     let deleted = app.delete(&format!("{PARTIES}/{id}"), Some(&token)).await;
     assert_eq!(deleted.status, StatusCode::NO_CONTENT);
@@ -547,8 +589,18 @@ async fn a_deleted_party_leaves_the_list_and_the_detail_route() {
     let fetched = app.get(&format!("{PARTIES}/{id}"), Some(&token)).await;
     assert_eq!(fetched.status, StatusCode::NOT_FOUND);
 
+    // Both the rows and the count, because they are separate statements:
+    // `meta.total` comes from `count_parties` and the rows from `list_parties`,
+    // and asserting only the total left the list query with no soft-delete
+    // coverage at all (#106 F6).
     let listed = app.get(PARTIES, Some(&token)).await;
-    assert_eq!(listed.body["meta"]["total"], 0, "{}", listed.body);
+    assert_eq!(
+        party_codes(&listed.body),
+        vec!["PARTY-ACME".to_owned()],
+        "the deleted party is still listed: {}",
+        listed.body
+    );
+    assert_eq!(listed.body["meta"]["total"], 1, "{}", listed.body);
 
     // Soft delete, not a hard one: the row is still there for a restore and for
     // the audit trail to point at (§1.2).
@@ -608,7 +660,14 @@ async fn a_party_in_another_tenant_is_not_visible() {
     .await
     .expect("insert the other tenant's party");
 
+    // Rows as well as the count: `list_parties` is the read every user hits,
+    // and `meta.total` alone could not tell whether it was scoped (#106 F6).
     let listed = app.get(PARTIES, Some(&token)).await;
+    assert!(
+        party_codes(&listed.body).is_empty(),
+        "the other tenant's party is in the list: {}",
+        listed.body
+    );
     assert_eq!(listed.body["meta"]["total"], 0, "{}", listed.body);
 
     let fetched = app
@@ -632,6 +691,188 @@ async fn a_party_in_another_tenant_is_not_visible() {
         StatusCode::UNPROCESSABLE_ENTITY,
         "another tenant's party resolved as a counterparty: {body}"
     );
+}
+
+/// The child tables the aggregate reads back, and the column each is keyed on.
+///
+/// `mdm_party_statuses` is here for the tenant sweep only: it is append-only
+/// (§4.7) and has no `deleted_at` column, so `list_statuses` has no soft-delete
+/// filter to probe. `mdm_contact_mechs` is absent because it is reached through
+/// its link row rather than by `party_id`; `list_contact_mechs` joins it on
+/// `m.deleted_at IS NULL`, and the link row covers the same reach.
+const CHILD_TABLES: [(&str, &str); 7] = [
+    ("mdm_persons", "party_id"),
+    ("mdm_party_groups", "party_id"),
+    ("mdm_party_identifications", "party_id"),
+    ("mdm_party_statuses", "party_id"),
+    ("mdm_party_classifications", "party_id"),
+    ("mdm_party_contact_mechs", "party_id"),
+    ("mdm_party_relationships", "from_party_id"),
+];
+
+/// The subject of the two child-row probes: a person and a group which between
+/// them carry a row in every table [`CHILD_TABLES`] names, related to each
+/// other so the relationship is read from both directions.
+async fn a_person_and_a_group_with_one_of_every_child(app: &TestApp, token: &str) -> [Uuid; 2] {
+    let group = create_ok(app, token, party_group("PARTY-ACME", "Acme Supplies")).await;
+
+    let mut person = full_person("PARTY-0001");
+    person["relationshipsFrom"] = json!([{
+        "partyIdFrom": "PARTY-0001",
+        "partyIdTo": "PARTY-ACME",
+        "partyRelationshipTypeId": "ORGANIZATION_ROLLUP",
+        "fromDate": "2026-01-01T00:00:00Z",
+    }]);
+
+    [create_ok(app, token, person).await, group]
+}
+
+/// Restamps every child row of `parties` with `tenant`, and fails unless each
+/// table had a row to restamp.
+///
+/// That last part is what stops the assertions downstream from being vacuous: a
+/// collection that comes back empty because nothing was ever written proves
+/// nothing about the query that would have read it.
+async fn move_child_rows_to(app: &TestApp, parties: &[Uuid], tenant: Uuid) {
+    for (table, key) in CHILD_TABLES {
+        // The table and column names are interpolated because neither can be a
+        // bind parameter. They come from the constant above, never from data,
+        // and the values are still bound (coding standard §2.5).
+        let moved = sqlx::query(&format!(
+            "UPDATE {table} SET tenant_id = $1 WHERE {key} = ANY($2)"
+        ))
+        .bind(tenant)
+        .bind(parties)
+        .execute(&app.pool)
+        .await
+        .unwrap_or_else(|error| panic!("restamp {table}: {error}"))
+        .rows_affected();
+
+        assert!(moved > 0, "{table} had no row to restamp");
+    }
+}
+
+/// Soft-deletes every child row of `parties`, on the same terms.
+///
+/// `mdm_party_statuses` is skipped rather than failing the `rewritten > 0`
+/// check: the table is append-only and has no `deleted_at` at all.
+async fn close_child_rows(app: &TestApp, parties: &[Uuid]) {
+    for (table, key) in CHILD_TABLES {
+        if table == "mdm_party_statuses" {
+            continue;
+        }
+
+        let closed = sqlx::query(&format!(
+            "UPDATE {table} SET deleted_at = now() WHERE {key} = ANY($1)"
+        ))
+        .bind(parties)
+        .execute(&app.pool)
+        .await
+        .unwrap_or_else(|error| panic!("soft-delete {table}: {error}"))
+        .rows_affected();
+
+        assert!(closed > 0, "{table} had no row to soft-delete");
+    }
+}
+
+/// Fails unless the aggregate came back with every child collection empty.
+///
+/// Applied to both parties, and the two carry different subsets — the person
+/// has the identifications and contact mechanisms, the group has the group row
+/// and the incoming relationship. [`move_child_rows_to`] is what proves the
+/// union covers every table.
+fn assert_no_children(party: &Value) {
+    assert!(
+        party["person"].is_null(),
+        "the person row was read: {party}"
+    );
+    assert!(
+        party["partyGroup"].is_null(),
+        "the group row was read: {party}"
+    );
+
+    for collection in [
+        "identifications",
+        "statuses",
+        "classifications",
+        "contactMechanisms",
+        "relationshipsFrom",
+        "relationshipsTo",
+    ] {
+        assert_eq!(
+            party[collection].as_array().map(Vec::len),
+            Some(0),
+            "{collection} was read: {party}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_child_row_stamped_with_another_tenant_is_not_read_back() {
+    // The party is the caller's own, which is the whole point (#106 F7). A
+    // party in *another* tenant is refused at the `find_party` gate and nothing
+    // below it ever runs, so a test written that way absorbs every mutation
+    // beneath the gate and covers exactly one query no matter how many it
+    // appears to. Here the gate lets the request through and the child query's
+    // own `tenant_id` filter is the only thing left standing.
+    //
+    // That filter is defence in depth — parties are themselves tenant-scoped,
+    // so a child row whose stamp disagrees with its party's is a row no route
+    // can currently write. This is the probe that says whether the filter is
+    // load-bearing or decorative, and the answer has to be the first one.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let parties = a_person_and_a_group_with_one_of_every_child(&app, &token).await;
+    let other_tenant = fixtures::create_tenant(&app.pool, "TNT-002", "Other").await;
+
+    move_child_rows_to(&app, &parties, other_tenant).await;
+
+    for party in parties {
+        let fetched = app.get(&format!("{PARTIES}/{party}"), Some(&token)).await;
+        assert_eq!(fetched.status, StatusCode::OK, "{}", fetched.body);
+        assert_no_children(fetched.data());
+    }
+}
+
+#[tokio::test]
+async fn a_soft_deleted_child_row_is_not_read_back() {
+    // The mirror of the test above, for the other filter every child query
+    // carries. `mdm_party_statuses` keeps its rows: the table is append-only
+    // and has no `deleted_at`, so `statuses` is the one collection that stays
+    // populated here.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let parties = a_person_and_a_group_with_one_of_every_child(&app, &token).await;
+
+    close_child_rows(&app, &parties).await;
+
+    for party in parties {
+        let fetched = app.get(&format!("{PARTIES}/{party}"), Some(&token)).await;
+        assert_eq!(fetched.status, StatusCode::OK, "{}", fetched.body);
+
+        let data = fetched.data();
+        assert!(data["person"].is_null(), "the person row was read: {data}");
+        assert!(
+            data["partyGroup"].is_null(),
+            "the group row was read: {data}"
+        );
+
+        for collection in [
+            "identifications",
+            "classifications",
+            "contactMechanisms",
+            "relationshipsFrom",
+            "relationshipsTo",
+        ] {
+            assert_eq!(
+                data[collection].as_array().map(Vec::len),
+                Some(0),
+                "{collection} was read: {data}"
+            );
+        }
+    }
 }
 
 #[tokio::test]
