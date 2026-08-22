@@ -60,6 +60,17 @@ While the major version is `0`, the public API may change in any release.
   a re-created party could take the old code and then be refused its old number.
   The delete now closes the party, its live roles and its profiles in one
   transaction, keeping them as closed history rather than erasing them.
+- **Two concurrent role assignments left the party holding one role twice
+  (#105).** `assign_role` read whether the party already held the role on the
+  pool and then opened a transaction to act on what it read — check-then-act
+  across a connection boundary. The database did not catch it either:
+  `uq_mdm_party_roles_party_id_role_type_id_starts_at` includes `starts_at`, so
+  two inserts with different `fromDate` do not collide. Reproduced 28 times in
+  30. For the profiled roles it surfaced instead as a spurious
+  `409 That profile number is already in use` on a request that did nothing
+  wrong. The party row is now locked for the transaction that writes, so the
+  second request reads what the first wrote. The same lock closes a second
+  race: a party deleted mid-assignment no longer ends up holding a live role.
 - **Assigning a role handed back every profile the party held, without
   `master-data:party-role:read` (#104).** `PUT .../roles/{roleTypeId}` answered
   with the whole role collection while requiring only

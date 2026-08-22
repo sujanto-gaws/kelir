@@ -952,9 +952,6 @@ pub async fn assign_role(
 
     let tenant_id = caller.tenant_id();
     let actor = Some(caller.user_id());
-    let party = repo::find_party(&state.pool, tenant_id, party_id)
-        .await?
-        .ok_or_else(|| AppError::not_found("Party"))?;
 
     let role_type = role_type_code.trim();
     let role_type_id = repo::find_role_type_id(&state.pool, tenant_id, role_type)
@@ -971,18 +968,39 @@ pub async fn assign_role(
             )])
         })?;
 
+    let mut transaction = state.pool.begin().await?;
+
+    // The party is found and held in the same statement, and everything that
+    // decides between an insert and an update is read after it.
+    //
+    // This used to read the party and its existing role on the pool and then
+    // open a transaction to act on what it read — check-then-act across a
+    // connection boundary. Two concurrent assignments both read *no such role*
+    // and both inserted, and the database did not catch it because
+    // `uq_mdm_party_roles_party_id_role_type_id_starts_at` includes `starts_at`,
+    // so two rows with different `fromDate` do not collide. It left the party
+    // holding one role twice, 28 times in 30 (#105).
+    //
+    // Waiting on the lock rather than trying it, unlike the bootstrap's: both
+    // requests are legitimate and both must finish, one creating and one
+    // updating. Standing down would fail a request that did nothing wrong.
+    let party = repo::lock_party(&mut transaction, tenant_id, party_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Party"))?;
+
     let existing =
-        repo::find_live_party_role(&state.pool, tenant_id, party_id, role_type_id).await?;
+        repo::find_live_party_role(&mut *transaction, tenant_id, party_id, role_type_id).await?;
     let creating = existing.is_none();
 
+    // Validated against the *locked* answer, not a hint read earlier. Whether a
+    // profile is required depends on whether this is a create, and reading that
+    // outside the lock is what this change exists to stop doing.
     validate_assign_role(&request, role_type, &party.party_code, creating)?;
 
     // Everything the profile points at is resolved before anything is written,
     // so a manager or a department that does not exist is a 422 naming the path
     // rather than a foreign-key violation surfacing as a 500.
     let references = resolve_profile_references(state, tenant_id, request.profile.as_ref()).await?;
-
-    let mut transaction = state.pool.begin().await?;
 
     let role_fields = PartyRoleFields {
         starts_at: request.from_date,
