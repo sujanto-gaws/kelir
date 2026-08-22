@@ -79,6 +79,19 @@ While the major version is `0`, the public API may change in any release.
   the aggregate one URL away withholds both. The route now answers with the
   assignment it wrote. A caller who wants the profiles asks `GET .../roles`,
   under the permission that governs them.
+- **Four tenant and soft-delete tests asserted a query they never exercised
+  (#106).** No product behaviour changed: the queries were already scoped, and
+  nothing in CI would have noticed them becoming unscoped. Two list tests
+  checked only `meta.total`, which `count_parties` produces, while the rows come
+  from `list_parties` — under a mutation that dropped the soft-delete filter the
+  deleted party came back in `data` and the test still passed, leaving the
+  module's highest-traffic read with no tenant or soft-delete coverage at all.
+  Two more put their party in *another* tenant, so every route refused at the
+  `find_party` gate and nothing downstream ran; the gate absorbed six mutations
+  beneath it. The tests now assert the rows as well as the count, and the
+  child-query probes keep the party in the caller's own tenant and point its
+  child rows at a foreign tenant instead, so the query under test is the only
+  thing left standing.
 
 ### Changed
 
