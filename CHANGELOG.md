@@ -60,9 +60,22 @@ While the major version is `0`, the public API may change in any release.
   a re-created party could take the old code and then be refused its old number.
   The delete now closes the party, its live roles and its profiles in one
   transaction, keeping them as closed history rather than erasing them.
+- **Assigning a role handed back every profile the party held, without
+  `master-data:party-role:read` (#104).** `PUT .../roles/{roleTypeId}` answered
+  with the whole role collection while requiring only
+  `master-data:party-role:assign`, so a caller who could write a role could read
+  the bank account and the credit limit that permission was introduced to gate —
+  the aggregate one URL away withholds both. The route now answers with the
+  assignment it wrote. A caller who wants the profiles asks `GET .../roles`,
+  under the permission that governs them.
 
 ### Changed
 
+- **`PUT /api/v1/master-data/parties/{id}/roles/{roleTypeId}` answers with the
+  role assignment rather than with the party's whole `roles` and `profiles`
+  collection**, as part of the fix above. Nothing consumed the old shape — the
+  party surface has not been released — so this is a narrowing of an unreleased
+  contract rather than a break.
 - The planned migrations shift down by one: `0009_party_role_permissions.sql`
   took the next free number, so RAD is now `0010_rad.sql` and the plugin
   migration `0018_plugin.sql`. Nothing merged was renumbered. Four inline

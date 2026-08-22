@@ -4,8 +4,8 @@ use axum::{Json, Router};
 use uuid::Uuid;
 
 use super::domain::{
-    AssignRoleRequest, CreatePartyRequest, PartyAggregate, PartyRoles, PartySummary, RoleView,
-    RoleViewQuery, RoleViewRow, UpdatePartyRequest,
+    AssignRoleRequest, CreatePartyRequest, PartyAggregate, PartyRole, PartyRoles, PartySummary,
+    RoleView, RoleViewQuery, RoleViewRow, UpdatePartyRequest,
 };
 use super::service;
 use crate::error::AppError;
@@ -162,12 +162,16 @@ async fn get_party_roles(
 /// `PUT` rather than `POST`: assigning a role is idempotent — a party either
 /// holds SUPPLIER or it does not — and the role type is what identifies the
 /// assignment, so it belongs in the path rather than repeated in the body.
+///
+/// Answers with the assignment it wrote, not with every role and profile the
+/// party holds. The profiles are `master-data:party-role:read`'s to give, and
+/// this route does not require it (#104).
 #[utoipa::path(
     put, path = "/api/v1/master-data/parties/{id}/roles/{roleTypeId}", tag = "master-data",
     request_body = AssignRoleRequest,
     responses(
-        (status = 200, description = "The party already held this role; it and its profile are updated", body = PartyRoles),
-        (status = 201, description = "Role assigned", body = PartyRoles),
+        (status = 200, description = "The party already held this role; it and its profile are updated", body = PartyRole),
+        (status = 201, description = "Role assigned", body = PartyRole),
         (status = 403, description = "Missing master-data:party-role:assign"),
         (status = 404, description = "No such party"),
         (status = 409, description = "That profile number is already in use"),
@@ -180,8 +184,8 @@ async fn assign_role(
     caller: Authenticated,
     Path((id, role_type_id)): Path<(Uuid, String)>,
     JsonBody(request): JsonBody<AssignRoleRequest>,
-) -> Result<(axum::http::StatusCode, Json<ItemEnvelope<PartyRoles>>), AppError> {
-    let (created, roles) =
+) -> Result<(axum::http::StatusCode, Json<ItemEnvelope<PartyRole>>), AppError> {
+    let (created, assignment) =
         service::assign_role(&state, &caller, id, &role_type_id, request).await?;
 
     let status = if created {
@@ -190,7 +194,7 @@ async fn assign_role(
         axum::http::StatusCode::OK
     };
 
-    Ok((status, Json(ItemEnvelope::new(roles))))
+    Ok((status, Json(ItemEnvelope::new(assignment))))
 }
 
 #[utoipa::path(

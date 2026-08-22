@@ -390,6 +390,21 @@ mod tests {
             responses["200"].is_object(),
             "the already-held outcome is undocumented: {responses}"
         );
+
+        // And both outcomes answer with the assignment, not with every role and
+        // profile the party holds. The published shape is the contract a client
+        // is generated from, so a response documented as `PartyRoles` would
+        // have clients expecting the bank accounts #104 took out of it — and
+        // would be the first sign of the leak coming back.
+        for outcome in ["200", "201"] {
+            let schema = &responses[outcome]["content"]["application/json"]["schema"];
+            let referenced = schema["$ref"].as_str().unwrap_or_default();
+
+            assert!(
+                referenced.ends_with("/PartyRole"),
+                "{outcome} is documented as {schema}, not as the assignment it returns"
+            );
+        }
     }
 
     #[tokio::test]

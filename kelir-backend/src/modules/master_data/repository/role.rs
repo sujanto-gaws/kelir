@@ -67,6 +67,47 @@ pub async fn list_party_roles(
 /// unique index covers `starts_at` as well, so a second assignment with a
 /// different start date would be accepted by the database. The service asks
 /// here first and updates in place instead.
+/// The one live role a party holds under this role type, as the aggregate
+/// carries it.
+///
+/// The assignment route answers with this rather than with every role and
+/// profile the party has: a `PUT` addresses one assignment, and returning the
+/// whole collection is what handed a caller holding only
+/// `master-data:party-role:assign` the bank accounts and credit limits that
+/// permission was never meant to reach (#104).
+pub async fn find_party_role(
+    executor: impl PgExecutor<'_>,
+    tenant_id: Uuid,
+    party_id: Uuid,
+    role_type_code: &str,
+) -> Result<Option<PartyRole>, sqlx::Error> {
+    let row = sqlx::query!(
+        r#"
+        SELECT t.role_type_code, r.starts_at, r.ends_at, r.status, r.comments, r.attributes_json
+        FROM mdm_party_roles r
+        JOIN mdm_role_types t ON t.id = r.role_type_id AND t.tenant_id = r.tenant_id
+        WHERE r.tenant_id = $1
+          AND r.party_id = $2
+          AND t.role_type_code = $3
+          AND r.deleted_at IS NULL
+        "#,
+        tenant_id,
+        party_id,
+        role_type_code
+    )
+    .fetch_optional(executor)
+    .await?;
+
+    Ok(row.map(|row| PartyRole {
+        role_type_id: row.role_type_code,
+        from_date: row.starts_at,
+        thru_date: row.ends_at,
+        status_id: PartyRoleStatus::from_db(&row.status),
+        comments: row.comments,
+        additional_attributes: row.attributes_json,
+    }))
+}
+
 pub async fn find_live_party_role(
     executor: impl PgExecutor<'_>,
     tenant_id: Uuid,
