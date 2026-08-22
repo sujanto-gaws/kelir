@@ -188,6 +188,37 @@ pub async fn soft_delete_party_role(
     .map(|result| result.rows_affected())
 }
 
+/// Closes every live role a party holds, in one statement.
+///
+/// The same close as [`soft_delete_party_role`], without naming a role type —
+/// what a deleted party needs, because leaving a role live behind a party that
+/// is not is what left the supplier number occupied by a row nothing could
+/// reach (#103).
+pub async fn soft_delete_party_roles(
+    executor: impl PgExecutor<'_>,
+    tenant_id: Uuid,
+    party_id: Uuid,
+    updated_by: Option<Uuid>,
+) -> Result<u64, sqlx::Error> {
+    sqlx::query!(
+        r#"
+        UPDATE mdm_party_roles
+        SET deleted_at = now(),
+            ends_at = COALESCE(ends_at, now()),
+            status = 'INACTIVE',
+            updated_by = $3,
+            updated_at = now()
+        WHERE tenant_id = $1 AND party_id = $2 AND deleted_at IS NULL
+        "#,
+        tenant_id,
+        party_id,
+        updated_by
+    )
+    .execute(executor)
+    .await
+    .map(|result| result.rows_affected())
+}
+
 /// Whether a department exists in this tenant, for an employee profile that
 /// names one.
 pub async fn department_exists(

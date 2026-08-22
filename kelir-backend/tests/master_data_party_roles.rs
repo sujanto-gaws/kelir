@@ -849,3 +849,227 @@ async fn a_role_type_from_another_tenant_does_not_resolve() {
         .expect("query runs");
     assert_eq!(roles, 0, "the role was assigned across a tenant boundary");
 }
+
+// ---------------------------------------------------------------------------
+// Deleting the party (#103)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn deleting_a_party_releases_the_business_numbers_it_held() {
+    // The five steps from #103, which succeeded through step 4 and failed at
+    // step 5 before this was fixed. `uq_mdm_supplier_profiles_tenant_id_supplier_number`
+    // is partial on `deleted_at IS NULL`, so a profile left live behind a
+    // deleted party kept the number — and no route could reach it to release
+    // it, because `remove_role` 404s at the party lookup.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let first = create_party(&app, &token, party_group("PARTY-A", "Acme Supplies")).await;
+    let assigned = app
+        .put(
+            &role_path(first, "SUPPLIER"),
+            Some(&token),
+            supplier_profile("SUP-0001"),
+        )
+        .await;
+    assert_eq!(assigned.status, StatusCode::CREATED, "{}", assigned.body);
+
+    let deleted = app
+        .delete(&format!("{PARTIES}/{first}"), Some(&token))
+        .await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
+
+    // The party code is released by the same kind of partial index, so this
+    // half already worked and is asserted to keep the scenario honest.
+    let second = create_party(&app, &token, party_group("PARTY-A", "Acme Supplies Again")).await;
+
+    let reassigned = app
+        .put(
+            &role_path(second, "SUPPLIER"),
+            Some(&token),
+            supplier_profile("SUP-0001"),
+        )
+        .await;
+    assert_eq!(
+        reassigned.status,
+        StatusCode::CREATED,
+        "the supplier number is still held by the deleted party: {}",
+        reassigned.body
+    );
+
+    let live_for_first: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM mdm_supplier_profiles WHERE party_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(first)
+    .fetch_one(&app.pool)
+    .await
+    .expect("query runs");
+    assert_eq!(live_for_first, 0, "the deleted party kept a live profile");
+}
+
+#[tokio::test]
+async fn deleting_a_party_leaves_no_live_role_or_profile_behind_it() {
+    // #103 acceptance criterion 1, across every role the party held rather
+    // than only the first — the close is one statement over all of them, and a
+    // version that closed one would pass a single-role test.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let party = create_party(&app, &token, party_group("PARTY-ACME", "Acme Trading")).await;
+    for (role, body) in [
+        ("SUPPLIER", supplier_profile("SUP-0001")),
+        ("CUSTOMER", customer_profile("CUS-0001")),
+    ] {
+        let assigned = app.put(&role_path(party, role), Some(&token), body).await;
+        assert_eq!(assigned.status, StatusCode::CREATED, "{}", assigned.body);
+    }
+
+    let deleted = app
+        .delete(&format!("{PARTIES}/{party}"), Some(&token))
+        .await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
+
+    for table in [
+        "mdm_party_roles",
+        "mdm_supplier_profiles",
+        "mdm_customer_profiles",
+    ] {
+        let live: i64 = sqlx::query_scalar(&format!(
+            "SELECT count(*) FROM {table} WHERE party_id = $1 AND deleted_at IS NULL"
+        ))
+        .bind(party)
+        .fetch_one(&app.pool)
+        .await
+        .expect("query runs");
+
+        assert_eq!(live, 0, "{table} kept a live row behind a deleted party");
+    }
+
+    // Closed, not erased: the history the removal path is careful to keep is
+    // kept here too, and `ends_at` says when it stopped.
+    let closed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM mdm_party_roles
+          WHERE party_id = $1 AND deleted_at IS NOT NULL AND ends_at IS NOT NULL",
+    )
+    .bind(party)
+    .fetch_one(&app.pool)
+    .await
+    .expect("query runs");
+    assert_eq!(
+        closed, 2,
+        "the delete erased the role history it should keep"
+    );
+}
+
+#[tokio::test]
+async fn deleting_one_party_does_not_close_another_partys_roles() {
+    // The close is aimed at one party. A version scoped to the tenant rather
+    // than to the party would take every supplier in the tenant out with the
+    // one being deleted, and the request would still answer 204.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    // The survivor exists *before* the delete, which is what makes this test
+    // able to fail: created afterwards, it could not be affected by it.
+    let survivor = create_party(&app, &token, party_group("PARTY-LIVE", "Still Trading")).await;
+    let kept = app
+        .put(
+            &role_path(survivor, "SUPPLIER"),
+            Some(&token),
+            supplier_profile("SUP-0002"),
+        )
+        .await;
+    assert_eq!(kept.status, StatusCode::CREATED, "{}", kept.body);
+
+    let doomed = create_party(&app, &token, party_group("PARTY-ACME", "Acme Trading")).await;
+    let assigned = app
+        .put(
+            &role_path(doomed, "CUSTOMER"),
+            Some(&token),
+            customer_profile("CUS-0001"),
+        )
+        .await;
+    assert_eq!(assigned.status, StatusCode::CREATED, "{}", assigned.body);
+
+    let deleted = app
+        .delete(&format!("{PARTIES}/{doomed}"), Some(&token))
+        .await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
+
+    for (table, party, label) in [
+        ("mdm_party_roles", survivor, "role"),
+        ("mdm_supplier_profiles", survivor, "supplier profile"),
+    ] {
+        let live: i64 = sqlx::query_scalar(&format!(
+            "SELECT count(*) FROM {table} WHERE party_id = $1 AND deleted_at IS NULL"
+        ))
+        .bind(party)
+        .fetch_one(&app.pool)
+        .await
+        .expect("query runs");
+
+        assert_eq!(live, 1, "deleting one party closed another party's {label}");
+    }
+
+    // And the survivor is still reachable as the supplier it is.
+    let aggregate = app
+        .get(&format!("{PARTIES}/{survivor}"), Some(&token))
+        .await;
+    assert_eq!(aggregate.status, StatusCode::OK, "{}", aggregate.body);
+    assert_eq!(
+        aggregate.data()["profiles"]["supplier"]["supplierNumber"],
+        "SUP-0002"
+    );
+}
+
+#[tokio::test]
+async fn a_delete_that_finds_nothing_writes_nothing() {
+    // The party lookup refuses before the close runs, so a 404 leaves the
+    // tenant exactly as it was — including the second delete of a party that
+    // was already deleted.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let party = create_party(&app, &token, party_group("PARTY-ACME", "Acme Trading")).await;
+    let assigned = app
+        .put(
+            &role_path(party, "SUPPLIER"),
+            Some(&token),
+            supplier_profile("SUP-0001"),
+        )
+        .await;
+    assert_eq!(assigned.status, StatusCode::CREATED, "{}", assigned.body);
+
+    let first = app
+        .delete(&format!("{PARTIES}/{party}"), Some(&token))
+        .await;
+    assert_eq!(first.status, StatusCode::NO_CONTENT, "{}", first.body);
+
+    let closed_at: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT deleted_at FROM mdm_party_roles WHERE party_id = $1")
+            .bind(party)
+            .fetch_one(&app.pool)
+            .await
+            .expect("query runs");
+
+    let again = app
+        .delete(&format!("{PARTIES}/{party}"), Some(&token))
+        .await;
+    assert_eq!(again.status, StatusCode::NOT_FOUND, "{}", again.body);
+
+    let unchanged: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT deleted_at FROM mdm_party_roles WHERE party_id = $1")
+            .bind(party)
+            .fetch_one(&app.pool)
+            .await
+            .expect("query runs");
+    assert_eq!(
+        closed_at, unchanged,
+        "a refused delete rewrote the history of an already-closed role"
+    );
+
+    let missing = app
+        .delete(&format!("{PARTIES}/{}", Uuid::now_v7()), Some(&token))
+        .await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND, "{}", missing.body);
+}
