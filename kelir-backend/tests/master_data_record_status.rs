@@ -8,6 +8,27 @@
 //! The state machine itself is unit-tested in `domain::record_status`; what
 //! these tests add is that the machine is the one the routes actually use, on
 //! both entities, and that nothing else can move the column.
+//!
+//! # One service, two statements
+//!
+//! `transition()` is a single function over a `match` on `TransitionTarget`,
+//! with one `query!` per entity behind each of its two repository calls. It
+//! reads as one code path and is two, and the entity a test happens to use
+//! decides which arm it exercises — so a file of thirteen passing tests left
+//! every predicate on the facility arm untouched, including the
+//! `record_status = $3` compare-and-swap that is the whole of this issue's
+//! concurrency design (#139).
+//!
+//! Tests below the "facility arm" heading exist to cover the *statement*, not
+//! the use case, and a new predicate on either arm needs one of its own.
+//!
+//! **Not reachable: the `tenant_id` predicate on both `move_record_status`
+//! statements.** `transition()` reads the status through `find_record_status`
+//! first, scoped by the same `(tenant_id, id)` on the same table, so no fixture
+//! can make the id match and the tenant not. Defence in depth rather than a
+//! control. The `deleted_at` predicate on the same statements is *not* in that
+//! category — it guards a delete landing between the two statements — and is
+//! covered against the repository, where that window can be opened on purpose.
 
 mod common;
 
@@ -586,4 +607,258 @@ async fn a_transition_on_a_record_that_does_not_exist_is_a_404() {
     .await;
 
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+}
+
+// ---------------------------------------------------------------------------
+// The facility arm (#139)
+// ---------------------------------------------------------------------------
+//
+// `transition()` is one service function over a `match` with one statement per
+// entity, so it reads as a single code path and is two. Every test above this
+// point that exercises a *statement* rather than the machine used a party, and
+// the verification pass found the facility arm untouched on all of its own
+// predicates. What follows covers the arm rather than the use case.
+
+/// #139. The compare-and-swap, on the facility statement.
+///
+/// The predicate `record_status = $3` is the whole of #99's concurrency design.
+/// Removing it from the party statement turns
+/// `two_concurrent_transitions_cannot_both_move_the_record_from_the_same_state`
+/// red; removing it from the facility statement changed nothing at all.
+///
+/// Called against the repository rather than through the route, because the
+/// property is "this write is conditional on the state it was checked against"
+/// and a race reproduces it only sometimes. The concurrency test below asserts
+/// the behaviour; this one asserts the predicate.
+#[tokio::test]
+async fn a_facility_transition_writes_only_from_the_state_it_was_checked_against() {
+    use kelir_backend::modules::master_data::domain::{RecordStatus, TransitionTarget};
+    use kelir_backend::modules::master_data::repository::move_record_status;
+
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let facility = given_facility(&app, &token, "FAC-CAS").await;
+
+    // The row is DRAFT. A write that believes it is ACTIVE must match nothing.
+    let moved = move_record_status(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        TransitionTarget::Facility,
+        facility,
+        RecordStatus::Active,
+        RecordStatus::Suspended,
+        None,
+    )
+    .await
+    .expect("the query runs");
+
+    assert_eq!(
+        moved, 0,
+        "a facility moved from a state it was not in — the compare-and-swap is gone"
+    );
+    assert_eq!(
+        stored_status(&app, "mdm_facilities", facility).await,
+        "DRAFT"
+    );
+
+    // And the same write from the state the row is actually in does move it, so
+    // the assertion above is about the predicate and not about the call being
+    // broken.
+    let moved = move_record_status(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        TransitionTarget::Facility,
+        facility,
+        RecordStatus::Draft,
+        RecordStatus::Active,
+        None,
+    )
+    .await
+    .expect("the query runs");
+
+    assert_eq!(moved, 1);
+    assert_eq!(
+        stored_status(&app, "mdm_facilities", facility).await,
+        "ACTIVE"
+    );
+}
+
+/// #139. The behaviour the predicate above buys, on facilities.
+///
+/// The party equivalent is
+/// `two_concurrent_transitions_cannot_both_move_the_record_from_the_same_state`,
+/// and its comment explains the two legitimate refusal shapes at length. This is
+/// that test with the other entity, because the statement behind it is a
+/// different statement.
+#[tokio::test]
+async fn two_concurrent_facility_transitions_cannot_both_move_it_from_one_state() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    const ROUNDS: usize = 20;
+
+    for round in 0..ROUNDS {
+        let facility = given_facility(&app, &token, &format!("FAC-RACE-{round:04}")).await;
+        let path = format!("{FACILITIES}/{facility}/transition");
+
+        transition(&app, &token, &path, json!({ "recordStatusId": "ACTIVE" })).await;
+
+        let (suspended, deactivated) = tokio::join!(
+            app.post(
+                &path,
+                Some(&token),
+                json!({ "recordStatusId": "SUSPENDED" })
+            ),
+            app.post(&path, Some(&token), json!({ "recordStatusId": "INACTIVE" })),
+        );
+
+        let claimed: Vec<String> = [&suspended, &deactivated]
+            .iter()
+            .filter(|response| response.status == StatusCode::OK)
+            .map(|response| {
+                response.data()["previousRecordStatusId"]
+                    .as_str()
+                    .unwrap_or_else(|| {
+                        panic!("a success carries a previous status: {}", response.body)
+                    })
+                    .to_owned()
+            })
+            .collect();
+
+        let mut distinct = claimed.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(
+            claimed.len(),
+            distinct.len(),
+            "round {round}: two transitions both moved the facility from one state — {} and {}",
+            suspended.body,
+            deactivated.body
+        );
+        assert!(!claimed.is_empty(), "round {round}: neither transition ran");
+
+        let stored = stored_status(&app, "mdm_facilities", facility).await;
+        assert!(
+            stored == "SUSPENDED" || stored == "INACTIVE",
+            "round {round}: the column ended at {stored}"
+        );
+    }
+}
+
+/// #139. Tenant scoping, on the facility statement.
+///
+/// `another_tenants_record_cannot_be_transitioned` inserts a foreign **party**,
+/// so the facility arm's `tenant_id` predicate had no test: removing it changed
+/// nothing.
+#[tokio::test]
+async fn another_tenants_facility_cannot_be_transitioned() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let other_tenant = fixtures::create_tenant(&app.pool, "TNT-003", "Other").await;
+    let foreign = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO mdm_facilities (id, tenant_id, facility_code, name)
+         VALUES ($1, $2, 'FAC-FOREIGN', 'Theirs')",
+    )
+    .bind(foreign)
+    .bind(other_tenant)
+    .execute(&app.pool)
+    .await
+    .expect("insert the other tenant's facility");
+
+    let (status, body) = transition(
+        &app,
+        &token,
+        &format!("{FACILITIES}/{foreign}/transition"),
+        json!({ "recordStatusId": "ACTIVE" }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(
+        stored_status(&app, "mdm_facilities", foreign).await,
+        "DRAFT",
+        "another tenant's facility was transitioned"
+    );
+}
+
+/// #139. A retired record has no lifecycle left.
+///
+/// `find_record_status` filters `deleted_at IS NULL` and nothing asked it to:
+/// removing the predicate let a soft-deleted party be moved through the machine,
+/// which would put a record nothing can reach into ACTIVE.
+#[tokio::test]
+async fn a_retired_record_cannot_be_transitioned() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let party = given_party(&app, &token, "PARTY-RETIRED").await;
+    assert_eq!(
+        app.delete(&format!("{PARTIES}/{party}"), Some(&token))
+            .await
+            .status,
+        StatusCode::NO_CONTENT
+    );
+
+    let (status, body) = transition(
+        &app,
+        &token,
+        &format!("{PARTIES}/{party}/transition"),
+        json!({ "recordStatusId": "ACTIVE" }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(
+        stored_status(&app, "mdm_parties", party).await,
+        "DRAFT",
+        "a retired party was moved through the lifecycle"
+    );
+}
+
+/// #139. The write refuses a retired record too, not only the read before it.
+///
+/// `move_record_status` carries its own `deleted_at IS NULL`, and the service
+/// never reaches it with a deleted row because `find_record_status` answers
+/// first — so no route-level test can isolate it. It is not redundancy: it is
+/// what stops a delete landing *between* the two statements from being
+/// overwritten, and that window is exactly what #105 was about. Asserted against
+/// the repository, which is the only place the window can be opened on purpose.
+#[tokio::test]
+async fn the_lifecycle_write_refuses_a_record_retired_since_it_was_read() {
+    use kelir_backend::modules::master_data::domain::{RecordStatus, TransitionTarget};
+    use kelir_backend::modules::master_data::repository::move_record_status;
+
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let party = given_party(&app, &token, "PARTY-WINDOW").await;
+    // Read the status, as the service does...
+    assert_eq!(stored_status(&app, "mdm_parties", party).await, "DRAFT");
+    // ...then the delete lands.
+    assert_eq!(
+        app.delete(&format!("{PARTIES}/{party}"), Some(&token))
+            .await
+            .status,
+        StatusCode::NO_CONTENT
+    );
+
+    let moved = move_record_status(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        TransitionTarget::Party,
+        party,
+        RecordStatus::Draft,
+        RecordStatus::Active,
+        None,
+    )
+    .await
+    .expect("the query runs");
+
+    assert_eq!(
+        moved, 0,
+        "the lifecycle write moved a record retired since it was read"
+    );
+    assert_eq!(stored_status(&app, "mdm_parties", party).await, "DRAFT");
 }

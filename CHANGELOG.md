@@ -132,6 +132,41 @@ While the major version is `0`, the public API may change in any release.
   `v0.3.0` demo is shown from.
 ### Fixed
 
+- **Eight predicates were exercised by no test, including the facility
+  transition's compare-and-swap (#139).** The third of these in three sprints,
+  after #106 and #121, and found the same way: of 48 mutations over the Sprint 6
+  surface, 17 came back green. The sharpest was `move_record_status`'s
+  `record_status = $3` on the **facility** statement — the whole of FR-MDM-007's
+  concurrency design. Removing it from the party statement turns the
+  two-concurrent-transitions test red; removing it from the facility statement
+  changed nothing, because `transition()` is one service function over a `match`
+  with one statement per entity and every test that exercised a *statement*
+  rather than the machine happened to use a party. Thirteen passing tests, half
+  the file's own statements untouched.
+
+  Nine tests close the eight: the facility compare-and-swap asserted against the
+  repository so the property is deterministic rather than reproduced-sometimes,
+  twenty rounds of concurrent facility transitions beside it, a foreign
+  *facility* where the existing tenant test inserts a foreign party, a retired
+  party refused by the lifecycle read and another refused by the lifecycle
+  *write* — the window a delete lands in between the two statements, which no
+  route-level test can open on purpose. On facilities: a retired facility leaves
+  `meta.total` and not only the page, a retired facility cannot be named as a
+  parent, and neither a retired parent nor a retired owner is shown as one, the
+  last two written directly into the table because nothing can reach that state
+  through the API any more. Seven of the eight mutations are now red.
+
+  **The eighth changed category rather than being covered.**
+  `find_facility_id_by_code`'s soft-delete predicate is no longer isolable: since
+  #137 its only caller re-reads the parent under the hierarchy lock before
+  pointing at it, so dropping the predicate produces the same 422 naming the same
+  field, one guard later. Confirmed by removing both and watching the test fail.
+  A fix made a predicate redundant, and the mutation that used to prove the
+  predicate now proves the fix.
+
+  No product behaviour changed. Both test modules now record which predicates no
+  fixture can isolate and why, so the next reader does not file the gap a fourth
+  time.
 - **No Sprint 6 route reached the OpenAPI document (#138).** Nine handlers —
   the five facility routes, both lifecycle transitions and both change-history
   routes — carried `#[utoipa::path]` annotations that nothing collected, because
