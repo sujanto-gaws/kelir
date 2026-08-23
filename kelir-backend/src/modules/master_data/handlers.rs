@@ -4,8 +4,9 @@ use axum::{Json, Router};
 use uuid::Uuid;
 
 use super::domain::{
-    AssignRoleRequest, CreatePartyRequest, PartyAggregate, PartyRole, PartyRoles, PartySummary,
-    RoleView, RoleViewQuery, RoleViewRow, UpdatePartyRequest,
+    AssignRoleRequest, CreateFacilityRequest, CreatePartyRequest, Facility, FacilitySummary,
+    PartyAggregate, PartyRole, PartyRoles, PartySummary, RoleView, RoleViewQuery, RoleViewRow,
+    UpdateFacilityRequest, UpdatePartyRequest,
 };
 use super::service;
 use crate::error::AppError;
@@ -35,6 +36,15 @@ pub fn routes() -> Router<AppState> {
         .route("/suppliers", get(list_suppliers))
         .route("/customers", get(list_customers))
         .route("/employees", get(list_employees))
+        // Facilities (FR-MDM-004). The one entity in this module that is not a
+        // party, and the only one that nests.
+        .route("/facilities", get(list_facilities).post(create_facility))
+        .route(
+            "/facilities/{id}",
+            get(get_facility)
+                .put(update_facility)
+                .delete(delete_facility),
+        )
 }
 
 #[utoipa::path(
@@ -286,4 +296,116 @@ async fn list_employees(
     Query(query): Query<RoleViewQuery>,
 ) -> Result<Json<ListEnvelope<RoleViewRow>>, AppError> {
     list_role_view(&state, &caller, RoleView::Employee, &query).await
+}
+
+// ---------------------------------------------------------------------------
+// Facilities (FR-MDM-004)
+// ---------------------------------------------------------------------------
+
+#[utoipa::path(
+    get, path = "/api/v1/master-data/facilities", tag = "master-data",
+    params(Pagination),
+    responses(
+        (status = 200, description = "Facilities", body = [FacilitySummary]),
+        (status = 403, description = "Missing master-data:facility:read")
+    ),
+    security(("bearer" = []))
+)]
+async fn list_facilities(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Query(pagination): Query<Pagination>,
+) -> Result<Json<ListEnvelope<FacilitySummary>>, AppError> {
+    let (facilities, meta) = service::list_facilities(&state, &caller, &pagination).await?;
+
+    Ok(Json(ListEnvelope::new(facilities, meta)))
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/master-data/facilities/{id}", tag = "master-data",
+    responses(
+        (status = 200, description = "The facility", body = Facility),
+        (status = 403, description = "Missing master-data:facility:read"),
+        (status = 404, description = "No such facility")
+    ),
+    security(("bearer" = []))
+)]
+async fn get_facility(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ItemEnvelope<Facility>>, AppError> {
+    Ok(Json(ItemEnvelope::new(
+        service::get_facility(&state, &caller, id).await?,
+    )))
+}
+
+#[utoipa::path(
+    post, path = "/api/v1/master-data/facilities", tag = "master-data",
+    request_body = CreateFacilityRequest,
+    responses(
+        (status = 201, description = "Created", body = Facility),
+        (status = 403, description = "Missing master-data:facility:create"),
+        (status = 409, description = "That facilityId is already in use"),
+        (status = 422, description = "Validation failed, or a reference does not resolve")
+    ),
+    security(("bearer" = []))
+)]
+async fn create_facility(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    JsonBody(request): JsonBody<CreateFacilityRequest>,
+) -> Result<(axum::http::StatusCode, Json<ItemEnvelope<Facility>>), AppError> {
+    let facility = service::create_facility(&state, &caller, request).await?;
+
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(ItemEnvelope::new(facility)),
+    ))
+}
+
+/// An omitted field is left alone; `parentFacilityId` and `ownerPartyId` accept
+/// an explicit `null`, which detaches the reference rather than leaving it.
+#[utoipa::path(
+    put, path = "/api/v1/master-data/facilities/{id}", tag = "master-data",
+    request_body = UpdateFacilityRequest,
+    responses(
+        (status = 200, description = "Updated", body = Facility),
+        (status = 403, description = "Missing master-data:facility:update"),
+        (status = 404, description = "No such facility"),
+        (status = 422, description = "Validation failed, a reference does not resolve, or the move would close a loop")
+    ),
+    security(("bearer" = []))
+)]
+async fn update_facility(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path(id): Path<Uuid>,
+    JsonBody(request): JsonBody<UpdateFacilityRequest>,
+) -> Result<Json<ItemEnvelope<Facility>>, AppError> {
+    Ok(Json(ItemEnvelope::new(
+        service::update_facility(&state, &caller, id, request).await?,
+    )))
+}
+
+/// Refuses while anything still sits under the facility, rather than cascading:
+/// deleting a building would otherwise take its floors and rooms with it.
+#[utoipa::path(
+    delete, path = "/api/v1/master-data/facilities/{id}", tag = "master-data",
+    responses(
+        (status = 204, description = "Deleted; the facility is soft-deleted"),
+        (status = 403, description = "Missing master-data:facility:delete"),
+        (status = 404, description = "No such facility"),
+        (status = 409, description = "Facilities are still under this one")
+    ),
+    security(("bearer" = []))
+)]
+async fn delete_facility(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path(id): Path<Uuid>,
+) -> Result<axum::http::StatusCode, AppError> {
+    service::delete_facility(&state, &caller, id).await?;
+
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }

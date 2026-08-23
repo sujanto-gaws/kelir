@@ -1,0 +1,385 @@
+//! Facility use cases (FR-MDM-004).
+//!
+//! The one entity in this module that is not a party. What it adds over the
+//! party's create/read/update/delete is the hierarchy: `parentFacilityId` is a
+//! self-reference, so a facility can be put under another, and nothing in the
+//! database stops it being put under itself at one remove. [`refuse_cycle`] is
+//! that stop.
+
+use serde_json::{json, Value};
+use uuid::Uuid;
+
+use super::domain::{
+    validate_create_facility, validate_update_facility, CreateFacilityRequest, Facility,
+    FacilitySummary, FacilityType, PostalAddress, UpdateFacilityRequest, MAX_FACILITY_DEPTH,
+};
+use super::repository::{self as repo, FacilityFields, NewFacility};
+use crate::error::{AppError, ValidationDetail};
+use crate::middleware::auth::Authenticated;
+use crate::modules::audit::{self, AuditEntry};
+use crate::response::{PageMeta, Pagination};
+use crate::state::AppState;
+
+/// What the audit trail calls a facility (naming convention §7).
+const OBJECT_TYPE: &str = "FACILITY";
+
+pub async fn list_facilities(
+    state: &AppState,
+    caller: &Authenticated,
+    pagination: &Pagination,
+) -> Result<(Vec<FacilitySummary>, PageMeta), AppError> {
+    caller.require("master-data:facility:read")?;
+
+    let tenant_id = caller.tenant_id();
+    let total = repo::count_facilities(&state.pool, tenant_id).await?;
+    let facilities = repo::list_facilities(
+        &state.pool,
+        tenant_id,
+        pagination.limit(),
+        pagination.offset(),
+    )
+    .await?;
+
+    Ok((facilities, pagination.meta(total.max(0) as u64)))
+}
+
+pub async fn get_facility(
+    state: &AppState,
+    caller: &Authenticated,
+    id: Uuid,
+) -> Result<Facility, AppError> {
+    caller.require("master-data:facility:read")?;
+
+    repo::find_facility(&state.pool, caller.tenant_id(), id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Facility"))
+}
+
+pub async fn create_facility(
+    state: &AppState,
+    caller: &Authenticated,
+    request: CreateFacilityRequest,
+) -> Result<Facility, AppError> {
+    caller.require("master-data:facility:create")?;
+
+    validate_create_facility(&request)?;
+
+    let tenant_id = caller.tenant_id();
+    let actor = Some(caller.user_id());
+
+    // Both references are resolved before anything is written, so a parent or
+    // an owner that does not exist is a 422 naming the path rather than a
+    // foreign-key violation surfacing as a 500 — and before the transaction
+    // opens, so this call holds one connection at a time (coding standard
+    // §2.5, #118).
+    let parent = resolve_parent(state, tenant_id, request.parent_facility_id.as_deref()).await?;
+    let owner = resolve_owner(state, tenant_id, request.owner_party_id.as_deref()).await?;
+
+    let id = Uuid::now_v7();
+    let facility_code = request.facility_id.trim();
+    let name = request.name.as_deref().unwrap_or_default().trim();
+    let address = address_json(request.address.as_ref())?;
+    let attributes = request
+        .additional_attributes
+        .clone()
+        .unwrap_or_else(|| json!({}));
+
+    repo::insert_facility(
+        &state.pool,
+        &NewFacility {
+            id,
+            tenant_id,
+            facility_code,
+            name,
+            facility_type: request.facility_type_id.map(FacilityType::as_db),
+            parent_facility_id: parent,
+            owner_party_id: owner,
+            address_json: &address,
+            attributes_json: &attributes,
+            created_by: actor,
+        },
+    )
+    .await
+    .map_err(duplicate_facility_to_conflict)?;
+
+    audit::record_or_warn(
+        &state.pool,
+        AuditEntry {
+            tenant_id,
+            event_type: "Facility.Created",
+            action: "CREATE",
+            object_type: OBJECT_TYPE,
+            object_id: id,
+            actor_user_id: actor,
+            ip_address: None,
+            reason: None,
+            old_value: None,
+            new_value: Some(json!({
+                "facilityId": facility_code,
+                "name": name,
+                "facilityTypeId": request.facility_type_id.map(FacilityType::as_db),
+                "parentFacilityId": request.parent_facility_id,
+                "ownerPartyId": request.owner_party_id,
+            })),
+        },
+    )
+    .await;
+
+    load(state, tenant_id, id).await
+}
+
+pub async fn update_facility(
+    state: &AppState,
+    caller: &Authenticated,
+    id: Uuid,
+    request: UpdateFacilityRequest,
+) -> Result<Facility, AppError> {
+    caller.require("master-data:facility:update")?;
+
+    let tenant_id = caller.tenant_id();
+    let actor = Some(caller.user_id());
+
+    let before = repo::find_facility(&state.pool, tenant_id, id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Facility"))?;
+
+    validate_update_facility(&request, &before.facility_id)?;
+
+    let parent = match &request.parent_facility_id {
+        None => None,
+        Some(None) => Some(None),
+        Some(Some(code)) => {
+            let resolved = resolve_parent(state, tenant_id, Some(code)).await?;
+
+            if let Some(parent_id) = resolved {
+                refuse_cycle(state, tenant_id, id, parent_id).await?;
+            }
+
+            Some(resolved)
+        }
+    };
+
+    let owner = match &request.owner_party_id {
+        None => None,
+        Some(None) => Some(None),
+        Some(Some(code)) => Some(resolve_owner(state, tenant_id, Some(code)).await?),
+    };
+
+    let address = match request.address.as_ref() {
+        Some(address) => Some(address_json(Some(address))?),
+        None => None,
+    };
+
+    let updated = repo::update_facility_fields(
+        &state.pool,
+        tenant_id,
+        id,
+        &FacilityFields {
+            name: request.name.as_deref().map(str::trim),
+            facility_type: request.facility_type_id.map(FacilityType::as_db),
+            parent_facility_id: parent,
+            owner_party_id: owner,
+            address_json: address.as_ref(),
+            attributes_json: request.additional_attributes.as_ref(),
+        },
+        actor,
+    )
+    .await?;
+
+    if updated == 0 {
+        return Err(AppError::not_found("Facility"));
+    }
+
+    audit::record_or_warn(
+        &state.pool,
+        AuditEntry {
+            tenant_id,
+            event_type: "Facility.Updated",
+            action: "UPDATE",
+            object_type: OBJECT_TYPE,
+            object_id: id,
+            actor_user_id: actor,
+            ip_address: None,
+            reason: None,
+            old_value: Some(json!({
+                "name": before.name,
+                "facilityTypeId": before.facility_type_id.map(FacilityType::as_db),
+                "parentFacilityId": before.parent_facility_id,
+                "ownerPartyId": before.owner_party_id,
+            })),
+            new_value: Some(json!({
+                "name": request.name,
+                "facilityTypeId": request.facility_type_id.map(FacilityType::as_db),
+                "parentFacilityId": request.parent_facility_id,
+                "ownerPartyId": request.owner_party_id,
+            })),
+        },
+    )
+    .await;
+
+    load(state, tenant_id, id).await
+}
+
+/// Soft-deletes a facility, refusing while anything still sits under it.
+///
+/// Not a cascade. Deleting a building would otherwise take its floors and their
+/// rooms with it in one call, and the caller who asked to delete one row would
+/// have deleted a hundred. Refusing names the count, so the caller can decide
+/// whether to re-parent the children or delete them too — which is a decision,
+/// not a default.
+pub async fn delete_facility(
+    state: &AppState,
+    caller: &Authenticated,
+    id: Uuid,
+) -> Result<(), AppError> {
+    caller.require("master-data:facility:delete")?;
+
+    let tenant_id = caller.tenant_id();
+    let actor = Some(caller.user_id());
+
+    let children = repo::children_of(&state.pool, tenant_id, id).await?;
+
+    if children > 0 {
+        return Err(AppError::conflict(format!(
+            "{children} facilities are still under this one"
+        )));
+    }
+
+    let removed = repo::soft_delete_facility(&state.pool, tenant_id, id, actor).await?;
+
+    if removed == 0 {
+        return Err(AppError::not_found("Facility"));
+    }
+
+    audit::record_or_warn(
+        &state.pool,
+        AuditEntry {
+            tenant_id,
+            event_type: "Facility.Deleted",
+            action: "DELETE",
+            object_type: OBJECT_TYPE,
+            object_id: id,
+            actor_user_id: actor,
+            ip_address: None,
+            reason: None,
+            old_value: None,
+            new_value: None,
+        },
+    )
+    .await;
+
+    Ok(())
+}
+
+/// Refuses a re-parenting that would close a loop.
+///
+/// The hierarchy is a tree and `parent_facility_id` is a self-reference, so the
+/// database can express *points at a facility* and cannot express *and not at
+/// one of its own descendants*. Walking up from the proposed parent is the
+/// check: if `id` is on that path, then making `parent` the parent of `id`
+/// would make `id` its own ancestor.
+///
+/// It needs a test more than most rules here do, because the failure is not a
+/// wrong answer — a cycle in storage makes any traversal loop until something
+/// times out.
+async fn refuse_cycle(
+    state: &AppState,
+    tenant_id: Uuid,
+    id: Uuid,
+    parent: Uuid,
+) -> Result<(), AppError> {
+    let ancestors =
+        repo::facility_ancestors(&state.pool, tenant_id, parent, MAX_FACILITY_DEPTH).await?;
+
+    if ancestors.contains(&id) {
+        return Err(AppError::validation(vec![ValidationDetail::new(
+            "parentFacilityId",
+            "consistency",
+            "CYCLE",
+            "That facility is under this one; moving it there would close a loop",
+        )]));
+    }
+
+    Ok(())
+}
+
+/// The surrogate id behind a `parentFacilityId`, or a 422 naming the field.
+async fn resolve_parent(
+    state: &AppState,
+    tenant_id: Uuid,
+    code: Option<&str>,
+) -> Result<Option<Uuid>, AppError> {
+    let Some(code) = code.map(str::trim).filter(|code| !code.is_empty()) else {
+        return Ok(None);
+    };
+
+    match repo::find_facility_id_by_code(&state.pool, tenant_id, code).await? {
+        Some(id) => Ok(Some(id)),
+        None => Err(AppError::validation(vec![ValidationDetail::new(
+            "parentFacilityId",
+            "exists",
+            "NOT_FOUND",
+            "No facility with that facilityId",
+        )])),
+    }
+}
+
+/// The surrogate id behind an `ownerPartyId`, or a 422 naming the field.
+///
+/// The same shape `managerPartyId` uses on an employee profile: a reference
+/// that does not resolve is the caller's mistake and is named, not a
+/// foreign-key violation surfacing as a 500.
+async fn resolve_owner(
+    state: &AppState,
+    tenant_id: Uuid,
+    code: Option<&str>,
+) -> Result<Option<Uuid>, AppError> {
+    let Some(code) = code.map(str::trim).filter(|code| !code.is_empty()) else {
+        return Ok(None);
+    };
+
+    match repo::find_party_id_by_code(&state.pool, tenant_id, code).await? {
+        Some(id) => Ok(Some(id)),
+        None => Err(AppError::validation(vec![ValidationDetail::new(
+            "ownerPartyId",
+            "exists",
+            "NOT_FOUND",
+            "No party with that partyId",
+        )])),
+    }
+}
+
+/// The address as the column stores it.
+///
+/// `{}` rather than `null` when no address is given, matching the column's own
+/// default so that a facility created without one and a facility created before
+/// this field existed read back the same way.
+fn address_json(address: Option<&PostalAddress>) -> Result<Value, AppError> {
+    match address {
+        None => Ok(json!({})),
+        Some(address) => serde_json::to_value(address).map_err(|error| AppError::Internal {
+            source: anyhow::anyhow!("serializing a postal address: {error}"),
+        }),
+    }
+}
+
+async fn load(state: &AppState, tenant_id: Uuid, id: Uuid) -> Result<Facility, AppError> {
+    repo::find_facility(&state.pool, tenant_id, id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Facility"))
+}
+
+/// The unique index on `(tenant_id, facility_code)` among live rows, as a 409.
+///
+/// A duplicate code is the caller telling the truth about a facility that
+/// already exists, not a malformed request — the same reason
+/// `duplicate_party_to_conflict` answers 409 rather than 422.
+fn duplicate_facility_to_conflict(error: sqlx::Error) -> AppError {
+    if let sqlx::Error::Database(database_error) = &error {
+        if database_error.constraint() == Some("uq_mdm_facilities_tenant_id_facility_code") {
+            return AppError::conflict("That facilityId is already in use");
+        }
+    }
+
+    AppError::from(error)
+}

@@ -1,0 +1,66 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT f.id, f.facility_code, f.name, f.facility_type,\n               parent.facility_code AS \"parent_code?\",\n               owner.party_code AS \"owner_code?\",\n               f.created_at, f.updated_at\n        FROM mdm_facilities f\n        LEFT JOIN mdm_facilities parent\n          ON parent.id = f.parent_facility_id AND parent.tenant_id = f.tenant_id\n             AND parent.deleted_at IS NULL\n        LEFT JOIN mdm_parties owner\n          ON owner.id = f.owner_party_id AND owner.tenant_id = f.tenant_id\n             AND owner.deleted_at IS NULL\n        WHERE f.tenant_id = $1 AND f.deleted_at IS NULL\n        ORDER BY f.facility_code\n        LIMIT $2 OFFSET $3\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "facility_code",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "facility_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "parent_code?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "owner_code?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "b429791641003ad7139932fec8bce916153fc57871da003b79037a66067544b7"
+}

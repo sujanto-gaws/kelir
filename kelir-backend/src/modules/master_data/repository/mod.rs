@@ -12,6 +12,7 @@
 //! workaround: a JSON number is an IEEE double and `NUMERIC(18,2)` has values it
 //! cannot hold exactly, so the string is the honest wire shape either way.
 
+pub mod facility;
 pub mod party;
 pub mod party_children;
 pub mod role;
@@ -20,6 +21,7 @@ pub mod role_view;
 // Re-exported flat, so the service keeps addressing these as `repo::find_party`
 // — which file a query lives in is a question about this module's size, not
 // about its interface.
+pub use facility::*;
 pub use party::*;
 pub use party_children::*;
 pub use role::*;
