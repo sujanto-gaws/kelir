@@ -6,7 +6,8 @@ use uuid::Uuid;
 use super::domain::{
     AssignRoleRequest, CreateFacilityRequest, CreatePartyRequest, Facility, FacilitySummary,
     PartyAggregate, PartyRole, PartyRoles, PartySummary, RoleView, RoleViewQuery, RoleViewRow,
-    UpdateFacilityRequest, UpdatePartyRequest,
+    TransitionRequest, TransitionResult, TransitionTarget, UpdateFacilityRequest,
+    UpdatePartyRequest,
 };
 use super::service;
 use crate::error::AppError;
@@ -25,6 +26,13 @@ pub fn routes() -> Router<AppState> {
             get(get_party).put(update_party).delete(delete_party),
         )
         .route("/parties/{id}/roles", get(get_party_roles))
+        // A lifecycle transition is not a field edit, so it is a verb
+        // sub-resource rather than a member of the update payload (naming
+        // convention §5; #99).
+        .route(
+            "/parties/{id}/transition",
+            axum::routing::post(transition_party),
+        )
         .route(
             "/parties/{id}/roles/{roleTypeId}",
             axum::routing::put(assign_role).delete(remove_role),
@@ -44,6 +52,10 @@ pub fn routes() -> Router<AppState> {
             get(get_facility)
                 .put(update_facility)
                 .delete(delete_facility),
+        )
+        .route(
+            "/facilities/{id}/transition",
+            axum::routing::post(transition_facility),
         )
 }
 
@@ -408,4 +420,60 @@ async fn delete_facility(
     service::delete_facility(&state, &caller, id).await?;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle transitions (FR-MDM-007)
+// ---------------------------------------------------------------------------
+
+/// One route per entity rather than one taking an entity type, because the URL
+/// already addresses the record and a `/master-data/transition` would have to
+/// take the table as a parameter — the thing coding standard §2.5 exists to
+/// avoid. One verb rather than five (`/activate`, `/suspend`, …) because the
+/// legal set is a property of the state machine and belongs in one place, not
+/// spread across five handlers that must be kept in step.
+#[utoipa::path(
+    post, path = "/api/v1/master-data/parties/{id}/transition", tag = "master-data",
+    request_body = TransitionRequest,
+    responses(
+        (status = 200, description = "Moved", body = TransitionResult),
+        (status = 403, description = "Missing master-data:record-status:transition"),
+        (status = 404, description = "No such party"),
+        (status = 409, description = "The record changed while the transition was being applied"),
+        (status = 422, description = "That transition is not legal from where the record is")
+    ),
+    security(("bearer" = []))
+)]
+async fn transition_party(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path(id): Path<Uuid>,
+    JsonBody(request): JsonBody<TransitionRequest>,
+) -> Result<Json<ItemEnvelope<TransitionResult>>, AppError> {
+    Ok(Json(ItemEnvelope::new(
+        service::transition(&state, &caller, TransitionTarget::Party, id, request).await?,
+    )))
+}
+
+#[utoipa::path(
+    post, path = "/api/v1/master-data/facilities/{id}/transition", tag = "master-data",
+    request_body = TransitionRequest,
+    responses(
+        (status = 200, description = "Moved", body = TransitionResult),
+        (status = 403, description = "Missing master-data:record-status:transition"),
+        (status = 404, description = "No such facility"),
+        (status = 409, description = "The record changed while the transition was being applied"),
+        (status = 422, description = "That transition is not legal from where the record is")
+    ),
+    security(("bearer" = []))
+)]
+async fn transition_facility(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path(id): Path<Uuid>,
+    JsonBody(request): JsonBody<TransitionRequest>,
+) -> Result<Json<ItemEnvelope<TransitionResult>>, AppError> {
+    Ok(Json(ItemEnvelope::new(
+        service::transition(&state, &caller, TransitionTarget::Facility, id, request).await?,
+    )))
 }

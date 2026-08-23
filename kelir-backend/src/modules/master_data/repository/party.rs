@@ -8,7 +8,7 @@ use serde_json::Value;
 use sqlx::{PgExecutor, PgPool};
 use uuid::Uuid;
 
-use crate::modules::master_data::domain::{PartyStatusCode, PartySummary, PartyType};
+use crate::modules::master_data::domain::{PartyStatusCode, PartySummary, PartyType, RecordStatus};
 
 /// A party's own row, before its children are loaded.
 pub struct PartyRow {
@@ -16,6 +16,8 @@ pub struct PartyRow {
     pub party_code: String,
     pub party_type: PartyType,
     pub status: PartyStatusCode,
+    /// The record's own governance lifecycle, which is not `status` (#99).
+    pub record_status: RecordStatus,
     pub external_id: Option<String>,
     pub description: Option<String>,
     pub attributes_json: Value,
@@ -199,8 +201,8 @@ pub async fn lock_party(
 ) -> Result<Option<PartyRow>, sqlx::Error> {
     let row = sqlx::query!(
         r#"
-        SELECT id, party_code, party_type, status, external_id, description,
-               attributes_json, created_at, updated_at
+        SELECT id, party_code, party_type, status, record_status, external_id,
+               description, attributes_json, created_at, updated_at
         FROM mdm_parties
         WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
         FOR UPDATE
@@ -216,6 +218,7 @@ pub async fn lock_party(
         party_code: row.party_code,
         party_type: PartyType::from_db(&row.party_type),
         status: PartyStatusCode::from_db(&row.status),
+        record_status: RecordStatus::from_db(&row.record_status),
         external_id: row.external_id,
         description: row.description,
         attributes_json: row.attributes_json,
@@ -231,8 +234,8 @@ pub async fn find_party(
 ) -> Result<Option<PartyRow>, sqlx::Error> {
     let row = sqlx::query!(
         r#"
-        SELECT id, party_code, party_type, status, external_id, description,
-               attributes_json, created_at, updated_at
+        SELECT id, party_code, party_type, status, record_status, external_id,
+               description, attributes_json, created_at, updated_at
         FROM mdm_parties
         WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
         "#,
@@ -247,6 +250,7 @@ pub async fn find_party(
         party_code: row.party_code,
         party_type: PartyType::from_db(&row.party_type),
         status: PartyStatusCode::from_db(&row.status),
+        record_status: RecordStatus::from_db(&row.record_status),
         external_id: row.external_id,
         description: row.description,
         attributes_json: row.attributes_json,

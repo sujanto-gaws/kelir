@@ -35,7 +35,9 @@ use serde_json::Value;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use super::{bound_name, finish, non_empty, require_code, require_name, PostalAddress};
+use super::{
+    bound_name, finish, non_empty, require_code, require_name, PostalAddress, RecordStatus,
+};
 use crate::error::{AppError, ValidationDetail};
 
 /// Longest `facilityId` §4.16 holds — `facility_code VARCHAR(64)`.
@@ -104,6 +106,10 @@ pub struct Facility {
     pub facility_id: String,
     pub name: String,
     pub facility_type_id: Option<FacilityType>,
+    /// Where the record has got to in its governance lifecycle (FR-MDM-007).
+    /// Read-only here: it is moved by `POST /facilities/{id}/transition` and by
+    /// nothing else (#99).
+    pub record_status_id: RecordStatus,
     /// The `facilityId` of the parent, or `null` at the root of a tree.
     pub parent_facility_id: Option<String>,
     /// The `partyId` of the party that owns the place, if one is recorded.

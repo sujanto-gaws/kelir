@@ -14,7 +14,9 @@ use serde_json::Value;
 use sqlx::{PgExecutor, PgPool};
 use uuid::Uuid;
 
-use crate::modules::master_data::domain::{Facility, FacilitySummary, FacilityType, PostalAddress};
+use crate::modules::master_data::domain::{
+    Facility, FacilitySummary, FacilityType, PostalAddress, RecordStatus,
+};
 
 /// The columns a create writes. `record_status` is absent deliberately: it is
 /// left at its `DRAFT` default because nothing moves it until #99, and a value
@@ -109,7 +111,7 @@ pub async fn find_facility(
 ) -> Result<Option<Facility>, sqlx::Error> {
     let row = sqlx::query!(
         r#"
-        SELECT f.id, f.facility_code, f.name, f.facility_type,
+        SELECT f.id, f.facility_code, f.name, f.facility_type, f.record_status,
                parent.facility_code AS "parent_code?",
                owner.party_code AS "owner_code?",
                f.address_json, f.attributes_json, f.created_at, f.updated_at
@@ -133,6 +135,7 @@ pub async fn find_facility(
         facility_id: row.facility_code,
         name: row.name,
         facility_type_id: row.facility_type.as_deref().and_then(FacilityType::from_db),
+        record_status_id: RecordStatus::from_db(&row.record_status),
         parent_facility_id: row.parent_code,
         owner_party_id: row.owner_code,
         address: address_from(row.address_json),
