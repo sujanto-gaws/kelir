@@ -1,0 +1,36 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH RECURSIVE up AS (\n            SELECT id, parent_facility_id, 1 AS depth\n            FROM mdm_facilities\n            WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL\n            UNION ALL\n            SELECT f.id, f.parent_facility_id, up.depth + 1\n            FROM mdm_facilities f\n            JOIN up ON f.id = up.parent_facility_id\n            WHERE f.tenant_id = $1 AND f.deleted_at IS NULL AND up.depth < $3\n        )\n        SELECT id AS \"id!\", parent_facility_id, depth AS \"depth!\" FROM up\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "parent_facility_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "depth!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "695e37c67984af442ae29afe25cca2cf09b902527360ace5d6bde837fd99ab38"
+}

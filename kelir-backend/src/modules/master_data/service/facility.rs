@@ -84,8 +84,23 @@ pub async fn create_facility(
         .clone()
         .unwrap_or_else(|| json!({}));
 
+    // The parent is re-read under the lock before the child is written (#137).
+    // Resolving it above answered "is there such a facility" a moment ago, and
+    // a delete landing in between would leave this row under a facility that no
+    // longer exists — the state `delete_facility`'s refusal is there to prevent,
+    // arrived at without anybody deciding it.
+    let mut transaction = state.pool.begin().await?;
+
+    if let Some(parent_id) = parent {
+        repo::lock_facility_hierarchy(&mut transaction, tenant_id).await?;
+
+        if !repo::facility_is_live(&mut *transaction, tenant_id, parent_id).await? {
+            return Err(parent_no_longer_there());
+        }
+    }
+
     repo::insert_facility(
-        &state.pool,
+        &mut *transaction,
         &NewFacility {
             id,
             tenant_id,
@@ -101,6 +116,8 @@ pub async fn create_facility(
     )
     .await
     .map_err(duplicate_facility_to_conflict)?;
+
+    transaction.commit().await?;
 
     audit::record_or_warn(
         &state.pool,
@@ -145,18 +162,12 @@ pub async fn update_facility(
 
     validate_update_facility(&request, &before.facility_id)?;
 
+    // Both references resolve on the pool, before the transaction opens, so
+    // this call holds one connection at a time (coding standard §2.5, #118).
     let parent = match &request.parent_facility_id {
         None => None,
         Some(None) => Some(None),
-        Some(Some(code)) => {
-            let resolved = resolve_parent(state, tenant_id, Some(code)).await?;
-
-            if let Some(parent_id) = resolved {
-                refuse_cycle(state, tenant_id, id, parent_id).await?;
-            }
-
-            Some(resolved)
-        }
+        Some(Some(code)) => Some(resolve_parent(state, tenant_id, Some(code)).await?),
     };
 
     let owner = match &request.owner_party_id {
@@ -170,8 +181,27 @@ pub async fn update_facility(
         None => None,
     };
 
+    // The cycle check and the write it guards, in one transaction (#133). Read
+    // on the pool and written after, they were check-then-act: two callers each
+    // walked a path the other was about to change, both were told the move was
+    // legal, and the pair closed a loop neither could see on its own.
+    let mut transaction = state.pool.begin().await?;
+
+    if let Some(Some(parent_id)) = parent {
+        repo::lock_facility_hierarchy(&mut transaction, tenant_id).await?;
+
+        // Re-read under the lock, for the same reason a create does (#137): the
+        // resolve above ran on the pool, and a delete since then would put this
+        // facility under one that is gone.
+        if !repo::facility_is_live(&mut *transaction, tenant_id, parent_id).await? {
+            return Err(parent_no_longer_there());
+        }
+
+        refuse_cycle(&mut *transaction, tenant_id, id, parent_id).await?;
+    }
+
     let updated = repo::update_facility_fields(
-        &state.pool,
+        &mut *transaction,
         tenant_id,
         id,
         &FacilityFields {
@@ -189,6 +219,8 @@ pub async fn update_facility(
     if updated == 0 {
         return Err(AppError::not_found("Facility"));
     }
+
+    transaction.commit().await?;
 
     audit::record_or_warn(
         &state.pool,
@@ -227,6 +259,20 @@ pub async fn update_facility(
 /// have deleted a hundred. Refusing names the count, so the caller can decide
 /// whether to re-parent the children or delete them too — which is a decision,
 /// not a default.
+///
+/// **The count and the delete are one transaction, under the same lock a
+/// re-parenting takes** (#137). Counted on the pool and deleted afterwards, the
+/// refusal only held against children that already existed: a create naming
+/// this facility as its parent, resolving that parent a moment before the
+/// delete landed, produced a live facility under a deleted one in 19 of 20
+/// rounds. Nobody chose that — the delete reported success, the create reported
+/// success, and the decision this refusal exists to force was never put to
+/// anyone.
+///
+/// It is also the failure that hides. `find_facility` and `list_facilities`
+/// join the parent on `deleted_at IS NULL`, so such a row reads back as a root;
+/// the dangling reference stays in the column, visible to an export or a repair
+/// script and to nothing a user can see.
 pub async fn delete_facility(
     state: &AppState,
     caller: &Authenticated,
@@ -237,7 +283,11 @@ pub async fn delete_facility(
     let tenant_id = caller.tenant_id();
     let actor = Some(caller.user_id());
 
-    let children = repo::children_of(&state.pool, tenant_id, id).await?;
+    let mut transaction = state.pool.begin().await?;
+
+    repo::lock_facility_hierarchy(&mut transaction, tenant_id).await?;
+
+    let children = repo::children_of(&mut *transaction, tenant_id, id).await?;
 
     if children > 0 {
         return Err(AppError::conflict(format!(
@@ -245,11 +295,13 @@ pub async fn delete_facility(
         )));
     }
 
-    let removed = repo::soft_delete_facility(&state.pool, tenant_id, id, actor).await?;
+    let removed = repo::soft_delete_facility(&mut *transaction, tenant_id, id, actor).await?;
 
     if removed == 0 {
         return Err(AppError::not_found("Facility"));
     }
+
+    transaction.commit().await?;
 
     audit::record_or_warn(
         &state.pool,
@@ -282,16 +334,28 @@ pub async fn delete_facility(
 /// It needs a test more than most rules here do, because the failure is not a
 /// wrong answer — a cycle in storage makes any traversal loop until something
 /// times out.
+///
+/// **Runs inside the caller's transaction, under
+/// [`repo::lock_facility_hierarchy`]** (#133). On the pool it was a read whose
+/// answer expired before the write that depended on it.
+///
+/// **A path it could not walk to the end is refused, not assumed safe** (#134).
+/// Past `MAX_FACILITY_DEPTH` the walk returns a prefix, and `id` being absent
+/// from a prefix is not evidence that `id` is not an ancestor — that is how the
+/// bound came to allow the corruption it was there to survive. Refusing a move
+/// this check cannot verify errs towards a tree that stays a tree; the caller
+/// is told the depth is the reason, because "no" without one is indistinguishable
+/// from a defect.
 async fn refuse_cycle(
-    state: &AppState,
+    executor: impl sqlx::PgExecutor<'_>,
     tenant_id: Uuid,
     id: Uuid,
     parent: Uuid,
 ) -> Result<(), AppError> {
-    let ancestors =
-        repo::facility_ancestors(&state.pool, tenant_id, parent, MAX_FACILITY_DEPTH).await?;
+    let ancestry =
+        repo::facility_ancestors(executor, tenant_id, parent, MAX_FACILITY_DEPTH).await?;
 
-    if ancestors.contains(&id) {
+    if ancestry.ids.contains(&id) {
         return Err(AppError::validation(vec![ValidationDetail::new(
             "parentFacilityId",
             "consistency",
@@ -300,7 +364,35 @@ async fn refuse_cycle(
         )]));
     }
 
+    if ancestry.truncated {
+        return Err(AppError::validation(vec![ValidationDetail::new(
+            "parentFacilityId",
+            "consistency",
+            "TOO_DEEP",
+            format!(
+                "That facility sits more than {MAX_FACILITY_DEPTH} levels deep, so this move \
+                 cannot be checked for a loop. Move it nearer the root first"
+            ),
+        )]));
+    }
+
     Ok(())
+}
+
+/// The parent named by the request went away between resolving it and writing.
+///
+/// The same 422 `resolve_parent` gives, deliberately: from the caller's side
+/// nothing distinguishes a parent that never existed from one deleted while
+/// their request was in flight, and both are answered by naming the field and
+/// letting them send it again. A 409 would suggest a conflict they could
+/// resolve, and there is nothing for them to resolve — the facility is gone.
+fn parent_no_longer_there() -> AppError {
+    AppError::validation(vec![ValidationDetail::new(
+        "parentFacilityId",
+        "exists",
+        "NOT_FOUND",
+        "No facility with that facilityId",
+    )])
 }
 
 /// The surrogate id behind a `parentFacilityId`, or a 422 naming the field.

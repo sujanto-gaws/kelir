@@ -92,6 +92,20 @@ async fn caller_holding(app: &TestApp, permissions: &[&str], nonce: usize) -> St
     app.sign_in(&username, PASSWORD).await
 }
 
+/// The parent a facility actually points at, read from the column.
+///
+/// Not from the API: `find_facility` joins the parent on `deleted_at IS NULL`
+/// and reports a dangling reference as no parent at all, so a test asking the
+/// route what the hierarchy looks like cannot see the shapes these tests are
+/// about.
+async fn parent_of(app: &TestApp, id: Uuid) -> Option<Uuid> {
+    sqlx::query_scalar("SELECT parent_facility_id FROM mdm_facilities WHERE id = $1")
+        .bind(id)
+        .fetch_one(&app.pool)
+        .await
+        .expect("read the parent column")
+}
+
 /// The `facilityId` of every row a list response actually returned.
 ///
 /// The rows, not `meta.total` — they come from different statements, and a test
@@ -837,7 +851,11 @@ async fn the_ancestor_walk_stops_at_its_bound_against_a_cycle_already_in_storage
     let first = create_ok(&app, &token, building("FAC-A", "A")).await;
     let second = create_ok(&app, &token, building("FAC-B", "B")).await;
 
-    // Straight into the table: the API refuses this, which is the point.
+    // Straight into the table: the API refuses this, which is the point. It did
+    // not always — until #133 two concurrent re-parentings could write exactly
+    // this pair — so the claim is now carried by
+    // `two_concurrent_reparentings_cannot_close_a_loop` as well as by this
+    // comment.
     for (child, parent) in [(first, second), (second, first)] {
         sqlx::query("UPDATE mdm_facilities SET parent_facility_id = $2 WHERE id = $1")
             .bind(child)
@@ -861,8 +879,260 @@ async fn the_ancestor_walk_stops_at_its_bound_against_a_cycle_already_in_storage
     .expect("the query runs");
 
     assert_eq!(
-        walked.len(),
+        walked.ids.len(),
         8,
         "the walk did not stop at the bound it was given"
     );
+
+    // Stopping is half of it. The walk must also say that it stopped early,
+    // because a caller that cannot tell a prefix from a whole path treats
+    // "not on it" as "not an ancestor" — which is how the bound came to allow
+    // the cycle it exists to survive (#134).
+    assert!(
+        walked.truncated,
+        "the walk hit its bound and reported a complete path"
+    );
+}
+
+/// #133. The check-then-act shape #105 was about, on the hierarchy.
+///
+/// `refuse_cycle` read the ancestor path and `update_facility_fields` wrote,
+/// both on the pool. Two callers each walked a path the other was about to
+/// change, both were told the move was legal, and the pair closed a loop
+/// neither could see alone. The verification pass reproduced it in 18 of 20
+/// rounds.
+///
+/// A loop rather than one attempt, for the reason #105 records and #118
+/// repeated: a race that needs an interleaving is not reliably reproduced by a
+/// single shot.
+#[tokio::test]
+async fn two_concurrent_reparentings_cannot_close_a_loop() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    const ROUNDS: usize = 20;
+
+    for round in 0..ROUNDS {
+        let a_code = format!("LOOP-A-{round:04}");
+        let b_code = format!("LOOP-B-{round:04}");
+        let a = create_ok(&app, &token, building(&a_code, "A")).await;
+        let b = create_ok(&app, &token, building(&b_code, "B")).await;
+
+        let a_path = format!("{FACILITIES}/{a}");
+        let b_path = format!("{FACILITIES}/{b}");
+        let (first, second) = tokio::join!(
+            app.put(&a_path, Some(&token), json!({ "parentFacilityId": b_code })),
+            app.put(&b_path, Some(&token), json!({ "parentFacilityId": a_code })),
+        );
+
+        // Not "one of them fails": whichever runs first is a legal move and
+        // must succeed. What must never happen is both, because together they
+        // are a loop.
+        assert!(
+            !(parent_of(&app, a).await == Some(b) && parent_of(&app, b).await == Some(a)),
+            "round {round}: a loop reached storage — {} / {}",
+            first.body,
+            second.body
+        );
+
+        for response in [&first, &second] {
+            assert!(
+                response.status == StatusCode::OK
+                    || response.status == StatusCode::UNPROCESSABLE_ENTITY,
+                "round {round}: a re-parenting answered {} — {}",
+                response.status,
+                response.body
+            );
+        }
+    }
+}
+
+/// #133, the case that decides how the serialisation has to work.
+///
+/// Two re-parentings can close a loop while touching four different facilities,
+/// so locking each caller's own row and its proposed parent locks two disjoint
+/// pairs and serialises nothing. With `B → C` and `D → A` stored, moving `A`
+/// under `B` and `C` under `D` at once yields `A → B → C → D → A`.
+///
+/// This is here as a test rather than only as a comment on
+/// `lock_facility_hierarchy`, because the tempting cheaper fix passes the test
+/// above and fails this one.
+#[tokio::test]
+async fn two_re_parentings_that_share_no_row_cannot_close_a_loop() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    const ROUNDS: usize = 20;
+
+    for round in 0..ROUNDS {
+        let codes: Vec<String> = (0..4).map(|n| format!("FOUR-{round:04}-{n}")).collect();
+        let mut ids = Vec::new();
+        for (n, code) in codes.iter().enumerate() {
+            ids.push(create_ok(&app, &token, building(code, &format!("node {n}"))).await);
+        }
+        let (a, b, c, d) = (ids[0], ids[1], ids[2], ids[3]);
+
+        // B -> C and D -> A, written directly so the round starts from the
+        // shape the race needs rather than from four more requests.
+        for (child, parent) in [(b, c), (d, a)] {
+            sqlx::query("UPDATE mdm_facilities SET parent_facility_id = $2 WHERE id = $1")
+                .bind(child)
+                .bind(parent)
+                .execute(&app.pool)
+                .await
+                .expect("seed the two existing edges");
+        }
+
+        let a_path = format!("{FACILITIES}/{a}");
+        let c_path = format!("{FACILITIES}/{c}");
+        let (first, second) = tokio::join!(
+            app.put(
+                &a_path,
+                Some(&token),
+                json!({ "parentFacilityId": codes[1] })
+            ),
+            app.put(
+                &c_path,
+                Some(&token),
+                json!({ "parentFacilityId": codes[3] })
+            ),
+        );
+
+        let closed = parent_of(&app, a).await == Some(b)
+            && parent_of(&app, b).await == Some(c)
+            && parent_of(&app, c).await == Some(d)
+            && parent_of(&app, d).await == Some(a);
+
+        assert!(
+            !closed,
+            "round {round}: a four-node loop reached storage — {} / {}",
+            first.body, second.body
+        );
+    }
+}
+
+/// #134. A hierarchy deeper than the walk's bound.
+///
+/// Nothing limits how deep a tree may be built, so past `MAX_FACILITY_DEPTH`
+/// the walk up from the proposed parent returns a prefix that does not contain
+/// the root. `contains(&id)` then answers "not an ancestor" about a facility
+/// that is one, and the check that exists to refuse a cycle allows it — one
+/// caller, one request, no race.
+#[tokio::test]
+async fn a_move_the_depth_bound_cannot_verify_is_refused() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    // Comfortably past the bound, and cheap: these are 70 inserts.
+    const DEPTH: usize = 70;
+
+    let mut codes: Vec<String> = Vec::new();
+    let mut root = None;
+    for level in 0..DEPTH {
+        let code = format!("DEEP-{level:04}");
+        let mut body = building(&code, &format!("level {level}"));
+        if level > 0 {
+            body["parentFacilityId"] = json!(codes[level - 1]);
+        }
+        let id = create_ok(&app, &token, body).await;
+        root.get_or_insert(id);
+        codes.push(code);
+    }
+    let root = root.expect("a root");
+
+    let response = app
+        .put(
+            &format!("{FACILITIES}/{root}"),
+            Some(&token),
+            json!({ "parentFacilityId": codes[DEPTH - 1] }),
+        )
+        .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "the root was moved under its own descendant: {}",
+        response.body
+    );
+    assert_eq!(
+        response.body["error"]["details"][0]["code"], "TOO_DEEP",
+        "refused, but not for the reason the caller needs: {}",
+        response.body
+    );
+
+    assert_eq!(
+        parent_of(&app, root).await,
+        None,
+        "the root was re-parented despite the refusal"
+    );
+}
+
+/// #137. The no-cascade refusal only held against children that already existed.
+///
+/// `children_of` counted on the pool and `soft_delete_facility` wrote
+/// afterwards, while a create resolved its parent on the pool and inserted
+/// afterwards. A create that resolved the parent a moment before the delete
+/// landed produced a live facility under a deleted one — 19 of 20 rounds — and
+/// nobody decided it: the delete answered 204, the create answered 201, and the
+/// decision the refusal exists to force was never put to anyone.
+///
+/// The assertion is on the column rather than on the route, because
+/// `find_facility` joins the parent on `deleted_at IS NULL` and reports the
+/// dangling reference as no parent at all.
+#[tokio::test]
+async fn deleting_a_facility_cannot_race_a_child_being_created_under_it() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    const ROUNDS: usize = 20;
+
+    for round in 0..ROUNDS {
+        let parent_code = format!("RACE-P-{round:04}");
+        let child_code = format!("RACE-C-{round:04}");
+        let parent = create_ok(&app, &token, building(&parent_code, "parent")).await;
+
+        let parent_path = format!("{FACILITIES}/{parent}");
+        let child_body = json!({
+            "facilityId": child_code,
+            "name": "child",
+            "facilityTypeId": "ROOM",
+            "parentFacilityId": parent_code,
+        });
+        let (deleted, created) = tokio::join!(
+            app.delete(&parent_path, Some(&token)),
+            app.post(FACILITIES, Some(&token), child_body),
+        );
+
+        // Either order is legitimate. What must not happen is both: a live
+        // facility whose parent column names a row that has been retired.
+        if deleted.status == StatusCode::NO_CONTENT && created.status == StatusCode::CREATED {
+            let child = created.data()["id"]
+                .as_str()
+                .and_then(|id| Uuid::parse_str(id).ok())
+                .unwrap_or_else(|| panic!("the created child carries no id: {}", created.body));
+
+            assert_ne!(
+                parent_of(&app, child).await,
+                Some(parent),
+                "round {round}: a live facility was left under a deleted one"
+            );
+        }
+
+        for response in [&deleted.status, &created.status] {
+            assert!(
+                matches!(
+                    *response,
+                    StatusCode::NO_CONTENT
+                        | StatusCode::CREATED
+                        | StatusCode::CONFLICT
+                        | StatusCode::UNPROCESSABLE_ENTITY
+                ),
+                "round {round}: the pair answered {} / {} — {} / {}",
+                deleted.status,
+                created.status,
+                deleted.body,
+                created.body
+            );
+        }
+    }
 }
