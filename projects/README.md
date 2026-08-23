@@ -1,6 +1,6 @@
 # Kelir Project Management
 
-**Status:** Living · **Last updated:** 2026-08-21
+**Status:** Living · **Last updated:** 2026-08-23
 
 This folder holds Kelir's **project management artifacts** — the documents that govern *when and in what order* things get built. They live outside [docs/](../docs/) deliberately: `docs/` describes the system (requirements, architecture, design, standards — see its [README](../docs/README.md) for the full index and authority rules); `projects/` describes the work.
 
@@ -14,6 +14,7 @@ projects/
 ├── status/             per-sprint status reports (decision-oriented, one page)
 ├── retrospectives/     per-sprint and per-phase retrospectives with committed actions
 ├── releases/           one evidence checklist per tagged release
+├── verifications/      one record per independent verification pass
 └── spikes/             one finding per time-boxed investigation
 ```
 
@@ -36,6 +37,7 @@ Each folder is a numbered series (`NN. Title Case.md`); `00.` files are template
 | [03. Sprint 2 Status.md](status/03.%20Sprint%202%20Status.md) | Sprint 2, 2026-08-12: the Phase 1 frontend — app shell, envelope-aware API client, login page, UI baseline, plus the CORS layer without which the two halves could not talk. #12 (staging) still open |
 | [04. Sprint 3 Status.md](status/04.%20Sprint%203%20Status.md) | Sprint 3, closed 2026-08-12: the Phase 2 backend — authentication with rotating refresh tokens, users, roles, permission enforcement, and the audit write path |
 | [05. Sprint 4 Status.md](status/05.%20Sprint%204%20Status.md) | Sprint 4, closed 2026-08-13: the Phase 2 `Must` scope built and merged, and two items recorded as delivered that failed Definition-of-Done verification. Five open decisions, two of which gate the `v0.2.0` tag |
+| [06. Sprint 5 Status.md](status/06.%20Sprint%205%20Status.md) | Sprint 5, closed 2026-08-21: the Phase 2 exit debt discharged and the party model built — seven items planned, seven closed. Every Done row cites evidence; two of them cite evidence the item's own author produced, which is what [Sprint 5's retrospective](retrospectives/03.%20Sprint%205%20Retrospective.md) turned into a rule |
 
 ### retrospectives/
 
@@ -44,6 +46,7 @@ Each folder is a numbered series (`NN. Title Case.md`); `00.` files are template
 | [00. Retrospective Template.md](retrospectives/00.%20Retrospective%20Template.md) | Per-sprint and per-phase retrospective: worked/didn't/root causes, committed actions with owners, previous-actions review. Convention changes flow into `docs/standards/`, plan changes re-baseline the sprint plan |
 | [01. Sprints 0-1 Retrospective.md](retrospectives/01.%20Sprints%200-1%20Retrospective.md) | Combined, because the two sprints ran without a boundary and their lessons interleave. Six committed actions, chiefly: scaffolds must run rather than merely compile, and acceptance criteria state outcomes rather than mechanisms |
 | [02. Sprints 2-4 Retrospective.md](retrospectives/02.%20Sprints%202-4%20Retrospective.md) | Combined because Sprints 2 and 3 closed without one — itself a finding. Eight actions, chiefly: a security-control test is not accepted until the defect it claims to catch has been reintroduced and seen to fail, and a status report does not go Final without its retrospective |
+| [03. Sprint 5 Retrospective.md](retrospectives/03.%20Sprint%205%20Retrospective.md) | Sprint 5, 2026-08-21. Chiefly: an item whose author is also its only verifier is `In progress`, not Done — twenty mutation runs designed by the agent that wrote the code are strong evidence of what the tests catch and no evidence of what nobody thought to test |
 
 ### releases/
 
@@ -52,6 +55,15 @@ Each folder is a numbered series (`NN. Title Case.md`); `00.` files are template
 | [00. Release Checklist Template.md](releases/00.%20Release%20Checklist%20Template.md) | Per-release evidence record for the [release process](../docs/standards/04.%20Release%20Process.md): pre-flight (scope, tests, migrations, docs, version), staging pass with rollback rehearsal, ship steps, aftermath |
 | [01. Release v0.1.0.md](releases/01.%20Release%20v0.1.0.md) | Phase 1. Cut 2026-08-12 — pre-flight and ship steps done, staging deploy outstanding and blocking |
 | [02. Release v0.2.0.md](releases/02.%20Release%20v0.2.0.md) | Phase 2, cut 2026-08-20. Two blocking checklist items outstanding: staging (#12) for the second release running, and the N−1 rollback rehearsal, run for the first time here and failed (#76) |
+
+### verifications/
+
+An independent verification pass is a **person or agent other than the author** reading a delivered surface and trying to break it. [Sprint plan](planning/01.%20Sprint%20Plan.md) §2 makes an item whose author is also its only verifier `In progress` rather than Done, so a record here is what closes such an item. It states its method, its findings with the issue each was filed as, **what was checked and found sound** — absence of findings only means something with a boundary around it — and what was not reached.
+
+| Document | Content |
+|---|---|
+| [01. Party Surface Verification.md](verifications/01.%20Party%20Surface%20Verification.md) | Issue #96, 2026-08-21, over the party surface Sprint 5 delivered (#80, #81). Eighteen mutations, fifteen probes: **seven defects, three release-blocking** — a deleted party permanently burning its supplier number, an authorization bypass on the assign route, a concurrent-assignment race, and four tests asserting a query they never exercised. The author's own twenty mutation runs over the same surface had found one gap |
+| [02. Role View and Fix Verification.md](verifications/02.%20Role%20View%20and%20Fix%20Verification.md) | 2026-08-23, over the role views (#97) and all four fixes record 01 produced (#113, #114, #116, #117). Twenty-five mutations, seven probes: **six defects, one release-blocking** — chiefly that the fix for the race introduced a pool-exhaustion deadlock its own tests could not reach, and that the two functions those fixes *added* carry predicates nothing exercises |
 
 ### spikes/
 
