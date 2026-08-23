@@ -4,9 +4,9 @@ use axum::{Json, Router};
 use uuid::Uuid;
 
 use super::domain::{
-    AssignRoleRequest, CreateFacilityRequest, CreatePartyRequest, Facility, FacilitySummary,
-    PartyAggregate, PartyRole, PartyRoles, PartySummary, RoleView, RoleViewQuery, RoleViewRow,
-    TransitionRequest, TransitionResult, TransitionTarget, UpdateFacilityRequest,
+    AssignRoleRequest, AuditRecord, CreateFacilityRequest, CreatePartyRequest, Facility,
+    FacilitySummary, PartyAggregate, PartyRole, PartyRoles, PartySummary, RoleView, RoleViewQuery,
+    RoleViewRow, TransitionRequest, TransitionResult, TransitionTarget, UpdateFacilityRequest,
     UpdatePartyRequest,
 };
 use super::service;
@@ -33,6 +33,11 @@ pub fn routes() -> Router<AppState> {
             "/parties/{id}/transition",
             axum::routing::post(transition_party),
         )
+        // The history of one record (FR-MDM-009). A sub-resource rather than a
+        // module-wide feed: "what happened to this supplier" and "what changed
+        // last week" are different questions, and the second belongs to the
+        // audit module's own surface (FR-AUD-004).
+        .route("/parties/{id}/audit", get(party_audit))
         .route(
             "/parties/{id}/roles/{roleTypeId}",
             axum::routing::put(assign_role).delete(remove_role),
@@ -57,6 +62,7 @@ pub fn routes() -> Router<AppState> {
             "/facilities/{id}/transition",
             axum::routing::post(transition_facility),
         )
+        .route("/facilities/{id}/audit", get(facility_audit))
 }
 
 #[utoipa::path(
@@ -476,4 +482,59 @@ async fn transition_facility(
     Ok(Json(ItemEnvelope::new(
         service::transition(&state, &caller, TransitionTarget::Facility, id, request).await?,
     )))
+}
+
+// ---------------------------------------------------------------------------
+// Change history (FR-MDM-009)
+// ---------------------------------------------------------------------------
+
+/// Oldest first, because the question is "how did this get here".
+///
+/// A caller without `master-data:party-role:read` gets the party's own history
+/// and not the role records: a role assignment names the role type, and #81
+/// keeps that from them one URL away.
+#[utoipa::path(
+    get, path = "/api/v1/master-data/parties/{id}/audit", tag = "master-data",
+    params(Pagination),
+    responses(
+        (status = 200, description = "What happened to this party", body = [AuditRecord]),
+        (status = 403, description = "Missing master-data:audit:read"),
+        (status = 404, description = "No such party")
+    ),
+    security(("bearer" = []))
+)]
+async fn party_audit(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path(id): Path<Uuid>,
+    Query(pagination): Query<Pagination>,
+) -> Result<Json<ListEnvelope<AuditRecord>>, AppError> {
+    let (records, meta) =
+        service::list_audit_records(&state, &caller, TransitionTarget::Party, id, &pagination)
+            .await?;
+
+    Ok(Json(ListEnvelope::new(records, meta)))
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/master-data/facilities/{id}/audit", tag = "master-data",
+    params(Pagination),
+    responses(
+        (status = 200, description = "What happened to this facility", body = [AuditRecord]),
+        (status = 403, description = "Missing master-data:audit:read"),
+        (status = 404, description = "No such facility")
+    ),
+    security(("bearer" = []))
+)]
+async fn facility_audit(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path(id): Path<Uuid>,
+    Query(pagination): Query<Pagination>,
+) -> Result<Json<ListEnvelope<AuditRecord>>, AppError> {
+    let (records, meta) =
+        service::list_audit_records(&state, &caller, TransitionTarget::Facility, id, &pagination)
+            .await?;
+
+    Ok(Json(ListEnvelope::new(records, meta)))
 }

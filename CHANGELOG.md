@@ -90,6 +90,27 @@ While the major version is `0`, the public API may change in any release.
   both move a record away from the same state. `recordStatusId` is now readable
   on the party aggregate and on a facility; it was off the wire only because
   nothing could change it.
+- **A master-data record's change history reads back (FR-MDM-009).**
+  `GET /api/v1/master-data/parties/{id}/audit`, and the same route under
+  `/facilities/{id}`. The *write* path shipped with #80's first endpoint —
+  every create, update, delete, role assignment, role removal and lifecycle
+  transition was already hash-chained into `audit_events`; what was missing was
+  the ability to ask, which is what makes the requirement worth having. Oldest
+  first, because the question is "how did this get here", paged in the standard
+  envelope, with who, when, and both ends of what changed. **The surface does
+  not leak what the aggregate withholds**: #81 keeps a party's roles and
+  profiles from a caller without `master-data:party-role:read`, and a role
+  assignment's audit record names the role type, so those rows are excluded in
+  SQL — and excluded from `meta.total` with them, rather than leaving a page
+  with holes in it. `previousHash` and `currentHash` are never selected:
+  nothing verifies the chain until FR-AUD-003, and publishing it would let a
+  client show "verified" beside a chain nobody checked. A sub-resource per
+  entity rather than a module-wide feed, because "what happened to this
+  supplier" and "what changed last week" are different questions and the second
+  belongs to the audit module's own surface (FR-AUD-004, Phase 6).
+  `0012_master_data_audit_permission.sql` seeds `master-data:audit:read` — a
+  master-data row rather than the audit module's own `audit:read`, which is
+  that module's to define when it has endpoints.
 ### Fixed
 
 - **Deleting a party burned the supplier, customer or employee number it held,
@@ -183,10 +204,10 @@ While the major version is `0`, the public API may change in any release.
   child-collection queries. Every file in the module is now under 900 lines.
   Each layer re-exports flat, so `service::create_party`, `repo::find_party`
   and `domain::PartyAggregate` all still name what they named before.
-- The planned migrations shift down twice more:
-  `0010_facility_permissions.sql` and `0011_record_status_permissions.sql` each
-  took the next free number, so RAD is now `0012_rad.sql` and the plugin
-  migration `0020_plugin.sql`. Nothing merged was renumbered; the Database Schema mapping
+- The planned migrations shift down three times more:
+  `0010_facility_permissions.sql`, `0011_record_status_permissions.sql` and
+  `0012_master_data_audit_permission.sql` each took the next free number, so
+  RAD is now `0013_rad.sql` and the plugin migration `0021_plugin.sql`. Nothing merged was renumbered; the Database Schema mapping
   table is the sequence and carries the correction, along with the two inline
   forward references that named the old numbers.
 - The planned migrations shift down by one: `0009_party_role_permissions.sql`
