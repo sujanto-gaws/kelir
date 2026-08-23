@@ -693,6 +693,50 @@ async fn a_party_in_another_tenant_is_not_visible() {
     );
 }
 
+#[tokio::test]
+async fn another_tenants_party_cannot_be_deleted() {
+    // #121. `delete_party` does not go through `find_party` — it calls
+    // `soft_delete_party` and turns `rows_affected == 0` into the 404. That
+    // makes the tenant predicate inside the UPDATE the only thing standing
+    // between a caller and another tenant's row, and the test above cannot
+    // reach it: it covers the reads and the relationship counterparty, and
+    // there is no cross-tenant write anywhere in the suite.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let other_tenant = fixtures::create_tenant(&app.pool, "TNT-002", "Other").await;
+    let foreign_party = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO mdm_parties (id, tenant_id, party_code, party_type)
+         VALUES ($1, $2, 'PARTY-FOREIGN', 'PARTY_GROUP')",
+    )
+    .bind(foreign_party)
+    .bind(other_tenant)
+    .execute(&app.pool)
+    .await
+    .expect("insert the other tenant's party");
+
+    let deleted = app
+        .delete(&format!("{PARTIES}/{foreign_party}"), Some(&token))
+        .await;
+    assert_eq!(
+        deleted.status,
+        StatusCode::NOT_FOUND,
+        "another tenant's party answered the delete: {}",
+        deleted.body
+    );
+
+    // The status, not only the answer: a 404 produced *after* the row was
+    // closed would still be a 404.
+    let still_live: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM mdm_parties WHERE id = $1 AND deleted_at IS NULL")
+            .bind(foreign_party)
+            .fetch_one(&app.pool)
+            .await
+            .expect("query runs");
+    assert_eq!(still_live, 1, "another tenant's party row was closed");
+}
+
 /// The child tables the aggregate reads back, and the column each is keyed on.
 ///
 /// `mdm_party_statuses` is here for the tenant sweep only: it is append-only
