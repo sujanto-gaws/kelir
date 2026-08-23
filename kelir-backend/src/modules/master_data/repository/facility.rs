@@ -163,6 +163,17 @@ pub async fn find_facility_id_by_code(
     .await
 }
 
+/// The path from `start` up towards its root, and whether the walk reached one.
+///
+/// `truncated` is the difference between *`id` is not an ancestor* and *`id` was
+/// not on the part of the path we looked at*, and the two are not the same
+/// answer. See [`facility_ancestors`].
+pub struct FacilityAncestry {
+    pub ids: Vec<Uuid>,
+    /// True when the walk stopped at `max_depth` with a parent still above it.
+    pub truncated: bool,
+}
+
 /// Every facility on the path from `start` up to its root, `start` included.
 ///
 /// This is what makes the hierarchy a tree rather than a graph. `parent_facility_id`
@@ -173,16 +184,35 @@ pub async fn find_facility_id_by_code(
 ///
 /// **Depth-bounded, and the bound is not a business rule.** A cycle already in
 /// storage would make an unbounded `WITH RECURSIVE` spin until the connection
-/// died; stopping at `max_depth` means the worst case is a wrong answer rather
-/// than a hung request. No such cycle can be written through this module, which
-/// is exactly the claim that needs a limit behind it rather than a comment.
+/// died; stopping at `max_depth` means the worst case is a bounded walk rather
+/// than a hung request.
+///
+/// **A truncated walk is reported, not silently returned** (#134). The bound
+/// used to be invisible to the caller, which made a prefix of the path
+/// indistinguishable from the whole of it: past `max_depth` the root is simply
+/// not in the answer, `contains(&id)` says "not an ancestor" about a facility
+/// that is one, and the check that exists to refuse a cycle allows it. That is
+/// the bound creating the corruption it was there to survive. A caller that
+/// cannot see a complete path must refuse rather than assume, so `truncated`
+/// travels with the ids and [`super::super::service::facility`] turns it into a
+/// refusal.
+///
+/// The walk stopping early for any *other* reason — a parent that is
+/// soft-deleted or in another tenant — is not truncation. Such a parent is not
+/// in the live tree, so no live traversal reaches through it, and the path this
+/// returns is complete with respect to the tree the product can see. #137
+/// covers how such a reference comes to exist at all.
+///
+/// If the bound ever becomes a real limit rather than a safety margin, the
+/// standard `CYCLE` clause (PostgreSQL 14+) removes the trade entirely: it
+/// terminates on a cycle already in storage without bounding depth at all.
 pub async fn facility_ancestors(
     executor: impl PgExecutor<'_>,
     tenant_id: Uuid,
     start: Uuid,
     max_depth: i32,
-) -> Result<Vec<Uuid>, sqlx::Error> {
-    let rows = sqlx::query_scalar!(
+) -> Result<FacilityAncestry, sqlx::Error> {
+    let rows = sqlx::query!(
         r#"
         WITH RECURSIVE up AS (
             SELECT id, parent_facility_id, 1 AS depth
@@ -194,7 +224,7 @@ pub async fn facility_ancestors(
             JOIN up ON f.id = up.parent_facility_id
             WHERE f.tenant_id = $1 AND f.deleted_at IS NULL AND up.depth < $3
         )
-        SELECT id AS "id!" FROM up
+        SELECT id AS "id!", parent_facility_id, depth AS "depth!" FROM up
         "#,
         tenant_id,
         start,
@@ -203,8 +233,58 @@ pub async fn facility_ancestors(
     .fetch_all(executor)
     .await?;
 
-    Ok(rows)
+    // The deepest row still naming a parent is the walk running out of budget:
+    // the recursive term declines to follow it precisely because `depth` has
+    // reached the bound.
+    let truncated = rows
+        .iter()
+        .any(|row| row.depth >= max_depth && row.parent_facility_id.is_some());
+
+    Ok(FacilityAncestry {
+        ids: rows.into_iter().map(|row| row.id).collect(),
+        truncated,
+    })
 }
+
+/// Serialises every re-parenting in one tenant for the life of the transaction.
+///
+/// **Row locks are not enough, and the reason is worth writing down** (#133).
+/// A re-parenting is a check against a path followed by a write to one row, and
+/// two of them can close a loop while touching four different facilities. With
+/// `B → C` and `D → A` already stored, one caller moving `A` under `B` and
+/// another moving `C` under `D` each walk a path the other is about to change:
+/// both checks pass, both writes land, and the result is `A → B → C → D → A`.
+/// Locking each caller's own row and its proposed parent locks `{A, B}` and
+/// `{C, D}` — disjoint sets, so nothing serialises and the loop closes.
+///
+/// Locking the whole walked path would cover that pair, and stops being obvious
+/// once three re-parentings interleave. A tenant-wide lock is the version whose
+/// correctness does not need a proof: re-parenting a facility is a rare
+/// administrative act, and taking it one at a time per tenant costs nothing
+/// anybody will measure.
+///
+/// Keyed on a class constant and a hash of the tenant, in the two-argument form,
+/// so tenants do not wait on each other and this cannot collide with
+/// [`crate::modules::auth::bootstrap`]'s single-argument lock — PostgreSQL keeps
+/// the one-argument and two-argument spaces apart. A hash collision between two
+/// tenants costs a little serialisation and no correctness.
+pub async fn lock_facility_hierarchy(
+    connection: &mut sqlx::PgConnection,
+    tenant_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        "SELECT pg_advisory_xact_lock($1, hashtext($2::text))",
+        FACILITY_HIERARCHY_LOCK_CLASS,
+        tenant_id.to_string()
+    )
+    .execute(connection)
+    .await
+    .map(|_| ())
+}
+
+/// Lock class for [`lock_facility_hierarchy`]. The ASCII of `FCTY`, carrying no
+/// meaning beyond being unlikely to collide.
+const FACILITY_HIERARCHY_LOCK_CLASS: i32 = 0x4643_5459;
 
 pub async fn insert_facility(
     executor: impl PgExecutor<'_>,

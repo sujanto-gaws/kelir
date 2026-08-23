@@ -145,18 +145,12 @@ pub async fn update_facility(
 
     validate_update_facility(&request, &before.facility_id)?;
 
+    // Both references resolve on the pool, before the transaction opens, so
+    // this call holds one connection at a time (coding standard §2.5, #118).
     let parent = match &request.parent_facility_id {
         None => None,
         Some(None) => Some(None),
-        Some(Some(code)) => {
-            let resolved = resolve_parent(state, tenant_id, Some(code)).await?;
-
-            if let Some(parent_id) = resolved {
-                refuse_cycle(state, tenant_id, id, parent_id).await?;
-            }
-
-            Some(resolved)
-        }
+        Some(Some(code)) => Some(resolve_parent(state, tenant_id, Some(code)).await?),
     };
 
     let owner = match &request.owner_party_id {
@@ -170,8 +164,19 @@ pub async fn update_facility(
         None => None,
     };
 
+    // The cycle check and the write it guards, in one transaction (#133). Read
+    // on the pool and written after, they were check-then-act: two callers each
+    // walked a path the other was about to change, both were told the move was
+    // legal, and the pair closed a loop neither could see on its own.
+    let mut transaction = state.pool.begin().await?;
+
+    if let Some(Some(parent_id)) = parent {
+        repo::lock_facility_hierarchy(&mut transaction, tenant_id).await?;
+        refuse_cycle(&mut *transaction, tenant_id, id, parent_id).await?;
+    }
+
     let updated = repo::update_facility_fields(
-        &state.pool,
+        &mut *transaction,
         tenant_id,
         id,
         &FacilityFields {
@@ -189,6 +194,8 @@ pub async fn update_facility(
     if updated == 0 {
         return Err(AppError::not_found("Facility"));
     }
+
+    transaction.commit().await?;
 
     audit::record_or_warn(
         &state.pool,
@@ -282,21 +289,45 @@ pub async fn delete_facility(
 /// It needs a test more than most rules here do, because the failure is not a
 /// wrong answer — a cycle in storage makes any traversal loop until something
 /// times out.
+///
+/// **Runs inside the caller's transaction, under
+/// [`repo::lock_facility_hierarchy`]** (#133). On the pool it was a read whose
+/// answer expired before the write that depended on it.
+///
+/// **A path it could not walk to the end is refused, not assumed safe** (#134).
+/// Past `MAX_FACILITY_DEPTH` the walk returns a prefix, and `id` being absent
+/// from a prefix is not evidence that `id` is not an ancestor — that is how the
+/// bound came to allow the corruption it was there to survive. Refusing a move
+/// this check cannot verify errs towards a tree that stays a tree; the caller
+/// is told the depth is the reason, because "no" without one is indistinguishable
+/// from a defect.
 async fn refuse_cycle(
-    state: &AppState,
+    executor: impl sqlx::PgExecutor<'_>,
     tenant_id: Uuid,
     id: Uuid,
     parent: Uuid,
 ) -> Result<(), AppError> {
-    let ancestors =
-        repo::facility_ancestors(&state.pool, tenant_id, parent, MAX_FACILITY_DEPTH).await?;
+    let ancestry =
+        repo::facility_ancestors(executor, tenant_id, parent, MAX_FACILITY_DEPTH).await?;
 
-    if ancestors.contains(&id) {
+    if ancestry.ids.contains(&id) {
         return Err(AppError::validation(vec![ValidationDetail::new(
             "parentFacilityId",
             "consistency",
             "CYCLE",
             "That facility is under this one; moving it there would close a loop",
+        )]));
+    }
+
+    if ancestry.truncated {
+        return Err(AppError::validation(vec![ValidationDetail::new(
+            "parentFacilityId",
+            "consistency",
+            "TOO_DEEP",
+            format!(
+                "That facility sits more than {MAX_FACILITY_DEPTH} levels deep, so this move \
+                 cannot be checked for a loop. Move it nearer the root first"
+            ),
         )]));
     }
 

@@ -132,6 +132,30 @@ While the major version is `0`, the public API may change in any release.
   `v0.3.0` demo is shown from.
 ### Fixed
 
+- **A facility hierarchy could be made cyclic two different ways, and the module
+  said it could not (#133, #134).** `parent_facility_id` is a self-reference, so
+  the service walks up from the proposed parent and refuses a move that would
+  close a loop — but the walk ran on the pool and the write followed it, which
+  is check-then-act. Two callers each walked a path the other was about to
+  change, both were told the move was legal, and the pair closed a loop neither
+  could see alone: reproduced in 18 of 20 rounds. Row locks do not close it,
+  because two re-parentings can form a loop while touching four different
+  facilities and each caller's own row and its proposed parent are then disjoint
+  sets. The check and the write it guards are now one transaction, serialised
+  per tenant by an advisory lock; re-parenting a facility is a rare
+  administrative act, so taking it one at a time costs nothing measurable and is
+  correct without an argument about which rows to lock.
+
+  The second route needed no concurrency at all. Nothing limits how deep a
+  hierarchy may be built, and past the walk's depth bound the answer was a
+  *prefix* of the ancestor path — so the root was simply not in it, "is this
+  facility an ancestor?" answered no about one that was, and moving a root under
+  its own descendant returned `200 OK`. The bound existed to survive a cycle
+  that reached the table some other way; it had become a way to create one. The
+  walk now reports that it stopped early, and a move that cannot be verified is
+  refused with `422 TOO_DEEP` naming `parentFacilityId` rather than allowed.
+  Both were found by the [Sprint 6 verification pass](projects/verifications/03.%20Sprint%206%20Surface%20Verification.md).
+
 - **Deleting a party burned the supplier, customer or employee number it held,
   permanently (#103).** `delete_party` soft-deleted only the `mdm_parties` row,
   and the unique indexes on those numbers are partial on `deleted_at IS NULL` —
