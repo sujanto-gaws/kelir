@@ -1656,3 +1656,122 @@ async fn a_party_deleted_mid_assignment_does_not_get_the_role() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// One connection at a time (#118)
+// ---------------------------------------------------------------------------
+
+/// A department for a profile to name, so that resolving the profile has a
+/// query to run. Without one, `resolve_profile_references` returns before it
+/// touches the database and the test below cannot fail.
+async fn given_department(app: &TestApp, code: &str) -> Uuid {
+    let id = Uuid::now_v7();
+
+    sqlx::query(
+        "INSERT INTO departments (id, tenant_id, department_code, name)
+         VALUES ($1, $2, $3, 'Procurement')",
+    )
+    .bind(id)
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .bind(code)
+    .execute(&app.pool)
+    .await
+    .expect("insert a department");
+
+    id
+}
+
+#[tokio::test]
+async fn assigning_a_role_takes_one_connection_at_a_time() {
+    // #118. `assign_role` opened its transaction — one connection, held until
+    // commit — and then called `resolve_profile_references`, which runs on the
+    // pool and takes a second. Ten concurrent profiled assignments against the
+    // production ceiling of ten therefore waited on connections held by each
+    // other, stalled for the acquire timeout and answered 500. A self-deadlock,
+    // not contention: the requests were not waiting on the database.
+    //
+    // Written by holding connections rather than by racing requests, because
+    // racing cannot express it here. Two concurrent requests need four
+    // connections and `TEST_POOL_MAX_CONNECTIONS` is five, which is why the two
+    // races #116 added stayed green through the whole of #118's lifetime.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let department = given_department(&app, "DEPT-ONECONN").await;
+    let employee = create_party(&app, &token, person("PARTY-ONECONN", "Ada", "Byron")).await;
+
+    // Every connection but one. What is left is enough for a request that needs
+    // one at a time and not enough for one that holds a transaction open while
+    // acquiring a second.
+    let mut held = Vec::new();
+    for _ in 1..common::TEST_POOL_MAX_CONNECTIONS {
+        held.push(
+            app.pool
+                .acquire()
+                .await
+                .expect("the harness pool has a connection to hold"),
+        );
+    }
+
+    let assigned = app
+        .put(
+            &role_path(employee, "EMPLOYEE"),
+            Some(&token),
+            json!({
+                "fromDate": "2026-01-01T00:00:00Z",
+                "profile": {
+                    "employee": {
+                        "employeeNumber": "EMP-ONECONN",
+                        "departmentId": department,
+                    }
+                },
+            }),
+        )
+        .await;
+
+    drop(held);
+
+    assert_eq!(
+        assigned.status,
+        StatusCode::CREATED,
+        "an assignment answered {} with one connection free — it took two: {}",
+        assigned.status,
+        assigned.body
+    );
+}
+
+#[tokio::test]
+async fn a_request_aimed_at_no_party_is_a_404_before_its_profile_is_resolved() {
+    // The ordering #118's fix had to keep. Hoisting `resolve_profile_references`
+    // out of the transaction moves it ahead of the locked party lookup, so
+    // without the read that precedes it a request aimed at nothing would be
+    // answered `422 no such department` instead of `404 no such party` — a
+    // silent contract change inside an availability fix.
+    //
+    // It is also the ordering `list_role_view` argues for: refuse on the
+    // resource before reading the request.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let refused = app
+        .put(
+            &role_path(Uuid::now_v7(), "EMPLOYEE"),
+            Some(&token),
+            json!({
+                "fromDate": "2026-01-01T00:00:00Z",
+                "profile": {
+                    "employee": {
+                        "employeeNumber": "EMP-NOWHERE",
+                        "departmentId": Uuid::now_v7(),
+                    }
+                },
+            }),
+        )
+        .await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::NOT_FOUND,
+        "a request aimed at no party was answered about its profile: {}",
+        refused.body
+    );
+}

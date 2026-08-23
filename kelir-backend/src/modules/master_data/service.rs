@@ -968,6 +968,45 @@ pub async fn assign_role(
             )])
         })?;
 
+    // Asked before the profile references are resolved, so that a request aimed
+    // at a party that does not exist is answered with that and not with which
+    // of its profile references was wrong. It is the ordering `list_role_view`
+    // argues for one screen away — refuse on the resource before reading the
+    // request — and the one every version of this function has had; hoisting
+    // the resolve out of the transaction for #118 would otherwise have swapped
+    // it silently.
+    //
+    // A hint, not the authority. The party is found again under `FOR UPDATE`
+    // below and a 404 from there is the one that counts: this read is on the
+    // pool and a party deleted between the two is exactly what #116 made the
+    // lock re-ask.
+    if repo::find_party(&state.pool, tenant_id, party_id)
+        .await?
+        .is_none()
+    {
+        return Err(AppError::not_found("Party"));
+    }
+
+    // Resolved before the transaction opens, and that ordering is the point.
+    //
+    // This runs on `state.pool`, so it takes a connection of its own. Called
+    // between `begin()` and `commit()` it would take a *second* connection
+    // while the transaction still holds the first, and enough concurrent
+    // assignments would then wait on connections held by each other: the pool
+    // ceiling is 10 and the acquire timeout 5 seconds, so ten of them stalled
+    // and answered 500 (#118). It is a self-deadlock, not contention — the
+    // requests are not waiting on the database, they are waiting on each other.
+    //
+    // Nothing here needs the lock. It resolves what the *request* points at, so
+    // it belongs where `create_party` and `update_party` already put it, ahead
+    // of their own `begin()`. What must stay inside is `validate_assign_role`,
+    // which reads `creating`.
+    //
+    // The failure it exists for is unchanged: a manager or a department that
+    // does not exist is a 422 naming the path, rather than a foreign-key
+    // violation surfacing as a 500.
+    let references = resolve_profile_references(state, tenant_id, request.profile.as_ref()).await?;
+
     let mut transaction = state.pool.begin().await?;
 
     // The party is found and held in the same statement, and everything that
@@ -996,11 +1035,6 @@ pub async fn assign_role(
     // profile is required depends on whether this is a create, and reading that
     // outside the lock is what this change exists to stop doing.
     validate_assign_role(&request, role_type, &party.party_code, creating)?;
-
-    // Everything the profile points at is resolved before anything is written,
-    // so a manager or a department that does not exist is a 422 naming the path
-    // rather than a foreign-key violation surfacing as a 500.
-    let references = resolve_profile_references(state, tenant_id, request.profile.as_ref()).await?;
 
     let role_fields = PartyRoleFields {
         starts_at: request.from_date,

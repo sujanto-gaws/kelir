@@ -79,6 +79,21 @@ While the major version is `0`, the public API may change in any release.
   the aggregate one URL away withholds both. The route now answers with the
   assignment it wrote. A caller who wants the profiles asks `GET .../roles`,
   under the permission that governs them.
+- **Ten concurrent role assignments deadlocked the endpoint (#118).** The fix
+  for #105 opened the transaction before calling `resolve_profile_references`,
+  which runs on the pool — so a request held one connection for its
+  transaction and then asked for a second while still holding the first. At the
+  pool ceiling of ten, ten concurrent assignments carrying a profile that names
+  a department or another party waited on connections held by each other,
+  stalled for the five-second acquire timeout and all answered 500. A
+  self-deadlock rather than contention: nothing was waiting on the database.
+  The references are now resolved before the transaction opens, where
+  `create_party` and `update_party` already resolve theirs, so the request
+  takes one connection at a time. The party is looked up ahead of them so that
+  a request aimed at a party that does not exist is still answered with that
+  rather than with which of its profile references was wrong; the locked
+  lookup inside the transaction remains the authority. Coding standard §2.5
+  now carries the rule this broke.
 - **Four tenant and soft-delete tests asserted a query they never exercised
   (#106).** No product behaviour changed: the queries were already scoped, and
   nothing in CI would have noticed them becoming unscoped. Two list tests
