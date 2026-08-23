@@ -17,14 +17,38 @@
 //! `tenant_id`, and every mutation turns
 //! `another_tenants_facility_is_out_of_reach_on_every_route` red.
 //!
-//! **Not reached: `update_facility_fields`.** Its tenant predicate cannot be
-//! isolated, and saying so is better than implying otherwise (#121).
-//! `update_facility` reads the facility first — it needs the *before* values
-//! for the audit record and the current code for the self-parent rule — and
-//! that read is scoped on the same table by the same `(tenant_id, id)`. No
-//! fixture can make one match and the other not, so the predicate in the
-//! `UPDATE` is redundancy rather than a control, and a test claiming to cover
-//! it would be covering the read.
+//! **Not reached, and not reachable: five tenant predicates.** Saying so is
+//! better than implying otherwise (#121), and better than a later reader
+//! filing the gap again (#139).
+//!
+//! `update_facility_fields`, `children_of`, both joins in `list_facilities`,
+//! and both terms of `facility_ancestors` each filter on `tenant_id` after a
+//! preceding tenant-scoped read has already established the row — and each
+//! joins or filters on a **UUID primary key**. No fixture can make the id match
+//! and the tenant not, so these are defence in depth rather than controls, and
+//! a test claiming to cover one would be covering the read before it.
+//! `update_facility` is the clearest case: it reads the facility first, for the
+//! audit record's *before* values and for the self-parent rule, scoped on the
+//! same table by the same `(tenant_id, id)`.
+//!
+//! **The soft-delete predicates are not in that category** and each now has a
+//! test — see the section at the foot of this file. Two of them guard a state
+//! nothing can reach through the API, which is an argument for writing the
+//! state directly rather than for leaving them untested.
+//!
+//! **With one exception, and it changed category while #139 was being closed.**
+//! `find_facility_id_by_code`'s `deleted_at IS NULL` is no longer isolable:
+//! `resolve_parent` is its only caller, and since #137 every caller re-reads the
+//! parent under the hierarchy lock through `facility_is_live` before pointing at
+//! it. Dropping the predicate now produces the same 422 naming the same field,
+//! one guard later. `a_retired_facility_cannot_be_named_as_a_parent` covers the
+//! behaviour and is red when *both* guards are removed; it is not evidence about
+//! that predicate alone, and saying so here is the point of this section.
+//!
+//! That is the shape [record 02](../../projects/verifications/02.%20Role%20View%20and%20Fix%20Verification.md)
+//! named as F5 — a test masked by a later fix rather than by its own shape — met
+//! from the other side: a fix made a predicate redundant, and the mutation that
+//! used to prove the predicate now proves the fix.
 
 mod common;
 
@@ -1135,4 +1159,185 @@ async fn deleting_a_facility_cannot_race_a_child_being_created_under_it() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Soft-delete predicates the scoping tests did not reach (#139)
+// ---------------------------------------------------------------------------
+//
+// Every tenant predicate on this table is either covered by
+// `another_tenants_facility_is_out_of_reach_on_every_route` or is redundancy no
+// fixture can isolate — the list of the second kind is in the module
+// documentation at the top of this file. The soft-delete predicates are
+// different: each of the four below is a control, each was still green under
+// mutation, and two of them guard a state only #137's race could produce.
+
+/// #139. A retired facility leaves the total, not just the page.
+///
+/// `count_facilities` and `list_facilities` are different statements, and
+/// `the_list_pages_and_reports_a_total_that_counts_the_same_rows` compares them
+/// against each other without a deleted row in play — so removing
+/// `deleted_at IS NULL` from the count alone changed nothing it asserts.
+#[tokio::test]
+async fn a_retired_facility_leaves_the_total_as_well_as_the_page() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for code in ["TOT-A", "TOT-B", "TOT-C"] {
+        create_ok(&app, &token, building(code, code)).await;
+    }
+    let retired = create_ok(&app, &token, building("TOT-D", "TOT-D")).await;
+    assert_eq!(
+        app.delete(&format!("{FACILITIES}/{retired}"), Some(&token))
+            .await
+            .status,
+        StatusCode::NO_CONTENT
+    );
+
+    let listed = app.get(FACILITIES, Some(&token)).await;
+    let rows = codes(&listed.body);
+
+    assert_eq!(rows.len(), 3, "{}", listed.body);
+    assert_eq!(
+        listed.body["meta"]["total"], 3,
+        "the total counts a retired facility the page does not show: {}",
+        listed.body
+    );
+}
+
+/// #139. A retired facility cannot be named as a parent.
+///
+/// A delete releases the code (`a_facility_code_is_unique_among_live_rows_...`),
+/// so the code of a retired facility is a string a caller may well still have.
+/// `find_facility_id_by_code` filters `deleted_at IS NULL` and nothing asked it
+/// to: without the predicate the create succeeds and puts a live facility under
+/// a retired one, which is #137's outcome by a different route.
+#[tokio::test]
+async fn a_retired_facility_cannot_be_named_as_a_parent() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let parent = create_ok(&app, &token, building("PAR-GONE", "Parent")).await;
+    assert_eq!(
+        app.delete(&format!("{FACILITIES}/{parent}"), Some(&token))
+            .await
+            .status,
+        StatusCode::NO_CONTENT
+    );
+
+    let mut child = building("CHILD-1", "Child");
+    child["parentFacilityId"] = json!("PAR-GONE");
+    let (status, body) = create(&app, &token, child).await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(
+        body["error"]["details"][0]["path"], "parentFacilityId",
+        "{body}"
+    );
+}
+
+/// #139. A read never shows a retired facility as somebody's parent.
+///
+/// The `parent.deleted_at IS NULL` predicate on both reads guards a row whose
+/// `parent_facility_id` names a retired facility. Nothing can create that state
+/// through the API — the delete refuses while children exist, and #137 closed
+/// the race that got around it — so the state is written directly here, the way
+/// `the_ancestor_walk_stops_at_its_bound_against_a_cycle_already_in_storage`
+/// writes the cycle it is about. A predicate that only defends against a
+/// defect elsewhere is still a predicate, and this is the shape of test that
+/// can reach one.
+#[tokio::test]
+async fn a_retired_parent_is_not_shown_as_a_parent() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let parent = create_ok(&app, &token, building("HID-P", "Parent")).await;
+    let mut child_body = building("HID-C", "Child");
+    child_body["parentFacilityId"] = json!("HID-P");
+    let child = create_ok(&app, &token, child_body).await;
+
+    // Straight into the table: the API refuses this, which is the point.
+    sqlx::query("UPDATE mdm_facilities SET deleted_at = now() WHERE id = $1")
+        .bind(parent)
+        .execute(&app.pool)
+        .await
+        .expect("retire the parent behind the API's back");
+
+    let fetched = app
+        .get(&format!("{FACILITIES}/{child}"), Some(&token))
+        .await;
+    assert_eq!(fetched.status, StatusCode::OK, "{}", fetched.body);
+    assert!(
+        fetched.data()["parentFacilityId"].is_null(),
+        "a retired facility is still shown as a parent: {}",
+        fetched.body
+    );
+
+    let listed = app.get(FACILITIES, Some(&token)).await;
+    let row = listed.body["data"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["facilityId"] == "HID-C"))
+        .unwrap_or_else(|| panic!("the child is not in the list: {}", listed.body));
+    assert!(
+        row["parentFacilityId"].is_null(),
+        "the list shows a retired facility as a parent: {}",
+        listed.body
+    );
+}
+
+/// #139. A read never shows a retired party as somebody's owner.
+///
+/// The owner's soft-delete predicate, and unlike the parent's this state is
+/// reachable through the API alone: nothing stops a party being deleted while a
+/// facility names it as owner.
+#[tokio::test]
+async fn a_retired_owner_is_not_shown_as_an_owner() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let created = app
+        .post(
+            PARTIES,
+            Some(&token),
+            json!({
+                "partyId": "OWN-GONE",
+                "partyTypeId": "PARTY_GROUP",
+                "partyGroup": { "groupName": "Owner" },
+            }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let owner = created.data()["id"].as_str().expect("id").to_owned();
+
+    let mut body = building("OWNED-1", "Owned");
+    body["ownerPartyId"] = json!("OWN-GONE");
+    let facility = create_ok(&app, &token, body).await;
+
+    assert_eq!(
+        app.delete(&format!("{PARTIES}/{owner}"), Some(&token))
+            .await
+            .status,
+        StatusCode::NO_CONTENT
+    );
+
+    let fetched = app
+        .get(&format!("{FACILITIES}/{facility}"), Some(&token))
+        .await;
+    assert_eq!(fetched.status, StatusCode::OK, "{}", fetched.body);
+    assert!(
+        fetched.data()["ownerPartyId"].is_null(),
+        "a retired party is still shown as an owner: {}",
+        fetched.body
+    );
+
+    let listed = app.get(FACILITIES, Some(&token)).await;
+    let row = listed.body["data"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["facilityId"] == "OWNED-1"))
+        .unwrap_or_else(|| panic!("the facility is not in the list: {}", listed.body));
+    assert!(
+        row["ownerPartyId"].is_null(),
+        "the list shows a retired party as an owner: {}",
+        listed.body
+    );
 }
