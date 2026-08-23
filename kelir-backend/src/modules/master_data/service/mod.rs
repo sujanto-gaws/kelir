@@ -12,12 +12,14 @@
 // #112 split it — the split is not an interface change (coding standard §1.5).
 pub(super) use super::{domain, repository};
 
+pub mod audit_record;
 pub mod facility;
 pub mod party;
 pub mod record_status;
 pub mod role;
 pub mod role_view;
 
+pub use audit_record::*;
 pub use facility::*;
 pub use party::*;
 pub use record_status::*;

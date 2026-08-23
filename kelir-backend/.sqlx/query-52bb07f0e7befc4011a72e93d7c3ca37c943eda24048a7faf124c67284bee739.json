@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT count(*)\n        FROM audit_events\n        WHERE tenant_id = $1\n          AND object_id = $2\n          AND ($3 OR action NOT IN ('ROLE_ASSIGNED', 'ROLE_UPDATED', 'ROLE_REMOVED'))\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "52bb07f0e7befc4011a72e93d7c3ca37c943eda24048a7faf124c67284bee739"
+}
