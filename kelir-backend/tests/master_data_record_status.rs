@@ -513,11 +513,30 @@ async fn two_concurrent_transitions_cannot_both_move_the_record_from_the_same_st
             "round {round}: the column ended at {stored}"
         );
 
-        // A refusal, if there was one, says the record moved under it rather
-        // than that the transition was illegal.
+        // A refusal, if there was one, must be about *this* record rather than
+        // about the caller or the request shape.
+        //
+        // Two shapes are legitimate, and which appears depends on where the two
+        // calls interleaved — which is what makes it worth spelling out:
+        //
+        //   409 — the loser read ACTIVE, was told the move was legal, and its
+        //         conditional write matched nothing because the winner had
+        //         already moved the record.
+        //   422 — the loser read the state the winner had *already written*,
+        //         and the move it was asked for is not legal from there:
+        //         INACTIVE cannot become SUSPENDED, so a deactivation that
+        //         lands first turns the suspension into an illegal transition
+        //         rather than a lost race.
+        //
+        // Both are the record refusing to move twice from one state, which is
+        // the invariant. CI found the second on its first round; this test had
+        // asserted only the first and passed locally for twenty rounds, because
+        // the interleaving never went that way on a machine this fast.
         for response in [&suspended, &deactivated] {
             assert!(
-                response.status == StatusCode::OK || response.status == StatusCode::CONFLICT,
+                response.status == StatusCode::OK
+                    || response.status == StatusCode::CONFLICT
+                    || response.status == StatusCode::UNPROCESSABLE_ENTITY,
                 "round {round}: a transition answered {} — {}",
                 response.status,
                 response.body
