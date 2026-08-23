@@ -11,7 +11,7 @@ use serde_json::Value;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use super::{non_empty, PartyProfiles, PartyRole};
+use super::{non_empty, PartyProfiles, PartyRole, RecordStatus};
 
 // ---------------------------------------------------------------------------
 // Vocabularies
@@ -245,6 +245,12 @@ pub struct PartyAggregate {
     pub party_id: String,
     pub party_type_id: PartyType,
     pub status_id: PartyStatusCode,
+    /// Where the *record* has got to in its governance lifecycle, which is not
+    /// `statusId` (FR-MDM-007). Read-only here: it is moved by
+    /// `POST /parties/{id}/transition` and by nothing else, because a
+    /// transition has a from-state, a legal set, its own permission and its own
+    /// audit action (#99).
+    pub record_status_id: RecordStatus,
     pub external_id: Option<String>,
     pub description: Option<String>,
     /// Present exactly when `partyTypeId` is `PERSON`.

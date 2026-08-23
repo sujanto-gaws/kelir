@@ -14,11 +14,13 @@ pub(super) use super::{domain, repository};
 
 pub mod facility;
 pub mod party;
+pub mod record_status;
 pub mod role;
 pub mod role_view;
 
 pub use facility::*;
 pub use party::*;
+pub use record_status::*;
 pub use role::*;
 pub use role_view::*;
 

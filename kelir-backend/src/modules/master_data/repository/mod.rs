@@ -15,6 +15,7 @@
 pub mod facility;
 pub mod party;
 pub mod party_children;
+pub mod record_status;
 pub mod role;
 pub mod role_view;
 
@@ -24,5 +25,6 @@ pub mod role_view;
 pub use facility::*;
 pub use party::*;
 pub use party_children::*;
+pub use record_status::*;
 pub use role::*;
 pub use role_view::*;

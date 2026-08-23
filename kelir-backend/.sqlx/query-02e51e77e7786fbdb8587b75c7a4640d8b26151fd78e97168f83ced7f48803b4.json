@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, party_code, party_type, status, external_id, description,\n               attributes_json, created_at, updated_at\n        FROM mdm_parties\n        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL\n        FOR UPDATE\n        ",
+  "query": "\n        SELECT id, party_code, party_type, status, record_status, external_id,\n               description, attributes_json, created_at, updated_at\n        FROM mdm_parties\n        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL\n        ",
   "describe": {
     "columns": [
       {
@@ -25,26 +25,31 @@
       },
       {
         "ordinal": 4,
-        "name": "external_id",
+        "name": "record_status",
         "type_info": "Varchar"
       },
       {
         "ordinal": 5,
+        "name": "external_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
         "name": "description",
         "type_info": "Text"
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "attributes_json",
         "type_info": "Jsonb"
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
@@ -60,6 +65,7 @@
       false,
       false,
       false,
+      false,
       true,
       true,
       false,
@@ -67,5 +73,5 @@
       false
     ]
   },
-  "hash": "f548ae85fd9d72e7edc6c1fe606f33a29977419e77d91eb36ddf7570d3f7a08c"
+  "hash": "02e51e77e7786fbdb8587b75c7a4640d8b26151fd78e97168f83ced7f48803b4"
 }

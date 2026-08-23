@@ -571,6 +571,7 @@ async fn load_aggregate(
         party_id: party.party_code,
         party_type_id: party.party_type,
         status_id: party.status,
+        record_status_id: party.record_status,
         external_id: party.external_id,
         description: party.description,
         person,

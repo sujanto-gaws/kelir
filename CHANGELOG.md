@@ -69,6 +69,27 @@ While the major version is `0`, the public API may change in any release.
   `:update` and `:delete`; no table was added, because `0008` already created
   `mdm_facilities`.
 
+- **Master-data records move through a governance lifecycle (FR-MDM-007).**
+  `record_status` had been a column since `0008` and nothing moved it: every
+  party, facility, product and service sat at `DRAFT` and always would.
+  `POST /api/v1/master-data/parties/{id}/transition` and the same route under
+  `/facilities/{id}` now move it, against a legal set stated in one place
+  rather than implied by match arms per entity — `DRAFT → ACTIVE → SUSPENDED
+  → ACTIVE → INACTIVE → ARCHIVED`, with `ARCHIVED` terminal because an archive
+  a record can leave is a filter rather than a decision. **Nothing reaches
+  `PENDING_APPROVAL`**: it is the workflow's state (FR-MDM-010, Phase 5+) and
+  a record put there today would await an approver that does not exist, which
+  is the overstatement this change set out to remove rather than move one value
+  over. A transition is not a field edit — it has its own permission
+  (`master-data:record-status:transition`, seeded by
+  `0011_record_status_permissions.sql`), its own audit action
+  (`RECORD_STATUS_CHANGE`, distinct from the `STATUS_CHANGE` that
+  `mdm_parties.status` uses), and neither update payload accepts
+  `recordStatusId`. The write is conditional on the row still holding the
+  status the move was checked against, so two concurrent transitions cannot
+  both move a record away from the same state. `recordStatusId` is now readable
+  on the party aggregate and on a facility; it was off the wire only because
+  nothing could change it.
 ### Fixed
 
 - **Deleting a party burned the supplier, customer or employee number it held,
@@ -162,9 +183,10 @@ While the major version is `0`, the public API may change in any release.
   child-collection queries. Every file in the module is now under 900 lines.
   Each layer re-exports flat, so `service::create_party`, `repo::find_party`
   and `domain::PartyAggregate` all still name what they named before.
-- The planned migrations shift down again: `0010_facility_permissions.sql` took
-  the next free number, so RAD is now `0011_rad.sql` and the plugin migration
-  `0019_plugin.sql`. Nothing merged was renumbered; the Database Schema mapping
+- The planned migrations shift down twice more:
+  `0010_facility_permissions.sql` and `0011_record_status_permissions.sql` each
+  took the next free number, so RAD is now `0012_rad.sql` and the plugin
+  migration `0020_plugin.sql`. Nothing merged was renumbered; the Database Schema mapping
   table is the sequence and carries the correction, along with the two inline
   forward references that named the old numbers.
 - The planned migrations shift down by one: `0009_party_role_permissions.sql`
