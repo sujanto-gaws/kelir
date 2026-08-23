@@ -135,6 +135,14 @@ While the major version is `0`, the public API may change in any release.
   collection**, as part of the fix above. Nothing consumed the old shape — the
   party surface has not been released — so this is a narrowing of an unreleased
   contract rather than a break.
+- **The three master-data files past ~1000 lines are split (#112).** No
+  behaviour change and no test edited — that is the acceptance criterion, and
+  a split that needed a test changed would not be one. `service.rs` becomes a
+  directory beside `domain/` and `repository/`, which were already directories;
+  `domain/party.rs` sheds its validation rules and `repository/party.rs` its
+  child-collection queries. Every file in the module is now under 900 lines.
+  Each layer re-exports flat, so `service::create_party`, `repo::find_party`
+  and `domain::PartyAggregate` all still name what they named before.
 - The planned migrations shift down by one: `0009_party_role_permissions.sql`
   took the next free number, so RAD is now `0010_rad.sql` and the plugin
   migration `0018_plugin.sql`. Nothing merged was renumbered. Four inline

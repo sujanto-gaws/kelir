@@ -13,6 +13,7 @@
 //! cannot hold exactly, so the string is the honest wire shape either way.
 
 pub mod party;
+pub mod party_children;
 pub mod role;
 pub mod role_view;
 
@@ -20,5 +21,6 @@ pub mod role_view;
 // — which file a query lives in is a question about this module's size, not
 // about its interface.
 pub use party::*;
+pub use party_children::*;
 pub use role::*;
 pub use role_view::*;
