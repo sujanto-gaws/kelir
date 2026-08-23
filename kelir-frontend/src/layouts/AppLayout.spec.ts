@@ -63,6 +63,14 @@ describe('AppLayout', () => {
       routes: [
         { path: '/', name: 'dashboard', component: blank },
         { path: '/login', name: 'login', component: blank },
+        // Real as of #101: the entry is a link now rather than a disabled
+        // label, and `RouterLink` cannot resolve a name the router has never
+        // heard of.
+        {
+          path: '/master-data/:view(parties|suppliers|customers|employees)?',
+          name: 'master-data',
+          component: blank,
+        },
         { path: '/admin/users', name: 'admin-users', component: blank },
         { path: '/admin/roles', name: 'admin-roles', component: blank },
       ],

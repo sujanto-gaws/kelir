@@ -111,6 +111,25 @@ While the major version is `0`, the public API may change in any release.
   `0012_master_data_audit_permission.sql` seeds `master-data:audit:read` — a
   master-data row rather than the audit module's own `audit:read`, which is
   that module's to define when it has endpoints.
+- **Master data has a screen (FR-MDM-008).** `/master-data/parties` and the
+  three role views, as **one component over four endpoints** — the backend
+  shaped the role-view row so a client rendering all three needs one component
+  and not three, and this is that decision honoured. **The server paginates and
+  the server filters**: search, the three filters and the page all go on the
+  wire, and nothing fetches a population and narrows it locally, which is the
+  failure FR-MDM-008 and NFR-PERF-002 exist to prevent. **The URL is the
+  state** — page, search and filters live in the query string, so a filtered
+  list can be linked to and survives a reload. Loading, failed and empty are
+  three states and not two: a screen that showed "nothing matches" over a
+  failed request would be lying about the data. The pager trusts the page size
+  the server says it used rather than the one it asked for, because the backend
+  clamps rather than refuses. A caller holding `master-data:party:read` without
+  `master-data:party-role:read` gets the Parties tab and no others — the
+  permitted subset, rather than three tabs that can only answer 403. The
+  `/parties` list offers no search or filter controls at all, because its
+  endpoint accepts none and a control that silently did nothing would be worse
+  than its absence. First frontend feature since Phase 2, and the screen the
+  `v0.3.0` demo is shown from.
 ### Fixed
 
 - **Deleting a party burned the supplier, customer or employee number it held,
