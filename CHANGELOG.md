@@ -132,6 +132,28 @@ While the major version is `0`, the public API may change in any release.
   `v0.3.0` demo is shown from.
 ### Fixed
 
+- **No Sprint 6 route reached the OpenAPI document (#138).** Nine handlers —
+  the five facility routes, both lifecycle transitions and both change-history
+  routes — carried `#[utoipa::path]` annotations that nothing collected, because
+  `utoipa` publishes only what `paths(...)` lists and none of them was listed.
+  They compiled, routed and served traffic while existing for no client
+  generated from the spec, and nothing warned: an unreferenced annotation is not
+  an error. The published document listed 22 paths and now lists 28, with
+  `Facility`, `CreateFacilityRequest`, `TransitionRequest`, `AuditRecord` and
+  the rest of their schemas alongside. Definition of Done §2 requires "API
+  changes reflected in OpenAPI", so #98, #99 and #100 had not met it.
+
+  **What let it stand for a sprint was the test.** `the_openapi_document_lists_every_party_route`
+  asserted this property by naming eleven party routes, and it passed throughout
+  — a checklist of routes has the same failure mode as the list it is checking,
+  and both have to be remembered. It is replaced by a test that names none:
+  `every_annotated_route_reaches_the_document` scans the source for
+  `#[utoipa::path]` annotations and for `.route(` literals, and asserts every
+  annotation reaches the document and every served route carries an annotation.
+  Both directions were seen to fail — the first against the nine unregistered
+  handlers, the second against a route literal with no annotation to match.
+  What remains of the party test is what only it can assert: the query
+  parameters the role views publish, and the aggregate's response shape.
 - **A facility hierarchy could be made cyclic two different ways, and the module
   said it could not (#133, #134).** `parent_facility_id` is a self-reference, so
   the service walks up from the proposed parent and refuses a move that would

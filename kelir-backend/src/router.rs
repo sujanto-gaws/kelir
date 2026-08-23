@@ -12,7 +12,16 @@ use crate::state::AppState;
 /// The generated OpenAPI document (FR-API-004).
 ///
 /// Never hand-edited (coding standard §2.6): endpoints are added by annotating
-/// their handler with `#[utoipa::path]` and listing it here.
+/// their handler with `#[utoipa::path]` **and** listing it here. Both halves
+/// are load-bearing and only one of them is visible from the handler: an
+/// annotation whose handler is missing from `paths(...)` compiles, routes,
+/// serves traffic, and reaches no generated client. Nine of them did, for a
+/// whole sprint (#138).
+///
+/// `every_annotated_route_reaches_the_document` is what now holds the two
+/// halves together. It reads the source rather than a list of routes, because
+/// the test it replaced was a list of routes and aged out of usefulness while
+/// still passing.
 #[derive(OpenApi)]
 #[openapi(
     paths(
@@ -48,6 +57,15 @@ use crate::state::AppState;
         master_data::handlers::list_suppliers,
         master_data::handlers::list_customers,
         master_data::handlers::list_employees,
+        master_data::handlers::list_facilities,
+        master_data::handlers::get_facility,
+        master_data::handlers::create_facility,
+        master_data::handlers::update_facility,
+        master_data::handlers::delete_facility,
+        master_data::handlers::transition_party,
+        master_data::handlers::transition_facility,
+        master_data::handlers::party_audit,
+        master_data::handlers::facility_audit,
     ),
     components(schemas(
         health::HealthBody,
@@ -110,6 +128,15 @@ use crate::state::AppState;
         master_data::domain::EmployeeProfileInput,
         master_data::domain::ContactProfileInput,
         master_data::domain::RoleViewRow,
+        master_data::domain::Facility,
+        master_data::domain::FacilitySummary,
+        master_data::domain::FacilityType,
+        master_data::domain::CreateFacilityRequest,
+        master_data::domain::UpdateFacilityRequest,
+        master_data::domain::RecordStatus,
+        master_data::domain::TransitionRequest,
+        master_data::domain::TransitionResult,
+        master_data::domain::AuditRecord,
         ErrorEnvelope,
         ErrorBody,
         ValidationDetail,
@@ -119,7 +146,10 @@ use crate::state::AppState;
         (name = "operations", description = "Health, readiness and build information"),
         (name = "auth", description = "Sign in, sign out, session refresh"),
         (name = "identity", description = "Users, roles and permissions"),
-        (name = "master-data", description = "Parties and their attributes")
+        (
+            name = "master-data",
+            description = "Parties, facilities, their governance lifecycle and their change history"
+        )
     ),
     info(
         title = "Kelir API",
@@ -287,38 +317,169 @@ mod tests {
         );
     }
 
+    /// Every route the source annotates reaches the published document, and
+    /// every route the source serves is annotated (#138).
+    ///
+    /// **This test names no routes, because the test it replaces did.** Eleven
+    /// party paths were listed here and asserted for a whole sprint while nine
+    /// routes it had never heard of — every facility route, both lifecycle
+    /// transitions and both change-history routes — reached no generated client
+    /// at all. A `#[utoipa::path]` annotation is inert unless the handler is
+    /// also listed in `paths(...)` above, nothing warns when it is not, and a
+    /// checklist of routes ages exactly as fast as the list it is checking.
+    ///
+    /// So it reads the source instead. Both directions matter and they catch
+    /// different mistakes: annotate-and-forget-to-register is what happened,
+    /// and route-without-annotating is the way the same hole opens from the
+    /// other side.
+    ///
+    /// Two literals are skipped, and both are named here rather than filtered
+    /// by a pattern that might quietly grow: `/api/docs/openapi.json` serves the
+    /// document itself and is not part of the API it describes, and `"/"`
+    /// appears only in `extract.rs`'s own test scaffolding.
     #[tokio::test]
-    async fn the_openapi_document_lists_every_party_route() {
-        // The Definition of Done says "API changes reflected in OpenAPI". The
-        // party surface is the first module added since that document started
-        // being checked, and a handler that loses its `#[utoipa::path]`
-        // annotation still routes — it just stops existing for every client
-        // generated from the spec.
+    async fn every_annotated_route_reaches_the_document() {
+        use std::collections::BTreeSet;
+
         let (_, body) = get("/api/docs/openapi.json").await;
+        let documented: BTreeSet<String> = body["paths"]
+            .as_object()
+            .map(|paths| paths.keys().cloned().collect())
+            .unwrap_or_default();
 
-        let expected = [
-            ("/api/v1/master-data/parties", "get"),
-            ("/api/v1/master-data/parties", "post"),
-            ("/api/v1/master-data/parties/{id}", "get"),
-            ("/api/v1/master-data/parties/{id}", "put"),
-            ("/api/v1/master-data/parties/{id}", "delete"),
-            ("/api/v1/master-data/parties/{id}/roles", "get"),
-            ("/api/v1/master-data/parties/{id}/roles/{roleTypeId}", "put"),
-            (
-                "/api/v1/master-data/parties/{id}/roles/{roleTypeId}",
-                "delete",
-            ),
-            ("/api/v1/master-data/suppliers", "get"),
-            ("/api/v1/master-data/customers", "get"),
-            ("/api/v1/master-data/employees", "get"),
-        ];
+        let sources = rust_sources("src".as_ref());
+        assert!(
+            sources.len() > 10,
+            "the source scan found {} files, so it is not reading the crate",
+            sources.len()
+        );
 
-        for (path, method) in expected {
-            assert!(
-                body["paths"][path][method].is_object(),
-                "{method} {path} is missing from the published document"
-            );
+        let mut annotated = BTreeSet::new();
+        let mut served = BTreeSet::new();
+
+        for text in &sources {
+            for capture in between(text, "#[utoipa::path", "]") {
+                if let Some(path) = quoted_after(&capture, "path = ") {
+                    annotated.insert(path);
+                }
+            }
+
+            for capture in between(text, ".route(", ")") {
+                if let Some(path) = first_quoted(&capture) {
+                    served.insert(path);
+                }
+            }
         }
+
+        served.remove("/api/docs/openapi.json");
+        served.remove("/");
+
+        assert!(
+            !annotated.is_empty() && !served.is_empty(),
+            "the scan found no routes at all — annotated: {annotated:?}, served: {served:?}"
+        );
+
+        let undocumented: Vec<&String> = annotated
+            .iter()
+            .filter(|path| !documented.contains(*path))
+            .collect();
+        assert!(
+            undocumented.is_empty(),
+            "annotated but absent from the published document — the handler is              probably missing from `paths(...)`: {undocumented:?}"
+        );
+
+        // A served route is mounted under a prefix its annotation spells out in
+        // full, so the annotation ends with the literal the router registers.
+        let unannotated: Vec<&String> = served
+            .iter()
+            .filter(|literal| {
+                !annotated
+                    .iter()
+                    .any(|path| path.ends_with(literal.as_str()))
+            })
+            .collect();
+        assert!(
+            unannotated.is_empty(),
+            "served but carrying no `#[utoipa::path]` annotation: {unannotated:?}"
+        );
+    }
+
+    /// Every `.rs` file under a directory, read.
+    fn rust_sources(dir: &std::path::Path) -> Vec<String> {
+        let mut out = Vec::new();
+        let entries = std::fs::read_dir(dir)
+            .unwrap_or_else(|error| panic!("reading {}: {error}", dir.display()));
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                out.extend(rust_sources(&path));
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                out.push(std::fs::read_to_string(&path).unwrap_or_default());
+            }
+        }
+
+        out
+    }
+
+    /// Each slice of `text` that starts after `open` and ends before the next
+    /// `close`.
+    ///
+    /// A needle immediately preceded by a double quote is skipped: this file
+    /// contains the scanner, so it contains the literals the scanner looks for,
+    /// and without this the test reports its own source as an undocumented
+    /// route. That is a real hazard of scanning source rather than a nuisance —
+    /// it is the first thing this test did.
+    fn between(text: &str, open: &str, close: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let bytes = text.as_bytes();
+        let mut offset = 0;
+
+        while let Some(found) = text[offset..].find(open) {
+            let start = offset + found;
+            let after = start + open.len();
+            let end = text[after..]
+                .find(close)
+                .map_or(text.len(), |index| after + index);
+
+            if !(start > 0 && bytes[start - 1] == b'"') {
+                out.push(text[after..end].to_owned());
+            }
+
+            offset = end.max(after);
+        }
+
+        out
+    }
+
+    /// The first double-quoted string in `text`.
+    fn first_quoted(text: &str) -> Option<String> {
+        let start = text.find('"')? + 1;
+        let end = text[start..].find('"')? + start;
+
+        Some(text[start..end].to_owned())
+    }
+
+    /// The double-quoted string that follows `key`.
+    fn quoted_after(text: &str, key: &str) -> Option<String> {
+        let at = text.find(key)? + key.len();
+
+        first_quoted(&text[at..])
+    }
+
+    #[tokio::test]
+    async fn the_master_data_document_carries_the_shapes_a_client_needs() {
+        // Which master-data *routes* are published is
+        // `every_annotated_route_reaches_the_document`'s job, and it does not
+        // need updating when one is added. What is left here is what only this
+        // surface can assert: that the published operations carry the query
+        // parameters and the response shape the API actually serves.
+        //
+        // This test used to name eleven party routes. That enumeration passed
+        // for the whole of Sprint 6 while nine routes it did not know about
+        // reached no client at all (#138) — a list of routes has the same
+        // failure mode as the list it is checking.
+        let (_, body) = get("/api/docs/openapi.json").await;
 
         // The role views are the API half of FR-MDM-008, so the parameters that
         // make them searchable have to be in the document a client generates
