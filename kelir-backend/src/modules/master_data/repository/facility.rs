@@ -246,7 +246,41 @@ pub async fn facility_ancestors(
     })
 }
 
-/// Serialises every re-parenting in one tenant for the life of the transaction.
+/// Whether a facility is still live, for re-checking a reference under the lock.
+///
+/// [`find_facility_id_by_code`] answers the same question from a code and is
+/// what resolves a request's `parentFacilityId`; this one takes the id it
+/// returned and asks again inside the transaction that is about to depend on
+/// the answer (#137). The pattern is
+/// [`crate::modules::auth::bootstrap`]'s — ask cheaply outside the lock, ask
+/// again under it, and let the second answer be the one that counts.
+pub async fn facility_is_live(
+    executor: impl PgExecutor<'_>,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar!(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM mdm_facilities
+            WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+        ) AS "exists!"
+        "#,
+        tenant_id,
+        id
+    )
+    .fetch_one(executor)
+    .await
+}
+
+/// Serialises every change to one tenant's hierarchy for the life of the
+/// transaction.
+///
+/// Three writers take it, because all three decide against a set of rows rather
+/// than against the row they write: a re-parenting checks an ancestor path
+/// (#133), a delete counts children (#137), and a create or re-parent naming a
+/// parent re-reads that parent under the lock before pointing at it (#137).
+/// Renaming a facility takes nothing — it cannot make the hierarchy wrong.
 ///
 /// **Row locks are not enough, and the reason is worth writing down** (#133).
 /// A re-parenting is a check against a path followed by a write to one row, and

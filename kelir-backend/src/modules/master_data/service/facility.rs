@@ -84,8 +84,23 @@ pub async fn create_facility(
         .clone()
         .unwrap_or_else(|| json!({}));
 
+    // The parent is re-read under the lock before the child is written (#137).
+    // Resolving it above answered "is there such a facility" a moment ago, and
+    // a delete landing in between would leave this row under a facility that no
+    // longer exists — the state `delete_facility`'s refusal is there to prevent,
+    // arrived at without anybody deciding it.
+    let mut transaction = state.pool.begin().await?;
+
+    if let Some(parent_id) = parent {
+        repo::lock_facility_hierarchy(&mut transaction, tenant_id).await?;
+
+        if !repo::facility_is_live(&mut *transaction, tenant_id, parent_id).await? {
+            return Err(parent_no_longer_there());
+        }
+    }
+
     repo::insert_facility(
-        &state.pool,
+        &mut *transaction,
         &NewFacility {
             id,
             tenant_id,
@@ -101,6 +116,8 @@ pub async fn create_facility(
     )
     .await
     .map_err(duplicate_facility_to_conflict)?;
+
+    transaction.commit().await?;
 
     audit::record_or_warn(
         &state.pool,
@@ -172,6 +189,14 @@ pub async fn update_facility(
 
     if let Some(Some(parent_id)) = parent {
         repo::lock_facility_hierarchy(&mut transaction, tenant_id).await?;
+
+        // Re-read under the lock, for the same reason a create does (#137): the
+        // resolve above ran on the pool, and a delete since then would put this
+        // facility under one that is gone.
+        if !repo::facility_is_live(&mut *transaction, tenant_id, parent_id).await? {
+            return Err(parent_no_longer_there());
+        }
+
         refuse_cycle(&mut *transaction, tenant_id, id, parent_id).await?;
     }
 
@@ -234,6 +259,20 @@ pub async fn update_facility(
 /// have deleted a hundred. Refusing names the count, so the caller can decide
 /// whether to re-parent the children or delete them too — which is a decision,
 /// not a default.
+///
+/// **The count and the delete are one transaction, under the same lock a
+/// re-parenting takes** (#137). Counted on the pool and deleted afterwards, the
+/// refusal only held against children that already existed: a create naming
+/// this facility as its parent, resolving that parent a moment before the
+/// delete landed, produced a live facility under a deleted one in 19 of 20
+/// rounds. Nobody chose that — the delete reported success, the create reported
+/// success, and the decision this refusal exists to force was never put to
+/// anyone.
+///
+/// It is also the failure that hides. `find_facility` and `list_facilities`
+/// join the parent on `deleted_at IS NULL`, so such a row reads back as a root;
+/// the dangling reference stays in the column, visible to an export or a repair
+/// script and to nothing a user can see.
 pub async fn delete_facility(
     state: &AppState,
     caller: &Authenticated,
@@ -244,7 +283,11 @@ pub async fn delete_facility(
     let tenant_id = caller.tenant_id();
     let actor = Some(caller.user_id());
 
-    let children = repo::children_of(&state.pool, tenant_id, id).await?;
+    let mut transaction = state.pool.begin().await?;
+
+    repo::lock_facility_hierarchy(&mut transaction, tenant_id).await?;
+
+    let children = repo::children_of(&mut *transaction, tenant_id, id).await?;
 
     if children > 0 {
         return Err(AppError::conflict(format!(
@@ -252,11 +295,13 @@ pub async fn delete_facility(
         )));
     }
 
-    let removed = repo::soft_delete_facility(&state.pool, tenant_id, id, actor).await?;
+    let removed = repo::soft_delete_facility(&mut *transaction, tenant_id, id, actor).await?;
 
     if removed == 0 {
         return Err(AppError::not_found("Facility"));
     }
+
+    transaction.commit().await?;
 
     audit::record_or_warn(
         &state.pool,
@@ -332,6 +377,22 @@ async fn refuse_cycle(
     }
 
     Ok(())
+}
+
+/// The parent named by the request went away between resolving it and writing.
+///
+/// The same 422 `resolve_parent` gives, deliberately: from the caller's side
+/// nothing distinguishes a parent that never existed from one deleted while
+/// their request was in flight, and both are answered by naming the field and
+/// letting them send it again. A 409 would suggest a conflict they could
+/// resolve, and there is nothing for them to resolve — the facility is gone.
+fn parent_no_longer_there() -> AppError {
+    AppError::validation(vec![ValidationDetail::new(
+        "parentFacilityId",
+        "exists",
+        "NOT_FOUND",
+        "No facility with that facilityId",
+    )])
 }
 
 /// The surrogate id behind a `parentFacilityId`, or a 422 naming the field.

@@ -1066,3 +1066,73 @@ async fn a_move_the_depth_bound_cannot_verify_is_refused() {
         "the root was re-parented despite the refusal"
     );
 }
+
+/// #137. The no-cascade refusal only held against children that already existed.
+///
+/// `children_of` counted on the pool and `soft_delete_facility` wrote
+/// afterwards, while a create resolved its parent on the pool and inserted
+/// afterwards. A create that resolved the parent a moment before the delete
+/// landed produced a live facility under a deleted one — 19 of 20 rounds — and
+/// nobody decided it: the delete answered 204, the create answered 201, and the
+/// decision the refusal exists to force was never put to anyone.
+///
+/// The assertion is on the column rather than on the route, because
+/// `find_facility` joins the parent on `deleted_at IS NULL` and reports the
+/// dangling reference as no parent at all.
+#[tokio::test]
+async fn deleting_a_facility_cannot_race_a_child_being_created_under_it() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    const ROUNDS: usize = 20;
+
+    for round in 0..ROUNDS {
+        let parent_code = format!("RACE-P-{round:04}");
+        let child_code = format!("RACE-C-{round:04}");
+        let parent = create_ok(&app, &token, building(&parent_code, "parent")).await;
+
+        let parent_path = format!("{FACILITIES}/{parent}");
+        let child_body = json!({
+            "facilityId": child_code,
+            "name": "child",
+            "facilityTypeId": "ROOM",
+            "parentFacilityId": parent_code,
+        });
+        let (deleted, created) = tokio::join!(
+            app.delete(&parent_path, Some(&token)),
+            app.post(FACILITIES, Some(&token), child_body),
+        );
+
+        // Either order is legitimate. What must not happen is both: a live
+        // facility whose parent column names a row that has been retired.
+        if deleted.status == StatusCode::NO_CONTENT && created.status == StatusCode::CREATED {
+            let child = created.data()["id"]
+                .as_str()
+                .and_then(|id| Uuid::parse_str(id).ok())
+                .unwrap_or_else(|| panic!("the created child carries no id: {}", created.body));
+
+            assert_ne!(
+                parent_of(&app, child).await,
+                Some(parent),
+                "round {round}: a live facility was left under a deleted one"
+            );
+        }
+
+        for response in [&deleted.status, &created.status] {
+            assert!(
+                matches!(
+                    *response,
+                    StatusCode::NO_CONTENT
+                        | StatusCode::CREATED
+                        | StatusCode::CONFLICT
+                        | StatusCode::UNPROCESSABLE_ENTITY
+                ),
+                "round {round}: the pair answered {} / {} — {} / {}",
+                deleted.status,
+                created.status,
+                deleted.body,
+                created.body
+            );
+        }
+    }
+}

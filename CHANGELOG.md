@@ -155,6 +155,22 @@ While the major version is `0`, the public API may change in any release.
   walk now reports that it stopped early, and a move that cannot be verified is
   refused with `422 TOO_DEEP` naming `parentFacilityId` rather than allowed.
   Both were found by the [Sprint 6 verification pass](projects/verifications/03.%20Sprint%206%20Surface%20Verification.md).
+- **Deleting a facility could race a child being created under it (#137).** The
+  no-cascade refusal — *this facility still has children, decide what happens to
+  them* — counted children on the pool and deleted afterwards, while a create
+  resolved its parent on the pool and inserted afterwards. A create that
+  resolved the parent a moment before the delete landed produced a live facility
+  under a deleted one in 19 of 20 rounds, and nobody decided it: the delete
+  answered 204, the create answered 201, and the decision the refusal exists to
+  force was never put to anyone. The failure also hid, because both reads join
+  the parent on `deleted_at IS NULL` and report the dangling reference as no
+  parent at all — the row looks like a root while its column still names a
+  retired facility. The count and the delete are now one transaction under the
+  same per-tenant lock a re-parenting takes, and a create or a re-parent re-reads
+  the parent under that lock before pointing at it. A parent retired in the
+  meantime is the same `422` naming `parentFacilityId` that an unknown one gets,
+  because from the caller's side the two are indistinguishable and neither is a
+  conflict they can resolve.
 
 - **Deleting a party burned the supplier, customer or employee number it held,
   permanently (#103).** `delete_party` soft-deleted only the `mdm_parties` row,
