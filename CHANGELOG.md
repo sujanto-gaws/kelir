@@ -94,6 +94,26 @@ While the major version is `0`, the public API may change in any release.
   rather than with which of its profile references was wrong; the locked
   lookup inside the transaction remains the authority. Coding standard §2.5
   now carries the rule this broke.
+- **Four tenant and soft-delete predicates were exercised by no test (#121).**
+  The direct successor to #106, found the same way: of 25 mutations over the
+  party and role-view surface, four came back green. `soft_delete_party`'s
+  tenant predicate is the only cross-tenant guard on `DELETE /parties/{id}` —
+  the route does not go through `find_party` first — and nothing had ever
+  written a cross-tenant write. The role view's own `p.deleted_at IS NULL` was
+  masked by #113: the test that covers it deletes through the API, which since
+  #113 closes the party's roles as well, so the role predicate absorbed the
+  mutation. The other two, `find_party_role` and `soft_delete_party_roles`,
+  were added *by* the fixes for #104 and #103, whose mutation runs were aimed
+  at the defects they were closing rather than at the queries they were
+  introducing. No product behaviour changed for three of them. The fourth did:
+  `find_party_role` looked its row up again by
+  `(tenant_id, party_id, role_type_code)`, which matches one row only because
+  of the tenant predicate — dropping it made the query match two and
+  `fetch_optional` return an unspecified one, so no test could pin it without
+  asserting on undefined behaviour. The assign route now reads its answer back
+  by the assignment's own primary key, which cannot be ambiguous, and
+  `insert_party_role` returns the id it wrote. The read-back also moves inside
+  the transaction, so the route answers with the row as this call left it.
 - **Four tenant and soft-delete tests asserted a query they never exercised
   (#106).** No product behaviour changed: the queries were already scoped, and
   nothing in CI would have noticed them becoming unscoped. Two list tests

@@ -1044,8 +1044,13 @@ pub async fn assign_role(
         attributes_json: request.additional_attributes.as_ref(),
     };
 
-    match existing {
-        Some(id) => repo::update_party_role(&mut *transaction, id, &role_fields, actor).await?,
+    // The row's own id, kept so the read-back below is a primary-key lookup
+    // rather than a second search for the row this just wrote (#121).
+    let assignment_id = match existing {
+        Some(id) => {
+            repo::update_party_role(&mut *transaction, id, &role_fields, actor).await?;
+            id
+        }
         None => {
             repo::insert_party_role(
                 &mut *transaction,
@@ -1057,7 +1062,7 @@ pub async fn assign_role(
             )
             .await?
         }
-    }
+    };
 
     if let Some(profile) = &request.profile {
         write_profile(
@@ -1072,6 +1077,12 @@ pub async fn assign_role(
         .await
         .map_err(duplicate_profile_to_conflict)?;
     }
+
+    // Read back inside the transaction, so what the route answers with is the
+    // row as this call left it rather than as a later one may have.
+    let assignment = repo::find_party_role_by_id(&mut *transaction, assignment_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Party role"))?;
 
     transaction.commit().await?;
 
@@ -1121,10 +1132,6 @@ pub async fn assign_role(
     // step with the first — and it is the smaller contract: a caller who wants
     // the profiles asks `GET .../roles`, under the permission that governs
     // them.
-    let assignment = repo::find_party_role(&state.pool, tenant_id, party_id, role_type)
-        .await?
-        .ok_or_else(|| AppError::not_found("Party role"))?;
-
     Ok((creating, assignment))
 }
 

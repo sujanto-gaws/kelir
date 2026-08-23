@@ -61,39 +61,35 @@ pub async fn list_party_roles(
         .collect())
 }
 
-/// The live assignment of one role type to one party, if there is one.
-///
-/// "Live" is what keeps a party holding a role once rather than twice: the
-/// unique index covers `starts_at` as well, so a second assignment with a
-/// different start date would be accepted by the database. The service asks
-/// here first and updates in place instead.
-/// The one live role a party holds under this role type, as the aggregate
-/// carries it.
+/// One role assignment by its own id, as the aggregate carries it.
 ///
 /// The assignment route answers with this rather than with every role and
 /// profile the party has: a `PUT` addresses one assignment, and returning the
 /// whole collection is what handed a caller holding only
 /// `master-data:party-role:assign` the bank accounts and credit limits that
 /// permission was never meant to reach (#104).
-pub async fn find_party_role(
+///
+/// **By primary key, and that is the point.** It read back by
+/// `(tenant_id, party_id, role_type_code)` until #121, which matches one row
+/// only because the tenant predicate is there — so what the tenant predicate
+/// was protecting could not be pinned by a test: dropping it made the query
+/// match two rows and `fetch_optional` return an unspecified one, and a test
+/// asserting which would have been asserting on undefined behaviour. An id the
+/// caller has just written cannot be ambiguous, so there is nothing left to
+/// scope and nothing left to get wrong. The join is a lookup, not a filter: it
+/// translates `role_type_id` into the code the aggregate speaks in.
+pub async fn find_party_role_by_id(
     executor: impl PgExecutor<'_>,
-    tenant_id: Uuid,
-    party_id: Uuid,
-    role_type_code: &str,
+    id: Uuid,
 ) -> Result<Option<PartyRole>, sqlx::Error> {
     let row = sqlx::query!(
         r#"
         SELECT t.role_type_code, r.starts_at, r.ends_at, r.status, r.comments, r.attributes_json
         FROM mdm_party_roles r
-        JOIN mdm_role_types t ON t.id = r.role_type_id AND t.tenant_id = r.tenant_id
-        WHERE r.tenant_id = $1
-          AND r.party_id = $2
-          AND t.role_type_code = $3
-          AND r.deleted_at IS NULL
+        JOIN mdm_role_types t ON t.id = r.role_type_id
+        WHERE r.id = $1
         "#,
-        tenant_id,
-        party_id,
-        role_type_code
+        id
     )
     .fetch_optional(executor)
     .await?;
@@ -108,6 +104,12 @@ pub async fn find_party_role(
     }))
 }
 
+/// The live assignment of one role type to one party, if there is one.
+///
+/// "Live" is what keeps a party holding a role once rather than twice: the
+/// unique index covers `starts_at` as well, so a second assignment with a
+/// different start date would be accepted by the database. The service asks
+/// here first and updates in place instead.
 pub async fn find_live_party_role(
     executor: impl PgExecutor<'_>,
     tenant_id: Uuid,
@@ -127,6 +129,11 @@ pub async fn find_live_party_role(
     .await
 }
 
+/// Writes a new assignment and hands back its id.
+///
+/// The id rather than nothing, so the service can read the row back by primary
+/// key instead of looking again for the one it just wrote — see
+/// [`find_party_role_by_id`].
 pub async fn insert_party_role(
     executor: impl PgExecutor<'_>,
     tenant_id: Uuid,
@@ -134,14 +141,15 @@ pub async fn insert_party_role(
     role_type_id: Uuid,
     fields: &PartyRoleFields<'_>,
     created_by: Option<Uuid>,
-) -> Result<(), sqlx::Error> {
-    sqlx::query!(
+) -> Result<Uuid, sqlx::Error> {
+    sqlx::query_scalar!(
         r#"
         INSERT INTO mdm_party_roles (
             id, tenant_id, party_id, role_type_id, starts_at, ends_at,
             status, comments, attributes_json, created_by
         )
         VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, 'ACTIVE'), $8, COALESCE($9, '{}'::jsonb), $10)
+        RETURNING id
         "#,
         Uuid::now_v7(),
         tenant_id,
@@ -154,9 +162,8 @@ pub async fn insert_party_role(
         fields.attributes_json,
         created_by
     )
-    .execute(executor)
+    .fetch_one(executor)
     .await
-    .map(|_| ())
 }
 
 /// Updates a role the party already holds.

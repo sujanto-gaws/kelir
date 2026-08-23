@@ -339,6 +339,56 @@ async fn a_soft_deleted_party_leaves_every_view_it_was_in() {
 }
 
 #[tokio::test]
+async fn a_party_row_closed_without_its_roles_leaves_every_view() {
+    // #121. `a_soft_deleted_party_leaves_every_view_it_was_in` deletes through
+    // the API, and since #113 that closes the party's roles as well — so
+    // `r.deleted_at IS NULL` takes the party out of the view and the party's own
+    // `p.deleted_at IS NULL` never gets the chance. The test passes for a reason
+    // other than the one it names, and a mutation that dropped the party
+    // predicate left it green.
+    //
+    // The party row is closed on its own here, which is the orphan shape #103
+    // described: a live role behind a party that is not.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let party = given_party(&app, &token, "PARTY-ORPHAN", "Orphan Supplier").await;
+    assign(&app, &token, party, "SUPPLIER", supplier("SUP-ORPHAN")).await;
+
+    assert_eq!(
+        codes(&app.get(SUPPLIERS, Some(&token)).await),
+        vec!["PARTY-ORPHAN"],
+        "the fixture never reached the view"
+    );
+
+    sqlx::query("UPDATE mdm_parties SET deleted_at = now() WHERE id = $1")
+        .bind(party)
+        .execute(&app.pool)
+        .await
+        .expect("close the party row");
+
+    let live_roles: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM mdm_party_roles WHERE party_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(party)
+    .fetch_one(&app.pool)
+    .await
+    .expect("query runs");
+    assert_eq!(
+        live_roles, 1,
+        "the fixture closed the role too, which is the masking this test exists to avoid"
+    );
+
+    let listed = app.get(SUPPLIERS, Some(&token)).await;
+    assert!(
+        codes(&listed).is_empty(),
+        "a party whose row is closed is still listed as a supplier: {}",
+        listed.body
+    );
+    assert_eq!(listed.body["meta"]["total"], 0, "{}", listed.body);
+}
+
+#[tokio::test]
 async fn a_party_holding_the_role_without_a_profile_is_listed_without_a_number() {
     // Built directly, because the API refuses it: `validate_assign_role` makes
     // the profile required for the three profiled roles. The join is a LEFT

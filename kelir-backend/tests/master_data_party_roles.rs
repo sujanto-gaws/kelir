@@ -16,9 +16,19 @@
 //! only what it covers: mutating `find_party` is the one thing that turns it
 //! red, because the gate refuses ahead of every query it appears to exercise.
 //!
-//! Not reached: `soft_delete_party_roles` and `soft_delete_role_profile`, the
-//! party-delete cascade's two queries. The delete tests below exercise them,
-//! but their scoping sits behind the same gate and is not isolated from it.
+//! `soft_delete_party_roles` is reached as of #121:
+//! `deleting_a_party_closes_this_tenants_roles_and_leaves_anothers_alone` puts
+//! another tenant's role row on the party being deleted, so the sweep's tenant
+//! predicate is the only thing keeping that row live.
+//!
+//! `find_party_role` is not probed and cannot be: it reads back by primary key
+//! (#121), so there is no scoping left in it to drop.
+//! `the_assignment_answered_with_is_the_row_this_call_wrote` covers what
+//! replaced it — an ambiguous lookup turns it red.
+//!
+//! Still not reached: `soft_delete_role_profile`, the other half of the
+//! party-delete cascade. The delete tests below exercise it, but its scoping
+//! sits behind the same gate and is not isolated from it.
 
 mod common;
 
@@ -1773,5 +1783,164 @@ async fn a_request_aimed_at_no_party_is_a_404_before_its_profile_is_resolved() {
         StatusCode::NOT_FOUND,
         "a request aimed at no party was answered about its profile: {}",
         refused.body
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The predicates the fixes' own queries carry (#121)
+// ---------------------------------------------------------------------------
+
+/// A role type with this code in `tenant`, so that a role row stamped with that
+/// tenant is reachable by a query that has stopped scoping.
+///
+/// `a_role_row_stamped_with_another_tenant_is_not_mine_to_read_or_remove` points
+/// its foreign row at *this* tenant's role type, which is enough for the three
+/// queries it probes because none of them joins `mdm_role_types` on the tenant.
+/// The read-back below needs a role type of the other tenant's own, so that the
+/// foreign row is a genuine second candidate rather than one the join drops.
+async fn given_foreign_role_type(app: &TestApp, tenant: Uuid, code: &str) -> Uuid {
+    let id = Uuid::now_v7();
+
+    sqlx::query(
+        "INSERT INTO mdm_role_types (id, tenant_id, role_type_code, name, is_system)
+         VALUES ($1, $2, $3, $4, false)",
+    )
+    .bind(id)
+    .bind(tenant)
+    .bind(code)
+    .bind(code)
+    .execute(&app.pool)
+    .await
+    .expect("insert the other tenant's role type");
+
+    id
+}
+
+#[tokio::test]
+async fn the_assignment_answered_with_is_the_row_this_call_wrote() {
+    // #121, and the reason the read-back is by primary key.
+    //
+    // `find_party_role` looked the row up again by
+    // `(tenant_id, party_id, role_type_code)`, which matches one row only
+    // because of the tenant predicate — so the predicate could not be pinned by
+    // a test: dropping it made the query match two rows and `fetch_optional`
+    // return an unspecified one, and asserting which would have been asserting
+    // on undefined behaviour. Under the mutation this test passed, which is
+    // exactly the shape #106 was about.
+    //
+    // The read-back is now by the assignment's own id, so a second candidate
+    // cannot exist. This test is what says so: another tenant holding the same
+    // role code on the same party is present, and the answer is still ours.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let party = create_party(&app, &token, party_group("PARTY-ACME", "Acme")).await;
+
+    let other_tenant = fixtures::create_tenant(&app.pool, "TNT-002", "Other").await;
+    let their_supplier = given_foreign_role_type(&app, other_tenant, "SUPPLIER").await;
+
+    // Their SUPPLIER assignment on our party: the same party, the same role
+    // code, and a `starts_at` of its own so it cannot collide with ours.
+    sqlx::query(
+        "INSERT INTO mdm_party_roles (id, tenant_id, party_id, role_type_id, starts_at, comments)
+         VALUES ($1, $2, $3, $4, TIMESTAMPTZ '2025-01-01T00:00:00Z', 'the other tenant''s row')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(other_tenant)
+    .bind(party)
+    .bind(their_supplier)
+    .execute(&app.pool)
+    .await
+    .expect("insert the other tenant's role row");
+
+    let mut assignment = supplier_profile("SUP-0001");
+    assignment["comments"] = json!("ours");
+
+    let assigned = app
+        .put(&role_path(party, "SUPPLIER"), Some(&token), assignment)
+        .await;
+
+    assert_eq!(assigned.status, StatusCode::CREATED, "{}", assigned.body);
+    assert_eq!(
+        assigned.data()["comments"],
+        "ours",
+        "the assign route answered with another tenant's role row: {}",
+        assigned.body
+    );
+    assert_eq!(
+        assigned.data()["fromDate"],
+        "2026-01-01T00:00:00Z",
+        "the assign route answered with another tenant's dates: {}",
+        assigned.body
+    );
+
+    // And the update path, which reads back the row it updated rather than the
+    // one it inserted.
+    let restated = app
+        .put(
+            &role_path(party, "SUPPLIER"),
+            Some(&token),
+            json!({ "fromDate": "2026-03-01T00:00:00Z" }),
+        )
+        .await;
+
+    assert_eq!(restated.status, StatusCode::OK, "{}", restated.body);
+    assert_eq!(
+        restated.data()["fromDate"],
+        "2026-03-01T00:00:00Z",
+        "the restatement answered with a row it did not write: {}",
+        restated.body
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_party_closes_this_tenants_roles_and_leaves_anothers_alone() {
+    // #121. `soft_delete_party_roles` was added by the fix for #103 to stop a
+    // delete from leaving a live role behind. It closes by party rather than by
+    // role type, so its tenant predicate is the only thing keeping the sweep
+    // inside the caller's tenant — and nothing exercised it, for the same
+    // reason as above.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let party = create_party(&app, &token, party_group("PARTY-ACME", "Acme")).await;
+
+    app.put(
+        &role_path(party, "SUPPLIER"),
+        Some(&token),
+        supplier_profile("SUP-0001"),
+    )
+    .await;
+
+    let other_tenant = fixtures::create_tenant(&app.pool, "TNT-002", "Other").await;
+    let supplier = role_type_id(&app, "SUPPLIER").await;
+    let foreign_role = Uuid::now_v7();
+
+    sqlx::query(
+        "INSERT INTO mdm_party_roles (id, tenant_id, party_id, role_type_id, starts_at)
+         VALUES ($1, $2, $3, $4, TIMESTAMPTZ '2025-01-01T00:00:00Z')",
+    )
+    .bind(foreign_role)
+    .bind(other_tenant)
+    .bind(party)
+    .bind(supplier)
+    .execute(&app.pool)
+    .await
+    .expect("insert the other tenant's role row");
+
+    let deleted = app
+        .delete(&format!("{PARTIES}/{party}"), Some(&token))
+        .await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
+
+    // Ours closed — that is #103's fix, and it still holds.
+    assert_eq!(
+        live_roles(&app, party).await,
+        1,
+        "the delete left one of this party's roles live, or closed the wrong count"
+    );
+
+    // Theirs did not.
+    assert!(
+        !is_closed(&app, foreign_role).await,
+        "deleting a party closed another tenant's role row"
     );
 }
