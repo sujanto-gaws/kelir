@@ -52,7 +52,7 @@ const navigation = [
     name: 'master-data',
     label: 'Master Data',
     icon: Users,
-    enabled: false,
+    enabled: true,
     permission: 'master-data:party:read',
   },
   {

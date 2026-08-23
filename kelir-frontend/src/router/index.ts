@@ -27,6 +27,24 @@ export const routes: RouteRecordRaw[] = [
         meta: { requiresAuth: true, title: 'Dashboard' },
       },
       {
+        // One route over the four lists: the view is a path segment so a
+        // supplier list can be linked to, and the search and filters live in
+        // the query string beside it (#101).
+        path: 'master-data/:view(parties|suppliers|customers|employees)?',
+        name: 'master-data',
+        component: () => import('@/features/master-data/MasterDataListPage.vue'),
+        // The party read permission alone. The role views need
+        // `master-data:party-role:read` as well, and the page offers only the
+        // tabs the caller may open rather than the route refusing all four for
+        // want of one — a caller who may read parties and not roles has a
+        // working screen, not a forbidden one (#101 AC5).
+        meta: {
+          requiresAuth: true,
+          permission: 'master-data:party:read',
+          title: 'Master data',
+        },
+      },
+      {
         path: 'admin/users',
         name: 'admin-users',
         component: () => import('@/features/admin/UserListPage.vue'),

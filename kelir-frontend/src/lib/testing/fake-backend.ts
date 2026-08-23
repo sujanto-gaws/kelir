@@ -21,6 +21,14 @@ export interface RecordedRequest {
   method: string
   /** The parsed request body, or undefined when there was none. */
   body: unknown
+  /**
+   * The query parameters the client sent, empty when it sent none.
+   *
+   * Recorded because "the server does the filtering" is a claim about the wire
+   * and cannot be checked from the URL alone: a list that fetched everything
+   * and narrowed locally would hit the same path with no parameters on it.
+   */
+  params: Record<string, unknown>
   authorization?: string
 }
 
@@ -79,6 +87,7 @@ function toRecorded(config: InternalAxiosRequestConfig): RecordedRequest {
     url: config.url ?? '',
     method: (config.method ?? 'get').toLowerCase(),
     body: parseBody(config.data),
+    params: (config.params as Record<string, unknown> | undefined) ?? {},
     authorization: typeof authorization === 'string' ? authorization : undefined,
   }
 }
