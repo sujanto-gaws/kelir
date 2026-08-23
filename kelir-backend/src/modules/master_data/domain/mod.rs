@@ -27,6 +27,7 @@
 //!
 //! [architectures/05]: ../../../../../docs/architectures/05.%20Core%20-%20Master%20Data%20-%20Party.md
 
+pub mod facility;
 pub mod party;
 pub mod party_validation;
 pub mod role;
@@ -35,6 +36,7 @@ pub mod role_view;
 // Re-exported flat, so the rest of the module keeps addressing these as
 // `domain::PartyAggregate` — where the type is declared is a question about this
 // file's size, not about the module's interface.
+pub use facility::*;
 pub use party::*;
 pub use party_validation::*;
 pub use role::*;

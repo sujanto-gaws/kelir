@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO mdm_facilities (\n            id, tenant_id, facility_code, name, facility_type, parent_facility_id,\n            owner_party_id, address_json, attributes_json, created_by\n        )\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Uuid",
+        "Uuid",
+        "Jsonb",
+        "Jsonb",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "166d8a7d7033ea0e9d6a379ef7345127cc8ae8db2f27d882c146bc6a4dd970e7"
+}

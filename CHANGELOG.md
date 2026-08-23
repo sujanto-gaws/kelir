@@ -49,6 +49,25 @@ While the major version is `0`, the public API may change in any release.
   **No new permission:** a view requires both `master-data:party:read` and
   `master-data:party-role:read`, because a row is made of both surfaces and a
   view needing only one would be a way around the other.
+- **Facility master data (FR-MDM-004).** `/api/v1/master-data/facilities`
+  creates, lists, reads, updates and soft-deletes facilities — the last `Must`
+  entity in the master-data epic and the only one that is not a party. A
+  facility nests: `parentFacilityId` makes Building → Floor → Room a tree, and
+  because a self-referencing column cannot express "and not one of its own
+  descendants", the service walks up from the proposed parent and refuses a
+  move that would close a loop. The walk is depth-bounded, so a cycle reaching
+  the table some other way is a wrong answer rather than a request that never
+  returns. A delete refuses while anything still sits under the facility rather
+  than cascading — one call should not retire a hundred rows. `ownerPartyId`
+  resolves to a live party in the tenant and is refused by name if it does not;
+  `facilityTypeId` is a closed vocabulary in code, because the column carries no
+  `CHECK` and would store anything; `address` reuses the `postalAddress` shape
+  the party contact mechanisms already define. On an update, `parentFacilityId`
+  and `ownerPartyId` tell an omitted field from an explicit `null` — without
+  that a facility could be given a parent and never taken out from under it.
+  `0010_facility_permissions.sql` seeds `master-data:facility:create`, `:read`,
+  `:update` and `:delete`; no table was added, because `0008` already created
+  `mdm_facilities`.
 
 ### Fixed
 
@@ -143,6 +162,11 @@ While the major version is `0`, the public API may change in any release.
   child-collection queries. Every file in the module is now under 900 lines.
   Each layer re-exports flat, so `service::create_party`, `repo::find_party`
   and `domain::PartyAggregate` all still name what they named before.
+- The planned migrations shift down again: `0010_facility_permissions.sql` took
+  the next free number, so RAD is now `0011_rad.sql` and the plugin migration
+  `0019_plugin.sql`. Nothing merged was renumbered; the Database Schema mapping
+  table is the sequence and carries the correction, along with the two inline
+  forward references that named the old numbers.
 - The planned migrations shift down by one: `0009_party_role_permissions.sql`
   took the next free number, so RAD is now `0010_rad.sql` and the plugin
   migration `0018_plugin.sql`. Nothing merged was renumbered. Four inline
