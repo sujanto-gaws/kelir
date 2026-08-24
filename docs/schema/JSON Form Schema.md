@@ -2,7 +2,7 @@
 **Version:** 2.0.1  
 **Status:** Final Standard  
 **Target Stack:** Vue.js (Frontend), Rust (Backend)  
-**Last updated:** 2026-08-21 (errata E-1; see Section 13)
+**Last updated:** 2026-08-25 (errata E-1, E-2; see Section 13)
 
 ---
 
@@ -303,7 +303,7 @@ JSON Logic uses **dot-notation** for array access (zero-indexed). Array aggregat
 - **Rendering:** Recursive component switching on the `role` property.
 - **State Management:** Bind `data` components to a centralized reactive store using the `key`. Use `id` for Vue's `:key`.
 - **Value Resolution on Mount:** Follow the decision procedure in S4.2.3, branching on `calculate` and `calculateMode`.
-- **Conditional & Calculation:** Use `json-logic-js`, wrapping evaluations in Vue `computed` or `watch`. Build the dependency graph once from every `{"var": ...}` reference - it is already required for cycle detection (S12.2) - and recompute only the fields downstream of a change. Re-evaluating every `calculate` on every keystroke is O(fields x rows) on a form containing a datagrid.
+- **Conditional & Calculation:** Use `@goplasmatic/datalogic-wasm` — the WebAssembly build of the engine the backend runs, adopted with `datalogic-rs` as decision **D-10** (2026-08-25) in place of `json-logic-js`, so the two sides agree by construction rather than by test. Load it on demand (`kelir-frontend/src/lib/jsonlogic.ts`): the payload is 588 KB gzipped and D-10 accepted that only because it stays off the first-load path. Wrap evaluations in Vue `computed` or `watch`. Build the dependency graph once from every `{"var": ...}` reference - it is already required for cycle detection (S12.2) - and recompute only the fields downstream of a change. Re-evaluating every `calculate` on every keystroke is O(fields x rows) on a form containing a datagrid.
 - **Validation:** Filter the `rules` array by `scope`. Build dynamic Zod/Yup schemas.
 - **Array Sequencing & Uniqueness:** Intercept array mutations to enforce `sequenceKey` and real-time `uniqueBy` checks.
 
@@ -388,6 +388,7 @@ This specification is a **Final Standard**: frozen at v2.0.1, errata only, and a
 | # | Date | Correction |
 |---|---|---|
 | **E-1** | 2026-08-21 | **The target stack named two backend languages; there is one.** Every reference to Go or Golang is replaced with Rust — the header target stack, the §1 polyglot-compatibility claim, the §2 Polyglot Parity definition and the Custom Operator entry, the §4.2.3 decision-procedure rationale, the §9.2 backend heading, and guardrails 4 and 5 in §12. Guardrail 4's "initialize the payload map with default zero-values" was a Go idiom and is restated for `serde_json`, where a missing key resolves to `Value::Null` rather than a typed zero. Kelir's backend is Rust ([SDD](../design/01.%20System%20Design%20Document.md) §2, [architecture 01](../architectures/01.%20Basic%20Framework%20Concept%20and%20Architecture.md)); no Go service exists or is planned, and a parity claim for a language nobody compiles is how the companion registries' Rust column came to be wrong (see the [operator-parity spike](../../projects/spikes/01.%20JFSS%20Operator%20Parity.md) §2.8). **Polyglot Parity is not weakened by this** — it was never about the count of languages. One JavaScript runtime and one Rust runtime evaluate the same schema, and the boundary between them is still where a schema can silently mean two different things. |
+| **E-2** | 2026-08-25 | **§9.1 named `json-logic-js` as the frontend evaluator; Kelir no longer uses it.** Decision **D-10** adopts `@goplasmatic/datalogic-wasm` on the client and `datalogic-rs` on the server — one Rust core compiled for two runtimes, pinned to the same version on both sides, so the two agree by construction rather than by a test suite chasing them. §9.1 names it and records that it is loaded on demand, because the payload is 588 KB gzipped and D-10 accepted that cost only on the condition that it stays off the first-load path. **This changes nothing this specification specifies:** the operator set is the [Calculation Rule Registry](JFSS%20Calculation%20Rule%20Registry.md)'s, S8.1's server re-evaluation is unchanged, and Polyglot Parity is now easier to hold rather than differently defined — what remains genuinely written twice is the custom `sum` operator, which is where [`parity/`](../../parity/README.md) points its corpus. |
 
 ---
 *End of Specification v2.0.1*

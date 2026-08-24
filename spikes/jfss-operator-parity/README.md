@@ -7,12 +7,20 @@ how they were produced.
 
 **This is spike scaffolding, not production code.** Nothing here is wired into
 CI, imported by the backend, or shipped in the frontend bundle. It exists so the
-finding can be re-run rather than believed. Promoting the corpus into a real
-parity gate is Sprint 7 work, and depends on which evaluator is adopted.
+finding can be re-run rather than believed.
+
+> **The corpus moved out, on 2026-08-25.** ~~Promoting the corpus into a real
+> parity gate is Sprint 7 work~~ — it is done: decision **D-10** adopted
+> `datalogic-rs` on both sides and issue #154 promoted `cases.json` to
+> [`parity/cases.json`](../../parity/README.md), where a committed expectation
+> file holds both sides to it in CI. This harness now reads the corpus from
+> there rather than keeping a second copy, so the four-evaluator comparison and
+> the gate can never disagree about what the corpus is. Everything else here is
+> unchanged and still scaffolding.
 
 ## What it does
 
-`cases.json` is one corpus of 51 JSON Logic expressions, each derived from a
+`parity/cases.json` is one corpus of 51 JSON Logic expressions, each derived from a
 claim the [Calculation Rule Registry](../../docs/schema/JFSS%20Calculation%20Rule%20Registry.md)
 or [JFSS](../../docs/schema/JSON%20Form%20Schema.md) makes — the base operators,
 the array operators §2.1 says must be verified in CI, the normalizations §3.1

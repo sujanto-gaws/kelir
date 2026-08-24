@@ -1,13 +1,15 @@
 # JFSS Calculation Rule Registry
-**Version:** 1.4.0
+**Version:** 1.5.0
 **Status:** Active Standard
-**Last updated:** 2026-08-21
+**Last updated:** 2026-08-25
 **Pairs with:** JFSS v2.0.1
 **Maintainers:** Full-Stack Engineering Team
 
 ## 1. Purpose & The Polyglot Contract
 
 The JFSS Calculation Rule Registry defines the standardized JSON Logic operators that can be utilized within the `calculate` property of any component.
+
+> **Since 2026-08-25 the two runtimes run one engine.** Decision **D-10** adopted `datalogic-rs` on the server and its official WebAssembly build on the client, so parity is a property of the artefact rather than a claim two libraries have to keep agreeing on. The contract below is unchanged and still binding — a custom operator is still written twice, in Rust and in JavaScript, and that is where divergence now lives. See [`parity/`](../../parity/README.md).
 
 The registry exists to prevent the "Polyglot Parity Problem" from breaking the tamper-proof calculation pattern. Without it, a frontend developer could use an operator in a calculation that the Vue frontend renders perfectly but the Rust backend cannot recalculate, causing either a 500 error or a silent security bypass where the backend trusts the frontend's calculated value.
 
@@ -17,8 +19,8 @@ Kelir runs a Vue frontend and a **Rust** backend, so using a calculation operato
 Two, not three: earlier versions of this registry carried a Go column and Go implementations for a backend that does not exist and is not planned. Two runtimes is not a weaker contract than three — the parity problem lives at the language boundary, and there is still a boundary.
 
 Before using an operator in a `calculate` property, the engineering team must ensure:
-1. **Frontend Parity:** The operator is supported by `json-logic-js` (Vue), or registered as a custom operator there.
-2. **Backend Parity:** The operator is supported by the Rust JSON Logic library, or has been explicitly implemented as a custom operator — and that the library **accepts custom operators at all**, which not every candidate does (Section 4).
+1. **Frontend Parity:** The operator is supported by `@goplasmatic/datalogic-wasm` (Vue), or registered as a custom operator there.
+2. **Backend Parity:** The operator is supported by `datalogic-rs`, or has been explicitly implemented as a custom operator — and that the library **accepts custom operators at all**, which not every candidate does (Section 4).
 3. **Tamper-Proof Guarantee:** The backend can recalculate the exact same expression to overwrite the frontend's submitted value, **and can fail loudly if it cannot** (Section 4).
 
 **If an operator is not in this registry, it is FORBIDDEN from use in the `calculate` property.**
@@ -31,13 +33,15 @@ This matrix defines which JSON Logic operators are approved for use in `calculat
 
 ### 2.1 Base Operators (Universal Support)
 
-These operators are part of the standard JSON Logic specification (jsonlogic.com) and are implemented by `json-logic-js` on the Vue side.
+These operators are part of the standard JSON Logic specification (jsonlogic.com).
 
-> **The Rust column was measured, not assumed, by the [operator-parity spike](../../projects/spikes/01.%20JFSS%20Operator%20Parity.md) (#31) on 2026-08-21.** Earlier versions of this table named `json-logic-rs`, which **does not exist on crates.io**; the marks below were never checked against anything. Every ✅ now records a result from `datalogic-rs` 5.2.0, which is the spike's recommendation but **is not yet adopted** — decision **D-10** is open on which evaluator Kelir takes.
+> **The Rust column was measured, not assumed, by the [operator-parity spike](../../projects/spikes/01.%20JFSS%20Operator%20Parity.md) (#31) on 2026-08-21.** Earlier versions of this table named `json-logic-rs`, which **does not exist on crates.io**; the marks below were never checked against anything. Every ✅ records a result from `datalogic-rs` 5.2.0.
+>
+> **D-10 is decided, and both columns are now one engine (2026-08-25, v1.5.0).** ~~is not yet adopted — decision **D-10** is open on which evaluator Kelir takes~~. Kelir takes `datalogic-rs` 5.2.0 (Apache-2.0) on the server and `@goplasmatic/datalogic-wasm` 5.2.0 — the same Rust core compiled to WebAssembly — on the client, replacing `json-logic-js` (MIT). Both sides pin the version exactly, because a version bump is a parity-affecting change, and [`parity/`](../../parity/README.md) fails the build when they stop agreeing. The Vue column therefore no longer records a second implementation's behaviour; it records the same one.
 >
 > The Go column is gone as of v1.4.0 (decision **D-11**). It was never measured, and no Go backend exists.
 
-| Operator | Description | Vue (`json-logic-js`) | Rust (pending **D-10**) |
+| Operator | Description | Vue (`datalogic-wasm`) | Rust (`datalogic-rs`) |
 | :--- | :--- | :---: | :---: |
 | `var` | Access data by key (supports dot-notation for arrays) | ✅ | ✅ |
 | `+` | Addition | ✅ | ✅ |
@@ -59,17 +63,19 @@ These operators are part of the standard JSON Logic specification (jsonlogic.com
 
 \* **CI Parity Requirement:** `map`, `filter`, `reduce`, `all`, and `some` are standard JSON Logic operators, but the exact behaviour of the Rust library (argument evaluation, lambda scoping, edge cases such as empty arrays) **must be verified in CI parity tests** before an expression using them ships. Vue and Rust must return identical results for identical inputs.
 
-That verification is **done for `datalogic-rs` 5.2.0**: all eleven array cases in the spike corpus — including empty arrays, a missing source array, and `none` — return identical results to `json-logic-js` 2.0.5. The corpus lives in [`spikes/jfss-operator-parity/`](../../spikes/jfss-operator-parity/) and is **not yet a CI gate**; promoting it is Sprint 7 work and depends on D-10.
+That verification is **done for `datalogic-rs` 5.2.0**: all eleven array cases in the spike corpus — including empty arrays, a missing source array, and `none` — return identical results to `json-logic-js` 2.0.5.
+
+**The requirement is now met by a gate rather than by a spike (2026-08-25, #154).** ~~The corpus lives in `spikes/jfss-operator-parity/` and is not yet a CI gate; promoting it is Sprint 7 work and depends on D-10.~~ The corpus is [`parity/cases.json`](../../parity/README.md), and both sides assert it in the test job each already has, so a divergence fails the build in the half that caused it. Two things the gate is honest about: it holds Kelir's two sides to **each other** rather than to `json-logic-js`, and the corpus grew from 51 cases to 55 because a mutation survived the original set.
 
 ### 2.2 Extended Operators (Conditional Support)
 
 These operators are **NOT** part of the standard JSON Logic specification. They are extensions added by specific library implementations.
 
-| Operator | Description | Vue (`json-logic-js`) | Rust (pending **D-10**) |
+| Operator | Description | Vue (`datalogic-wasm`) | Rust (`datalogic-rs`) |
 | :--- | :--- | :---: | :---: |
 | `sum` | Sum all numbers in an array | ❌ **NOT SUPPORTED** | ❌ **NOT SUPPORTED** |
 
-`sum` is non-standard and requires a custom implementation in **both** environments — including `json-logic-js`, which does not ship it natively.
+`sum` is non-standard and requires a custom implementation in **both** environments — no JSON Logic engine ships it, the adopted one included.
 
 Confirmed by the spike: neither candidate Rust crate ships `sum`, and a custom implementation is about ten lines. What the spike also found is that **not every library can accept one** — `jsonlogic-rs` has no registration API at all, and silently returns an unregistered operator's expression instead of failing (§4.1).
 
@@ -118,7 +124,7 @@ Accesses data from the form payload. Supports dot-notation for nested objects an
 ```
 
 **Implementation Notes:**
-- **Vue:** Native support via `json-logic-js`
+- **Vue:** Native support via `@goplasmatic/datalogic-wasm`
 - **Rust:** Native support, verified against `datalogic-rs` 5.2.0 (dot-notation, array indices, nested keys, missing keys, and the `{"var": [key, default]}` form)
 
 ---
@@ -254,7 +260,7 @@ Applies an expression to each element of an array, returning a new array.
 3. Returns a new array of line totals
 
 **Implementation Notes:**
-- **Vue:** Native support via `json-logic-js`
+- **Vue:** Native support via `@goplasmatic/datalogic-wasm`
 - **Rust:** Standard operator, verified against `datalogic-rs` 5.2.0 — lambda scoping, empty arrays, and a missing source array all match `json-logic-js`
 - **Variable Scope:** Inside the `map` expression, `{ "var": "unit_price" }` refers to `items[n].unit_price`, not the root data
 
@@ -376,21 +382,34 @@ let engine = Engine::builder().add_operator("sum", Sum).build();
 
 The empty-array case falls out of `unwrap_or(0.0)` and of summing an empty iterator, both of which yield `0` as Section 3.2 requires.
 
-**This is not yet an adoption.** Decision **D-10** is open on which evaluator Kelir takes; the code above records what the spike verified, not a committed dependency. The runnable version is in [`spikes/jfss-operator-parity/`](../../spikes/jfss-operator-parity/).
+**This is the adopted implementation as of 2026-08-25.** ~~Decision D-10 is open on which evaluator Kelir takes; the code above records what the spike verified, not a committed dependency.~~ D-10 took `datalogic-rs` 5.2.0, and the shipped version of the operator above is `kelir-backend/src/modules/rad/evaluator.rs`.
 
 ### 4.2 Implementing `sum` in Vue
 
-The Vue side needs the same operator and, critically, the **same edge-case behaviour** — an empty array yields `0`, and a non-numeric element contributes `0` rather than poisoning the sum with `NaN`:
+The Vue side needs the same operator and, critically, the **same edge-case behaviour** — an empty array yields `0`, and a non-numeric element contributes `0` rather than poisoning the sum with `NaN`.
+
+The registration API is the engine's, not `json-logic-js`'s: `@goplasmatic/datalogic-wasm` hands the evaluated arguments in as a JSON-array string and requires a JSON string back, and treats a throw or a non-string return as an evaluation error.
 
 ```typescript
-import jsonLogic from 'json-logic-js';
+// kelir-frontend/src/lib/jsonlogic.ts
+export function sumOperator(argsJson: string): string {
+  const args: unknown = JSON.parse(argsJson)
+  const first = Array.isArray(args) ? args[0] : undefined
+  const items = Array.isArray(first) ? first : []
 
-jsonLogic.add_operation('sum', (arr: unknown) =>
-  Array.isArray(arr) ? arr.reduce<number>((total, v) => total + (Number(v) || 0), 0) : 0,
-);
+  const total = items.reduce<number>((running, item) => {
+    const value = typeof item === 'number' ? item : Number.NaN
+
+    return Number.isFinite(value) ? running + value : running
+  }, 0)
+
+  return JSON.stringify(total)
+}
+
+new Engine({ customOperators: { sum: sumOperator }, config: JFSS_ENGINE_CONFIG })
 ```
 
-The two implementations above are the ones the spike ran against each other; they agree on the corpus. Writing them independently is exactly the risk this registry exists to manage, which is why the parity corpus is the acceptance test for a custom operator and not the code review.
+The two implementations above are the ones the spike ran against each other; they agree on the corpus. Writing them independently is exactly the risk this registry exists to manage — and it is now the **only** place the two runtimes can disagree, since everything else is one engine. Which is why the [parity corpus](../../parity/README.md) is the acceptance test for a custom operator and not the code review.
 
 ### 4.3 Do Not Reimplement Standard Operators
 
@@ -529,11 +548,12 @@ This "result is 0" rule is a **JFSS-mandated normalization, not native library b
 
 **Implementation (Vue):**
 ```typescript
-// Vue: useCalculator.ts
-const result = jsonLogic.apply(component.calculate, newData);
-const value = Number(result);
-formData.value[component.key] = Number.isFinite(value) ? value : 0;
+// kelir-frontend/src/lib/jsonlogic.ts — normalizeNumeric, applied by evaluateNumeric
+const evaluator = await loadEvaluator()
+formData.value[component.key] = evaluator.evaluateNumeric(component.calculate, newData)
 ```
+
+> ⚠️ **Measured against the adopted engine, 2026-08-25 (#154), and the rule is not fully delivered.** The wrapper is now half the story, because `datalogic-rs` and its WebAssembly build never return a non-finite *number* — an overflow returns `null`, and so does `10.5 / 0`, both of which the wrapper turns into the `0` this section asks for. But **`10 / 0`, `0 / 0` and `10 % 0` throw**, so no wrapper is reached and the caller sees an error rather than a zero. Both sides throw identically, so parity holds and the gap is registry-versus-engine rather than a divergence. Correcting the normalization spec is renderer work under **D-15**; until then the behaviour is pinned by tests on both sides so a version bump that changes it is loud.
 
 > ⚠️ **Corrected in v1.3.0.** Versions up to 1.2.0 gave this wrapper as `Number(result) || 0`, which **does not normalize division by zero**: `Infinity` is truthy, so `Number(Infinity) || 0` is `Infinity`. Only `NaN` was ever normalized. The field then rendered `Infinity` and `JSON.stringify` submitted `null`, so the backend received a null for a field the user saw as a number. The finiteness test above is the predicate every environment must use — and note that `0` for a divide-by-zero is a **display and storage** decision, not a claim that the calculation was meaningful. Measured in [operator-parity spike](../../projects/spikes/01.%20JFSS%20Operator%20Parity.md) §2.3.
 
@@ -557,6 +577,7 @@ formData.value[component.key] = Number.isFinite(value) ? value : 0;
 
 ## 9. Changelog
 
+- **1.5.0 (2026-08-25):** **Decision D-10 is taken, and the two runtimes now run one engine.** Kelir adopts `datalogic-rs` 5.2.0 on the server and `@goplasmatic/datalogic-wasm` 5.2.0 — the same Rust core compiled to WebAssembly — on the client, replacing `json-logic-js`; the licence for the evaluator is Apache-2.0 on both sides rather than MIT on one. **Applied:** the Section 2.1 and 2.2 matrix columns no longer read "pending **D-10**" and no longer name two implementations; Section 1.1's parity criteria name the adopted packages; Section 4.1 is the shipped Rust operator rather than a spike sample, and Section 4.2 is the shipped Vue one, whose registration API is the engine's JSON-string contract and not `json-logic-js`'s `add_operation`. **Section 2.1's CI parity requirement is satisfied by a gate rather than by a spike:** the corpus moved to [`parity/`](../../parity/README.md), grew from 51 cases to 55 — four added because flipping the engine's NaN handling left the original set green — and is asserted by both sides in the test job each already has. **Section 7.3 is measured against the adopted engine and the "result is 0" rule is recorded as *not fully delivered*:** `10.5 / 0` and an overflow return `null` and normalize to `0`, while `10 / 0`, `0 / 0` and `10 % 0` throw. Both sides throw identically, so parity holds; the correction belongs to the renderer under **D-15**. **Unchanged:** the approved operator set, the forbidden tier, the Tamper-Proof Pattern, and the two open ambiguities Section 3.1 and Section 6.2 already flag.
 - **1.4.0 (2026-08-21):** **Removed Go.** Decision **D-11** settles what the [operator-parity spike](../../projects/spikes/01.%20JFSS%20Operator%20Parity.md) §2.8 raised: Kelir's backend is Rust, no Go service exists or is planned, and this registry had been carrying a Go column and two Go implementations for it. Dropped the Go column from the Section 2.1 and 2.2 matrices, deleted the Go `sum` and `map` sections (old 4.1 and 4.2), renumbered the Rust `sum` section from 4.3 to **4.1**, and added **4.2** (the Vue `sum` it must agree with, which was previously only implied) and **4.3** (do not reimplement standard operators). Restated the Section 1.1 polyglot contract, the Section 5 extension SOP, and Sections 6.1, 7.3 and 8 for two runtimes. **This is not a relaxation:** the parity problem lives at the language boundary, and one JavaScript runtime plus one Rust runtime still has one. Nothing about the approved operator set, the mandated normalizations, or the Tamper-Proof Pattern changes.
 - **1.3.0 (2026-08-21):** Applied the findings of the [JFSS operator-parity spike](../../projects/spikes/01.%20JFSS%20Operator%20Parity.md) (#31). **Corrections to statements the spike disproved:** the Rust column named `json-logic-rs`, which is not a crates.io package, and its ✅ marks had never been checked — the column is now headed "pending **D-10**" and every mark records a measured `datalogic-rs` 5.2.0 result; Section 4.3's illustrative pseudocode targeted an API that does not exist and is replaced with the verified `CustomOperator` shape plus the reason `jsonlogic-rs` is disqualified (it returns unknown operators instead of rejecting them, inverting the Tamper-Proof Pattern); the Section 7.3 wrapper `Number(result) || 0` did not implement the Section 3.1 division-by-zero rule it was cited for and is replaced with a finiteness test. **Gaps flagged, not yet resolved:** the "result is 0" rule is ambiguous between the operand and whole-expression readings, which `json-logic-js` and `datalogic-rs` answer differently for `+` (Section 3.1); `min`/`max` with a missing operand turns the Section 6.2 discount cap into a zero; this registry governs `calculate` only, while `conditional.logic` needs the operators Section 2.3 forbids and is bounded by nothing (Section 8). Recorded the Section 2.1 CI parity requirement as **satisfied for Rust** by the spike corpus, which is not yet a CI gate.
 - **1.2.0 (2026-08-05):** Reclassified the standard JSON Logic array operators (`map`, `filter`, `reduce`, `all`, `some`) from Extended to Base, subject to CI parity verification for Go/Rust; added the Generated (Non-Deterministic) Operators tier (Sections 2.4, 3.3) with `generateInvoiceId` as its first registered operator; fixed the Section 3.1 average example (removed the JS-only `.length` accessor) and added the property-accessor prohibition; documented the division-by-zero and null-operand "result is 0" rule as a JFSS-mandated normalization requiring wrappers in every environment; marked the Rust sample as illustrative pseudocode and added custom-operator semantics caveats; added `validation` objects to the Section 6.1 example; editorial cleanup of conversational framing.

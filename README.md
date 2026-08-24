@@ -177,6 +177,9 @@ The MVP focuses on:
 │   ├── playwright.config.ts
 │   ├── support/
 │   └── tests/
+├── parity/
+│   ├── cases.json
+│   └── expectations.json
 └── deploy/
     ├── docker/
     │   └── docker-compose.yml

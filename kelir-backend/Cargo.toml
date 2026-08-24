@@ -9,6 +9,16 @@ anyhow = "1"
 argon2 = "0.5"
 axum = { version = "0.8", features = ["macros"] }
 chrono = { version = "0.4", features = ["serde"] }
+# The JSON Logic evaluator behind JFSS calculate and conditional rules
+# (FR-RAD-006, decision D-10). Pinned exactly, and to the same version as the
+# frontend's @goplasmatic/datalogic-wasm: the two are one engine compiled for
+# two runtimes, which is what makes Polyglot Parity a property that holds
+# rather than one a test suite chases. A version bump is a parity-affecting
+# change and moves on both sides together. Apache-2.0.
+datalogic-rs = { version = "=5.2.0", features = ["serde_json"] }
+# datalogic-rs evaluates into a bump arena, and a custom operator has to
+# allocate its result there.
+bumpalo = "3"
 # JWT access tokens (architecture 01 section 18.1).
 jsonwebtoken = "9"
 rand = "0.8"
