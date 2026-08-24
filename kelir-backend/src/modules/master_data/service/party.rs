@@ -16,13 +16,13 @@ use super::domain::{
 };
 use super::repository::{
     self as repo, ClassificationFields, ContactMechFields, IdentificationFields, NewParty,
-    PartyGroupFields, PersonFields, RelationshipFields,
+    PartyGroupFields, PartyRow, PersonFields, RelationshipFields,
 };
 use super::role::load_roles;
-use super::{OBJECT_TYPE, ROLE_READ};
+use super::{OBJECT_TYPE, PARTY_READ, ROLE_READ};
 use crate::error::{AppError, ValidationDetail};
 use crate::middleware::auth::Authenticated;
-use crate::modules::audit::{self, AuditEntry};
+use crate::modules::audit::{self, AuditEntry, ChangeSet};
 use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
 
@@ -31,7 +31,7 @@ pub async fn list_parties(
     caller: &Authenticated,
     pagination: &Pagination,
 ) -> Result<(Vec<PartySummary>, PageMeta), AppError> {
-    caller.require("master-data:party:read")?;
+    caller.require(PARTY_READ)?;
 
     let tenant_id = caller.tenant_id();
     let total = repo::count_parties(&state.pool, tenant_id).await?;
@@ -51,7 +51,7 @@ pub async fn get_party(
     caller: &Authenticated,
     id: Uuid,
 ) -> Result<PartyAggregate, AppError> {
-    caller.require("master-data:party:read")?;
+    caller.require(PARTY_READ)?;
 
     load_aggregate(state, caller, id).await
 }
@@ -430,6 +430,15 @@ pub async fn update_party(
 
     transaction.commit().await?;
 
+    // The row as it now is, against the row as it was, and only the fields that
+    // moved (#135). A second reading of the same row rather than a projection
+    // of the aggregate below: `before` is that row, and two readings of one
+    // shape are what make the comparison mean anything.
+    let after = repo::find_party(&state.pool, tenant_id, id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Party"))?;
+    let (old_value, new_value) = party_changes(&before, &after).halves();
+
     audit::record_or_warn(
         &state.pool,
         AuditEntry {
@@ -445,21 +454,40 @@ pub async fn update_party(
             actor_user_id: actor,
             ip_address: None,
             reason: request.status_comments.as_deref(),
-            old_value: Some(json!({
-                "statusId": before.status,
-                "externalId": before.external_id,
-                "description": before.description,
-            })),
-            new_value: Some(json!({
-                "statusId": request.status_id,
-                "externalId": request.external_id,
-                "description": request.description,
-            })),
+            old_value: Some(old_value),
+            new_value: Some(new_value),
         },
     )
     .await;
 
     load_aggregate(state, caller, id).await
+}
+
+/// What one update moved, in the vocabulary the API publishes.
+///
+/// The party row's own updatable fields, `additionalAttributes` included — it
+/// was updatable and named on neither side, so a request that changed only an
+/// attribute produced a record in which nothing changed.
+///
+/// The aggregate's members are deliberately absent. `person`, `partyGroup`, the
+/// identifications, relationships, classifications and contact mechanisms are
+/// replaced wholesale by their own repository calls, they have never been in
+/// the record, and putting them there is a wider question than the one #135
+/// asks — what a *replacement* of a list even means as a before and an after.
+/// `partyId` and `partyTypeId` are absent because no update can move them.
+fn party_changes(before: &PartyRow, after: &PartyRow) -> ChangeSet {
+    let mut changes = ChangeSet::new();
+
+    changes.field("statusId", &before.status, &after.status);
+    changes.field("externalId", &before.external_id, &after.external_id);
+    changes.field("description", &before.description, &after.description);
+    changes.field(
+        "additionalAttributes",
+        &before.attributes_json,
+        &after.attributes_json,
+    );
+
+    changes
 }
 
 pub async fn delete_party(

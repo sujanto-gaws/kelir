@@ -10,12 +10,20 @@
 //!   2. `git rev-parse --short HEAD` — the local development case.
 //!   3. `unknown` — never fails the build; a missing SHA is a smoke-test
 //!      finding, not a compile error.
+//!
+//! It also declares `migrations/` as an input, which is nothing to do with the
+//! SHA and everything to do with `sqlx::migrate!` embedding that directory at
+//! compile time. Nothing else tells Cargo so: adding a migration left `db.rs`
+//! untouched, so an incremental build kept running the previous set and the
+//! new file was applied by nothing. `applies_every_migration_in_the_migrations_directory`
+//! is what noticed, one migration after the fact.
 
 use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=KELIR_BUILD_SHA");
     println!("cargo:rerun-if-changed=../.git/HEAD");
+    println!("cargo:rerun-if-changed=migrations");
 
     let sha = std::env::var("KELIR_BUILD_SHA")
         .ok()

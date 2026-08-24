@@ -19,6 +19,8 @@ const PARTIES: &str = "/api/v1/master-data/parties";
 const FACILITIES: &str = "/api/v1/master-data/facilities";
 const AUDIT_READ: &str = "master-data:audit:read";
 const ROLE_READ: &str = "master-data:party-role:read";
+const PARTY_READ: &str = "master-data:party:read";
+const FACILITY_READ: &str = "master-data:facility:read";
 const PASSWORD: &str = "audit-caller-password";
 
 // ---------------------------------------------------------------------------
@@ -262,7 +264,7 @@ async fn the_history_withholds_the_role_records_without_the_role_read_permission
     let token = app.administrator_token().await;
     let party = a_party_with_a_history(&app, &token).await;
 
-    let auditor = caller_holding(&app, &[AUDIT_READ, "master-data:party:read"], 1).await;
+    let auditor = caller_holding(&app, &[AUDIT_READ, PARTY_READ], 1).await;
     let history = app
         .get(&format!("{PARTIES}/{party}/audit"), Some(&auditor))
         .await;
@@ -313,7 +315,7 @@ async fn the_history_shows_the_role_records_to_a_caller_who_may_read_roles() {
     let token = app.administrator_token().await;
     let party = a_party_with_a_history(&app, &token).await;
 
-    let auditor = caller_holding(&app, &[AUDIT_READ, ROLE_READ], 2).await;
+    let auditor = caller_holding(&app, &[AUDIT_READ, PARTY_READ, ROLE_READ], 2).await;
     let history = app
         .get(&format!("{PARTIES}/{party}/audit"), Some(&auditor))
         .await;
@@ -369,11 +371,7 @@ async fn the_history_needs_its_own_permission() {
 
     let everything_else = caller_holding(
         &app,
-        &[
-            "master-data:party:read",
-            "master-data:party:update",
-            ROLE_READ,
-        ],
+        &[PARTY_READ, "master-data:party:update", ROLE_READ],
         3,
     )
     .await;
@@ -385,12 +383,80 @@ async fn the_history_needs_its_own_permission() {
         StatusCode::FORBIDDEN
     );
 
-    let auditor = caller_holding(&app, &[AUDIT_READ], 4).await;
+    // Since #136 the surface needs the record's own read permission alongside
+    // it, so the caller who is allowed through holds both. That the second one
+    // is genuinely required is
+    // `the_history_needs_the_records_own_read_permission_too`.
+    let auditor = caller_holding(&app, &[AUDIT_READ, PARTY_READ], 4).await;
     assert_eq!(
         app.get(&format!("{PARTIES}/{party}/audit"), Some(&auditor))
             .await
             .status,
         StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn the_history_needs_the_records_own_read_permission_too() {
+    // #136. A record's history is made of the record's own field values —
+    // `Party.Created` carries the party code, its type and its status — so
+    // `master-data:audit:read` alone would hand over at the side door what
+    // `master-data:party:read` refuses at the front one. The module already
+    // applies that rule to the role half of the same list; this is the party
+    // half of it.
+    //
+    // Both routes, because the reasoning is about the record and not about the
+    // entity: a facility's history answers the same way to
+    // `master-data:facility:read`.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let party = given_party(&app, &token, "PARTY-ACME").await;
+    let facility = given_facility(
+        &app,
+        &token,
+        json!({ "facilityId": "FAC-HQ", "name": "Head Office" }),
+    )
+    .await;
+
+    let party_history = format!("{PARTIES}/{party}/audit");
+    let facility_history = format!("{FACILITIES}/{facility}/audit");
+
+    // The permission that opens the surface, and nothing that opens a record.
+    let auditor = caller_holding(&app, &[AUDIT_READ], 5).await;
+    for path in [&party_history, &facility_history] {
+        assert_eq!(
+            app.get(path, Some(&auditor)).await.status,
+            StatusCode::FORBIDDEN,
+            "{AUDIT_READ} alone read a record's own field values: {path}"
+        );
+    }
+
+    // And it is the record's own permission that is missing rather than any
+    // permission at all: each caller below is refused exactly where they may
+    // not read.
+    let over_parties = caller_holding(&app, &[AUDIT_READ, PARTY_READ], 6).await;
+    assert_eq!(
+        app.get(&party_history, Some(&over_parties)).await.status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.get(&facility_history, Some(&over_parties)).await.status,
+        StatusCode::FORBIDDEN,
+        "a party reader was given a facility's history"
+    );
+
+    let over_facilities = caller_holding(&app, &[AUDIT_READ, FACILITY_READ], 7).await;
+    assert_eq!(
+        app.get(&facility_history, Some(&over_facilities))
+            .await
+            .status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.get(&party_history, Some(&over_facilities)).await.status,
+        StatusCode::FORBIDDEN,
+        "a facility reader was given a party's history"
     );
 }
 
@@ -535,4 +601,299 @@ async fn both_history_routes_refuse_a_request_with_no_token() {
 
         assert_eq!(response.status, StatusCode::UNAUTHORIZED, "{path}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// A record is the change, not the request (#135)
+// ---------------------------------------------------------------------------
+
+async fn given_facility(app: &TestApp, token: &str, body: Value) -> Uuid {
+    let created = app.post(FACILITIES, Some(token), body).await;
+
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    created.data()["id"]
+        .as_str()
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .expect("id")
+}
+
+/// Every UPDATE record against one record, oldest first.
+async fn update_records(app: &TestApp, token: &str, path: &str) -> Vec<Value> {
+    let history = app.get(&format!("{path}/audit"), Some(token)).await;
+    assert_eq!(history.status, StatusCode::OK, "{}", history.body);
+
+    history.body["data"]
+        .as_array()
+        .unwrap_or_else(|| panic!("data is not a list: {}", history.body))
+        .iter()
+        .filter(|record| record["action"] == "UPDATE")
+        .cloned()
+        .collect()
+}
+
+/// The field names one half of a record carries, sorted.
+///
+/// Sorted because the column is `JSONB` and PostgreSQL orders an object's keys
+/// by length and then by bytes, which is neither the order they were written in
+/// nor the one `serde_json` would produce.
+fn fields(half: &Value) -> Vec<String> {
+    let mut names: Vec<String> = half
+        .as_object()
+        .unwrap_or_else(|| panic!("not an object: {half}"))
+        .keys()
+        .cloned()
+        .collect();
+
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn an_updates_record_names_the_fields_that_changed_and_no_others() {
+    // #135 AC1 and AC2. Every field of an update request is optional — that is
+    // what makes a partial update partial — so a field the caller did not
+    // mention serialised as `null` on the new side, and the record said the
+    // name and the type had been cleared when neither had been touched.
+    //
+    // `address` and `additionalAttributes` are the other half of the same
+    // defect: both are updatable and neither appeared on either side, so the
+    // only thing that did change was in no half of the record at all.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let facility = given_facility(
+        &app,
+        &token,
+        json!({ "facilityId": "FAC-HQ", "name": "Head Office", "facilityTypeId": "BUILDING" }),
+    )
+    .await;
+    let path = format!("{FACILITIES}/{facility}");
+
+    let updated = app
+        .put(
+            &path,
+            Some(&token),
+            json!({
+                "address": { "address1": "1 Dock Road", "city": "Surabaya" },
+                "additionalAttributes": { "floors": 3 },
+            }),
+        )
+        .await;
+    assert_eq!(updated.status, StatusCode::OK, "{}", updated.body);
+
+    let records = update_records(&app, &token, &path).await;
+    let [record] = records.as_slice() else {
+        panic!("one update, one record: {records:?}");
+    };
+
+    // The two fields that moved, on both sides, and nothing else on either.
+    assert_eq!(
+        fields(&record["oldValue"]),
+        vec!["additionalAttributes", "address"],
+        "{record}"
+    );
+    assert_eq!(
+        fields(&record["newValue"]),
+        vec!["additionalAttributes", "address"],
+        "{record}"
+    );
+
+    assert_eq!(record["oldValue"]["address"], Value::Null, "{record}");
+    assert_eq!(
+        record["oldValue"]["additionalAttributes"],
+        json!({}),
+        "{record}"
+    );
+    assert_eq!(
+        record["newValue"]["address"]["address1"], "1 Dock Road",
+        "{record}"
+    );
+    assert_eq!(
+        record["newValue"]["address"]["city"], "Surabaya",
+        "{record}"
+    );
+    assert_eq!(
+        record["newValue"]["additionalAttributes"],
+        json!({ "floors": 3 }),
+        "{record}"
+    );
+
+    // And the facility still holds the name and the type the record does not
+    // mention, which is what makes naming them a false statement.
+    let facility = app.get(&path, Some(&token)).await;
+    assert_eq!(facility.data()["name"], "Head Office", "{}", facility.body);
+    assert_eq!(
+        facility.data()["facilityTypeId"],
+        "BUILDING",
+        "{}",
+        facility.body
+    );
+}
+
+#[tokio::test]
+async fn both_halves_of_a_record_are_read_off_the_row() {
+    // The request is not the change even for a field it does name: the service
+    // trims a name before storing it, so a record built from the payload
+    // reports a value the column does not hold.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let facility = given_facility(
+        &app,
+        &token,
+        json!({ "facilityId": "FAC-HQ", "name": "Head Office" }),
+    )
+    .await;
+    let path = format!("{FACILITIES}/{facility}");
+
+    app.put(
+        &path,
+        Some(&token),
+        json!({ "name": "  Head Office (North)  " }),
+    )
+    .await;
+
+    let records = update_records(&app, &token, &path).await;
+    let [record] = records.as_slice() else {
+        panic!("one update, one record: {records:?}");
+    };
+
+    assert_eq!(
+        record["oldValue"],
+        json!({ "name": "Head Office" }),
+        "{record}"
+    );
+    assert_eq!(
+        record["newValue"],
+        json!({ "name": "Head Office (North)" }),
+        "{record}"
+    );
+}
+
+#[tokio::test]
+async fn clearing_a_reference_and_leaving_it_alone_are_different_records() {
+    // #135 AC3. `parentFacilityId` is `Option<Option<String>>` precisely so
+    // that *omitted* and *explicitly cleared* are different requests, and
+    // `update_facility_fields` goes to some trouble to honour the difference.
+    // Both serialised to `null`, so the audit trail could not tell a facility
+    // taken out from under its parent from one whose parent was never
+    // mentioned.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    given_facility(
+        &app,
+        &token,
+        json!({ "facilityId": "FAC-SITE", "name": "Dock Site", "facilityTypeId": "SITE" }),
+    )
+    .await;
+    let facility = given_facility(
+        &app,
+        &token,
+        json!({
+            "facilityId": "FAC-HQ",
+            "name": "Head Office",
+            "facilityTypeId": "BUILDING",
+            "parentFacilityId": "FAC-SITE",
+        }),
+    )
+    .await;
+    let path = format!("{FACILITIES}/{facility}");
+
+    // Omitted: the parent is not what this request is about.
+    app.put(
+        &path,
+        Some(&token),
+        json!({ "name": "Head Office (North)" }),
+    )
+    .await;
+
+    // Cleared: the parent is exactly what this request is about.
+    let detached = app
+        .put(&path, Some(&token), json!({ "parentFacilityId": null }))
+        .await;
+    assert_eq!(detached.status, StatusCode::OK, "{}", detached.body);
+
+    let records = update_records(&app, &token, &path).await;
+    let [left_alone, cleared] = records.as_slice() else {
+        panic!("two updates, two records: {records:?}");
+    };
+
+    assert_eq!(
+        fields(&left_alone["oldValue"]),
+        vec!["name"],
+        "{left_alone}"
+    );
+    assert_eq!(
+        fields(&left_alone["newValue"]),
+        vec!["name"],
+        "{left_alone}"
+    );
+
+    assert_eq!(
+        cleared["oldValue"],
+        json!({ "parentFacilityId": "FAC-SITE" }),
+        "{cleared}"
+    );
+    assert_eq!(
+        cleared["newValue"],
+        json!({ "parentFacilityId": null }),
+        "{cleared}"
+    );
+}
+
+#[tokio::test]
+async fn a_partys_update_records_the_change_too() {
+    // #135 AC4. `update_party` has had the same shape since #80 and the same
+    // symptom: changing only the description reported `externalId` and
+    // `statusId` as cleared, and both were still there.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let created = app
+        .post(
+            PARTIES,
+            Some(&token),
+            json!({
+                "partyId": "PARTY-ACME",
+                "partyTypeId": "PARTY_GROUP",
+                "externalId": "EXT-9",
+                "description": "original description",
+                "partyGroup": { "groupName": "Acme" },
+            }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+    let party = created.data()["id"]
+        .as_str()
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .expect("id");
+    let path = format!("{PARTIES}/{party}");
+
+    app.put(
+        &path,
+        Some(&token),
+        json!({ "description": "a new description" }),
+    )
+    .await;
+
+    let records = update_records(&app, &token, &path).await;
+    let [record] = records.as_slice() else {
+        panic!("one update, one record: {records:?}");
+    };
+
+    assert_eq!(
+        record["oldValue"],
+        json!({ "description": "original description" }),
+        "{record}"
+    );
+    assert_eq!(
+        record["newValue"],
+        json!({ "description": "a new description" }),
+        "{record}"
+    );
+
+    // The party still holds what the record does not mention.
+    let party = app.get(&path, Some(&token)).await;
+    assert_eq!(party.data()["externalId"], "EXT-9", "{}", party.body);
+    assert_eq!(party.data()["statusId"], "PARTY_ENABLED", "{}", party.body);
 }

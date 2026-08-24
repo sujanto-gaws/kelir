@@ -21,13 +21,13 @@ use uuid::Uuid;
 
 use super::domain::{AuditRecord, TransitionTarget};
 use super::repository as repo;
-use super::ROLE_READ;
+use super::{FACILITY_READ, PARTY_READ, ROLE_READ};
 use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
 use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
 
-/// The permission this surface needs.
+/// The permission that opens this surface — with the record's own, never alone.
 ///
 /// A new string rather than the audit module's own `audit:read`. That module
 /// has no endpoints yet, and minting its permission here would seed a
@@ -36,16 +36,40 @@ use crate::state::AppState;
 /// When FR-AUD-004 lands, `audit:read` is its to define, and whether this one
 /// folds into it is a decision that surface can make with its own requirements
 /// in front of it.
+///
+/// What it grants is the *question*, not the content: see
+/// [`list_audit_records`] for why the record's own read permission is required
+/// alongside it (#136).
 pub const AUDIT_READ: &str = "master-data:audit:read";
 
 /// One page of a record's history, oldest first.
 ///
-/// **Two permissions, conditionally.** `master-data:audit:read` is what opens
-/// the surface; `master-data:party-role:read` is what decides whether the role
-/// records are in it. #81 keeps `roles` and `profiles` off the aggregate for a
-/// caller without the second, and a role assignment's audit record names the
-/// role type — so returning them here would put *this party is a supplier* one
-/// URL away from a permission that exists to refuse exactly that.
+/// **Two permissions open it, and a third decides what is in it.**
+///
+/// `master-data:audit:read` is the governance half — may this caller ask who
+/// changed what. The record's own read permission is the content half, because
+/// a record's history is made of the record's own field values: `Party.Created`
+/// carries the party code, its type and its status, and `Facility.Updated`
+/// carries the name, the type and both references. A history needing only
+/// `audit:read` would be a way around `master-data:party:read` by exactly the
+/// argument that produced the role gate below, and #97 stated that argument in
+/// so many words — "a row is made of both surfaces, and a view needing only one
+/// would be a way around the other".
+///
+/// **That was not the first answer.** Until #136 `audit:read` alone opened the
+/// surface, deliberately and with a test asserting it, on the reading that a
+/// governance permission is separable from the content it governs. What
+/// settled it the other way is not that the first reading was unarguable but
+/// that this one function applied both rules at once — the role half gated, the
+/// party half not — and an asymmetry inside one function is a rule nobody can
+/// state. Decision **D-12** records the trade: every caller of a history now
+/// needs one permission more than it did.
+///
+/// **`master-data:party-role:read` decides whether the role records are in
+/// it.** #81 keeps `roles` and `profiles` off the aggregate for a caller
+/// without it, and a role assignment's audit record names the role type — so
+/// returning them here would put *this party is a supplier* one URL away from a
+/// permission that exists to refuse exactly that.
 ///
 /// The filter is applied in SQL rather than after the fact, so the withheld
 /// rows do not consume the page and `meta.total` counts what the caller can
@@ -59,6 +83,7 @@ pub async fn list_audit_records(
     pagination: &Pagination,
 ) -> Result<(Vec<AuditRecord>, PageMeta), AppError> {
     caller.require(AUDIT_READ)?;
+    caller.require(record_read_permission(target))?;
 
     let tenant_id = caller.tenant_id();
 
@@ -89,4 +114,15 @@ pub async fn list_audit_records(
     .await?;
 
     Ok((records, pagination.meta(total.max(0) as u64)))
+}
+
+/// The permission that opens the record whose history is being asked for.
+///
+/// Here rather than on [`TransitionTarget`] because the permission catalogue is
+/// a fact about this layer; `domain` neither knows the strings nor should.
+fn record_read_permission(target: TransitionTarget) -> &'static str {
+    match target {
+        TransitionTarget::Party => PARTY_READ,
+        TransitionTarget::Facility => FACILITY_READ,
+    }
 }

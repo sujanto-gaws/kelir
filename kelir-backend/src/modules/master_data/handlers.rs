@@ -490,6 +490,10 @@ async fn transition_facility(
 
 /// Oldest first, because the question is "how did this get here".
 ///
+/// Two permissions: `master-data:audit:read` asks the question and
+/// `master-data:party:read` opens the party, because a record's `oldValue` and
+/// `newValue` are the party's own field values (#136).
+///
 /// A caller without `master-data:party-role:read` gets the party's own history
 /// and not the role records: a role assignment names the role type, and #81
 /// keeps that from them one URL away.
@@ -498,7 +502,7 @@ async fn transition_facility(
     params(Pagination),
     responses(
         (status = 200, description = "What happened to this party", body = [AuditRecord]),
-        (status = 403, description = "Missing master-data:audit:read"),
+        (status = 403, description = "Missing master-data:audit:read or master-data:party:read"),
         (status = 404, description = "No such party")
     ),
     security(("bearer" = []))
@@ -516,12 +520,15 @@ async fn party_audit(
     Ok(Json(ListEnvelope::new(records, meta)))
 }
 
+/// The same two permissions, over the facility's own read permission:
+/// `master-data:audit:read` asks the question, `master-data:facility:read`
+/// opens the facility whose field values the record carries (#136).
 #[utoipa::path(
     get, path = "/api/v1/master-data/facilities/{id}/audit", tag = "master-data",
     params(Pagination),
     responses(
         (status = 200, description = "What happened to this facility", body = [AuditRecord]),
-        (status = 403, description = "Missing master-data:audit:read"),
+        (status = 403, description = "Missing master-data:audit:read or master-data:facility:read"),
         (status = 404, description = "No such facility")
     ),
     security(("bearer" = []))

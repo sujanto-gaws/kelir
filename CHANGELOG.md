@@ -110,7 +110,9 @@ While the major version is `0`, the public API may change in any release.
   belongs to the audit module's own surface (FR-AUD-004, Phase 6).
   `0012_master_data_audit_permission.sql` seeds `master-data:audit:read` — a
   master-data row rather than the audit module's own `audit:read`, which is
-  that module's to define when it has endpoints.
+  that module's to define when it has endpoints. It is not sufficient on its
+  own: see **Changed** for the record's own read permission, which #136
+  requires alongside it.
 - **Master data has a screen (FR-MDM-008).** `/master-data/parties` and the
   three role views, as **one component over four endpoints** — the backend
   shaped the role-view row so a client rendering all three needs one component
@@ -132,6 +134,50 @@ While the major version is `0`, the public API may change in any release.
   `v0.3.0` demo is shown from.
 ### Fixed
 
+- **An added migration did not rebuild the binary that embeds it.**
+  `sqlx::migrate!("./migrations")` reads the directory at compile time and
+  nothing declared it a build input, so on an incremental build `db.rs` kept the
+  previous set: `0013` was on disk, applied by nothing, and every test still
+  passed except the one that counts. `build.rs` now emits
+  `cargo:rerun-if-changed=migrations`. CI never saw it — it builds from cold —
+  which is exactly why it survived to be found by hand.
+- **An update's audit record stated the request rather than the change, and
+  reported untouched fields as cleared (#135).** Every field of an update
+  request is optional — that is what makes a partial update partial — so a field
+  the caller never mentioned serialised as `null`, and `new_value` was built
+  from the request. Changing only a facility's address produced a record whose
+  `newValue` said the name and the facility type had been cleared; both were
+  still there, and the address, the only thing that had actually changed, was in
+  neither half. `oldValue` came from the row, so the two halves were not even
+  descriptions of the same thing.
+
+  **Both halves now come from the row** — read before the write, read again
+  after — **and only the fields whose value moved are recorded.** A field that
+  did not move is absent from both halves, which is also what restores the
+  distinction `Option<Option<String>>` exists for: an omitted `parentFacilityId`
+  leaves the column alone and says nothing in the record, while an explicitly
+  cleared one moves to `null` and is recorded as such. The two were
+  indistinguishable before, so the trail could not tell a facility taken out
+  from under its parent from one whose parent was never mentioned. `address` and
+  `additionalAttributes` are covered for the first time; they are updatable and
+  had never appeared on either side. A `CREATE` record likewise reads its values
+  off the stored row, which differs from the request wherever a name was
+  trimmed.
+
+  **This was never a Sprint 6 regression.** `update_party` has had the same
+  shape since #80, with the same symptom — changing only a description reported
+  `externalId` and `statusId` as cleared — and #98 copied a pattern that was
+  already there. Both surfaces are fixed together. The party aggregate's
+  members (person, group, identifications, relationships, classifications,
+  contact mechanisms) are still absent from the record: they are replaced
+  wholesale by their own statements, they have never been recorded, and what a
+  *replacement of a list* means as a before and an after is a wider question
+  than this one.
+
+  The shared piece is `modules::audit::ChangeSet`, beside `AuditEntry`, because
+  every module that audits a partial update meets the same problem. Five tests,
+  each seen to fail against the code before this change (§2.9), and the failure
+  output of each is the symptom the issue describes.
 - **Eight predicates were exercised by no test, including the facility
   transition's compare-and-swap (#139).** The third of these in three sprints,
   after #106 and #121, and found the same way: of 48 mutations over the Sprint 6
@@ -307,6 +353,32 @@ While the major version is `0`, the public API may change in any release.
 
 ### Changed
 
+- **A record's change history now requires the record's own read permission as
+  well as `master-data:audit:read` (#136, decision D-12).**
+  `GET /parties/{id}/audit` needs `master-data:party:read` alongside it and
+  `GET /facilities/{id}/audit` needs `master-data:facility:read`. A record's
+  `oldValue` and `newValue` **are** the record's own field values — the party
+  code, its type, its status, a facility's name and both its references — so a
+  caller holding only `master-data:audit:read` was refused at
+  `GET /parties/{id}` and answered at `GET /parties/{id}/audit` with the same
+  values. The surface already applied that reasoning to the role half of the
+  same list, and #97 stated it in so many words for the role views: a row made
+  of two surfaces must not be reachable through one of them.
+
+  The previous rule was deliberate and tested, so this is a decision revisited
+  rather than a slip; **D-12** records why it went the other way and what the
+  alternative was. `master-data:party-role:read` still decides whether the role
+  records are in the page, unchanged. Nothing but `ROLE-ADMIN` holds
+  `master-data:audit:read` by default, so no seeded grant loses access.
+  `0013_master_data_audit_permission_scope.sql` rewrites the catalogue row's
+  description to say what the permission grants, and both `403` descriptions in
+  the OpenAPI document name both permissions.
+- The planned migrations shift down once more:
+  `0013_master_data_audit_permission_scope.sql` took the next free number, so
+  RAD is now `0014_rad.sql` and the plugin migration `0022_plugin.sql`. Nothing
+  merged was renumbered; the Database Schema mapping table is the sequence and
+  carries the correction, along with the System Design Document's file listing
+  and its one inline forward reference.
 - **`PUT /api/v1/master-data/parties/{id}/roles/{roleTypeId}` answers with the
   role assignment rather than with the party's whole `roles` and `profiles`
   collection**, as part of the fix above. Nothing consumed the old shape — the
