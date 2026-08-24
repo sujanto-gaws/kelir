@@ -57,7 +57,7 @@ Each folder is a numbered series (`NN. Title Case.md`); `00.` files are template
 | [00. Release Checklist Template.md](releases/00.%20Release%20Checklist%20Template.md) | Per-release evidence record for the [release process](../docs/standards/04.%20Release%20Process.md): pre-flight (scope, tests, migrations, docs, version), staging pass with rollback rehearsal, ship steps, aftermath |
 | [01. Release v0.1.0.md](releases/01.%20Release%20v0.1.0.md) | Phase 1. Cut 2026-08-12 — pre-flight and ship steps done, staging deploy outstanding and blocking |
 | [02. Release v0.2.0.md](releases/02.%20Release%20v0.2.0.md) | Phase 2, cut 2026-08-20. Two blocking checklist items outstanding: staging (#12) for the second release running, and the N−1 rollback rehearsal, run for the first time here and failed (#76) |
-| [03. Release v0.3.0.md](releases/03.%20Release%20v0.3.0.md) | Phase 3, **not yet cut**. The release check was rehearsed on 2026-08-24 at the sprint close rather than at the tag, and passed in full — including the N−1 rollback, which worked first time for the first time in the project, and the Phase 3 exit demo run end to end through the release images |
+| [03. Release v0.3.0.md](releases/03.%20Release%20v0.3.0.md) | Phase 3, cut 2026-08-24 at `2225c92`. The check was rehearsed at the sprint close *before* the tag and passed in full — the first release of the three that is proven rather than cut, and the first whose N−1 rollback worked without being fixed first |
 
 ### verifications/
 
