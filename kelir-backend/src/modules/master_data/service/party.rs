@@ -19,7 +19,7 @@ use super::repository::{
     PartyGroupFields, PartyRow, PersonFields, RelationshipFields,
 };
 use super::role::load_roles;
-use super::{OBJECT_TYPE, ROLE_READ};
+use super::{OBJECT_TYPE, PARTY_READ, ROLE_READ};
 use crate::error::{AppError, ValidationDetail};
 use crate::middleware::auth::Authenticated;
 use crate::modules::audit::{self, AuditEntry, ChangeSet};
@@ -31,7 +31,7 @@ pub async fn list_parties(
     caller: &Authenticated,
     pagination: &Pagination,
 ) -> Result<(Vec<PartySummary>, PageMeta), AppError> {
-    caller.require("master-data:party:read")?;
+    caller.require(PARTY_READ)?;
 
     let tenant_id = caller.tenant_id();
     let total = repo::count_parties(&state.pool, tenant_id).await?;
@@ -51,7 +51,7 @@ pub async fn get_party(
     caller: &Authenticated,
     id: Uuid,
 ) -> Result<PartyAggregate, AppError> {
-    caller.require("master-data:party:read")?;
+    caller.require(PARTY_READ)?;
 
     load_aggregate(state, caller, id).await
 }

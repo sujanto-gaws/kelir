@@ -29,6 +29,17 @@ pub use role_view::*;
 /// What the audit trail calls a party (naming convention §7).
 const OBJECT_TYPE: &str = "PARTY";
 
+/// The permission that opens a party.
+///
+/// Named rather than repeated since #136, because it is now checked from three
+/// surfaces — the party's own routes, the role views, and the change history of
+/// a party — and a permission string that three surfaces have to agree on
+/// should not be a literal in each of them.
+const PARTY_READ: &str = "master-data:party:read";
+
+/// The permission that opens a facility, named for the same reason.
+const FACILITY_READ: &str = "master-data:facility:read";
+
 /// The permission that makes a party's roles and profiles visible.
 ///
 /// Separate from `master-data:party:read` because the data is: a supplier

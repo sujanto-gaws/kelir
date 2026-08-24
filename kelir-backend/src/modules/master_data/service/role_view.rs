@@ -8,7 +8,7 @@
 
 use super::domain::{RoleView, RoleViewQuery, RoleViewRow};
 use super::repository as repo;
-use super::ROLE_READ;
+use super::{PARTY_READ, ROLE_READ};
 use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
 use crate::response::PageMeta;
@@ -39,7 +39,7 @@ pub async fn list_role_view(
     view: RoleView,
     query: &RoleViewQuery,
 ) -> Result<(Vec<RoleViewRow>, PageMeta), AppError> {
-    caller.require("master-data:party:read")?;
+    caller.require(PARTY_READ)?;
     caller.require(ROLE_READ)?;
 
     let filters = query.filters()?;

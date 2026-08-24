@@ -14,6 +14,7 @@ use super::domain::{
     FacilitySummary, FacilityType, PostalAddress, UpdateFacilityRequest, MAX_FACILITY_DEPTH,
 };
 use super::repository::{self as repo, FacilityFields, NewFacility};
+use super::FACILITY_READ;
 use crate::error::{AppError, ValidationDetail};
 use crate::middleware::auth::Authenticated;
 use crate::modules::audit::{self, AuditEntry, ChangeSet};
@@ -28,7 +29,7 @@ pub async fn list_facilities(
     caller: &Authenticated,
     pagination: &Pagination,
 ) -> Result<(Vec<FacilitySummary>, PageMeta), AppError> {
-    caller.require("master-data:facility:read")?;
+    caller.require(FACILITY_READ)?;
 
     let tenant_id = caller.tenant_id();
     let total = repo::count_facilities(&state.pool, tenant_id).await?;
@@ -48,7 +49,7 @@ pub async fn get_facility(
     caller: &Authenticated,
     id: Uuid,
 ) -> Result<Facility, AppError> {
-    caller.require("master-data:facility:read")?;
+    caller.require(FACILITY_READ)?;
 
     repo::find_facility(&state.pool, caller.tenant_id(), id)
         .await?

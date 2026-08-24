@@ -19,6 +19,8 @@ const PARTIES: &str = "/api/v1/master-data/parties";
 const FACILITIES: &str = "/api/v1/master-data/facilities";
 const AUDIT_READ: &str = "master-data:audit:read";
 const ROLE_READ: &str = "master-data:party-role:read";
+const PARTY_READ: &str = "master-data:party:read";
+const FACILITY_READ: &str = "master-data:facility:read";
 const PASSWORD: &str = "audit-caller-password";
 
 // ---------------------------------------------------------------------------
@@ -262,7 +264,7 @@ async fn the_history_withholds_the_role_records_without_the_role_read_permission
     let token = app.administrator_token().await;
     let party = a_party_with_a_history(&app, &token).await;
 
-    let auditor = caller_holding(&app, &[AUDIT_READ, "master-data:party:read"], 1).await;
+    let auditor = caller_holding(&app, &[AUDIT_READ, PARTY_READ], 1).await;
     let history = app
         .get(&format!("{PARTIES}/{party}/audit"), Some(&auditor))
         .await;
@@ -313,7 +315,7 @@ async fn the_history_shows_the_role_records_to_a_caller_who_may_read_roles() {
     let token = app.administrator_token().await;
     let party = a_party_with_a_history(&app, &token).await;
 
-    let auditor = caller_holding(&app, &[AUDIT_READ, ROLE_READ], 2).await;
+    let auditor = caller_holding(&app, &[AUDIT_READ, PARTY_READ, ROLE_READ], 2).await;
     let history = app
         .get(&format!("{PARTIES}/{party}/audit"), Some(&auditor))
         .await;
@@ -369,11 +371,7 @@ async fn the_history_needs_its_own_permission() {
 
     let everything_else = caller_holding(
         &app,
-        &[
-            "master-data:party:read",
-            "master-data:party:update",
-            ROLE_READ,
-        ],
+        &[PARTY_READ, "master-data:party:update", ROLE_READ],
         3,
     )
     .await;
@@ -385,12 +383,80 @@ async fn the_history_needs_its_own_permission() {
         StatusCode::FORBIDDEN
     );
 
-    let auditor = caller_holding(&app, &[AUDIT_READ], 4).await;
+    // Since #136 the surface needs the record's own read permission alongside
+    // it, so the caller who is allowed through holds both. That the second one
+    // is genuinely required is
+    // `the_history_needs_the_records_own_read_permission_too`.
+    let auditor = caller_holding(&app, &[AUDIT_READ, PARTY_READ], 4).await;
     assert_eq!(
         app.get(&format!("{PARTIES}/{party}/audit"), Some(&auditor))
             .await
             .status,
         StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn the_history_needs_the_records_own_read_permission_too() {
+    // #136. A record's history is made of the record's own field values —
+    // `Party.Created` carries the party code, its type and its status — so
+    // `master-data:audit:read` alone would hand over at the side door what
+    // `master-data:party:read` refuses at the front one. The module already
+    // applies that rule to the role half of the same list; this is the party
+    // half of it.
+    //
+    // Both routes, because the reasoning is about the record and not about the
+    // entity: a facility's history answers the same way to
+    // `master-data:facility:read`.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let party = given_party(&app, &token, "PARTY-ACME").await;
+    let facility = given_facility(
+        &app,
+        &token,
+        json!({ "facilityId": "FAC-HQ", "name": "Head Office" }),
+    )
+    .await;
+
+    let party_history = format!("{PARTIES}/{party}/audit");
+    let facility_history = format!("{FACILITIES}/{facility}/audit");
+
+    // The permission that opens the surface, and nothing that opens a record.
+    let auditor = caller_holding(&app, &[AUDIT_READ], 5).await;
+    for path in [&party_history, &facility_history] {
+        assert_eq!(
+            app.get(path, Some(&auditor)).await.status,
+            StatusCode::FORBIDDEN,
+            "{AUDIT_READ} alone read a record's own field values: {path}"
+        );
+    }
+
+    // And it is the record's own permission that is missing rather than any
+    // permission at all: each caller below is refused exactly where they may
+    // not read.
+    let over_parties = caller_holding(&app, &[AUDIT_READ, PARTY_READ], 6).await;
+    assert_eq!(
+        app.get(&party_history, Some(&over_parties)).await.status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.get(&facility_history, Some(&over_parties)).await.status,
+        StatusCode::FORBIDDEN,
+        "a party reader was given a facility's history"
+    );
+
+    let over_facilities = caller_holding(&app, &[AUDIT_READ, FACILITY_READ], 7).await;
+    assert_eq!(
+        app.get(&facility_history, Some(&over_facilities))
+            .await
+            .status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.get(&party_history, Some(&over_facilities)).await.status,
+        StatusCode::FORBIDDEN,
+        "a facility reader was given a party's history"
     );
 }
 

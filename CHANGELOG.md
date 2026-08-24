@@ -110,7 +110,9 @@ While the major version is `0`, the public API may change in any release.
   belongs to the audit module's own surface (FR-AUD-004, Phase 6).
   `0012_master_data_audit_permission.sql` seeds `master-data:audit:read` — a
   master-data row rather than the audit module's own `audit:read`, which is
-  that module's to define when it has endpoints.
+  that module's to define when it has endpoints. It is not sufficient on its
+  own: see **Changed** for the record's own read permission, which #136
+  requires alongside it.
 - **Master data has a screen (FR-MDM-008).** `/master-data/parties` and the
   three role views, as **one component over four endpoints** — the backend
   shaped the role-view row so a client rendering all three needs one component
@@ -132,6 +134,13 @@ While the major version is `0`, the public API may change in any release.
   `v0.3.0` demo is shown from.
 ### Fixed
 
+- **An added migration did not rebuild the binary that embeds it.**
+  `sqlx::migrate!("./migrations")` reads the directory at compile time and
+  nothing declared it a build input, so on an incremental build `db.rs` kept the
+  previous set: `0013` was on disk, applied by nothing, and every test still
+  passed except the one that counts. `build.rs` now emits
+  `cargo:rerun-if-changed=migrations`. CI never saw it — it builds from cold —
+  which is exactly why it survived to be found by hand.
 - **An update's audit record stated the request rather than the change, and
   reported untouched fields as cleared (#135).** Every field of an update
   request is optional — that is what makes a partial update partial — so a field
@@ -344,6 +353,32 @@ While the major version is `0`, the public API may change in any release.
 
 ### Changed
 
+- **A record's change history now requires the record's own read permission as
+  well as `master-data:audit:read` (#136, decision D-12).**
+  `GET /parties/{id}/audit` needs `master-data:party:read` alongside it and
+  `GET /facilities/{id}/audit` needs `master-data:facility:read`. A record's
+  `oldValue` and `newValue` **are** the record's own field values — the party
+  code, its type, its status, a facility's name and both its references — so a
+  caller holding only `master-data:audit:read` was refused at
+  `GET /parties/{id}` and answered at `GET /parties/{id}/audit` with the same
+  values. The surface already applied that reasoning to the role half of the
+  same list, and #97 stated it in so many words for the role views: a row made
+  of two surfaces must not be reachable through one of them.
+
+  The previous rule was deliberate and tested, so this is a decision revisited
+  rather than a slip; **D-12** records why it went the other way and what the
+  alternative was. `master-data:party-role:read` still decides whether the role
+  records are in the page, unchanged. Nothing but `ROLE-ADMIN` holds
+  `master-data:audit:read` by default, so no seeded grant loses access.
+  `0013_master_data_audit_permission_scope.sql` rewrites the catalogue row's
+  description to say what the permission grants, and both `403` descriptions in
+  the OpenAPI document name both permissions.
+- The planned migrations shift down once more:
+  `0013_master_data_audit_permission_scope.sql` took the next free number, so
+  RAD is now `0014_rad.sql` and the plugin migration `0022_plugin.sql`. Nothing
+  merged was renumbered; the Database Schema mapping table is the sequence and
+  carries the correction, along with the System Design Document's file listing
+  and its one inline forward reference.
 - **`PUT /api/v1/master-data/parties/{id}/roles/{roleTypeId}` answers with the
   role assignment rather than with the party's whole `roles` and `profiles`
   collection**, as part of the fix above. Nothing consumed the old shape — the
