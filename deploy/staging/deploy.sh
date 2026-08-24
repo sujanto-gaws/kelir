@@ -194,8 +194,14 @@ cat <<EOF
 
 $(printf '\033[1;32m==> %s is live at %s\033[0m' "${VERSION}" "${KELIR_PUBLIC_URL}")
 
-Still to verify by hand, as each phase delivers it (release process §4 step 7):
-  login · document submission · one workflow approval
+Sign-in is covered by the browser harness — run it against this address rather
+than repeating the flow yourself (release process §4 step 7):
+
+  cd e2e && npm ci
+  KELIR_E2E_BASE_URL=${KELIR_PUBLIC_URL} KELIR_E2E_PASSWORD=... npm test
+
+Still to verify by hand, as each phase delivers it:
+  document submission · one workflow approval
 
 Rollback:
   ./deploy.sh <previous-version>

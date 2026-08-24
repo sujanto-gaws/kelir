@@ -15,6 +15,13 @@ yarn-error.log*
 coverage/
 .nyc_output/
 
+# End-to-end harness output (e2e/). Reports, traces, screenshots and video are
+# artifacts of a run, uploaded by CI when a run fails; none of them is source.
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+
 # Env
 # Real env files never; the *.example templates always. The second negation
 # covers per-environment templates such as .env.staging.example, which the
