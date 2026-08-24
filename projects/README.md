@@ -1,6 +1,6 @@
 # Kelir Project Management
 
-**Status:** Living · **Last updated:** 2026-08-23
+**Status:** Living · **Last updated:** 2026-08-24
 
 This folder holds Kelir's **project management artifacts** — the documents that govern *when and in what order* things get built. They live outside [docs/](../docs/) deliberately: `docs/` describes the system (requirements, architecture, design, standards — see its [README](../docs/README.md) for the full index and authority rules); `projects/` describes the work.
 
@@ -38,6 +38,7 @@ Each folder is a numbered series (`NN. Title Case.md`); `00.` files are template
 | [04. Sprint 3 Status.md](status/04.%20Sprint%203%20Status.md) | Sprint 3, closed 2026-08-12: the Phase 2 backend — authentication with rotating refresh tokens, users, roles, permission enforcement, and the audit write path |
 | [05. Sprint 4 Status.md](status/05.%20Sprint%204%20Status.md) | Sprint 4, closed 2026-08-13: the Phase 2 `Must` scope built and merged, and two items recorded as delivered that failed Definition-of-Done verification. Five open decisions, two of which gate the `v0.2.0` tag |
 | [06. Sprint 5 Status.md](status/06.%20Sprint%205%20Status.md) | Sprint 5, closed 2026-08-21: the Phase 2 exit debt discharged and the party model built — seven items planned, seven closed. Every Done row cites evidence; two of them cite evidence the item's own author produced, which is what [Sprint 5's retrospective](retrospectives/03.%20Sprint%205%20Retrospective.md) turned into a rule |
+| [07. Sprint 6 Status.md](status/07.%20Sprint%206%20Status.md) | Sprint 6, closed 2026-08-24: Phase 3's `Must` scope built — facilities, the record-status lifecycle, the change history and the list UI — and every release-blocking finding of the three independent passes closed. Six items planned, six built, twenty issues filed against the sprint by its own verifiers and fourteen closed in it. The `v0.3.0` rehearsal is the one thing left before the tag |
 
 ### retrospectives/
 
@@ -47,6 +48,7 @@ Each folder is a numbered series (`NN. Title Case.md`); `00.` files are template
 | [01. Sprints 0-1 Retrospective.md](retrospectives/01.%20Sprints%200-1%20Retrospective.md) | Combined, because the two sprints ran without a boundary and their lessons interleave. Six committed actions, chiefly: scaffolds must run rather than merely compile, and acceptance criteria state outcomes rather than mechanisms |
 | [02. Sprints 2-4 Retrospective.md](retrospectives/02.%20Sprints%202-4%20Retrospective.md) | Combined because Sprints 2 and 3 closed without one — itself a finding. Eight actions, chiefly: a security-control test is not accepted until the defect it claims to catch has been reintroduced and seen to fail, and a status report does not go Final without its retrospective |
 | [03. Sprint 5 Retrospective.md](retrospectives/03.%20Sprint%205%20Retrospective.md) | Sprint 5, 2026-08-21. Chiefly: an item whose author is also its only verifier is `In progress`, not Done — twenty mutation runs designed by the agent that wrote the code are strong evidence of what the tests catch and no evidence of what nobody thought to test |
+| [04. Sprint 6 Retrospective.md](retrospectives/04.%20Sprint%206%20Retrospective.md) | Sprint 6, 2026-08-24. Eight actions, chiefly: the pull requests that close a verification record get a bounded independent read before the release they gate, the release rehearsal becomes the next sprint's entry criterion rather than this one's exit step, and a test asserting a project-wide property discovers its subjects instead of listing them |
 
 ### releases/
 
