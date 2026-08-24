@@ -132,6 +132,43 @@ While the major version is `0`, the public API may change in any release.
   `v0.3.0` demo is shown from.
 ### Fixed
 
+- **An update's audit record stated the request rather than the change, and
+  reported untouched fields as cleared (#135).** Every field of an update
+  request is optional — that is what makes a partial update partial — so a field
+  the caller never mentioned serialised as `null`, and `new_value` was built
+  from the request. Changing only a facility's address produced a record whose
+  `newValue` said the name and the facility type had been cleared; both were
+  still there, and the address, the only thing that had actually changed, was in
+  neither half. `oldValue` came from the row, so the two halves were not even
+  descriptions of the same thing.
+
+  **Both halves now come from the row** — read before the write, read again
+  after — **and only the fields whose value moved are recorded.** A field that
+  did not move is absent from both halves, which is also what restores the
+  distinction `Option<Option<String>>` exists for: an omitted `parentFacilityId`
+  leaves the column alone and says nothing in the record, while an explicitly
+  cleared one moves to `null` and is recorded as such. The two were
+  indistinguishable before, so the trail could not tell a facility taken out
+  from under its parent from one whose parent was never mentioned. `address` and
+  `additionalAttributes` are covered for the first time; they are updatable and
+  had never appeared on either side. A `CREATE` record likewise reads its values
+  off the stored row, which differs from the request wherever a name was
+  trimmed.
+
+  **This was never a Sprint 6 regression.** `update_party` has had the same
+  shape since #80, with the same symptom — changing only a description reported
+  `externalId` and `statusId` as cleared — and #98 copied a pattern that was
+  already there. Both surfaces are fixed together. The party aggregate's
+  members (person, group, identifications, relationships, classifications,
+  contact mechanisms) are still absent from the record: they are replaced
+  wholesale by their own statements, they have never been recorded, and what a
+  *replacement of a list* means as a before and an after is a wider question
+  than this one.
+
+  The shared piece is `modules::audit::ChangeSet`, beside `AuditEntry`, because
+  every module that audits a partial update meets the same problem. Five tests,
+  each seen to fail against the code before this change (§2.9), and the failure
+  output of each is the symptom the issue describes.
 - **Eight predicates were exercised by no test, including the facility
   transition's compare-and-swap (#139).** The third of these in three sprints,
   after #106 and #121, and found the same way: of 48 mutations over the Sprint 6

@@ -536,3 +536,298 @@ async fn both_history_routes_refuse_a_request_with_no_token() {
         assert_eq!(response.status, StatusCode::UNAUTHORIZED, "{path}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// A record is the change, not the request (#135)
+// ---------------------------------------------------------------------------
+
+async fn given_facility(app: &TestApp, token: &str, body: Value) -> Uuid {
+    let created = app.post(FACILITIES, Some(token), body).await;
+
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    created.data()["id"]
+        .as_str()
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .expect("id")
+}
+
+/// Every UPDATE record against one record, oldest first.
+async fn update_records(app: &TestApp, token: &str, path: &str) -> Vec<Value> {
+    let history = app.get(&format!("{path}/audit"), Some(token)).await;
+    assert_eq!(history.status, StatusCode::OK, "{}", history.body);
+
+    history.body["data"]
+        .as_array()
+        .unwrap_or_else(|| panic!("data is not a list: {}", history.body))
+        .iter()
+        .filter(|record| record["action"] == "UPDATE")
+        .cloned()
+        .collect()
+}
+
+/// The field names one half of a record carries, sorted.
+///
+/// Sorted because the column is `JSONB` and PostgreSQL orders an object's keys
+/// by length and then by bytes, which is neither the order they were written in
+/// nor the one `serde_json` would produce.
+fn fields(half: &Value) -> Vec<String> {
+    let mut names: Vec<String> = half
+        .as_object()
+        .unwrap_or_else(|| panic!("not an object: {half}"))
+        .keys()
+        .cloned()
+        .collect();
+
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn an_updates_record_names_the_fields_that_changed_and_no_others() {
+    // #135 AC1 and AC2. Every field of an update request is optional — that is
+    // what makes a partial update partial — so a field the caller did not
+    // mention serialised as `null` on the new side, and the record said the
+    // name and the type had been cleared when neither had been touched.
+    //
+    // `address` and `additionalAttributes` are the other half of the same
+    // defect: both are updatable and neither appeared on either side, so the
+    // only thing that did change was in no half of the record at all.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let facility = given_facility(
+        &app,
+        &token,
+        json!({ "facilityId": "FAC-HQ", "name": "Head Office", "facilityTypeId": "BUILDING" }),
+    )
+    .await;
+    let path = format!("{FACILITIES}/{facility}");
+
+    let updated = app
+        .put(
+            &path,
+            Some(&token),
+            json!({
+                "address": { "address1": "1 Dock Road", "city": "Surabaya" },
+                "additionalAttributes": { "floors": 3 },
+            }),
+        )
+        .await;
+    assert_eq!(updated.status, StatusCode::OK, "{}", updated.body);
+
+    let records = update_records(&app, &token, &path).await;
+    let [record] = records.as_slice() else {
+        panic!("one update, one record: {records:?}");
+    };
+
+    // The two fields that moved, on both sides, and nothing else on either.
+    assert_eq!(
+        fields(&record["oldValue"]),
+        vec!["additionalAttributes", "address"],
+        "{record}"
+    );
+    assert_eq!(
+        fields(&record["newValue"]),
+        vec!["additionalAttributes", "address"],
+        "{record}"
+    );
+
+    assert_eq!(record["oldValue"]["address"], Value::Null, "{record}");
+    assert_eq!(
+        record["oldValue"]["additionalAttributes"],
+        json!({}),
+        "{record}"
+    );
+    assert_eq!(
+        record["newValue"]["address"]["address1"], "1 Dock Road",
+        "{record}"
+    );
+    assert_eq!(
+        record["newValue"]["address"]["city"], "Surabaya",
+        "{record}"
+    );
+    assert_eq!(
+        record["newValue"]["additionalAttributes"],
+        json!({ "floors": 3 }),
+        "{record}"
+    );
+
+    // And the facility still holds the name and the type the record does not
+    // mention, which is what makes naming them a false statement.
+    let facility = app.get(&path, Some(&token)).await;
+    assert_eq!(facility.data()["name"], "Head Office", "{}", facility.body);
+    assert_eq!(
+        facility.data()["facilityTypeId"],
+        "BUILDING",
+        "{}",
+        facility.body
+    );
+}
+
+#[tokio::test]
+async fn both_halves_of_a_record_are_read_off_the_row() {
+    // The request is not the change even for a field it does name: the service
+    // trims a name before storing it, so a record built from the payload
+    // reports a value the column does not hold.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let facility = given_facility(
+        &app,
+        &token,
+        json!({ "facilityId": "FAC-HQ", "name": "Head Office" }),
+    )
+    .await;
+    let path = format!("{FACILITIES}/{facility}");
+
+    app.put(
+        &path,
+        Some(&token),
+        json!({ "name": "  Head Office (North)  " }),
+    )
+    .await;
+
+    let records = update_records(&app, &token, &path).await;
+    let [record] = records.as_slice() else {
+        panic!("one update, one record: {records:?}");
+    };
+
+    assert_eq!(
+        record["oldValue"],
+        json!({ "name": "Head Office" }),
+        "{record}"
+    );
+    assert_eq!(
+        record["newValue"],
+        json!({ "name": "Head Office (North)" }),
+        "{record}"
+    );
+}
+
+#[tokio::test]
+async fn clearing_a_reference_and_leaving_it_alone_are_different_records() {
+    // #135 AC3. `parentFacilityId` is `Option<Option<String>>` precisely so
+    // that *omitted* and *explicitly cleared* are different requests, and
+    // `update_facility_fields` goes to some trouble to honour the difference.
+    // Both serialised to `null`, so the audit trail could not tell a facility
+    // taken out from under its parent from one whose parent was never
+    // mentioned.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    given_facility(
+        &app,
+        &token,
+        json!({ "facilityId": "FAC-SITE", "name": "Dock Site", "facilityTypeId": "SITE" }),
+    )
+    .await;
+    let facility = given_facility(
+        &app,
+        &token,
+        json!({
+            "facilityId": "FAC-HQ",
+            "name": "Head Office",
+            "facilityTypeId": "BUILDING",
+            "parentFacilityId": "FAC-SITE",
+        }),
+    )
+    .await;
+    let path = format!("{FACILITIES}/{facility}");
+
+    // Omitted: the parent is not what this request is about.
+    app.put(
+        &path,
+        Some(&token),
+        json!({ "name": "Head Office (North)" }),
+    )
+    .await;
+
+    // Cleared: the parent is exactly what this request is about.
+    let detached = app
+        .put(&path, Some(&token), json!({ "parentFacilityId": null }))
+        .await;
+    assert_eq!(detached.status, StatusCode::OK, "{}", detached.body);
+
+    let records = update_records(&app, &token, &path).await;
+    let [left_alone, cleared] = records.as_slice() else {
+        panic!("two updates, two records: {records:?}");
+    };
+
+    assert_eq!(
+        fields(&left_alone["oldValue"]),
+        vec!["name"],
+        "{left_alone}"
+    );
+    assert_eq!(
+        fields(&left_alone["newValue"]),
+        vec!["name"],
+        "{left_alone}"
+    );
+
+    assert_eq!(
+        cleared["oldValue"],
+        json!({ "parentFacilityId": "FAC-SITE" }),
+        "{cleared}"
+    );
+    assert_eq!(
+        cleared["newValue"],
+        json!({ "parentFacilityId": null }),
+        "{cleared}"
+    );
+}
+
+#[tokio::test]
+async fn a_partys_update_records_the_change_too() {
+    // #135 AC4. `update_party` has had the same shape since #80 and the same
+    // symptom: changing only the description reported `externalId` and
+    // `statusId` as cleared, and both were still there.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let created = app
+        .post(
+            PARTIES,
+            Some(&token),
+            json!({
+                "partyId": "PARTY-ACME",
+                "partyTypeId": "PARTY_GROUP",
+                "externalId": "EXT-9",
+                "description": "original description",
+                "partyGroup": { "groupName": "Acme" },
+            }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+    let party = created.data()["id"]
+        .as_str()
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .expect("id");
+    let path = format!("{PARTIES}/{party}");
+
+    app.put(
+        &path,
+        Some(&token),
+        json!({ "description": "a new description" }),
+    )
+    .await;
+
+    let records = update_records(&app, &token, &path).await;
+    let [record] = records.as_slice() else {
+        panic!("one update, one record: {records:?}");
+    };
+
+    assert_eq!(
+        record["oldValue"],
+        json!({ "description": "original description" }),
+        "{record}"
+    );
+    assert_eq!(
+        record["newValue"],
+        json!({ "description": "a new description" }),
+        "{record}"
+    );
+
+    // The party still holds what the record does not mention.
+    let party = app.get(&path, Some(&token)).await;
+    assert_eq!(party.data()["externalId"], "EXT-9", "{}", party.body);
+    assert_eq!(party.data()["statusId"], "PARTY_ENABLED", "{}", party.body);
+}

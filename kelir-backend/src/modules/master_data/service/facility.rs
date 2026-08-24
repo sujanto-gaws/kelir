@@ -16,7 +16,7 @@ use super::domain::{
 use super::repository::{self as repo, FacilityFields, NewFacility};
 use crate::error::{AppError, ValidationDetail};
 use crate::middleware::auth::Authenticated;
-use crate::modules::audit::{self, AuditEntry};
+use crate::modules::audit::{self, AuditEntry, ChangeSet};
 use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
 
@@ -119,6 +119,12 @@ pub async fn create_facility(
 
     transaction.commit().await?;
 
+    // Read back before the record is written, so the record says what the row
+    // holds rather than what the request asked for (#135). The two differ even
+    // on a create: a name is trimmed on the way in, and a reference is stored
+    // against the code the resolver found.
+    let created = load(state, tenant_id, id).await?;
+
     audit::record_or_warn(
         &state.pool,
         AuditEntry {
@@ -132,17 +138,17 @@ pub async fn create_facility(
             reason: None,
             old_value: None,
             new_value: Some(json!({
-                "facilityId": facility_code,
-                "name": name,
-                "facilityTypeId": request.facility_type_id.map(FacilityType::as_db),
-                "parentFacilityId": request.parent_facility_id,
-                "ownerPartyId": request.owner_party_id,
+                "facilityId": created.facility_id,
+                "name": created.name,
+                "facilityTypeId": created.facility_type_id,
+                "parentFacilityId": created.parent_facility_id,
+                "ownerPartyId": created.owner_party_id,
             })),
         },
     )
     .await;
 
-    load(state, tenant_id, id).await
+    Ok(created)
 }
 
 pub async fn update_facility(
@@ -222,6 +228,12 @@ pub async fn update_facility(
 
     transaction.commit().await?;
 
+    // The row as it now is, against the row as it was. `load` was already the
+    // last thing this function did; reading it here rather than after the audit
+    // write is what gives the record an *after* to compare against (#135).
+    let after = load(state, tenant_id, id).await?;
+    let (old_value, new_value) = facility_changes(&before, &after).halves();
+
     audit::record_or_warn(
         &state.pool,
         AuditEntry {
@@ -233,23 +245,53 @@ pub async fn update_facility(
             actor_user_id: actor,
             ip_address: None,
             reason: None,
-            old_value: Some(json!({
-                "name": before.name,
-                "facilityTypeId": before.facility_type_id.map(FacilityType::as_db),
-                "parentFacilityId": before.parent_facility_id,
-                "ownerPartyId": before.owner_party_id,
-            })),
-            new_value: Some(json!({
-                "name": request.name,
-                "facilityTypeId": request.facility_type_id.map(FacilityType::as_db),
-                "parentFacilityId": request.parent_facility_id,
-                "ownerPartyId": request.owner_party_id,
-            })),
+            old_value: Some(old_value),
+            new_value: Some(new_value),
         },
     )
     .await;
 
-    load(state, tenant_id, id).await
+    Ok(after)
+}
+
+/// What one update moved, in the vocabulary the API publishes.
+///
+/// Every field an [`UpdateFacilityRequest`] can change is listed — `address`
+/// and `additionalAttributes` included, which the old record named on neither
+/// side, so a request that changed only an address produced a record in which
+/// the address did not appear.
+///
+/// `facilityId` and `recordStatusId` are absent because no update can move
+/// them: the code is fixed at creation, and the lifecycle status moves only
+/// through `POST /facilities/{id}/transition`, which writes its own record with
+/// its own action.
+fn facility_changes(before: &Facility, after: &Facility) -> ChangeSet {
+    let mut changes = ChangeSet::new();
+
+    changes.field("name", &before.name, &after.name);
+    changes.field(
+        "facilityTypeId",
+        &before.facility_type_id,
+        &after.facility_type_id,
+    );
+    changes.field(
+        "parentFacilityId",
+        &before.parent_facility_id,
+        &after.parent_facility_id,
+    );
+    changes.field(
+        "ownerPartyId",
+        &before.owner_party_id,
+        &after.owner_party_id,
+    );
+    changes.field("address", &before.address, &after.address);
+    changes.field(
+        "additionalAttributes",
+        &before.additional_attributes,
+        &after.additional_attributes,
+    );
+
+    changes
 }
 
 /// Soft-deletes a facility, refusing while anything still sits under it.

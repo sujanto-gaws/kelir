@@ -6,7 +6,8 @@
 //! Phase 2 writes the chain; verifying it and exposing audit search land with
 //! the rest of §10 in Phase 6.
 
-use serde_json::Value;
+use serde::Serialize;
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -25,6 +26,73 @@ pub struct AuditEntry<'a> {
     pub reason: Option<&'a str>,
     pub old_value: Option<Value>,
     pub new_value: Option<Value>,
+}
+
+/// What a write actually changed, for the two halves of an [`AuditEntry`].
+///
+/// An update request carries only the fields it changes — that is what makes a
+/// partial update partial — so **the request is not a description of the
+/// change**. A field the caller never mentioned deserialises to the same `None`
+/// as one they asked to clear, and a record built from the request cannot tell
+/// the two apart. It reported the second: an update that touched one field
+/// produced a record saying every other field had been cleared, and the field
+/// that did change was in neither half (#135).
+///
+/// So both halves are read off the row — once before the write, once after —
+/// and only the fields whose value moved are recorded. A field that did not
+/// move is absent from both halves, which is also what removes the ambiguity:
+/// *omitted* leaves the value where it was and says nothing here, while
+/// *cleared* moves it to `null` and is recorded as such.
+///
+/// It follows that a request which changes nothing records nothing on either
+/// side. The record still exists, with its actor and its time and two empty
+/// objects — the update happened and moved no field, which is what the trail
+/// should say.
+///
+/// ```ignore
+/// let mut changes = ChangeSet::new();
+/// changes.field("name", &before.name, &after.name);
+/// changes.field("ownerPartyId", &before.owner_party_id, &after.owner_party_id);
+/// let (old_value, new_value) = changes.halves();
+/// ```
+#[derive(Debug, Default)]
+pub struct ChangeSet {
+    old: Map<String, Value>,
+    new: Map<String, Value>,
+}
+
+impl ChangeSet {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records `name` if the row's value for it moved, and nothing otherwise.
+    ///
+    /// Both sides are serialised the way the API publishes them, so a record
+    /// reads in the caller's vocabulary — `"BUILDING"` rather than the enum,
+    /// under the `facilityTypeId` the caller sent. `name` is therefore the
+    /// wire name of the field and not the column's.
+    ///
+    /// Serialisation cannot fail for what a caller passes here: a string, a
+    /// plain enum, an `Option` of one, or a `Value` already read out of a JSONB
+    /// column. `Value::Null` stands in if one ever did, and a field that
+    /// serialises to null on both sides is a field that did not move.
+    pub fn field<T: Serialize + ?Sized>(&mut self, name: &str, before: &T, after: &T) {
+        let before = serde_json::to_value(before).unwrap_or(Value::Null);
+        let after = serde_json::to_value(after).unwrap_or(Value::Null);
+
+        if before == after {
+            return;
+        }
+
+        self.old.insert(name.to_owned(), before);
+        self.new.insert(name.to_owned(), after);
+    }
+
+    /// The `old_value` and `new_value` of the entry, in that order.
+    pub fn halves(self) -> (Value, Value) {
+        (Value::Object(self.old), Value::Object(self.new))
+    }
 }
 
 /// Appends an audit event, chaining it to the tenant's previous row.
@@ -142,6 +210,55 @@ mod tests {
             old_value: None,
             new_value: None,
         }
+    }
+
+    #[test]
+    fn a_change_set_records_only_the_fields_that_moved() {
+        let mut changes = ChangeSet::new();
+        changes.field("name", "Head Office", "Head Office (North)");
+        changes.field("facilityTypeId", "BUILDING", "BUILDING");
+
+        let (old_value, new_value) = changes.halves();
+
+        assert_eq!(old_value, serde_json::json!({ "name": "Head Office" }));
+        assert_eq!(
+            new_value,
+            serde_json::json!({ "name": "Head Office (North)" })
+        );
+    }
+
+    #[test]
+    fn clearing_a_field_is_not_the_same_as_leaving_it_alone() {
+        // The distinction #135 is about. `Option<Option<T>>` exists in the
+        // update requests so that *omitted* and *set to null* are different
+        // requests; recording the request lost that, and recording the row
+        // keeps it — an omitted field never moves, so it is never written.
+        let mut cleared = ChangeSet::new();
+        cleared.field("parentFacilityId", &Some("FAC-SITE"), &None);
+
+        let mut left_alone = ChangeSet::new();
+        left_alone.field("parentFacilityId", &Some("FAC-SITE"), &Some("FAC-SITE"));
+
+        let (old_value, new_value) = cleared.halves();
+        assert_eq!(
+            old_value,
+            serde_json::json!({ "parentFacilityId": "FAC-SITE" })
+        );
+        assert_eq!(new_value, serde_json::json!({ "parentFacilityId": null }));
+
+        let (old_value, new_value) = left_alone.halves();
+        assert_eq!(old_value, serde_json::json!({}));
+        assert_eq!(new_value, serde_json::json!({}));
+    }
+
+    #[test]
+    fn a_write_that_moved_nothing_records_two_empty_halves() {
+        // Not `null`: a DELETE has no halves at all, and the difference between
+        // "not applicable" and "nothing moved" is worth keeping in the trail.
+        let (old_value, new_value) = ChangeSet::new().halves();
+
+        assert_eq!(old_value, serde_json::json!({}));
+        assert_eq!(new_value, serde_json::json!({}));
     }
 
     #[test]
