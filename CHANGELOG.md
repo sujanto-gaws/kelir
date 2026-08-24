@@ -9,6 +9,27 @@ While the major version is `0`, the public API may change in any release.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.3.0] — 2026-08-24
+
+Phase 3: a party is created and given the roles that make it a supplier, a
+customer or an employee; facilities form a hierarchy that stays a tree; master
+data moves through a governed lifecycle; and every change to it can be read back
+off the record it happened to.
+
+**This is the first release whose rollback was rehearsed and worked.** `0.1.0`
+deferred the rehearsal and `0.2.0` failed it. The check was run here at the
+sprint close rather than at the tag: the `0.2.0` image boots against this
+release's schema and reaches `/health/ready`, which is what
+`Migrator::set_ignore_missing(true)` was added for. Rolling back to `0.1.0`
+still needs manual work and always will — see *Known limitations*.
+
+**No action is required of a deployment.** The six new migrations apply at
+startup. One permission rule narrowed (decision **D-12**, below), but nothing
+except `ROLE-ADMIN` holds the permission it affects by default, so no existing
+grant loses access.
+
 ### Added
 
 - **Master-data schema (Database Schema §4).** `0008_master_data.sql` creates the
@@ -409,6 +430,32 @@ While the major version is `0`, the public API may change in any release.
   `0004_string_lengths.sql` was written to fix. Applied at `CREATE TABLE` time,
   so no existing table is rewritten; recorded as §14 deviation #15.
 
+### Known limitations
+
+- **One tenant per deployment.** `tenant_id` scopes every read, but nothing
+  resolves a tenant per request, and the backend refuses to start with
+  `KELIR_MULTI_TENANT` set rather than serving a sign-in nobody can complete
+  (decision **D-7**). Tenant management and the roles-across-tenants question
+  (#65) are unscheduled together under **D-13**.
+- **Rolling back to `0.1.0` still needs manual work.** That binary predates
+  `set_ignore_missing`, so it cannot start against a database carrying
+  migrations it does not know. Rollback to `0.2.0` and later is rehearsed and
+  works.
+- **No staging host and no production environment** (decision **D-9**). The
+  release check runs against the Docker Compose stack built from the release
+  images, which does not serve TLS — an IP address cannot be issued a
+  certificate — so NFR-SEC-010 is not exercised by it.
+- **The audit hash chain does not cover the values a record reports** (#145).
+  `old_value`, `new_value` and `created_at` are outside `chain_hash`, so a
+  record's payload can be rewritten without breaking the chain. Nothing verifies
+  a chain yet; the fix is argued for before FR-AUD-003 builds anything that does.
+- **Six `Should` findings stay open** on the Phase 3 milestone (#107, #108,
+  #109, #115, #119, #120). None gates this release; each is deferred by name in
+  the sprint plan.
+- **Products and services** (FR-MDM-005/006) and **external source references**
+  (FR-MDM-011) have tables and no surface — `Should`, and unscheduled until a
+  consumer needs them.
+
 ## [0.2.0] — 2026-08-20
 
 Phase 2: the application signs in, an administrator manages users and roles, and
@@ -574,6 +621,7 @@ outstanding. Treat `0.1.0` as cut, not proven.
 - No business endpoints. `/api/v1` is mounted and empty.
 - No production environment, image registry, or rehearsed database restore.
 
-[Unreleased]: https://github.com/sujanto-gaws/kelir/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/sujanto-gaws/kelir/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/sujanto-gaws/kelir/releases/tag/v0.3.0
 [0.2.0]: https://github.com/sujanto-gaws/kelir/releases/tag/v0.2.0
 [0.1.0]: https://github.com/sujanto-gaws/kelir/releases/tag/v0.1.0
