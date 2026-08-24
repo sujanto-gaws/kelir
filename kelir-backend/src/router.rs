@@ -5,7 +5,7 @@ use utoipa::OpenApi;
 use crate::error::ValidationDetail;
 use crate::health;
 use crate::middleware::cors::cors_layer;
-use crate::modules::{auth, identity, master_data, rad};
+use crate::modules::{auth, document_type, identity, master_data, rad};
 use crate::response::{ErrorBody, ErrorEnvelope, PageMeta};
 use crate::state::AppState;
 
@@ -78,6 +78,11 @@ use crate::state::AppState;
         rad::handlers::create_list,
         rad::handlers::update_list,
         rad::handlers::delete_list,
+        document_type::handlers::list_types,
+        document_type::handlers::get_type,
+        document_type::handlers::create_type,
+        document_type::handlers::update_type,
+        document_type::handlers::delete_type,
     ),
     components(schemas(
         health::HealthBody,
@@ -162,6 +167,13 @@ use crate::state::AppState;
         rad::domain::list::FilterType,
         rad::domain::CreateListRequest,
         rad::domain::UpdateListRequest,
+        document_type::domain::DocumentType,
+        document_type::domain::DocumentTypeSummary,
+        document_type::domain::DocumentTypeStatus,
+        document_type::domain::SecurityLevel,
+        document_type::domain::WorkflowBinding,
+        document_type::domain::CreateDocumentTypeRequest,
+        document_type::domain::UpdateDocumentTypeRequest,
         ErrorEnvelope,
         ErrorBody,
         ValidationDetail,
@@ -171,6 +183,10 @@ use crate::state::AppState;
         (name = "operations", description = "Health, readiness and build information"),
         (name = "auth", description = "Sign in, sign out, session refresh"),
         (name = "identity", description = "Users, roles and permissions"),
+        (
+            name = "document-type",
+            description = "Document types and the form, list and workflow bindings that configure them"
+        ),
         (
             name = "rad",
             description = "Form and list definitions — the metadata a document type binds and a renderer reads"
@@ -223,6 +239,7 @@ fn api_v1_router(state: AppState) -> Router<AppState> {
         .nest("/identity", identity::handlers::routes())
         .nest("/master-data", master_data::handlers::routes())
         .nest("/rad", rad::handlers::routes())
+        .nest("/document-types", document_type::handlers::routes())
 }
 
 async fn openapi_document() -> Json<utoipa::openapi::OpenApi> {
