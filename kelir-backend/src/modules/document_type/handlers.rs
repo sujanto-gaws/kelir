@@ -17,7 +17,8 @@ use uuid::Uuid;
 use super::domain::{
     CreateDocumentTypeRequest, DocumentType, DocumentTypeSummary, UpdateDocumentTypeRequest,
 };
-use super::service;
+use super::numbering::{NumberingRule, SetNumberingRuleRequest};
+use super::{numbering_service, service};
 use crate::error::AppError;
 use crate::extract::JsonBody;
 use crate::middleware::auth::Authenticated;
@@ -28,6 +29,74 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/", get(list_types).post(create_type))
         .route("/{id}", get(get_type).put(update_type).delete(delete_type))
+        // The numbering rule is a sub-resource of the type rather than a
+        // resource beside it: `uq_document_type_numbering_rules_active` allows
+        // one active rule per type, so a type has a numbering rule or it does
+        // not. `PUT` says that; a `POST` that conflicts the second time would
+        // say it less honestly.
+        .route(
+            "/{id}/numbering-rule",
+            get(get_numbering_rule)
+                .put(set_numbering_rule)
+                .delete(clear_numbering_rule),
+        )
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/document-types/{id}/numbering-rule", tag = "document-type",
+    responses(
+        (status = 200, description = "The active numbering rule", body = NumberingRule),
+        (status = 404, description = "No such document type, or it has no numbering rule")
+    ),
+    security(("bearer" = []))
+)]
+async fn get_numbering_rule(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ItemEnvelope<NumberingRule>>, AppError> {
+    Ok(Json(ItemEnvelope::new(
+        numbering_service::get_rule(&state, &caller, id).await?,
+    )))
+}
+
+#[utoipa::path(
+    put, path = "/api/v1/document-types/{id}/numbering-rule", tag = "document-type",
+    request_body = SetNumberingRuleRequest,
+    responses(
+        (status = 200, description = "The rule now in force; the previous one is kept, deactivated", body = NumberingRule),
+        (status = 404, description = "No such document type"),
+        (status = 422, description = "The template is malformed, or the counter would be rewound past a number already issued")
+    ),
+    security(("bearer" = []))
+)]
+async fn set_numbering_rule(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path(id): Path<Uuid>,
+    JsonBody(request): JsonBody<SetNumberingRuleRequest>,
+) -> Result<Json<ItemEnvelope<NumberingRule>>, AppError> {
+    Ok(Json(ItemEnvelope::new(
+        numbering_service::set_rule(&state, &caller, id, request).await?,
+    )))
+}
+
+#[utoipa::path(
+    delete, path = "/api/v1/document-types/{id}/numbering-rule", tag = "document-type",
+    responses(
+        (status = 204, description = "Deactivated; documents of this type can no longer be numbered"),
+        (status = 404, description = "No such document type, or it has no numbering rule")
+    ),
+    security(("bearer" = []))
+)]
+async fn clear_numbering_rule(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, AppError> {
+    numbering_service::clear_rule(&state, &caller, id).await?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[utoipa::path(

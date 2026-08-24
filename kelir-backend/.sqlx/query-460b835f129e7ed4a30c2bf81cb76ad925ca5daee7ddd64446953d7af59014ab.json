@@ -1,0 +1,59 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, rule_template, sequence_scope, sequence_padding,\n               allow_gaps, sequence_key, next_sequence\n        FROM document_type_numbering_rules\n        WHERE tenant_id = $1 AND document_type_id = $2\n          AND is_active AND deleted_at IS NULL\n        FOR UPDATE\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "rule_template",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "sequence_scope",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "sequence_padding",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "allow_gaps",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 5,
+        "name": "sequence_key",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "next_sequence",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "460b835f129e7ed4a30c2bf81cb76ad925ca5daee7ddd64446953d7af59014ab"
+}

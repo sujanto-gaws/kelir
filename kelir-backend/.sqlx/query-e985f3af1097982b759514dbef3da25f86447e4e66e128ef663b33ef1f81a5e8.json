@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT max(next_sequence)\n        FROM document_type_numbering_rules\n        WHERE tenant_id = $1 AND document_type_id = $2 AND sequence_key = $3\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "max",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "e985f3af1097982b759514dbef3da25f86447e4e66e128ef663b33ef1f81a5e8"
+}
