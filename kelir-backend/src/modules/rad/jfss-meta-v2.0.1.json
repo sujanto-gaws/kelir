@@ -1,0 +1,504 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/jfss-meta-v2.0.1.json",
+  "title": "JFSS Meta-Schema v2.0.1",
+  "description": "Validates form definitions against the JFSS v2.0.1 specification. v2.0.1 corrects defects in the v2.0.0 meta-schema and adds the child-container shapes (columns, tabs) and calculateMode that v2.0.1 of the specification defines.",
+  "type": "object",
+  "required": [
+    "formId",
+    "version",
+    "components"
+  ],
+  "properties": {
+    "formId": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^2\\.\\d+\\.\\d+$",
+      "description": "JFSS specification version this document conforms to. Pinned to the 2.x line."
+    },
+    "title": {
+      "type": "string"
+    },
+    "settings": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "components": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/component"
+      },
+      "minItems": 0
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "component": {
+      "type": "object",
+      "required": [
+        "id",
+        "role",
+        "type"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "data",
+            "layout",
+            "display",
+            "action"
+          ]
+        },
+        "type": {
+          "type": "string"
+        },
+        "conditional": {
+          "$ref": "#/$defs/conditional"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "role": {
+                "const": "data"
+              }
+            },
+            "required": [
+              "role"
+            ]
+          },
+          "then": {
+            "required": [
+              "key",
+              "label",
+              "validation"
+            ],
+            "properties": {
+              "key": {
+                "type": "string",
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+                "description": "Payload property name. Must not contain \".\" - dots are reserved for dot-notation paths (spec S8.2, S10.3). Form-wide uniqueness is an out-of-band constraint JSON Schema cannot express and MUST be enforced by the authoring tool."
+              },
+              "label": {
+                "type": "string"
+              },
+              "placeholder": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "defaultValue": {
+                "description": "The initial value for the field. Must match validation.type.",
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "array"
+                  },
+                  {
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "validation": {
+                "$ref": "#/$defs/validation"
+              },
+              "options": {
+                "$ref": "#/$defs/options"
+              },
+              "rules": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/advancedRule"
+                }
+              },
+              "calculate": {
+                "$ref": "#/$defs/jsonLogic"
+              },
+              "readOnly": {
+                "type": "boolean"
+              },
+              "sequenceKey": {
+                "type": "string"
+              },
+              "defaultItems": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "components": {
+                "description": "Row template for array/repeater types (e.g. datagrid). See spec S4.3.1.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/component"
+                }
+              },
+              "calculateMode": {
+                "description": "How `calculate` participates in Value Resolution (spec S4.2.3). \"derived\" recomputes continuously and always wins; \"generated\" evaluates once and never overwrites a persisted value. Defaults to \"derived\".",
+                "type": "string",
+                "enum": [
+                  "derived",
+                  "generated"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "role": {
+                "const": "layout"
+              }
+            },
+            "required": [
+              "role"
+            ]
+          },
+          "then": {
+            "properties": {
+              "components": {
+                "description": "Single-slot children (e.g. panel, fieldset).",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/component"
+                }
+              },
+              "title": {
+                "type": "string"
+              },
+              "grid": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "columns": {
+                "description": "Positional slots, one entry per column.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/columnSlot"
+                }
+              },
+              "tabs": {
+                "description": "Named slots, one entry per tab.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/tabSlot"
+                }
+              }
+            },
+            "oneOf": [
+              {
+                "required": [
+                  "components"
+                ]
+              },
+              {
+                "required": [
+                  "columns"
+                ]
+              },
+              {
+                "required": [
+                  "tabs"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "role": {
+                "const": "display"
+              }
+            },
+            "required": [
+              "role"
+            ]
+          },
+          "then": {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "variant": {
+                "type": "string"
+              },
+              "calculate": {
+                "$ref": "#/$defs/jsonLogic"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "role": {
+                "const": "action"
+              }
+            },
+            "required": [
+              "role"
+            ]
+          },
+          "then": {
+            "required": [
+              "label",
+              "action"
+            ],
+            "properties": {
+              "label": {
+                "type": "string"
+              },
+              "action": {
+                "type": "string"
+              },
+              "theme": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "validation": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "string",
+            "number",
+            "integer",
+            "boolean",
+            "array",
+            "object"
+          ]
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "minLength": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "maxLength": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "minimum": {
+          "type": "number"
+        },
+        "maximum": {
+          "type": "number"
+        },
+        "pattern": {
+          "type": "string"
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "email",
+            "uri",
+            "date",
+            "time",
+            "date-time",
+            "uuid"
+          ]
+        },
+        "enum": {
+          "type": "array",
+          "items": {}
+        },
+        "uniqueItems": {
+          "type": "boolean"
+        },
+        "uniqueBy": {
+          "description": "JFSS Extension: Specifies the child key(s) that must be unique within the array.",
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "messages": {
+          "$ref": "#/$defs/messages"
+        }
+      },
+      "additionalProperties": false
+    },
+    "messages": {
+      "type": "object",
+      "properties": {
+        "required": {
+          "type": "string"
+        },
+        "minLength": {
+          "type": "string"
+        },
+        "maxLength": {
+          "type": "string"
+        },
+        "minimum": {
+          "type": "string"
+        },
+        "maximum": {
+          "type": "string"
+        },
+        "pattern": {
+          "type": "string"
+        },
+        "format": {
+          "type": "string"
+        },
+        "enum": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "uniqueBy": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "options": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "label",
+          "value"
+        ],
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "value": {}
+        },
+        "additionalProperties": false
+      }
+    },
+    "advancedRule": {
+      "type": "object",
+      "required": [
+        "rule",
+        "scope",
+        "params",
+        "message"
+      ],
+      "properties": {
+        "rule": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "client",
+            "server",
+            "both"
+          ]
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "conditional": {
+      "type": "object",
+      "required": [
+        "action",
+        "logic"
+      ],
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "show",
+            "hide",
+            "enable",
+            "disable"
+          ]
+        },
+        "logic": {
+          "$ref": "#/$defs/jsonLogic"
+        }
+      },
+      "additionalProperties": false
+    },
+    "jsonLogic": {
+      "type": "object",
+      "description": "A JSON Logic expression: exactly one operator key. Deep operator/arity validation is deferred to the runtime libraries and the Calculation Rule Registry.",
+      "additionalProperties": true,
+      "minProperties": 1,
+      "maxProperties": 1
+    },
+    "columnSlot": {
+      "type": "object",
+      "required": [
+        "components"
+      ],
+      "properties": {
+        "components": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/component"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "tabSlot": {
+      "type": "object",
+      "required": [
+        "title",
+        "components"
+      ],
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "components": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/component"
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

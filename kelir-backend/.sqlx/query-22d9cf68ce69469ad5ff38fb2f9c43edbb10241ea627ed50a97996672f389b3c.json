@@ -1,0 +1,47 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT filter_key, label, filter_type, options_json, is_default\n        FROM rad_list_filters\n        WHERE tenant_id = $1 AND list_id = $2 AND deleted_at IS NULL\n        ORDER BY sort_order, filter_key\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "filter_key",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "label",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "filter_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "options_json",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 4,
+        "name": "is_default",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "22d9cf68ce69469ad5ff38fb2f9c43edbb10241ea627ed50a97996672f389b3c"
+}

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE rad_lists\n        SET deleted_at = now(), updated_by = $3, updated_at = now()\n        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "481147dfd9b328f9e13a3a2b6fc75793246ba010a9870f2fbbc8c0c46cc2a11d"
+}
