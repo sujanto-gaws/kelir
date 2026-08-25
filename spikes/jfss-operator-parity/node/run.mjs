@@ -8,7 +8,8 @@ import jsonLogic from 'json-logic-js';
 const ROOT = new URL('../', import.meta.url);
 const here = (name) => new URL(name, ROOT);
 
-const cases = JSON.parse(fs.readFileSync(here('cases.json'), 'utf8'));
+// The corpus lives in parity/ since Sprint 7 promoted it into a CI gate (#154).
+const cases = JSON.parse(fs.readFileSync(here('../../parity/cases.json'), 'utf8'));
 
 const encode = (v) => {
   if (typeof v === 'number' && !Number.isFinite(v)) return Number.isNaN(v) ? '#NaN' : v > 0 ? '#Infinity' : '#-Infinity';

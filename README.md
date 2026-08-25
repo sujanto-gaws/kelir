@@ -177,6 +177,13 @@ The MVP focuses on:
 │       ├── styles/
 │       ├── types/
 │       └── lib/
+├── e2e/
+│   ├── playwright.config.ts
+│   ├── support/
+│   └── tests/
+├── parity/
+│   ├── cases.json
+│   └── expectations.json
 └── deploy/
     ├── docker/
     │   └── docker-compose.yml
@@ -243,6 +250,20 @@ cd kelir-frontend
 npm install
 npm run dev
 ```
+
+### End-to-end flows
+
+`e2e/` holds a Playwright harness that drives a real browser against a
+**deployed** stack — the release images, not the dev server. Bring the stack up
+first, then point the harness at the address the deploy printed:
+
+```bash
+cd deploy/staging && KELIR_BOOTSTRAP_ADMIN_PASSWORD='…' ./deploy-local.sh 0.3.0 8080
+cd ../../e2e && npm ci && npx playwright install --with-deps chromium
+KELIR_E2E_BASE_URL=http://127.0.0.1:8080 KELIR_E2E_PASSWORD='…' npm test
+```
+
+Details, including how to add a flow, are in [e2e/README.md](e2e/README.md).
 
 ## Environment Variables
 

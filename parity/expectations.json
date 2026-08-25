@@ -1,0 +1,285 @@
+[
+ {
+  "id": "var-simple",
+  "ok": true,
+  "value": 5
+ },
+ {
+  "id": "var-dot-index",
+  "ok": true,
+  "value": 12.5
+ },
+ {
+  "id": "var-missing",
+  "ok": true,
+  "value": null
+ },
+ {
+  "id": "var-default",
+  "ok": true,
+  "value": 0
+ },
+ {
+  "id": "mul",
+  "ok": true,
+  "value": 37.5
+ },
+ {
+  "id": "add-weighted",
+  "ok": true,
+  "value": 14
+ },
+ {
+  "id": "sub",
+  "ok": true,
+  "value": 7
+ },
+ {
+  "id": "div",
+  "ok": true,
+  "value": 22.5
+ },
+ {
+  "id": "mod",
+  "ok": true,
+  "value": 1
+ },
+ {
+  "id": "min-cap",
+  "ok": true,
+  "value": 100
+ },
+ {
+  "id": "max",
+  "ok": true,
+  "value": 9
+ },
+ {
+  "id": "div-by-zero",
+  "ok": false
+ },
+ {
+  "id": "mul-null",
+  "ok": true,
+  "value": 0
+ },
+ {
+  "id": "mul-missing-var",
+  "ok": true,
+  "value": 0
+ },
+ {
+  "id": "add-null",
+  "ok": true,
+  "value": 5
+ },
+ {
+  "id": "add-string",
+  "ok": true,
+  "value": 7
+ },
+ {
+  "id": "float-repr",
+  "ok": true,
+  "value": 0.30000000000000004
+ },
+ {
+  "id": "map-line-totals",
+  "ok": true,
+  "value": [
+   20,
+   22
+  ]
+ },
+ {
+  "id": "map-empty",
+  "ok": true,
+  "value": []
+ },
+ {
+  "id": "map-missing-array",
+  "ok": true,
+  "value": []
+ },
+ {
+  "id": "filter",
+  "ok": true,
+  "value": [
+   {
+    "quantity": 3
+   },
+   {
+    "quantity": 5
+   }
+  ]
+ },
+ {
+  "id": "reduce",
+  "ok": true,
+  "value": 10
+ },
+ {
+  "id": "reduce-empty",
+  "ok": true,
+  "value": 0
+ },
+ {
+  "id": "all",
+  "ok": true,
+  "value": true
+ },
+ {
+  "id": "all-empty",
+  "ok": true,
+  "value": false
+ },
+ {
+  "id": "some",
+  "ok": true,
+  "value": true
+ },
+ {
+  "id": "some-empty",
+  "ok": true,
+  "value": false
+ },
+ {
+  "id": "none-empty",
+  "ok": true,
+  "value": true
+ },
+ {
+  "id": "sum",
+  "ok": true,
+  "value": 42
+ },
+ {
+  "id": "sum-empty",
+  "ok": true,
+  "value": 0
+ },
+ {
+  "id": "invoice-pattern",
+  "ok": true,
+  "value": 42
+ },
+ {
+  "id": "unknown-operator",
+  "ok": false
+ },
+ {
+  "id": "eq-loose",
+  "ok": true,
+  "value": true
+ },
+ {
+  "id": "eq-strict",
+  "ok": true,
+  "value": false
+ },
+ {
+  "id": "neq",
+  "ok": true,
+  "value": true
+ },
+ {
+  "id": "gt",
+  "ok": true,
+  "value": true
+ },
+ {
+  "id": "between",
+  "ok": true,
+  "value": true
+ },
+ {
+  "id": "and-or",
+  "ok": true,
+  "value": true
+ },
+ {
+  "id": "not-empty-string",
+  "ok": true,
+  "value": true
+ },
+ {
+  "id": "not-empty-array",
+  "ok": true,
+  "value": true
+ },
+ {
+  "id": "if",
+  "ok": true,
+  "value": "high"
+ },
+ {
+  "id": "in-array",
+  "ok": true,
+  "value": true
+ },
+ {
+  "id": "in-string",
+  "ok": true,
+  "value": true
+ },
+ {
+  "id": "cat",
+  "ok": true,
+  "value": "INV-42"
+ },
+ {
+  "id": "missing",
+  "ok": true,
+  "value": [
+   "b"
+  ]
+ },
+ {
+  "id": "missing-some",
+  "ok": true,
+  "value": []
+ },
+ {
+  "id": "div-by-zero-float",
+  "ok": true,
+  "value": null
+ },
+ {
+  "id": "div-zero-by-zero",
+  "ok": false
+ },
+ {
+  "id": "sub-null",
+  "ok": true,
+  "value": 100
+ },
+ {
+  "id": "min-null",
+  "ok": false
+ },
+ {
+  "id": "datagrid-typing-race",
+  "ok": true,
+  "value": 20
+ },
+ {
+  "id": "add-array-operand",
+  "ok": true,
+  "value": 5
+ },
+ {
+  "id": "add-object-operand",
+  "ok": true,
+  "value": 5
+ },
+ {
+  "id": "add-non-numeric-string-operand",
+  "ok": true,
+  "value": 5
+ },
+ {
+  "id": "mul-array-operand",
+  "ok": true,
+  "value": 5
+ }
+]

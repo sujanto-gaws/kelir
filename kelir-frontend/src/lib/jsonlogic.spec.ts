@@ -1,0 +1,177 @@
+import { beforeAll, describe, expect, it } from 'vitest'
+
+import {
+  EvaluationError,
+  ENGINE_VERSION,
+  loadEvaluator,
+  normalizeNumeric,
+  sumOperator,
+  type RuleEvaluator,
+} from './jsonlogic'
+
+/**
+ * The evaluator, and the parts of it that are ours rather than the engine's.
+ *
+ * `normalizeNumeric` and `sumOperator` are the two pieces of behaviour this
+ * repository writes on both sides, so they are tested here case for case
+ * against the backend's tests of the same two. Everything else is the engine,
+ * and `jsonlogic.parity.spec.ts` is where the engine is held to the corpus.
+ */
+
+describe('normalizeNumeric', () => {
+  it('keeps a finite number', () => {
+    expect(normalizeNumeric(42.5)).toBe(42.5)
+    expect(normalizeNumeric(0)).toBe(0)
+    expect(normalizeNumeric(-3)).toBe(-3)
+  })
+
+  it('coerces a numeric string, which is what a form field carries', () => {
+    expect(normalizeNumeric('42.5')).toBe(42.5)
+    expect(normalizeNumeric('  7 ')).toBe(7)
+  })
+
+  it('is 0 for everything that is not a finite number', () => {
+    // The §3.1 rule, and the reason it is a finiteness test rather than the
+    // `Number(result) || 0` the registry wrote: `Infinity` is truthy.
+    expect(normalizeNumeric(Number.POSITIVE_INFINITY)).toBe(0)
+    expect(normalizeNumeric(Number.NEGATIVE_INFINITY)).toBe(0)
+    expect(normalizeNumeric(Number.NaN)).toBe(0)
+    expect(normalizeNumeric(null)).toBe(0)
+    expect(normalizeNumeric(undefined)).toBe(0)
+    expect(normalizeNumeric('')).toBe(0)
+    expect(normalizeNumeric('not a number')).toBe(0)
+    expect(normalizeNumeric([1, 2])).toBe(0)
+    expect(normalizeNumeric({ a: 1 })).toBe(0)
+  })
+
+  it('is 1 for true and 0 for false', () => {
+    expect(normalizeNumeric(true)).toBe(1)
+    expect(normalizeNumeric(false)).toBe(0)
+  })
+})
+
+describe('sumOperator', () => {
+  it('sums the numbers in its single array argument', () => {
+    expect(sumOperator('[[1, 2, 3.5]]')).toBe('6.5')
+  })
+
+  it('sums an empty array to 0', () => {
+    expect(sumOperator('[[]]')).toBe('0')
+  })
+
+  it('sums only the numeric members', () => {
+    // A total of what is there, not NaN because one row was blank.
+    expect(sumOperator('[[1, null, "x", 2]]')).toBe('3')
+  })
+
+  it('sums a non-array argument to 0', () => {
+    expect(sumOperator('[42]')).toBe('0')
+  })
+})
+
+describe('the evaluator', () => {
+  let evaluator: RuleEvaluator
+
+  beforeAll(async () => {
+    evaluator = await loadEvaluator()
+  })
+
+  it('pins the version the backend pins', () => {
+    expect(ENGINE_VERSION).toBe('5.2.0')
+  })
+
+  it('evaluates the registry line total', () => {
+    expect(
+      evaluator.evaluateNumeric(
+        { '*': [{ var: 'unit_price' }, { var: 'quantity' }] },
+        {
+          unit_price: 12.5,
+          quantity: 3,
+        },
+      ),
+    ).toBe(37.5)
+  })
+
+  it('evaluates the registry §6.1 invoice total', () => {
+    const expression = {
+      sum: [{ map: [{ var: 'items' }, { '*': [{ var: 'unit_price' }, { var: 'quantity' }] }] }],
+    }
+    const data = {
+      items: [
+        { unit_price: 10, quantity: 2 },
+        { unit_price: 11, quantity: 2 },
+      ],
+    }
+
+    expect(evaluator.evaluateNumeric(expression, data)).toBe(42)
+  })
+
+  it('refuses an unknown operator instead of quietly returning zero', () => {
+    // The defect that disqualified `jsonlogic-rs`, asserted against the engine
+    // that replaced it. Mistype `sum` and an engine that returns unknown
+    // operators unevaluated hands back the expression object, which the
+    // wrapper then turns into 0 — a 42-rupiah line persisted as free with
+    // nothing logged. The assertion is not that some error occurs; it is that
+    // 42 does not silently become 0.
+    const mistyped = {
+      summ: [{ map: [{ var: 'items' }, { '*': [{ var: 'unit_price' }, { var: 'quantity' }] }] }],
+    }
+    const data = {
+      items: [
+        { unit_price: 10, quantity: 2 },
+        { unit_price: 11, quantity: 2 },
+      ],
+    }
+
+    expect(() => evaluator.evaluate(mistyped, data)).toThrow(EvaluationError)
+    expect(normalizeNumeric({ summ: [1, 2] })).toBe(0)
+  })
+
+  it('treats a misspelled variable as absent rather than as an error', () => {
+    // Distinct from an unknown operator on purpose: a half-filled form is
+    // normal, and refusing to evaluate it would make every draft an error.
+    expect(
+      evaluator.evaluateNumeric(
+        { '*': [{ var: 'unit_price' }, { var: 'quantitee' }] },
+        {
+          unit_price: 12.5,
+          quantity: 3,
+        },
+      ),
+    ).toBe(0)
+  })
+
+  it('normalizes a fractional division by zero to 0', () => {
+    expect(evaluator.evaluateNumeric({ '/': [10.5, 0] }, {})).toBe(0)
+  })
+
+  it('never yields a non-finite number', () => {
+    // An overflow returns null rather than Infinity, so nothing non-finite
+    // reaches a numeric field even before the wrapper.
+    expect(evaluator.evaluateNumeric({ '*': [1e308, 10] }, {})).toBe(0)
+  })
+
+  it('throws on an integer division by zero, which is the measured §3.1 gap', () => {
+    // Pinned, not endorsed: these three throw rather than returning the 0 the
+    // registry asks for, the backend throws on the same three, and the day
+    // this fails is the day the gap closed or moved.
+    for (const expression of [{ '/': [10, 0] }, { '/': [0, 0] }, { '%': [10, 0] }]) {
+      expect(() => evaluator.evaluate(expression, {}), JSON.stringify(expression)).toThrow(
+        EvaluationError,
+      )
+    }
+  })
+
+  it('refuses a cap with an absent operand rather than zeroing it', () => {
+    // §6.2's discount cap. The reference implementation returns 0, which
+    // satisfies "the result is 0" and silently turns the cap into no discount
+    // at all; refusing is the better of the two failures.
+    expect(() => evaluator.evaluate({ min: [{ var: 'computed' }, 100] }, { other: 1 })).toThrow(
+      EvaluationError,
+    )
+  })
+
+  it('evaluates a conditional expression as a boolean', () => {
+    expect(evaluator.evaluate({ '>': [{ var: 'total' }, 1000] }, { total: 1500 })).toBe(true)
+  })
+})

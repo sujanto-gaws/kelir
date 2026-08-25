@@ -151,6 +151,126 @@ jobs:
       - name: Build
         run: npm run build
 
+  e2e:
+    name: End-to-end (browser)
+    runs-on: ubuntu-latest
+
+    # It drives the release stack, not a dev server (decision D-14, issue #153).
+    # That is the whole point and it is also the whole cost: this job builds both
+    # release images from scratch, so it is the slowest in the pipeline by a wide
+    # margin. The alternative — pointing a browser at `vite dev` — would exercise
+    # a bundle nobody ships and a proxy nobody deploys.
+    #
+    # It runs on the same trigger as the frontend job (issue #153 AC1) rather
+    # than on a schedule: a browser check that runs after the merge tells you
+    # about a defect that is already on main.
+
+    # PostgreSQL is not part of the deployed stack — the staging compose file
+    # addresses a database outside it, because that is how the real host runs
+    # (a native install, so the NFR-AVA-004 restore drill exercises something
+    # real). A service container published on the runner is that same shape:
+    # the backend container reaches it through host.docker.internal, which the
+    # compose file already maps to the bridge gateway.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: kelir
+          POSTGRES_PASSWORD: ci-only-database-password-6Qb2xR
+          POSTGRES_DB: kelir
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kelir -d kelir"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      # Not secrets: this stack exists for the length of one job, is reachable
+      # from nothing but the runner, and is destroyed with it. Held in the
+      # workflow rather than in repository secrets so a fork's pull request can
+      # run the job at all — a check that silently does not run on forks is
+      # worse than one that runs with a throwaway password.
+      KELIR_E2E_USERNAME: admin
+      KELIR_E2E_PASSWORD: ci-only-bootstrap-password-4Tz9wK
+      KELIR_E2E_BASE_URL: http://127.0.0.1:8080
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: e2e/package-lock.json
+
+      - name: Install the harness
+        working-directory: e2e
+        run: npm ci
+
+      - name: Type check
+        # Playwright transpiles TypeScript without type-checking it, so a spec
+        # that does not compile still runs — and fails at whatever line the
+        # missing type would have named. Checking here means a type error is a
+        # type error, before a stack is built to discover it.
+        working-directory: e2e
+        run: npm run type-check
+
+      - name: Install the browser
+        working-directory: e2e
+        run: npx playwright install --with-deps chromium
+
+      - name: Configure the deployment
+        # deploy.sh reads this file, refuses placeholder secrets in it, and
+        # compose interpolates the same file. KELIR_DB_HOST is left at its
+        # default (host.docker.internal) because that is where the service
+        # container's published port is reachable from inside the stack.
+        run: |
+          cat > deploy/staging/.env <<'ENVFILE'
+          KELIR_DB_PASSWORD=ci-only-database-password-6Qb2xR
+          KELIR_JWT_SECRET=ci-only-jwt-secret-Xr4Lm8Qp2ZvT6Ns1
+          KELIR_MINIO_USER=ci-only-minio-user
+          KELIR_MINIO_PASSWORD=ci-only-minio-password-9Hd3Bs
+          KELIR_TRUSTED_PROXY_HOPS=1
+          KELIR_BOOTSTRAP_ADMIN_USERNAME=admin
+          KELIR_BOOTSTRAP_ADMIN_PASSWORD=ci-only-bootstrap-password-4Tz9wK
+          KELIR_BOOTSTRAP_ADMIN_EMAIL=admin@localhost
+          ENVFILE
+
+      - name: Bring the release stack up
+        # The version has to be the one the binary reports, because deploy.sh
+        # smoke-tests /version against it and fails when the wrong image is
+        # running. Reading it from Cargo.toml keeps that true across a release
+        # bump without a second place to edit.
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' kelir-backend/Cargo.toml | head -1)"
+          echo "deploying ${version} for the browser flow"
+          cd deploy/staging
+          KELIR_HOST_IP=127.0.0.1 ./deploy-local.sh "${version}" 8080
+
+      - name: Drive the flow
+        working-directory: e2e
+        run: npm test
+
+      - name: Stack logs
+        if: failure()
+        # KELIR_VERSION is re-derived rather than carried over: the compose file
+        # makes it required, and a diagnostic step that fails to interpolate is
+        # a diagnostic missing exactly when it is wanted.
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' kelir-backend/Cargo.toml | head -1)"
+          cd deploy/staging
+          KELIR_VERSION="${version}" docker compose -f docker-compose.staging.yml logs --tail 200
+
+      - name: Keep the report
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: playwright-report
+          path: e2e/playwright-report
+          retention-days: 7
+
   commit-messages:
     name: Commit messages
     runs-on: ubuntu-latest

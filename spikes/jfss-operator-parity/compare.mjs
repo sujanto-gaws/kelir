@@ -3,7 +3,10 @@ import fs from 'node:fs';
 // Paths resolve against this file, not the shell's working directory.
 const here = (name) => new URL(name, import.meta.url);
 
-const cases = JSON.parse(fs.readFileSync(here('cases.json'), 'utf8'));
+// The corpus moved to parity/ when Sprint 7 promoted it into a CI gate (#154).
+// This harness reads it from there rather than keeping a second copy: two
+// corpora that drift is the failure the promotion was meant to end.
+const cases = JSON.parse(fs.readFileSync(here('../../parity/cases.json'), 'utf8'));
 const js = JSON.parse(fs.readFileSync(here('results-js.json'), 'utf8'));
 const rust = JSON.parse(fs.readFileSync(here('results-rust.json'), 'utf8'));
 
