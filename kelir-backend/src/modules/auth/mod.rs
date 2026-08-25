@@ -8,5 +8,6 @@
 pub mod bootstrap;
 pub mod handlers;
 pub mod password;
+pub mod reset;
 pub mod service;
 pub mod token;

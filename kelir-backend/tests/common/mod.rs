@@ -62,6 +62,7 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use kelir_backend::config::{AppConfig, AppEnv, BootstrapAdmin};
+use kelir_backend::mail::Mailer;
 use kelir_backend::state::AppState;
 use kelir_backend::{db, modules, router};
 
@@ -165,7 +166,12 @@ impl TestApp {
                 )
             });
 
-        let state = AppState::new(pool.clone(), config);
+        // A captured mailer rather than a real one: the reset flow's tests
+        // read the link out of the delivered message, which is how a person
+        // gets it. Fetching the token from `password_reset_tokens` instead
+        // would prove the row was written and nothing about whether anybody
+        // could have used it.
+        let state = AppState::with_mailer(pool.clone(), config, Mailer::captured());
 
         Self {
             pool,
@@ -412,7 +418,12 @@ fn test_config(database_url: &str) -> AppConfig {
         database_url: database_url.to_owned(),
         jwt_secret: JWT_SECRET.to_owned(),
         storage_driver: "local".to_owned(),
+        // The harness uses a captured mailer, so this is never dialled — but a
+        // host is left set deliberately: an empty one would exercise the
+        // no-SMTP path rather than the one a deployment runs.
         smtp_host: "localhost".to_owned(),
+        smtp_port: 1025,
+        mail_from: "no-reply@kelir.test".to_owned(),
         frontend_url: "http://localhost:5173".to_owned(),
         multi_tenant: false,
         default_tenant_code: "SYSTEM".to_owned(),

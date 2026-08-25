@@ -2,6 +2,8 @@ import { getItem, postItem, postVoid } from './client'
 import type {
   ChangePasswordRequest,
   CurrentUser,
+  RequestResetRequest,
+  ResetPasswordRequest,
   SessionResponse,
   SignInRequest,
 } from '@/types/auth'
@@ -52,4 +54,28 @@ export function fetchCurrentUser(): Promise<CurrentUser> {
  */
 export function changePassword(request: ChangePasswordRequest): Promise<void> {
   return postVoid('/auth/change-password', request)
+}
+
+/**
+ * Ask for a reset link. Answers 202 whether or not the identifier exists.
+ *
+ * **A caller cannot learn anything from the outcome, and must not try.** The
+ * backend answers the same way for an unknown identifier, a suspended account,
+ * a resend still inside its cooldown, and a mail server that is down — so a
+ * page that branched on anything but "the request was accepted" would be
+ * reporting a difference the server deliberately refuses to make.
+ */
+export function requestPasswordReset(request: RequestResetRequest): Promise<void> {
+  return postVoid('/auth/forgot-password', request)
+}
+
+/**
+ * Redeem a reset token and set the new password. Succeeds with 204.
+ *
+ * A token that is unknown, expired or already spent is a 422 with the same
+ * message as one that is malformed — the same reasoning as `signIn`'s generic
+ * 401. The account's sessions are revoked, so the person signs in afresh.
+ */
+export function resetPassword(request: ResetPasswordRequest): Promise<void> {
+  return postVoid('/auth/reset-password', request)
 }

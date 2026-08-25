@@ -55,6 +55,7 @@ describe('LoginPage', () => {
       history: createMemoryHistory(),
       routes: [
         { path: '/login', name: 'login', component: blank },
+        { path: '/forgot-password', name: 'forgot-password', component: blank },
         { path: '/', name: 'dashboard', component: blank },
         { path: '/documents/:id', name: 'document-detail', component: blank },
       ],

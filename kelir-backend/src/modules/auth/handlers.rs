@@ -1,10 +1,12 @@
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{middleware, Json, Router};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use super::reset::{self, RequestResetRequest, ResetPasswordRequest};
 use super::service;
 use crate::error::AppError;
 use crate::extract::JsonBody;
@@ -12,6 +14,7 @@ use crate::middleware::auth::Authenticated;
 use crate::middleware::client_address::ClientAddress;
 use crate::middleware::rate_limit;
 use crate::modules::identity::repository as identity_repo;
+use crate::modules::organization::service as organization;
 use crate::response::ItemEnvelope;
 use crate::state::AppState;
 
@@ -87,6 +90,9 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/login", post(sign_in))
         .route("/refresh", post(refresh))
         .route("/change-password", post(change_password))
+        // Redeeming a reset token is metered: a wrong token is a 4xx, so
+        // guessing one costs the guesser their rate-limit budget.
+        .route("/reset-password", post(reset_password))
         .route_layer(middleware::from_fn_with_state(
             state,
             rate_limit::limit_authentication_attempts,
@@ -95,6 +101,14 @@ pub fn routes(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/logout", post(sign_out))
         .route("/me", get(me))
+        // **Not metered, and that is a decision rather than an omission.** The
+        // limiter decrements a caller's failure count on every 2xx, and asking
+        // for a reset link always answers 202 — so metering this endpoint would
+        // hand an attacker a way to refund the failures a login brute-force
+        // spends, one per request. Its own abuse case, flooding somebody's
+        // mailbox, is handled per account instead: see
+        // `reset::RESEND_COOLDOWN_SECONDS`.
+        .route("/forgot-password", post(forgot_password))
         .merge(metered)
 }
 
@@ -253,4 +267,55 @@ async fn change_password(
     .await?;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(
+    post, path = "/api/v1/auth/forgot-password", tag = "auth",
+    request_body = RequestResetRequest,
+    responses(
+        (status = 202, description = "If that identifier belongs to an account that can sign in, a reset link has been sent. The answer is the same either way, deliberately: a different one would say whether the account exists"),
+        (status = 422, description = "The identifier was missing")
+    )
+)]
+async fn forgot_password(
+    State(state): State<AppState>,
+    client: ClientAddress,
+    JsonBody(request): JsonBody<RequestResetRequest>,
+) -> Result<StatusCode, AppError> {
+    // The same resolution sign-in does, and the same silence on failure: an
+    // unresolvable tenant answers 202 like everything else here, because a
+    // different answer would be an enumeration oracle for tenants instead of
+    // for accounts.
+    let Ok(tenant) = organization::resolve_for_sign_in(&state.pool, &state.config, None).await
+    else {
+        tracing::warn!("a password reset was requested but the tenant did not resolve");
+        return Ok(StatusCode::ACCEPTED);
+    };
+
+    let ip = client.to_string();
+
+    reset::request_reset(&state, tenant.id, request, Some(&ip)).await?;
+
+    Ok(StatusCode::ACCEPTED)
+}
+
+#[utoipa::path(
+    post, path = "/api/v1/auth/reset-password", tag = "auth",
+    request_body = ResetPasswordRequest,
+    responses(
+        (status = 204, description = "The password is changed and every other session for that account is signed out"),
+        (status = 422, description = "The token is not valid, is used or expired, or the new password fails the policy"),
+        (status = 429, description = "Too many attempts from this address; see Retry-After")
+    )
+)]
+async fn reset_password(
+    State(state): State<AppState>,
+    client: ClientAddress,
+    JsonBody(request): JsonBody<ResetPasswordRequest>,
+) -> Result<StatusCode, AppError> {
+    let ip = client.to_string();
+
+    reset::reset_password(&state, request, Some(&ip)).await?;
+
+    Ok(StatusCode::NO_CONTENT)
 }

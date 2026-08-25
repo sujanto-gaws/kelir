@@ -39,3 +39,16 @@ export interface ChangePasswordRequest {
   currentPassword: string
   newPassword: string
 }
+
+/** Body posted to `/auth/forgot-password`. */
+export interface RequestResetRequest {
+  /** A username or an email address — the same identifier sign-in takes. */
+  username: string
+}
+
+/** Body posted to `/auth/reset-password`. */
+export interface ResetPasswordRequest {
+  /** The opaque token out of the emailed link. */
+  token: string
+  newPassword: string
+}
