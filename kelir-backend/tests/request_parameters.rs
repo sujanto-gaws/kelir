@@ -74,7 +74,8 @@ async fn a_non_numeric_page_is_refused_in_the_envelope_on_every_list_endpoint() 
             response.body
         );
         assert_eq!(
-            first_detail(&response)["path"], "page",
+            first_detail(&response)["path"],
+            "page",
             "{endpoint} did not name the parameter: {}",
             response.body
         );
@@ -101,7 +102,8 @@ async fn a_non_numeric_page_size_is_refused_in_the_envelope_on_every_list_endpoi
         // The wire name, not the field name. A caller correcting their request
         // needs the spelling they sent.
         assert_eq!(
-            first_detail(&response)["path"], "pageSize",
+            first_detail(&response)["path"],
+            "pageSize",
             "{endpoint} did not name the parameter as sent: {}",
             response.body
         );

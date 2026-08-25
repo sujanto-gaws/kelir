@@ -29,8 +29,8 @@
 
 use axum::body::Bytes;
 use axum::extract::{FromRequest, FromRequestParts, Request};
-use axum::http::request::Parts;
 use axum::http::header;
+use axum::http::request::Parts;
 use serde::de::DeserializeOwned;
 
 use crate::error::{AppError, ValidationDetail};
@@ -195,7 +195,9 @@ fn path_rejection(rejection: axum::extract::rejection::PathRejection) -> AppErro
     match failure.into_kind() {
         ErrorKind::ParseErrorAtKey {
             key, expected_type, ..
-        } => AppError::bad_request(format!("`{key}` in the path is not a valid {expected_type}")),
+        } => AppError::bad_request(format!(
+            "`{key}` in the path is not a valid {expected_type}"
+        )),
         ErrorKind::DeserializeError { key, message, .. } => {
             AppError::bad_request(format!("`{key}` in the path is not valid: {message}"))
         }
