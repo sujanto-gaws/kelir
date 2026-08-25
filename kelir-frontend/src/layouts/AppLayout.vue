@@ -95,16 +95,17 @@ async function signOut(): Promise<void> {
 
 <template>
   <div class="flex min-h-screen bg-background text-foreground">
-    <aside
-      v-show="appStore.isSidebarOpen"
-      class="w-60 shrink-0 border-r border-border bg-card"
-      aria-label="Main navigation"
-    >
+    <!-- The label belongs on the <nav>, not on this <aside>. It was on the
+         aside, which made the only landmark called "Main navigation" a
+         complementary one and left the navigation landmark unnamed — found by
+         the browser harness (#153) the first time anything asked the page for
+         a navigation by that name. -->
+    <aside v-show="appStore.isSidebarOpen" class="w-60 shrink-0 border-r border-border bg-card">
       <div class="flex h-14 items-center border-b border-border px-4">
         <span class="text-lg font-semibold tracking-tight">Kelir</span>
       </div>
 
-      <nav class="space-y-1 p-3">
+      <nav class="space-y-1 p-3" aria-label="Main navigation">
         <template v-for="item in visibleNavigation" :key="item.name">
           <RouterLink
             v-if="item.enabled"
