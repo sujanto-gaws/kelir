@@ -309,6 +309,132 @@ async fn refuses_a_second_party_with_the_same_party_id() {
 }
 
 #[tokio::test]
+async fn a_deleted_party_keeps_its_party_id_and_a_stored_reference_still_means_it() {
+    // #107, the four steps it records, driven end to end.
+    //
+    // `uq_mdm_parties_tenant_id_party_code` was partial on `deleted_at IS NULL`,
+    // so deleting a party released its code — while every read path stores a
+    // UUID and renders it as whatever code that UUID's row currently carries.
+    // The pair re-targeted stored references without touching them: a customer
+    // whose `billingPartyId` read `PARTY-BILL` went on reading `PARTY-BILL`
+    // after a different legal entity took the freed code.
+    //
+    // Of the three ways out, `0018_party_code_is_not_released.sql` takes the
+    // first: the code is never released, so step 3 cannot happen and step 4 is
+    // true rather than merely unchanged.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    // 1. A customer whose billing party is another party, by code.
+    let billing = create_ok(&app, &token, full_person("PARTY-BILL")).await;
+    let customer = create_ok(&app, &token, full_person("PARTY-CUST")).await;
+
+    let assigned = app
+        .put(
+            &format!("{PARTIES}/{customer}/roles/CUSTOMER"),
+            Some(&token),
+            json!({
+                "fromDate": "2026-01-01T00:00:00Z",
+                "profile": {
+                    "customer": { "customerNumber": "CUS-0001", "billingPartyId": "PARTY-BILL" }
+                },
+            }),
+        )
+        .await;
+    assert_eq!(assigned.status, StatusCode::CREATED, "{}", assigned.body);
+
+    // 2. The billing party is deleted.
+    let deleted = app
+        .delete(&format!("{PARTIES}/{billing}"), Some(&token))
+        .await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
+
+    // 3. Another party cannot take the freed code, because it is not freed.
+    let (status, body) = create(&app, &token, full_person("PARTY-BILL")).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a deleted party released its partyId: {body}"
+    );
+    assert_eq!(body["error"]["code"], "CONFLICT");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("deleted")),
+        "the refusal does not say why the code is taken, which is the part a          caller cannot guess: {body}"
+    );
+
+    // 4. And the stored reference still names the party it was written against.
+    let roles = app
+        .get(&format!("{PARTIES}/{customer}/roles"), Some(&token))
+        .await;
+    assert_eq!(roles.status, StatusCode::OK, "{}", roles.body);
+    assert_eq!(
+        roles.data()["profiles"]["customer"]["billingPartyId"],
+        "PARTY-BILL",
+        "the stored reference no longer names the party it was written against: {}",
+        roles.body
+    );
+}
+
+/// `0018_party_code_is_not_released.sql`, verbatim, so this test cannot drift
+/// from the file it is about.
+const NOT_RELEASED_MIGRATION: &str =
+    include_str!("../migrations/0018_party_code_is_not_released.sql");
+
+#[tokio::test]
+async fn the_migration_names_the_rows_that_would_block_it() {
+    // The guard in `0018` is the half a fresh database never executes, and the
+    // half an operator meets at the worst moment. Without it, a deployment that
+    // had already exercised #107 gets `could not create unique index` and a
+    // duplicate key — accurate and unactionable.
+    //
+    // Reproducing that state means undoing the migration in this test's own
+    // database first: the total index is exactly what makes the offending pair
+    // unwritable, which is the point of the migration and the reason this
+    // fixture has to start by dropping it.
+    let app = TestApp::spawn().await;
+
+    sqlx::query("DROP INDEX uq_mdm_parties_tenant_id_party_code")
+        .execute(&app.pool)
+        .await
+        .expect("the index is there to drop");
+
+    let tenant = sqlx::query_scalar::<_, Uuid>("SELECT id FROM tenants LIMIT 1")
+        .fetch_one(&app.pool)
+        .await
+        .expect("the bootstrap tenant exists");
+
+    for deleted in [false, true] {
+        sqlx::query(
+            "INSERT INTO mdm_parties (id, tenant_id, party_code, party_type, deleted_at)
+             VALUES ($1, $2, 'PARTY-CLASH', 'PARTY_GROUP', CASE WHEN $3 THEN now() END)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(tenant)
+        .bind(deleted)
+        .execute(&app.pool)
+        .await
+        .expect("seed the pair the migration refuses to migrate over");
+    }
+
+    let error = sqlx::raw_sql(NOT_RELEASED_MIGRATION)
+        .execute(&app.pool)
+        .await
+        .expect_err("the migration should refuse rather than fail on the index");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("PARTY-CLASH"),
+        "the refusal does not name the offending code: {message}"
+    );
+    assert!(
+        message.contains("#107"),
+        "the refusal does not say where to read about it: {message}"
+    );
+}
+
+#[tokio::test]
 async fn refuses_a_purpose_type_longer_than_its_column() {
     // #109, reproduced through the router. `mdm_party_contact_mechs.purpose_type`
     // is `VARCHAR(64)` and nothing bounded the field that fills it, so the value

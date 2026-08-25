@@ -885,7 +885,13 @@ pub(super) fn trimmed(value: Option<&str>) -> Option<&str> {
 /// caller's problem to fix — not an internal error.
 pub(super) fn duplicate_party_to_conflict(error: sqlx::Error) -> AppError {
     if matches!(&error, sqlx::Error::Database(db) if db.code().as_deref() == Some("23505")) {
-        AppError::conflict("That partyId is already in use")
+        // "including by a deleted one" is the part a caller cannot guess. Since
+        // #107 the uniqueness is total rather than partial on `deleted_at`, so a
+        // code that a list does not show may still be taken — and the alternative
+        // to saying so is a 409 the caller reads as a bug in the API.
+        AppError::conflict(
+            "That partyId is already in use, including by a deleted party — a partyId is never released",
+        )
     } else {
         AppError::from(error)
     }

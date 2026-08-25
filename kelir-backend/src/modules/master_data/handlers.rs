@@ -107,7 +107,7 @@ async fn get_party(
     request_body = CreatePartyRequest,
     responses(
         (status = 201, description = "Created", body = PartyAggregate),
-        (status = 409, description = "That partyId is already in use"),
+        (status = 409, description = "That partyId is already in use — including by a deleted party, whose partyId is never released (#107)"),
         (status = 422, description = "Validation failed")
     ),
     security(("bearer" = []))
