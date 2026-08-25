@@ -8,7 +8,7 @@
 //! module offers is storage and retrieval of a definition somebody produced,
 //! which is what #157's document type binds and what Sprint 8's renderer reads.
 
-use axum::extract::{Path, Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -20,7 +20,7 @@ use super::domain::{
 };
 use super::service;
 use crate::error::AppError;
-use crate::extract::JsonBody;
+use crate::extract::{JsonBody, PathParam, QueryParams};
 use crate::middleware::auth::Authenticated;
 use crate::response::{ItemEnvelope, ListEnvelope, Pagination};
 use crate::state::AppState;
@@ -60,7 +60,7 @@ pub fn routes() -> Router<AppState> {
 async fn list_forms(
     State(state): State<AppState>,
     caller: Authenticated,
-    Query(pagination): Query<Pagination>,
+    QueryParams(pagination): QueryParams<Pagination>,
 ) -> Result<Json<ListEnvelope<FormSummary>>, AppError> {
     let (forms, meta) = service::form::list_forms(&state, &caller, &pagination).await?;
 
@@ -78,7 +78,7 @@ async fn list_forms(
 async fn get_form(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
 ) -> Result<Json<ItemEnvelope<Form>>, AppError> {
     Ok(Json(ItemEnvelope::new(
         service::form::get_form(&state, &caller, id).await?,
@@ -118,7 +118,7 @@ async fn create_form(
 async fn update_form(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
     JsonBody(request): JsonBody<UpdateFormRequest>,
 ) -> Result<Json<ItemEnvelope<Form>>, AppError> {
     Ok(Json(ItemEnvelope::new(
@@ -139,7 +139,7 @@ async fn update_form(
 async fn publish_form(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
 ) -> Result<Json<ItemEnvelope<Form>>, AppError> {
     Ok(Json(ItemEnvelope::new(
         service::form::publish_form(&state, &caller, id).await?,
@@ -159,7 +159,7 @@ async fn publish_form(
 async fn create_revision(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
     JsonBody(request): JsonBody<UpdateFormRequest>,
 ) -> Result<(StatusCode, Json<ItemEnvelope<Form>>), AppError> {
     let form = service::form::create_revision(&state, &caller, id, request).await?;
@@ -178,7 +178,7 @@ async fn create_revision(
 async fn delete_form(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
 ) -> Result<StatusCode, AppError> {
     service::form::delete_form(&state, &caller, id).await?;
 
@@ -197,7 +197,7 @@ async fn delete_form(
 async fn list_lists(
     State(state): State<AppState>,
     caller: Authenticated,
-    Query(pagination): Query<Pagination>,
+    QueryParams(pagination): QueryParams<Pagination>,
 ) -> Result<Json<ListEnvelope<ListSummary>>, AppError> {
     let (lists, meta) = service::list::list_lists(&state, &caller, &pagination).await?;
 
@@ -215,7 +215,7 @@ async fn list_lists(
 async fn get_list(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
 ) -> Result<Json<ItemEnvelope<ListDefinition>>, AppError> {
     Ok(Json(ItemEnvelope::new(
         service::list::get_list(&state, &caller, id).await?,
@@ -255,7 +255,7 @@ async fn create_list(
 async fn update_list(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
     JsonBody(request): JsonBody<UpdateListRequest>,
 ) -> Result<Json<ItemEnvelope<ListDefinition>>, AppError> {
     Ok(Json(ItemEnvelope::new(
@@ -274,7 +274,7 @@ async fn update_list(
 async fn delete_list(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
 ) -> Result<StatusCode, AppError> {
     service::list::delete_list(&state, &caller, id).await?;
 

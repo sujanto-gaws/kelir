@@ -1066,6 +1066,7 @@ dependencies = [
  "bumpalo",
  "chrono",
  "datalogic-rs",
+ "form_urlencoded",
  "jsonschema",
  "jsonwebtoken",
  "lettre",

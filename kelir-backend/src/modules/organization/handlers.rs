@@ -15,7 +15,7 @@
 //! and that column is set through the user surface in `identity`. A second
 //! place to write it would be a second thing to keep in step.
 
-use axum::extract::{Path, Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
@@ -26,7 +26,7 @@ use super::department_service;
 use super::domain::{CreateTenantRequest, TenantView, UpdateTenantRequest};
 use super::service;
 use crate::error::AppError;
-use crate::extract::JsonBody;
+use crate::extract::{JsonBody, PathParam, QueryParams};
 use crate::middleware::auth::Authenticated;
 use crate::response::{ItemEnvelope, ListEnvelope, Pagination};
 use crate::state::AppState;
@@ -62,7 +62,7 @@ pub fn routes() -> Router<AppState> {
 async fn list_tenants(
     State(state): State<AppState>,
     caller: Authenticated,
-    Query(pagination): Query<Pagination>,
+    QueryParams(pagination): QueryParams<Pagination>,
 ) -> Result<Json<ListEnvelope<TenantView>>, AppError> {
     let (tenants, meta) = service::list_tenants(&state, &caller, &pagination).await?;
 
@@ -80,7 +80,7 @@ async fn list_tenants(
 async fn get_tenant(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
 ) -> Result<Json<ItemEnvelope<TenantView>>, AppError> {
     Ok(Json(ItemEnvelope::new(
         service::get_tenant(&state, &caller, id).await?,
@@ -126,7 +126,7 @@ async fn create_tenant(
 async fn update_tenant(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
     JsonBody(request): JsonBody<UpdateTenantRequest>,
 ) -> Result<Json<ItemEnvelope<TenantView>>, AppError> {
     Ok(Json(ItemEnvelope::new(
@@ -145,7 +145,7 @@ async fn update_tenant(
 async fn delete_tenant(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
 ) -> Result<StatusCode, AppError> {
     service::delete_tenant(&state, &caller, id).await?;
 
@@ -164,7 +164,7 @@ async fn delete_tenant(
 async fn list_departments(
     State(state): State<AppState>,
     caller: Authenticated,
-    Query(pagination): Query<Pagination>,
+    QueryParams(pagination): QueryParams<Pagination>,
 ) -> Result<Json<ListEnvelope<Department>>, AppError> {
     let (departments, meta) =
         department_service::list_departments(&state, &caller, &pagination).await?;
@@ -183,7 +183,7 @@ async fn list_departments(
 async fn get_department(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
 ) -> Result<Json<ItemEnvelope<Department>>, AppError> {
     Ok(Json(ItemEnvelope::new(
         department_service::get_department(&state, &caller, id).await?,
@@ -223,7 +223,7 @@ async fn create_department(
 async fn update_department(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
     JsonBody(request): JsonBody<UpdateDepartmentRequest>,
 ) -> Result<Json<ItemEnvelope<Department>>, AppError> {
     Ok(Json(ItemEnvelope::new(
@@ -243,7 +243,7 @@ async fn update_department(
 async fn delete_department(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
 ) -> Result<StatusCode, AppError> {
     department_service::delete_department(&state, &caller, id).await?;
 

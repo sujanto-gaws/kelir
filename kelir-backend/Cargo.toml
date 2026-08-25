@@ -30,6 +30,14 @@ serde_json = "1"
 # only what went wrong, so a type error could not name the field it was on and
 # the envelope had nothing to put in ValidationDetail.path.
 serde_path_to_error = "0.1"
+# Query strings, deserialized the way `axum::extract::Query` does it internally.
+# Reimplemented over the same two crates rather than wrapped, because the
+# rejection axum builds is a plain-text 400 whose parameter name survives only
+# inside a `Display` string. `extract::QueryParams` needs the name as data
+# (naming convention §5), and `serde_path_to_error` supplies it only when it
+# wraps the deserializer directly.
+serde_urlencoded = "0.7"
+form_urlencoded = "1"
 # "log" bridges sqlx's statement logging into tracing; "migrate" provides the
 # embedded migration runner; uuid/chrono map the BASE columns.
 sqlx = { version = "0.8", default-features = false, features = [
@@ -74,7 +82,5 @@ lettre = { version = "0.11.23", default-features = false, features = [
 ] }
 
 [dev-dependencies]
-# Integration tests drive the API against a real PostgreSQL.
-serde_urlencoded = "0.7"
 # Drives the router in tests via ServiceExt::oneshot, without binding a port.
 tower = { version = "0.5", features = ["util"] }

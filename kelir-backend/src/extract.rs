@@ -1,16 +1,23 @@
 //! Request extractors that fail inside the error envelope.
 //!
-//! **Why this exists.** `axum::Json` rejects a bad body with its own plain-text
-//! response, which is neither the envelope every other error uses (coding
-//! standard §2.6) nor something a form can act on: it names no field. Worse, a
+//! **Why this exists.** Axum's own extractors reject with their own plain-text
+//! responses, which are neither the envelope every other error uses (coding
+//! standard §2.6) nor something a form can act on: they name no field. Worse, a
 //! body that deserializes *successfully* while dropping what the client sent is
 //! not an error at all — a client posting `role_ids` for `roleIds` got 201
 //! Created and a user with no roles (#62).
 //!
-//! [`JsonBody`] closes both halves. `#[serde(deny_unknown_fields)]` on the
-//! request structs turns the silent drop into a deserialization failure, and
-//! this extractor turns that failure into a 422 naming the field the client
+//! [`JsonBody`] closes both halves for the body. `#[serde(deny_unknown_fields)]`
+//! on the request structs turns the silent drop into a deserialization failure,
+//! and this extractor turns that failure into a 422 naming the field the client
 //! actually sent.
+//!
+//! [`QueryParams`] and [`PathParam`] close the same hole on the other two places
+//! a request carries data. `?page=abc` used to be a bare 400 with an **empty
+//! body** on every list endpoint in the product (#122), which is the one shape a
+//! client written against the envelope cannot read: it finds `null` where it
+//! expects `error.code`. The three extractors together mean no refusal leaves
+//! this API outside the envelope.
 //!
 //! **One gap, deliberately left.** The generated OpenAPI document does not say
 //! `additionalProperties: false`, because utoipa 5 accepts that attribute only
@@ -21,7 +28,8 @@
 //! §2.6).
 
 use axum::body::Bytes;
-use axum::extract::{FromRequest, Request};
+use axum::extract::{FromRequest, FromRequestParts, Request};
+use axum::http::request::Parts;
 use axum::http::header;
 use serde::de::DeserializeOwned;
 
@@ -72,6 +80,144 @@ fn is_json(request: &Request) -> bool {
         || essence
             .rsplit_once('+')
             .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("json"))
+}
+
+/// Query-string parameters, rejected through [`AppError`].
+///
+/// Drop-in for `axum::extract::Query`. The `utoipa` annotation is unaffected:
+/// `params(...)` names the type, not the extractor.
+///
+/// **Why this is not a wrapper around `axum::extract::Query`.** Axum already
+/// deserializes through `serde_path_to_error`, so it knows which parameter
+/// failed — but it keeps that knowledge inside a `Display` string on a rejection
+/// that renders as plain text. Recovering the name would mean parsing English
+/// back out of `"Failed to deserialize query string: pageSize: invalid digit
+/// found in string"`, which breaks the first time axum rewords it. Repeating the
+/// four lines axum's own `try_from_uri` runs costs less and hands the parameter
+/// name over as data.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct QueryParams<T>(pub T);
+
+impl<T, S> FromRequestParts<S> for QueryParams<T>
+where
+    T: DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let query = parts.uri.query().unwrap_or_default();
+        let deserializer =
+            serde_urlencoded::Deserializer::new(form_urlencoded::parse(query.as_bytes()));
+
+        serde_path_to_error::deserialize(deserializer)
+            .map(Self)
+            .map_err(query_rejection)
+    }
+}
+
+/// A path parameter, rejected through [`AppError`].
+///
+/// Drop-in for `axum::extract::Path`. Unlike [`QueryParams`] this *does* wrap the
+/// axum extractor: `Path` reads the captures the router put in the request
+/// extensions, which is routing state rather than anything re-derivable from the
+/// URI, and its rejection already carries the parameter name as structured data
+/// (`ErrorKind`) rather than only in a message.
+///
+/// The status codes axum chose are kept. A path segment that will not parse is
+/// still a 400 — the resource named by `/parties/not-a-uuid` does not fail to
+/// exist, the reference to it never became one — and the two programmer-error
+/// kinds are still 500. All that changes is that the reply is now the envelope.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PathParam<T>(pub T);
+
+impl<T, S> FromRequestParts<S> for PathParam<T>
+where
+    T: DeserializeOwned + Send,
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        axum::extract::Path::<T>::from_request_parts(parts, state)
+            .await
+            .map(|axum::extract::Path(value)| Self(value))
+            .map_err(path_rejection)
+    }
+}
+
+/// Turns a query-string deserialization failure into a 422 naming the parameter.
+///
+/// 422 rather than 400, and a [`ValidationDetail`] rather than a message,
+/// because `?page=abc` is the same class of mistake as `?statusId=NOPE`, which
+/// `RoleViewQuery::filters` has always answered that way. One struct answering
+/// two shapes for two of its own parameters is what #122 was filed about.
+///
+/// The path `serde_path_to_error` reports is the key as it appeared on the wire,
+/// so a caller who sent `pageSize` is told `pageSize` even though the field is
+/// `page_size`.
+fn query_rejection(error: serde_path_to_error::Error<serde_urlencoded::de::Error>) -> AppError {
+    let path = error.path().to_string();
+    let parameter = if path.is_empty() || path == "." {
+        "query".to_owned()
+    } else {
+        path
+    };
+
+    AppError::validation(vec![ValidationDetail::new(
+        parameter,
+        "type",
+        "INVALID_TYPE",
+        capitalize(&error.inner().to_string()),
+    )])
+}
+
+/// Turns a path-parameter rejection into the envelope, keeping axum's status.
+///
+/// The status codes are the ones axum already chose, so this changes the shape
+/// of the reply and not the contract. A path segment that will not parse stays a
+/// 400: `/parties/not-a-uuid` does not name a resource that is missing, it fails
+/// to name one at all. The two kinds axum answers 500 to describe a handler
+/// signature that does not match its route — a defect here, not in the request —
+/// and stay 500, saying nothing to the caller like every other internal error.
+fn path_rejection(rejection: axum::extract::rejection::PathRejection) -> AppError {
+    use axum::extract::path::ErrorKind;
+    use axum::extract::rejection::PathRejection;
+
+    let PathRejection::FailedToDeserializePathParams(failure) = rejection else {
+        // `MissingPathParams`: the router captured nothing for a handler that
+        // asked for a capture. Wiring, not input.
+        return AppError::Internal {
+            source: anyhow::anyhow!("path parameters missing from the request extensions"),
+        };
+    };
+
+    match failure.into_kind() {
+        ErrorKind::ParseErrorAtKey {
+            key, expected_type, ..
+        } => AppError::bad_request(format!("`{key}` in the path is not a valid {expected_type}")),
+        ErrorKind::DeserializeError { key, message, .. } => {
+            AppError::bad_request(format!("`{key}` in the path is not valid: {message}"))
+        }
+        ErrorKind::InvalidUtf8InPathParam { key } => AppError::bad_request(format!(
+            "`{key}` in the path is not valid UTF-8 once decoded"
+        )),
+        ErrorKind::ParseError { expected_type, .. }
+        | ErrorKind::ParseErrorAtIndex { expected_type, .. } => {
+            AppError::bad_request(format!("The path is not a valid {expected_type}"))
+        }
+        ErrorKind::Message(message) => AppError::bad_request(capitalize(&message)),
+        kind @ (ErrorKind::UnsupportedType { .. } | ErrorKind::WrongNumberOfParameters { .. }) => {
+            AppError::Internal {
+                source: anyhow::anyhow!("path extractor does not match its route: {kind}"),
+            }
+        }
+        // `ErrorKind` is `#[non_exhaustive]`. A kind added later is answered as
+        // input rather than as an internal error: five of the seven that exist
+        // today describe the request, and reporting a caller's mistake as a 500
+        // is the worse of the two ways to be wrong about a new one.
+        kind => AppError::bad_request(capitalize(&kind.to_string())),
+    }
 }
 
 /// Turns a deserialization failure into the error a client can act on.
@@ -389,6 +535,165 @@ mod tests {
         assert!(
             !message.contains("at line"),
             "message should not carry byte offsets: {message}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // QueryParams (#122)
+    // -----------------------------------------------------------------------
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Filters {
+        page: Option<u32>,
+        page_size: Option<u32>,
+        search: Option<String>,
+    }
+
+    async fn filter(QueryParams(filters): QueryParams<Filters>) -> String {
+        format!(
+            "{}:{}:{}",
+            filters.page.unwrap_or_default(),
+            filters.page_size.unwrap_or_default(),
+            filters.search.unwrap_or_default()
+        )
+    }
+
+    async fn get_query(query: &str) -> (StatusCode, serde_json::Value) {
+        let response = Router::new()
+            .route("/", axum::routing::get(filter))
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/?{query}"))
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("router responds");
+
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn accepts_a_well_formed_query_string() {
+        let (status, _) = get_query("page=2&pageSize=50&search=acme").await;
+
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn a_non_numeric_page_is_a_422_inside_the_envelope() {
+        let (status, body) = get_query("page=abc").await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["success"], false);
+        assert_eq!(body["error"]["code"], "VALIDATION_ERROR");
+    }
+
+    #[tokio::test]
+    async fn a_negative_page_is_a_422_inside_the_envelope() {
+        // The parameter is `u32`, so `-1` fails to parse rather than arriving
+        // and being clamped. It is a refusal either way; #122 is about where.
+        let (status, body) = get_query("page=-1").await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"]["code"], "VALIDATION_ERROR");
+    }
+
+    #[tokio::test]
+    async fn a_bad_query_parameter_is_named_as_the_client_spelled_it() {
+        // The field is `page_size`; the wire name is `pageSize`. A caller
+        // correcting their request needs the second.
+        let (_, body) = get_query("pageSize=x").await;
+
+        assert_eq!(detail(&body)["path"], "pageSize");
+        assert_eq!(detail(&body)["code"], "INVALID_TYPE");
+    }
+
+    #[tokio::test]
+    async fn a_bad_query_parameter_carries_a_body_at_all() {
+        // The defect #122 records is not the status but the empty body: a
+        // client written against the envelope finds `null` where `error.code`
+        // should be. This is the assertion that goes red if the extractor is
+        // swapped back for `axum::extract::Query`.
+        let (_, body) = get_query("page=abc").await;
+
+        assert!(
+            body["error"]["code"].is_string(),
+            "the refusal should be readable as the error envelope, got {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_query_parameter_is_ignored_rather_than_refused() {
+        // Deliberate, and unchanged by #122: `Pagination` has always ignored
+        // what it does not recognise, and `deny_unknown_fields` on one query
+        // struct and not the others would be a difference with no reason behind
+        // it (coding standard §1.1).
+        let (status, _) = get_query("page=1&somethingElse=1").await;
+
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    // -----------------------------------------------------------------------
+    // PathParam (#122)
+    // -----------------------------------------------------------------------
+
+    async fn identify(PathParam(id): PathParam<uuid::Uuid>) -> String {
+        id.to_string()
+    }
+
+    async fn get_path(path: &str) -> (StatusCode, serde_json::Value) {
+        let response = Router::new()
+            .route("/{id}", axum::routing::get(identify))
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/{path}"))
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("router responds");
+
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn accepts_a_well_formed_path_parameter() {
+        let (status, _) = get_path("0198f0e2-0000-7000-8000-000000000000").await;
+
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn an_unparseable_path_parameter_stays_a_400_and_joins_the_envelope() {
+        let (status, body) = get_path("not-a-uuid").await;
+
+        // The status is the one axum already answered. What changes is that
+        // there is now a body to read.
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "BAD_REQUEST");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("id")),
+            "the message should name the parameter, got {body}"
         );
     }
 }
