@@ -19,8 +19,22 @@ use crate::modules::identity::domain::validate_password_value;
 use crate::modules::identity::repository as identity_repo;
 use crate::modules::organization::service as organization;
 
-/// The role every bootstrap administrator is granted, seeded by 0002.
-const ADMIN_ROLE_ID: Uuid = uuid::uuid!("00000000-0000-0000-0002-000000000001");
+/// The role every bootstrap administrator is granted, **looked up in the
+/// resolved tenant rather than pinned** (#65, decision **D-18**).
+///
+/// It used to be the id `0002_identity.sql` seeds — which is the system
+/// tenant's row. On a deployment whose `KELIR_DEFAULT_TENANT_CODE` is anything
+/// else, that granted the *system* tenant's role through a `user_roles` row
+/// carrying the *resolved* tenant's id: a grant across a tenant boundary, which
+/// worked only because `roles_of_user` joined without a tenant filter. D-18
+/// settles that roles are tenant-scoped, so both halves of that grant have to
+/// name the same tenant, and the only way to satisfy that is to look the role
+/// up in the tenant the account is being created in.
+///
+/// `0017_tenant_administration.sql` now refuses the old shape outright, so this
+/// is no longer merely the better of two behaviours — the pinned id would fail
+/// the insert.
+const ADMIN_ROLE_CODE: &str = crate::modules::identity::service::TENANT_ADMIN_ROLE_CODE;
 
 /// Advisory lock held for the creating transaction. The value is the ASCII of
 /// `KELIRBT!` and carries no meaning beyond being unlikely to collide with
@@ -201,7 +215,23 @@ pub async fn ensure_administrator(
     )
     .await?;
 
-    identity_repo::replace_user_roles(&mut transaction, tenant_id, id, &[ADMIN_ROLE_ID]).await?;
+    // Looked up inside the transaction and inside the tenant, so the grant and
+    // the account it is for name the same tenant (#65). A default tenant with
+    // no administrator role is a deployment fault worth naming: the account
+    // would be created holding nothing, and the symptom would be an
+    // administrator who can sign in and do nothing at all.
+    let admin_role_id =
+        identity_repo::find_role_id_by_code(&mut *transaction, tenant_id, ADMIN_ROLE_CODE)
+            .await?
+            .ok_or_else(|| AppError::Internal {
+                source: anyhow::anyhow!(
+            "tenant '{}' has no {ADMIN_ROLE_CODE} role, so the first administrator would hold \
+             no permissions; create the tenant through the tenant API rather than by hand",
+            tenant.tenant_code
+        ),
+            })?;
+
+    identity_repo::replace_user_roles(&mut transaction, tenant_id, id, &[admin_role_id]).await?;
 
     transaction.commit().await?;
 
@@ -513,7 +543,7 @@ mod tests {
         .await
         .expect("the migration seeds a system role");
 
-        let granted = identity_repo::roles_of_user(&pool, admin.id)
+        let granted = identity_repo::roles_of_user(&pool, SYSTEM_TENANT_ID, admin.id)
             .await
             .expect("reads the granted roles");
 
@@ -523,7 +553,7 @@ mod tests {
 
         // And the role is worth having: the account can administer everything
         // the catalogue defines, which is the reason the bootstrap exists.
-        let mut held = identity_repo::permissions_for_user(&pool, admin.id)
+        let mut held = identity_repo::permissions_for_user(&pool, SYSTEM_TENANT_ID, admin.id)
             .await
             .expect("reads permissions");
         let mut defined: Vec<String> = identity_repo::list_permissions(&pool)

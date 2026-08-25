@@ -114,13 +114,14 @@ The MVP focuses on:
 │   │   ├── 0014_rad.sql
 │   │   ├── 0015_document.sql
 │   │   ├── 0016_numbering_gap_policy.sql
-│   │   ├── 0017_workflow.sql
-│   │   ├── 0018_attachment.sql
-│   │   ├── 0019_comment.sql
-│   │   ├── 0020_activity_audit.sql
-│   │   ├── 0021_notification.sql
-│   │   ├── 0022_integration.sql
-│   │   └── 0023_plugin.sql
+│   │   ├── 0017_tenant_administration.sql
+│   │   ├── 0018_workflow.sql
+│   │   ├── 0019_attachment.sql
+│   │   ├── 0020_comment.sql
+│   │   ├── 0021_activity_audit.sql
+│   │   ├── 0022_notification.sql
+│   │   ├── 0023_integration.sql
+│   │   └── 0024_plugin.sql
 │   └── src/
 │       ├── main.rs
 │       ├── config.rs

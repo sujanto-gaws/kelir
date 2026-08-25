@@ -128,6 +128,23 @@ impl TestApp {
     /// on them. `AppConfig::from_env`'s own parsing of those variables is
     /// covered by its unit tests.
     pub async fn spawn() -> Self {
+        Self::spawn_with(|_| {}).await
+    }
+
+    /// A [`TestApp::spawn`] whose configuration the caller adjusts first.
+    ///
+    /// Exists for one setting: `multi_tenant`. Tenancy is a deployment
+    /// property, so the behaviour that depends on it — sign-in requiring a
+    /// tenant code, and a second tenant's administrator being able to sign in
+    /// at all — cannot be reached from a fixture. Everything else about the
+    /// instance is unchanged, including the bootstrap, so a test that adjusts
+    /// nothing is exactly `spawn`.
+    ///
+    /// The adjustment runs *before* the bootstrap, which is what makes it
+    /// meaningful: `KELIR_DEFAULT_TENANT_CODE` decides which tenant the first
+    /// administrator lands in, and that is the tenant every tenant-administration
+    /// check compares against.
+    pub async fn spawn_with(adjust: impl FnOnce(&mut AppConfig)) -> Self {
         let maintenance_url = server_url();
         let database_name = format!("kelir_test_{}", Uuid::now_v7().simple());
 
@@ -154,7 +171,8 @@ impl TestApp {
             )
         });
 
-        let config = test_config(&database_url);
+        let mut config = test_config(&database_url);
+        adjust(&mut config);
 
         modules::auth::bootstrap::ensure_administrator(&pool, &config)
             .await
@@ -272,6 +290,42 @@ impl TestApp {
 
     pub async fn delete(&self, uri: &str, token: Option<&str>) -> TestResponse {
         self.send(Method::DELETE, uri, token, None).await
+    }
+
+    /// Signs in naming a tenant, as a multi-tenant deployment's client does.
+    ///
+    /// Separate from [`TestApp::sign_in`] rather than an `Option` parameter on
+    /// it, because the two are different claims: `sign_in` asserts that the
+    /// unchanged single-tenant login contract still works, and this asserts
+    /// that the tenant-code half does. Every existing test uses the first, and
+    /// should keep proving that.
+    pub async fn sign_in_to(&self, tenant_code: &str, username: &str, password: &str) -> String {
+        let response = self
+            .post(
+                "/api/v1/auth/login",
+                None,
+                serde_json::json!({
+                    "username": username,
+                    "password": password,
+                    "tenantCode": tenant_code,
+                }),
+            )
+            .await;
+
+        if response.status != StatusCode::OK {
+            sign_in_failure(username, &response);
+        }
+
+        response.body["data"]["accessToken"]
+            .as_str()
+            .unwrap_or_else(|| {
+                harness_failure(
+                    "read accessToken from the sign-in response",
+                    &response.body.to_string(),
+                    &self.database_name,
+                )
+            })
+            .to_owned()
     }
 
     /// Signs in through `POST /api/v1/auth/login` and returns the access token.

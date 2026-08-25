@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import {
+  Building2,
   FileText,
   Inbox,
   LayoutDashboard,
@@ -68,6 +69,13 @@ const navigation = [
     icon: ShieldCheck,
     enabled: true,
     permission: 'identity:role:read',
+  },
+  {
+    name: 'admin-tenants',
+    label: 'Tenants',
+    icon: Building2,
+    enabled: true,
+    permission: 'organization:tenant:read',
   },
 ] as const
 

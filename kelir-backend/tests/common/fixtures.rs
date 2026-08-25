@@ -16,17 +16,20 @@ use kelir_backend::modules::identity::repository as identity_repo;
 
 use super::harness_failure;
 
-/// `ROLE-ADMIN`, seeded by `0002_identity.sql` with every permission.
+/// The **system tenant's** `ROLE-ADMIN`, seeded by `0002_identity.sql` with
+/// every permission.
 ///
-/// Mirrors the constant in `modules::auth::bootstrap`, which is private.
-/// [`assert_admin_role_exists`] is what stops the two drifting silently.
+/// It is no longer the id the bootstrap grants: under decision **D-18** roles
+/// are tenant-scoped, so the bootstrap looks its role up by code inside the
+/// tenant it is creating the account in (#65). Every tenant has a `ROLE-ADMIN`
+/// and this id names one of them — the seeded one.
 pub const ADMIN_ROLE_ID: Uuid = uuid::uuid!("00000000-0000-0000-0002-000000000001");
 
 /// The reserved system tenant, seeded by `0001_core.sql`.
 ///
-/// Every sign-in resolves against this tenant today
-/// (`modules::auth::service::sign_in` hard-codes it), so a user who must be
-/// able to authenticate has to live here.
+/// The tenant a sign-in resolves to when the harness leaves
+/// `default_tenant_code` at `SYSTEM`, which every test but the tenancy ones
+/// does — so a fixture user who must be able to authenticate lives here.
 pub const SYSTEM_TENANT_ID: Uuid = uuid::uuid!("00000000-0000-0000-0000-000000000001");
 
 /// Creates an active user with exactly the roles given — `&[]` for a user who
@@ -144,6 +147,10 @@ pub async fn create_role_with_permissions(
         role_code,
         role_code,
         None,
+        // A fixture role is an ordinary role: `is_system` would make it
+        // undeletable, and a test that needed to delete one would then be
+        // asserting against the wrong refusal.
+        false,
         None,
     )
     .await
@@ -181,8 +188,11 @@ pub async fn create_role_with_permissions(
 pub async fn create_tenant(pool: &PgPool, tenant_code: &str, name: &str) -> Uuid {
     let id = Uuid::now_v7();
 
-    // No repository owns `tenants` yet (the tenant module is Phase 3), so this
-    // is direct. Parameterised, per coding standard §2.5.
+    // Direct on purpose, now that `organization::repository` does own `tenants`.
+    // A fixture tenant is a *bare* tenant — no roles, no users — which is
+    // precisely what `create_tenant` refuses to produce (D-18), so a test that
+    // needs one cannot get it from the surface under test. Tests asserting what
+    // the API creates go through the API.
     sqlx::query(
         "INSERT INTO tenants (id, tenant_code, name, status) VALUES ($1, $2, $3, 'ACTIVE')",
     )
@@ -202,12 +212,13 @@ pub async fn create_tenant(pool: &PgPool, tenant_code: &str, name: &str) -> Uuid
     id
 }
 
-/// Fails loudly if the migration no longer seeds `ROLE-ADMIN` under the id the
-/// bootstrap grants.
+/// Fails loudly if the migration no longer seeds `ROLE-ADMIN` in the system
+/// tenant under the id above.
 ///
-/// Drift here would not fail a unit test — `bootstrap`'s own test only compares
-/// the constant against a literal — it would fail at startup on a fresh
-/// deployment, which is the worst place to find out.
+/// The bootstrap no longer depends on that id (**D-18**), but plenty else
+/// assumes the seeded row exists and is a *system* role — `delete_role`'s
+/// refusal, and every fixture that grants it. Drift here would not fail a unit
+/// test; it would fail at startup on a fresh deployment.
 pub async fn assert_admin_role_exists(pool: &PgPool) {
     let found: Option<(String, bool)> = sqlx::query_as(
         "SELECT role_code, is_system FROM roles WHERE id = $1 AND deleted_at IS NULL",

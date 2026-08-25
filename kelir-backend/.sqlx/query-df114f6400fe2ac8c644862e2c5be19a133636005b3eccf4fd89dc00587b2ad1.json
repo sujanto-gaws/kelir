@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT r.role_code\n        FROM user_roles ur\n        JOIN roles r ON r.id = ur.role_id AND r.tenant_id = ur.tenant_id\n                    AND r.deleted_at IS NULL\n        WHERE ur.tenant_id = $1 AND ur.user_id = $2 AND ur.deleted_at IS NULL\n        ORDER BY 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "role_code",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "df114f6400fe2ac8c644862e2c5be19a133636005b3eccf4fd89dc00587b2ad1"
+}

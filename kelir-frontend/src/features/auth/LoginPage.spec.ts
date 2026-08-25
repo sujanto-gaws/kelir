@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 
 import LoginPage from './LoginPage.vue'
+import { fetchDeployment } from '@/api/deployment'
 import { registerSessionBridge } from '@/api/session'
 import {
   errorBody,
@@ -13,6 +14,23 @@ import {
   type FakeHandler,
 } from '@/lib/testing/fake-backend'
 import { useAuthStore } from '@/stores/auth'
+
+/**
+ * `GET /deployment` is an *operational* endpoint: it sits at the root, outside
+ * `/api/v1`, and the fake backend cannot see it — that helper replaces
+ * `apiClient`'s adapter, and this call deliberately does not go through
+ * `apiClient`. So it is mocked at the module boundary.
+ *
+ * The default rejection is not laziness. It is the exact condition the page has
+ * to survive: the probe failing tells the form nothing about which mode the
+ * deployment is in, and every test outside the tenancy block below asserts that
+ * a failed probe leaves the single-tenant form completely unchanged.
+ */
+vi.mock('@/api/deployment', () => ({
+  fetchDeployment: vi.fn(() => Promise.reject(new Error('unreachable'))),
+}))
+
+const deploymentProbe = vi.mocked(fetchDeployment)
 
 const blank = { template: '<div />' }
 
@@ -50,6 +68,7 @@ describe('LoginPage', () => {
 
     handler = signInSucceeds
     backend = installFakeBackend((request) => handler(request))
+    deploymentProbe.mockRejectedValue(new Error('unreachable'))
 
     router = createRouter({
       history: createMemoryHistory(),
@@ -325,6 +344,108 @@ describe('LoginPage', () => {
 
       expect(useAuthStore().isAuthenticated).toBe(false)
       expect(wrapper.find('form').exists()).toBe(true)
+    })
+  })
+
+  /**
+   * #67, closed by decision D-18.
+   *
+   * `SignInRequest` has carried `tenantCode` since Sprint 4 and this form had no
+   * field for it, so turning `KELIR_MULTI_TENANT` on produced a 422 whose
+   * per-field message the page could not show and whose remedy the user could
+   * not type. The backend refused to start in that mode rather than serve it.
+   * Both halves are gone: the mode runs, and this is the half that makes it
+   * usable.
+   */
+  describe('on a multi-tenant deployment', () => {
+    async function renderMultiTenant(): Promise<VueWrapper> {
+      deploymentProbe.mockResolvedValue({ multiTenant: true })
+
+      const wrapper = await renderAt()
+      // The probe resolves after mount, so the field appears a tick later.
+      await flushPromises()
+
+      return wrapper
+    }
+
+    it('asks for a tenant code', async () => {
+      const wrapper = await renderMultiTenant()
+
+      expect(wrapper.find('#tenantCode').exists()).toBe(true)
+      expect(wrapper.text()).toContain('serves more than one organization')
+    })
+
+    it('sends the code with the credentials', async () => {
+      const wrapper = await renderMultiTenant()
+
+      await wrapper.find('#tenantCode').setValue('  acme  ')
+      await signIn(wrapper)
+
+      const login = backend.requests.find((request) => request.url === '/auth/login')
+      expect(login?.body).toMatchObject({
+        username: 'ana',
+        password: 'correct horse',
+        tenantCode: 'acme',
+      })
+    })
+
+    it('will not send an attempt with the code left blank', async () => {
+      const wrapper = await renderMultiTenant()
+
+      await wrapper.find('#username').setValue('ana')
+      await wrapper.find('#password').setValue('correct horse')
+      await wrapper.find('form').trigger('submit')
+      await flushPromises()
+
+      expect(wrapper.text()).toContain('Enter the tenant code you were given')
+      expect(backend.requests).toHaveLength(0)
+    })
+  })
+
+  describe('when the deployment could not be asked which mode it is in', () => {
+    it('shows the unchanged single-tenant form and sends no code', async () => {
+      // The default in this file: the probe rejects. Every deployment that has
+      // not turned the flag on is single-tenant, so this is the right guess and
+      // the request must stay identical to what clients sent before the field
+      // existed.
+      const wrapper = await renderAt()
+      await flushPromises()
+
+      expect(wrapper.find('#tenantCode').exists()).toBe(false)
+
+      await signIn(wrapper)
+
+      const login = backend.requests.find((request) => request.url === '/auth/login')
+      expect(login?.body).toEqual({ username: 'ana', password: 'correct horse' })
+    })
+
+    it('reveals the field when the server says one was required', async () => {
+      // The recovery path, and the part of #67 that was actually broken: the
+      // backend wrote a per-field message, the form had no field to show it
+      // against, and the user was left with a generic error and nothing to type
+      // into. A wrong guess now costs one attempt instead of locking them out.
+      handler = () => ({
+        status: 422,
+        body: errorBody('VALIDATION_ERROR', 'Validation failed', [
+          {
+            path: 'tenantCode',
+            rule: 'required',
+            code: 'REQUIRED',
+            message: 'A tenant code is required on this deployment',
+          },
+        ]),
+      })
+      const wrapper = await renderAt()
+      await flushPromises()
+
+      expect(wrapper.find('#tenantCode').exists()).toBe(false)
+
+      await signIn(wrapper)
+
+      expect(wrapper.find('#tenantCode').exists()).toBe(true)
+      expect(wrapper.find('#tenantCode-error').text()).toBe(
+        'A tenant code is required on this deployment',
+      )
     })
   })
 })

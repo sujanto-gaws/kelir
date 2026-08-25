@@ -375,8 +375,8 @@ async fn issue_session(
     username: &str,
     rotated_from_id: Option<Uuid>,
 ) -> Result<SignedIn, AppError> {
-    let roles = identity_repo::role_codes_for_user(&state.pool, user_id).await?;
-    let permissions = identity_repo::permissions_for_user(&state.pool, user_id).await?;
+    let roles = identity_repo::role_codes_for_user(&state.pool, tenant_id, user_id).await?;
+    let permissions = identity_repo::permissions_for_user(&state.pool, tenant_id, user_id).await?;
 
     let (access_token, _expires_at) = issue_access_token(
         &state.config.jwt_secret,

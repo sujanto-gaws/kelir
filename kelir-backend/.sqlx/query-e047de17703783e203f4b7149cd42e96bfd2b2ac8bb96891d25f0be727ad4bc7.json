@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT r.id, r.role_code, r.name\n        FROM user_roles ur\n        JOIN roles r ON r.id = ur.role_id AND r.deleted_at IS NULL\n        WHERE ur.user_id = $1 AND ur.deleted_at IS NULL\n        ORDER BY r.role_code\n        ",
+  "query": "\n        SELECT r.id, r.role_code, r.name\n        FROM user_roles ur\n        JOIN roles r ON r.id = ur.role_id AND r.tenant_id = ur.tenant_id\n                    AND r.deleted_at IS NULL\n        WHERE ur.tenant_id = $1 AND ur.user_id = $2 AND ur.deleted_at IS NULL\n        ORDER BY r.role_code\n        ",
   "describe": {
     "columns": [
       {
@@ -21,6 +21,7 @@
     ],
     "parameters": {
       "Left": [
+        "Uuid",
         "Uuid"
       ]
     },
@@ -30,5 +31,5 @@
       false
     ]
   },
-  "hash": "f61c98e9468814416245568499910a0d2c81bf6acf40a4cdafdd92d11b3bd68e"
+  "hash": "e047de17703783e203f4b7149cd42e96bfd2b2ac8bb96891d25f0be727ad4bc7"
 }

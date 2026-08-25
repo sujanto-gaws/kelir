@@ -36,6 +36,19 @@ pub struct VersionBody {
     pub environment: String,
 }
 
+/// What a client needs to know before anybody has signed in.
+///
+/// Exactly one field today, and the field is the point: the login form cannot
+/// know whether to ask for a tenant code unless the deployment tells it
+/// (#67, decision **D-18**).
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DeploymentBody {
+    /// Whether this deployment serves more than one tenant, and therefore
+    /// whether `POST /auth/login` requires `tenantCode`.
+    pub multi_tenant: bool,
+}
+
 /// Overall health. Kept dependency-free so it answers even while PostgreSQL is
 /// still starting; `/health/ready` is the probe that gates traffic.
 #[utoipa::path(
@@ -111,6 +124,39 @@ pub async fn version(State(state): State<AppState>) -> Json<VersionBody> {
     })
 }
 
+/// How this deployment is configured, for a client that has not signed in yet.
+///
+/// **Unauthenticated on purpose, and this is the decision #67 asked for.** The
+/// login form has to know whether to show a tenant-code field before it has any
+/// credentials to show it with, so the answer cannot sit behind a token. Two
+/// transports were available:
+///
+/// - a build-time `VITE_KELIR_MULTI_TENANT` flag, which is cheaper and would
+///   couple the frontend *image* to one backend's setting. The image today
+///   bakes only `VITE_KELIR_API_BASE_URL=/api/v1`, a relative path, so one
+///   build serves every deployment — a build-time tenancy flag would end that
+///   and make the image per-deployment.
+/// - this endpoint, which is new API surface and keeps the image generic.
+///
+/// **D-18** takes the second. What it discloses is one boolean that the login
+/// form is about to make visible anyway, and nothing about which tenants exist:
+/// enumerating those needs `organization:tenant:read` and the administering
+/// tenant.
+///
+/// Not rate-limited, for the same reason `/health` is not: it reads no
+/// database, costs a struct, and reveals nothing worth guessing at.
+#[utoipa::path(
+    get,
+    path = "/deployment",
+    tag = "operations",
+    responses((status = 200, description = "How this deployment is configured", body = DeploymentBody))
+)]
+pub async fn deployment(State(state): State<AppState>) -> Json<DeploymentBody> {
+    Json(DeploymentBody {
+        multi_tenant: state.config.multi_tenant,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,5 +186,25 @@ mod tests {
         // The release smoke test compares this against the released tag, so an
         // empty value would make that check silently pass.
         assert!(!BUILD_SHA.is_empty());
+    }
+
+    #[tokio::test]
+    async fn deployment_reports_the_tenancy_mode_it_is_configured_with() {
+        // The login form renders its tenant-code field off this and nothing
+        // else, so a value that did not follow the configuration would produce
+        // exactly the unrecoverable sign-in #67 was filed about — from the
+        // other direction.
+        for multi_tenant in [false, true] {
+            let config = crate::config::AppConfig {
+                multi_tenant,
+                ..crate::config::AppConfig::test_default()
+            };
+            let pool = crate::db::create_pool("postgres://postgres:postgres@localhost:5432/kelir")
+                .expect("lazy pool builds without a server");
+
+            let Json(body) = deployment(State(AppState::new(pool, config))).await;
+
+            assert_eq!(body.multi_tenant, multi_tenant);
+        }
     }
 }

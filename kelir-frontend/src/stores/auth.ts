@@ -189,8 +189,15 @@ export const useAuthStore = defineStore('auth', () => {
    * the user reads (coding standard §3.4: user-facing strings live in the
    * component).
    */
-  async function signIn(username: string, password: string): Promise<void> {
-    const session = await authApi.signIn({ username, password })
+  async function signIn(username: string, password: string, tenantCode?: string): Promise<void> {
+    // Omitted rather than sent as an empty string when the form has no tenant
+    // field: the backend's `deny_unknown_fields` accepts an absent `tenantCode`
+    // and a blank one resolves to the same "no code given" refusal, so leaving
+    // the key out keeps the single-tenant request byte-identical to what every
+    // client sent before this existed.
+    const session = await authApi.signIn(
+      tenantCode ? { username, password, tenantCode } : { username, password },
+    )
 
     applySession(session)
 

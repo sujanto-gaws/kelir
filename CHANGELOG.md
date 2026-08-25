@@ -12,9 +12,34 @@ While the major version is `0`, the public API may change in any release.
 Phase 4 opens: the RAD metadata tables and the definition APIs over them, the
 document table group with document types and their numbering rules, one JSON
 Logic engine shared by both sides, and a browser harness that drives a real
-deployment. Two Phase 2 carry-overs land with them.
+deployment. Two Phase 2 carry-overs land with them, and a third — tenant
+management — returns from the unscheduled backlog and takes multi-tenant mode
+with it.
 
 ### Added
+
+- **Multi-tenant mode runs, and tenants are administrable (FR-ORG-001,
+  FR-IDM-009; decision D-18, superseding D-7).** `KELIR_MULTI_TENANT` no longer
+  refuses to start the backend. `/api/v1/organization/tenants` creates, lists,
+  renames, suspends and removes tenants, and **creating one creates the
+  administrator who can sign in to it, in the same transaction** — the objection
+  that kept this surface unscheduled for four sprints was that it would create
+  rows nobody could reach. A tenant's code is fixed once it exists, because that
+  code is what its users type at sign-in; suspending or deleting a tenant
+  revokes its refresh tokens, so sessions end rather than merely failing to
+  renew.
+- **`GET /deployment`.** Unauthenticated, root-level, and one field: whether this
+  deployment is multi-tenant. The login form reads it to decide whether to ask
+  for a tenant code, which it must do before it has any credentials. A
+  build-time `VITE_` flag was rejected because the frontend image bakes only a
+  relative API base today, so one build serves every deployment.
+- **A tenant-code field on the sign-in form.** Shown when the deployment says so,
+  and **also shown when the server answers that one was required** — so a
+  deployment that could not be probed costs one attempt rather than locking
+  somebody out. That second path is [#67](https://github.com/sujanto-gaws/kelir/issues/67),
+  which had been closed by refusing to boot rather than by building the field.
+- **A Tenants screen**, behind `organization:tenant:read`, with a Playwright flow
+  covering sign-in → list → create (`e2e/tests/create-a-tenant.spec.ts`).
 
 - **One JSON Logic engine on both sides (decision D-10).** The backend evaluates
   JFSS calculation and validation rules with `datalogic-rs` and the browser with
@@ -61,6 +86,23 @@ deployment. Two Phase 2 carry-overs land with them.
 
 ### Changed
 
+- **Roles are tenant-scoped, and the database now enforces it
+  ([#65](https://github.com/sujanto-gaws/kelir/issues/65)).** Every tenant has
+  its own `ROLE-ADMIN`; the permission catalogue stays global. Three identity
+  reads that had been joining across the boundary — `roles_of_user`,
+  `permissions_for_user`, `role_codes_for_user` — now filter `tenant_id` like
+  their siblings, and `0017_tenant_administration.sql` adds composite foreign
+  keys that make a cross-tenant grant unwritable. **The first-run bootstrap was
+  writing exactly such a row** on any deployment whose
+  `KELIR_DEFAULT_TENANT_CODE` was not `SYSTEM`; it now looks its role up inside
+  the tenant it is creating the account in.
+- **Tenant administration is restricted to the deployment's default tenant.**
+  Holding `organization:tenant:manage` is not enough — the request must come
+  from the tenant `KELIR_DEFAULT_TENANT_CODE` names. This is the boundary rather
+  than a convenience: the permission catalogue is global and a tenant's own
+  administrator holds `identity:role:update`, so they can grant themselves any
+  code in it. A provisioned tenant's role is also created without the
+  `organization:tenant:*` family, which is defence in depth on top.
 - **`KELIR_SMTP_PORT` and `KELIR_MAIL_FROM` are read by the backend.** Both have
   defaults that match the mailpit the local stack runs, so no deployment needs
   to set them; a deployment that relays for a real domain must own the address
@@ -83,7 +125,11 @@ deployment. Two Phase 2 carry-overs land with them.
 - **A browser harness (`e2e/`).** Playwright drives a real deployment — the
   release images brought up by `deploy-local.sh` — through one full flow, and
   runs in CI as `End-to-end (browser)`. Not a released artefact, so it is not
-  versioned with the product.
+  versioned with the product. A second flow, tenant creation, joined it.
+- **Two security controls were accepted only after the defect was reintroduced
+  and the test seen to fail** (coding standard §2.9): the administering-tenant
+  check on the tenant routes, and the composite foreign key that refuses a
+  cross-tenant role grant. Each test names its mutation in a comment.
 
 ## [0.3.0] — 2026-08-24
 

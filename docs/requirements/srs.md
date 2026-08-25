@@ -1,6 +1,6 @@
 # Kelir Software Requirements Specification
 
-**Status:** Draft · **Last updated:** 2026-08-20
+**Status:** Draft · **Last updated:** 2026-08-25
 
 The companion Solution Blueprint formerly bundled in this file now lives in the System Design Document: `docs/design/01. System Design Document.md`.
 
@@ -14,7 +14,7 @@ The companion Solution Blueprint formerly bundled in this file now lives in the 
 |---|---|
 | Document Name | Kelir Software Requirements Specification |
 | Framework Name | Kelir |
-| Version | 0.7 |
+| Version | 0.8 |
 | Status | Initial Draft |
 | Date | 2026-08-05 |
 | Document Type | SRS |
@@ -33,6 +33,7 @@ Revision history:
 0.5 (2026-08-11): separated priority from MVP scope — Must now means "required for 1.0" and §9 is the sole MVP gate (§4 preamble); raised FR-API-004 (OpenAPI) from Should to Must, since §9 criterion 14 requires documented APIs; baselined the six proposed targets in FR-ATT-004, NFR-PERF-001, NFR-AVA-004 and NFR-SEC-008/009/010. Recorded as decisions D-3 and D-5 in projects/planning/02. Product Backlog.md.
 0.6 (2026-08-20): narrowed FR-IDM-004 from "manage permissions" to maintaining the permission catalogue, which is system-defined rather than administrator-editable; the administrative surface is role–permission mapping (FR-IDM-005). No requirement added or removed, and MVP scope is unchanged — §9 names neither. Recorded as decision D-6 in projects/planning/02. Product Backlog.md.
 0.7 (2026-08-20): re-scoped FR-IDM-008 to department assignment, leaving department management to FR-ORG-002 and positions to FR-ORG-003, which the three requirements had been claiming between them; recorded that multi-tenant mode (FR-IDM-009) is not exercised before 1.0 and that a deployment serves one tenant, added to §10. No requirement added or removed, and MVP scope is unchanged — §9 names neither departments nor tenants. Recorded as decisions D-7 and D-8 in projects/planning/02. Product Backlog.md.
+0.8 (2026-08-25): reversed the v0.7 tenancy entry. Multi-tenant mode is exercised: FR-IDM-009 is delivered in full and FR-ORG-001 with it, so the §10 line deferring multiple tenants past 1.0 is removed and the §4.2 and §4.3 notes are rewritten to say what was built rather than what was deferred. §2 gains the answer FR-IDM-009 had left open — roles are tenant-scoped, the permission catalogue is global. No requirement added or removed, and MVP scope is unchanged — §9 still names no tenant criterion, which is why this could be `Should` work at all. Recorded as decision D-18 in projects/planning/02. Product Backlog.md, superseding D-7.
 ```
 
 > **Note:** As of v0.4 this file contains only the SRS. The Solution Blueprint has been split out into the System Design Document (`docs/design/01. System Design Document.md`), which is versioned independently.
@@ -123,7 +124,7 @@ Implementation teams
 | RBAC | Role-Based Access Control |
 | ABAC | Attribute-Based Access Control |
 | MDM | Master Data Management |
-| Multi-tenant mode | A deployment configuration flag; when enabled, all business data is partitioned by tenant_id and tenant administrators manage users within their tenant. Single-tenant deployments run with a single default tenant |
+| Multi-tenant mode | A deployment configuration flag; when enabled, all business data is partitioned by tenant_id and tenant administrators manage users within their tenant. Single-tenant deployments run with a single default tenant, and a caller naming a tenant is ignored rather than obeyed. Roles are tenant-scoped — every tenant has its own copy of a system role — while the permission catalogue is global (decision D-18) |
 | JWT | JSON Web Token, a signed token format used for stateless authentication |
 | SSO | Single Sign-On, authenticating once to access multiple applications |
 | OAuth2 | An authorization framework for delegated access to resources |
@@ -165,7 +166,7 @@ Additional features can be added through configuration, extensions, and plugins.
 | Department Manager | Approves documents within department scope |
 | Finance / Legal / Compliance Officer | Reviews specialized documents |
 | Administrator | Manages users, roles, document types, workflows, and configuration |
-| Tenant Administrator | Manages configuration for a tenant |
+| Tenant Administrator | Manages configuration for a tenant. Holds every permission within it and none over the set of tenants — creating and suspending tenants is done from the deployment's default tenant only (FR-ORG-001, decision D-18) |
 | Auditor | Views audit trail, activity logs, and compliance reports |
 | System Integrator | Manages integration with external systems |
 | Plugin Developer | Develops extensions or plugins |
@@ -286,7 +287,9 @@ Note: FR-IDM-004 read "the system shall manage permissions" until v0.6, which wa
 
 Note: FR-IDM-008 read "department and position management" until v0.7, which duplicated FR-ORG-002 (departments) and FR-ORG-003 (positions) — three requirements over one existing table, `departments`, with no way to tell which of them an implementation had satisfied. Positions have no table at all; FR-ORG-003 is `Could` and unscheduled. The organization requirements own the entities; identity owns only the edge from a user to a department, which is the half that lives on `users.department_id` rather than on `departments`. Recorded as decision **D-8**.
 
-Note: FR-IDM-009 is conditional — it obliges isolation *if multi-tenant mode is enabled* — and as of v0.7 no deployment enables it. Identity queries are tenant-scoped already, but nothing resolves a tenant per request, so the mode has no state in which it is true. A deployment serves one tenant until per-request resolution is designed (§10), and the backend refuses to start with the mode switched on rather than presenting a sign-in nobody can complete. The requirement stands and is partly delivered; what is deferred is exercising it. Recorded as decision **D-7**.
+Note: FR-IDM-009 is conditional — it obliges isolation *if multi-tenant mode is enabled* — and until v0.8 no deployment could enable it. Identity queries were tenant-scoped from Sprint 3, but nothing told a client the deployment's mode, so `KELIR_MULTI_TENANT` demanded a tenant code the login form had no field for and the backend refused to start with the mode on (decision **D-7**, v0.7).
+
+**As of v0.8 the mode runs, and the requirement is delivered.** A tenant is named in the sign-in body, resolved once, and carried in the access token's `tenant_id` claim, which every downstream query filters by — that is per-request resolution for every request after the first. The client learns which mode it is talking to from `GET /deployment`, unauthenticated, because the login form needs the answer before it has credentials. The boot guard is gone. Two questions D-7 left open are answered rather than deferred: **roles are tenant-scoped** (each tenant has its own `ROLE-ADMIN`; the permission catalogue stays global), and **tenant administration is performed only from the deployment's default tenant**, which is what stops a tenant's own administrator creating more tenants. Recorded as decision **D-18**, superseding **D-7**.
 
 ---
 
@@ -301,6 +304,8 @@ Note: FR-IDM-009 is conditional — it obliges isolation *if multi-tenant mode i
 | FR-ORG-005 | The system shall support organizational hierarchy | Could |
 
 FR-ORG-002 is the sole administrative surface for departments and FR-ORG-003 for positions, as of v0.7 (decision **D-8**); FR-IDM-008 covers only assigning a user to a department.
+
+Note: FR-ORG-001 is delivered as of v0.8 and is one piece of work with FR-IDM-009 — decision **D-18** took them together, because a surface that creates tenants nobody can sign in to is not tenant management. Two properties of it are requirements-level rather than design detail. **Creating a tenant creates its first administrator in the same transaction**, so the row this surface produces is one a person can reach; giving a new tenant its first account is not the first-run bootstrap's job, which is a deployment-wide switch. And **a tenant may be administered only from the deployment's default tenant**, which is the boundary that keeps FR-IDM-002 (a tenant manages its own roles) from becoming a way to mint tenants.
 
 ---
 
@@ -838,7 +843,6 @@ Real-time WebSocket collaboration
 Advanced AI classification
 Complex ABAC policies
 Multi-region high availability
-Multiple tenants served by one deployment (FR-IDM-009 stands; the mode is not exercised before 1.0)
 Payment processing
 E-signature legal integration
 Machine learning analytics

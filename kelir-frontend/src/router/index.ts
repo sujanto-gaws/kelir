@@ -72,6 +72,21 @@ export const routes: RouteRecordRaw[] = [
         meta: { requiresAuth: true, permission: 'identity:role:read', title: 'Roles' },
       },
       {
+        path: 'admin/tenants',
+        name: 'admin-tenants',
+        component: () => import('@/features/admin/TenantListPage.vue'),
+        // The permission alone. The backend also requires the caller to be in
+        // the deployment's administering tenant, which no route meta can
+        // express — a token carries permissions, not that fact. It does not
+        // need to: a tenant's own administrator is never granted this code
+        // (decision D-18), so the route is unreachable where it would refuse.
+        meta: {
+          requiresAuth: true,
+          permission: 'organization:tenant:read',
+          title: 'Tenants',
+        },
+      },
+      {
         path: 'forbidden',
         name: 'forbidden',
         component: () => import('@/pages/ForbiddenPage.vue'),
