@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT r.id,\n               f.party_code AS party_id_from,\n               t.party_code AS party_id_to,\n               rf.role_type_code AS \"role_type_id_from?\",\n               rt.role_type_code AS \"role_type_id_to?\",\n               r.relationship_type,\n               r.starts_at,\n               r.ends_at,\n               r.status,\n               r.priority,\n               r.comments,\n               r.attributes_json\n        FROM mdm_party_relationships r\n        JOIN mdm_parties f ON f.id = r.from_party_id\n        JOIN mdm_parties t ON t.id = r.to_party_id\n        LEFT JOIN mdm_role_types rf ON rf.id = r.from_role_type_id\n        LEFT JOIN mdm_role_types rt ON rt.id = r.to_role_type_id\n        WHERE r.tenant_id = $1\n          AND r.deleted_at IS NULL\n          AND (($3 AND r.from_party_id = $2) OR (NOT $3 AND r.to_party_id = $2))\n        ORDER BY r.starts_at, r.id\n        ",
+  "query": "\n        SELECT r.id,\n               f.party_code AS party_id_from,\n               t.party_code AS party_id_to,\n               rf.role_type_code AS \"role_type_id_from?\",\n               rt.role_type_code AS \"role_type_id_to?\",\n               r.relationship_type,\n               r.starts_at,\n               r.ends_at,\n               r.status,\n               r.priority,\n               r.comments,\n               r.attributes_json\n        FROM mdm_party_relationships r\n        JOIN mdm_parties f ON f.id = r.from_party_id AND f.tenant_id = r.tenant_id\n        JOIN mdm_parties t ON t.id = r.to_party_id AND t.tenant_id = r.tenant_id\n        LEFT JOIN mdm_role_types rf\n          ON rf.id = r.from_role_type_id AND rf.tenant_id = r.tenant_id\n        LEFT JOIN mdm_role_types rt\n          ON rt.id = r.to_role_type_id AND rt.tenant_id = r.tenant_id\n        WHERE r.tenant_id = $1\n          AND r.deleted_at IS NULL\n          AND (($3 AND r.from_party_id = $2) OR (NOT $3 AND r.to_party_id = $2))\n        ORDER BY r.starts_at, r.id\n        ",
   "describe": {
     "columns": [
       {
@@ -86,5 +86,5 @@
       false
     ]
   },
-  "hash": "561a1d3bf135d0dc9159ca9f268930aa9931752a6ded2f2254b2a7eef74f9eb0"
+  "hash": "a20c5c0091df1461628ad7a2cbdc00e70ce83a222aaca1c58c8958f1281b30ef"
 }

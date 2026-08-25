@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT s.status, s.status_at, s.comments, u.username AS \"username?\"\n        FROM mdm_party_statuses s\n        LEFT JOIN users u ON u.id = s.changed_by\n        WHERE s.tenant_id = $1 AND s.party_id = $2\n        ORDER BY s.status_at, s.id\n        ",
+  "query": "\n        SELECT s.status, s.status_at, s.comments, u.username AS \"username?\"\n        FROM mdm_party_statuses s\n        LEFT JOIN users u ON u.id = s.changed_by AND u.tenant_id = s.tenant_id\n        WHERE s.tenant_id = $1 AND s.party_id = $2\n        ORDER BY s.status_at, s.id\n        ",
   "describe": {
     "columns": [
       {
@@ -37,5 +37,5 @@
       false
     ]
   },
-  "hash": "4a17d2ed21ce3f912708898ab5ae18d9222a9d67cdc589bc0134c16beed78e34"
+  "hash": "7f970452e4584b6cd7fbf90d73ce3f8e8ee3ea15a9e1e39d7b1d1cb8d698f938"
 }

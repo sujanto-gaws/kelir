@@ -146,7 +146,17 @@ pub async fn assign_role(
     };
 
     match existing {
-        Some(id) => repo::update_party_role(&mut *transaction, id, &role_fields, actor).await?,
+        Some(id) => {
+            repo::update_party_role(
+                &mut *transaction,
+                tenant_id,
+                party_id,
+                id,
+                &role_fields,
+                actor,
+            )
+            .await?;
+        }
         None => {
             repo::insert_party_role(
                 &mut *transaction,

@@ -332,7 +332,7 @@ pub async fn list_statuses(
         r#"
         SELECT s.status, s.status_at, s.comments, u.username AS "username?"
         FROM mdm_party_statuses s
-        LEFT JOIN users u ON u.id = s.changed_by
+        LEFT JOIN users u ON u.id = s.changed_by AND u.tenant_id = s.tenant_id
         WHERE s.tenant_id = $1 AND s.party_id = $2
         ORDER BY s.status_at, s.id
         "#,
@@ -409,10 +409,12 @@ pub async fn list_relationships(
                r.comments,
                r.attributes_json
         FROM mdm_party_relationships r
-        JOIN mdm_parties f ON f.id = r.from_party_id
-        JOIN mdm_parties t ON t.id = r.to_party_id
-        LEFT JOIN mdm_role_types rf ON rf.id = r.from_role_type_id
-        LEFT JOIN mdm_role_types rt ON rt.id = r.to_role_type_id
+        JOIN mdm_parties f ON f.id = r.from_party_id AND f.tenant_id = r.tenant_id
+        JOIN mdm_parties t ON t.id = r.to_party_id AND t.tenant_id = r.tenant_id
+        LEFT JOIN mdm_role_types rf
+          ON rf.id = r.from_role_type_id AND rf.tenant_id = r.tenant_id
+        LEFT JOIN mdm_role_types rt
+          ON rt.id = r.to_role_type_id AND rt.tenant_id = r.tenant_id
         WHERE r.tenant_id = $1
           AND r.deleted_at IS NULL
           AND (($3 AND r.from_party_id = $2) OR (NOT $3 AND r.to_party_id = $2))
@@ -616,7 +618,8 @@ pub async fn list_contact_mechs(
                l.allow_solicitation,
                l.attributes_json
         FROM mdm_party_contact_mechs l
-        JOIN mdm_contact_mechs m ON m.id = l.contact_mech_id AND m.deleted_at IS NULL
+        JOIN mdm_contact_mechs m
+          ON m.id = l.contact_mech_id AND m.tenant_id = l.tenant_id AND m.deleted_at IS NULL
         WHERE l.tenant_id = $1 AND l.party_id = $2 AND l.deleted_at IS NULL
         ORDER BY l.is_primary DESC, l.starts_at, l.id
         "#,

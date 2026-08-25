@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT c.contact_type, c.preferred_contact_mech_type, c.do_not_contact,\n               c.attributes_json, a.party_code AS \"assistant_party_id?\"\n        FROM mdm_contact_profiles c\n        LEFT JOIN mdm_parties a ON a.id = c.assistant_party_id\n        WHERE c.tenant_id = $1 AND c.party_id = $2 AND c.deleted_at IS NULL\n        ",
+  "query": "\n        SELECT c.contact_type, c.preferred_contact_mech_type, c.do_not_contact,\n               c.attributes_json, a.party_code AS \"assistant_party_id?\"\n        FROM mdm_contact_profiles c\n        LEFT JOIN mdm_parties a ON a.id = c.assistant_party_id AND a.tenant_id = c.tenant_id\n        WHERE c.tenant_id = $1 AND c.party_id = $2 AND c.deleted_at IS NULL\n        ",
   "describe": {
     "columns": [
       {
@@ -43,5 +43,5 @@
       false
     ]
   },
-  "hash": "2690e267b3cea5616705646c687c8a22ef3b411a09fcf4e90852f4fbbf1a6d84"
+  "hash": "cd010b3f3403be660764768aad0ec94eb7c2e4e5d421e9286ec9c4bfdb111880"
 }

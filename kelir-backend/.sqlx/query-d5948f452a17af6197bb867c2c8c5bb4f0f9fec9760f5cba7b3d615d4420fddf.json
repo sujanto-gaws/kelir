@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT t.role_type_code, r.starts_at, r.ends_at, r.status, r.comments, r.attributes_json\n        FROM mdm_party_roles r\n        JOIN mdm_role_types t ON t.id = r.role_type_id\n        WHERE r.tenant_id = $1 AND r.party_id = $2 AND r.deleted_at IS NULL\n        ORDER BY t.role_type_code\n        ",
+  "query": "\n        SELECT t.role_type_code, r.starts_at, r.ends_at, r.status, r.comments, r.attributes_json\n        FROM mdm_party_roles r\n        JOIN mdm_role_types t\n          ON t.id = r.role_type_id AND t.tenant_id = r.tenant_id AND t.deleted_at IS NULL\n        WHERE r.tenant_id = $1 AND r.party_id = $2 AND r.deleted_at IS NULL\n        ORDER BY t.role_type_code\n        ",
   "describe": {
     "columns": [
       {
@@ -49,5 +49,5 @@
       false
     ]
   },
-  "hash": "f4ed201113e6fb1c3468f7911ac81b2434e760b8258367f62c7a29a053446c7b"
+  "hash": "d5948f452a17af6197bb867c2c8c5bb4f0f9fec9760f5cba7b3d615d4420fddf"
 }

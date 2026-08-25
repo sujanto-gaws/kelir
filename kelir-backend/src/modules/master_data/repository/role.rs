@@ -38,7 +38,8 @@ pub async fn list_party_roles(
         r#"
         SELECT t.role_type_code, r.starts_at, r.ends_at, r.status, r.comments, r.attributes_json
         FROM mdm_party_roles r
-        JOIN mdm_role_types t ON t.id = r.role_type_id
+        JOIN mdm_role_types t
+          ON t.id = r.role_type_id AND t.tenant_id = r.tenant_id AND t.deleted_at IS NULL
         WHERE r.tenant_id = $1 AND r.party_id = $2 AND r.deleted_at IS NULL
         ORDER BY t.role_type_code
         "#,
@@ -128,9 +129,22 @@ pub async fn insert_party_role(
 /// `starts_at` and `ends_at` are written unconditionally rather than through
 /// `COALESCE`: they are the assignment's period, `PUT` states the period the
 /// assignment should end in, and a `thruDate` that could be set but never
-/// cleared would make an ended role impossible to reopen.
+/// cleared would make an ended role impossible to reopen. The published
+/// contract states this too, as of #120 — the reason being sound did not make
+/// it discoverable.
+///
+/// **`tenant_id` and `party_id` are in the predicate as defence in depth, not
+/// as the scope that protects this write.** The `id` comes from
+/// `find_live_party_role`, which is scoped, and is read under the party's lock;
+/// the row it names cannot be another tenant's. But `WHERE id = $1` alone was
+/// the one statement in this module that would obey any id it was handed, and
+/// the module header claimed every query filters on `tenant_id` (#108). A
+/// caller that one day passes an id from somewhere less careful now writes
+/// nothing rather than another tenant's row.
 pub async fn update_party_role(
     executor: impl PgExecutor<'_>,
+    tenant_id: Uuid,
+    party_id: Uuid,
     id: Uuid,
     fields: &PartyRoleFields<'_>,
     updated_by: Option<Uuid>,
@@ -138,16 +152,18 @@ pub async fn update_party_role(
     sqlx::query!(
         r#"
         UPDATE mdm_party_roles
-        SET starts_at = $2,
-            ends_at = $3,
-            status = COALESCE($4, status),
-            comments = COALESCE($5, comments),
-            attributes_json = COALESCE($6, attributes_json),
-            updated_by = $7,
+        SET starts_at = $4,
+            ends_at = $5,
+            status = COALESCE($6, status),
+            comments = COALESCE($7, comments),
+            attributes_json = COALESCE($8, attributes_json),
+            updated_by = $9,
             updated_at = now()
-        WHERE id = $1
+        WHERE id = $1 AND tenant_id = $2 AND party_id = $3 AND deleted_at IS NULL
         "#,
         id,
+        tenant_id,
+        party_id,
         fields.starts_at,
         fields.ends_at,
         fields.status,
@@ -497,7 +513,7 @@ pub async fn find_customer_profile(
                c.default_currency_uom, c.tax_number, c.status, c.attributes_json,
                b.party_code AS "billing_party_id?"
         FROM mdm_customer_profiles c
-        LEFT JOIN mdm_parties b ON b.id = c.billing_party_id
+        LEFT JOIN mdm_parties b ON b.id = c.billing_party_id AND b.tenant_id = c.tenant_id
         WHERE c.tenant_id = $1 AND c.party_id = $2 AND c.deleted_at IS NULL
         "#,
         tenant_id,
@@ -631,7 +647,7 @@ pub async fn find_employee_profile(
                e.employment_type, e.join_date, e.resign_date, e.status, e.attributes_json,
                m.party_code AS "manager_party_id?"
         FROM mdm_employee_profiles e
-        LEFT JOIN mdm_parties m ON m.id = e.manager_party_id
+        LEFT JOIN mdm_parties m ON m.id = e.manager_party_id AND m.tenant_id = e.tenant_id
         WHERE e.tenant_id = $1 AND e.party_id = $2 AND e.deleted_at IS NULL
         "#,
         tenant_id,
@@ -745,7 +761,7 @@ pub async fn find_contact_profile(
         SELECT c.contact_type, c.preferred_contact_mech_type, c.do_not_contact,
                c.attributes_json, a.party_code AS "assistant_party_id?"
         FROM mdm_contact_profiles c
-        LEFT JOIN mdm_parties a ON a.id = c.assistant_party_id
+        LEFT JOIN mdm_parties a ON a.id = c.assistant_party_id AND a.tenant_id = c.tenant_id
         WHERE c.tenant_id = $1 AND c.party_id = $2 AND c.deleted_at IS NULL
         "#,
         tenant_id,

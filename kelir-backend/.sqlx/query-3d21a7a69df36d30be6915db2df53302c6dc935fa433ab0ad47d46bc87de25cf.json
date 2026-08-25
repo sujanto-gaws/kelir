@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT c.customer_number, c.customer_category, c.customer_since_date,\n               c.credit_limit::text AS credit_limit, c.payment_term_days,\n               c.default_currency_uom, c.tax_number, c.status, c.attributes_json,\n               b.party_code AS \"billing_party_id?\"\n        FROM mdm_customer_profiles c\n        LEFT JOIN mdm_parties b ON b.id = c.billing_party_id\n        WHERE c.tenant_id = $1 AND c.party_id = $2 AND c.deleted_at IS NULL\n        ",
+  "query": "\n        SELECT c.customer_number, c.customer_category, c.customer_since_date,\n               c.credit_limit::text AS credit_limit, c.payment_term_days,\n               c.default_currency_uom, c.tax_number, c.status, c.attributes_json,\n               b.party_code AS \"billing_party_id?\"\n        FROM mdm_customer_profiles c\n        LEFT JOIN mdm_parties b ON b.id = c.billing_party_id AND b.tenant_id = c.tenant_id\n        WHERE c.tenant_id = $1 AND c.party_id = $2 AND c.deleted_at IS NULL\n        ",
   "describe": {
     "columns": [
       {
@@ -73,5 +73,5 @@
       false
     ]
   },
-  "hash": "935689495f5f4d26ad4fb9ee970a465316f87452dbfa0369f54ed9b3feffb69b"
+  "hash": "3d21a7a69df36d30be6915db2df53302c6dc935fa433ab0ad47d46bc87de25cf"
 }
