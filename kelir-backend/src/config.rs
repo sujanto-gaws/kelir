@@ -25,6 +25,13 @@ pub struct AppConfig {
     pub jwt_secret: String,
     pub storage_driver: String,
     pub smtp_host: String,
+    /// The port `smtp_host` listens on. 1025 is mailpit's, which the compose
+    /// stack runs; a relay is usually 587.
+    pub smtp_port: u16,
+    /// The `From` on the one transactional email the product sends
+    /// (FR-AUTH-006). A deployment that leaves it at the default sends mail
+    /// from an address nobody reads, which is correct for a reset link.
+    pub mail_from: String,
     pub frontend_url: String,
     /// Whether this deployment serves more than one tenant (SRS §2, FR-IDM-009).
     ///
@@ -317,6 +324,15 @@ impl AppConfig {
             jwt_secret,
             storage_driver: optional("KELIR_STORAGE_DRIVER", "local"),
             smtp_host: optional("KELIR_SMTP_HOST", "localhost"),
+            smtp_port: {
+                let raw = optional("KELIR_SMTP_PORT", "1025");
+
+                raw.parse().map_err(|_| ConfigError::Invalid {
+                    key: "KELIR_SMTP_PORT",
+                    reason: format!("expected a port number; found '{raw}'"),
+                })?
+            },
+            mail_from: optional("KELIR_MAIL_FROM", "no-reply@kelir.local"),
             frontend_url: optional("KELIR_FRONTEND_URL", "http://localhost:5173"),
             multi_tenant: multi_tenant(&optional("KELIR_MULTI_TENANT", "false"))?,
             // Uppercased on the way in so the configured value and the codes
@@ -343,6 +359,8 @@ impl AppConfig {
             jwt_secret: "test-secret".to_owned(),
             storage_driver: "local".to_owned(),
             smtp_host: "localhost".to_owned(),
+            smtp_port: 1025,
+            mail_from: "no-reply@kelir.test".to_owned(),
             frontend_url: "http://localhost:5173".to_owned(),
             multi_tenant: false,
             default_tenant_code: "SYSTEM".to_owned(),

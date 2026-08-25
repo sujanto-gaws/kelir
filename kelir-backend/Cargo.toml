@@ -54,6 +54,24 @@ uuid = { version = "1", features = ["v7", "serde"] }
 # resolver feature is enabled: a validator that can fetch a remote schema is a
 # validator that can be pointed at one.
 jsonschema = { version = "0.51.0", default-features = false }
+# SMTP delivery for the one transactional email the product sends: the
+# password-reset link (FR-AUTH-006, #17). Locally that is mailpit, which the
+# compose stack already runs.
+#
+# `default-features = false` deliberately: the default pulls `native-tls`, and
+# every other TLS user in this crate is rustls (see the sqlx feature list
+# above). Two TLS stacks in one binary is two certificate stores to configure
+# and two sets of failures to diagnose.
+#
+# **This is not the notification module.** Phase 6 owns templates, channels,
+# retries and the outbox; this sends one message directly, which is the
+# smallest thing that makes the reset flow real rather than logged.
+lettre = { version = "0.11.23", default-features = false, features = [
+    "smtp-transport",
+    "tokio1-rustls",
+    "tokio1-rustls-tls",
+    "builder",
+] }
 
 [dev-dependencies]
 # Integration tests drive the API against a real PostgreSQL.

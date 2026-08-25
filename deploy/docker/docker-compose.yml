@@ -38,6 +38,10 @@ services:
       - KELIR_JWT_SECRET=change-me
       - KELIR_STORAGE_DRIVER=local
       - KELIR_SMTP_HOST=mailpit
+      # The container port, which is fixed; KELIR_SMTP_PORT in the environment
+      # moves the host mapping only, and must not follow it in here.
+      - KELIR_SMTP_PORT=1025
+      - KELIR_MAIL_FROM=no-reply@kelir.local
       - KELIR_FRONTEND_URL=http://localhost:5173
     depends_on:
       - postgres

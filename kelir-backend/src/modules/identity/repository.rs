@@ -772,6 +772,156 @@ pub async fn set_password_hash(
     .map(|result| result.rows_affected())
 }
 
+// ---------------------------------------------------------------------------
+// Password reset tokens (FR-AUTH-006, #17)
+// ---------------------------------------------------------------------------
+//
+// `password_reset_tokens` has existed since `0006` with nothing reading it.
+// These are the first queries against it.
+//
+// Every one keys on the digest or the row id, never on the token itself: the
+// token exists only in the link that was mailed, and a query taking it would be
+// a query logging it.
+
+/// A live reset token — one that exists, is unconsumed, and has not expired.
+pub struct StoredResetToken {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub user_id: Uuid,
+}
+
+pub async fn insert_reset_token(
+    executor: impl PgExecutor<'_>,
+    id: Uuid,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    token_hash: &str,
+    expires_at: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        r#"
+        INSERT INTO password_reset_tokens (id, tenant_id, user_id, token_hash, expires_at)
+        VALUES ($1, $2, $3, $4, $5)
+        "#,
+        id,
+        tenant_id,
+        user_id,
+        token_hash,
+        expires_at
+    )
+    .execute(executor)
+    .await
+    .map(|_| ())
+}
+
+/// The live token behind a digest, or `None`.
+///
+/// **Consumed and expired are folded into `None` here rather than reported**,
+/// so a caller cannot accidentally answer differently for the two. Somebody
+/// holding an expired token and somebody holding a made-up one are told the
+/// same thing.
+pub async fn find_live_reset_token(
+    executor: impl PgExecutor<'_>,
+    token_hash: &str,
+) -> Result<Option<StoredResetToken>, sqlx::Error> {
+    sqlx::query_as!(
+        StoredResetToken,
+        r#"
+        SELECT id, tenant_id, user_id
+        FROM password_reset_tokens
+        WHERE token_hash = $1
+          AND consumed_at IS NULL
+          AND expires_at > now()
+          AND deleted_at IS NULL
+        "#,
+        token_hash
+    )
+    .fetch_optional(executor)
+    .await
+}
+
+/// Marks a token consumed, and reports whether it was this call that did it.
+///
+/// The predicate is what makes a token single-use under concurrency: two
+/// requests carrying the same token both reach here, and exactly one affects a
+/// row. Reading first and updating after would let both through.
+pub async fn consume_reset_token(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    id: Uuid,
+) -> Result<u64, sqlx::Error> {
+    sqlx::query!(
+        r#"
+        UPDATE password_reset_tokens
+        SET consumed_at = now(), updated_at = now()
+        WHERE id = $1 AND consumed_at IS NULL AND expires_at > now() AND deleted_at IS NULL
+        "#,
+        id
+    )
+    .execute(&mut **transaction)
+    .await
+    .map(|result| result.rows_affected())
+}
+
+/// Consumes every outstanding token for a user.
+///
+/// Somebody who clicked "forgot password" three times should not leave two live
+/// links in a mailbox once one has been used.
+pub async fn invalidate_reset_tokens_for_user(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    user_id: Uuid,
+) -> Result<u64, sqlx::Error> {
+    sqlx::query!(
+        r#"
+        UPDATE password_reset_tokens
+        SET consumed_at = now(), updated_at = now()
+        WHERE user_id = $1 AND consumed_at IS NULL AND deleted_at IS NULL
+        "#,
+        user_id
+    )
+    .execute(&mut **transaction)
+    .await
+    .map(|result| result.rows_affected())
+}
+
+/// Whether a link was issued for this account since `since`.
+///
+/// The per-account resend throttle. It looks at issue time rather than at
+/// consumption, because the abuse being stopped is *sending* — a token the
+/// victim never clicked is exactly the case that matters.
+pub async fn reset_token_issued_recently(
+    executor: impl PgExecutor<'_>,
+    user_id: Uuid,
+    since: DateTime<Utc>,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar!(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM password_reset_tokens
+            WHERE user_id = $1 AND created_at > $2 AND deleted_at IS NULL
+        ) AS "exists!"
+        "#,
+        user_id,
+        since
+    )
+    .fetch_one(executor)
+    .await
+}
+
+/// A user's email address, for addressing the link to it.
+pub async fn find_user_email(
+    executor: impl PgExecutor<'_>,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar!(
+        "SELECT email FROM users WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL",
+        tenant_id,
+        id
+    )
+    .fetch_optional(executor)
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

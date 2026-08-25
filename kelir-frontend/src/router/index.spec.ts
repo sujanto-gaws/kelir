@@ -51,8 +51,16 @@ function leaves(
  */
 const PERMISSION_EXEMPT = new Set(['dashboard', 'forbidden'])
 
-/** Routes that are deliberately reachable with no session at all. */
-const PUBLIC_ROUTES = new Set(['login', 'not-found'])
+/**
+ * Routes that are deliberately reachable with no session at all.
+ *
+ * The two reset routes have to be: somebody who cannot sign in is exactly who
+ * needs them, so requiring a session would make the flow unreachable to its
+ * only users. Neither reads anything — `forgot-password` answers identically
+ * whatever it is given, and `reset-password` is guarded by the token in the
+ * link rather than by the router.
+ */
+const PUBLIC_ROUTES = new Set(['login', 'forgot-password', 'reset-password', 'not-found'])
 
 describe('the shipped route table', () => {
   const all = leaves(routes)

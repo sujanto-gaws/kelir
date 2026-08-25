@@ -16,6 +16,7 @@ pub mod db;
 pub mod error;
 pub mod extract;
 pub mod health;
+pub mod mail;
 pub mod middleware;
 pub mod modules;
 pub mod response;

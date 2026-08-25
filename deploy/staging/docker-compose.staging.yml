@@ -60,6 +60,10 @@ services:
       KELIR_JWT_SECRET: ${KELIR_JWT_SECRET:?set KELIR_JWT_SECRET to a generated value}
       KELIR_STORAGE_DRIVER: s3
       KELIR_SMTP_HOST: mailpit
+      KELIR_SMTP_PORT: 1025
+      # Staging sends to mailpit, so the sender is never delivered anywhere real.
+      # A deployment that relays for a domain must own the address it sends from.
+      KELIR_MAIL_FROM: ${KELIR_MAIL_FROM:-no-reply@staging.kelir.gawshub.com}
       # Single origin: the browser only ever talks to the Caddy address, so this
       # is used for redirects and links rather than for CORS.
       KELIR_FRONTEND_URL: ${KELIR_PUBLIC_URL:-https://staging.kelir.gawshub.com}

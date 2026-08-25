@@ -17,6 +17,21 @@ export const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: false, layout: 'blank', title: 'Sign in' },
   },
   {
+    path: '/forgot-password',
+    name: 'forgot-password',
+    component: () => import('@/features/auth/ForgotPasswordPage.vue'),
+    meta: { requiresAuth: false, layout: 'blank', title: 'Reset your password' },
+  },
+  {
+    // The path the emailed link points at: `KELIR_FRONTEND_URL` +
+    // `/reset-password?token=...`, built in `auth::reset`. Changing it here
+    // without changing it there strands every link already in a mailbox.
+    path: '/reset-password',
+    name: 'reset-password',
+    component: () => import('@/features/auth/ResetPasswordPage.vue'),
+    meta: { requiresAuth: false, layout: 'blank', title: 'Choose a new password' },
+  },
+  {
     path: '/',
     component: () => import('@/layouts/AppLayout.vue'),
     children: [

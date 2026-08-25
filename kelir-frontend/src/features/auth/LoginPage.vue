@@ -240,6 +240,15 @@ async function submit(): Promise<void> {
         <Button type="submit" class="w-full" :loading="isSubmitting" :disabled="isRateLimited">
           {{ isRateLimited ? `Try again in ${retryAfter}s` : 'Sign in' }}
         </Button>
+
+        <p class="text-center text-sm">
+          <RouterLink
+            :to="{ name: 'forgot-password' }"
+            class="font-medium underline underline-offset-4"
+          >
+            Forgot your password?
+          </RouterLink>
+        </p>
       </form>
     </div>
   </div>

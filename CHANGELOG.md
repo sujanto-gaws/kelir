@@ -9,7 +9,81 @@ While the major version is `0`, the public API may change in any release.
 
 ## [Unreleased]
 
-Nothing yet.
+Phase 4 opens: the RAD metadata tables and the definition APIs over them, the
+document table group with document types and their numbering rules, one JSON
+Logic engine shared by both sides, and a browser harness that drives a real
+deployment. Two Phase 2 carry-overs land with them.
+
+### Added
+
+- **One JSON Logic engine on both sides (decision D-10).** The backend evaluates
+  JFSS calculation and validation rules with `datalogic-rs` and the browser with
+  `@goplasmatic/datalogic-wasm`, which are the same Rust core behind two
+  runtimes rather than two implementations that agree by inspection. A shared
+  corpus in `parity/` is replayed by a test on each side, so a rule that
+  computes one answer on the server and another in the form is a build failure
+  rather than a support ticket.
+- **RAD metadata tables (Database Schema §5).** `0014_rad.sql` creates the form
+  and list definition tables, their revisions, sections, components, columns,
+  filters and lookups, and seeds nine `rad:*` permissions.
+- **Form and list definitions (FR-RAD-001, 002, 003).**
+  `/api/v1/rad/forms` and `/api/v1/rad/lists` create, list, read, update,
+  publish, revise and soft-delete definitions. A published revision is
+  immutable; editing means a new draft revision. A form's JFSS document is
+  validated against the vendored JFSS v2.0.1 meta-schema on the way in, so a
+  definition that no renderer could read is refused at the API rather than
+  discovered by a user.
+- **Document tables and document types (Database Schema §6).**
+  `0015_document.sql` creates the document table group, and
+  `/api/v1/document-types` manages the types that documents are created from —
+  each bound to a form definition, so a type whose form does not exist cannot be
+  saved.
+- **Numbering rules (FR-DTYPE-002).** A document type carries a numbering rule
+  with a scoped sequence, so numbers are unique within the scope that matters
+  (tenant, facility, year) rather than globally. `0016_numbering_gap_policy.sql`
+  makes the gap policy explicit: a sequence that must not skip is allocated
+  inside the transaction that uses it and is therefore contended, and one that
+  may skip is not — the trade is stated in the schema instead of being implied
+  by the code.
+- **Self-service password reset (FR-AUTH-006).**
+  `POST /api/v1/auth/forgot-password` emails a single-use link and
+  `POST /api/v1/auth/reset-password` redeems it, with pages behind both and a
+  "Forgot your password?" link on sign-in. The link is good for 30 minutes,
+  redeeming it signs the account out everywhere and voids every other
+  outstanding link for it, and a resend is throttled per account. **The request
+  endpoint answers the same way whatever it is given** — unknown identifier,
+  suspended account, throttled resend, mail server down — because any difference
+  would tell an unauthenticated caller whether an account exists. Mail goes to
+  mailpit in the development and staging stacks; a deployment with no
+  `KELIR_SMTP_HOST` logs instead of failing to start.
+  `password_reset_tokens` has existed since `0006` and until now nothing read
+  it.
+
+### Changed
+
+- **`KELIR_SMTP_PORT` and `KELIR_MAIL_FROM` are read by the backend.** Both have
+  defaults that match the mailpit the local stack runs, so no deployment needs
+  to set them; a deployment that relays for a real domain must own the address
+  in `KELIR_MAIL_FROM`. `KELIR_FRONTEND_URL` now also determines what a reset
+  link points at, so it must be an address a person's browser can reach.
+
+### Fixed
+
+- **Database Schema §3.9 and the Sprint 4 record.** Both the section and
+  `0006_password_reset_tokens.sql`'s header said Sprint 4 "added the reset token
+  flow". It added the table and no flow. The migration comment cannot be
+  corrected — `sqlx` checksums the whole file, comments included — so §3.9
+  carries the correction.
+- **The main navigation landmark.** `aria-label="Main navigation"` sat on the
+  `<aside>` rather than on the `<nav>` inside it, so assistive technology found
+  no named navigation landmark. Found by the browser harness on its first run.
+
+### Testing
+
+- **A browser harness (`e2e/`).** Playwright drives a real deployment — the
+  release images brought up by `deploy-local.sh` — through one full flow, and
+  runs in CI as `End-to-end (browser)`. Not a released artefact, so it is not
+  versioned with the product.
 
 ## [0.3.0] — 2026-08-24
 

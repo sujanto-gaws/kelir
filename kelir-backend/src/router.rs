@@ -34,6 +34,8 @@ use crate::state::AppState;
         auth::handlers::sign_out,
         auth::handlers::me,
         auth::handlers::change_password,
+        auth::handlers::forgot_password,
+        auth::handlers::reset_password,
         identity::handlers::list_users,
         identity::handlers::get_user,
         identity::handlers::create_user,
@@ -102,6 +104,8 @@ use crate::state::AppState;
         auth::handlers::SessionResponse,
         auth::handlers::CurrentUser,
         auth::handlers::ChangePasswordRequest,
+        auth::reset::RequestResetRequest,
+        auth::reset::ResetPasswordRequest,
         identity::domain::User,
         identity::domain::UserStatus,
         identity::domain::RoleSummary,
@@ -361,6 +365,8 @@ mod tests {
             ("/api/v1/auth/logout", "post"),
             ("/api/v1/auth/me", "get"),
             ("/api/v1/auth/change-password", "post"),
+            ("/api/v1/auth/forgot-password", "post"),
+            ("/api/v1/auth/reset-password", "post"),
         ];
 
         for (path, method) in expected {
