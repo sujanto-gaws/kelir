@@ -107,15 +107,19 @@ The MVP focuses on:
 │   │   ├── 0007_account_lockout.sql
 │   │   ├── 0008_master_data.sql
 │   │   ├── 0009_party_role_permissions.sql
-│   │   ├── 0010_rad.sql
-│   │   ├── 0011_document.sql
-│   │   ├── 0012_workflow.sql
-│   │   ├── 0013_attachment.sql
-│   │   ├── 0014_comment.sql
-│   │   ├── 0015_activity_audit.sql
-│   │   ├── 0016_notification.sql
-│   │   ├── 0017_integration.sql
-│   │   └── 0018_plugin.sql
+│   │   ├── 0010_facility_permissions.sql
+│   │   ├── 0011_record_status_permissions.sql
+│   │   ├── 0012_master_data_audit_permission.sql
+│   │   ├── 0013_master_data_audit_permission_scope.sql
+│   │   ├── 0014_rad.sql
+│   │   ├── 0015_document.sql
+│   │   ├── 0016_workflow.sql
+│   │   ├── 0017_attachment.sql
+│   │   ├── 0018_comment.sql
+│   │   ├── 0019_activity_audit.sql
+│   │   ├── 0020_notification.sql
+│   │   ├── 0021_integration.sql
+│   │   └── 0022_plugin.sql
 │   └── src/
 │       ├── main.rs
 │       ├── config.rs
@@ -187,7 +191,7 @@ The MVP focuses on:
         └── .env.example
 ```
 
-Migrations `0001`–`0006` exist; `0007` onward are planned. The authoritative
+Migrations `0001`–`0014` exist; `0015` onward are planned. The authoritative
 migration list is the mapping table at the top of
 [docs/design/02. Database Schema.md](docs/design/02.%20Database%20Schema.md) —
 numbers follow the order migrations are applied, so an early arrival shifts
