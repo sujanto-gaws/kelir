@@ -1,0 +1,53 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT column_key, label, data_type, format, is_sortable, width\n        FROM rad_list_columns\n        WHERE tenant_id = $1 AND list_id = $2 AND deleted_at IS NULL\n        ORDER BY sort_order, column_key\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "column_key",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "label",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "data_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "format",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "is_sortable",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 5,
+        "name": "width",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "542934eeabf22ca84c9710d59e41e9732dcd3aa8cacebb1930e28854eedac9bb"
+}

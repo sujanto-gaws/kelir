@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM rad_list_columns WHERE tenant_id = $1 AND list_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2726f8999d1abd9b7c42de51de0ff2f3ab2df79d309795febcfd5410c10f3bb9"
+}

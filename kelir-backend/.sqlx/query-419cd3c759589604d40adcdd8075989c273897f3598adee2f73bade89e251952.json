@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE rad_forms\n        SET status = 'PUBLISHED',\n            published_at = now(),\n            published_by = $3,\n            updated_by = $3,\n            updated_at = now()\n        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL AND status = 'DRAFT'\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "419cd3c759589604d40adcdd8075989c273897f3598adee2f73bade89e251952"
+}

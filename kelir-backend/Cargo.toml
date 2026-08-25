@@ -49,6 +49,11 @@ tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 utoipa = { version = "5", features = ["axum_extras", "uuid", "chrono"] }
 uuid = { version = "1", features = ["v7", "serde"] }
+# JSON Schema validation of stored JFSS form definitions (FR-RAD-002, #156).
+# All references in the meta-schema are internal (`#/$defs/...`), so no
+# resolver feature is enabled: a validator that can fetch a remote schema is a
+# validator that can be pointed at one.
+jsonschema = { version = "0.51.0", default-features = false }
 
 [dev-dependencies]
 # Integration tests drive the API against a real PostgreSQL.

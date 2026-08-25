@@ -5,7 +5,7 @@ use utoipa::OpenApi;
 use crate::error::ValidationDetail;
 use crate::health;
 use crate::middleware::cors::cors_layer;
-use crate::modules::{auth, identity, master_data};
+use crate::modules::{auth, identity, master_data, rad};
 use crate::response::{ErrorBody, ErrorEnvelope, PageMeta};
 use crate::state::AppState;
 
@@ -66,6 +66,18 @@ use crate::state::AppState;
         master_data::handlers::transition_facility,
         master_data::handlers::party_audit,
         master_data::handlers::facility_audit,
+        rad::handlers::list_forms,
+        rad::handlers::get_form,
+        rad::handlers::create_form,
+        rad::handlers::update_form,
+        rad::handlers::publish_form,
+        rad::handlers::create_revision,
+        rad::handlers::delete_form,
+        rad::handlers::list_lists,
+        rad::handlers::get_list,
+        rad::handlers::create_list,
+        rad::handlers::update_list,
+        rad::handlers::delete_list,
     ),
     components(schemas(
         health::HealthBody,
@@ -137,6 +149,19 @@ use crate::state::AppState;
         master_data::domain::TransitionRequest,
         master_data::domain::TransitionResult,
         master_data::domain::AuditRecord,
+        rad::domain::Form,
+        rad::domain::FormSummary,
+        rad::domain::FormStatus,
+        rad::domain::CreateFormRequest,
+        rad::domain::UpdateFormRequest,
+        rad::domain::ListDefinition,
+        rad::domain::ListSummary,
+        rad::domain::ListStatus,
+        rad::domain::ListColumnInput,
+        rad::domain::ListFilterInput,
+        rad::domain::list::FilterType,
+        rad::domain::CreateListRequest,
+        rad::domain::UpdateListRequest,
         ErrorEnvelope,
         ErrorBody,
         ValidationDetail,
@@ -146,6 +171,10 @@ use crate::state::AppState;
         (name = "operations", description = "Health, readiness and build information"),
         (name = "auth", description = "Sign in, sign out, session refresh"),
         (name = "identity", description = "Users, roles and permissions"),
+        (
+            name = "rad",
+            description = "Form and list definitions — the metadata a document type binds and a renderer reads"
+        ),
         (
             name = "master-data",
             description = "Parties, facilities, their governance lifecycle and their change history"
@@ -193,6 +222,7 @@ fn api_v1_router(state: AppState) -> Router<AppState> {
         .nest("/auth", auth::handlers::routes(state))
         .nest("/identity", identity::handlers::routes())
         .nest("/master-data", master_data::handlers::routes())
+        .nest("/rad", rad::handlers::routes())
 }
 
 async fn openapi_document() -> Json<utoipa::openapi::OpenApi> {
