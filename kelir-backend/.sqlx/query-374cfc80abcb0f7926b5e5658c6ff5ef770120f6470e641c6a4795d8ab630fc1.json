@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE document_type_numbering_rules\n        SET is_active = false, updated_by = $3, updated_at = now()\n        WHERE tenant_id = $1 AND document_type_id = $2 AND is_active AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "374cfc80abcb0f7926b5e5658c6ff5ef770120f6470e641c6a4795d8ab630fc1"
+}

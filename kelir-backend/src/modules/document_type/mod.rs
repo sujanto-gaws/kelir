@@ -6,6 +6,9 @@
 
 pub mod domain;
 pub mod handlers;
+pub mod numbering;
+pub mod numbering_repository;
+pub mod numbering_service;
 pub mod repository;
 pub mod service;
 

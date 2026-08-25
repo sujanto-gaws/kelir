@@ -113,13 +113,14 @@ The MVP focuses on:
 │   │   ├── 0013_master_data_audit_permission_scope.sql
 │   │   ├── 0014_rad.sql
 │   │   ├── 0015_document.sql
-│   │   ├── 0016_workflow.sql
-│   │   ├── 0017_attachment.sql
-│   │   ├── 0018_comment.sql
-│   │   ├── 0019_activity_audit.sql
-│   │   ├── 0020_notification.sql
-│   │   ├── 0021_integration.sql
-│   │   └── 0022_plugin.sql
+│   │   ├── 0016_numbering_gap_policy.sql
+│   │   ├── 0017_workflow.sql
+│   │   ├── 0018_attachment.sql
+│   │   ├── 0019_comment.sql
+│   │   ├── 0020_activity_audit.sql
+│   │   ├── 0021_notification.sql
+│   │   ├── 0022_integration.sql
+│   │   └── 0023_plugin.sql
 │   └── src/
 │       ├── main.rs
 │       ├── config.rs
@@ -191,7 +192,7 @@ The MVP focuses on:
         └── .env.example
 ```
 
-Migrations `0001`–`0014` exist; `0015` onward are planned. The authoritative
+Migrations `0001`–`0016` exist; `0017` onward are planned. The authoritative
 migration list is the mapping table at the top of
 [docs/design/02. Database Schema.md](docs/design/02.%20Database%20Schema.md) —
 numbers follow the order migrations are applied, so an early arrival shifts
