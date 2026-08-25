@@ -7,7 +7,8 @@ const { Engine } = require('@goplasmatic/datalogic-wasm');
 
 // Paths resolve against this file, not the shell's working directory.
 const ROOT = new URL('../', import.meta.url);
-const cases = JSON.parse(fs.readFileSync(new URL('cases.json', ROOT), 'utf8'));
+// The corpus lives in parity/ since Sprint 7 promoted it into a CI gate (#154).
+const cases = JSON.parse(fs.readFileSync(new URL('../../parity/cases.json', ROOT), 'utf8'));
 
 const sum = (argsJson) => {
   const args = JSON.parse(argsJson);

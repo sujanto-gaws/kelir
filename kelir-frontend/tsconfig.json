@@ -7,7 +7,11 @@
     "jsx": "preserve",
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    // ESNext.Disposable is here for one reason: the JSON Logic engine's own
+    // type declarations expose `[Symbol.dispose]()`, and without the library
+    // that declares that symbol `vue-tsc` fails inside node_modules. It adds a
+    // declaration, not a runtime feature — nothing in src/ uses `using`.
+    "lib": ["ES2020", "DOM", "DOM.Iterable", "ESNext.Disposable"],
     "types": ["vite/client"],
     "baseUrl": ".",
     "paths": {

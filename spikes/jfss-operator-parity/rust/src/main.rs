@@ -86,7 +86,9 @@ fn spike_root() -> std::path::PathBuf {
 
 fn main() {
     let cases: Vec<Case> =
-        serde_json::from_str(&std::fs::read_to_string(spike_root().join("cases.json")).expect("corpus is readable"))
+        // The corpus lives in parity/ since Sprint 7 promoted it into a CI
+        // gate (#154); this harness reads it there rather than keeping a copy.
+        serde_json::from_str(&std::fs::read_to_string(spike_root().join("../../parity/cases.json")).expect("corpus is readable"))
             .expect("corpus parses");
 
     let stock = Engine::builder().add_operator("sum", Sum).build();

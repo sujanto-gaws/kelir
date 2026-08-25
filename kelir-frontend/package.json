@@ -13,9 +13,11 @@
     "format:check": "prettier --check .",
     "type-check": "vue-tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "parity:update": "vitest run --mode parity-update src/lib/jsonlogic.parity.spec.ts"
   },
   "dependencies": {
+    "@goplasmatic/datalogic-wasm": "5.2.0",
     "axios": "^1.8.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

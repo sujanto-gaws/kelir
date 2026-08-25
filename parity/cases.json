@@ -987,5 +987,76 @@
    ]
   },
   "note": "Registry 6.1 invoice while the user is still typing row 2"
+ },
+ {
+  "id": "add-array-operand",
+  "tier": "normalization",
+  "expr": {
+   "+": [
+    {
+     "var": "x"
+    },
+    5
+   ]
+  },
+  "data": {
+   "x": []
+  },
+  "note": "Registry 7.3 non-numeric operand. Added 2026-08-25 by #154: the original 51 never reached arithmetic_nan_handling, so flipping that setting left the gate green",
+  "added": "#154"
+ },
+ {
+  "id": "add-object-operand",
+  "tier": "normalization",
+  "expr": {
+   "+": [
+    {
+     "var": "x"
+    },
+    5
+   ]
+  },
+  "data": {
+   "x": {}
+  },
+  "note": "Registry 7.3 non-numeric operand, object",
+  "added": "#154"
+ },
+ {
+  "id": "add-non-numeric-string-operand",
+  "tier": "normalization",
+  "expr": {
+   "+": [
+    {
+     "var": "x"
+    },
+    5
+   ]
+  },
+  "data": {
+   "x": "abc"
+  },
+  "note": "Registry 7.3 non-numeric operand, a string that is not a number — distinct from the empty string, which numeric_coercion handles",
+  "added": "#154"
+ },
+ {
+  "id": "mul-array-operand",
+  "tier": "normalization",
+  "expr": {
+   "*": [
+    {
+     "var": "x"
+    },
+    5
+   ]
+  },
+  "data": {
+   "x": [
+    1,
+    2
+   ]
+  },
+  "note": "Registry 7.3 non-numeric operand under the operator the registry uses as its worked example",
+  "added": "#154"
  }
 ]
