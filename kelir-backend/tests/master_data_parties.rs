@@ -309,6 +309,68 @@ async fn refuses_a_second_party_with_the_same_party_id() {
 }
 
 #[tokio::test]
+async fn refuses_a_purpose_type_longer_than_its_column() {
+    // #109, reproduced through the router. `mdm_party_contact_mechs.purpose_type`
+    // is `VARCHAR(64)` and nothing bounded the field that fills it, so the value
+    // reached the INSERT and the caller got
+    // `{"code":"INTERNAL_ERROR","message":"An unexpected error occurred"}` —
+    // a 500 with nothing to act on, where the contract promises a 422 naming the
+    // field. Every other code field on this surface already went through
+    // `require_code`; this one was missed.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let (status, body) = create(
+        &app,
+        &token,
+        json!({
+            "partyId": "PARTY-0001",
+            "partyTypeId": "PERSON",
+            "person": { "firstName": "Jane", "lastName": "Doe" },
+            "contactMechanisms": [{
+                "contactMechTypeId": "EMAIL_ADDRESS",
+                "purposeTypeId": "P".repeat(200),
+                "fromDate": "2026-01-01T00:00:00Z",
+                "detail": { "emailAddress": "jane@acme.example" },
+            }],
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["error"]["code"], "VALIDATION_ERROR");
+    assert_eq!(
+        body["error"]["details"][0]["path"],
+        "contactMechanisms[0].purposeTypeId"
+    );
+    assert_eq!(body["error"]["details"][0]["code"], "TOO_LONG");
+}
+
+#[tokio::test]
+async fn refuses_an_external_id_longer_than_its_column() {
+    // Found by the sweep #109 asked for, not by the report. `external_id` is
+    // `VARCHAR(255)` and had the same hole; it is on the party root rather than
+    // on a child, so it is the shorter path to the same 500.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let (status, body) = create(
+        &app,
+        &token,
+        json!({
+            "partyId": "PARTY-0001",
+            "partyTypeId": "PERSON",
+            "externalId": "E".repeat(300),
+            "person": { "firstName": "Jane", "lastName": "Doe" },
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["error"]["details"][0]["path"], "externalId");
+}
+
+#[tokio::test]
 async fn refuses_a_field_the_contract_does_not_have() {
     // #62: a misspelled field must be named, not discarded. `partyID` for
     // `partyId` would otherwise create a party with an empty code.
