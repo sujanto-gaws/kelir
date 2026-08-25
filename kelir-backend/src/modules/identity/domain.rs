@@ -4,6 +4,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::error::{AppError, ValidationDetail};
+use crate::utils::serde::present_or_absent;
 
 /// Account lifecycle (SRS FR-IDM-007).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -109,7 +110,14 @@ pub struct UpdateUserRequest {
     pub email: Option<String>,
     pub display_name: Option<String>,
     pub status: Option<UserStatus>,
-    pub department_id: Option<Uuid>,
+    /// The department the user belongs to (FR-IDM-008, per decision **D-8**).
+    ///
+    /// `Option<Option<_>>` because the column is nullable and *clearing* it is
+    /// a real edit — a person who leaves a department has none, and a plain
+    /// `Option` cannot say so: `COALESCE` reads a missing field and an explicit
+    /// null identically, so the department could be set and never unset.
+    #[serde(default, deserialize_with = "present_or_absent")]
+    pub department_id: Option<Option<Uuid>>,
     pub role_ids: Option<Vec<Uuid>>,
 }
 

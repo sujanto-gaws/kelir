@@ -1,0 +1,66 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT d.id, d.department_code, d.name, d.status, d.created_at, d.updated_at,\n               parent.department_code AS \"parent_code?\",\n               manager.party_code AS \"manager_code?\"\n        FROM departments d\n        LEFT JOIN departments parent\n          ON parent.id = d.parent_department_id AND parent.tenant_id = d.tenant_id\n             AND parent.deleted_at IS NULL\n        LEFT JOIN mdm_parties manager\n          ON manager.id = d.manager_party_id AND manager.tenant_id = d.tenant_id\n             AND manager.deleted_at IS NULL\n        WHERE d.tenant_id = $1 AND d.deleted_at IS NULL\n        ORDER BY d.department_code\n        LIMIT $2 OFFSET $3\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "department_code",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 5,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "parent_code?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "manager_code?",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "bbf26b596240c41d8ddb90d377f6198f16a9ae169420dceb31ed395aabd8476e"
+}

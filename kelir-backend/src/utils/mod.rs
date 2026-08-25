@@ -1,1 +1,3 @@
-// Shared helper functions will be added here.
+//! Shared helpers.
+
+pub mod serde;

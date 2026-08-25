@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE departments\n        SET name = COALESCE($3, name),\n            parent_department_id = CASE WHEN $4 THEN $5 ELSE parent_department_id END,\n            manager_party_id = CASE WHEN $6 THEN $7 ELSE manager_party_id END,\n            status = COALESCE($8, status),\n            updated_by = $9,\n            updated_at = now()\n        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Bool",
+        "Uuid",
+        "Bool",
+        "Uuid",
+        "Varchar",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b2ea78ff1895f83127a67d66e0b15211f9f4dd8959f8b00315166578e88a6d88"
+}

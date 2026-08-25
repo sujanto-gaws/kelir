@@ -8,10 +8,11 @@ use super::domain::{
     Permission, Role, UpdateRoleRequest, UpdateUserRequest, User, UserStatus,
 };
 use super::repository as repo;
-use crate::error::AppError;
+use crate::error::{AppError, ValidationDetail};
 use crate::middleware::auth::Authenticated;
 use crate::modules::audit::{self, AuditEntry};
 use crate::modules::auth::password::hash_password;
+use crate::modules::organization::department_repository as department_repo;
 use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
 
@@ -65,6 +66,11 @@ pub async fn create_user(
         .map_err(|error| AppError::Internal {
             source: anyhow::anyhow!("password hashing task failed: {error}"),
         })??;
+
+    // The department is checked before anything is written. Without this the
+    // reference reaches the foreign key and a caller who mistyped a UUID gets a
+    // 500 rather than a 422 naming the field (FR-IDM-008, decision D-8).
+    check_department(state, tenant_id, request.department_id).await?;
 
     // The user and its role grants are one unit: a user created without the
     // roles that were asked for would silently have no access.
@@ -126,6 +132,10 @@ pub async fn update_user(
     let before = repo::find_user(&state.pool, tenant_id, id)
         .await?
         .ok_or_else(|| AppError::not_found("User"))?;
+
+    // Only a department the caller is *setting* is checked, and only when it
+    // names one. `Some(None)` clears the column and has nothing to resolve.
+    check_department(state, tenant_id, request.department_id.flatten()).await?;
 
     let mut transaction = state.pool.begin().await?;
 
@@ -489,6 +499,39 @@ fn duplicate_role_to_conflict(error: sqlx::Error) -> AppError {
     } else {
         AppError::from(error)
     }
+}
+
+/// Refuses a department reference that names nothing in this tenant.
+///
+/// **The edge decision D-8 left to identity** — FR-IDM-008 is re-scoped to
+/// exactly this, the user-to-department assignment, while the department entity
+/// itself belongs to the organization module (#28).
+///
+/// Checked here rather than left to the foreign key, because the foreign key
+/// answers with a 500 that names a constraint. It is also not a substitute for
+/// the constraint: this read and the insert are not one transaction, so a
+/// department deleted in between is still caught by the key — as a 500, but a
+/// correct one, and the window is a rare administrative race rather than the
+/// ordinary case of a mistyped id.
+async fn check_department(
+    state: &AppState,
+    tenant_id: Uuid,
+    department_id: Option<Uuid>,
+) -> Result<(), AppError> {
+    let Some(department_id) = department_id else {
+        return Ok(());
+    };
+
+    if department_repo::department_is_live(&state.pool, tenant_id, department_id).await? {
+        return Ok(());
+    }
+
+    Err(AppError::validation(vec![ValidationDetail::new(
+        "departmentId",
+        "exists",
+        "NOT_FOUND",
+        "No department with that id in this tenant",
+    )]))
 }
 
 fn is_unique_violation(error: &sqlx::Error) -> bool {

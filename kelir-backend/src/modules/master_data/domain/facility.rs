@@ -30,7 +30,7 @@
 //! [concepts/03]: ../../../../../docs/concepts/03.%20Handling%20Master%20Data.md
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -39,6 +39,7 @@ use super::{
     bound_name, finish, non_empty, require_code, require_name, PostalAddress, RecordStatus,
 };
 use crate::error::{AppError, ValidationDetail};
+use crate::utils::serde::present_or_absent;
 
 /// Longest `facilityId` §4.16 holds — `facility_code VARCHAR(64)`.
 pub const MAX_FACILITY_CODE_LENGTH: usize = 64;
@@ -171,20 +172,6 @@ pub struct UpdateFacilityRequest {
     pub owner_party_id: Option<Option<String>>,
     pub address: Option<PostalAddress>,
     pub additional_attributes: Option<Value>,
-}
-
-/// Tells *absent* from *present and null*, which `Option<String>` alone cannot.
-///
-/// With `#[serde(default)]` a missing key stays `None` and never reaches here;
-/// a key that is present — including `null` — arrives and is wrapped in `Some`.
-/// Written out rather than pulled in as a dependency: it is four lines and two
-/// fields need it.
-fn present_or_absent<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
-where
-    D: Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 /// Validates a create payload, collecting every problem rather than stopping at
