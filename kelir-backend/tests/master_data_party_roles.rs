@@ -1235,9 +1235,21 @@ async fn deleting_a_party_releases_the_business_numbers_it_held() {
         .await;
     assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
 
-    // The party code is released by the same kind of partial index, so this
-    // half already worked and is asserted to keep the scenario honest.
-    let second = create_party(&app, &token, party_group("PARTY-A", "Acme Supplies Again")).await;
+    // **The second party takes a different code, and that is the change #107
+    // made.** This used to reuse `PARTY-A`, on the grounds that the party code
+    // was released by the same kind of partial index as the supplier number.
+    // It no longer is: `0018_party_code_is_not_released.sql` made
+    // `uq_mdm_parties_tenant_id_party_code` total, so a deleted party keeps its
+    // `partyId` forever and re-creating it is a 409.
+    //
+    // The two now differ deliberately, and #107 says so in as many words: a
+    // party code is a business identifier that must name one thing over time,
+    // while a supplier number is a slot in a sequence that a deleted supplier
+    // has no claim on. #107 also records that the pair should be decided
+    // together and leaves the numbers to #103 — so the asymmetry is a known
+    // open question, not an oversight, and this comment is where the next
+    // reader meets it.
+    let second = create_party(&app, &token, party_group("PARTY-B", "Acme Supplies Again")).await;
 
     let reassigned = app
         .put(
