@@ -1,0 +1,98 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, tenant_id, event_type, action, object_type, object_id,\n               actor_user_id, ip_address, reason, old_value_json, new_value_json,\n               previous_hash, current_hash, created_at\n        FROM audit_events\n        ORDER BY created_at, id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "tenant_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "event_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "action",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "object_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "object_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 6,
+        "name": "actor_user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 7,
+        "name": "ip_address",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "reason",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "old_value_json",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 10,
+        "name": "new_value_json",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 11,
+        "name": "previous_hash",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 12,
+        "name": "current_hash",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 13,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "1f142aea05f538843a47d216657034accae2b6b60a4bfe59b0b299afcd461f80"
+}
