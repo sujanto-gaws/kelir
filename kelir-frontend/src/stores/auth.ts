@@ -4,6 +4,7 @@ import { computed, ref } from 'vue'
 import * as authApi from '@/api/auth'
 import { ApiError } from '@/api/error'
 import { registerSessionBridge } from '@/api/session'
+import { notifySessionLost } from '@/stores/session-events'
 import type { CurrentUser, SessionResponse } from '@/types/auth'
 
 /**
@@ -173,6 +174,23 @@ export const useAuthStore = defineStore('auth', () => {
     writePersistedSession(null)
   }
 
+  /**
+   * Drop the session *and say so*, for the paths where this tab did not ask.
+   *
+   * The route guard only runs on navigation, so a session lost while the user
+   * is sitting on a page redirects nothing: they stay on a page whose data is
+   * stale and whose every action will fail (#68). Announcing it is what lets
+   * the router act without waiting to be asked.
+   *
+   * The deliberate paths — `signOut` here, `discardSession` on the login page —
+   * call `clearSession` instead. Their caller is already navigating, and a
+   * second redirect would race the first.
+   */
+  function endSession(): void {
+    clearSession()
+    notifySessionLost()
+  }
+
   /** Reload the tokens saved by a previous page load. */
   function restore(): void {
     const persisted = readPersistedSession()
@@ -238,7 +256,7 @@ export const useAuthStore = defineStore('auth', () => {
       // answered, or answered with something that is not about the token, the
       // tokens are still good and the caller can try again — see `endsSession`.
       if (endsSession(error)) {
-        clearSession()
+        endSession()
       }
 
       return false
@@ -269,7 +287,7 @@ export const useAuthStore = defineStore('auth', () => {
     const presented = refreshToken.value
 
     if (!presented) {
-      clearSession()
+      endSession()
       return false
     }
 
@@ -282,7 +300,7 @@ export const useAuthStore = defineStore('auth', () => {
       // out. Anything else says nothing about the token, so the session
       // survives and the caller can retry.
       if (endsSession(error)) {
-        clearSession()
+        endSession()
       }
 
       return false
@@ -361,10 +379,13 @@ export const useAuthStore = defineStore('auth', () => {
       return
     }
 
-    // Another tab signed out. Drop the session here too, without writing back.
+    // Another tab signed out. Drop the session here too, without writing back —
+    // and announce it, because this tab did not ask and is now sitting on a
+    // page that will fail every call it makes (#68).
     accessToken.value = null
     refreshToken.value = null
     user.value = null
+    notifySessionLost()
   }
 
   restore()

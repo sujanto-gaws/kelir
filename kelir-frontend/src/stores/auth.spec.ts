@@ -2,6 +2,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { useAuthStore } from './auth'
+import { onSessionLost, resetSessionListeners } from './session-events'
 import { getItem } from '@/api/client'
 import { registerSessionBridge } from '@/api/session'
 import {
@@ -110,7 +111,18 @@ describe('useAuthStore', () => {
   afterEach(() => {
     backend.restore()
     registerSessionBridge(null)
+    resetSessionListeners()
   })
+
+  /** Counts the announcements a test provokes. */
+  function watchSessionLoss(): { count: () => number } {
+    let seen = 0
+    onSessionLost(() => {
+      seen += 1
+    })
+
+    return { count: () => seen }
+  }
 
   describe('sign in', () => {
     beforeEach(() => {
@@ -516,6 +528,86 @@ describe('useAuthStore', () => {
    * Without these, tab A rotates, tab B presents the token A has already spent,
    * and the backend correctly reads the replay as theft — killing both.
    */
+  describe('announcing a session that ends on its own (#68)', () => {
+    // The route guard runs on navigation. A session lost while the user sits on
+    // a page moves nothing, so nothing redirects them: they stay on a page whose
+    // data is stale and whose every action will fail. The store is the only
+    // place that knows the session has gone, so it is the place that says so.
+
+    beforeEach(() => {
+      window.localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({ accessToken: 'access-1', refreshToken: 'refresh-1' }),
+      )
+    })
+
+    it('announces a refresh the server refuses', async () => {
+      // The case #68 names first: a refresh that fails with a 4xx. Nothing is
+      // navigating, and without the announcement nothing ever would.
+      const store = useAuthStore()
+      const lost = watchSessionLoss()
+      handler = () => ({ status: 401, body: errorBody('UNAUTHORIZED', 'Token revoked') })
+
+      expect(await store.refresh()).toBe(false)
+
+      expect(store.isAuthenticated).toBe(false)
+      expect(lost.count()).toBe(1)
+    })
+
+    it('says nothing when the server could not be reached', async () => {
+      // The session is not lost — the tokens are still good and the caller can
+      // retry. Announcing here would sign somebody out over a two-second
+      // connectivity drop, which is the outcome `endsSession` exists to
+      // prevent, arriving through a different door.
+      const store = useAuthStore()
+      const lost = watchSessionLoss()
+      handler = () => ({ status: 503, body: errorBody('INTERNAL_ERROR', 'unavailable') })
+
+      expect(await store.refresh()).toBe(false)
+
+      expect(store.isAuthenticated).toBe(true)
+      expect(lost.count()).toBe(0)
+    })
+
+    it('announces another tab signing out', async () => {
+      // This tab did not ask, and is now on a page that will fail every call.
+      const store = useAuthStore()
+      const lost = watchSessionLoss()
+
+      window.localStorage.clear()
+      window.dispatchEvent(new StorageEvent('storage', { key: STORAGE_KEY }))
+
+      expect(store.isAuthenticated).toBe(false)
+      expect(lost.count()).toBe(1)
+    })
+
+    it('says nothing when this tab signs itself out', async () => {
+      // The caller of `signOut` is already navigating. A second redirect would
+      // race the first, and neither would be wrong — which is exactly the kind
+      // of race worth not having.
+      const store = useAuthStore()
+      const lost = watchSessionLoss()
+      handler = () => ({ status: 204 })
+
+      await store.signOut()
+
+      expect(store.isAuthenticated).toBe(false)
+      expect(lost.count()).toBe(0)
+    })
+
+    it('says nothing when the session is discarded deliberately', async () => {
+      // `clearSession` is what the login page calls to sign in as somebody
+      // else. The caller is already where the announcement would send them.
+      const store = useAuthStore()
+      const lost = watchSessionLoss()
+
+      store.clearSession()
+
+      expect(store.isAuthenticated).toBe(false)
+      expect(lost.count()).toBe(0)
+    })
+  })
+
   describe('another tab', () => {
     function storeSession(generation: number): void {
       window.localStorage.setItem(
