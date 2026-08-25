@@ -1,9 +1,14 @@
-//! Routes over departments (FR-ORG-002).
+//! Routes over tenants (FR-ORG-001) and departments (FR-ORG-002).
 //!
-//! The organization module's first endpoints. Tenant administration
-//! (FR-ORG-001) still has none — decision **D-7** keeps a deployment
-//! single-tenant, so the surface would manage rows nobody can sign in to — and
-//! positions (FR-ORG-003) have no table at all.
+//! Departments came first; tenant administration arrived with decision
+//! **D-18**, which supersedes **D-7**. Positions (FR-ORG-003) still have no
+//! table at all.
+//!
+//! **The tenant routes carry a condition no other route in the system does.**
+//! Besides their permission, the caller must be signed in to the deployment's
+//! *administering* tenant — see `service::require_tenant_administrator`. A
+//! tenant is not a row inside a tenant, so `tenant_id` scoping cannot express
+//! who may touch it and a permission alone cannot either.
 //!
 //! **Assigning a user to a department has no route here**, which is decision
 //! **D-8** working as intended: FR-IDM-008 is the edge `users.department_id`,
@@ -18,6 +23,8 @@ use uuid::Uuid;
 
 use super::department::{CreateDepartmentRequest, Department, UpdateDepartmentRequest};
 use super::department_service;
+use super::domain::{CreateTenantRequest, TenantView, UpdateTenantRequest};
+use super::service;
 use crate::error::AppError;
 use crate::extract::JsonBody;
 use crate::middleware::auth::Authenticated;
@@ -36,6 +43,113 @@ pub fn routes() -> Router<AppState> {
                 .put(update_department)
                 .delete(delete_department),
         )
+        .route("/tenants", get(list_tenants).post(create_tenant))
+        .route(
+            "/tenants/{id}",
+            get(get_tenant).put(update_tenant).delete(delete_tenant),
+        )
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/organization/tenants", tag = "organization",
+    params(Pagination),
+    responses(
+        (status = 200, description = "Tenants", body = [TenantView]),
+        (status = 403, description = "Missing organization:tenant:read, or not signed in to the administering tenant")
+    ),
+    security(("bearer" = []))
+)]
+async fn list_tenants(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Query(pagination): Query<Pagination>,
+) -> Result<Json<ListEnvelope<TenantView>>, AppError> {
+    let (tenants, meta) = service::list_tenants(&state, &caller, &pagination).await?;
+
+    Ok(Json(ListEnvelope::new(tenants, meta)))
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/organization/tenants/{id}", tag = "organization",
+    responses(
+        (status = 200, description = "The tenant", body = TenantView),
+        (status = 404, description = "No such tenant")
+    ),
+    security(("bearer" = []))
+)]
+async fn get_tenant(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ItemEnvelope<TenantView>>, AppError> {
+    Ok(Json(ItemEnvelope::new(
+        service::get_tenant(&state, &caller, id).await?,
+    )))
+}
+
+/// Create a tenant, together with the administrator who can sign in to it.
+#[utoipa::path(
+    post, path = "/api/v1/organization/tenants", tag = "organization",
+    request_body = CreateTenantRequest,
+    responses(
+        (status = 201, description = "Created, with its first administrator", body = TenantView),
+        (status = 409, description = "The tenant code, or the administrator's username or email, is already in use"),
+        (status = 422, description = "Validation failed")
+    ),
+    security(("bearer" = []))
+)]
+async fn create_tenant(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    JsonBody(request): JsonBody<CreateTenantRequest>,
+) -> Result<(StatusCode, Json<ItemEnvelope<TenantView>>), AppError> {
+    let tenant = service::create_tenant(&state, &caller, request).await?;
+
+    Ok((StatusCode::CREATED, Json(ItemEnvelope::new(tenant))))
+}
+
+/// Rename a tenant, or change its status.
+///
+/// `tenantCode` is not updatable — it is the handle users sign in with, and
+/// changing it would strand them at a login form with no way to learn the new
+/// value.
+#[utoipa::path(
+    put, path = "/api/v1/organization/tenants/{id}", tag = "organization",
+    request_body = UpdateTenantRequest,
+    responses(
+        (status = 200, description = "Updated; suspending a tenant also revokes its refresh tokens", body = TenantView),
+        (status = 400, description = "Refusing to suspend the tenant the request came from"),
+        (status = 404, description = "No such tenant")
+    ),
+    security(("bearer" = []))
+)]
+async fn update_tenant(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path(id): Path<Uuid>,
+    JsonBody(request): JsonBody<UpdateTenantRequest>,
+) -> Result<Json<ItemEnvelope<TenantView>>, AppError> {
+    Ok(Json(ItemEnvelope::new(
+        service::update_tenant(&state, &caller, id, request).await?,
+    )))
+}
+
+#[utoipa::path(
+    delete, path = "/api/v1/organization/tenants/{id}", tag = "organization",
+    responses(
+        (status = 204, description = "Soft-deleted; its refresh tokens are revoked and its users can no longer sign in. An access token already issued remains valid until it expires."),
+        (status = 400, description = "Refusing to delete the tenant the request came from")
+    ),
+    security(("bearer" = []))
+)]
+async fn delete_tenant(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, AppError> {
+    service::delete_tenant(&state, &caller, id).await?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[utoipa::path(

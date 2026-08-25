@@ -1,6 +1,6 @@
 # Kelir Documentation
 
-**Status:** Living · **Last updated:** 2026-08-21
+**Status:** Living · **Last updated:** 2026-08-25
 
 Kelir is a metadata-driven, document-centric, workflow-enabled full-stack framework for building enterprise business applications rapidly — Rust (Axum + SQLx + PostgreSQL) on the backend, Vue 3 (Vite + Pinia + shadcn-vue + Tailwind CSS v4) on the frontend. This folder is the complete documentation set; this file is its map.
 
@@ -56,7 +56,7 @@ Early exploratory documents. Still valid for intent and examples, but **supersed
 | Document | Content |
 |---|---|
 | [01. System Design Document.md](design/01.%20System%20Design%20Document.md) | The SDD: architecture overview, stacks, module map, table groups, workflow/RAD/integration/plugin/security design, roadmap |
-| [02. Database Schema.md](design/02.%20Database%20Schema.md) | Column-level DDL for all 95 tables across 16 migrations, with conventions, indexes, and enum vocabularies |
+| [02. Database Schema.md](design/02.%20Database%20Schema.md) | Column-level DDL for all 95 tables across 17 migrations, with conventions, indexes, and enum vocabularies |
 
 ### schema/
 
@@ -128,12 +128,12 @@ When documents disagree, precedence is explicit:
 
 | Area | Status |
 |---|---|
-| Requirements (SRS v0.5) | **Draft** — the scope authority, and §9 is the MVP gate, but approval is still an open action (SDD §16 step 1) |
+| Requirements (SRS v0.8) | **Draft** — the scope authority, and §9 is the MVP gate, but approval is still an open action (SDD §16 step 1) |
 | Architecture 01–05 | **Adopted** |
 | System Design Document v0.1 | **Draft** — approval open, as above |
-| Database Schema | **Draft** — 95 tables / 16 migrations; adopted with the SDD |
+| Database Schema | **Draft** — 95 tables / 17 migrations; adopted with the SDD |
 | Schema standards | JFSS **Final Standard**; rule registries **Active Standard**; JWSS / LHCS / PMS / EES / DTDS **Draft Standard** |
 | Standards 01–05 | **Adopted** — CI enforces the coding standard, branch protection implements the git workflow |
 | Concepts 01–04 | **Superseded** — background and intent only (authority rule 7) |
-| Planning | Complete — sprint plan and product backlog cover all 164 FRs; scope decisions D-1…D-5 resolved 2026-08-11 |
+| Planning | Complete — sprint plan and product backlog cover all 164 FRs. Scope decisions D-1…D-18 are recorded in [Product Backlog](../projects/planning/02.%20Product%20Backlog.md) §6; all are resolved except **D-15**, and **D-7** is superseded by **D-18** |
 | Implementation | Phase 1 released as `v0.1.0` and closed; staging retired by decision D-9. Phase 2 backend done (Sprint 3): Argon2id authentication with rotating refresh tokens, users, roles, permissions enforced per route, and the hash-chained audit write path. Remaining in Phase 2: the frontend auth flow, admin screens, delegation, departments and rate limiting. See [Sprint 3 Status](../projects/status/04.%20Sprint%203%20Status.md) |

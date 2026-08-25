@@ -32,6 +32,17 @@ export interface CurrentUser {
 export interface SignInRequest {
   username: string
   password: string
+  /**
+   * Which tenant to authenticate against (FR-IDM-009).
+   *
+   * Optional, and the backend has accepted it since Sprint 4 — what was missing
+   * until decision **D-18** was any way for this client to know when to send it
+   * (#67). It is required only on a multi-tenant deployment, which
+   * `GET /deployment` reports; a single-tenant deployment **ignores** it and
+   * resolves its configured default, so sending it there cannot reach another
+   * tenant's users.
+   */
+  tenantCode?: string
 }
 
 /** Body posted to `/auth/change-password`. */

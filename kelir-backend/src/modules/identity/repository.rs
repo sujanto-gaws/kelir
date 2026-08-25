@@ -139,41 +139,67 @@ pub async fn record_failed_login(
     .await
 }
 
-/// Permission codes granted to a user through their roles.
+/// Permission codes granted to a user through their roles, within one tenant.
+///
+/// **The `tenant_id` filter is the half of decision D-18 that lives in a query**
+/// (#65). This join used to run on `user_roles.user_id` alone while every other
+/// identity read filtered `tenant_id`, and the two assumptions cannot both be
+/// right: either roles are tenant-scoped, in which case a grant naming another
+/// tenant's role must resolve to nothing, or they are global, in which case the
+/// rest of the module is over-filtering. D-18 says scoped.
+///
+/// The composite foreign key added by `0017_tenant_administration.sql` means no
+/// such row can exist any more, so on today's data this filter changes nothing.
+/// It stays because a constraint that makes a filter redundant is not a reason
+/// to write the query as though the constraint were the only guard. The two
+/// are asserted separately, so dropping either alone is caught:
+/// `a_role_grant_cannot_cross_a_tenant_boundary` covers the key and
+/// `permissions_resolve_only_within_the_tenant_they_are_asked_for` covers this
+/// filter (`tests/organization_tenants.rs`).
 pub async fn permissions_for_user(
     executor: impl PgExecutor<'_>,
+    tenant_id: Uuid,
     user_id: Uuid,
 ) -> Result<Vec<String>, sqlx::Error> {
     sqlx::query_scalar!(
         r#"
         SELECT DISTINCT p.permission_code
         FROM user_roles ur
+        JOIN roles r ON r.id = ur.role_id AND r.tenant_id = ur.tenant_id
+                    AND r.deleted_at IS NULL
         JOIN role_permissions rp ON rp.role_id = ur.role_id AND rp.deleted_at IS NULL
         JOIN permissions p ON p.id = rp.permission_id AND p.deleted_at IS NULL
-        WHERE ur.user_id = $1
+        WHERE ur.tenant_id = $1
+          AND ur.user_id = $2
           AND ur.deleted_at IS NULL
           AND (ur.valid_from IS NULL OR ur.valid_from <= current_date)
           AND (ur.valid_to IS NULL OR ur.valid_to >= current_date)
         ORDER BY 1
         "#,
+        tenant_id,
         user_id
     )
     .fetch_all(executor)
     .await
 }
 
+/// Role codes the user holds in one tenant. Scoped for the same reason
+/// [`permissions_for_user`] is — these two are what the access token carries.
 pub async fn role_codes_for_user(
     executor: impl PgExecutor<'_>,
+    tenant_id: Uuid,
     user_id: Uuid,
 ) -> Result<Vec<String>, sqlx::Error> {
     sqlx::query_scalar!(
         r#"
         SELECT r.role_code
         FROM user_roles ur
-        JOIN roles r ON r.id = ur.role_id AND r.deleted_at IS NULL
-        WHERE ur.user_id = $1 AND ur.deleted_at IS NULL
+        JOIN roles r ON r.id = ur.role_id AND r.tenant_id = ur.tenant_id
+                    AND r.deleted_at IS NULL
+        WHERE ur.tenant_id = $1 AND ur.user_id = $2 AND ur.deleted_at IS NULL
         ORDER BY 1
         "#,
+        tenant_id,
         user_id
     )
     .fetch_all(executor)
@@ -331,7 +357,7 @@ pub async fn list_users(
             last_login_at: row.last_login_at,
             locked_until: row.locked_until,
             created_at: row.created_at,
-            roles: roles_of_user(pool, row.id).await?,
+            roles: roles_of_user(pool, tenant_id, row.id).await?,
         });
     }
 
@@ -370,12 +396,15 @@ pub async fn find_user(
         last_login_at: row.last_login_at,
         locked_until: row.locked_until,
         created_at: row.created_at,
-        roles: roles_of_user(pool, row.id).await?,
+        roles: roles_of_user(pool, tenant_id, row.id).await?,
     }))
 }
 
+/// Roles a user holds, as embedded in the user record. Tenant-scoped for the
+/// reason [`permissions_for_user`] gives (**D-18**, #65).
 pub async fn roles_of_user(
     executor: impl PgExecutor<'_>,
+    tenant_id: Uuid,
     user_id: Uuid,
 ) -> Result<Vec<RoleSummary>, sqlx::Error> {
     sqlx::query_as!(
@@ -383,10 +412,12 @@ pub async fn roles_of_user(
         r#"
         SELECT r.id, r.role_code, r.name
         FROM user_roles ur
-        JOIN roles r ON r.id = ur.role_id AND r.deleted_at IS NULL
-        WHERE ur.user_id = $1 AND ur.deleted_at IS NULL
+        JOIN roles r ON r.id = ur.role_id AND r.tenant_id = ur.tenant_id
+                    AND r.deleted_at IS NULL
+        WHERE ur.tenant_id = $1 AND ur.user_id = $2 AND ur.deleted_at IS NULL
         ORDER BY r.role_code
         "#,
+        tenant_id,
         user_id
     )
     .fetch_all(executor)
@@ -648,6 +679,18 @@ pub async fn list_permissions(pool: &PgPool) -> Result<Vec<Permission>, sqlx::Er
     .await
 }
 
+/// Inserts a role.
+///
+/// `is_system` is a parameter rather than always `false` because a provisioned
+/// tenant's own `ROLE-ADMIN` has to carry it: `delete_role` refuses a system
+/// role precisely so a tenant cannot be left unable to grant permissions, and a
+/// tenant whose only role was deletable would be one restart away from exactly
+/// that. The API's own create-role path passes `false` — nothing a caller
+/// creates is a system role.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one parameter per column; grouping them into a struct would only move the list"
+)]
 pub async fn insert_role(
     executor: impl PgExecutor<'_>,
     id: Uuid,
@@ -655,18 +698,20 @@ pub async fn insert_role(
     role_code: &str,
     name: &str,
     description: Option<&str>,
+    is_system: bool,
     created_by: Option<Uuid>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query!(
         r#"
-        INSERT INTO roles (id, tenant_id, role_code, name, description, created_by)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO roles (id, tenant_id, role_code, name, description, is_system, created_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
         id,
         tenant_id,
         role_code,
         name,
         description,
+        is_system,
         created_by
     )
     .execute(executor)
@@ -770,6 +815,57 @@ pub async fn set_password_hash(
     .execute(executor)
     .await
     .map(|result| result.rows_affected())
+}
+/// Permission ids in the catalogue, minus a family the caller must not hold.
+///
+/// Used when a tenant is provisioned: its own administrator holds everything
+/// except tenant administration, which belongs to the deployment's default
+/// tenant alone (decision **D-18**). The exclusion is by code prefix rather
+/// than by an id list, so a permission added to that family by a later
+/// migration is withheld without this code being told about it.
+///
+/// The prefix is a `LIKE` pattern operand, so a caller passing one containing
+/// `%` or `_` would widen it. Every caller passes a literal module prefix; a
+/// caller-supplied value would need escaping first.
+pub async fn permission_ids_excluding_prefix(
+    executor: impl PgExecutor<'_>,
+    prefix: &str,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    sqlx::query_scalar!(
+        r#"
+        SELECT id
+        FROM permissions
+        WHERE deleted_at IS NULL AND permission_code NOT LIKE $1 || '%'
+        ORDER BY permission_code
+        "#,
+        prefix
+    )
+    .fetch_all(executor)
+    .await
+}
+
+/// The id of a tenant's role with a given code, if it has one.
+///
+/// Exists for the first-run bootstrap, which needs the *resolved* tenant's
+/// `ROLE-ADMIN` rather than the one `0002_identity.sql` seeds in the system
+/// tenant (#65). Returns the id alone because that is all a grant needs, and
+/// because [`find_role`] would run a second query for permissions nobody reads
+/// here.
+pub async fn find_role_id_by_code(
+    executor: impl PgExecutor<'_>,
+    tenant_id: Uuid,
+    role_code: &str,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    sqlx::query_scalar!(
+        r#"
+        SELECT id FROM roles
+        WHERE tenant_id = $1 AND role_code = $2 AND deleted_at IS NULL
+        "#,
+        tenant_id,
+        role_code
+    )
+    .fetch_optional(executor)
+    .await
 }
 
 // ---------------------------------------------------------------------------

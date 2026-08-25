@@ -1,9 +1,11 @@
-//! Tenancy resolution (FR-IDM-009).
+//! Tenancy resolution (FR-IDM-009) and tenant administration (FR-ORG-001).
 //!
-//! Every tenant-scoped query in the system already filters `tenant_id`; what
-//! this decides is *which* `tenant_id` a session gets in the first place. The
-//! answer is then written into the JWT `tenant_id` claim and everything
-//! downstream reads it from there via `Authenticated::tenant_id()`.
+//! **Resolution** decides *which* `tenant_id` a session gets. Every
+//! tenant-scoped query in the system already filters that column; this is where
+//! the value comes from. The answer is written into the JWT `tenant_id` claim
+//! and everything downstream reads it from there via
+//! `Authenticated::tenant_id()` — which is what per-request tenant resolution
+//! amounts to once the session exists.
 //!
 //! **Why a deployment flag.** The SRS §2 glossary defines multi-tenant mode as
 //! a deployment configuration flag, and that is what this implements. Two
@@ -11,20 +13,39 @@
 //! subdomain needs wildcard DNS and TLS on a staging host that does not exist
 //! yet, and a caller-supplied header carries exactly the same trust level as a
 //! body field while being invisible in the OpenAPI contract.
+//!
+//! **Administration** is the second half, and it arrived three sprints later.
+//! Decision **D-7** deferred it: with no way for a client to *learn* that a
+//! deployment was multi-tenant, the flag was unusable and `config.rs` refused
+//! to start with it on, so administering tenants would have meant creating rows
+//! nobody could sign in to. **D-18** supersedes that. `GET /api/v1/deployment`
+//! is the missing half — the login form asks it whether to show a tenant-code
+//! field — and creating a tenant here creates its first administrator in the
+//! same transaction, so the rows this makes are rows somebody can sign in to.
+//!
+//! The one boundary worth reading before changing anything below:
+//! [`require_tenant_administrator`]. A tenant is not a row *inside* a tenant, so
+//! `tenant_id` scoping cannot say who may touch it, and a permission alone
+//! cannot either — the catalogue is global and a tenant administrator can grant
+//! themselves any code in it.
 
 use std::fmt;
 
 use sqlx::PgExecutor;
+use uuid::Uuid;
 
-use super::domain::{normalize_tenant_code, Tenant};
+use super::domain::{
+    normalize_tenant_code, validate_create_tenant, validate_update_tenant, CreateTenantRequest,
+    Tenant, TenantStatus, TenantView, UpdateTenantRequest, MAX_TENANT_CODE_LEN,
+};
+use super::repository::{self, TenantRecord};
 use crate::config::AppConfig;
 use crate::error::AppError;
-
-/// The longest tenant code that can exist (`tenants.tenant_code VARCHAR(64)`).
-///
-/// Checked before the query so an over-long value is refused without a round
-/// trip, and so nothing unbounded and caller-controlled reaches the logs.
-const MAX_TENANT_CODE_LEN: usize = 64;
+use crate::middleware::auth::Authenticated;
+use crate::modules::audit::{self, AuditEntry};
+use crate::modules::identity::service as identity;
+use crate::response::{PageMeta, Pagination};
+use crate::state::AppState;
 
 /// Why a sign-in could not be attributed to a tenant.
 ///
@@ -179,19 +200,366 @@ async fn find_live(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tenant administration (FR-ORG-001, decision D-18)
+// ---------------------------------------------------------------------------
+
+/// The permission family a tenant's own administrator does not hold.
+///
+/// **The rule this expresses is the one that makes tenant-scoped roles safe.**
+/// D-18 gives every tenant its own `ROLE-ADMIN`, and that role holds the whole
+/// catalogue; without withholding this family, creating a tenant would hand its
+/// administrator the ability to create more of them.
+///
+/// Withholding it is not the boundary, though — [`require_tenant_administrator`]
+/// is. The permission catalogue is global and a tenant administrator holds
+/// `identity:role:update`, so nothing stops them adding these codes back to
+/// their own role. What stops the request is that it did not come from the
+/// deployment's administering tenant.
+pub const TENANT_ADMINISTRATION_PREFIX: &str = "organization:tenant:";
+
+/// Confirms the caller may administer tenants, and answers with the tenant they
+/// must be in.
+///
+/// Two conditions, and both are load-bearing:
+///
+/// 1. **The permission.** `organization:tenant:read` to look, `:manage` to
+///    change — the codes `0005_delegation_tenant_permissions.sql` seeded for
+///    this surface a sprint before it existed.
+/// 2. **The tenant.** The caller must be signed in to the deployment's default
+///    tenant (`KELIR_DEFAULT_TENANT_CODE`) — the one the first-run
+///    administrator lives in. A tenant is not a row inside a tenant; it is the
+///    partition itself, so `tenant_id` scoping cannot express who may touch it
+///    and something else has to.
+///
+/// Resolved from configuration rather than compared against
+/// [`crate::db::SYSTEM_TENANT_ID`], for the reason that constant's own doc
+/// comment gives: a deployment that repoints its default tenant must not find
+/// the answer hardcoded somewhere else.
+async fn require_tenant_administrator(
+    state: &AppState,
+    caller: &Authenticated,
+    permission: &str,
+) -> Result<Tenant, AppError> {
+    caller.require(permission)?;
+
+    let administering = resolve_default(&state.pool, &state.config).await?;
+
+    if caller.tenant_id() != administering.id {
+        tracing::info!(
+            user_id = %caller.user_id(),
+            permission,
+            "tenant administration refused: the caller is not in the administering tenant"
+        );
+
+        // `Forbidden`, matching `Authenticated::require`: the caller is
+        // authenticated and holds the permission, they are simply not where it
+        // may be used. Hiding the surface behind a 404 instead would make this
+        // indistinguishable from a typo in the path.
+        return Err(AppError::Forbidden);
+    }
+
+    Ok(administering)
+}
+
+/// Maps a repository row onto the published shape.
+fn view(record: TenantRecord, administering_id: Uuid) -> TenantView {
+    TenantView {
+        is_default: record.id == administering_id,
+        id: record.id,
+        tenant_code: record.tenant_code,
+        name: record.name,
+        status: record.status,
+        user_count: record.user_count,
+        created_at: record.created_at,
+    }
+}
+
+pub async fn list_tenants(
+    state: &AppState,
+    caller: &Authenticated,
+    pagination: &Pagination,
+) -> Result<(Vec<TenantView>, PageMeta), AppError> {
+    let administering =
+        require_tenant_administrator(state, caller, "organization:tenant:read").await?;
+
+    let total = repository::count(&state.pool).await?;
+    let tenants = repository::list(&state.pool, pagination.limit(), pagination.offset()).await?;
+
+    Ok((
+        tenants
+            .into_iter()
+            .map(|record| view(record, administering.id))
+            .collect(),
+        pagination.meta(total.max(0) as u64),
+    ))
+}
+
+pub async fn get_tenant(
+    state: &AppState,
+    caller: &Authenticated,
+    id: Uuid,
+) -> Result<TenantView, AppError> {
+    let administering =
+        require_tenant_administrator(state, caller, "organization:tenant:read").await?;
+
+    repository::find(&state.pool, id)
+        .await?
+        .map(|record| view(record, administering.id))
+        .ok_or_else(|| AppError::not_found("Tenant"))
+}
+
+/// Creates a tenant and the administrator who can sign in to it, in one
+/// transaction.
+///
+/// **The two halves are one transaction because a tenant without a user is the
+/// thing D-13 refused to let this surface build** — a row nobody can sign in
+/// to. Splitting them into two calls would put that state back within reach of
+/// any client that made the first call and not the second.
+pub async fn create_tenant(
+    state: &AppState,
+    caller: &Authenticated,
+    request: CreateTenantRequest,
+) -> Result<TenantView, AppError> {
+    let administering =
+        require_tenant_administrator(state, caller, "organization:tenant:manage").await?;
+
+    validate_create_tenant(&request)?;
+
+    let tenant_code = normalize_tenant_code(&request.tenant_code);
+    let id = Uuid::now_v7();
+    let mut transaction = state.pool.begin().await?;
+
+    repository::insert(
+        &mut *transaction,
+        id,
+        &tenant_code,
+        request.name.trim(),
+        Some(caller.user_id()),
+    )
+    .await
+    .map_err(duplicate_tenant_to_conflict)?;
+
+    let provisioned = identity::provision_tenant_identity(
+        &mut transaction,
+        id,
+        identity::FirstAdministrator {
+            username: &request.administrator.username,
+            email: &request.administrator.email,
+            display_name: &request.administrator.display_name,
+            password: &request.administrator.password,
+        },
+        TENANT_ADMINISTRATION_PREFIX,
+    )
+    .await?;
+
+    transaction.commit().await?;
+
+    // Recorded against the administering tenant, not the new one: audit answers
+    // "who did this", and the actor and the act both belong here. A record filed
+    // under the new tenant would be invisible to the only people who may read
+    // this surface.
+    audit::record_or_warn(
+        &state.pool,
+        AuditEntry {
+            tenant_id: administering.id,
+            event_type: "Tenant.Created",
+            action: "CREATE",
+            object_type: "TENANT",
+            object_id: id,
+            actor_user_id: Some(caller.user_id()),
+            ip_address: None,
+            reason: None,
+            old_value: None,
+            new_value: Some(serde_json::json!({
+                "tenantCode": tenant_code,
+                "name": request.name.trim(),
+                "administratorUserId": provisioned.user_id,
+                "administratorRoleId": provisioned.role_id,
+            })),
+        },
+    )
+    .await;
+
+    tracing::info!(
+        tenant_code = %tenant_code,
+        user_id = %provisioned.user_id,
+        "created a tenant and its first administrator"
+    );
+
+    get_tenant_unchecked(state, id, administering.id).await
+}
+
+pub async fn update_tenant(
+    state: &AppState,
+    caller: &Authenticated,
+    id: Uuid,
+    request: UpdateTenantRequest,
+) -> Result<TenantView, AppError> {
+    let administering =
+        require_tenant_administrator(state, caller, "organization:tenant:manage").await?;
+
+    validate_update_tenant(&request)?;
+
+    let before = repository::find(&state.pool, id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Tenant"))?;
+
+    // Suspending the tenant the request came from would end the session making
+    // the request, and there would then be nobody able to undo it — the same
+    // refusal `deactivate_user` gives for your own account, for the same reason.
+    if id == administering.id && matches!(request.status, Some(status) if !status.admits_sign_in())
+    {
+        return Err(AppError::bad_request(
+            "You cannot suspend the tenant you administer from",
+        ));
+    }
+
+    let updated = repository::update_fields(
+        &state.pool,
+        id,
+        request.name.as_deref().map(str::trim),
+        request.status.map(TenantStatus::as_db),
+        Some(caller.user_id()),
+    )
+    .await?;
+
+    if updated == 0 {
+        return Err(AppError::not_found("Tenant"));
+    }
+
+    // Taking a tenant offline must end its users' sessions, not merely stop new
+    // sign-ins. `resolve_for_sign_in` already refuses a suspended tenant, but a
+    // refresh token issued a minute ago would otherwise keep a session alive
+    // indefinitely — the mirror of what `update_user` does for an account.
+    if matches!(request.status, Some(status) if !status.admits_sign_in()) {
+        let revoked = repository::revoke_sessions(&state.pool, id, "tenant suspended").await?;
+        tracing::info!(tenant_id = %id, revoked, "revoked sessions for a suspended tenant");
+    }
+
+    audit::record_or_warn(
+        &state.pool,
+        AuditEntry {
+            tenant_id: administering.id,
+            event_type: "Tenant.Updated",
+            action: "UPDATE",
+            object_type: "TENANT",
+            object_id: id,
+            actor_user_id: Some(caller.user_id()),
+            ip_address: None,
+            reason: None,
+            old_value: Some(serde_json::json!({
+                "name": before.name,
+                "status": before.status,
+            })),
+            new_value: Some(serde_json::json!({
+                "name": request.name,
+                "status": request.status,
+            })),
+        },
+    )
+    .await;
+
+    get_tenant_unchecked(state, id, administering.id).await
+}
+
+/// Soft-deletes a tenant and ends its sessions.
+///
+/// Its users, roles and data are left in place rather than cascaded: a
+/// soft-deleted tenant resolves to nothing at sign-in, which is what makes the
+/// data unreachable, and hard-deleting it would take the audit trail with it.
+pub async fn delete_tenant(
+    state: &AppState,
+    caller: &Authenticated,
+    id: Uuid,
+) -> Result<(), AppError> {
+    let administering =
+        require_tenant_administrator(state, caller, "organization:tenant:manage").await?;
+
+    if id == administering.id {
+        // The deployment's default tenant. Deleting it would make every
+        // subsequent sign-in fail to resolve — including the one that would be
+        // needed to undo it.
+        return Err(AppError::bad_request(
+            "You cannot delete the tenant you administer from",
+        ));
+    }
+
+    let removed = repository::soft_delete(&state.pool, id, Some(caller.user_id())).await?;
+
+    if removed == 0 {
+        return Err(AppError::not_found("Tenant"));
+    }
+
+    let revoked = repository::revoke_sessions(&state.pool, id, "tenant deleted").await?;
+    tracing::info!(tenant_id = %id, revoked, "revoked sessions for a deleted tenant");
+
+    audit::record_or_warn(
+        &state.pool,
+        AuditEntry {
+            tenant_id: administering.id,
+            event_type: "Tenant.Deleted",
+            action: "DELETE",
+            object_type: "TENANT",
+            object_id: id,
+            actor_user_id: Some(caller.user_id()),
+            ip_address: None,
+            reason: None,
+            old_value: None,
+            new_value: None,
+        },
+    )
+    .await;
+
+    Ok(())
+}
+
+/// Re-reads a tenant after a write. The permission check has already happened;
+/// a row that has just been written and cannot be read back is a fault, not a
+/// 404.
+async fn get_tenant_unchecked(
+    state: &AppState,
+    id: Uuid,
+    administering_id: Uuid,
+) -> Result<TenantView, AppError> {
+    repository::find(&state.pool, id)
+        .await?
+        .map(|record| view(record, administering_id))
+        .ok_or_else(|| AppError::Internal {
+            source: anyhow::anyhow!("tenant {id} vanished between writing and reading it"),
+        })
+}
+
+/// A duplicate `tenant_code` is a conflict, not a server error.
+///
+/// Detected from the constraint rather than pre-checked, so two concurrent
+/// creators cannot both pass a check and then both insert.
+fn duplicate_tenant_to_conflict(error: sqlx::Error) -> AppError {
+    let is_duplicate = error
+        .as_database_error()
+        .is_some_and(|database_error| database_error.is_unique_violation());
+
+    if is_duplicate {
+        AppError::conflict("That tenant code is already in use")
+    } else {
+        AppError::from(error)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::modules::organization::domain::TenantStatus;
 
-    /// Built as a struct literal rather than through `AppConfig::from_env`,
-    /// which refuses `multi_tenant: true` outright (#67, decision **D-7**).
+    /// Built as a struct literal rather than through the environment, which is
+    /// process-global and races across parallel tests.
     ///
-    /// That guard sits on the deployment path, not on this one, precisely so
-    /// the resolution below stays exercised while no deployment runs it. These
-    /// are not dead tests waiting to be deleted: they are what makes removing
-    /// the guard, once per-request resolution exists, a one-line change rather
-    /// than an archaeology exercise.
+    /// **These tests are why removing the boot guard was a one-line change.**
+    /// Under **D-7** `AppConfig::from_env` refused `multi_tenant: true`
+    /// outright, so nothing could reach the multi-tenant branch below through
+    /// configuration — and the branch stayed fully exercised anyway, because
+    /// the guard sat on the deployment path rather than on this one. **D-18**
+    /// deleted the guard and changed nothing here.
     fn config(multi_tenant: bool) -> AppConfig {
         AppConfig {
             multi_tenant,

@@ -29,6 +29,7 @@ use crate::state::AppState;
         health::liveness,
         health::readiness,
         health::version,
+        health::deployment,
         auth::handlers::sign_in,
         auth::handlers::refresh,
         auth::handlers::sign_out,
@@ -93,11 +94,17 @@ use crate::state::AppState;
         organization::handlers::create_department,
         organization::handlers::update_department,
         organization::handlers::delete_department,
+        organization::handlers::list_tenants,
+        organization::handlers::get_tenant,
+        organization::handlers::create_tenant,
+        organization::handlers::update_tenant,
+        organization::handlers::delete_tenant,
     ),
     components(schemas(
         health::HealthBody,
         health::ReadyBody,
         health::VersionBody,
+        health::DeploymentBody,
         auth::handlers::SignInRequest,
         auth::handlers::RefreshRequest,
         auth::handlers::SignOutRequest,
@@ -194,6 +201,11 @@ use crate::state::AppState;
         organization::department::DepartmentStatus,
         organization::department::CreateDepartmentRequest,
         organization::department::UpdateDepartmentRequest,
+        organization::domain::TenantView,
+        organization::domain::TenantStatus,
+        organization::domain::CreateTenantRequest,
+        organization::domain::TenantAdministratorInput,
+        organization::domain::UpdateTenantRequest,
         ErrorEnvelope,
         ErrorBody,
         ValidationDetail,
@@ -205,7 +217,7 @@ use crate::state::AppState;
         (name = "identity", description = "Users, roles and permissions"),
         (
             name = "organization",
-            description = "Departments, and the organizational structure a user or an employee belongs to"
+            description = "Tenants, departments, and the organizational structure a user or an employee belongs to. Tenant routes are administrable only from the deployment's default tenant"
         ),
         (
             name = "document-type",
@@ -239,6 +251,12 @@ pub fn create_router(state: AppState) -> Router {
         .route("/health/live", get(health::liveness))
         .route("/health/ready", get(health::readiness))
         .route("/version", get(health::version))
+        // Operational, and at the root beside `/version` for the same reason:
+        // it identifies the deployment rather than serving its data, and it
+        // answers outside the response envelope. Unauthenticated because the
+        // login form reads it before there is anything to authenticate with
+        // (#67, decision D-18). See `health::deployment`.
+        .route("/deployment", get(health::deployment))
         .route("/api/docs/openapi.json", get(openapi_document))
         .nest("/api/v1", api_v1_router(state.clone()))
         // Applied last so it wraps every route, including the 404 fallback and

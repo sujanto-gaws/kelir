@@ -351,6 +351,9 @@ pub async fn create_role(
         request.role_code.trim(),
         request.name.trim(),
         request.description.as_deref(),
+        // Nothing a caller creates is a system role; `is_system` is what makes
+        // a role undeletable, and a caller minting one could not undo it.
+        false,
         Some(caller.user_id()),
     )
     .await
@@ -536,4 +539,154 @@ async fn check_department(
 
 fn is_unique_violation(error: &sqlx::Error) -> bool {
     matches!(error, sqlx::Error::Database(db) if db.code().as_deref() == Some("23505"))
+}
+
+// ---------------------------------------------------------------------------
+// Tenant provisioning (FR-ORG-001, decision D-18)
+// ---------------------------------------------------------------------------
+
+/// The `role_code` every tenant's own administrator role carries.
+///
+/// The same code the system tenant's seeded role uses (`0002_identity.sql`),
+/// which is not a collision: `uq_roles_tenant_id_role_code` is per tenant, so
+/// each tenant has its own `ROLE-ADMIN` and they are different rows. That is
+/// the whole content of "roles are tenant-scoped" (**D-18**) expressed in one
+/// identifier.
+pub const TENANT_ADMIN_ROLE_CODE: &str = "ROLE-ADMIN";
+
+/// The first administrator of a tenant being created.
+///
+/// Borrowed rather than owned, and deliberately not the organization module's
+/// request DTO: identity owns what a username, an email and a password are, and
+/// a shared DTO would let the two modules' vocabularies drift.
+pub struct FirstAdministrator<'a> {
+    pub username: &'a str,
+    pub email: &'a str,
+    pub display_name: &'a str,
+    pub password: &'a str,
+}
+
+/// What provisioning created, for the caller's audit record.
+#[derive(Debug, Clone, Copy)]
+pub struct ProvisionedIdentity {
+    pub role_id: uuid::Uuid,
+    pub user_id: uuid::Uuid,
+}
+
+/// Gives a brand-new tenant the identity rows that make it signable-into: its
+/// own `ROLE-ADMIN`, the catalogue permissions that role holds, and the first
+/// user holding it.
+///
+/// **This function checks no permission, and that is not an omission.** It runs
+/// inside the caller's transaction, and the caller — `organization::service` —
+/// has already required `organization:tenant:manage` *and* that the request
+/// came from the deployment's default tenant. Repeating the check here would
+/// check the wrong thing: the permission that governs this work is about
+/// tenants, which identity knows nothing about. Nothing else may call it.
+///
+/// `withheld_permission_prefix` is the one policy the caller supplies, because
+/// it is the caller's: a tenant's own administrator holds every permission in
+/// the catalogue *except* the family that administers tenants (**D-18**).
+/// Identity has no opinion on which family that is.
+///
+/// Password hashing runs on the blocking pool, so a transaction is held open
+/// across an `await` on another thread for the ~100 ms Argon2id takes. That is
+/// deliberate: the alternative is hashing before the transaction and leaving a
+/// tenant with no administrator when the insert then fails, which is the state
+/// this whole function exists to prevent.
+pub async fn provision_tenant_identity(
+    transaction: &mut sqlx::PgConnection,
+    tenant_id: Uuid,
+    administrator: FirstAdministrator<'_>,
+    withheld_permission_prefix: &str,
+) -> Result<ProvisionedIdentity, AppError> {
+    validate_first_administrator(&administrator)?;
+
+    let password = administrator.password.to_owned();
+    let password_hash = tokio::task::spawn_blocking(move || hash_password(&password))
+        .await
+        .map_err(|error| AppError::Internal {
+            source: anyhow::anyhow!("password hashing task failed: {error}"),
+        })??;
+
+    let role_id = Uuid::now_v7();
+
+    repo::insert_role(
+        &mut *transaction,
+        role_id,
+        tenant_id,
+        TENANT_ADMIN_ROLE_CODE,
+        "Administrator",
+        Some("Full access within this tenant"),
+        // Undeletable, for the reason `delete_role`'s refusal already gives: a
+        // tenant without it cannot grant permissions to anybody.
+        true,
+        None,
+    )
+    .await?;
+
+    let permission_ids =
+        repo::permission_ids_excluding_prefix(&mut *transaction, withheld_permission_prefix)
+            .await?;
+
+    repo::replace_role_permissions(&mut *transaction, tenant_id, role_id, &permission_ids).await?;
+
+    let user_id = Uuid::now_v7();
+
+    repo::insert_user(
+        &mut *transaction,
+        user_id,
+        tenant_id,
+        administrator.username.trim(),
+        administrator.email.trim(),
+        &password_hash,
+        administrator.display_name.trim(),
+        None,
+        // The password was chosen by whoever created the tenant and handed over
+        // out of band, exactly like the bootstrap administrator's. It is a way
+        // in, not a credential to keep.
+        true,
+        None,
+    )
+    .await
+    .map_err(duplicate_user_to_conflict)?;
+
+    repo::replace_user_roles(&mut *transaction, tenant_id, user_id, &[role_id]).await?;
+
+    Ok(ProvisionedIdentity { role_id, user_id })
+}
+
+/// The same rules `validate_create_user` applies, reported against the paths
+/// this request actually has.
+///
+/// A caller posting to the tenant endpoint sends `administrator.username`, so a
+/// detail whose `path` is `username` would name a field their form does not
+/// have and the message would never be shown (#67 is the same failure one layer
+/// up: a correct per-field message against a field the form cannot highlight).
+fn validate_first_administrator(administrator: &FirstAdministrator<'_>) -> Result<(), AppError> {
+    let request = CreateUserRequest {
+        username: administrator.username.to_owned(),
+        email: administrator.email.to_owned(),
+        password: administrator.password.to_owned(),
+        display_name: administrator.display_name.to_owned(),
+        department_id: None,
+        role_ids: vec![],
+    };
+
+    validate_create_user(&request).map_err(|error| match error {
+        AppError::Validation { details } => AppError::validation(
+            details
+                .into_iter()
+                .map(|detail| {
+                    ValidationDetail::new(
+                        format!("administrator.{}", detail.path),
+                        detail.rule,
+                        detail.code,
+                        detail.message,
+                    )
+                })
+                .collect(),
+        ),
+        other => other,
+    })
 }

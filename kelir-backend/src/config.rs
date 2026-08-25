@@ -157,35 +157,29 @@ where
     }
 }
 
-/// Reads `KELIR_MULTI_TENANT`, and refuses to start when it is on.
+/// Reads `KELIR_MULTI_TENANT`.
 ///
-/// **The flag is parsed but not honoured, on purpose.** Tenancy is half-built:
-/// `tenant_id` is in the BASE column set and every identity read is scoped by
-/// it, but nothing resolves a tenant per request. With the flag on,
-/// `resolve_for_sign_in` demands a tenant code, the login form has no field for
-/// one, and the deployment reaches a state where **nobody can sign in at all**
-/// (#67) — discovered on first use, by a person who cannot fix it from the UI.
+/// **This used to refuse to start when the flag was on, and decision D-18
+/// removed the refusal.** The guard existed because tenancy was half-built:
+/// `resolve_for_sign_in` demanded a tenant code, the login form had no field
+/// for one, and a deployment that switched the flag on reached a state where
+/// nobody could sign in at all (#67). Refusing at startup turned that into a
+/// container that did not start and said which variable to unset — decision
+/// **D-7**, 2026-08-20.
 ///
-/// Refusing at startup turns that into a container that does not start and says
-/// which variable to unset. It is the same trade the deployment already makes
-/// for a placeholder `KELIR_JWT_SECRET` in production: a setting whose
-/// consequence is discovered late is better refused early.
+/// Both halves it was waiting for now exist: `GET /api/v1/deployment` tells the
+/// login form which mode it is talking to, and `POST /auth/login` has carried
+/// `tenantCode` since Sprint 4. Tenants are administrable (FR-ORG-001), and a
+/// created tenant has an administrator who can sign in to it. So the flag is
+/// honoured, and the only thing left here is parsing it.
 ///
-/// Decision **D-7** (2026-08-20) keeps a deployment single-tenant until
-/// per-request resolution is designed, which is deferred past 1.0. The
-/// resolution code stays and stays tested — this guard is on the deployment
-/// path, not the code path — so removing it is all that stands between here and
-/// multi-tenant mode once the missing half exists.
+/// It stays a flag rather than becoming always-on. With it off,
+/// `resolve_for_sign_in` **ignores** a supplied code and resolves the
+/// configured default, which is what keeps a single-tenant deployment's login
+/// contract unchanged — and what stops a caller on such a deployment naming
+/// somebody else's tenant.
 fn multi_tenant(raw: &str) -> Result<bool, ConfigError> {
-    if flag(raw, "KELIR_MULTI_TENANT")? {
-        return Err(ConfigError::Invalid {
-            key: "KELIR_MULTI_TENANT",
-            reason: "multi-tenant mode is not supported yet: no per-request tenant                      resolution exists, so sign-in would demand a tenant code that no                      client can send and nobody could sign in. Unset it or set it to                      false. See decision D-7 in projects/planning/02. Product Backlog.md"
-                .to_owned(),
-        });
-    }
-
-    Ok(false)
+    flag(raw, "KELIR_MULTI_TENANT")
 }
 
 /// Secrets shipped in `.env.example` and the compose stack. Never valid in
@@ -599,53 +593,26 @@ mod tests {
     }
 
     #[test]
-    fn refuses_to_start_in_multi_tenant_mode_however_the_flag_is_spelled() {
-        // Every spelling `flag` accepts, not only the literal "true": a guard
-        // that matched one of them would let `KELIR_MULTI_TENANT=1` start a
-        // deployment nobody can sign in to (#67), which is the whole failure
-        // it exists to prevent.
+    fn starts_in_multi_tenant_mode_however_the_flag_is_spelled() {
+        // Every spelling `flag` accepts, not only the literal "true". This was
+        // the boot guard's test, inverted by **D-18**: the guard refused all
+        // five spellings because per-request resolution had no client-side
+        // half, and it now has one (`GET /api/v1/deployment` plus the
+        // `tenantCode` login field), so the mode is a mode rather than a trap.
+        //
+        // Asserting every spelling still matters for the same reason it did
+        // then: an implementation that honoured only the literal "true" would
+        // read `KELIR_MULTI_TENANT=1` as single-tenant and quietly land every
+        // sign-in in the default tenant.
         for raw in ["true", "1", "yes", "on", "TRUE"] {
-            let error = AppConfig::from_source(source(&[
+            let config = AppConfig::from_source(source(&[
                 ("KELIR_JWT_SECRET", "s3cret"),
                 ("KELIR_MULTI_TENANT", raw),
             ]))
-            .unwrap_err();
+            .unwrap_or_else(|error| panic!("{raw} must start the deployment, got {error}"));
 
-            let ConfigError::Invalid { key, reason } = error else {
-                panic!("{raw} must be refused as invalid configuration");
-            };
-
-            assert_eq!(key, "KELIR_MULTI_TENANT");
-            assert!(
-                reason.contains("not supported yet"),
-                "for {raw}, the operator is not told why: {reason}"
-            );
-            assert!(
-                reason.contains("false"),
-                "for {raw}, the operator is not told what to do instead: {reason}"
-            );
+            assert!(config.multi_tenant, "for {raw}");
         }
-    }
-
-    #[test]
-    fn an_unrecognised_multi_tenant_value_is_refused_as_a_typo_not_as_the_guard() {
-        // Both refusals carry the same key, and they mean different things: one
-        // says "this deployment cannot run yet", the other says "that is not a
-        // boolean". An operator who reads the wrong one edits the wrong thing.
-        let error = AppConfig::from_source(source(&[
-            ("KELIR_JWT_SECRET", "s3cret"),
-            ("KELIR_MULTI_TENANT", "enabled"),
-        ]))
-        .unwrap_err();
-
-        let ConfigError::Invalid { reason, .. } = error else {
-            panic!("an unparseable flag is invalid configuration");
-        };
-
-        assert!(
-            reason.contains("expected a boolean"),
-            "a typo was reported as the tenancy guard: {reason}"
-        );
     }
 
     #[test]

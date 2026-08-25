@@ -1,0 +1,53 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT t.id, t.tenant_code, t.name, t.status, t.created_at,\n               (\n                   SELECT count(*)\n                   FROM users u\n                   WHERE u.tenant_id = t.id AND u.deleted_at IS NULL\n               ) AS \"user_count!\"\n        FROM tenants t\n        WHERE t.deleted_at IS NULL\n        ORDER BY t.created_at DESC, t.tenant_code\n        LIMIT $1 OFFSET $2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "tenant_code",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 5,
+        "name": "user_count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "d64521ff460ef8358e6e61204abb8fb45cedfa5e15ac5425a718b2137ae78db7"
+}

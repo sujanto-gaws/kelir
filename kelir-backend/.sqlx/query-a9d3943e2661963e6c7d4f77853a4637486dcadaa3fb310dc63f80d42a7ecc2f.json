@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE tenants\n        SET status = 'INACTIVE', deleted_at = now(), updated_by = $2, updated_at = now()\n        WHERE id = $1 AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a9d3943e2661963e6c7d4f77853a4637486dcadaa3fb310dc63f80d42a7ecc2f"
+}

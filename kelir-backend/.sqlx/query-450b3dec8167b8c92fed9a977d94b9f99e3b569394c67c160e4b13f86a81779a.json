@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id\n        FROM permissions\n        WHERE deleted_at IS NULL AND permission_code NOT LIKE $1 || '%'\n        ORDER BY permission_code\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "450b3dec8167b8c92fed9a977d94b9f99e3b569394c67c160e4b13f86a81779a"
+}
