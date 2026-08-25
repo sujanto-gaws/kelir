@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM document_type_workflows WHERE tenant_id = $1 AND document_type_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d2fbde1719bd3aed95c5a7fd2d116ad63bedea68c968b36ddd8a8fbc6a1e6717"
+}

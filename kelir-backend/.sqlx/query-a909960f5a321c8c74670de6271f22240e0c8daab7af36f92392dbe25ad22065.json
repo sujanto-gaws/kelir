@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO document_types\n            (id, tenant_id, type_code, name, description, category, form_id, list_id,\n             default_security_level, retention_policy_id, target_entity_type, status, created_by)\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Text",
+        "Varchar",
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a909960f5a321c8c74670de6271f22240e0c8daab7af36f92392dbe25ad22065"
+}

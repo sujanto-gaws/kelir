@@ -1,0 +1,47 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT workflow_definition_id, condition_expression, priority, valid_from, valid_to\n        FROM document_type_workflows\n        WHERE tenant_id = $1 AND document_type_id = $2 AND deleted_at IS NULL\n        ORDER BY priority, workflow_definition_id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "workflow_definition_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "condition_expression",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "priority",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "valid_from",
+        "type_info": "Date"
+      },
+      {
+        "ordinal": 4,
+        "name": "valid_to",
+        "type_info": "Date"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "4b8c49900ed426a34cd86cc152179255f72e5f367d12e6608672b4297e4e6ec4"
+}
