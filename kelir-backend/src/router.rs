@@ -665,6 +665,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn assigning_a_role_publishes_which_fields_it_replaces_and_which_it_merges() {
+        // #120. `update_party_role` treats five columns two ways in one
+        // statement, deliberately and for a good reason: `starts_at`/`ends_at`
+        // are the assignment's period, a PUT states the period, and a
+        // `thruDate` that could be set but never cleared would make an ended
+        // role impossible to reopen. The reason is sound and was written down —
+        // in a doc comment on the repository function. **No caller can read
+        // that.** The behaviour was discoverable only by losing a `thruDate`.
+        //
+        // This asserts the published contract carries it. The behaviour itself
+        // is pinned by
+        // `a_restatement_that_omits_everything_optional_clears_the_end_date_and_keeps_the_rest`
+        // in `master_data_party_roles.rs`; the two together are what stops the
+        // contract and the code drifting apart.
+        let (_, body) = get("/api/docs/openapi.json").await;
+
+        let description = body["paths"]["/api/v1/master-data/parties/{id}/roles/{roleTypeId}"]
+            ["put"]["description"]
+            .as_str()
+            .expect("the operation carries a description");
+
+        for field in ["fromDate", "thruDate"] {
+            assert!(
+                description.contains(field),
+                "the contract does not name {field} as replaced: {description}"
+            );
+        }
+        for field in ["statusId", "comments", "additionalAttributes"] {
+            assert!(
+                description.contains(field),
+                "the contract does not name {field} as merged: {description}"
+            );
+        }
+        assert!(
+            description.contains("replaced") && description.contains("merged"),
+            "the contract does not say which fields are which: {description}"
+        );
+        assert!(
+            description.contains("clears it"),
+            "the contract does not say what omitting thruDate does: {description}"
+        );
+    }
+
+    #[tokio::test]
     async fn the_change_password_contract_does_not_promise_more_than_it_delivers() {
         // #60: the 204 read "every session for the account ends", while only
         // refresh tokens are revoked — false for up to fifteen minutes, in the

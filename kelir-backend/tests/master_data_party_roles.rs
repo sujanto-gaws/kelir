@@ -1953,3 +1953,101 @@ async fn deleting_a_party_closes_this_tenants_roles_and_leaves_anothers_alone() 
         "deleting a party closed another tenant's role row"
     );
 }
+
+#[tokio::test]
+async fn a_restatement_that_omits_everything_optional_clears_the_end_date_and_keeps_the_rest() {
+    // #120. `update_party_role` treats five columns two ways in one statement:
+    //
+    //     SET starts_at       = $2,                           -- replaced
+    //         ends_at         = $3,                           -- replaced
+    //         status          = COALESCE($4, status),         -- merged
+    //         comments        = COALESCE($5, comments),       -- merged
+    //         attributes_json = COALESCE($6, attributes_json) -- merged
+    //
+    // The asymmetry is deliberate and the reason is good — the period is what a
+    // PUT to an assignment is *for*, and a `thruDate` that could be set but
+    // never cleared would make an ended role impossible to reopen. What #120 is
+    // about is that no caller could learn it: the reason lived in a doc comment
+    // on the repository function, and the behaviour was discoverable only by
+    // losing a `thruDate`.
+    //
+    // The published contract now states it, asserted by
+    // `assigning_a_role_publishes_which_fields_it_replaces_and_which_it_merges`
+    // in `router.rs`. This is the other half: what the code actually does, so
+    // the two cannot drift apart.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let party = create_party(&app, &token, party_group("PARTY-ACME", "Acme")).await;
+
+    let mut first = supplier_profile("SUP-0001");
+    first["thruDate"] = json!("2026-12-31T00:00:00Z");
+    first["comments"] = json!("seasonal");
+    first["additionalAttributes"] = json!({ "tier": "gold" });
+    first["statusId"] = json!("INACTIVE");
+
+    let created = app
+        .put(&role_path(party, "SUPPLIER"), Some(&token), first)
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+    // A restatement carrying nothing but the period's start.
+    let restated = app
+        .put(
+            &role_path(party, "SUPPLIER"),
+            Some(&token),
+            json!({ "fromDate": "2026-02-01T00:00:00Z" }),
+        )
+        .await;
+    assert_eq!(restated.status, StatusCode::OK, "{}", restated.body);
+
+    let stored = app
+        .get(&format!("{PARTIES}/{party}/roles"), Some(&token))
+        .await;
+    let role = stored.data()["roles"]
+        .as_array()
+        .expect("roles is a list")
+        .iter()
+        .find(|role| role["roleTypeId"] == "SUPPLIER")
+        .expect("the party still holds SUPPLIER")
+        .clone();
+
+    // Replaced.
+    assert_eq!(
+        role["fromDate"], "2026-02-01T00:00:00Z",
+        "fromDate is documented as replaced: {role}"
+    );
+    assert_eq!(
+        role["thruDate"],
+        Value::Null,
+        "thruDate is documented as replaced, so omitting it clears it: {role}"
+    );
+
+    // Merged.
+    assert_eq!(
+        role["comments"], "seasonal",
+        "comments is documented as merged: {role}"
+    );
+    assert_eq!(
+        role["additionalAttributes"]["tier"], "gold",
+        "additionalAttributes is documented as merged: {role}"
+    );
+    assert_eq!(
+        role["statusId"], "INACTIVE",
+        "statusId is documented as merged: {role}"
+    );
+
+    // And the response reports what *this call* stated, which is the #119 half:
+    // `thruDate` null because the call cleared it, and no `comments` member at
+    // all because the call did not send one.
+    assert_eq!(
+        restated.data()["thruDate"],
+        Value::Null,
+        "{}",
+        restated.body
+    );
+    assert!(
+        restated.data().get("comments").is_none(),
+        "the response reports a value this call did not send: {}",
+        restated.body
+    );
+}

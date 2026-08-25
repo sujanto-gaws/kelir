@@ -195,8 +195,21 @@ async fn get_party_roles(
 /// row and not with every role and profile the party holds. The stored values
 /// are `master-data:party-role:read`'s to give, and this route does not require
 /// it (#104, #119).
+///
+/// The `description` below is the #120 half: the replace/merge split is a real
+/// asymmetry with a good reason, and a caller could previously learn it only by
+/// losing a `thruDate`.
 #[utoipa::path(
     put, path = "/api/v1/master-data/parties/{id}/roles/{roleTypeId}", tag = "master-data",
+    description = "Assigns a role to a party, or restates the assignment it already holds.
+
+**Two fields are replaced and three are merged, and an omission means different things on each side.**
+
+`fromDate` and `thruDate` are *replaced*: they are the assignment's period, a PUT states the period the assignment should end in, and omitting `thruDate` clears it. A merged `thruDate` could be set but never cleared, which would make an ended role impossible to reopen.
+
+`statusId`, `comments` and `additionalAttributes` are *merged*: omitting one leaves the stored value alone.
+
+So a restatement carrying only `fromDate` clears the end date and keeps the comments. The response reports what this call stated — the three merged members appear only if the request sent them, and `thruDate` is reported as `null` because that is what the call did to it. To read the stored assignment, use `GET /api/v1/master-data/parties/{id}/roles`, which requires `master-data:party-role:read`.",
     request_body = AssignRoleRequest,
     responses(
         (status = 200, description = "The party already held this role; it and its profile are updated", body = AssignedRole),
