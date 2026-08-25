@@ -165,6 +165,65 @@ pub struct PartyRole {
     pub additional_attributes: Value,
 }
 
+/// What `PUT .../roles/{roleTypeId}` answers with: the assignment **as this call
+/// stated it**, not as the row now reads.
+///
+/// **Why it is not [`PartyRole`].** #104 stopped this route answering with every
+/// role and profile the party holds, which had handed a caller holding only
+/// `master-data:party-role:assign` the bank accounts and credit limits that
+/// `master-data:party-role:read` exists to gate. It replaced the answer with
+/// `PartyRole` — and `PartyRole` still carries `comments` and
+/// `additionalAttributes`, which `update_party_role` **merges**. So a caller who
+/// sent neither got back the values somebody else wrote, one field over from the
+/// leak that had just been closed (#119).
+///
+/// Echoing the request is the fix rather than filtering the row, because a
+/// second gate is a second thing to keep in step with the first — the shape #104
+/// rejected for the same reason. An answer bounded by its own input cannot leak
+/// what it was not given.
+///
+/// The three merged members are therefore omitted when the request omitted them.
+/// `thruDate` is **not** omitted when absent: a `PUT` replaces the period, so an
+/// absent `thruDate` means *cleared*, and `null` is the accurate report of what
+/// this call did. A caller who wants the stored row asks `GET .../roles`, under
+/// the permission that governs it.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AssignedRole {
+    /// The role type's code, from the path — this call's own subject.
+    pub role_type_id: String,
+    /// Replaced by every `PUT`.
+    pub from_date: DateTime<Utc>,
+    /// Replaced by every `PUT`, so `null` means this call cleared it.
+    pub thru_date: Option<DateTime<Utc>>,
+    /// Merged: present only when this call sent it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_id: Option<PartyRoleStatus>,
+    /// Merged: present only when this call sent it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comments: Option<String>,
+    /// Merged: present only when this call sent it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub additional_attributes: Option<Value>,
+}
+
+impl AssignedRole {
+    /// The assignment as the request stated it.
+    ///
+    /// `role_type_code` comes from the path rather than from the request, which
+    /// is where the route carries it — the body has no `roleTypeId` to send.
+    pub fn echo(role_type_code: &str, request: &AssignRoleRequest) -> Self {
+        Self {
+            role_type_id: role_type_code.trim().to_owned(),
+            from_date: request.from_date,
+            thru_date: request.thru_date,
+            status_id: request.status_id,
+            comments: request.comments.clone(),
+            additional_attributes: request.additional_attributes.clone(),
+        }
+    }
+}
+
 /// The role-specific profiles a party carries. A member is present exactly when
 /// the party holds the matching role and that role has a profile.
 #[derive(Debug, Clone, Default, Serialize, ToSchema)]

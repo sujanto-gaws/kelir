@@ -4,8 +4,8 @@ use axum::{Json, Router};
 use uuid::Uuid;
 
 use super::domain::{
-    AssignRoleRequest, AuditRecord, CreateFacilityRequest, CreatePartyRequest, Facility,
-    FacilitySummary, PartyAggregate, PartyRole, PartyRoles, PartySummary, RoleView, RoleViewQuery,
+    AssignRoleRequest, AssignedRole, AuditRecord, CreateFacilityRequest, CreatePartyRequest,
+    Facility, FacilitySummary, PartyAggregate, PartyRoles, PartySummary, RoleView, RoleViewQuery,
     RoleViewRow, TransitionRequest, TransitionResult, TransitionTarget, UpdateFacilityRequest,
     UpdatePartyRequest,
 };
@@ -191,15 +191,16 @@ async fn get_party_roles(
 /// holds SUPPLIER or it does not — and the role type is what identifies the
 /// assignment, so it belongs in the path rather than repeated in the body.
 ///
-/// Answers with the assignment it wrote, not with every role and profile the
-/// party holds. The profiles are `master-data:party-role:read`'s to give, and
-/// this route does not require it (#104).
+/// Answers with the assignment as the request stated it, not with the stored
+/// row and not with every role and profile the party holds. The stored values
+/// are `master-data:party-role:read`'s to give, and this route does not require
+/// it (#104, #119).
 #[utoipa::path(
     put, path = "/api/v1/master-data/parties/{id}/roles/{roleTypeId}", tag = "master-data",
     request_body = AssignRoleRequest,
     responses(
-        (status = 200, description = "The party already held this role; it and its profile are updated", body = PartyRole),
-        (status = 201, description = "Role assigned", body = PartyRole),
+        (status = 200, description = "The party already held this role; it and its profile are updated", body = AssignedRole),
+        (status = 201, description = "Role assigned", body = AssignedRole),
         (status = 403, description = "Missing master-data:party-role:assign"),
         (status = 404, description = "No such party"),
         (status = 409, description = "That profile number is already in use"),
@@ -212,7 +213,7 @@ async fn assign_role(
     caller: Authenticated,
     PathParam((id, role_type_id)): PathParam<(Uuid, String)>,
     JsonBody(request): JsonBody<AssignRoleRequest>,
-) -> Result<(axum::http::StatusCode, Json<ItemEnvelope<PartyRole>>), AppError> {
+) -> Result<(axum::http::StatusCode, Json<ItemEnvelope<AssignedRole>>), AppError> {
     let (created, assignment) =
         service::assign_role(&state, &caller, id, &role_type_id, request).await?;
 

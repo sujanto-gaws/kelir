@@ -61,49 +61,6 @@ pub async fn list_party_roles(
         .collect())
 }
 
-/// One role assignment by its own id, as the aggregate carries it.
-///
-/// The assignment route answers with this rather than with every role and
-/// profile the party has: a `PUT` addresses one assignment, and returning the
-/// whole collection is what handed a caller holding only
-/// `master-data:party-role:assign` the bank accounts and credit limits that
-/// permission was never meant to reach (#104).
-///
-/// **By primary key, and that is the point.** It read back by
-/// `(tenant_id, party_id, role_type_code)` until #121, which matches one row
-/// only because the tenant predicate is there — so what the tenant predicate
-/// was protecting could not be pinned by a test: dropping it made the query
-/// match two rows and `fetch_optional` return an unspecified one, and a test
-/// asserting which would have been asserting on undefined behaviour. An id the
-/// caller has just written cannot be ambiguous, so there is nothing left to
-/// scope and nothing left to get wrong. The join is a lookup, not a filter: it
-/// translates `role_type_id` into the code the aggregate speaks in.
-pub async fn find_party_role_by_id(
-    executor: impl PgExecutor<'_>,
-    id: Uuid,
-) -> Result<Option<PartyRole>, sqlx::Error> {
-    let row = sqlx::query!(
-        r#"
-        SELECT t.role_type_code, r.starts_at, r.ends_at, r.status, r.comments, r.attributes_json
-        FROM mdm_party_roles r
-        JOIN mdm_role_types t ON t.id = r.role_type_id
-        WHERE r.id = $1
-        "#,
-        id
-    )
-    .fetch_optional(executor)
-    .await?;
-
-    Ok(row.map(|row| PartyRole {
-        role_type_id: row.role_type_code,
-        from_date: row.starts_at,
-        thru_date: row.ends_at,
-        status_id: PartyRoleStatus::from_db(&row.status),
-        comments: row.comments,
-        additional_attributes: row.attributes_json,
-    }))
-}
-
 /// The live assignment of one role type to one party, if there is one.
 ///
 /// "Live" is what keeps a party holding a role once rather than twice: the
@@ -131,9 +88,9 @@ pub async fn find_live_party_role(
 
 /// Writes a new assignment and hands back its id.
 ///
-/// The id rather than nothing, so the service can read the row back by primary
-/// key instead of looking again for the one it just wrote — see
-/// [`find_party_role_by_id`].
+/// The id is what a caller needing to address the row it just wrote would use.
+/// `assign_role` no longer does: it answers with the request it was given
+/// (#119), so it has nothing to read back and discards this.
 pub async fn insert_party_role(
     executor: impl PgExecutor<'_>,
     tenant_id: Uuid,

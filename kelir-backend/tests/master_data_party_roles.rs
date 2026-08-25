@@ -21,10 +21,12 @@
 //! another tenant's role row on the party being deleted, so the sweep's tenant
 //! predicate is the only thing keeping that row live.
 //!
-//! `find_party_role` is not probed and cannot be: it reads back by primary key
-//! (#121), so there is no scoping left in it to drop.
-//! `the_assignment_answered_with_is_the_row_this_call_wrote` covers what
-//! replaced it — an ambiguous lookup turns it red.
+//! `find_party_role` is not probed and cannot be, and as of #119 no longer
+//! exists. #121 had already reduced it to a primary-key read-back, leaving no
+//! scoping in it to drop; #119 removed the read-back itself, because the assign
+//! route now answers with the request it was given rather than with the stored
+//! row. `the_assignment_answered_with_is_the_row_this_call_wrote` is kept as the
+//! guard against a read-back coming back — see its own note.
 //!
 //! Still not reached: `soft_delete_role_profile`, the other half of the
 //! party-delete cascade. The delete tests below exercise it, but its scoping
@@ -1818,7 +1820,8 @@ async fn given_foreign_role_type(app: &TestApp, tenant: Uuid, code: &str) -> Uui
 
 #[tokio::test]
 async fn the_assignment_answered_with_is_the_row_this_call_wrote() {
-    // #121, and the reason the read-back is by primary key.
+    // #121, and then #119 — the same property reached twice, by two different
+    // routes, and worth keeping for the second.
     //
     // `find_party_role` looked the row up again by
     // `(tenant_id, party_id, role_type_code)`, which matches one row only
@@ -1826,11 +1829,17 @@ async fn the_assignment_answered_with_is_the_row_this_call_wrote() {
     // a test: dropping it made the query match two rows and `fetch_optional`
     // return an unspecified one, and asserting which would have been asserting
     // on undefined behaviour. Under the mutation this test passed, which is
-    // exactly the shape #106 was about.
+    // exactly the shape #106 was about. #121 made the read-back a primary-key
+    // lookup so a second candidate could not exist.
     //
-    // The read-back is now by the assignment's own id, so a second candidate
-    // cannot exist. This test is what says so: another tenant holding the same
-    // role code on the same party is present, and the answer is still ours.
+    // **#119 removed the read-back altogether.** The route answers with the
+    // request it was given, so the property this test names now holds by
+    // construction rather than by a predicate: there is no query left that could
+    // return the wrong row. That makes it a *guard* rather than a probe — it
+    // fails if an answer built from storage is ever reintroduced here, which is
+    // the change that would put both #119 and #121 back at once. The fixture is
+    // kept exactly as it was: another tenant holding the same role code on the
+    // same party, present and still not the answer.
     let app = TestApp::spawn().await;
     let token = app.administrator_token().await;
     let party = create_party(&app, &token, party_group("PARTY-ACME", "Acme")).await;

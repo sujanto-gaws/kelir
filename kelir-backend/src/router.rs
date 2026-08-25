@@ -149,6 +149,7 @@ use crate::state::AppState;
         master_data::domain::PartyContactMechInput,
         master_data::domain::PartyRoles,
         master_data::domain::PartyRole,
+        master_data::domain::AssignedRole,
         master_data::domain::PartyRoleStatus,
         master_data::domain::PartyProfiles,
         master_data::domain::SupplierProfile,
@@ -644,17 +645,20 @@ mod tests {
             "the already-held outcome is undocumented: {responses}"
         );
 
-        // And both outcomes answer with the assignment, not with every role and
-        // profile the party holds. The published shape is the contract a client
-        // is generated from, so a response documented as `PartyRoles` would
-        // have clients expecting the bank accounts #104 took out of it — and
-        // would be the first sign of the leak coming back.
+        // And both outcomes answer with the assignment this call stated, not
+        // with every role and profile the party holds and not with the stored
+        // row. The published shape is the contract a client is generated from,
+        // so a response documented as `PartyRoles` would have clients expecting
+        // the bank accounts #104 took out of it, and one documented as
+        // `PartyRole` would have them expecting the merged `comments` and
+        // `additionalAttributes` #119 took out after it. Either would be the
+        // first sign of the leak coming back.
         for outcome in ["200", "201"] {
             let schema = &responses[outcome]["content"]["application/json"]["schema"];
             let referenced = schema["$ref"].as_str().unwrap_or_default();
 
             assert!(
-                referenced.ends_with("/PartyRole"),
+                referenced.ends_with("/AssignedRole"),
                 "{outcome} is documented as {schema}, not as the assignment it returns"
             );
         }
