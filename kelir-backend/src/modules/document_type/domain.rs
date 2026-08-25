@@ -12,6 +12,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::error::{AppError, ValidationDetail};
+use crate::utils::serde::present_or_absent;
 
 /// Longest `typeCode` §6.2 holds — `type_code VARCHAR(64)`.
 pub const MAX_TYPE_CODE_LENGTH: usize = 64;
@@ -173,12 +174,18 @@ pub struct CreateDocumentTypeRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateDocumentTypeRequest {
     pub name: Option<String>,
+    #[serde(default, deserialize_with = "present_or_absent")]
     pub description: Option<Option<String>>,
+    #[serde(default, deserialize_with = "present_or_absent")]
     pub category: Option<Option<String>>,
+    #[serde(default, deserialize_with = "present_or_absent")]
     pub form_id: Option<Option<Uuid>>,
+    #[serde(default, deserialize_with = "present_or_absent")]
     pub list_id: Option<Option<Uuid>>,
     pub default_security_level: Option<SecurityLevel>,
+    #[serde(default, deserialize_with = "present_or_absent")]
     pub retention_policy_id: Option<Option<Uuid>>,
+    #[serde(default, deserialize_with = "present_or_absent")]
     pub target_entity_type: Option<Option<String>>,
     pub status: Option<DocumentTypeStatus>,
     pub workflows: Option<Vec<WorkflowBinding>>,

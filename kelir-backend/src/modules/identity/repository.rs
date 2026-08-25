@@ -442,9 +442,18 @@ pub async fn update_user_fields(
     email: Option<&str>,
     display_name: Option<&str>,
     status: Option<&str>,
-    department_id: Option<Uuid>,
+    // `None` leaves the department alone; `Some(None)` clears it.
+    department_id: Option<Option<Uuid>>,
     updated_by: Option<Uuid>,
 ) -> Result<u64, sqlx::Error> {
+    // `COALESCE` cannot express "clear this column": it reads an unsupplied
+    // field and an explicit null identically. A `CASE` on whether the caller
+    // sent the field at all can (FR-IDM-008, per decision D-8).
+    let (department_set, department_id) = match department_id {
+        None => (false, None),
+        Some(value) => (true, value),
+    };
+
     // COALESCE keeps every unsupplied field at its current value, so a partial
     // update cannot blank a column it did not mention.
     //
@@ -460,9 +469,9 @@ pub async fn update_user_fields(
         SET email = COALESCE($3, email),
             display_name = COALESCE($4, display_name),
             status = COALESCE($5, status),
-            department_id = COALESCE($6, department_id),
+            department_id = CASE WHEN $6 THEN $7 ELSE department_id END,
             locked_until = CASE WHEN $5 = 'ACTIVE' THEN NULL ELSE locked_until END,
-            updated_by = $7,
+            updated_by = $8,
             updated_at = now()
         WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
         "#,
@@ -471,6 +480,7 @@ pub async fn update_user_fields(
         email,
         display_name,
         status,
+        department_set,
         department_id,
         updated_by
     )

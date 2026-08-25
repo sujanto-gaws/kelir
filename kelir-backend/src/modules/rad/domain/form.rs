@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 use super::jfss;
 use crate::error::{AppError, ValidationDetail};
+use crate::utils::serde::present_or_absent;
 
 /// Longest `formKey` §5.3 holds — `form_key VARCHAR(64)`.
 pub const MAX_FORM_KEY_LENGTH: usize = 64;
@@ -140,6 +141,7 @@ pub struct CreateFormRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateFormRequest {
     pub title: Option<String>,
+    #[serde(default, deserialize_with = "present_or_absent")]
     pub entity_id: Option<Option<Uuid>>,
     pub definition: Option<Value>,
 }

@@ -13,6 +13,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::error::{AppError, ValidationDetail};
+use crate::utils::serde::present_or_absent;
 
 /// Longest `listKey` §5.6 holds — `list_key VARCHAR(64)`.
 pub const MAX_LIST_KEY_LENGTH: usize = 64;
@@ -187,7 +188,9 @@ pub struct CreateListRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateListRequest {
     pub title: Option<String>,
+    #[serde(default, deserialize_with = "present_or_absent")]
     pub entity_id: Option<Option<Uuid>>,
+    #[serde(default, deserialize_with = "present_or_absent")]
     pub default_sort: Option<Option<Value>>,
     pub page_size: Option<i32>,
     pub status: Option<ListStatus>,
