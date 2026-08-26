@@ -15,9 +15,7 @@ import { dataComponents, type JfssComponent, type JfssDataComponent } from '@/ty
  * rather than an error. `defineAsyncComponent` defers the import to first
  * render, by which point every module in the loop is initialised.
  */
-const JfssRenderer = defineAsyncComponent(
-  () => import('@/features/rad/renderer/JfssRenderer.vue'),
-)
+const JfssRenderer = defineAsyncComponent(() => import('@/features/rad/renderer/JfssRenderer.vue'))
 
 const props = defineProps<{ component: JfssDataComponent; modelValue: unknown }>()
 const emit = defineEmits<{ (e: 'update:modelValue', value: unknown): void }>()
@@ -104,7 +102,9 @@ onMounted(() => {
   <fieldset class="space-y-3">
     <legend class="text-sm font-medium">
       {{ component.label }}
-      <span v-if="component.validation.required" class="text-destructive" aria-hidden="true">*</span>
+      <span v-if="component.validation.required" class="text-destructive" aria-hidden="true"
+        >*</span
+      >
     </legend>
 
     <p v-if="component.description" class="text-sm text-muted-foreground">

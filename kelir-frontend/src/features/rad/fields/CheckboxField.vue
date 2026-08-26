@@ -37,10 +37,7 @@ const value = computed({
       />
       <Label :for="controlId">
         {{ component.label }}
-        <span
-          v-if="component.validation.required"
-          class="text-destructive"
-          aria-hidden="true"
+        <span v-if="component.validation.required" class="text-destructive" aria-hidden="true"
           >*</span
         >
       </Label>

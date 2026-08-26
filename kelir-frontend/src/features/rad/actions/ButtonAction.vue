@@ -30,7 +30,9 @@ const THEMES: Record<string, ButtonVariant> = {
 }
 
 const variant = computed<ButtonVariant>(
-  () => THEMES[props.component.theme ?? ''] ?? (props.component.action === 'submit' ? 'default' : 'secondary'),
+  () =>
+    THEMES[props.component.theme ?? ''] ??
+    (props.component.action === 'submit' ? 'default' : 'secondary'),
 )
 </script>
 

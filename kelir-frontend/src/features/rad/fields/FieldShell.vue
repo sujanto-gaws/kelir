@@ -33,7 +33,9 @@ const describedBy = `jfss-${props.component.id}-description`
            refuses is worse than one with no asterisks. `aria-hidden` because
            the control itself carries `required`, and a screen reader announcing
            both says "required required". -->
-      <span v-if="component.validation.required" class="text-destructive" aria-hidden="true">*</span>
+      <span v-if="component.validation.required" class="text-destructive" aria-hidden="true"
+        >*</span
+      >
     </Label>
 
     <slot :control-id="controlId" :described-by="component.description ? describedBy : undefined" />

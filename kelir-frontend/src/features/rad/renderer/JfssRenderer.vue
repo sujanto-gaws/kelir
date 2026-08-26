@@ -64,7 +64,9 @@ const entry = computed(() => resolve(props.component.type))
  * carry, not which types belong to which role. Rendering it would mean handing
  * a container a `modelValue`, so the mismatch is shown as unsupported instead.
  */
-const renderable = computed(() => entry.value !== undefined && entry.value.role === props.component.role)
+const renderable = computed(
+  () => entry.value !== undefined && entry.value.role === props.component.role,
+)
 
 const gap = computed(() => declaredGap(props.component.type))
 

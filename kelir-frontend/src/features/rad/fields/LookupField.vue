@@ -121,9 +121,7 @@ watch(search, () => {
 
         <p v-if="loading" class="text-sm text-muted-foreground">Loading…</p>
 
-        <Alert v-else-if="failed" variant="destructive">
-          These choices could not be loaded.
-        </Alert>
+        <Alert v-else-if="failed" variant="destructive"> These choices could not be loaded. </Alert>
 
         <!-- A value stored earlier whose record is not in the current page: the
              chooser would otherwise show "Select…" over a field that holds a

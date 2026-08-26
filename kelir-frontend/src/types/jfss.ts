@@ -174,10 +174,7 @@ export interface JfssActionComponent extends JfssBaseComponent {
 }
 
 export type JfssComponent =
-  | JfssDataComponent
-  | JfssLayoutComponent
-  | JfssDisplayComponent
-  | JfssActionComponent
+  JfssDataComponent | JfssLayoutComponent | JfssDisplayComponent | JfssActionComponent
 
 /** JFSS §2. The document. */
 export interface JfssDefinition {

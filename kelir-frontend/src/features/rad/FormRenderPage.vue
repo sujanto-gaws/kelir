@@ -47,7 +47,11 @@ async function load(id: string): Promise<void> {
   }
 }
 
-watch(() => route.params.id, (id) => load(String(id)), { immediate: true })
+watch(
+  () => route.params.id,
+  (id) => load(String(id)),
+  { immediate: true },
+)
 
 /**
  * What a button means.

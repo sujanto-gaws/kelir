@@ -73,31 +73,43 @@ describe('the component registry', () => {
     expect(Object.keys(fixtures).length).toBeGreaterThan(0)
   })
 
-  it.each(Object.entries(fixtures))('declares every component type %s uses', (_path, definition) => {
-    const declared = declaredTypes()
+  it.each(Object.entries(fixtures))(
+    'declares every component type %s uses',
+    (_path, definition) => {
+      const declared = declaredTypes()
 
-    for (const type of usedTypes(definition.components).keys()) {
-      expect(declared, `component type "${type}" is in neither list`).toContain(type)
-    }
-  })
-
-  it.each(Object.entries(fixtures))('agrees with %s about which role each type has', (_path, definition) => {
-    for (const [type, role] of usedTypes(definition.components)) {
-      const entry = resolve(type)
-
-      // A declared gap has no entry and no role to disagree about.
-      if (entry) {
-        expect(entry.role, `registry has "${type}" as ${entry.role}, the fixture uses it as ${role}`).toBe(role)
+      for (const type of usedTypes(definition.components).keys()) {
+        expect(declared, `component type "${type}" is in neither list`).toContain(type)
       }
-    }
-  })
+    },
+  )
+
+  it.each(Object.entries(fixtures))(
+    'agrees with %s about which role each type has',
+    (_path, definition) => {
+      for (const [type, role] of usedTypes(definition.components)) {
+        const entry = resolve(type)
+
+        // A declared gap has no entry and no role to disagree about.
+        if (entry) {
+          expect(
+            entry.role,
+            `registry has "${type}" as ${entry.role}, the fixture uses it as ${role}`,
+          ).toBe(role)
+        }
+      }
+    },
+  )
 
   it('never has a type in both lists', () => {
     // A type in both would resolve as supported and explain itself as a gap,
     // which is two answers to one question and the kind of thing that survives
     // review because each list looks right on its own.
     for (const type of Object.keys(SUPPORTED)) {
-      expect(NOT_YET_RENDERED, `"${type}" is both supported and declared missing`).not.toHaveProperty(type)
+      expect(
+        NOT_YET_RENDERED,
+        `"${type}" is both supported and declared missing`,
+      ).not.toHaveProperty(type)
     }
   })
 
