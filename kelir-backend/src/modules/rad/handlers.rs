@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use super::domain::{
     CreateFormRequest, CreateListRequest, Form, FormSummary, ListDefinition, ListSummary,
-    UpdateFormRequest, UpdateListRequest,
+    LookupOption, LookupQuery, LookupSource, UpdateFormRequest, UpdateListRequest,
 };
 use super::service;
 use crate::error::AppError;
@@ -46,6 +46,14 @@ pub fn routes() -> Router<AppState> {
             "/lists/{id}",
             get(get_list).put(update_list).delete(delete_list),
         )
+        // The options a lookup field offers, as a sub-collection of the source
+        // that produces them (naming convention §5). There is deliberately no
+        // `GET /lookups` beside it: the sources are a static allow-list rather
+        // than stored rows, and a form author discovers them from the refusal a
+        // bad binding earns, which names every one of them. An endpoint whose
+        // whole answer is four constants would be a surface to keep in step
+        // with them for no reader that needs it.
+        .route("/lookups/{source}/options", get(list_lookup_options))
 }
 
 #[utoipa::path(
@@ -279,4 +287,36 @@ async fn delete_list(
     service::list::delete_list(&state, &caller, id).await?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/rad/lookups/{source}/options", tag = "rad",
+    params(
+        ("source" = String, Path,
+         description = "Master-data source: customer, employee, facility or supplier"),
+        LookupQuery,
+    ),
+    responses(
+        (status = 200, description = "One page of the options this lookup offers", body = [LookupOption]),
+        (status = 403, description = "Missing the permission that opens the underlying master data"),
+        (status = 404, description = "No such lookup source"),
+        (status = 422, description = "The search is longer than anything it could match")
+    ),
+    security(("bearer" = []))
+)]
+async fn list_lookup_options(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    PathParam(source): PathParam<String>,
+    QueryParams(query): QueryParams<LookupQuery>,
+) -> Result<Json<ListEnvelope<LookupOption>>, AppError> {
+    // Resolved before the service runs, and this is not a read: the sources are
+    // four constants, so nothing about the caller's data has been touched when
+    // an unknown one answers 404. The permission check still comes first over
+    // anything stored, inside `master_data::service`.
+    let source = LookupSource::from_key(&source).ok_or_else(|| AppError::not_found("Lookup"))?;
+
+    let (options, meta) = service::lookup::list_options(&state, &caller, source, &query).await?;
+
+    Ok(Json(ListEnvelope::new(options, meta)))
 }

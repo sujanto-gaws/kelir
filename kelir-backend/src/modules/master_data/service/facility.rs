@@ -11,7 +11,8 @@ use uuid::Uuid;
 
 use super::domain::{
     validate_create_facility, validate_update_facility, CreateFacilityRequest, Facility,
-    FacilitySummary, FacilityType, PostalAddress, UpdateFacilityRequest, MAX_FACILITY_DEPTH,
+    FacilitySummary, FacilityType, MasterDataOption, PostalAddress, UpdateFacilityRequest,
+    MAX_FACILITY_DEPTH,
 };
 use super::repository::{self as repo, FacilityFields, NewFacility};
 use super::FACILITY_READ;
@@ -42,6 +43,41 @@ pub async fn list_facilities(
     .await?;
 
     Ok((facilities, pagination.meta(total.max(0) as u64)))
+}
+
+/// One page of the facilities a form may offer for selection (FR-RAD-007, #161).
+///
+/// **The same permission as reading the facility list, and deliberately not a
+/// new one.** A lookup is a narrower view of data `master-data:facility:read`
+/// already opens, so it can grant nothing the caller could not get from
+/// `GET /master-data/facilities` — which is the whole answer to the question
+/// [#161] asks, and it holds by construction rather than by two checks agreeing.
+/// Minting a `rad:lookup:read` beside it would create the gap it was meant to
+/// close: a caller could then be given the lookup without the list.
+///
+/// The refusal comes before anything is read, as everywhere else in this module.
+///
+/// [#161]: https://github.com/sujanto-gaws/kelir/issues/161
+pub async fn list_facility_options(
+    state: &AppState,
+    caller: &Authenticated,
+    search: Option<&str>,
+    pagination: &Pagination,
+) -> Result<(Vec<MasterDataOption>, PageMeta), AppError> {
+    caller.require(FACILITY_READ)?;
+
+    let tenant_id = caller.tenant_id();
+    let total = repo::count_facility_options(&state.pool, tenant_id, search).await?;
+    let options = repo::list_facility_options(
+        &state.pool,
+        tenant_id,
+        search,
+        pagination.limit(),
+        pagination.offset(),
+    )
+    .await?;
+
+    Ok((options, pagination.meta(total.max(0) as u64)))
 }
 
 pub async fn get_facility(

@@ -103,6 +103,39 @@ changed.
   `KELIR_SMTP_HOST` logs instead of failing to start.
   `password_reset_tokens` has existed since `0006` and until now nothing read
   it.
+- **Lookup fields bound to master data (FR-RAD-007,
+  [#161](https://github.com/sujanto-gaws/kelir/issues/161)).** A form definition
+  can declare a field whose options come from a master-data query rather than
+  from the definition, and `GET /api/v1/rad/lookups/{source}/options` resolves
+  them — paged, searched and filtered on the server. Four sources: `supplier`,
+  `customer`, `employee` and `facility`.
+
+  **A lookup cannot become a way to read master data the caller could not read
+  directly.** It requires exactly what the master-data endpoint it projects
+  requires — `master-data:party:read` with `master-data:party-role:read` for the
+  three role-backed sources, `master-data:facility:read` for facilities — and it
+  requires them by *calling that module's service* rather than by checking a
+  string of its own, so the two cannot drift apart. No `rad:lookup:read` exists,
+  deliberately: a deployment able to grant the lookup without the list would be
+  the gap the permission was meant to close. A caller without the permission gets
+  **403 rather than an empty page**, because an empty page is a false statement
+  about the data that nobody filling in a form can tell from a tenant with no
+  suppliers yet.
+
+  The binding lives in the form's `settings.lookups`, mapping a component `id` to
+  a source. JFSS is frozen at v2.0.1 and closes a component to new properties, so
+  `settings` — the one object it leaves open to an implementation — is where a
+  Kelir extension may go; a definition carrying a lookup is therefore still a
+  conformant JFSS v2.0.1 document. Bindings are checked when the definition is
+  **saved**, in both directions: a source nobody serves, a lookup field nothing
+  binds, a binding naming no component, an ambiguous `id`, and a bound field that
+  also carries static `options` are each a 422 at the API rather than a chooser
+  that opens empty in front of a user.
+
+  Nothing is stored in `rad_lookup_definitions` and it still has no endpoint. The
+  sources are a code allow-list, because a source decides both which query runs
+  and which permission it needs, and a row that chose the second would make a
+  misconfigured lookup a permission bypass that reads as a typo.
 
 ### Changed
 

@@ -15,7 +15,7 @@ use sqlx::{PgExecutor, PgPool};
 use uuid::Uuid;
 
 use crate::modules::master_data::domain::{
-    Facility, FacilitySummary, FacilityType, PostalAddress, RecordStatus,
+    Facility, FacilitySummary, FacilityType, MasterDataOption, PostalAddress, RecordStatus,
 };
 
 /// The columns a create writes. `record_status` is absent deliberately: it is
@@ -100,6 +100,92 @@ pub async fn list_facilities(
             owner_party_id: row.owner_code,
             created_stamp: row.created_at,
             last_updated_stamp: row.updated_at,
+        })
+        .collect())
+}
+
+/// How many facilities a form may offer, before paging.
+///
+/// **Changed together with [`list_facility_options`].** Their predicates are the
+/// same query, and a `meta.total` counted over a different population than the
+/// rows is not a smaller version of the same answer — the reason
+/// `count_role_view` states beside its own pair.
+pub async fn count_facility_options(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    search: Option<&str>,
+) -> Result<i64, sqlx::Error> {
+    let search = search.map(super::like_contains);
+
+    sqlx::query_scalar!(
+        r#"
+        SELECT count(*)
+        FROM mdm_facilities
+        WHERE tenant_id = $1
+          AND deleted_at IS NULL
+          AND record_status <> 'ARCHIVED'
+          AND ($2::text IS NULL OR facility_code ILIKE $2 OR name ILIKE $2)
+        "#,
+        tenant_id,
+        search
+    )
+    .fetch_one(pool)
+    .await
+    .map(|count| count.unwrap_or(0))
+}
+
+/// One page of the facilities a form may offer (FR-RAD-007, #161).
+///
+/// **Three columns, not the list row.** `list_facilities` joins the parent and
+/// the owning party to render their codes; a chooser shows neither, and a join
+/// per row is what makes a lookup stop working at the size where it matters.
+///
+/// **`ARCHIVED` is excluded and the other five statuses are not.** Archiving is
+/// the one move the lifecycle calls terminal — "a record that must live again is
+/// re-created" (`domain::record_status`) — so offering an archived facility on a
+/// form would be offering a record the tenant has finished with. The remaining
+/// values are reversible states a record can come back from, and every facility
+/// in every deployment sits at `DRAFT` until somebody transitions it, so a
+/// filter that demanded `ACTIVE` would empty every lookup in the product. That
+/// is a decision rather than an omission, and the place it changes is
+/// FR-MDM-010's workflow, where governance starts meaning something.
+///
+/// Ordered by name because a chooser is read alphabetically, then by code so
+/// that two facilities sharing a name keep a stable order across pages.
+pub async fn list_facility_options(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    search: Option<&str>,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<MasterDataOption>, sqlx::Error> {
+    let search = search.map(super::like_contains);
+
+    let rows = sqlx::query!(
+        r#"
+        SELECT id, facility_code, name
+        FROM mdm_facilities
+        WHERE tenant_id = $1
+          AND deleted_at IS NULL
+          AND record_status <> 'ARCHIVED'
+          AND ($2::text IS NULL OR facility_code ILIKE $2 OR name ILIKE $2)
+        ORDER BY name, facility_code
+        LIMIT $3 OFFSET $4
+        "#,
+        tenant_id,
+        search,
+        limit,
+        offset
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| MasterDataOption {
+            id: row.id,
+            name: row.name,
+            code: Some(row.facility_code),
         })
         .collect())
 }

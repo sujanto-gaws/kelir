@@ -1,0 +1,37 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, facility_code, name\n        FROM mdm_facilities\n        WHERE tenant_id = $1\n          AND deleted_at IS NULL\n          AND record_status <> 'ARCHIVED'\n          AND ($2::text IS NULL OR facility_code ILIKE $2 OR name ILIKE $2)\n        ORDER BY name, facility_code\n        LIMIT $3 OFFSET $4\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "facility_code",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "name",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "b776a16bc50a836e72d71661fe741b27e457f2a16f70c63621d7c66d00a20f5a"
+}
