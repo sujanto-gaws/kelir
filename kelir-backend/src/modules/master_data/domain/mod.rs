@@ -59,6 +59,17 @@ pub const MAX_CODE_LENGTH: usize = 64;
 /// Longest human name or title — `VARCHAR(200)` in §4.
 pub const MAX_NAME_LENGTH: usize = 200;
 
+/// Longest value for the vocabulary columns — `VARCHAR(40)` in §4.
+///
+/// Most columns of that width carry a `CHECK` and are typed as an enum here, so
+/// this bound applies to the handful that are open: the `status` a caller may
+/// set on a relationship or a role profile, `marital_status`, and a contact
+/// mechanism's preferred type.
+pub const MAX_VOCABULARY_LENGTH: usize = 40;
+
+/// Longest reference to something outside this system — `VARCHAR(255)` in §4.
+pub const MAX_EXTERNAL_ID_LENGTH: usize = 255;
+
 // ---------------------------------------------------------------------------
 // Validation primitives shared by the party and its roles
 // ---------------------------------------------------------------------------
@@ -122,13 +133,30 @@ pub(super) fn require_name(value: Option<&str>, path: &str, details: &mut Vec<Va
 }
 
 pub(super) fn bound_name(value: Option<&str>, path: &str, details: &mut Vec<ValidationDetail>) {
-    if let Some(name) = non_empty(value) {
-        if name.chars().count() > MAX_NAME_LENGTH {
+    bounded(value, path, MAX_NAME_LENGTH, details);
+}
+
+/// Bounds an optional field at the width of the column behind it.
+///
+/// **Every optional string that reaches a `VARCHAR` column goes through this or
+/// through [`require_code`].** A field that skips both reaches PostgreSQL, which
+/// answers `value too long for type character varying(n)` — a `sqlx` error, an
+/// `INTERNAL_ERROR` and a 500, where the contract promises a 422 naming the
+/// field (#109). The bound is a contract, not a defensive check: it is what
+/// makes the difference between the two answers.
+pub(super) fn bounded(
+    value: Option<&str>,
+    path: &str,
+    max: usize,
+    details: &mut Vec<ValidationDetail>,
+) {
+    if let Some(value) = non_empty(value) {
+        if value.chars().count() > max {
             details.push(ValidationDetail::new(
                 path,
                 "maxLength",
                 "TOO_LONG",
-                format!("Must be at most {MAX_NAME_LENGTH} characters"),
+                format!("Must be at most {max} characters"),
             ));
         }
     }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT e.employee_number, e.department_id, e.position, e.job_grade,\n               e.employment_type, e.join_date, e.resign_date, e.status, e.attributes_json,\n               m.party_code AS \"manager_party_id?\"\n        FROM mdm_employee_profiles e\n        LEFT JOIN mdm_parties m ON m.id = e.manager_party_id\n        WHERE e.tenant_id = $1 AND e.party_id = $2 AND e.deleted_at IS NULL\n        ",
+  "query": "\n        SELECT e.employee_number, e.department_id, e.position, e.job_grade,\n               e.employment_type, e.join_date, e.resign_date, e.status, e.attributes_json,\n               m.party_code AS \"manager_party_id?\"\n        FROM mdm_employee_profiles e\n        LEFT JOIN mdm_parties m ON m.id = e.manager_party_id AND m.tenant_id = e.tenant_id\n        WHERE e.tenant_id = $1 AND e.party_id = $2 AND e.deleted_at IS NULL\n        ",
   "describe": {
     "columns": [
       {
@@ -73,5 +73,5 @@
       false
     ]
   },
-  "hash": "73dbb92031424556c51349260dfc37498ce3604d4f09831831a8367d5d48227e"
+  "hash": "2d69faae84efb9d618dda39acbb11500986194c9c97a8e4fdf8053a02000d056"
 }

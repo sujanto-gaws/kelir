@@ -1,4 +1,4 @@
-use axum::extract::{Path, Query, State};
+use axum::extract::State;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -11,7 +11,7 @@ use super::domain::{
 };
 use super::service;
 use crate::error::AppError;
-use crate::extract::JsonBody;
+use crate::extract::{JsonBody, PathParam, QueryParams};
 use crate::middleware::auth::Authenticated;
 use crate::response::{ItemEnvelope, ListEnvelope, Pagination};
 use crate::state::AppState;
@@ -45,7 +45,7 @@ pub fn routes() -> Router<AppState> {
 async fn list_users(
     State(state): State<AppState>,
     caller: Authenticated,
-    Query(pagination): Query<Pagination>,
+    QueryParams(pagination): QueryParams<Pagination>,
 ) -> Result<Json<ListEnvelope<User>>, AppError> {
     let (users, meta) = service::list_users(&state, &caller, &pagination).await?;
 
@@ -60,7 +60,7 @@ async fn list_users(
 async fn get_user(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
 ) -> Result<Json<ItemEnvelope<User>>, AppError> {
     Ok(Json(ItemEnvelope::new(
         service::get_user(&state, &caller, id).await?,
@@ -99,7 +99,7 @@ async fn create_user(
 async fn update_user(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
     JsonBody(request): JsonBody<UpdateUserRequest>,
 ) -> Result<Json<ItemEnvelope<User>>, AppError> {
     Ok(Json(ItemEnvelope::new(
@@ -118,7 +118,7 @@ async fn update_user(
 async fn deactivate_user(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
 ) -> Result<axum::http::StatusCode, AppError> {
     service::deactivate_user(&state, &caller, id).await?;
 
@@ -134,7 +134,7 @@ async fn deactivate_user(
 async fn set_password(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
     JsonBody(request): JsonBody<SetPasswordRequest>,
 ) -> Result<axum::http::StatusCode, AppError> {
     service::set_password(&state, &caller, id, &request.password).await?;
@@ -151,7 +151,7 @@ async fn set_password(
 async fn list_roles(
     State(state): State<AppState>,
     caller: Authenticated,
-    Query(pagination): Query<Pagination>,
+    QueryParams(pagination): QueryParams<Pagination>,
 ) -> Result<Json<ListEnvelope<Role>>, AppError> {
     let (roles, meta) = service::list_roles(&state, &caller, &pagination).await?;
 
@@ -166,7 +166,7 @@ async fn list_roles(
 async fn get_role(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
 ) -> Result<Json<ItemEnvelope<Role>>, AppError> {
     Ok(Json(ItemEnvelope::new(
         service::get_role(&state, &caller, id).await?,
@@ -201,7 +201,7 @@ async fn create_role(
 async fn update_role(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
     JsonBody(request): JsonBody<UpdateRoleRequest>,
 ) -> Result<Json<ItemEnvelope<Role>>, AppError> {
     Ok(Json(ItemEnvelope::new(
@@ -220,7 +220,7 @@ async fn update_role(
 async fn delete_role(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
 ) -> Result<axum::http::StatusCode, AppError> {
     service::delete_role(&state, &caller, id).await?;
 

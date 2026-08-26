@@ -149,6 +149,7 @@ use crate::state::AppState;
         master_data::domain::PartyContactMechInput,
         master_data::domain::PartyRoles,
         master_data::domain::PartyRole,
+        master_data::domain::AssignedRole,
         master_data::domain::PartyRoleStatus,
         master_data::domain::PartyProfiles,
         master_data::domain::SupplierProfile,
@@ -644,20 +645,67 @@ mod tests {
             "the already-held outcome is undocumented: {responses}"
         );
 
-        // And both outcomes answer with the assignment, not with every role and
-        // profile the party holds. The published shape is the contract a client
-        // is generated from, so a response documented as `PartyRoles` would
-        // have clients expecting the bank accounts #104 took out of it — and
-        // would be the first sign of the leak coming back.
+        // And both outcomes answer with the assignment this call stated, not
+        // with every role and profile the party holds and not with the stored
+        // row. The published shape is the contract a client is generated from,
+        // so a response documented as `PartyRoles` would have clients expecting
+        // the bank accounts #104 took out of it, and one documented as
+        // `PartyRole` would have them expecting the merged `comments` and
+        // `additionalAttributes` #119 took out after it. Either would be the
+        // first sign of the leak coming back.
         for outcome in ["200", "201"] {
             let schema = &responses[outcome]["content"]["application/json"]["schema"];
             let referenced = schema["$ref"].as_str().unwrap_or_default();
 
             assert!(
-                referenced.ends_with("/PartyRole"),
+                referenced.ends_with("/AssignedRole"),
                 "{outcome} is documented as {schema}, not as the assignment it returns"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn assigning_a_role_publishes_which_fields_it_replaces_and_which_it_merges() {
+        // #120. `update_party_role` treats five columns two ways in one
+        // statement, deliberately and for a good reason: `starts_at`/`ends_at`
+        // are the assignment's period, a PUT states the period, and a
+        // `thruDate` that could be set but never cleared would make an ended
+        // role impossible to reopen. The reason is sound and was written down —
+        // in a doc comment on the repository function. **No caller can read
+        // that.** The behaviour was discoverable only by losing a `thruDate`.
+        //
+        // This asserts the published contract carries it. The behaviour itself
+        // is pinned by
+        // `a_restatement_that_omits_everything_optional_clears_the_end_date_and_keeps_the_rest`
+        // in `master_data_party_roles.rs`; the two together are what stops the
+        // contract and the code drifting apart.
+        let (_, body) = get("/api/docs/openapi.json").await;
+
+        let description = body["paths"]["/api/v1/master-data/parties/{id}/roles/{roleTypeId}"]
+            ["put"]["description"]
+            .as_str()
+            .expect("the operation carries a description");
+
+        for field in ["fromDate", "thruDate"] {
+            assert!(
+                description.contains(field),
+                "the contract does not name {field} as replaced: {description}"
+            );
+        }
+        for field in ["statusId", "comments", "additionalAttributes"] {
+            assert!(
+                description.contains(field),
+                "the contract does not name {field} as merged: {description}"
+            );
+        }
+        assert!(
+            description.contains("replaced") && description.contains("merged"),
+            "the contract does not say which fields are which: {description}"
+        );
+        assert!(
+            description.contains("clears it"),
+            "the contract does not say what omitting thruDate does: {description}"
+        );
     }
 
     #[tokio::test]

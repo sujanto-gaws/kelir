@@ -8,7 +8,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { fetchDeployment } from '@/api/deployment'
 import { ApiError } from '@/api/error'
-import { HOME_ROUTE_NAME, safeReturnPath } from '@/router/guards'
+import { HOME_ROUTE_NAME, SESSION_ENDED_QUERY_KEY, safeReturnPath } from '@/router/guards'
 import { useAuthStore } from '@/stores/auth'
 
 /**
@@ -64,6 +64,24 @@ const serverFieldErrors = ref<Record<string, string>>({})
  */
 const hasUnverifiedSession = computed(() => auth.isAuthenticated && auth.user === null)
 const isRetrying = ref(false)
+
+/**
+ * The caller was signed in a moment ago and is not any more.
+ *
+ * The router says so with a query parameter, because arriving here after a lost
+ * session and arriving here from a deep link look identical otherwise: both
+ * carry `redirect` and neither carries a session. Only the first needs
+ * explaining, and until #68 it got none — a session lost while the user sat on
+ * a page redirected nothing at all, so they met the failure as a form that
+ * submitted into a 401.
+ *
+ * Not shown alongside `hasUnverifiedSession`, which is the better answer when
+ * it applies: that one says the sign-in is *not* lost and offers a retry, and
+ * two notices contradicting each other is worse than one.
+ */
+const sessionEnded = computed(
+  () => route.query[SESSION_ENDED_QUERY_KEY] === '1' && !hasUnverifiedSession.value,
+)
 
 async function retrySession(): Promise<void> {
   isRetrying.value = true
@@ -242,6 +260,17 @@ onMounted(async () => {
       </div>
 
       <Alert v-if="formError" variant="destructive" class="mb-4">{{ formError }}</Alert>
+
+      <div
+        v-else-if="sessionEnded"
+        class="mb-4 rounded-md border border-border bg-card p-4"
+        role="status"
+      >
+        <p class="text-sm font-medium">Your session has ended</p>
+        <p class="mt-1 text-sm text-muted-foreground">
+          Sign in again to carry on where you left off.
+        </p>
+      </div>
 
       <div v-if="hasUnverifiedSession" class="mb-4 rounded-md border border-border bg-card p-4">
         <p class="text-sm font-medium">You are still signed in</p>

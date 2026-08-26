@@ -16,6 +16,14 @@ deployment. Two Phase 2 carry-overs land with them, and a third — tenant
 management — returns from the unscheduled backlog and takes multi-tenant mode
 with it.
 
+Alongside them, every open defect the three verification passes had filed and
+left standing is closed. Four of the eight are contract defects rather than
+behavioural ones — documentation that described something the code did not do —
+and two of those needed a migration to correct, because a merged migration is
+never edited. Two carry a behaviour change worth reading before upgrading: a
+deleted party keeps its `partyId`, and the audit chain's hash format has
+changed.
+
 ### Added
 
 - **Multi-tenant mode runs, and tenants are administrable (FR-ORG-001,
@@ -111,6 +119,69 @@ with it.
 
 ### Fixed
 
+- **A bad `page` or `pageSize` is refused inside the error envelope
+  ([#122](https://github.com/sujanto-gaws/kelir/issues/122)).** The two
+  parameters were deserialized by the extractor, so a value that was not a `u32`
+  was rejected before any handler ran — a bare `400` with an **empty body**, on
+  every list endpoint in the product. A client written against `error.code`
+  found `null`. `QueryParams` and `PathParam` join the existing `JsonBody`, so no
+  refusal under `/api/v1` leaves the envelope; a bad query parameter is now a 422
+  naming the parameter as the caller spelled it, and a bad path segment stays a
+  400 with a body to read.
+- **An over-long field is a 422, not a 500
+  ([#109](https://github.com/sujanto-gaws/kelir/issues/109)).**
+  `contactMechanisms[].purposeTypeId` had no length check and its column is
+  `VARCHAR(64)`, so the value reached the INSERT and came back as
+  `INTERNAL_ERROR`. The sweep that came with the fix found six more of the same
+  shape on the party and four on the role profiles; Database Schema §1.3.1
+  records the rule and the width-to-constant mapping, and two tests assert the
+  boundary rather than describing it.
+- **Restating a role no longer hands back what somebody else wrote
+  ([#119](https://github.com/sujanto-gaws/kelir/issues/119)).** #104 narrowed
+  this route's answer to one assignment, and that answer still carried `comments`
+  and `additionalAttributes` — both merged on update — so a caller holding only
+  `master-data:party-role:assign` read back values they never sent. The route now
+  answers with the request it was given.
+- **The published contract says which fields a role `PUT` replaces and which it
+  merges ([#120](https://github.com/sujanto-gaws/kelir/issues/120)).** The
+  asymmetry is deliberate and its reason was written down — in a doc comment on a
+  repository function, where no caller could read it. The behaviour was
+  discoverable only by losing a `thruDate`. No behaviour change.
+- **Every master-data join is scoped by tenant, and the module doc is true
+  ([#108](https://github.com/sujanto-gaws/kelir/issues/108)).**
+  `repository/mod.rs` opened by claiming every query filters by `tenant_id`. It
+  was true of the base tables and false of the joins, so a cross-tenant row
+  present in storage would have rendered another tenant's `party_code` inside
+  `GET /parties/{mine}`. Latent — no request could create such a row — and one
+  bulk import away from live.
+- **A deleted party keeps its `partyId`
+  ([#107](https://github.com/sujanto-gaws/kelir/issues/107)).** The unique index
+  was partial on `deleted_at`, so a delete released the code while every stored
+  reference kept pointing at the row by id — a customer's `billingPartyId` went
+  on reading `PARTY-BILL` after a different legal entity took the freed code.
+  `0018_party_code_is_not_released.sql` makes the index total. **Creating a party
+  whose code a deleted party holds is now a 409**, and says so in as many words,
+  because the caller cannot see that party in any list. The matching question for
+  *profile* numbers is [#103](https://github.com/sujanto-gaws/kelir/issues/103)
+  and is still open.
+- **The audit chain covers what a record says it changed
+  ([#145](https://github.com/sujanto-gaws/kelir/issues/145)).** `chain_hash`
+  covered ten inputs and neither payload column was among them, nor `created_at`
+  — so all three could be rewritten without disturbing any hash, and the chain
+  still verified. A control that protects who and when but not *what* protects
+  the half nobody would bother to forge. The format changed while that was free:
+  FR-AUD-003 is Phase 6 and nothing has ever verified a chain, so no stored hash
+  had been relied on. Fields are now length-prefixed as well, and payloads are
+  hashed in `jsonb`'s own text form so a row read back recomputes to the value
+  stored with it. `0019_audit_hash_covers_the_payload.sql` carries the corrected
+  column comments, which a merged migration cannot.
+- **Losing a session no longer leaves a dead page
+  ([#68](https://github.com/sujanto-gaws/kelir/issues/68)).** The route guard
+  runs on navigation, so a session lost while the user sat on a page redirected
+  nothing: an administrator editing a role submitted the form, got a 401, and had
+  no explanation. The store now announces an ending it did not ask for — a
+  refused refresh, a revoked token, another tab signing out — and the router
+  leaves the page, saying why on arrival.
 - **Database Schema §3.9 and the Sprint 4 record.** Both the section and
   `0006_password_reset_tokens.sql`'s header said Sprint 4 "added the reset token
   flow". It added the table and no flow. The migration comment cannot be

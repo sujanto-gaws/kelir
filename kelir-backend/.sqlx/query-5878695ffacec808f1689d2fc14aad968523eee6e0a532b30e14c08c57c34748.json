@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT p.id,\n               p.party_code,\n               p.party_type,\n               p.status,\n               p.external_id,\n               p.created_at,\n               p.updated_at,\n               COALESCE(\n                   g.group_name,\n                   NULLIF(btrim(concat_ws(' ', pe.first_name, pe.middle_name, pe.last_name)), ''),\n                   p.party_code\n               ) AS \"name!\"\n        FROM mdm_parties p\n        LEFT JOIN mdm_persons pe ON pe.party_id = p.id AND pe.deleted_at IS NULL\n        LEFT JOIN mdm_party_groups g ON g.party_id = p.id AND g.deleted_at IS NULL\n        WHERE p.tenant_id = $1 AND p.deleted_at IS NULL\n        ORDER BY p.party_code\n        LIMIT $2 OFFSET $3\n        ",
+  "query": "\n        SELECT p.id,\n               p.party_code,\n               p.party_type,\n               p.status,\n               p.external_id,\n               p.created_at,\n               p.updated_at,\n               COALESCE(\n                   g.group_name,\n                   NULLIF(btrim(concat_ws(' ', pe.first_name, pe.middle_name, pe.last_name)), ''),\n                   p.party_code\n               ) AS \"name!\"\n        FROM mdm_parties p\n        LEFT JOIN mdm_persons pe\n          ON pe.party_id = p.id AND pe.tenant_id = p.tenant_id AND pe.deleted_at IS NULL\n        LEFT JOIN mdm_party_groups g\n          ON g.party_id = p.id AND g.tenant_id = p.tenant_id AND g.deleted_at IS NULL\n        WHERE p.tenant_id = $1 AND p.deleted_at IS NULL\n        ORDER BY p.party_code\n        LIMIT $2 OFFSET $3\n        ",
   "describe": {
     "columns": [
       {
@@ -62,5 +62,5 @@
       null
     ]
   },
-  "hash": "f3661e016167df27724346695c4da3ae4c2fe2aca604747d4323cddb1ae1f8a3"
+  "hash": "5878695ffacec808f1689d2fc14aad968523eee6e0a532b30e14c08c57c34748"
 }

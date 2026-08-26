@@ -150,8 +150,10 @@ pub async fn list_parties(
                    p.party_code
                ) AS "name!"
         FROM mdm_parties p
-        LEFT JOIN mdm_persons pe ON pe.party_id = p.id AND pe.deleted_at IS NULL
-        LEFT JOIN mdm_party_groups g ON g.party_id = p.id AND g.deleted_at IS NULL
+        LEFT JOIN mdm_persons pe
+          ON pe.party_id = p.id AND pe.tenant_id = p.tenant_id AND pe.deleted_at IS NULL
+        LEFT JOIN mdm_party_groups g
+          ON g.party_id = p.id AND g.tenant_id = p.tenant_id AND g.deleted_at IS NULL
         WHERE p.tenant_id = $1 AND p.deleted_at IS NULL
         ORDER BY p.party_code
         LIMIT $2 OFFSET $3

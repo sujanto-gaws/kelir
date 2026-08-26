@@ -299,6 +299,14 @@ async fn assigning_a_role_does_not_hand_back_the_profiles() {
     //
     // A caller restating a role the party already holds sends no profile and
     // needs none back to know the write happened.
+    //
+    // **#119 is the two assertions this test was missing.** #104 narrowed the
+    // answer to `PartyRole`, which still carries `comments` and
+    // `additionalAttributes` — and `update_party_role` merges both, so a
+    // restatement that sent neither got back what the administrator had put
+    // there. The same leak one field over, and this test did not see it because
+    // it only ever asserted about the profile secrets. The administrator's write
+    // below therefore carries a comment and an attribute worth not leaking.
     let app = TestApp::spawn().await;
     let administrator = app.administrator_token().await;
     let party = target_party(&app, 65).await;
@@ -308,6 +316,8 @@ async fn assigning_a_role_does_not_hand_back_the_profiles() {
         Some(&administrator),
         json!({
             "fromDate": "2026-01-01T00:00:00Z",
+            "comments": "renegotiating terms, do not pay",
+            "additionalAttributes": { "internalRating": "D", "watchlist": true },
             "profile": {
                 "supplier": { "supplierNumber": "SUP-0065", "bankAccount": "1234567890" }
             },
@@ -346,13 +356,54 @@ async fn assigning_a_role_does_not_hand_back_the_profiles() {
         restated.body
     );
 
-    for secret in ["1234567890", "SUP-0065", "50000000.00", "CUS-0065"] {
+    for secret in [
+        "1234567890",
+        "SUP-0065",
+        "50000000.00",
+        "CUS-0065",
+        // #119: written by the administrator, not by this caller.
+        "renegotiating terms, do not pay",
+        "internalRating",
+    ] {
         assert!(
             !restated.body.to_string().contains(secret),
             "assigning a role handed back {secret} to a caller without              master-data:party-role:read: {}",
             restated.body
         );
     }
+
+    // Stated as absence of the members rather than only as absence of the
+    // strings, so a future response that carried them under different values
+    // would still fail here.
+    assert!(
+        restated.data().get("comments").is_none(),
+        "the assign response carries comments this call did not send: {}",
+        restated.body
+    );
+    assert!(
+        restated.data().get("additionalAttributes").is_none(),
+        "the assign response carries additionalAttributes this call did not send: {}",
+        restated.body
+    );
+
+    // And the administrator's values are still stored — the response withholds
+    // them, it does not clear them. Merging is the documented behaviour (#120)
+    // and this is the assertion that keeps the two facts from being confused.
+    let stored = app
+        .get(
+            &format!("/api/v1/master-data/parties/{party}/roles"),
+            Some(&administrator),
+        )
+        .await;
+    let supplier = stored.data()["roles"]
+        .as_array()
+        .expect("roles is a list")
+        .iter()
+        .find(|role| role["roleTypeId"] == "SUPPLIER")
+        .expect("the party still holds SUPPLIER")
+        .clone();
+    assert_eq!(supplier["comments"], "renegotiating terms, do not pay");
+    assert_eq!(supplier["additionalAttributes"]["internalRating"], "D");
 
     assert!(
         restated.data().get("profiles").is_none(),

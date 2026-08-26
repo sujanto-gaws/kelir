@@ -21,10 +21,12 @@
 //! another tenant's role row on the party being deleted, so the sweep's tenant
 //! predicate is the only thing keeping that row live.
 //!
-//! `find_party_role` is not probed and cannot be: it reads back by primary key
-//! (#121), so there is no scoping left in it to drop.
-//! `the_assignment_answered_with_is_the_row_this_call_wrote` covers what
-//! replaced it — an ambiguous lookup turns it red.
+//! `find_party_role` is not probed and cannot be, and as of #119 no longer
+//! exists. #121 had already reduced it to a primary-key read-back, leaving no
+//! scoping in it to drop; #119 removed the read-back itself, because the assign
+//! route now answers with the request it was given rather than with the stored
+//! row. `the_assignment_answered_with_is_the_row_this_call_wrote` is kept as the
+//! guard against a read-back coming back — see its own note.
 //!
 //! Still not reached: `soft_delete_role_profile`, the other half of the
 //! party-delete cascade. The delete tests below exercise it, but its scoping
@@ -1233,9 +1235,21 @@ async fn deleting_a_party_releases_the_business_numbers_it_held() {
         .await;
     assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
 
-    // The party code is released by the same kind of partial index, so this
-    // half already worked and is asserted to keep the scenario honest.
-    let second = create_party(&app, &token, party_group("PARTY-A", "Acme Supplies Again")).await;
+    // **The second party takes a different code, and that is the change #107
+    // made.** This used to reuse `PARTY-A`, on the grounds that the party code
+    // was released by the same kind of partial index as the supplier number.
+    // It no longer is: `0018_party_code_is_not_released.sql` made
+    // `uq_mdm_parties_tenant_id_party_code` total, so a deleted party keeps its
+    // `partyId` forever and re-creating it is a 409.
+    //
+    // The two now differ deliberately, and #107 says so in as many words: a
+    // party code is a business identifier that must name one thing over time,
+    // while a supplier number is a slot in a sequence that a deleted supplier
+    // has no claim on. #107 also records that the pair should be decided
+    // together and leaves the numbers to #103 — so the asymmetry is a known
+    // open question, not an oversight, and this comment is where the next
+    // reader meets it.
+    let second = create_party(&app, &token, party_group("PARTY-B", "Acme Supplies Again")).await;
 
     let reassigned = app
         .put(
@@ -1818,7 +1832,8 @@ async fn given_foreign_role_type(app: &TestApp, tenant: Uuid, code: &str) -> Uui
 
 #[tokio::test]
 async fn the_assignment_answered_with_is_the_row_this_call_wrote() {
-    // #121, and the reason the read-back is by primary key.
+    // #121, and then #119 — the same property reached twice, by two different
+    // routes, and worth keeping for the second.
     //
     // `find_party_role` looked the row up again by
     // `(tenant_id, party_id, role_type_code)`, which matches one row only
@@ -1826,11 +1841,17 @@ async fn the_assignment_answered_with_is_the_row_this_call_wrote() {
     // a test: dropping it made the query match two rows and `fetch_optional`
     // return an unspecified one, and asserting which would have been asserting
     // on undefined behaviour. Under the mutation this test passed, which is
-    // exactly the shape #106 was about.
+    // exactly the shape #106 was about. #121 made the read-back a primary-key
+    // lookup so a second candidate could not exist.
     //
-    // The read-back is now by the assignment's own id, so a second candidate
-    // cannot exist. This test is what says so: another tenant holding the same
-    // role code on the same party is present, and the answer is still ours.
+    // **#119 removed the read-back altogether.** The route answers with the
+    // request it was given, so the property this test names now holds by
+    // construction rather than by a predicate: there is no query left that could
+    // return the wrong row. That makes it a *guard* rather than a probe — it
+    // fails if an answer built from storage is ever reintroduced here, which is
+    // the change that would put both #119 and #121 back at once. The fixture is
+    // kept exactly as it was: another tenant holding the same role code on the
+    // same party, present and still not the answer.
     let app = TestApp::spawn().await;
     let token = app.administrator_token().await;
     let party = create_party(&app, &token, party_group("PARTY-ACME", "Acme")).await;
@@ -1942,5 +1963,103 @@ async fn deleting_a_party_closes_this_tenants_roles_and_leaves_anothers_alone() 
     assert!(
         !is_closed(&app, foreign_role).await,
         "deleting a party closed another tenant's role row"
+    );
+}
+
+#[tokio::test]
+async fn a_restatement_that_omits_everything_optional_clears_the_end_date_and_keeps_the_rest() {
+    // #120. `update_party_role` treats five columns two ways in one statement:
+    //
+    //     SET starts_at       = $2,                           -- replaced
+    //         ends_at         = $3,                           -- replaced
+    //         status          = COALESCE($4, status),         -- merged
+    //         comments        = COALESCE($5, comments),       -- merged
+    //         attributes_json = COALESCE($6, attributes_json) -- merged
+    //
+    // The asymmetry is deliberate and the reason is good — the period is what a
+    // PUT to an assignment is *for*, and a `thruDate` that could be set but
+    // never cleared would make an ended role impossible to reopen. What #120 is
+    // about is that no caller could learn it: the reason lived in a doc comment
+    // on the repository function, and the behaviour was discoverable only by
+    // losing a `thruDate`.
+    //
+    // The published contract now states it, asserted by
+    // `assigning_a_role_publishes_which_fields_it_replaces_and_which_it_merges`
+    // in `router.rs`. This is the other half: what the code actually does, so
+    // the two cannot drift apart.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let party = create_party(&app, &token, party_group("PARTY-ACME", "Acme")).await;
+
+    let mut first = supplier_profile("SUP-0001");
+    first["thruDate"] = json!("2026-12-31T00:00:00Z");
+    first["comments"] = json!("seasonal");
+    first["additionalAttributes"] = json!({ "tier": "gold" });
+    first["statusId"] = json!("INACTIVE");
+
+    let created = app
+        .put(&role_path(party, "SUPPLIER"), Some(&token), first)
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+    // A restatement carrying nothing but the period's start.
+    let restated = app
+        .put(
+            &role_path(party, "SUPPLIER"),
+            Some(&token),
+            json!({ "fromDate": "2026-02-01T00:00:00Z" }),
+        )
+        .await;
+    assert_eq!(restated.status, StatusCode::OK, "{}", restated.body);
+
+    let stored = app
+        .get(&format!("{PARTIES}/{party}/roles"), Some(&token))
+        .await;
+    let role = stored.data()["roles"]
+        .as_array()
+        .expect("roles is a list")
+        .iter()
+        .find(|role| role["roleTypeId"] == "SUPPLIER")
+        .expect("the party still holds SUPPLIER")
+        .clone();
+
+    // Replaced.
+    assert_eq!(
+        role["fromDate"], "2026-02-01T00:00:00Z",
+        "fromDate is documented as replaced: {role}"
+    );
+    assert_eq!(
+        role["thruDate"],
+        Value::Null,
+        "thruDate is documented as replaced, so omitting it clears it: {role}"
+    );
+
+    // Merged.
+    assert_eq!(
+        role["comments"], "seasonal",
+        "comments is documented as merged: {role}"
+    );
+    assert_eq!(
+        role["additionalAttributes"]["tier"], "gold",
+        "additionalAttributes is documented as merged: {role}"
+    );
+    assert_eq!(
+        role["statusId"], "INACTIVE",
+        "statusId is documented as merged: {role}"
+    );
+
+    // And the response reports what *this call* stated, which is the #119 half:
+    // `thruDate` null because the call cleared it, and no `comments` member at
+    // all because the call did not send one.
+    assert_eq!(
+        restated.data()["thruDate"],
+        Value::Null,
+        "{}",
+        restated.body
+    );
+    assert!(
+        restated.data().get("comments").is_none(),
+        "the response reports a value this call did not send: {}",
+        restated.body
     );
 }

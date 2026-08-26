@@ -8,7 +8,7 @@
 //! than two — a type that cannot name the form it renders is a type nothing can
 //! use.
 
-use axum::extract::{Path, Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
@@ -20,7 +20,7 @@ use super::domain::{
 use super::numbering::{NumberingRule, SetNumberingRuleRequest};
 use super::{numbering_service, service};
 use crate::error::AppError;
-use crate::extract::JsonBody;
+use crate::extract::{JsonBody, PathParam, QueryParams};
 use crate::middleware::auth::Authenticated;
 use crate::response::{ItemEnvelope, ListEnvelope, Pagination};
 use crate::state::AppState;
@@ -53,7 +53,7 @@ pub fn routes() -> Router<AppState> {
 async fn get_numbering_rule(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
 ) -> Result<Json<ItemEnvelope<NumberingRule>>, AppError> {
     Ok(Json(ItemEnvelope::new(
         numbering_service::get_rule(&state, &caller, id).await?,
@@ -73,7 +73,7 @@ async fn get_numbering_rule(
 async fn set_numbering_rule(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
     JsonBody(request): JsonBody<SetNumberingRuleRequest>,
 ) -> Result<Json<ItemEnvelope<NumberingRule>>, AppError> {
     Ok(Json(ItemEnvelope::new(
@@ -92,7 +92,7 @@ async fn set_numbering_rule(
 async fn clear_numbering_rule(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
 ) -> Result<StatusCode, AppError> {
     numbering_service::clear_rule(&state, &caller, id).await?;
 
@@ -111,7 +111,7 @@ async fn clear_numbering_rule(
 async fn list_types(
     State(state): State<AppState>,
     caller: Authenticated,
-    Query(pagination): Query<Pagination>,
+    QueryParams(pagination): QueryParams<Pagination>,
 ) -> Result<Json<ListEnvelope<DocumentTypeSummary>>, AppError> {
     let (types, meta) = service::list_types(&state, &caller, &pagination).await?;
 
@@ -129,7 +129,7 @@ async fn list_types(
 async fn get_type(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
 ) -> Result<Json<ItemEnvelope<DocumentType>>, AppError> {
     Ok(Json(ItemEnvelope::new(
         service::get_type(&state, &caller, id).await?,
@@ -169,7 +169,7 @@ async fn create_type(
 async fn update_type(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
     JsonBody(request): JsonBody<UpdateDocumentTypeRequest>,
 ) -> Result<Json<ItemEnvelope<DocumentType>>, AppError> {
     Ok(Json(ItemEnvelope::new(
@@ -189,7 +189,7 @@ async fn update_type(
 async fn delete_type(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
 ) -> Result<StatusCode, AppError> {
     service::delete_type(&state, &caller, id).await?;
 

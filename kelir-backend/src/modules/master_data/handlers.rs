@@ -1,17 +1,17 @@
-use axum::extract::{Path, Query, State};
+use axum::extract::State;
 use axum::routing::get;
 use axum::{Json, Router};
 use uuid::Uuid;
 
 use super::domain::{
-    AssignRoleRequest, AuditRecord, CreateFacilityRequest, CreatePartyRequest, Facility,
-    FacilitySummary, PartyAggregate, PartyRole, PartyRoles, PartySummary, RoleView, RoleViewQuery,
+    AssignRoleRequest, AssignedRole, AuditRecord, CreateFacilityRequest, CreatePartyRequest,
+    Facility, FacilitySummary, PartyAggregate, PartyRoles, PartySummary, RoleView, RoleViewQuery,
     RoleViewRow, TransitionRequest, TransitionResult, TransitionTarget, UpdateFacilityRequest,
     UpdatePartyRequest,
 };
 use super::service;
 use crate::error::AppError;
-use crate::extract::JsonBody;
+use crate::extract::{JsonBody, PathParam, QueryParams};
 use crate::middleware::auth::Authenticated;
 use crate::response::{ItemEnvelope, ListEnvelope, Pagination};
 use crate::state::AppState;
@@ -77,7 +77,7 @@ pub fn routes() -> Router<AppState> {
 async fn list_parties(
     State(state): State<AppState>,
     caller: Authenticated,
-    Query(pagination): Query<Pagination>,
+    QueryParams(pagination): QueryParams<Pagination>,
 ) -> Result<Json<ListEnvelope<PartySummary>>, AppError> {
     let (parties, meta) = service::list_parties(&state, &caller, &pagination).await?;
 
@@ -95,7 +95,7 @@ async fn list_parties(
 async fn get_party(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
 ) -> Result<Json<ItemEnvelope<PartyAggregate>>, AppError> {
     Ok(Json(ItemEnvelope::new(
         service::get_party(&state, &caller, id).await?,
@@ -107,7 +107,7 @@ async fn get_party(
     request_body = CreatePartyRequest,
     responses(
         (status = 201, description = "Created", body = PartyAggregate),
-        (status = 409, description = "That partyId is already in use"),
+        (status = 409, description = "That partyId is already in use — including by a deleted party, whose partyId is never released (#107)"),
         (status = 422, description = "Validation failed")
     ),
     security(("bearer" = []))
@@ -138,7 +138,7 @@ async fn create_party(
 async fn update_party(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
     JsonBody(request): JsonBody<UpdatePartyRequest>,
 ) -> Result<Json<ItemEnvelope<PartyAggregate>>, AppError> {
     Ok(Json(ItemEnvelope::new(
@@ -157,7 +157,7 @@ async fn update_party(
 async fn delete_party(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
 ) -> Result<axum::http::StatusCode, AppError> {
     service::delete_party(&state, &caller, id).await?;
 
@@ -180,7 +180,7 @@ async fn delete_party(
 async fn get_party_roles(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
 ) -> Result<Json<ItemEnvelope<PartyRoles>>, AppError> {
     Ok(Json(ItemEnvelope::new(
         service::get_party_roles(&state, &caller, id).await?,
@@ -191,15 +191,29 @@ async fn get_party_roles(
 /// holds SUPPLIER or it does not — and the role type is what identifies the
 /// assignment, so it belongs in the path rather than repeated in the body.
 ///
-/// Answers with the assignment it wrote, not with every role and profile the
-/// party holds. The profiles are `master-data:party-role:read`'s to give, and
-/// this route does not require it (#104).
+/// Answers with the assignment as the request stated it, not with the stored
+/// row and not with every role and profile the party holds. The stored values
+/// are `master-data:party-role:read`'s to give, and this route does not require
+/// it (#104, #119).
+///
+/// The `description` below is the #120 half: the replace/merge split is a real
+/// asymmetry with a good reason, and a caller could previously learn it only by
+/// losing a `thruDate`.
 #[utoipa::path(
     put, path = "/api/v1/master-data/parties/{id}/roles/{roleTypeId}", tag = "master-data",
+    description = "Assigns a role to a party, or restates the assignment it already holds.
+
+**Two fields are replaced and three are merged, and an omission means different things on each side.**
+
+`fromDate` and `thruDate` are *replaced*: they are the assignment's period, a PUT states the period the assignment should end in, and omitting `thruDate` clears it. A merged `thruDate` could be set but never cleared, which would make an ended role impossible to reopen.
+
+`statusId`, `comments` and `additionalAttributes` are *merged*: omitting one leaves the stored value alone.
+
+So a restatement carrying only `fromDate` clears the end date and keeps the comments. The response reports what this call stated — the three merged members appear only if the request sent them, and `thruDate` is reported as `null` because that is what the call did to it. To read the stored assignment, use `GET /api/v1/master-data/parties/{id}/roles`, which requires `master-data:party-role:read`.",
     request_body = AssignRoleRequest,
     responses(
-        (status = 200, description = "The party already held this role; it and its profile are updated", body = PartyRole),
-        (status = 201, description = "Role assigned", body = PartyRole),
+        (status = 200, description = "The party already held this role; it and its profile are updated", body = AssignedRole),
+        (status = 201, description = "Role assigned", body = AssignedRole),
         (status = 403, description = "Missing master-data:party-role:assign"),
         (status = 404, description = "No such party"),
         (status = 409, description = "That profile number is already in use"),
@@ -210,9 +224,9 @@ async fn get_party_roles(
 async fn assign_role(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path((id, role_type_id)): Path<(Uuid, String)>,
+    PathParam((id, role_type_id)): PathParam<(Uuid, String)>,
     JsonBody(request): JsonBody<AssignRoleRequest>,
-) -> Result<(axum::http::StatusCode, Json<ItemEnvelope<PartyRole>>), AppError> {
+) -> Result<(axum::http::StatusCode, Json<ItemEnvelope<AssignedRole>>), AppError> {
     let (created, assignment) =
         service::assign_role(&state, &caller, id, &role_type_id, request).await?;
 
@@ -237,7 +251,7 @@ async fn assign_role(
 async fn remove_role(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path((id, role_type_id)): Path<(Uuid, String)>,
+    PathParam((id, role_type_id)): PathParam<(Uuid, String)>,
 ) -> Result<axum::http::StatusCode, AppError> {
     service::remove_role(&state, &caller, id, &role_type_id).await?;
 
@@ -275,7 +289,7 @@ async fn list_role_view(
 async fn list_suppliers(
     State(state): State<AppState>,
     caller: Authenticated,
-    Query(query): Query<RoleViewQuery>,
+    QueryParams(query): QueryParams<RoleViewQuery>,
 ) -> Result<Json<ListEnvelope<RoleViewRow>>, AppError> {
     list_role_view(&state, &caller, RoleView::Supplier, &query).await
 }
@@ -293,7 +307,7 @@ async fn list_suppliers(
 async fn list_customers(
     State(state): State<AppState>,
     caller: Authenticated,
-    Query(query): Query<RoleViewQuery>,
+    QueryParams(query): QueryParams<RoleViewQuery>,
 ) -> Result<Json<ListEnvelope<RoleViewRow>>, AppError> {
     list_role_view(&state, &caller, RoleView::Customer, &query).await
 }
@@ -311,7 +325,7 @@ async fn list_customers(
 async fn list_employees(
     State(state): State<AppState>,
     caller: Authenticated,
-    Query(query): Query<RoleViewQuery>,
+    QueryParams(query): QueryParams<RoleViewQuery>,
 ) -> Result<Json<ListEnvelope<RoleViewRow>>, AppError> {
     list_role_view(&state, &caller, RoleView::Employee, &query).await
 }
@@ -332,7 +346,7 @@ async fn list_employees(
 async fn list_facilities(
     State(state): State<AppState>,
     caller: Authenticated,
-    Query(pagination): Query<Pagination>,
+    QueryParams(pagination): QueryParams<Pagination>,
 ) -> Result<Json<ListEnvelope<FacilitySummary>>, AppError> {
     let (facilities, meta) = service::list_facilities(&state, &caller, &pagination).await?;
 
@@ -351,7 +365,7 @@ async fn list_facilities(
 async fn get_facility(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
 ) -> Result<Json<ItemEnvelope<Facility>>, AppError> {
     Ok(Json(ItemEnvelope::new(
         service::get_facility(&state, &caller, id).await?,
@@ -398,7 +412,7 @@ async fn create_facility(
 async fn update_facility(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
     JsonBody(request): JsonBody<UpdateFacilityRequest>,
 ) -> Result<Json<ItemEnvelope<Facility>>, AppError> {
     Ok(Json(ItemEnvelope::new(
@@ -421,7 +435,7 @@ async fn update_facility(
 async fn delete_facility(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
 ) -> Result<axum::http::StatusCode, AppError> {
     service::delete_facility(&state, &caller, id).await?;
 
@@ -453,7 +467,7 @@ async fn delete_facility(
 async fn transition_party(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
     JsonBody(request): JsonBody<TransitionRequest>,
 ) -> Result<Json<ItemEnvelope<TransitionResult>>, AppError> {
     Ok(Json(ItemEnvelope::new(
@@ -476,7 +490,7 @@ async fn transition_party(
 async fn transition_facility(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
+    PathParam(id): PathParam<Uuid>,
     JsonBody(request): JsonBody<TransitionRequest>,
 ) -> Result<Json<ItemEnvelope<TransitionResult>>, AppError> {
     Ok(Json(ItemEnvelope::new(
@@ -510,8 +524,8 @@ async fn transition_facility(
 async fn party_audit(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
-    Query(pagination): Query<Pagination>,
+    PathParam(id): PathParam<Uuid>,
+    QueryParams(pagination): QueryParams<Pagination>,
 ) -> Result<Json<ListEnvelope<AuditRecord>>, AppError> {
     let (records, meta) =
         service::list_audit_records(&state, &caller, TransitionTarget::Party, id, &pagination)
@@ -536,8 +550,8 @@ async fn party_audit(
 async fn facility_audit(
     State(state): State<AppState>,
     caller: Authenticated,
-    Path(id): Path<Uuid>,
-    Query(pagination): Query<Pagination>,
+    PathParam(id): PathParam<Uuid>,
+    QueryParams(pagination): QueryParams<Pagination>,
 ) -> Result<Json<ListEnvelope<AuditRecord>>, AppError> {
     let (records, meta) =
         service::list_audit_records(&state, &caller, TransitionTarget::Facility, id, &pagination)

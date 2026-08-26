@@ -31,7 +31,10 @@ use serde_json::Value;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use super::{bound_name, echoed_party_id, finish, non_empty, require_code, MAX_CODE_LENGTH};
+use super::{
+    bound_name, bounded, echoed_party_id, finish, non_empty, require_code, MAX_CODE_LENGTH,
+    MAX_VOCABULARY_LENGTH,
+};
 use crate::error::{AppError, ValidationDetail};
 
 /// The role type codes that have a profile table behind them (§4.12-4.15).
@@ -160,6 +163,65 @@ pub struct PartyRole {
     pub status_id: PartyRoleStatus,
     pub comments: Option<String>,
     pub additional_attributes: Value,
+}
+
+/// What `PUT .../roles/{roleTypeId}` answers with: the assignment **as this call
+/// stated it**, not as the row now reads.
+///
+/// **Why it is not [`PartyRole`].** #104 stopped this route answering with every
+/// role and profile the party holds, which had handed a caller holding only
+/// `master-data:party-role:assign` the bank accounts and credit limits that
+/// `master-data:party-role:read` exists to gate. It replaced the answer with
+/// `PartyRole` — and `PartyRole` still carries `comments` and
+/// `additionalAttributes`, which `update_party_role` **merges**. So a caller who
+/// sent neither got back the values somebody else wrote, one field over from the
+/// leak that had just been closed (#119).
+///
+/// Echoing the request is the fix rather than filtering the row, because a
+/// second gate is a second thing to keep in step with the first — the shape #104
+/// rejected for the same reason. An answer bounded by its own input cannot leak
+/// what it was not given.
+///
+/// The three merged members are therefore omitted when the request omitted them.
+/// `thruDate` is **not** omitted when absent: a `PUT` replaces the period, so an
+/// absent `thruDate` means *cleared*, and `null` is the accurate report of what
+/// this call did. A caller who wants the stored row asks `GET .../roles`, under
+/// the permission that governs it.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AssignedRole {
+    /// The role type's code, from the path — this call's own subject.
+    pub role_type_id: String,
+    /// Replaced by every `PUT`.
+    pub from_date: DateTime<Utc>,
+    /// Replaced by every `PUT`, so `null` means this call cleared it.
+    pub thru_date: Option<DateTime<Utc>>,
+    /// Merged: present only when this call sent it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_id: Option<PartyRoleStatus>,
+    /// Merged: present only when this call sent it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comments: Option<String>,
+    /// Merged: present only when this call sent it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub additional_attributes: Option<Value>,
+}
+
+impl AssignedRole {
+    /// The assignment as the request stated it.
+    ///
+    /// `role_type_code` comes from the path rather than from the request, which
+    /// is where the route carries it — the body has no `roleTypeId` to send.
+    pub fn echo(role_type_code: &str, request: &AssignRoleRequest) -> Self {
+        Self {
+            role_type_id: role_type_code.trim().to_owned(),
+            from_date: request.from_date,
+            thru_date: request.thru_date,
+            status_id: request.status_id,
+            comments: request.comments.clone(),
+            additional_attributes: request.additional_attributes.clone(),
+        }
+    }
 }
 
 /// The role-specific profiles a party carries. A member is present exactly when
@@ -495,6 +557,12 @@ fn validate_profile(
             &format!("{path}.bankAccount"),
             details,
         );
+        bound_code(
+            supplier.default_currency_uom.as_deref(),
+            &format!("{path}.defaultCurrencyUom"),
+            details,
+        );
+        bound_status(supplier.status_id.as_deref(), path, details);
     }
 
     if let Some(customer) = &profile.customer {
@@ -521,6 +589,12 @@ fn validate_profile(
             &format!("{path}.creditLimit"),
             details,
         );
+        bound_code(
+            customer.default_currency_uom.as_deref(),
+            &format!("{path}.defaultCurrencyUom"),
+            details,
+        );
+        bound_status(customer.status_id.as_deref(), path, details);
     }
 
     if let Some(employee) = &profile.employee {
@@ -543,6 +617,8 @@ fn validate_profile(
             details,
         );
 
+        bound_status(employee.status_id.as_deref(), path, details);
+
         if let (Some(join), Some(resign)) = (employee.join_date, employee.resign_date) {
             if resign < join {
                 details.push(ValidationDetail::new(
@@ -563,7 +639,26 @@ fn validate_profile(
             &format!("{path}.contactType"),
             details,
         );
+        bounded(
+            contact.preferred_contact_mech_type_id.as_deref(),
+            &format!("{path}.preferredContactMechTypeId"),
+            MAX_VOCABULARY_LENGTH,
+            details,
+        );
     }
+}
+
+/// Every profile carries its own `status`, and all four columns are
+/// `VARCHAR(40)` with no `CHECK` — the vocabulary is a deployment's to choose,
+/// which is why the field is a string here rather than an enum. Bounded rather
+/// than checked against a list for the same reason.
+fn bound_status(value: Option<&str>, path: &str, details: &mut Vec<ValidationDetail>) {
+    bounded(
+        value,
+        &format!("{path}.statusId"),
+        MAX_VOCABULARY_LENGTH,
+        details,
+    );
 }
 
 /// A profile's business number: required when the profile is being created,
@@ -587,16 +682,7 @@ fn require_business_number(
 }
 
 fn bound_code(value: Option<&str>, path: &str, details: &mut Vec<ValidationDetail>) {
-    if let Some(code) = non_empty(value) {
-        if code.chars().count() > MAX_CODE_LENGTH {
-            details.push(ValidationDetail::new(
-                path,
-                "maxLength",
-                "TOO_LONG",
-                format!("Must be at most {MAX_CODE_LENGTH} characters"),
-            ));
-        }
-    }
+    bounded(value, path, MAX_CODE_LENGTH, details);
 }
 
 fn require_decimal(value: Option<&str>, path: &str, details: &mut Vec<ValidationDetail>) {
@@ -643,6 +729,137 @@ mod tests {
                 details.into_iter().map(|detail| detail.path).collect()
             }
             other => panic!("expected a validation error, got {other:?}"),
+        }
+    }
+
+    /// The role-profile half of #109's sweep.
+    ///
+    /// **Its boundary.** Every `String` field of the four profile inputs that is
+    /// written to a `VARCHAR` column. Outside it: `additionalAttributes`
+    /// (JSONB), the fields typed as enums here and `CHECK`-constrained there
+    /// (`approvalStatus`, `employmentType`), the decimals (`creditLimit`), and
+    /// the three party references (`billingPartyId`, `managerPartyId`,
+    /// `assistantPartyId`) — those are resolved to a UUID before anything is
+    /// written, so an over-long value matches no party and is already a 422.
+    #[test]
+    fn every_profile_field_that_reaches_a_varchar_column_is_bounded() {
+        let over_64 = "x".repeat(MAX_CODE_LENGTH + 1);
+        let over_40 = "x".repeat(MAX_VOCABULARY_LENGTH + 1);
+        let over_200 = "x".repeat(super::super::MAX_NAME_LENGTH + 1);
+
+        let supplier = AssignRoleRequest {
+            profile: Some(RoleProfileInput {
+                supplier: Some(SupplierProfileInput {
+                    supplier_number: Some("SUP-0001".to_owned()),
+                    supplier_category: Some(over_64.clone()),
+                    default_currency_uom: Some(over_64.clone()),
+                    tax_number: Some(over_64.clone()),
+                    bank_name: Some(over_200.clone()),
+                    bank_account: Some(over_64.clone()),
+                    bank_account_name: Some(over_200.clone()),
+                    status_id: Some(over_40.clone()),
+                    ..SupplierProfileInput::default()
+                }),
+                ..RoleProfileInput::default()
+            }),
+            ..supplier_request()
+        };
+        let reported = paths(
+            validate_assign_role(&supplier, "SUPPLIER", "PARTY-0001", true).expect_err("invalid"),
+        );
+        for field in [
+            "profile.supplier.supplierCategory",
+            "profile.supplier.defaultCurrencyUom",
+            "profile.supplier.taxNumber",
+            "profile.supplier.bankName",
+            "profile.supplier.bankAccount",
+            "profile.supplier.bankAccountName",
+            "profile.supplier.statusId",
+        ] {
+            assert!(
+                reported.contains(&field.to_owned()),
+                "{field} reaches its column unbounded; reported {reported:?}"
+            );
+        }
+
+        let customer = AssignRoleRequest {
+            profile: Some(RoleProfileInput {
+                customer: Some(CustomerProfileInput {
+                    customer_number: Some("CUS-0001".to_owned()),
+                    customer_category: Some(over_64.clone()),
+                    default_currency_uom: Some(over_64.clone()),
+                    tax_number: Some(over_64.clone()),
+                    status_id: Some(over_40.clone()),
+                    ..CustomerProfileInput::default()
+                }),
+                ..RoleProfileInput::default()
+            }),
+            ..supplier_request()
+        };
+        let reported = paths(
+            validate_assign_role(&customer, "CUSTOMER", "PARTY-0001", true).expect_err("invalid"),
+        );
+        for field in [
+            "profile.customer.customerCategory",
+            "profile.customer.defaultCurrencyUom",
+            "profile.customer.taxNumber",
+            "profile.customer.statusId",
+        ] {
+            assert!(
+                reported.contains(&field.to_owned()),
+                "{field} reaches its column unbounded; reported {reported:?}"
+            );
+        }
+
+        let employee = AssignRoleRequest {
+            profile: Some(RoleProfileInput {
+                employee: Some(EmployeeProfileInput {
+                    employee_number: Some("EMP-0001".to_owned()),
+                    position: Some(over_200),
+                    job_grade: Some(over_64.clone()),
+                    status_id: Some(over_40.clone()),
+                    ..EmployeeProfileInput::default()
+                }),
+                ..RoleProfileInput::default()
+            }),
+            ..supplier_request()
+        };
+        let reported = paths(
+            validate_assign_role(&employee, "EMPLOYEE", "PARTY-0001", true).expect_err("invalid"),
+        );
+        for field in [
+            "profile.employee.position",
+            "profile.employee.jobGrade",
+            "profile.employee.statusId",
+        ] {
+            assert!(
+                reported.contains(&field.to_owned()),
+                "{field} reaches its column unbounded; reported {reported:?}"
+            );
+        }
+
+        let contact = AssignRoleRequest {
+            profile: Some(RoleProfileInput {
+                contact: Some(ContactProfileInput {
+                    contact_type: Some(over_64),
+                    preferred_contact_mech_type_id: Some(over_40),
+                    ..ContactProfileInput::default()
+                }),
+                ..RoleProfileInput::default()
+            }),
+            ..supplier_request()
+        };
+        let reported = paths(
+            validate_assign_role(&contact, "CONTACT", "PARTY-0001", true).expect_err("invalid"),
+        );
+        for field in [
+            "profile.contact.contactType",
+            "profile.contact.preferredContactMechTypeId",
+        ] {
+            assert!(
+                reported.contains(&field.to_owned()),
+                "{field} reaches its column unbounded; reported {reported:?}"
+            );
         }
     }
 

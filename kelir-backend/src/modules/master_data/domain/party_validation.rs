@@ -10,8 +10,8 @@
 
 use super::party::*;
 use super::{
-    bound_name, echoed_party_id, finish, non_empty, require_code, require_name, MAX_CODE_LENGTH,
-    MAX_PARTY_CODE_LENGTH,
+    bound_name, bounded, echoed_party_id, finish, non_empty, require_code, require_name,
+    MAX_CODE_LENGTH, MAX_EXTERNAL_ID_LENGTH, MAX_PARTY_CODE_LENGTH, MAX_VOCABULARY_LENGTH,
 };
 use crate::error::{AppError, ValidationDetail};
 
@@ -22,6 +22,12 @@ pub fn validate_create_party(request: &CreatePartyRequest) -> Result<(), AppErro
     let mut details = Vec::new();
 
     validate_party_code(&request.party_id, &mut details);
+    bounded(
+        request.external_id.as_deref(),
+        "externalId",
+        MAX_EXTERNAL_ID_LENGTH,
+        &mut details,
+    );
 
     match request.party_type_id {
         PartyType::Person => {
@@ -87,6 +93,13 @@ pub fn validate_update_party(
 ) -> Result<(), AppError> {
     let mut details = Vec::new();
 
+    bounded(
+        request.external_id.as_deref(),
+        "externalId",
+        MAX_EXTERNAL_ID_LENGTH,
+        &mut details,
+    );
+
     match (party_type, &request.person, &request.party_group) {
         (PartyType::Person, Some(person), _) => {
             validate_person(person, party_code, false, &mut details);
@@ -149,6 +162,11 @@ fn validate_children(
             MAX_CODE_LENGTH,
             details,
         );
+        bound_name(
+            identification.issued_by.as_deref(),
+            &format!("{path}.issuedBy"),
+            details,
+        );
     }
 
     for (index, relationship) in relationships_from.iter().enumerate() {
@@ -172,9 +190,16 @@ fn validate_children(
     }
 
     for (index, classification) in classifications.iter().enumerate() {
+        let path = format!("classifications[{index}]");
         require_code(
             &classification.party_class_type_id,
-            &format!("classifications[{index}].partyClassTypeId"),
+            &format!("{path}.partyClassTypeId"),
+            MAX_CODE_LENGTH,
+            details,
+        );
+        bounded(
+            classification.party_classification_id.as_deref(),
+            &format!("{path}.partyClassificationId"),
             MAX_CODE_LENGTH,
             details,
         );
@@ -201,6 +226,13 @@ fn validate_relationship(
         &relationship.party_relationship_type_id,
         &format!("{path}.partyRelationshipTypeId"),
         MAX_CODE_LENGTH,
+        details,
+    );
+
+    bounded(
+        relationship.status_id.as_deref(),
+        &format!("{path}.statusId"),
+        MAX_VOCABULARY_LENGTH,
         details,
     );
 
@@ -281,6 +313,17 @@ fn validate_contact_mech(
         (Some(_), None) => {}
     }
 
+    // The defect #109 reports: `purpose_type` is `VARCHAR(64)` and nothing
+    // bounded the field that fills it, so an over-long value reached the INSERT
+    // and came back as a 500. Every other code field on this surface already
+    // went through `require_code`; this one was missed.
+    bounded(
+        mechanism.purpose_type_id.as_deref(),
+        &format!("{path}.purposeTypeId"),
+        MAX_CODE_LENGTH,
+        details,
+    );
+
     if let Some(thru) = mechanism.thru_date {
         if thru < mechanism.from_date {
             details.push(ValidationDetail::new(
@@ -308,6 +351,13 @@ fn validate_person(
         require_name(person.last_name.as_deref(), "person.lastName", details);
     }
 
+    bounded(
+        person.marital_status.as_deref(),
+        "person.maritalStatus",
+        MAX_VOCABULARY_LENGTH,
+        details,
+    );
+
     bound_name(person.middle_name.as_deref(), "person.middleName", details);
     bound_name(
         person.personal_title.as_deref(),
@@ -328,6 +378,13 @@ fn validate_party_group(
     if required || group.group_name.is_some() {
         require_name(group.group_name.as_deref(), "partyGroup.groupName", details);
     }
+
+    bounded(
+        group.ticker_symbol.as_deref(),
+        "partyGroup.tickerSymbol",
+        MAX_CODE_LENGTH,
+        details,
+    );
 
     bound_name(group.local_name.as_deref(), "partyGroup.localName", details);
     bound_name(
@@ -409,6 +466,10 @@ mod tests {
         }
     }
 
+    fn epoch() -> DateTime<Utc> {
+        DateTime::<Utc>::from_timestamp(0, 0).expect("epoch is a valid timestamp")
+    }
+
     fn paths(error: AppError) -> Vec<String> {
         match error {
             AppError::Validation { details } => {
@@ -465,6 +526,176 @@ mod tests {
         };
         assert!(paths(validate_create_party(&both).expect_err("invalid"))
             .contains(&"person".to_owned()));
+    }
+
+    /// The sweep #109 asked for, as an assertion rather than a note.
+    ///
+    /// Each entry is a field that reaches a bounded `VARCHAR` column. Before
+    /// this, seven of them had no bound in front of them and an over-long value
+    /// reached the INSERT — a `sqlx` error, an `INTERNAL_ERROR`, and a 500 where
+    /// the contract promises a 422 naming the field.
+    ///
+    /// **The boundary of the sweep.** It covers every `String` field of
+    /// `CreatePartyRequest`, `UpdatePartyRequest` and their five child inputs
+    /// that is written to a `VARCHAR` column. It does *not* cover: fields
+    /// written to `TEXT` columns (`description`, every `comments`, a mechanism's
+    /// `displayValue`), which have no width to exceed; fields that are enums
+    /// here and `CHECK`-constrained there (`partyTypeId`, `statusId` on the
+    /// party, `gender`, `contactMechTypeId`); and the business codes that are
+    /// *resolved to a UUID* before anything is written (`partyIdFrom`/`To`,
+    /// `roleTypeIdFrom`/`To`, and the three party references on the role
+    /// profiles) — an over-long value there does not match a row, which is a
+    /// 422 already.
+    #[test]
+    fn every_string_field_that_reaches_a_varchar_column_is_bounded() {
+        let over_64 = "x".repeat(MAX_CODE_LENGTH + 1);
+        let over_40 = "x".repeat(MAX_VOCABULARY_LENGTH + 1);
+        let over_200 = "x".repeat(crate::modules::master_data::domain::MAX_NAME_LENGTH + 1);
+        let over_255 = "x".repeat(MAX_EXTERNAL_ID_LENGTH + 1);
+
+        let request = CreatePartyRequest {
+            external_id: Some(over_255),
+            person: Some(PersonInput {
+                first_name: Some("Jane".to_owned()),
+                last_name: Some("Doe".to_owned()),
+                marital_status: Some(over_40.clone()),
+                ..PersonInput::default()
+            }),
+            identifications: vec![PartyIdentificationInput {
+                party_identification_type_id: "PASSPORT_NUMBER".to_owned(),
+                id_value: "X1".to_owned(),
+                issued_by: Some(over_200),
+                issue_date: None,
+                expire_date: None,
+                additional_attributes: None,
+            }],
+            classifications: vec![PartyClassificationInput {
+                party_class_type_id: "CONTACT_TIER".to_owned(),
+                party_classification_id: Some(over_64.clone()),
+                from_date: epoch(),
+                thru_date: None,
+                comments: None,
+            }],
+            relationships_from: vec![PartyRelationshipInput {
+                party_id_from: "PARTY-0001".to_owned(),
+                role_type_id_from: None,
+                party_id_to: "PARTY-0002".to_owned(),
+                role_type_id_to: None,
+                party_relationship_type_id: "EMPLOYMENT".to_owned(),
+                from_date: epoch(),
+                thru_date: None,
+                status_id: Some(over_40),
+                priority: None,
+                comments: None,
+                additional_attributes: None,
+            }],
+            contact_mechanisms: vec![PartyContactMechInput {
+                contact_mech_id: Some(Uuid::nil()),
+                contact_mech_type_id: None,
+                purpose_type_id: Some(over_64),
+                from_date: epoch(),
+                thru_date: None,
+                is_primary: false,
+                allow_solicitation: true,
+                detail: None,
+                additional_attributes: None,
+            }],
+            ..person_request()
+        };
+
+        let reported = paths(validate_create_party(&request).expect_err("invalid"));
+
+        for field in [
+            "externalId",
+            "person.maritalStatus",
+            "identifications[0].issuedBy",
+            "classifications[0].partyClassificationId",
+            "relationshipsFrom[0].statusId",
+            "contactMechanisms[0].purposeTypeId",
+        ] {
+            assert!(
+                reported.contains(&field.to_owned()),
+                "{field} reaches its column unbounded; reported {reported:?}"
+            );
+        }
+    }
+
+    /// `tickerSymbol` is on the group input, so it needs the group request.
+    #[test]
+    fn a_ticker_symbol_longer_than_its_column_is_refused() {
+        let request = CreatePartyRequest {
+            party_group: Some(PartyGroupInput {
+                group_name: Some("Acme Supplies".to_owned()),
+                ticker_symbol: Some("x".repeat(MAX_CODE_LENGTH + 1)),
+                ..PartyGroupInput::default()
+            }),
+            ..group_request()
+        };
+
+        assert!(paths(validate_create_party(&request).expect_err("invalid"))
+            .contains(&"partyGroup.tickerSymbol".to_owned()));
+    }
+
+    /// An update takes the same payload shapes and had the same hole.
+    #[test]
+    fn an_update_bounds_the_same_fields_a_create_does() {
+        let request = UpdatePartyRequest {
+            status_id: None,
+            external_id: Some("x".repeat(MAX_EXTERNAL_ID_LENGTH + 1)),
+            description: None,
+            person: None,
+            party_group: None,
+            identifications: None,
+            relationships_from: None,
+            relationships_to: None,
+            classifications: None,
+            contact_mechanisms: Some(vec![PartyContactMechInput {
+                contact_mech_id: Some(Uuid::nil()),
+                contact_mech_type_id: None,
+                purpose_type_id: Some("x".repeat(MAX_CODE_LENGTH + 1)),
+                from_date: epoch(),
+                thru_date: None,
+                is_primary: false,
+                allow_solicitation: true,
+                detail: None,
+                additional_attributes: None,
+            }]),
+            additional_attributes: None,
+            status_comments: None,
+        };
+
+        let reported = paths(
+            validate_update_party(&request, "PARTY-0001", PartyType::Person).expect_err("invalid"),
+        );
+
+        assert!(reported.contains(&"externalId".to_owned()), "{reported:?}");
+        assert!(
+            reported.contains(&"contactMechanisms[0].purposeTypeId".to_owned()),
+            "{reported:?}"
+        );
+    }
+
+    /// A value exactly at the bound is accepted. Off-by-one in the other
+    /// direction turns a fix into a new refusal of valid data.
+    #[test]
+    fn a_value_exactly_at_the_bound_is_accepted() {
+        let request = CreatePartyRequest {
+            external_id: Some("x".repeat(MAX_EXTERNAL_ID_LENGTH)),
+            contact_mechanisms: vec![PartyContactMechInput {
+                contact_mech_id: Some(Uuid::nil()),
+                contact_mech_type_id: None,
+                purpose_type_id: Some("x".repeat(MAX_CODE_LENGTH)),
+                from_date: epoch(),
+                thru_date: None,
+                is_primary: false,
+                allow_solicitation: true,
+                detail: None,
+                additional_attributes: None,
+            }],
+            ..person_request()
+        };
+
+        assert!(validate_create_party(&request).is_ok());
     }
 
     #[test]

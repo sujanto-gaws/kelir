@@ -88,11 +88,22 @@ pub struct RoleViewRow {
 /// Query parameters accepted by all three role views (FR-MDM-008).
 ///
 /// The vocabularies arrive as strings rather than as the enums they name, and
-/// are parsed by [`RoleViewQuery::filters`]. Deserializing them directly would
-/// hand an unrecognised value to Axum's `Query` rejection, which answers 400 in
-/// plain text — outside the error envelope every other refusal in this API uses
-/// (naming convention §5). A mistyped filter value is a 422 that names the
-/// parameter, like every other bad input.
+/// are parsed by [`RoleViewQuery::filters`].
+///
+/// **The original reason for that is gone; a smaller one remains.** Hand-parsing
+/// was introduced because deserializing the enums directly would hand an
+/// unrecognised value to Axum's `Query` rejection, which answered 400 in plain
+/// text — outside the error envelope every other refusal in this API uses
+/// (naming convention §5). That comment then claimed a mistyped filter was a 422
+/// "like every other bad input", which was not true of `page` and `pageSize` in
+/// this same struct: they were `Option<u32>` and got the bare 400 (#122). The
+/// extractor is now [`crate::extract::QueryParams`], every parameter here lands
+/// in the envelope, and the two families answer alike.
+///
+/// What hand-parsing still buys is the *content* of the refusal, which the
+/// extractor cannot produce: `Must be one of PARTY_ENABLED, PARTY_DISABLED`
+/// instead of serde's `unknown variant`, and every bad filter collected before
+/// any is reported, so a caller who got two wrong learns both from one response.
 ///
 /// Unknown parameters are ignored rather than refused, which is what
 /// [`Pagination`] already does everywhere else in the API; `deny_unknown_fields`

@@ -281,6 +281,44 @@ describe('LoginPage', () => {
   })
 
   /**
+   * A session that ended on its own (#68) puts the caller here without their
+   * asking, and with nothing to explain it. Arriving after a lost session and
+   * arriving from a deep link look identical otherwise — both carry `redirect`
+   * and neither carries a session — so the router says which this is.
+   */
+  describe('arriving after a session ended on its own', () => {
+    it('says the session ended', async () => {
+      const wrapper = await renderAt('/login?redirect=/documents/7&sessionEnded=1')
+
+      expect(wrapper.text()).toContain('Your session has ended')
+      expect(wrapper.find('form').exists()).toBe(true)
+    })
+
+    it('says nothing to a caller who was never signed in', async () => {
+      // A deep link opened by somebody with no session. There is nothing to
+      // explain, and telling them their session ended would be a small lie.
+      const wrapper = await renderAt('/login?redirect=/documents/7')
+
+      expect(wrapper.text()).not.toContain('Your session has ended')
+    })
+
+    it('yields to the unconfirmed-session notice, which is the better answer', async () => {
+      // Both could apply after a transport failure. Only one of them offers a
+      // retry and says the sign-in is not lost, and two notices contradicting
+      // each other is worse than one.
+      window.localStorage.setItem(
+        'kelir.auth',
+        JSON.stringify({ accessToken: 'access-1', refreshToken: 'refresh-1' }),
+      )
+
+      const wrapper = await renderAt('/login?sessionEnded=1')
+
+      expect(wrapper.text()).toContain('You are still signed in')
+      expect(wrapper.text()).not.toContain('Your session has ended')
+    })
+  })
+
+  /**
    * A transport failure now leaves the tokens in place, so the guard can land a
    * caller here whose session is perfectly good. Asking them to retype
    * credentials they never lost would be the wrong remedy.
