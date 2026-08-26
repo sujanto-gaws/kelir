@@ -213,6 +213,25 @@ describe('the payload a rendered form starts with', () => {
     expect(payload.title).toBeNull()
   })
 
+  it('takes a number from a number field, which Vue hands over already cast', async () => {
+    // The regression test for a defect #162 shipped and none of its tests could
+    // reach: Vue's `vModelText` casts for `type="number"` without being asked,
+    // so `NumberField`'s setter was handed a `number` where it expected a
+    // `string` and threw `next.trim is not a function` on the first keystroke
+    // into any number field on any form. Nothing here typed into one.
+    const wrapper = render()
+
+    await flushPromises()
+    await wrapper.find('#jfss-budget-field').setValue('250')
+
+    const changes = wrapper.emitted('change')!
+    const payload = changes[changes.length - 1][0] as Record<string, unknown>
+
+    // And it is a number rather than the string the DOM carries, which is the
+    // property `NumberField` exists for.
+    expect(payload.budget).toBe(250)
+  })
+
   it('fills a datagrid sequenceKey with the 1-based row index', async () => {
     const wrapper = render()
 
