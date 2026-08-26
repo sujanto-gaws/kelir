@@ -22,7 +22,15 @@
           "label": "Title",
           "placeholder": "What is being requested",
           "description": "A short description other people will search for.",
-          "validation": { "type": "string", "required": true, "maxLength": 200 }
+          "validation": {
+            "type": "string",
+            "required": true,
+            "maxLength": 200,
+            "messages": {
+              "required": "Every request needs a title.",
+              "maxLength": "Keep the title under 200 characters."
+            }
+          }
         },
         {
           "id": "supplier-field",
@@ -30,7 +38,31 @@
           "type": "lookup",
           "key": "supplier_id",
           "label": "Supplier",
-          "validation": { "type": "string", "required": true }
+          "validation": {
+            "type": "string",
+            "required": true
+          }
+        },
+        {
+          "id": "cost-centre-field",
+          "role": "data",
+          "type": "textfield",
+          "key": "cost_centre",
+          "label": "Cost centre",
+          "placeholder": "FN-0142",
+          "validation": {
+            "type": "string"
+          },
+          "rules": [
+            {
+              "rule": "regex",
+              "scope": "both",
+              "params": {
+                "pattern": "^[A-Z]{2}-[0-9]{4}$"
+              },
+              "message": "A cost centre looks like FN-0142."
+            }
+          ]
         },
         {
           "id": "needed-by-field",
@@ -38,7 +70,10 @@
           "type": "date",
           "key": "needed_by",
           "label": "Needed by",
-          "validation": { "type": "string", "format": "date" }
+          "validation": {
+            "type": "string",
+            "format": "date"
+          }
         }
       ]
     },
@@ -56,7 +91,27 @@
               "key": "budget",
               "label": "Budget",
               "description": "In the requesting department's currency.",
-              "validation": { "type": "number", "minimum": 0 }
+              "validation": {
+                "type": "number",
+                "minimum": 0
+              }
+            },
+            {
+              "id": "baseline-field",
+              "role": "data",
+              "type": "number",
+              "key": "baseline_budget",
+              "label": "Baseline budget",
+              "description": "The figure this request opened with. Later edits to Budget do not move it.",
+              "defaultValue": 0,
+              "calculate": {
+                "var": "budget"
+              },
+              "calculateMode": "generated",
+              "readOnly": true,
+              "validation": {
+                "type": "number"
+              }
             }
           ]
         },
@@ -69,12 +124,27 @@
               "key": "priority",
               "label": "Priority",
               "options": [
-                { "label": "Low", "value": "LOW" },
-                { "label": "Normal", "value": "NORMAL" },
-                { "label": "High", "value": "HIGH" },
-                { "label": "Urgent", "value": "URGENT" }
+                {
+                  "label": "Low",
+                  "value": "LOW"
+                },
+                {
+                  "label": "Normal",
+                  "value": "NORMAL"
+                },
+                {
+                  "label": "High",
+                  "value": "HIGH"
+                },
+                {
+                  "label": "Urgent",
+                  "value": "URGENT"
+                }
               ],
-              "validation": { "type": "string", "required": true }
+              "validation": {
+                "type": "string",
+                "required": true
+              }
             }
           ]
         }
@@ -97,7 +167,10 @@
               "description": "One row per thing being ordered.",
               "sequenceKey": "line_no",
               "defaultItems": 1,
-              "validation": { "type": "array", "required": true },
+              "validation": {
+                "type": "array",
+                "required": true
+              },
               "components": [
                 {
                   "id": "line-no",
@@ -106,7 +179,9 @@
                   "key": "line_no",
                   "label": "Line",
                   "readOnly": true,
-                  "validation": { "type": "integer" }
+                  "validation": {
+                    "type": "integer"
+                  }
                 },
                 {
                   "id": "line-description",
@@ -114,7 +189,10 @@
                   "type": "textfield",
                   "key": "description",
                   "label": "Description",
-                  "validation": { "type": "string", "required": true }
+                  "validation": {
+                    "type": "string",
+                    "required": true
+                  }
                 },
                 {
                   "id": "line-quantity",
@@ -122,7 +200,13 @@
                   "type": "number",
                   "key": "quantity",
                   "label": "Quantity",
-                  "validation": { "type": "integer", "minimum": 1 }
+                  "validation": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "messages": {
+                      "minimum": "A line orders at least one."
+                    }
+                  }
                 },
                 {
                   "id": "line-unit-price",
@@ -130,9 +214,71 @@
                   "type": "number",
                   "key": "unit_price",
                   "label": "Unit price",
-                  "validation": { "type": "number", "minimum": 0 }
+                  "validation": {
+                    "type": "number",
+                    "minimum": 0
+                  }
+                },
+                {
+                  "id": "line-total",
+                  "role": "data",
+                  "type": "number",
+                  "key": "line_total",
+                  "label": "Line total",
+                  "calculate": {
+                    "*": [
+                      {
+                        "var": "unit_price"
+                      },
+                      {
+                        "var": "quantity"
+                      }
+                    ]
+                  },
+                  "validation": {
+                    "type": "number"
+                  }
                 }
               ]
+            },
+            {
+              "id": "grand-total-field",
+              "role": "data",
+              "type": "number",
+              "key": "grand_total",
+              "label": "Grand total",
+              "calculate": {
+                "sum": [
+                  {
+                    "map": [
+                      {
+                        "var": "line_items"
+                      },
+                      {
+                        "*": [
+                          {
+                            "var": "unit_price"
+                          },
+                          {
+                            "var": "quantity"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              "validation": {
+                "type": "number"
+              }
+            },
+            {
+              "id": "total-echo",
+              "role": "display",
+              "type": "paragraph",
+              "calculate": {
+                "var": "grand_total"
+              }
             }
           ]
         },
@@ -146,12 +292,40 @@
               "title": "Anything else",
               "components": [
                 {
+                  "id": "justification-field",
+                  "role": "data",
+                  "type": "textarea",
+                  "key": "justification",
+                  "label": "Justification",
+                  "conditional": {
+                    "action": "show",
+                    "logic": {
+                      ">": [
+                        {
+                          "var": "budget"
+                        },
+                        1000
+                      ]
+                    }
+                  },
+                  "validation": {
+                    "type": "string",
+                    "required": true,
+                    "messages": {
+                      "required": "A request over 1,000 needs a justification."
+                    }
+                  }
+                },
+                {
                   "id": "notes-field",
                   "role": "data",
                   "type": "textarea",
                   "key": "notes",
                   "label": "Notes",
-                  "validation": { "type": "string", "maxLength": 2000 }
+                  "validation": {
+                    "type": "string",
+                    "maxLength": 2000
+                  }
                 },
                 {
                   "id": "category-field",
@@ -171,7 +345,9 @@
                   "key": "urgent",
                   "label": "This request is urgent",
                   "description": "Urgent requests are reviewed the same day.",
-                  "validation": { "type": "boolean" }
+                  "validation": {
+                    "type": "boolean"
+                  }
                 }
               ]
             }
@@ -179,7 +355,11 @@
         }
       ]
     },
-    { "id": "divider-1", "role": "display", "type": "divider" },
+    {
+      "id": "divider-1",
+      "role": "display",
+      "type": "divider"
+    },
     {
       "id": "approval-note",
       "role": "display",

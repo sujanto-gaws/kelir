@@ -4,6 +4,7 @@ import { computed, onMounted } from 'vue'
 import DataGridRow from './DataGridRow.vue'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
+import { useFormEvaluation, useValueScope } from '@/features/rad/renderer/useFormEvaluation'
 import { dataComponents, type JfssComponent, type JfssDataComponent } from '@/types/jfss'
 
 /**
@@ -35,6 +36,20 @@ const rows = computed<Record<string, unknown>[]>(() =>
 )
 
 const template = computed<JfssComponent[]>(() => props.component.components ?? [])
+
+/**
+ * The grid's own verdict, which is about the array and not about a cell.
+ *
+ * `required` on an empty repeater, `uniqueItems`, and `uniqueBy` — the three §5
+ * keywords that apply to an `array` — are decided here because they are
+ * properties of the whole column, and a message under one row would be pointing
+ * at the wrong thing. Each row's fields carry their own message, from the same
+ * shell every other field wears.
+ */
+const evaluation = useFormEvaluation()
+const values = useValueScope()
+
+const violation = computed(() => evaluation?.violationFor(props.component, values.value))
 
 /** A blank row: every template field present, so the payload shape is stable. */
 function blankRow(): Record<string, unknown> {
@@ -108,6 +123,10 @@ onMounted(() => {
     </p>
 
     <p v-if="rows.length === 0" class="text-sm text-muted-foreground">No rows yet.</p>
+
+    <p v-if="violation" class="text-sm text-destructive" data-testid="field-error">
+      {{ violation.message }}
+    </p>
 
     <div
       v-for="(row, index) in rows"

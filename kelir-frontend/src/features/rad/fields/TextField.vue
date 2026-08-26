@@ -14,8 +14,9 @@ const emit = defineEmits<{ (e: 'update:modelValue', value: unknown): void }>()
  * The browser's own affordances for an email or a URL — the keyboard a phone
  * shows, the built-in hint — come free with the right `type` and cost nothing
  * to opt into. **This is not validation:** an `email` input does not refuse a
- * bad address here, #163 does that from `validation.format`, and the two read
- * the same property so they cannot disagree about which fields are addresses.
+ * bad address here, `validation.ts` does that from `validation.format`, and the
+ * two read the same property so they cannot disagree about which fields are
+ * addresses.
  */
 const inputType = computed(() => {
   switch (props.component.validation.format) {
@@ -35,7 +36,7 @@ const value = computed({
 </script>
 
 <template>
-  <FieldShell v-slot="{ controlId, describedBy }" :component="component">
+  <FieldShell v-slot="{ controlId, describedBy, invalid }" :component="component">
     <Input
       :id="controlId"
       v-model="value"
@@ -43,6 +44,7 @@ const value = computed({
       :placeholder="component.placeholder"
       :required="component.validation.required"
       :disabled="component.readOnly"
+      :invalid="invalid"
       :described-by="describedBy"
     />
   </FieldShell>

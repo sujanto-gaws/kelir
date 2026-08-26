@@ -35,13 +35,14 @@ const value = computed({
 </script>
 
 <template>
-  <FieldShell v-slot="{ controlId, describedBy }" :component="component">
+  <FieldShell v-slot="{ controlId, describedBy, invalid }" :component="component">
     <Input
       :id="controlId"
       v-model="value"
       :type="inputType"
       :required="component.validation.required"
       :disabled="component.readOnly"
+      :invalid="invalid"
       :described-by="describedBy"
     />
   </FieldShell>

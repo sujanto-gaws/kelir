@@ -69,6 +69,61 @@ describe('sumOperator', () => {
   })
 })
 
+describe('sum comes from one place', () => {
+  /**
+   * Calculation Rule Registry §4.3 forbids reimplementing a standard operator,
+   * and #163 AC2 requires the `sum` #154 registers rather than a local one.
+   *
+   * **The property is about the whole source tree and not about this module**,
+   * so the test discovers its subjects rather than listing them — the [Sprint 6
+   * retrospective](../../../projects/retrospectives/04.%20Sprint%206%20Retrospective.md)'s
+   * eighth action. A field component added next sprint that quietly totals its
+   * own rows fails here, which is the cost the construction plan §5.4 priced at
+   * one grep.
+   */
+  // Paths come back relative to this spec, which sits beside the module the
+  // property is about — so `src/lib/jsonlogic.ts` is `./jsonlogic.ts` here.
+  const EVALUATOR = './jsonlogic.ts'
+
+  const sources = Object.entries(
+    import.meta.glob<string>('../**/*.{ts,vue}', {
+      query: '?raw',
+      import: 'default',
+      eager: true,
+    }),
+    // Specs are excluded, and this one is why: a test that names the thing it
+    // forbids would otherwise be the first thing it caught.
+  ).filter(([path]) => !path.endsWith('.spec.ts'))
+
+  /** How the engine is told about an operator, in either of its two spellings. */
+  const REGISTRATION = /customOperators|addOperator/
+
+  it('found a source tree to look at', () => {
+    // Without this, the assertion below passes over an empty set — a green test
+    // proving that nothing was looked at.
+    expect(sources.length).toBeGreaterThan(20)
+  })
+
+  it('registers an operator in this module and nowhere else', () => {
+    const elsewhere = sources
+      .filter(([path]) => path !== EVALUATOR)
+      .filter(([, source]) => REGISTRATION.test(source))
+      .map(([path]) => path)
+
+    expect(
+      elsewhere,
+      `operator registration outside lib/jsonlogic.ts: ${elsewhere.join(', ')}`,
+    ).toEqual([])
+  })
+
+  it('is the module that registers one, so the assertion above is not vacuous', () => {
+    const evaluator = sources.find(([path]) => path === EVALUATOR)
+
+    expect(evaluator, 'the evaluator module was not in the glob').toBeDefined()
+    expect(REGISTRATION.test(evaluator![1])).toBe(true)
+  })
+})
+
 describe('the evaluator', () => {
   let evaluator: RuleEvaluator
 

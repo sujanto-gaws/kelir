@@ -1,8 +1,14 @@
 <script setup lang="ts">
-import { reactive, watch } from 'vue'
+import { computed, reactive, toRef, watch } from 'vue'
 
 import JfssRenderer from './renderer/JfssRenderer.vue'
+import {
+  createFormEvaluation,
+  provideFormEvaluation,
+  provideValueScope,
+} from './renderer/useFormEvaluation'
 import { provideLookupBindings } from './renderer/useLookupBindings'
+import { Alert } from '@/components/ui/alert'
 import { dataComponents, type JfssDefinition } from '@/types/jfss'
 
 const props = defineProps<{
@@ -17,32 +23,50 @@ const emit = defineEmits<{
 }>()
 
 /**
- * A definition, rendered as a form (#162).
+ * A definition, rendered as a form that evaluates its own rules (#162, #163).
  *
  * **The payload lives here and the renderer is stateless.** One reactive object
- * that every field reads its value out of and writes its value into, which is
- * what makes #163's calculation possible without restructuring anything: a
- * derived field is a value in this object that something else computes.
+ * that every field reads its value out of and writes its value into — which is
+ * what made #163 possible without restructuring anything, because a derived
+ * field is a value in this object that something else computes.
  *
- * **What this form does not do yet, by the sprint plan's split:** it does not
- * validate, does not evaluate `calculate` or `conditional`, and does not
- * submit. An action reaches the page as an event, so that #164 has somewhere
- * to attach a submit rather than a button that currently does nothing quietly.
+ * **What this form still does not do:** submit. #164 owns what `submit` means
+ * and where the payload goes; what is here is whether it may happen at all,
+ * which is validation's question and therefore this issue's.
  */
 const values = reactive<Record<string, unknown>>({})
 
 /**
- * JFSS §4.2.3 Case A: resolve once, on mount.
+ * The rules, running over the payload above.
  *
- * Existing payload first, `defaultValue` second — an edit of a stored document
- * must never have its values replaced by the definition's defaults, which is
- * what the priority table in Case A says and the order below implements.
+ * Created here rather than in the page, because the payload is here: an
+ * evaluation that had to be handed a payload from outside would be an
+ * evaluation two components could disagree about.
+ */
+const evaluation = createFormEvaluation(toRef(props, 'definition'), values)
+
+provideFormEvaluation(evaluation)
+
+// The scope a top-level `key` addresses is the payload itself. A datagrid's
+// rows open their own (see `DataGridRow.vue`), which is what lets one field
+// component serve both without knowing which it is in.
+provideValueScope(() => values)
+
+/**
+ * JFSS §4.2.3, as the decision procedure it is written as rather than a list.
  *
- * **Cases B and C are #163's.** A field carrying `calculate` resolves
- * differently — `derived` recomputes and always wins, `generated` resolves once
- * and never overwrites a persisted value — and both need an evaluator. Until
- * then such a field behaves as Case A, which shows the stored value rather than
- * a wrong computed one.
+ * **Case A — `calculate` absent.** Existing payload first, `defaultValue`
+ * second. An edit of a stored document must never have its values replaced by
+ * the definition's defaults.
+ *
+ * **Cases B and C — `calculate` present.** Neither is resolved here, and the
+ * `defaultValue` branch is skipped for both. Case B's computed value wins over
+ * every other source, so seeding one would be seeding something guaranteed to
+ * be overwritten; Case C ranks `calculate` **above** `defaultValue`, so seeding
+ * the default first would make the expression unreachable — the field would be
+ * non-null before anything evaluated it. Both are
+ * [`useFormEvaluation`](./renderer/useFormEvaluation.ts)'s, which applies the
+ * default itself as Case C's third priority.
  */
 function resolveInitialValues(): void {
   for (const key of Object.keys(values)) {
@@ -50,9 +74,11 @@ function resolveInitialValues(): void {
   }
 
   for (const field of dataComponents(props.definition.components)) {
+    const computedField = field.calculate !== undefined
+
     if (props.initialValues && field.key in props.initialValues) {
       values[field.key] = props.initialValues[field.key]
-    } else if (field.defaultValue !== undefined) {
+    } else if (field.defaultValue !== undefined && !computedField) {
       values[field.key] = field.defaultValue
     } else {
       // Present and empty rather than absent: a key that appears the moment
@@ -73,22 +99,84 @@ provideLookupBindings(props.definition.settings?.lookups)
 
 function updateField(key: string, value: unknown): void {
   values[key] = value
-  emit('change', { ...values })
 }
+
+/**
+ * `change`, emitted after the rules have run rather than as the value is set.
+ *
+ * `flush: 'post'` is the whole of it. The calculation pass is a `pre` watcher,
+ * so emitting inside `updateField` would hand a listener a payload whose
+ * derived fields are one tick behind — a `grand_total` from before the row that
+ * just changed, which is precisely the number a listener would be watching for.
+ * Emitting after the flush also means a value the rules computed reaches
+ * listeners at all; a value that only ever changed because something else
+ * computed it never passes through `updateField`.
+ */
+watch(values, () => emit('change', { ...values }), { deep: true, flush: 'post' })
+
+/**
+ * What a button means, and the one part of it that is this issue's.
+ *
+ * **`submit` is gated and every other action passes through.** #164 decides
+ * what submitting *does*; whether the payload is fit to submit is what the
+ * definition's rules answer, and answering it here is what makes AC1's
+ * per-field messages appear where a person can act on them. A `reset` or a
+ * `navigate` is not gated — refusing to let somebody leave a form because a
+ * field they never reached is empty would be a worse form than one with no
+ * validation at all.
+ *
+ * The messages stay hidden until this runs. Construction plan §5.6 argues that
+ * for calculations and the argument is the same here: a form that greets its
+ * user with red boxes it drew itself has told them nothing.
+ */
+function onAction(action: string): void {
+  if (action === 'submit' && !evaluation.reveal()) {
+    return
+  }
+
+  emit('action', action, { ...values })
+}
+
+/** Surfaced as top-level refs so the template reads them without `.value`. */
+const defect = evaluation.defect
+
+/** Registry rules the definition asks for that this side does not decide. */
+const undecided = computed(() =>
+  evaluation.undecided.value.filter((rule) => rule.scope !== 'server'),
+)
 </script>
 
 <template>
   <!-- `novalidate`: the browser's own bubbles would compete with the messages
-       #163 renders from the definition, and would be the only validation on a
-       form whose rules have not been built yet — which reads as working. -->
+       the definition supplies, and they would say something different — the
+       browser knows `required`, and knows nothing about `matchesField`. -->
   <form class="space-y-6" novalidate @submit.prevent>
+    <!-- A defect in the definition, not in what anybody typed (#163 AC3). It is
+         shown rather than thrown so the rest of the form still renders, and it
+         makes the form invalid so nothing is reported as checked that was not. -->
+    <Alert v-if="defect" variant="destructive" data-testid="form-defect">
+      <p class="font-medium">This form carries a rule Kelir cannot apply.</p>
+      <p class="mt-1">{{ defect }}</p>
+    </Alert>
+
+    <!-- A rule the registry defines and this side does not decide. Named, for
+         the reason `UnsupportedComponent` is: a check that quietly did not run
+         is indistinguishable from a check that passed. `server`-scoped rules
+         are filtered out above — those are not a gap, they are §3.3 working. -->
+    <Alert v-for="rule in undecided" :key="rule.rule" data-testid="form-undecided">
+      <p class="font-medium">
+        <code>{{ rule.rule }}</code> is checked when this form is submitted, not as you type.
+      </p>
+      <p class="mt-1">{{ rule.reason }}.</p>
+    </Alert>
+
     <JfssRenderer
       v-for="component in definition.components"
       :key="component.id"
       :component="component"
       :values="values"
       @update:field="updateField"
-      @action="(action: string) => emit('action', action, { ...values })"
+      @action="onAction"
     />
   </form>
 </template>

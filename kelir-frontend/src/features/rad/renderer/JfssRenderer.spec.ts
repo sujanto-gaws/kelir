@@ -185,10 +185,19 @@ describe('the payload a rendered form starts with', () => {
     // user happened to click. `budget` and `priority` live inside a `columns`
     // container and `notes` inside a `tabs` one — a walk that followed only
     // `components` would lose all three.
+    //
+    // `justification` is here while its `conditional` keeps it off the screen,
+    // which is S10.1.1 rather than an oversight: a hidden key is submitted and
+    // the server discards it, because the alternative makes the two engines
+    // evaluate the same condition against different data.
     expect(Object.keys(payload).sort()).toEqual(
       [
+        'baseline_budget',
         'budget',
         'category',
+        'cost_centre',
+        'grand_total',
+        'justification',
         'line_items',
         'needed_by',
         'notes',
@@ -206,7 +215,7 @@ describe('the payload a rendered form starts with', () => {
     const wrapper = render()
 
     // Present and empty, rather than absent. A `null` where an array belongs is
-    // what turns `sum` over line items into an evaluation error in #163.
+    // what turns `sum` over line items into an evaluation error.
     const payload = (wrapper.vm as unknown as { values: Record<string, unknown> }).values
 
     expect(Array.isArray(payload.line_items)).toBe(true)
@@ -218,7 +227,8 @@ describe('the payload a rendered form starts with', () => {
     // reach: Vue's `vModelText` casts for `type="number"` without being asked,
     // so `NumberField`'s setter was handed a `number` where it expected a
     // `string` and threw `next.trim is not a function` on the first keystroke
-    // into any number field on any form. Nothing here typed into one.
+    // into any number field on any form. Nothing here typed into one until
+    // #163's first calculation test did.
     const wrapper = render()
 
     await flushPromises()

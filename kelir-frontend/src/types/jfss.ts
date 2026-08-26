@@ -73,8 +73,14 @@ export interface JfssValidation {
   format?: 'email' | 'uri' | 'date' | 'time' | 'date-time' | 'uuid'
   enum?: unknown[]
   uniqueItems?: boolean
-  /** The child `key` an array's rows must be unique by (Validation Rule Registry). */
-  uniqueBy?: string
+  /**
+   * The child `key`, or keys, an array's rows must be unique by.
+   *
+   * The meta-schema's `oneOf` accepts a string or an array of them, and JFSS §5
+   * documents both — so several keys mean the *combination* is unique rather
+   * than each column separately.
+   */
+  uniqueBy?: string | string[]
   /** Per-keyword message overrides, keyed by the keyword they replace. */
   messages?: Record<string, string>
 }

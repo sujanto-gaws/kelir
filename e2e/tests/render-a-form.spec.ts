@@ -102,7 +102,12 @@ test('a published definition renders as a form, and every part of it comes from 
   //
   // A `columns` container and a `tabs` container, both of which a renderer that
   // walked only `components` would have dropped silently (JFSS §4.3.1).
-  await expect(page.getByLabel('Budget')).toBeVisible()
+  //
+  // `exact` on Budget: the same column also holds "Baseline budget", and
+  // `getByLabel` matches on substring by default — so the non-exact form
+  // resolves to two controls and fails on strict mode rather than on the thing
+  // it is asserting.
+  await expect(page.getByLabel('Budget', { exact: true })).toBeVisible()
   await expect(page.getByLabel('Priority')).toBeVisible()
   await expect(page.getByRole('tab', { name: 'Lines' })).toBeVisible()
   await expect(page.getByRole('tab', { name: 'Notes' })).toBeVisible()
@@ -139,8 +144,8 @@ test('a published definition renders as a form, and every part of it comes from 
 
   // --- The second tab's fields exist before the tab is opened --------------
   //
-  // Hidden, not absent: #163 validates the whole tree and #164 submits it, so a
-  // required field on an unopened tab must still count.
+  // Hidden, not absent: validation reads the whole tree and #164 submits it, so
+  // a required field on an unopened tab must still count.
   //
   // By role as well as by name. The fixture has a tab called "Notes" holding a
   // field called "Notes", and the panel takes its accessible name from its tab
@@ -160,10 +165,17 @@ test('a published definition renders as a form, and every part of it comes from 
   // here would be testing the fixture.
   await expect(page.locator('#jfss-supplier-field')).toBeEnabled()
 
-  // --- An action reaches the form, and says so honestly --------------------
+  // --- An action reaches the form, and the form's own rules answer it ------
   //
-  // Submitting is #164. The button raising its action is what #162 delivers,
-  // and the page says the rest is not built rather than appearing to work.
+  // Submitting is #164; whether a submission may happen at all is the
+  // definition's rules, which #163 made this form evaluate. So a click on a
+  // form nobody has filled in is *received* and *refused*, and the refusal is
+  // the evidence the button is wired — the accepted path is
+  // `a-form-calculates-and-validates.spec.ts`, which seeds a supplier and fills
+  // the form in properly.
   await page.getByRole('button', { name: 'Submit request' }).click()
-  await expect(page.getByTestId('form-action')).toContainText('submit')
+
+  await expect(page.getByText('Every request needs a title.')).toHaveCount(0)
+  await expect(page.locator('#jfss-supplier-field-error')).toBeVisible()
+  await expect(page.getByTestId('form-action')).toHaveCount(0)
 })

@@ -58,13 +58,14 @@ const selectedIndex = computed({
 </script>
 
 <template>
-  <FieldShell v-slot="{ controlId, describedBy }" :component="component">
+  <FieldShell v-slot="{ controlId, describedBy, invalid }" :component="component">
     <Select
       :id="controlId"
       v-model="selectedIndex"
       :options="choices"
       :placeholder="component.placeholder"
       :disabled="component.readOnly"
+      :invalid="invalid"
       :described-by="describedBy"
     />
   </FieldShell>

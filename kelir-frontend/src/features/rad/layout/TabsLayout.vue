@@ -12,8 +12,8 @@ const props = defineProps<{ component: JfssLayoutComponent }>()
  *
  * **Every tab's components stay mounted.** Only the inactive panels are hidden,
  * rather than rendered on demand — a required field on the third tab must count
- * against the form whether or not anybody opened that tab, and #163's
- * validation and #164's payload both read the whole tree. Rendering the active
+ * against the form whether or not anybody opened that tab, and validation and
+ * #164's payload both read the whole tree. Rendering the active
  * tab alone would make a form's validity depend on which tabs the user
  * happened to click, which is a defect that only appears on the definitions
  * that need it least.

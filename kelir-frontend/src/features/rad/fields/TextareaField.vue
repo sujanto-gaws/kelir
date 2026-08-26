@@ -15,12 +15,13 @@ const value = computed({
 </script>
 
 <template>
-  <FieldShell v-slot="{ controlId, describedBy }" :component="component">
+  <FieldShell v-slot="{ controlId, describedBy, invalid }" :component="component">
     <Textarea
       :id="controlId"
       v-model="value"
       :placeholder="component.placeholder"
       :disabled="component.readOnly"
+      :invalid="invalid"
       :described-by="describedBy"
     />
   </FieldShell>
