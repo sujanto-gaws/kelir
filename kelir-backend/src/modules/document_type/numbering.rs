@@ -4,13 +4,19 @@
 //! — and a sequence advances per scope, so `PR-2026-000001` starts again at
 //! `PR-2027-000001`.
 //!
-//! **This module is where the check-then-act shape lives**, and the project has
-//! produced that defect three times: #105 (a concurrent role assignment), #133
-//! (two re-parentings closing a loop) and #137 (a delete racing a child).
-//! Reading a sequence, adding one, and writing it back is the same shape at its
-//! purest, under concurrency, deciding a number a document keeps forever.
-//! [`allocate`] is written against coding standard §2.5's rule, which those
-//! three produced.
+//! **This module used to be where the check-then-act shape lived**, and the
+//! project has produced that defect four times: #105 (a concurrent role
+//! assignment), #133 (two re-parentings closing a loop), #137 (a delete racing
+//! a child) and #200 (this one, by a different route — the read and the write
+//! were correctly serialised and the *storage* could not hold what the scope
+//! needed). Since `0020_numbering_buckets.sql` there is no read to race: a
+//! number is taken by one `INSERT … ON CONFLICT DO UPDATE … RETURNING` against
+//! the bucket it belongs to.
+//!
+//! **A scope value is a row.** `GLOBAL` has one, `YEAR` and `MONTH` have one at
+//! a time in succession, and `DEPARTMENT_YEAR` has one per department live
+//! simultaneously — which is what one counter on the rule row could not
+//! express, and why every allocation that changed department used to reset it.
 //!
 //! **Two failures are specifically not acceptable**, and they pull in opposite
 //! directions:
@@ -118,9 +124,12 @@ pub struct NumberingRule {
     pub sequence_scope: SequenceScope,
     pub sequence_padding: i32,
     pub gap_policy: GapPolicy,
-    /// The bucket the counter is currently in — `2026` for a `YEAR` rule.
+    /// The furthest bucket this type's sequence has reached — `2026` for a
+    /// `YEAR` rule, `""` for a `GLOBAL` one, `<department>:2026` for a
+    /// `DEPARTMENT_YEAR` one. A department-scoped type has more buckets than
+    /// this names; the response reports the furthest rather than all of them.
     pub sequence_key: String,
-    /// The number the next document of this type will take, in that bucket.
+    /// The number the next document takes **in that bucket**.
     pub next_sequence: i64,
     pub is_active: bool,
 }
@@ -138,8 +147,11 @@ pub struct SetNumberingRuleRequest {
     pub sequence_scope: SequenceScope,
     pub sequence_padding: Option<i32>,
     pub gap_policy: Option<GapPolicy>,
-    /// Where the counter starts. Absent means 1, and it may not be lowered past
-    /// a number already issued — see [`validate_set`].
+    /// Where the counter starts, in the bucket the clock is in now. Absent
+    /// means 1, it may not be lowered past a number already issued, and it is
+    /// **refused on a `DEPARTMENT_YEAR` rule** — every department starts at 1
+    /// and which departments exist is not known when a rule is configured. See
+    /// [`validate_set`].
     pub next_sequence: Option<i64>,
 }
 
@@ -312,7 +324,27 @@ pub fn validate_set(
     }
 
     if let Some(next) = request.next_sequence {
-        if next < 1 {
+        if request.sequence_scope == SequenceScope::DepartmentYear {
+            // It has never done anything on this scope, and until
+            // `0020_numbering_buckets.sql` it was *stored* doing nothing: the
+            // value went onto the rule row under an empty bucket key, and the
+            // first allocation computed `<department>:<year>`, found no such
+            // bucket, and started at 1. A field that is accepted, persisted and
+            // ignored is worse than one that is refused, so it is refused.
+            //
+            // There is nothing to seed instead. A department-scoped sequence
+            // has one counter per department, and which departments exist is
+            // not known when the rule is configured — the first document names
+            // the first one.
+            details.push(ValidationDetail::new(
+                "nextSequence",
+                "conflict",
+                "NOT_SUPPORTED_FOR_SCOPE",
+                "a DEPARTMENT_YEAR rule counts separately in each department and \
+                 each starts at 1, so nextSequence cannot be set; it was accepted \
+                 and ignored before, which is why it is refused now",
+            ));
+        } else if next < 1 {
             details.push(ValidationDetail::new(
                 "nextSequence",
                 "range",
@@ -533,6 +565,24 @@ mod tests {
         let details = details(validate_set(&rewind, Some(42)).expect_err("refused"));
 
         assert!(details.iter().any(|detail| detail.code == "ALREADY_ISSUED"));
+    }
+
+    #[test]
+    fn refuses_a_start_sequence_on_a_department_scoped_rule() {
+        // Accepted, stored and ignored before 0020. A department-scoped rule
+        // has one counter per department and each starts at 1, so there is
+        // nothing for this to seed.
+        let mut seeded = request(
+            "PR-{department}-{year}-{sequence}",
+            SequenceScope::DepartmentYear,
+        );
+        seeded.next_sequence = Some(500);
+
+        let details = details(validate_set(&seeded, None).expect_err("refused"));
+
+        assert!(details
+            .iter()
+            .any(|detail| detail.code == "NOT_SUPPORTED_FOR_SCOPE"));
     }
 
     #[test]

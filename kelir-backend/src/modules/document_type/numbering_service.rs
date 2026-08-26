@@ -96,12 +96,31 @@ pub async fn set_rule(
                 .gap_policy
                 .unwrap_or(GapPolicy::Gapless)
                 .allows_gaps(),
-            sequence_key: &key,
-            next_sequence: request.next_sequence.unwrap_or(1),
         },
         actor,
     )
     .await?;
+
+    // `nextSequence` seeds a bucket, and only when it was asked for: writing one
+    // unconditionally would create a bucket for a rule nobody has allocated
+    // from, and `find_rule` would then report a sequence that has not started.
+    //
+    // No scope check here. `validate_set` has already refused `nextSequence` on
+    // a `DEPARTMENT_YEAR` rule — there is no bucket to seed, because the
+    // department that identifies one arrives with the first document — so a
+    // second guard would be a branch no test can reach, which is the shape
+    // [#206](https://github.com/sujanto-gaws/kelir/issues/206) is about.
+    if let Some(next_sequence) = request.next_sequence {
+        repo::seed_bucket(
+            &mut transaction,
+            tenant_id,
+            document_type_id,
+            &key,
+            next_sequence,
+            actor,
+        )
+        .await?;
+    }
 
     transaction.commit().await?;
 
@@ -204,30 +223,30 @@ pub async fn clear_rule(
 
 /// Allocates the next number **inside the caller's transaction**.
 ///
-/// This is the shape coding standard §2.5 governs, and the ordering is the
-/// whole of it:
+/// This is the shape coding standard §2.5 governs, and since
+/// `0020_numbering_buckets.sql` the whole of it is one statement:
 ///
-/// 1. `FOR UPDATE` on the rule row — the row the next step reads.
-/// 2. Decide the bucket and the sequence *from what the lock returned*, not
-///    from anything read earlier.
-/// 3. Write the advanced counter in the same transaction.
+/// 1. Read the rule — the *format*, which no allocation writes.
+/// 2. Decide the bucket from the context.
+/// 3. Insert-or-advance that bucket, and take the number it returns.
 ///
-/// A second caller reaching step 1 blocks until this transaction ends, so it
-/// reads the advanced counter rather than the stale one. Without the lock both
-/// read `41`, both render `…-000041`, and the second to commit is refused by
-/// `uq_documents_tenant_id_document_number` — at submit time, after the work.
+/// Step 3 has no read to race. Two callers in the same bucket are serialised
+/// by `uq_document_type_sequence_buckets_type_key`; two callers in *different*
+/// buckets touch different rows and do not contend at all — which the previous
+/// shape could not manage, because it kept every bucket in the rule row and so
+/// made two departments fight over one counter and then lose it.
 ///
 /// **The transaction is the caller's**, which is what makes a
 /// [`GapPolicy::Gapless`] rule gapless: the caller's rollback rolls the
-/// counter back with it. It is also what makes the lock expensive, because it
-/// is held until the caller commits. [`allocate_committed`] is the other trade.
+/// counter back with it, and the bucket row stays locked until the caller
+/// commits. [`allocate_committed`] is the other trade.
 pub async fn allocate_in(
     transaction: &mut sqlx::PgTransaction<'_>,
     tenant_id: Uuid,
     document_type_id: Uuid,
     context: &AllocationContext,
 ) -> Result<String, AppError> {
-    let rule = repo::lock_active_rule(transaction, tenant_id, document_type_id)
+    let rule = repo::find_active_rule(&mut **transaction, tenant_id, document_type_id)
         .await?
         .ok_or_else(|| {
             AppError::validation(vec![ValidationDetail::new(
@@ -251,39 +270,43 @@ pub async fn allocate_in(
 
     let key = scope_key(rule.sequence_scope, context);
 
-    // The bucket rolled over — a new year, a new month, a different department.
-    // The counter restarts at 1 *in the new bucket*, and the old bucket's
-    // counter is not kept: §6.3 stores one bucket per rule, so a document
-    // back-dated into a closed bucket would restart it. Refused below rather
-    // than silently re-issuing.
-    let sequence = if key == rule.sequence_key {
-        rule.next_sequence
-    } else if is_earlier_bucket(rule.sequence_scope, &key, &rule.sequence_key) {
-        return Err(AppError::validation(vec![ValidationDetail::new(
-            "requestedAt",
-            "range",
-            "CLOSED_SEQUENCE_BUCKET",
-            format!(
-                "this type's sequence has moved on to `{}` and cannot go back to \
-                 `{key}`; restarting a closed bucket re-issues numbers already \
-                 given out",
-                rule.sequence_key
-            ),
-        )]));
-    } else {
-        1
-    };
+    // A bucket the sequence has already passed is still refused, and the reason
+    // is no longer the one §6.3 gave. Under one-bucket-per-rule, reaching back
+    // *restarted* the counter and re-issued numbers documents already held.
+    // Buckets persist now, so reaching back would resume the old bucket
+    // correctly — the refusal survives because a closed period should not gain
+    // new numbers, which is a policy rather than a safety property. Recorded in
+    // **D-21** as a question for the product owner rather than settled here.
+    //
+    // `comparison_prefix` is what makes one comparison serve every scope: it
+    // restricts the group to keys that genuinely succeed one another, so two
+    // departments — which are parallel, not successive — are never compared.
+    let prefix = comparison_prefix(rule.sequence_scope, context);
 
-    let number = render(
+    if let Some(furthest) =
+        repo::furthest_key(&mut **transaction, tenant_id, document_type_id, &prefix).await?
+    {
+        if key < furthest {
+            return Err(AppError::validation(vec![ValidationDetail::new(
+                "requestedAt",
+                "range",
+                "CLOSED_SEQUENCE_BUCKET",
+                format!(
+                    "this type's sequence has moved on to `{furthest}` and cannot \
+                     go back to `{key}`; a closed period does not take new numbers"
+                ),
+            )]));
+        }
+    }
+
+    let sequence = repo::allocate_bucket(transaction, tenant_id, document_type_id, &key).await?;
+
+    Ok(render(
         &rule.rule_template,
         sequence,
         rule.sequence_padding,
         context,
-    );
-
-    repo::advance(transaction, rule.id, &key, sequence + 1).await?;
-
-    Ok(number)
+    ))
 }
 
 /// Allocates the next number in a transaction of its own, committing it.
@@ -335,27 +358,34 @@ pub async fn allocate(
     }
 }
 
-/// Whether `candidate` is a bucket the sequence has already passed.
+/// The set of buckets a candidate key may be compared against, as a key prefix.
 ///
-/// String comparison, and it works because every bucket key this module
-/// produces sorts chronologically: `2026` before `2027`, `2026-08` before
-/// `2026-09`. A `DEPARTMENT_YEAR` key is prefixed by the department, so two
-/// different departments never compare as earlier or later — which is right,
-/// they are parallel sequences and neither has passed the other.
-fn is_earlier_bucket(scope: SequenceScope, candidate: &str, current: &str) -> bool {
+/// **This is what `is_earlier_bucket` was, expressed as data instead of as a
+/// branch**, and the change is the fix for #200. That function answered "is
+/// this key earlier?" and got the department case right — two departments are
+/// parallel sequences, and neither has passed the other — while the caller
+/// treated "not earlier" as "start again at 1". The judgement was sound and the
+/// action behind it was wrong.
+///
+/// Restricting the comparison group instead means the caller has one rule for
+/// every scope: within a group, keys succeed one another and `<` means "already
+/// passed"; across groups there is no comparison to make, because each group has
+/// its own row and its own counter.
+///
+/// * `GLOBAL` — one key, `""`. Nothing precedes it.
+/// * `YEAR`, `MONTH` — every key is in one succession, so the group is all of
+///   them and the prefix is empty.
+/// * `DEPARTMENT_YEAR` — one succession *per department*, so the group is the
+///   department's own keys and the prefix is `<department>:`.
+fn comparison_prefix(scope: SequenceScope, context: &AllocationContext) -> String {
     match scope {
-        // One bucket, forever; it cannot be earlier than itself.
-        SequenceScope::Global => false,
-        SequenceScope::DepartmentYear => {
-            let (candidate_department, candidate_year) = split_department(candidate);
-            let (current_department, current_year) = split_department(current);
-
-            candidate_department == current_department && candidate_year < current_year
-        }
-        _ => candidate < current,
+        SequenceScope::DepartmentYear => context
+            .department_id
+            .map(|id| format!("{id}:"))
+            // Unreachable: a department-scoped allocation with no department is
+            // refused above. Matching nothing rather than everything is the
+            // safe reading if that ever stops being true.
+            .unwrap_or_else(|| "NO-DEPARTMENT:".to_owned()),
+        _ => String::new(),
     }
-}
-
-fn split_department(key: &str) -> (&str, &str) {
-    key.rsplit_once(':').unwrap_or(("", key))
 }

@@ -363,6 +363,82 @@ async fn a_gap_tolerant_rule_consumes_its_number() {
     );
 }
 
+/// What `GET .../numbering-rule` reports, which `0020_numbering_buckets.sql`
+/// changed and nothing asserted either way.
+///
+/// The counter is no longer a column on the rule row, so a rule that has never
+/// been allocated from has no bucket to report. It says so — `""` and `1` —
+/// rather than naming the bucket the clock happens to be in, which would be
+/// inventing one. Once something allocates, the response is what it always was.
+#[tokio::test]
+async fn a_rule_reports_its_bucket_only_once_the_sequence_has_started() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let type_id = document_type(&app, &token, "PR_REPORTED").await;
+
+    let configured = set_rule(
+        &app,
+        &token,
+        type_id,
+        json!({ "ruleTemplate": "PR-{year}-{sequence}", "sequenceScope": "YEAR" }),
+    )
+    .await;
+
+    assert_eq!(
+        configured["sequenceKey"], "",
+        "no bucket exists until something allocates from the rule"
+    );
+    assert_eq!(configured["nextSequence"], 1);
+
+    allocate(&app, type_id, &context_at(2026, 8)).await;
+
+    let read_back = app
+        .get(
+            &format!("/api/v1/document-types/{type_id}/numbering-rule"),
+            Some(&token),
+        )
+        .await;
+
+    assert_eq!(read_back.status, StatusCode::OK, "{}", read_back.body);
+    assert_eq!(read_back.body["data"]["sequenceKey"], "2026");
+    assert_eq!(
+        read_back.body["data"]["nextSequence"], 2,
+        "the number the next document takes in that bucket"
+    );
+}
+
+/// `nextSequence` on a department-scoped rule was accepted, stored and ignored.
+#[tokio::test]
+async fn a_start_sequence_is_refused_on_a_department_scoped_rule() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let type_id = document_type(&app, &token, "PR_DEPT_SEED").await;
+
+    let response = app
+        .send(
+            Method::PUT,
+            &format!("/api/v1/document-types/{type_id}/numbering-rule"),
+            Some(&token),
+            Some(json!({
+                "ruleTemplate": "PR-{department}-{year}-{sequence}",
+                "sequenceScope": "DEPARTMENT_YEAR",
+                "nextSequence": 500
+            })),
+        )
+        .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "each department starts at 1, so there is nothing to seed; body {}",
+        response.body
+    );
+    assert_eq!(
+        response.body["error"]["details"][0]["code"],
+        "NOT_SUPPORTED_FOR_SCOPE"
+    );
+}
+
 #[tokio::test]
 async fn a_type_with_no_rule_cannot_number_a_document() {
     let app = TestApp::spawn().await;
@@ -510,8 +586,17 @@ async fn a_department_scoped_rule_needs_a_department() {
     );
 }
 
+/// **Three moves, not two** ([#200](https://github.com/sujanto-gaws/kelir/issues/200)).
+///
+/// The version this replaces allocated for department A, then B, asserted both
+/// ended `000001`, asserted they differed, and stopped. Every one of those
+/// assertions was true while the sequence was destroyed: under one bucket per
+/// rule, "B starts its own sequence" was implemented by overwriting A's
+/// counter, so the *third* allocation handed department A `000001` a second
+/// time. Two moves cannot tell "separate" from "overwritten"; the third can,
+/// and it is the whole reason this test exists.
 #[tokio::test]
-async fn two_departments_run_separate_sequences() {
+async fn two_departments_run_separate_sequences_that_both_advance() {
     let app = TestApp::spawn().await;
     let token = app.administrator_token().await;
     let type_id = document_type(&app, &token, "PR_TWO_DEPARTMENTS").await;
@@ -535,8 +620,13 @@ async fn two_departments_run_separate_sequences() {
     let mut b = context_at(2026, 8);
     b.department_id = Some(second);
 
+    // Interleaved deliberately: the defect needed a department change between
+    // two allocations of the same department to show itself.
     let a1 = allocate(&app, type_id, &a).await;
     let b1 = allocate(&app, type_id, &b).await;
+    let a2 = allocate(&app, type_id, &a).await;
+    let b2 = allocate(&app, type_id, &b).await;
+    let a3 = allocate(&app, type_id, &a).await;
 
     assert!(a1.ends_with("000001"), "{a1}");
     assert!(
@@ -545,6 +635,172 @@ async fn two_departments_run_separate_sequences() {
          the first's: {b1}"
     );
     assert_ne!(a1, b1, "and the two numbers are still distinct");
+
+    assert!(
+        a2.ends_with("000002") && a3.ends_with("000003"),
+        "department A's own sequence advances across the other department's \
+         allocations: got {a2} then {a3}"
+    );
+    assert!(
+        b2.ends_with("000002"),
+        "and so does department B's: got {b2}"
+    );
+
+    let issued = [&a1, &a2, &a3, &b1, &b2];
+    let distinct: HashSet<&&String> = issued.iter().collect();
+    assert_eq!(
+        distinct.len(),
+        issued.len(),
+        "no number is issued twice: {issued:?}"
+    );
+}
+
+/// A year boundary inside one department, which is the other axis of the same
+/// scope and was never covered.
+#[tokio::test]
+async fn a_department_sequence_restarts_at_its_own_year_boundary() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let type_id = document_type(&app, &token, "PR_DEPARTMENT_YEARS").await;
+
+    set_rule(
+        &app,
+        &token,
+        type_id,
+        json!({
+            "ruleTemplate": "PR-{department}-{year}-{sequence}",
+            "sequenceScope": "DEPARTMENT_YEAR"
+        }),
+    )
+    .await;
+
+    let department = Uuid::now_v7();
+    let mut in_2026 = context_at(2026, 8);
+    in_2026.department_id = Some(department);
+    let mut in_2027 = context_at(2027, 1);
+    in_2027.department_id = Some(department);
+
+    allocate(&app, type_id, &in_2026).await;
+    let second_of_2026 = allocate(&app, type_id, &in_2026).await;
+    let first_of_2027 = allocate(&app, type_id, &in_2027).await;
+
+    assert!(second_of_2026.ends_with("000002"), "{second_of_2026}");
+    assert!(
+        first_of_2027.ends_with("000001"),
+        "a new year is a new bucket for this department: {first_of_2027}"
+    );
+
+    // And the department's own closed bucket stays closed, while the *other*
+    // department's 2026 is untouched by any of it.
+    let mut elsewhere = context_at(2026, 8);
+    elsewhere.department_id = Some(Uuid::now_v7());
+    let first_elsewhere = allocate(&app, type_id, &elsewhere).await;
+
+    assert!(
+        first_elsewhere.ends_with("000001"),
+        "another department's 2026 has not been advanced by the first \
+         department's: {first_elsewhere}"
+    );
+
+    let mut transaction = app.pool.begin().await.expect("a transaction");
+    let backdated = numbering_service::allocate_in(
+        &mut transaction,
+        fixtures::SYSTEM_TENANT_ID,
+        type_id,
+        &in_2026,
+    )
+    .await;
+
+    assert!(
+        backdated.is_err(),
+        "this department's 2026 is closed once its 2027 has opened; got \
+         {backdated:?}"
+    );
+}
+
+/// Two departments allocating at once do not contend, and neither loses a
+/// number to the other.
+///
+/// The concurrency test beside this one runs every allocation in one bucket,
+/// which is the contended case. This is the case the old storage could not
+/// express at all: separate buckets, so separate rows.
+#[tokio::test]
+async fn concurrent_allocations_in_two_departments_do_not_collide() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let type_id = document_type(&app, &token, "PR_DEPARTMENTS_AT_ONCE").await;
+
+    set_rule(
+        &app,
+        &token,
+        type_id,
+        json!({
+            "ruleTemplate": "PR-{department}-{year}-{sequence}",
+            "sequenceScope": "DEPARTMENT_YEAR"
+        }),
+    )
+    .await;
+
+    let departments = [Uuid::now_v7(), Uuid::now_v7()];
+    let app = Arc::new(app);
+    let mut handles = Vec::new();
+
+    for index in 0..CONCURRENT_ALLOCATIONS {
+        let app = Arc::clone(&app);
+        let department = departments[index % departments.len()];
+
+        handles.push(tokio::spawn(async move {
+            let mut context = context_at(2026, 8);
+            context.department_id = Some(department);
+
+            let mut transaction = app.pool.begin().await.expect("a transaction");
+            let number = numbering_service::allocate_in(
+                &mut transaction,
+                fixtures::SYSTEM_TENANT_ID,
+                type_id,
+                &context,
+            )
+            .await
+            .expect("a number is allocated");
+            transaction.commit().await.expect("the transaction commits");
+
+            number
+        }));
+    }
+
+    let mut numbers = HashSet::new();
+    for handle in handles {
+        numbers.insert(handle.await.expect("the task completes"));
+    }
+
+    assert_eq!(
+        numbers.len(),
+        CONCURRENT_ALLOCATIONS,
+        "every allocation took a distinct number across both departments"
+    );
+
+    for department in departments {
+        let mut mine: Vec<u32> = numbers
+            .iter()
+            .filter(|number| number.contains(&department.to_string()))
+            .map(|number| {
+                number
+                    .rsplit_once('-')
+                    .expect("a sequence segment")
+                    .1
+                    .parse()
+                    .expect("a number")
+            })
+            .collect();
+        mine.sort_unstable();
+
+        let expected: Vec<u32> = (1..=(CONCURRENT_ALLOCATIONS as u32 / 2)).collect();
+        assert_eq!(
+            mine, expected,
+            "department {department} took a contiguous run from 1 with no gaps \
+             and no repeats"
+        );
+    }
 }
 
 /// Allocates and commits, which is what most of these tests want.

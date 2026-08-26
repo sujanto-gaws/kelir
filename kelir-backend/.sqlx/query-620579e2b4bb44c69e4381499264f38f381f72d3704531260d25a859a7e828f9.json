@@ -1,0 +1,71 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT rule.id, rule.document_type_id, rule.rule_template, rule.sequence_scope,\n               rule.sequence_padding, rule.allow_gaps, rule.is_active,\n               bucket.sequence_key AS \"sequence_key?\",\n               bucket.next_sequence AS \"next_sequence?\"\n        FROM document_type_numbering_rules rule\n        LEFT JOIN LATERAL (\n            SELECT b.sequence_key, b.next_sequence\n            FROM document_type_sequence_buckets b\n            WHERE b.tenant_id = rule.tenant_id\n              AND b.document_type_id = rule.document_type_id\n            ORDER BY b.sequence_key DESC\n            LIMIT 1\n        ) bucket ON TRUE\n        WHERE rule.tenant_id = $1 AND rule.document_type_id = $2\n          AND rule.is_active AND rule.deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "document_type_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "rule_template",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "sequence_scope",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "sequence_padding",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "allow_gaps",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 6,
+        "name": "is_active",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 7,
+        "name": "sequence_key?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "next_sequence?",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "620579e2b4bb44c69e4381499264f38f381f72d3704531260d25a859a7e828f9"
+}

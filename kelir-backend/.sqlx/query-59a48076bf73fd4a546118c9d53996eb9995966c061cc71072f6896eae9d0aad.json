@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT max(sequence_key)\n        FROM document_type_sequence_buckets\n        WHERE tenant_id = $1 AND document_type_id = $2\n          AND sequence_key LIKE $3 || '%'\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "max",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "59a48076bf73fd4a546118c9d53996eb9995966c061cc71072f6896eae9d0aad"
+}

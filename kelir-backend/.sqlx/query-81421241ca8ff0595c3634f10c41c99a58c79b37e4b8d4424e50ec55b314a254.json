@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO document_type_sequence_buckets\n            (id, tenant_id, document_type_id, sequence_key, next_sequence, created_by)\n        VALUES ($1, $2, $3, $4, $5, $6)\n        ON CONFLICT (document_type_id, sequence_key) DO UPDATE\n            SET next_sequence = EXCLUDED.next_sequence,\n                updated_by = EXCLUDED.created_by,\n                updated_at = now()\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Int8",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "81421241ca8ff0595c3634f10c41c99a58c79b37e4b8d4424e50ec55b314a254"
+}

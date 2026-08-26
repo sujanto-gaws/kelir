@@ -16,6 +16,10 @@ deployment. Two Phase 2 carry-overs land with them, and a third — tenant
 management — returns from the unscheduled backlog and takes multi-tenant mode
 with it.
 
+The numbering defect the Sprint 7 verification pass found is closed with them:
+a department-scoped sequence keeps a counter per department rather than one per
+rule, which needed a migration and a table.
+
 Alongside them, every open defect the three verification passes had filed and
 left standing is closed. Four of the eight are contract defects rather than
 behavioural ones — documentation that described something the code did not do —
@@ -119,6 +123,22 @@ changed.
 
 ### Fixed
 
+- **A `DEPARTMENT_YEAR` numbering rule no longer issues `000001` to every
+  document
+  ([#200](https://github.com/sujanto-gaws/kelir/issues/200), decision **D-21**).**
+  `document_type_numbering_rules` held a single counter, and the schema said so:
+  *"One bucket per rule."* A department-scoped sequence needs one bucket **per
+  department**, live at the same time, so every allocation that changed
+  department reset the only bucket there was — allocating for department A, then
+  B, then A, then B issued `000001` four times, and a second document in either
+  department would have been refused at submit by
+  `uq_documents_tenant_id_document_number`. `0020_numbering_buckets.sql` moves
+  the counters into `document_type_sequence_buckets`, one row per scope value,
+  keyed on the document type so that correcting a template does not restart a
+  sequence. Allocation is now a single `INSERT … ON CONFLICT DO UPDATE …
+  RETURNING`: no read to race, and two scope values do not contend at all.
+  Nothing numbers documents yet — the document surface is Sprint 9 — so a
+  deployment carrying a configured rule keeps its counter and loses nothing.
 - **A bad `page` or `pageSize` is refused inside the error envelope
   ([#122](https://github.com/sujanto-gaws/kelir/issues/122)).** The two
   parameters were deserialized by the extractor, so a value that was not a `u32`
