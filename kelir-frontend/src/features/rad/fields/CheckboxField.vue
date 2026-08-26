@@ -3,6 +3,7 @@ import { computed } from 'vue'
 
 import { Checkbox } from '@/components/ui/checkbox'
 import { Label } from '@/components/ui/label'
+import { useFieldScope } from '@/features/rad/renderer/useFieldScope'
 import type { JfssDataComponent } from '@/types/jfss'
 
 const props = defineProps<{ component: JfssDataComponent; modelValue: unknown }>()
@@ -17,8 +18,9 @@ const emit = defineEmits<{ (e: 'update:modelValue', value: unknown): void }>()
  * `label`, `validation.required` and `description`, the same three the shell
  * reads, so #162 AC3 still holds for this type.
  */
-const controlId = `jfss-${props.component.id}`
-const describedBy = `jfss-${props.component.id}-description`
+const scope = useFieldScope()
+const controlId = computed(() => `jfss-${scope.value}${props.component.id}`)
+const describedBy = computed(() => `${controlId.value}-description`)
 
 const value = computed({
   get: () => props.modelValue === true,

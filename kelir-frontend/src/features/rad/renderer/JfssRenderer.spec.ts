@@ -218,8 +218,51 @@ describe('the payload a rendered form starts with', () => {
 
     await flushPromises()
 
-    const lineNo = wrapper.find('#jfss-line-no')
+    const lineNo = wrapper.find('#jfss-row-0-line-no')
 
     expect((lineNo.element as HTMLInputElement).value).toBe('1')
+  })
+})
+
+describe('identifiers inside a repeater', () => {
+  /**
+   * A repeater renders one template instance once per row, so §4.1's
+   * per-instance uniqueness does not by itself keep the DOM ids apart.
+   *
+   * Duplicate ids are invalid HTML and the consequence is not cosmetic:
+   * `<label for>` binds to the first match, so every row's label would point at
+   * row one's input, and a radio group's shared `name` would make choosing an
+   * option in row two clear row one.
+   */
+  it('gives every element in the document a unique id', async () => {
+    const wrapper = render()
+
+    await flushPromises()
+    await wrapper.find('button.bg-secondary').trigger('click')
+    await flushPromises()
+
+    const ids = wrapper.findAll('[id]').map((element) => element.attributes('id'))
+    const duplicates = ids.filter((id, index) => ids.indexOf(id) !== index)
+
+    expect(duplicates, `duplicated ids: ${duplicates.join(', ')}`).toHaveLength(0)
+  })
+
+  it('scopes a row field id by its row', async () => {
+    const wrapper = render()
+
+    await flushPromises()
+    await wrapper.find('button.bg-secondary').trigger('click')
+    await flushPromises()
+
+    // Deterministic rather than generated, because the browser harness locates
+    // by these and a test that has to discover an id cannot assert one.
+    expect(wrapper.find('#jfss-row-0-line-no').exists()).toBe(true)
+    expect(wrapper.find('#jfss-row-1-line-no').exists()).toBe(true)
+  })
+
+  it('does not scope a field outside a repeater', () => {
+    const wrapper = render()
+
+    expect(wrapper.find('#jfss-title-field').exists()).toBe(true)
   })
 })

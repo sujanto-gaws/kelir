@@ -1,5 +1,8 @@
 <script setup lang="ts">
+import { computed } from 'vue'
+
 import { Label } from '@/components/ui/label'
+import { useFieldScope } from '@/features/rad/renderer/useFieldScope'
 import type { JfssDataComponent } from '@/types/jfss'
 
 /**
@@ -10,17 +13,22 @@ import type { JfssDataComponent } from '@/types/jfss'
  * component that could draw a different one, and the marker for `required`
  * would end up meaning something slightly different on each of the nine types.
  *
- * The `id` it gives the control is the component's JFSS `id`, which §4.1
- * guarantees is unique per instance — so `for`/`id` pairing is correct by
- * construction rather than by a generated counter that has to stay unique.
+ * The `id` it gives the control is the component's JFSS `id` under whatever
+ * field scope is in force — `jfss-title-field` at the top level of a form,
+ * `jfss-row-1-line-no` inside a repeater's second row. **§4.1's per-instance
+ * uniqueness is not enough on its own**: a repeater renders one template
+ * instance once per row, so the scope is what keeps the ids distinct and the
+ * `for`/`id` pairing pointing at the right box (see `useFieldScope.ts`).
  */
 const props = defineProps<{ component: JfssDataComponent }>()
 
+const scope = useFieldScope()
+
 /** The id the control carries, and what the label points `for` at. */
-const controlId = `jfss-${props.component.id}`
+const controlId = computed(() => `jfss-${scope.value}${props.component.id}`)
 
 /** The id of the help text, for the control's `aria-describedby`. */
-const describedBy = `jfss-${props.component.id}-description`
+const describedBy = computed(() => `${controlId.value}-description`)
 </script>
 
 <template>

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 
+import { useFieldScope } from '@/features/rad/renderer/useFieldScope'
 import { cn } from '@/lib/utils'
 import type { JfssLayoutComponent, JfssTabSlot } from '@/types/jfss'
 
@@ -25,8 +26,13 @@ const tabs = computed<JfssTabSlot[]>(() => props.component.tabs ?? [])
 
 const active = ref(0)
 
-const panelId = (index: number) => `jfss-${props.component.id}-panel-${index}`
-const tabId = (index: number) => `jfss-${props.component.id}-tab-${index}`
+// Scoped for the same reason a field is: a `tabs` container inside a
+// repeater's row template renders once per row, and two panels sharing an id
+// would leave every tab's `aria-controls` pointing at the first row's.
+const scope = useFieldScope()
+
+const panelId = (index: number) => `jfss-${scope.value}${props.component.id}-panel-${index}`
+const tabId = (index: number) => `jfss-${scope.value}${props.component.id}-tab-${index}`
 </script>
 
 <template>

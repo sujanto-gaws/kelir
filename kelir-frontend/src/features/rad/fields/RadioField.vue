@@ -3,6 +3,7 @@ import { computed } from 'vue'
 
 import FieldShell from './FieldShell.vue'
 import { Label } from '@/components/ui/label'
+import { useFieldScope } from '@/features/rad/renderer/useFieldScope'
 import type { JfssDataComponent, JfssOption } from '@/types/jfss'
 
 const props = defineProps<{ component: JfssDataComponent; modelValue: unknown }>()
@@ -21,13 +22,18 @@ const options = computed<JfssOption[]>(() => {
 })
 
 /**
- * One `name` shared by every radio in the group, and it is the JFSS `id`.
+ * One `name` shared by every radio in the group, scoped to where it renders.
  *
- * The browser makes radios mutually exclusive by `name`, not by markup nesting.
- * Two groups on one form sharing a name would silently deselect each other, and
- * §4.1's per-instance uniqueness is exactly the guarantee that stops it.
+ * **The browser makes radios mutually exclusive by `name`, not by markup
+ * nesting**, so this is the one place where a colliding identifier corrupts
+ * data rather than accessibility. §4.1's per-instance uniqueness handles two
+ * groups in one definition; it does not handle **one** group rendered once per
+ * row of a repeater, where every row would share a name and choosing an option
+ * in row two would silently clear row one. The field scope is what separates
+ * them (see `useFieldScope.ts`).
  */
-const groupName = computed(() => `jfss-${props.component.id}`)
+const scope = useFieldScope()
+const groupName = computed(() => `jfss-${scope.value}${props.component.id}`)
 
 function isSelected(option: JfssOption): boolean {
   return option.value === props.modelValue

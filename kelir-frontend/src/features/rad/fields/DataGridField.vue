@@ -1,22 +1,18 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, onMounted } from 'vue'
+import { computed, onMounted } from 'vue'
 
+import DataGridRow from './DataGridRow.vue'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { dataComponents, type JfssComponent, type JfssDataComponent } from '@/types/jfss'
 
 /**
- * The renderer, imported lazily to break a cycle.
- *
- * `registry.ts` maps `datagrid` to this file, this file renders its rows
- * through `JfssRenderer.vue`, and the renderer reads the registry — a three
- * module loop. A static import would resolve to `undefined` for whichever
- * module the bundler evaluated first, and the symptom would be an empty grid
- * rather than an error. `defineAsyncComponent` defers the import to first
- * render, by which point every module in the loop is initialised.
+ * `DataGridRow` renders the template and holds the lazy import that breaks the
+ * cycle: `registry.ts` maps `datagrid` here, a row renders through
+ * `JfssRenderer.vue`, and the renderer reads the registry — a three module
+ * loop, whose symptom under a static import would be an empty grid rather than
+ * an error.
  */
-const JfssRenderer = defineAsyncComponent(() => import('@/features/rad/renderer/JfssRenderer.vue'))
-
 const props = defineProps<{ component: JfssDataComponent; modelValue: unknown }>()
 const emit = defineEmits<{ (e: 'update:modelValue', value: unknown): void }>()
 
@@ -131,11 +127,14 @@ onMounted(() => {
         </Button>
       </div>
 
-      <JfssRenderer
-        v-for="field in template"
-        :key="field.id"
-        :component="field"
+      <!-- Each row is its own component so it can open its own field scope:
+           `provide` runs once per instance, and these are a `v-for`. Without
+           it every row's fields would claim the same DOM ids and every row's
+           label would point at row one's input. -->
+      <DataGridRow
+        :template="template"
         :values="row"
+        :index="index"
         @update:field="(key: string, value: unknown) => updateCell(index, key, value)"
       />
     </div>

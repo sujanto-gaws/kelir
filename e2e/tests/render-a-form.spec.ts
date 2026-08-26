@@ -125,18 +125,31 @@ test('a published definition renders as a form, and every part of it comes from 
   // `sequenceKey` has filled the line number. A template rendered once as
   // ordinary fields would show the labels and no row heading at all.
   await expect(page.getByText('Row 1')).toBeVisible()
-  await expect(page.locator('#jfss-line-no')).toHaveValue('1')
+  await expect(page.locator('#jfss-row-0-line-no')).toHaveValue('1')
 
   await page.getByRole('button', { name: 'Add row' }).click()
   await expect(page.getByText('Row 2')).toBeVisible()
+
+  // A second row does not collide with the first. `id` is unique per component
+  // *instance* in the definition (§4.1), and a repeater renders one instance
+  // once per row — so without a per-row scope both rows claim `jfss-line-no`,
+  // every row's label points at row one's input, and a radio group's shared
+  // `name` makes choosing in row two clear row one.
+  await expect(page.locator('#jfss-row-1-line-no')).toHaveValue('2')
 
   // --- The second tab's fields exist before the tab is opened --------------
   //
   // Hidden, not absent: #163 validates the whole tree and #164 submits it, so a
   // required field on an unopened tab must still count.
+  //
+  // By role as well as by name. The fixture has a tab called "Notes" holding a
+  // field called "Notes", and the panel takes its accessible name from its tab
+  // — correct ARIA, and two elements answering to `getByLabel('Notes')`. The
+  // role is what says which one is meant, and a form whose tab shares a name
+  // with one of its fields is ordinary rather than contrived.
   await page.getByRole('tab', { name: 'Notes' }).click()
-  await expect(page.getByLabel('Notes')).toBeVisible()
-  await expect(page.getByLabel('This request is urgent')).toBeVisible()
+  await expect(page.getByRole('textbox', { name: 'Notes' })).toBeVisible()
+  await expect(page.getByRole('checkbox', { name: 'This request is urgent' })).toBeVisible()
 
   // --- The lookup reached the server (FR-RAD-007, #161) --------------------
   //
