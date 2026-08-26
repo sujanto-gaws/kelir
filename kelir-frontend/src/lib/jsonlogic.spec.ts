@@ -141,8 +141,12 @@ describe('the evaluator', () => {
     ).toBe(0)
   })
 
-  it('normalizes a fractional division by zero to 0', () => {
-    expect(evaluator.evaluateNumeric({ '/': [10.5, 0] }, {})).toBe(0)
+  it('refuses a fractional division by zero like every other', () => {
+    // The case that used to be the odd one out. Under `return_null` this
+    // returned `null` and the wrapper turned it into the 0 §3.1 then asked for,
+    // while `10 / 0` beside it threw — the same expression answering two ways
+    // on the numerator's type. **D-24** removed the split.
+    expect(() => evaluator.evaluate({ '/': [10.5, 0] }, {})).toThrow(EvaluationError)
   })
 
   it('never yields a non-finite number', () => {
@@ -151,10 +155,11 @@ describe('the evaluator', () => {
     expect(evaluator.evaluateNumeric({ '*': [1e308, 10] }, {})).toBe(0)
   })
 
-  it('throws on an integer division by zero, which is the measured §3.1 gap', () => {
-    // Pinned, not endorsed: these three throw rather than returning the 0 the
-    // registry asks for, the backend throws on the same three, and the day
-    // this fails is the day the gap closed or moved.
+  it('refuses every integer division by zero', () => {
+    // Registry §3.1 at v1.6.0. The name no longer says "rather than
+    // normalizing" because there is nothing left to normalize against: **D-24**
+    // closed the split by requiring all four to refuse rather than the `0` that
+    // was never reachable by configuration. The backend refuses the same four.
     for (const expression of [{ '/': [10, 0] }, { '/': [0, 0] }, { '%': [10, 0] }]) {
       expect(() => evaluator.evaluate(expression, {}), JSON.stringify(expression)).toThrow(
         EvaluationError,

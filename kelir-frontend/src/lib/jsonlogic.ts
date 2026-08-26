@@ -38,9 +38,12 @@ export const ENGINE_VERSION = '5.2.0'
 export const JFSS_ENGINE_CONFIG = {
   // §7.3: a null or missing operand yields 0, not NaN.
   arithmetic_nan_handling: 'coerce_to_zero',
-  // §3.1: division by zero is not a value. The engine has no return-zero
-  // variant; `normalizeNumeric` turns the null into the 0 the registry asks for.
-  division_by_zero: 'return_null',
+  // §3.1 as decision **D-24** settles it: a division by zero does not produce a
+  // value, so every one of them fails evaluation. `return_null` up to
+  // 2026-08-26, which normalized `10.5 / 0` to 0 while the integer path threw
+  // regardless of the setting — one expression behaving two ways depending on
+  // whether the numerator happened to be fractional.
+  division_by_zero: 'throw_error',
   // The reference implementation compares across types silently, and a form
   // that refuses to render because a blank field met a number is worse than one
   // that treats it as absent.
@@ -91,7 +94,9 @@ export function sumOperator(argsJson: string): string {
  *
  * Kept identical to the backend's `normalize_numeric`, including the cases
  * nobody expects to hit: a numeric string coerces, `true` is 1, and every other
- * shape — an array, an object, `null` — is 0.
+ * shape — an array, an object, `null` — is 0. A `null` reaching here is an
+ * overflow rather than a division by zero, which since **D-24** fails
+ * evaluation and never arrives.
  */
 export function normalizeNumeric(value: unknown): number {
   if (typeof value === 'number') {
@@ -161,12 +166,18 @@ export class RuleEvaluator {
   /**
    * Evaluates a `calculate` expression and normalizes the result.
    *
-   * **§3.1's "the result is 0" is not fully delivered, and that is a known gap
-   * rather than an oversight.** `10.5 / 0` returns `null` and normalizes to 0
-   * as the registry asks; `10 / 0`, `0 / 0` and `10 % 0` throw, so no wrapper
-   * is reached. The backend measures identically — which is what makes this a
-   * parity-preserving gap rather than a divergence — and correcting the
-   * normalization spec is where the spike §2.3 put it: with the renderer.
+   * **A division by zero never reaches this wrapper**, and since decision
+   * **D-24** that is uniform rather than a gap. The registry asked for `0` from
+   * v1.0.0 and the engine could not deliver it by configuration — its integer
+   * division path throws under every `division_by_zero` setting — so under the
+   * `return_null` this module carried until 2026-08-26, `10.5 / 0` normalized
+   * to `0` while `10 / 0` threw: one expression behaving two ways depending on
+   * whether the numerator happened to be fractional. Registry v1.6.0 §3.1 now
+   * says a division by zero does not produce a value at all, and both sides
+   * configure `throw_error`. What the renderer does with the failure is
+   * [`useFormEvaluation`](../features/rad/renderer/useFormEvaluation.ts)'s: the
+   * field renders blank while the form is being filled in, and #164 refuses the
+   * submission with the S10.3 envelope naming it.
    */
   evaluateNumeric(expression: unknown, data: unknown): number {
     return normalizeNumeric(this.evaluate(expression, data))

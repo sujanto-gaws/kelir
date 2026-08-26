@@ -202,7 +202,7 @@
    ]
   },
   "data": {},
-  "note": "Registry 3.1: MUST normalize to 0"
+  "note": "Registry 3.1 at v1.6.0 (D-24): a division by zero does not produce a value. Was 'MUST normalize to 0' up to 2026-08-26, which no engine setting delivered uniformly"
  },
  {
   "id": "mul-null",
@@ -893,7 +893,7 @@
    ]
   },
   "data": {},
-  "note": "fractional dividend takes datalogic's configurable path"
+  "note": "The case that used to split: a fractional dividend took datalogic's configurable path and returned null, while the integer path threw regardless of the setting. D-24 configures ThrowError so all four agree"
  },
  {
   "id": "div-zero-by-zero",
@@ -912,7 +912,20 @@
    "a": 0,
    "b": 0
   },
-  "note": "indeterminate form"
+  "note": "indeterminate form, and the shape a zero-filled payload reaches before the first keystroke (construction plan 5.6)"
+ },
+ {
+  "id": "mod-by-zero",
+  "tier": "normalization",
+  "expr": {
+   "%": [
+    10,
+    0
+   ]
+  },
+  "data": {},
+  "note": "The fourth of D-24's four. Registry 3.1 names the modulo beside the three divisions, and the corpus carried `10 % 3` and no `10 % 0` — so the gate could not have seen this one move",
+  "added": "#163"
  },
  {
   "id": "sub-null",

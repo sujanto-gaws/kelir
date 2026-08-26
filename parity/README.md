@@ -30,7 +30,7 @@ Both replaced `json-logic-js` (MIT) on the client and the never-published
 
 | File | What it is |
 |---|---|
-| `cases.json` | The corpus. 55 expressions, each derived from a claim the [Calculation Rule Registry](../docs/schema/JFSS%20Calculation%20Rule%20Registry.md) or [JFSS](../docs/schema/JSON%20Form%20Schema.md) makes |
+| `cases.json` | The corpus. 60 expressions, each derived from a claim the [Calculation Rule Registry](../docs/schema/JFSS%20Calculation%20Rule%20Registry.md) or [JFSS](../docs/schema/JSON%20Form%20Schema.md) makes |
 | `expectations.json` | What the adopted engine answers for each, `{id, ok, value}`. Generated from the frontend side; asserted by both |
 
 ## How it runs
@@ -73,20 +73,31 @@ environment hand-writes, which is how two environments end up subtly different.
 | Setting | Value | Why |
 |---|---|---|
 | `arithmetic_nan_handling` | coerce to zero | §7.3: a non-numeric operand yields 0, not NaN |
-| `division_by_zero` | throw error | §3.1 as **D-24** settles it: a division by zero does not produce a value. `ReturnNull` up to 2026-08-26, which normalized `10.5 / 0` to 0 while the integer path threw regardless of the setting — one expression behaving two ways. Pending on both sides with [#163](https://github.com/sujanto-gaws/kelir/issues/163) |
+| `division_by_zero` | throw error | §3.1 as **D-24** settles it: a division by zero does not produce a value. `ReturnNull` up to 2026-08-26, which normalized `10.5 / 0` to 0 while the integer path threw regardless of the setting — one expression behaving two ways. Applied on both sides by [#163](https://github.com/sujanto-gaws/kelir/issues/163) |
 | `loose_equality_errors` | false | The reference implementation compares across types silently |
 | `numeric_coercion` | null, empty string and bool coerce; non-numeric not rejected | A half-filled form is normal, not an error |
 
 ## Two things the corpus is honest about
 
-**It is 55 cases, not the spike's 51.** Four were added on 2026-08-25 by #154
-and are marked `"added": "#154"` in the file. They exist because a mutation
-came back green: flipping `arithmetic_nan_handling` to `throw` changed nothing
-the original 51 could see, since every non-numeric operand in them was `null`,
-`""` or a bool — all of which `numeric_coercion` handles first. The four new
-cases put an array, an object and a non-numeric string in front of `+` and `*`,
-and the same mutation now fails on all four. The spike finding's numbers refer
-to the original 51 and are not re-derivable from this file.
+**It is 60 cases, not the spike's 51.** Each addition is marked with the issue
+that made it, `"added": "#154"` and `"added": "#163"`, so the count is
+attributable rather than merely larger.
+
+Four were added on 2026-08-25 by #154 because a mutation came back green:
+flipping `arithmetic_nan_handling` to `throw` changed nothing the original 51
+could see, since every non-numeric operand in them was `null`, `""` or a bool —
+all of which `numeric_coercion` handles first. The four new cases put an array,
+an object and a non-numeric string in front of `+` and `*`, and the same
+mutation now fails on all four. The spike finding's numbers refer to the
+original 51 and are not re-derivable from this file.
+
+One was added on 2026-08-26 by #163, for the same reason in the other
+direction. **D-24** names four expressions — `10 / 0`, `10.5 / 0`, `0 / 0` and
+`10 % 0` — and the corpus held three of them: it carried `10 % 3` and no
+modulo by zero at all, so the gate could not have seen the fourth move. The
+other three needed no new case; what they needed was the configuration change,
+which turned `div-by-zero-float` from a `null` into a refusal and left the two
+that already refused alone.
 
 **Agreement here is not agreement with `json-logic-js`.** Against the JFSS
 reference the adopted engine agrees on 44/51 raw and 46/51 after the mandated
