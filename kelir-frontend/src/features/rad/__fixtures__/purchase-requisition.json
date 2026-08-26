@@ -97,7 +97,7 @@
               "description": "One row per thing being ordered.",
               "sequenceKey": "line_no",
               "defaultItems": 1,
-              "validation": { "type": "array", "minItems": 1 },
+              "validation": { "type": "array", "required": true },
               "components": [
                 {
                   "id": "line-no",

@@ -47,7 +47,21 @@ export type JfssConditionalAction = 'show' | 'hide' | 'enable' | 'disable'
  */
 export type JfssCalculateMode = 'derived' | 'generated'
 
-/** JFSS §5. The basic validation contract. */
+/**
+ * JFSS §5. The basic validation contract.
+ *
+ * **Exactly the keywords `jfss-meta-v2.0.1.json` allows, because it closes this
+ * object with `additionalProperties: false`.** A definition carrying anything
+ * else is refused at save, so a keyword declared here that the meta-schema does
+ * not have describes a document that can never be stored — which is worse than
+ * a missing one, because it reads as supported.
+ *
+ * Notably absent, and each was declared here once by assumption from JSON
+ * Schema: `minItems`, `maxItems`, `exclusiveMinimum`, `exclusiveMaximum` and
+ * `multipleOf`. An array's size is not constrained by this contract at all in
+ * v2.0.1 — `uniqueItems` and `uniqueBy` are what it offers for arrays — and the
+ * specification is frozen, so that is the shape rather than a gap to fill.
+ */
 export interface JfssValidation {
   type: 'string' | 'number' | 'integer' | 'boolean' | 'array' | 'object'
   required?: boolean
@@ -55,15 +69,12 @@ export interface JfssValidation {
   maxLength?: number
   minimum?: number
   maximum?: number
-  exclusiveMinimum?: number
-  exclusiveMaximum?: number
-  multipleOf?: number
   pattern?: string
   format?: 'email' | 'uri' | 'date' | 'time' | 'date-time' | 'uuid'
   enum?: unknown[]
-  minItems?: number
-  maxItems?: number
   uniqueItems?: boolean
+  /** The child `key` an array's rows must be unique by (Validation Rule Registry). */
+  uniqueBy?: string
   /** Per-keyword message overrides, keyed by the keyword they replace. */
   messages?: Record<string, string>
 }
