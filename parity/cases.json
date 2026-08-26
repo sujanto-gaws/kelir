@@ -1058,5 +1058,76 @@
   },
   "note": "Registry 7.3 non-numeric operand under the operator the registry uses as its worked example",
   "added": "#154"
+ },
+ {
+  "id": "sum-non-numeric-members",
+  "tier": "calculate",
+  "expr": {
+   "sum": [
+    {
+     "var": "line_totals"
+    }
+   ]
+  },
+  "data": {
+   "line_totals": [
+    1,
+    "2",
+    true,
+    null,
+    3
+   ]
+  },
+  "note": "Registry 3.2: a non-numeric member contributes nothing rather than poisoning the total. One of the three edge cases both implementations name; only the empty array was in this corpus before #201"
+ },
+ {
+  "id": "sum-non-array-argument",
+  "tier": "calculate",
+  "expr": {
+   "sum": [
+    {
+     "var": "total"
+    }
+   ]
+  },
+  "data": {
+   "total": 7
+  },
+  "note": "Registry 3.2: a non-array argument. The second of the three named edge cases"
+ },
+ {
+  "id": "sum-shorthand-argument",
+  "tier": "calculate",
+  "expr": {
+   "sum": {
+    "var": "line_totals"
+   }
+  },
+  "data": {
+   "line_totals": [
+    20,
+    22
+   ]
+  },
+  "note": "JSON Logic's shorthand — the argument given directly rather than wrapped in a list. Evaluates correctly on both sides, which is why validate_definition leaves it alone (#201)"
+ },
+ {
+  "id": "sum-multi-argument",
+  "tier": "calculate",
+  "expr": {
+   "sum": [
+    {
+     "var": "a"
+    },
+    {
+     "var": "b"
+    }
+   ]
+  },
+  "data": {
+   "a": 1,
+   "b": 2
+  },
+  "note": "The shape #201 is about: `sum` where `+` was meant. Both engines answer 0, silently, which is why it is refused at save rather than at evaluation — this case pins the runtime answer so a change to either sum is loud"
  }
 ]

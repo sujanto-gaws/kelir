@@ -205,6 +205,94 @@ async fn an_operator_the_engine_supports_and_no_registry_approves_is_refused() {
     );
 }
 
+/// A `sum` that would evaluate to `0` without meaning to is refused at save
+/// ([#201](https://github.com/sujanto-gaws/kelir/issues/201), **D-22**).
+///
+/// The evaluation is not wrong and both engines agree on it, which is what
+/// makes this invisible at runtime: JFSS S8.1's re-evaluation catches a client
+/// that disagrees with the server, and here they agree on `0`.
+#[tokio::test]
+async fn a_sum_that_would_silently_be_zero_is_refused_rather_than_stored() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let mut document = definition("silent-zero");
+    // `+` takes a list of operands; `sum` takes one argument and sums the array
+    // it evaluates to. Writing one where the other was meant is the mistake.
+    document["components"][0]["calculate"] =
+        json!({"sum": [{"var": "quantity"}, {"var": "unit_price"}]});
+
+    let response = app
+        .send(
+            Method::POST,
+            "/api/v1/rad/forms",
+            Some(&token),
+            Some(json!({
+                "formKey": "silent-zero",
+                "title": "Silent zero",
+                "definition": document,
+            })),
+        )
+        .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        response.body
+    );
+
+    let codes: Vec<&str> = response.body["error"]["details"]
+        .as_array()
+        .expect("details")
+        .iter()
+        .map(|detail| detail["code"].as_str().unwrap_or_default())
+        .collect();
+
+    assert!(
+        codes.contains(&"SUM_TAKES_ONE_ARRAY"),
+        "the refusal must name the reason, not merely fail; got {codes:?}"
+    );
+
+    // And nothing was stored: a refused definition is not a draft.
+    let listed = app.get("/api/v1/rad/forms", Some(&token)).await;
+    assert!(
+        !listed.body["data"].to_string().contains("silent-zero"),
+        "the definition must not be stored: {}",
+        listed.body
+    );
+}
+
+/// The shorthand evaluates correctly on both engines, so it is not refused.
+#[tokio::test]
+async fn the_sum_shorthand_is_accepted_because_it_works() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let mut document = definition("sum-shorthand");
+    document["components"][0]["calculate"] = json!({"sum": {"var": "line_totals"}});
+
+    let response = app
+        .send(
+            Method::POST,
+            "/api/v1/rad/forms",
+            Some(&token),
+            Some(json!({
+                "formKey": "sum-shorthand",
+                "title": "Sum shorthand",
+                "definition": document,
+            })),
+        )
+        .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::CREATED,
+        "refusing this would refuse definitions that evaluate correctly; {}",
+        response.body
+    );
+}
+
 #[tokio::test]
 async fn the_registry_invoice_calculation_is_accepted() {
     // The other half of the check above: an approved operator set, including

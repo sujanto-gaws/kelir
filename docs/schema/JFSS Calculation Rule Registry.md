@@ -289,11 +289,34 @@ Sums all numeric values in an array.
 }
 ```
 
+**Arity.** `sum` takes **exactly one argument** and sums the array that argument evaluates to. JSON Logic's shorthand — the argument given directly rather than wrapped in a list — is also one argument and is equally valid:
+
+```json
+{ "sum": [{ "var": "line_totals" }] }     // wrapped
+{ "sum": { "var": "line_totals" } }       // shorthand; identical result
+```
+
+**What every other shape evaluates to, measured on `datalogic-rs` 5.2.0 and `@goplasmatic/datalogic-wasm` 5.2.0 and identical on both:**
+
+| Shape | Result | Governed by |
+|---|---|---|
+| `{"sum": [[…]]}` — one array argument | the total | — |
+| `{"sum": []}` — no arguments | `0` | **refused at save** |
+| `{"sum": [a, b]}` — two or more arguments | `0` | **refused at save** |
+| a non-array member inside the array | contributes nothing | evaluated |
+| a non-array *argument* (`{"var": "total"}` → `7`) | `0` | evaluated |
+| an empty array | `0` (not `null`) | evaluated |
+
+**An argument list of any length but one is refused when the definition is saved** ([#201](https://github.com/sujanto-gaws/kelir/issues/201), decision **D-22**). It is not an evaluation error: both engines answer `0` and agree, which is exactly the problem — JFSS S8.1's server-side re-evaluation catches a client that *disagrees* with the server, so a shape both sides get wrong together is confirmed rather than caught. `{"sum": [a, b]}` is the mistake worth guarding: `+` sits beside `sum` in this registry, in the same allow-list, with the same bracket syntax, and it *does* take a list of operands. A form author who writes one for the other gets a grand total of zero and no error anywhere.
+
+The refusal is at save rather than at evaluation because a definition is written once and rendered thousands of times, and because refusing at evaluation would mean changing both engines in step — a parity-affecting change made to catch an authoring mistake.
+
 **Implementation Notes:**
 - **Vue:** ❌ **NOT SUPPORTED natively** — Must register custom operator via `jsonLogic.add_operation`
 - **Rust:** ❌ **NOT SUPPORTED natively** — Must register custom operator (see Section 4.1)
 - **Empty Array:** Returns `0` (not `null`)
 - **Before choosing a library, check that it can accept a custom operator at all.** `jsonlogic-rs` 0.5.0 cannot, and returns `{"sum": …}` unevaluated rather than failing — see Section 4.1.
+- **Every row of the table above is a case in [`parity/cases.json`](../../parity/cases.json)**, so a change to either implementation that moves one of them fails the build. Before #201 the corpus carried only the empty array, while both implementations' comments named three edge cases they had to agree on.
 
 ---
 

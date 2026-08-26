@@ -246,6 +246,10 @@ fn check_operators(
                     ));
                 }
 
+                if operator == "sum" {
+                    check_sum_arity(argument, path, details);
+                }
+
                 check_operators(argument, approved, path, details);
             }
         }
@@ -256,6 +260,60 @@ fn check_operators(
         }
         _ => {}
     }
+}
+
+/// Refuses a `sum` that would evaluate to `0` without meaning to
+/// ([#201](https://github.com/sujanto-gaws/kelir/issues/201), decision **D-22**).
+///
+/// **The defect is silence, not arithmetic.** `sum` reads one argument and
+/// expects it to be an array. Given anything else it contributes nothing and
+/// answers `0` — on both engines, identically, which is D-10 working exactly as
+/// designed and is precisely what hides this: JFSS S8.1's server-side
+/// re-evaluation catches a client that *disagrees* with the server, and here
+/// the two agree on the wrong number. The Tamper-Proof Pattern confirms the `0`
+/// instead of refusing it.
+///
+/// `{"sum": [a, b]}` is the mistake worth guarding, and it is a natural one:
+/// `+` sits beside `sum` in the registry, in the same allow-list, with the same
+/// bracket syntax, and it *does* take a list of operands. A form author who
+/// writes `sum` where they meant `+` gets a grand total of zero and no error
+/// anywhere on the path — which is the shape the Calculation Rule Registry §4.1
+/// describes as turning a 42-rupiah invoice line into free.
+///
+/// **Refused at save rather than at evaluation.** A definition is written once
+/// and rendered thousands of times; refusing here costs one round trip to the
+/// person who can fix it, and refusing at render costs a form that half-works
+/// for everyone else. It also leaves the two engines untouched, so nothing
+/// about parity moves.
+///
+/// **A non-array argument is left alone**, and that is measured rather than
+/// assumed. JSON Logic's shorthand — `{"sum": {"var": "line_totals"}}`, the
+/// argument given directly instead of wrapped in a list — is one argument, and
+/// both engines evaluate it correctly (`3` for `[1, 2]`). Refusing it would
+/// refuse definitions that work. What cannot work is an argument *list* of any
+/// length but one: zero arguments has nothing to sum, and two or more means the
+/// author expected `+`.
+fn check_sum_arity(argument: &Value, path: &str, details: &mut Vec<ValidationDetail>) {
+    let Some(arguments) = argument.as_array() else {
+        // The shorthand. One argument, evaluated correctly on both sides.
+        return;
+    };
+
+    if arguments.len() == 1 {
+        return;
+    }
+
+    details.push(ValidationDetail::new(
+        path,
+        "arity",
+        "SUM_TAKES_ONE_ARRAY",
+        format!(
+            "`sum` takes exactly one argument and sums the array it evaluates to; \
+             this one has {}. It would evaluate to 0 on both the server and the \
+             browser without reporting anything — for a list of operands use `+`",
+            arguments.len()
+        ),
+    ));
 }
 
 #[cfg(test)]
@@ -285,6 +343,64 @@ mod tests {
 
     fn paths(details: &[ValidationDetail]) -> Vec<&str> {
         details.iter().map(|detail| detail.path.as_str()).collect()
+    }
+
+    fn with_calculate(calculate: Value) -> Value {
+        let mut definition = minimal();
+        definition["components"][0]["calculate"] = calculate;
+        definition
+    }
+
+    #[test]
+    fn refuses_a_sum_whose_argument_list_is_not_one_long() {
+        // `+` is beside `sum` in the registry, in the same allow-list, with the
+        // same bracket syntax, and it does take a list of operands. Writing
+        // `sum` where `+` was meant evaluates to 0 on both engines and reports
+        // nothing (#201).
+        for arguments in [
+            json!({ "sum": [{ "var": "a" }, { "var": "b" }] }),
+            json!({ "sum": [] }),
+            json!({ "sum": [{ "var": "a" }, { "var": "b" }, { "var": "c" }] }),
+        ] {
+            let details = validate_definition(&with_calculate(arguments.clone()));
+
+            assert!(
+                details
+                    .iter()
+                    .any(|detail| detail.code == "SUM_TAKES_ONE_ARRAY"),
+                "expected {arguments} to be refused, got {details:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_the_two_sum_shapes_that_evaluate_correctly() {
+        // Measured on both engines rather than assumed: the wrapped form and
+        // JSON Logic's shorthand both answer 3 for `[1, 2]`. Refusing the
+        // shorthand would refuse definitions that work.
+        for arguments in [
+            json!({ "sum": [{ "var": "line_totals" }] }),
+            json!({ "sum": { "var": "line_totals" } }),
+        ] {
+            assert_eq!(
+                validate_definition(&with_calculate(arguments.clone())),
+                Vec::new(),
+                "expected {arguments} to be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_a_nested_sum_too() {
+        // The walk recurses, so a `sum` inside a `map` inside a `sum` is as
+        // much a stored operator as a top-level one.
+        let details = validate_definition(&with_calculate(json!({
+            "sum": [{ "map": [{ "var": "items" }, { "sum": [{ "var": "a" }, { "var": "b" }] }] }]
+        })));
+
+        assert!(details
+            .iter()
+            .any(|detail| detail.code == "SUM_TAKES_ONE_ARRAY"));
     }
 
     #[test]
