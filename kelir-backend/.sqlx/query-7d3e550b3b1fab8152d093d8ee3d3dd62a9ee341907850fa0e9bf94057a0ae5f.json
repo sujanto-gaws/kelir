@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT count(*)\n        FROM mdm_facilities\n        WHERE tenant_id = $1\n          AND deleted_at IS NULL\n          AND record_status <> 'ARCHIVED'\n          AND ($2::text IS NULL OR facility_code ILIKE $2 OR name ILIKE $2)\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "7d3e550b3b1fab8152d093d8ee3d3dd62a9ee341907850fa0e9bf94057a0ae5f"
+}

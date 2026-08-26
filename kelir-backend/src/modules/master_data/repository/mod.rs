@@ -66,3 +66,69 @@ pub use party_children::*;
 pub use record_status::*;
 pub use role::*;
 pub use role_view::*;
+
+/// Wraps a search term in a `%…%` pattern that matches it literally.
+///
+/// `LIKE` reads `%` as *any run of characters* and `_` as *any character*, so a
+/// caller searching for the literal string `100%` would otherwise match every
+/// row beginning `100`, and `_` would match a scan of the whole table. Both are
+/// escaped, and so is the escape character itself — `\` last would double the
+/// backslashes this function had just introduced.
+///
+/// PostgreSQL's default `LIKE` escape is the backslash, which is why no
+/// `ESCAPE` clause appears in the queries that bind this.
+///
+/// **It lives here rather than beside one query because two now use it.** It was
+/// private to `role_view` while the role views were the only searchable list in
+/// the module; the facility options of [#161] search the same way, and a second
+/// copy of an escaping rule is a second escaping rule.
+///
+/// [#161]: https://github.com/sujanto-gaws/kelir/issues/161
+pub(super) fn like_contains(search: &str) -> String {
+    let mut pattern = String::with_capacity(search.len() + 2);
+    pattern.push('%');
+
+    for character in search.chars() {
+        if matches!(character, '\\' | '%' | '_') {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+    }
+
+    pattern.push('%');
+    pattern
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wraps_a_plain_search_in_a_contains_pattern() {
+        assert_eq!(like_contains("ACME"), "%ACME%");
+    }
+
+    #[test]
+    fn escapes_a_percent_so_it_matches_itself() {
+        // Without this, searching `100%` returns every code starting `100`, and
+        // the caller reads the extra rows as matches.
+        assert_eq!(like_contains("100%"), "%100\\%%");
+    }
+
+    #[test]
+    fn escapes_an_underscore_so_it_matches_itself() {
+        assert_eq!(like_contains("A_B"), "%A\\_B%");
+    }
+
+    #[test]
+    fn escapes_the_escape_character_itself() {
+        // `\%` from a caller is a literal backslash followed by a literal
+        // percent, not an escaped percent.
+        assert_eq!(like_contains("\\%"), "%\\\\\\%%");
+    }
+
+    #[test]
+    fn leaves_a_search_that_needs_no_escaping_alone() {
+        assert_eq!(like_contains("SUP-0001"), "%SUP-0001%");
+    }
+}

@@ -42,6 +42,10 @@ const LIST_ENDPOINTS: &[&str] = &[
     "/api/v1/master-data/facilities",
     "/api/v1/rad/forms",
     "/api/v1/rad/lists",
+    // One source stands for all four: the four share one handler, one
+    // query struct and one extractor, so a second row would repeat the
+    // same call rather than reach a second refusal path.
+    "/api/v1/rad/lookups/supplier/options",
     "/api/v1/document-types",
     "/api/v1/organization/departments",
     "/api/v1/organization/tenants",

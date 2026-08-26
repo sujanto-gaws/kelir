@@ -1,6 +1,6 @@
 //! Validating a stored form definition (FR-RAD-002, #156 AC2).
 //!
-//! Two checks, and they catch different things.
+//! Three checks, and they catch different things.
 //!
 //! **Shape**, against the JFSS v2.0.1 meta-schema. That file is normative —
 //! "where this document and the Meta-Schema disagree, the Meta-Schema is
@@ -24,14 +24,29 @@
 //! runtimes agreeing on something the registry says is FORBIDDEN. The registry
 //! is the allow-list; this is where it is enforced.
 //!
+//! **Lookup bindings**, against the source allow-list of
+//! [`super::lookup::LookupSource`] (FR-RAD-007, [#161]). A lookup field is the
+//! one component whose options come from the database, so it names a
+//! master-data source — and the meta-schema cannot check that either, for a
+//! reason it states about component types generally: `type` is an open
+//! vocabulary defined by each implementation's registry, so which types exist
+//! and what they require is a **registry-level** constraint, exactly as JFSS
+//! §4.4 says of a text-bearing display component. This is Kelir's registry.
+//!
 //! **Refused at save, not at render.** A definition is written once and
 //! rendered thousands of times, and the render path has no good failure: a form
-//! that half-renders is worse than one that was never stored.
+//! that half-renders is worse than one that was never stored. A lookup naming a
+//! source nobody serves is the sharpest case of it — the field renders, the
+//! chooser opens, and it is empty, which is indistinguishable from master data
+//! that happens to hold nothing.
+//!
+//! [#161]: https://github.com/sujanto-gaws/kelir/issues/161
 
 use std::sync::OnceLock;
 
 use serde_json::Value;
 
+use super::lookup::LookupSource;
 use crate::error::ValidationDetail;
 
 /// The meta-schema, vendored into the crate.
@@ -124,10 +139,11 @@ fn validator() -> &'static jsonschema::Validator {
 pub fn validate_definition(definition: &Value) -> Vec<ValidationDetail> {
     let mut details = shape_errors(definition);
 
-    // Operators are checked even when the shape is wrong. The two checks read
-    // different parts of the document, and a caller who has both problems
-    // should be told about both.
+    // Operators and lookups are checked even when the shape is wrong. The three
+    // checks read different parts of the document, and a caller who has more
+    // than one problem should be told about all of them.
     details.extend(operator_errors(definition));
+    details.extend(lookup_errors(definition));
     details
 }
 
@@ -193,24 +209,40 @@ fn walk_components(node: &Value, path: &str, details: &mut Vec<ValidationDetail>
             );
         }
 
-        // Children live under `components` on a layout component, and under
-        // `columns` / `tabs` as slot objects that each carry their own
-        // `components` (JFSS v2.0.1 added those shapes). A nested calculate is
-        // as much a stored operator as a top-level one.
-        walk_components(component, &format!("{here}.components"), details);
+        // A nested calculate is as much a stored operator as a top-level one.
+        for (child, child_path) in child_containers(component, &here) {
+            walk_components(child, &child_path, details);
+        }
+    }
+}
 
-        for slot_key in ["columns", "tabs"] {
-            if let Some(slots) = component.get(slot_key).and_then(Value::as_array) {
-                for (slot_index, slot) in slots.iter().enumerate() {
-                    walk_components(
-                        slot,
-                        &format!("{here}.{slot_key}.{slot_index}.components"),
-                        details,
-                    );
-                }
+/// Every node under `component` whose `components` array holds children, with
+/// the path each of them is at.
+///
+/// **The closed set of three shapes, in one place** (JFSS §4.3.1): children live
+/// under `components` on a single-slot container, and under `columns` / `tabs`
+/// as slot objects that each carry their own `components`. §4.3.1 requires a
+/// conformant implementation to traverse all three *wherever* it walks the tree,
+/// and this file now walks it twice — once for operators and once for lookups.
+/// Two traversals that have to agree about the shapes are two places to forget
+/// one, which is the failure §4.3.1 describes: traversing only `components`
+/// silently ignores every child nested inside a `columns` or `tabs` container.
+///
+/// A `data` component's `components` is a row template rather than a set of
+/// siblings, and it is descended into all the same: a lookup declared inside a
+/// datagrid row is as much a stored lookup as one at the top level.
+fn child_containers<'a>(component: &'a Value, here: &str) -> Vec<(&'a Value, String)> {
+    let mut containers = vec![(component, format!("{here}.components"))];
+
+    for slot_key in ["columns", "tabs"] {
+        if let Some(slots) = component.get(slot_key).and_then(Value::as_array) {
+            for (slot_index, slot) in slots.iter().enumerate() {
+                containers.push((slot, format!("{here}.{slot_key}.{slot_index}.components")));
             }
         }
     }
+
+    containers
 }
 
 /// Collects operator keys from a JSON Logic expression and refuses unapproved
@@ -314,6 +346,216 @@ fn check_sum_arity(argument: &Value, path: &str, details: &mut Vec<ValidationDet
             arguments.len()
         ),
     ));
+}
+
+/// Where a form declares which of its fields are lookups, and onto what.
+///
+/// **`settings` is the extension point JFSS gives an implementation, and it is
+/// the only one.** The specification is a `Final Standard` — frozen at v2.0.1,
+/// errata only, and a successor takes a new major version ([naming
+/// convention](../../../../../docs/standards/02.%20Naming%20Convention.md)
+/// §10.1) — so a new component property is not a thing this issue may add: the
+/// meta-schema closes a component with `unevaluatedProperties: false`, and
+/// `settings` is the one object in the document declared
+/// `additionalProperties: true` and described as "global form configurations".
+/// A definition carrying a lookup binding is therefore a conformant JFSS v2.0.1
+/// document, which a definition carrying a `dataSource` property would not be.
+///
+/// The cost is stated rather than hidden: the binding does not sit on the
+/// component it binds, which is a departure from JFSS's own component-driven
+/// philosophy. Making it local would mean JFSS v3.0.0, and that is a phase-scale
+/// decision rather than a sprint item.
+const LOOKUP_BINDINGS: &str = "settings.lookups";
+
+/// A `data` component this document declares, as the lookup check sees it.
+struct DataComponent<'a> {
+    path: String,
+    id: Option<&'a str>,
+    component_type: Option<&'a str>,
+    has_options: bool,
+}
+
+/// Lookup bindings that name nothing, and lookup fields nothing binds.
+///
+/// **Bound by component `id`, not by `key`.** JFSS §4.1 makes `id` the globally
+/// unique identifier of a component *instance*, which is exactly the join a
+/// binding table needs. `key` is not that: a `data` component inside a datagrid
+/// row template holds a key in the row's scope, so two components in one
+/// document may legitimately carry the same `key` and a binding on it would be
+/// ambiguous about which field it meant.
+///
+/// The five refusals below are the five ways a binding can be wrong, and each is
+/// a form that renders wrongly rather than one that fails to render — which is
+/// the whole reason they are caught here.
+fn lookup_errors(definition: &Value) -> Vec<ValidationDetail> {
+    let mut details = Vec::new();
+    let mut components = Vec::new();
+
+    collect_data_components(definition, "definition.components", &mut components);
+
+    let bindings = definition
+        .get("settings")
+        .and_then(|settings| settings.get("lookups"));
+
+    let mut bound: Vec<&str> = Vec::new();
+
+    match bindings {
+        None => {}
+        Some(Value::Object(map)) => {
+            for (id, source) in map {
+                bound.push(id.as_str());
+                check_binding(id, source, &components, &mut details);
+            }
+        }
+        Some(_) => details.push(ValidationDetail::new(
+            format!("definition.{LOOKUP_BINDINGS}"),
+            "type",
+            "LOOKUP_BINDINGS_INVALID",
+            format!(
+                "`{LOOKUP_BINDINGS}` must be an object mapping a component id to a \
+                 lookup source, one of {}",
+                LookupSource::keys()
+            ),
+        )),
+    }
+
+    // The other direction. A field the renderer will treat as a lookup, with
+    // nothing saying where its options come from, is a chooser that opens empty
+    // — and an empty chooser reads as master data holding nothing.
+    for component in &components {
+        if component.component_type != Some(LOOKUP_TYPE) {
+            continue;
+        }
+
+        if component.id.is_some_and(|id| bound.contains(&id)) {
+            continue;
+        }
+
+        details.push(ValidationDetail::new(
+            component.path.clone(),
+            "lookup",
+            "LOOKUP_SOURCE_MISSING",
+            format!(
+                "a `{LOOKUP_TYPE}` component takes its options from master data, so \
+                 `{LOOKUP_BINDINGS}` must bind its `id` to one of {}",
+                LookupSource::keys()
+            ),
+        ));
+    }
+
+    details
+}
+
+/// The component type whose options come from master data rather than the
+/// definition.
+///
+/// `type` is an open vocabulary (JFSS §4.2), so this is Kelir's registry naming
+/// its own — the same way the renderer's component registry names `textfield`.
+const LOOKUP_TYPE: &str = "lookup";
+
+/// One binding: the component it names, and the source it points at.
+fn check_binding(
+    id: &str,
+    source: &Value,
+    components: &[DataComponent<'_>],
+    details: &mut Vec<ValidationDetail>,
+) {
+    let path = format!("definition.{LOOKUP_BINDINGS}.{id}");
+
+    let Some(source) = source.as_str() else {
+        details.push(ValidationDetail::new(
+            path,
+            "type",
+            "LOOKUP_SOURCE_INVALID",
+            format!(
+                "a lookup binding is the name of a master-data source, one of {}",
+                LookupSource::keys()
+            ),
+        ));
+
+        return;
+    };
+
+    if LookupSource::from_key(source).is_none() {
+        details.push(ValidationDetail::new(
+            path.clone(),
+            "enum",
+            "LOOKUP_SOURCE_UNKNOWN",
+            format!(
+                "`{source}` is not a master-data source this deployment serves; \
+                 it must be one of {}",
+                LookupSource::keys()
+            ),
+        ));
+    }
+
+    let matched: Vec<&DataComponent<'_>> = components
+        .iter()
+        .filter(|component| component.id == Some(id))
+        .collect();
+
+    match matched.as_slice() {
+        [] => details.push(ValidationDetail::new(
+            path,
+            "reference",
+            "LOOKUP_COMPONENT_NOT_FOUND",
+            format!(
+                "`{id}` is not the id of a data component in this definition, so the \
+                 binding would resolve options for a field that does not exist"
+            ),
+        )),
+        [component] => {
+            if component.has_options {
+                details.push(ValidationDetail::new(
+                    format!("{}.options", component.path),
+                    "conflict",
+                    "LOOKUP_HAS_STATIC_OPTIONS",
+                    "a bound lookup takes its options from master data, so it must not \
+                     also carry an `options` array — a component holding both leaves the \
+                     renderer to choose which one a person sees"
+                        .to_owned(),
+                ));
+            }
+        }
+        matched => details.push(ValidationDetail::new(
+            path,
+            "reference",
+            "LOOKUP_COMPONENT_AMBIGUOUS",
+            format!(
+                "`{id}` is the id of {} data components; JFSS §4.1 makes `id` unique per \
+                 component instance, and a binding cannot say which one it meant",
+                matched.len()
+            ),
+        )),
+    }
+}
+
+/// Every `data` component in the document, with the path it is at.
+///
+/// Descends through the same three child-container shapes the operator walk
+/// does, by way of the same [`child_containers`] — the two must agree about
+/// where children live, and this is how they are made to.
+fn collect_data_components<'a>(node: &'a Value, path: &str, found: &mut Vec<DataComponent<'a>>) {
+    let Some(components) = node.get("components").and_then(Value::as_array) else {
+        return;
+    };
+
+    for (index, component) in components.iter().enumerate() {
+        let here = format!("{path}.{index}");
+
+        if component.get("role").and_then(Value::as_str) == Some("data") {
+            found.push(DataComponent {
+                path: here.clone(),
+                id: component.get("id").and_then(Value::as_str),
+                component_type: component.get("type").and_then(Value::as_str),
+                has_options: component.get("options").is_some(),
+            });
+        }
+
+        for (child, child_path) in child_containers(component, &here) {
+            collect_data_components(child, &child_path, found);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -542,6 +784,243 @@ mod tests {
             paths(&details),
             vec!["definition.components.0.components.0.calculate"]
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Lookup bindings (FR-RAD-007, #161 AC1)
+    // -----------------------------------------------------------------------
+
+    /// A definition with one lookup field, bound to `source`.
+    fn with_lookup(source: Value) -> Value {
+        json!({
+            "formId": "purchase-requisition",
+            "version": "2.0.1",
+            "settings": { "lookups": { "supplier_field": source } },
+            "components": [{
+                "id": "supplier_field",
+                "role": "data",
+                "type": "lookup",
+                "key": "supplier_id",
+                "label": "Supplier",
+                "validation": { "type": "string" }
+            }]
+        })
+    }
+
+    fn codes(details: &[ValidationDetail]) -> Vec<&str> {
+        details.iter().map(|detail| detail.code.as_str()).collect()
+    }
+
+    #[test]
+    fn accepts_a_lookup_bound_to_a_source_this_deployment_serves() {
+        // The whole shape, end to end: a conformant JFSS v2.0.1 document — no
+        // property outside the frozen meta-schema — that declares a field whose
+        // options come from master data.
+        for source in crate::modules::rad::domain::lookup::SOURCES {
+            assert_eq!(
+                validate_definition(&with_lookup(json!(source.key()))),
+                Vec::new(),
+                "{} must be bindable",
+                source.key()
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_a_lookup_bound_to_a_source_nobody_serves() {
+        // The failure this is here for: the field renders, the chooser opens,
+        // and it is empty — which reads as master data holding nothing rather
+        // than as a definition nobody can serve.
+        let details = validate_definition(&with_lookup(json!("parties")));
+
+        assert_eq!(
+            codes(&details),
+            vec!["LOOKUP_SOURCE_UNKNOWN"],
+            "{details:?}"
+        );
+        assert_eq!(
+            paths(&details),
+            vec!["definition.settings.lookups.supplier_field"]
+        );
+        assert!(
+            details[0].message.contains("supplier"),
+            "the refusal must name what the author may write: {}",
+            details[0].message
+        );
+    }
+
+    #[test]
+    fn refuses_a_binding_that_is_not_the_name_of_a_source() {
+        let details = validate_definition(&with_lookup(json!({ "entity": "supplier" })));
+
+        assert!(details
+            .iter()
+            .any(|detail| detail.code == "LOOKUP_SOURCE_INVALID"));
+    }
+
+    #[test]
+    fn refuses_a_lookups_object_that_is_not_an_object() {
+        let mut definition = with_lookup(json!("supplier"));
+        definition["settings"]["lookups"] = json!(["supplier"]);
+
+        let details = validate_definition(&definition);
+
+        assert!(details
+            .iter()
+            .any(|detail| detail.code == "LOOKUP_BINDINGS_INVALID"));
+    }
+
+    #[test]
+    fn refuses_a_lookup_field_nothing_binds() {
+        // A `lookup` component with no source is a chooser with nothing behind
+        // it, and the renderer has no way to tell that from an empty list.
+        let mut definition = with_lookup(json!("supplier"));
+        definition["settings"] = json!({});
+
+        let details = validate_definition(&definition);
+
+        assert_eq!(
+            codes(&details),
+            vec!["LOOKUP_SOURCE_MISSING"],
+            "{details:?}"
+        );
+        assert_eq!(paths(&details), vec!["definition.components.0"]);
+    }
+
+    #[test]
+    fn refuses_a_binding_that_names_no_component() {
+        let mut definition = with_lookup(json!("supplier"));
+        definition["settings"]["lookups"] = json!({ "customer_field": "customer" });
+
+        let details = validate_definition(&definition);
+
+        // Both directions fire, and both are true: the binding names nothing,
+        // and the lookup field is unbound.
+        assert!(details
+            .iter()
+            .any(|detail| detail.code == "LOOKUP_COMPONENT_NOT_FOUND"));
+        assert!(details
+            .iter()
+            .any(|detail| detail.code == "LOOKUP_SOURCE_MISSING"));
+    }
+
+    #[test]
+    fn refuses_a_binding_onto_an_id_two_components_share() {
+        // JFSS §4.1 makes `id` unique per component instance and JSON Schema
+        // cannot express it, so a binding is where the ambiguity surfaces.
+        let mut definition = with_lookup(json!("supplier"));
+        definition["components"]
+            .as_array_mut()
+            .expect("array")
+            .push(json!({
+                "id": "supplier_field",
+                "role": "data",
+                "type": "textfield",
+                "key": "supplier_name",
+                "label": "Supplier name",
+                "validation": { "type": "string" }
+            }));
+
+        let details = validate_definition(&definition);
+
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.code == "LOOKUP_COMPONENT_AMBIGUOUS"),
+            "{details:?}"
+        );
+    }
+
+    #[test]
+    fn refuses_a_bound_lookup_that_also_carries_static_options() {
+        // Two answers to the same question, and the renderer would have to pick
+        // one. Refusing is the only reading that is not a guess.
+        let mut definition = with_lookup(json!("supplier"));
+        definition["components"][0]["options"] = json!([{ "label": "Acme", "value": "acme" }]);
+
+        let details = validate_definition(&definition);
+
+        assert_eq!(
+            codes(&details),
+            vec!["LOOKUP_HAS_STATIC_OPTIONS"],
+            "{details:?}"
+        );
+        assert_eq!(paths(&details), vec!["definition.components.0.options"]);
+    }
+
+    #[test]
+    fn finds_a_lookup_nested_in_a_tab() {
+        // The traversal §4.3.1 requires. A builder that puts every field one tab
+        // down would otherwise store lookups this check never sees.
+        let definition = json!({
+            "formId": "nested-lookup",
+            "version": "2.0.1",
+            "components": [{
+                "id": "tabs",
+                "role": "layout",
+                "type": "tabs",
+                "tabs": [{
+                    "title": "Supplier",
+                    "components": [{
+                        "id": "supplier_field",
+                        "role": "data",
+                        "type": "lookup",
+                        "key": "supplier_id",
+                        "label": "Supplier",
+                        "validation": { "type": "string" }
+                    }]
+                }]
+            }]
+        });
+
+        let details = validate_definition(&definition);
+
+        assert_eq!(
+            codes(&details),
+            vec!["LOOKUP_SOURCE_MISSING"],
+            "{details:?}"
+        );
+        assert_eq!(
+            paths(&details),
+            vec!["definition.components.0.tabs.0.components.0"]
+        );
+    }
+
+    #[test]
+    fn binds_a_lookup_inside_a_datagrid_row_by_its_own_id() {
+        // Why the binding is on `id` and not on `key`: a row template's keys
+        // live in the row's scope, so two components in one document may share
+        // one. The id is unique per instance, so the binding is not ambiguous.
+        let definition = json!({
+            "formId": "line-items",
+            "version": "2.0.1",
+            "settings": { "lookups": { "row_supplier": "supplier" } },
+            "components": [{
+                "id": "line_items",
+                "role": "data",
+                "type": "datagrid",
+                "key": "line_items",
+                "label": "Line items",
+                "validation": { "type": "array" },
+                "components": [{
+                    "id": "row_supplier",
+                    "role": "data",
+                    "type": "lookup",
+                    "key": "supplier_id",
+                    "label": "Supplier",
+                    "validation": { "type": "string" }
+                }]
+            }]
+        });
+
+        assert_eq!(validate_definition(&definition), Vec::new());
+    }
+
+    #[test]
+    fn leaves_a_definition_with_no_lookups_alone() {
+        // The check must cost nothing to a form that has no lookup in it, or
+        // every existing definition becomes unsaveable.
+        assert_eq!(validate_definition(&minimal()), Vec::new());
     }
 
     #[test]

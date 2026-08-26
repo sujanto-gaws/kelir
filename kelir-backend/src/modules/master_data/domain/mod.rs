@@ -71,6 +71,39 @@ pub const MAX_VOCABULARY_LENGTH: usize = 40;
 pub const MAX_EXTERNAL_ID_LENGTH: usize = 255;
 
 // ---------------------------------------------------------------------------
+// Master data as something selectable
+// ---------------------------------------------------------------------------
+
+/// One master-data record reduced to what a chooser needs (FR-RAD-007, #161).
+///
+/// A lookup field on a form offers master data the caller may already read, so
+/// this is the shape every source narrows to before it leaves this module: the
+/// key a document stores, the name a person recognises, and the business
+/// identifier that tells two records of the same name apart.
+///
+/// **It is produced here rather than in the module that renders it.** What
+/// identifies a supplier is the supplier number, what identifies a facility is
+/// its facility code, and what identifies a party holding a role without a
+/// profile is its party code. Those are answers about master data, so they are
+/// given by master data — a renderer that had to know them would be a second
+/// place they could be got wrong.
+///
+/// The list surfaces keep their own richer rows. This one exists because a
+/// dropdown that read `FacilitySummary` would join a parent and an owner it
+/// never shows, which is the cost that makes a lookup stop working at the size
+/// where it matters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MasterDataOption {
+    /// The record's surrogate key — what a document stores to point at it.
+    pub id: uuid::Uuid,
+    /// What a person calls the record.
+    pub name: String,
+    /// The business identifier, where the record carries one. `None` only where
+    /// the source has no identifier to offer at all.
+    pub code: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Validation primitives shared by the party and its roles
 // ---------------------------------------------------------------------------
 
