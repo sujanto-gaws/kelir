@@ -281,5 +281,25 @@
   "id": "mul-array-operand",
   "ok": true,
   "value": 5
+ },
+ {
+  "id": "sum-non-numeric-members",
+  "ok": true,
+  "value": 4
+ },
+ {
+  "id": "sum-non-array-argument",
+  "ok": true,
+  "value": 0
+ },
+ {
+  "id": "sum-shorthand-argument",
+  "ok": true,
+  "value": 42
+ },
+ {
+  "id": "sum-multi-argument",
+  "ok": true,
+  "value": 0
  }
 ]

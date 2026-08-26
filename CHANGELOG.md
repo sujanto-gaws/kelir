@@ -16,9 +16,11 @@ deployment. Two Phase 2 carry-overs land with them, and a third — tenant
 management — returns from the unscheduled backlog and takes multi-tenant mode
 with it.
 
-The numbering defect the Sprint 7 verification pass found is closed with them:
-a department-scoped sequence keeps a counter per department rather than one per
-rule, which needed a migration and a table.
+Two of the Sprint 7 verification pass's findings are closed with them. A
+department-scoped sequence keeps a counter per department rather than one per
+rule, which needed a migration and a table; and a `sum` that would silently
+total zero is refused when the definition is saved rather than confirmed by the
+server that re-evaluates it.
 
 Alongside them, every open defect the three verification passes had filed and
 left standing is closed. Four of the eight are contract defects rather than
@@ -53,6 +55,12 @@ changed.
 - **A Tenants screen**, behind `organization:tenant:read`, with a Playwright flow
   covering sign-in → list → create (`e2e/tests/create-a-tenant.spec.ts`).
 
+- **The parity corpus covers the `sum` edge cases its two implementations
+  promise to agree on.** Both sides' comments name three — a non-array argument,
+  an empty array, and non-numeric members — and `parity/cases.json` carried only
+  the empty array. All three are in it now, with the shorthand and the
+  multi-argument shape, so a change to either `sum` fails the build instead of
+  passing quietly.
 - **One JSON Logic engine on both sides (decision D-10).** The backend evaluates
   JFSS calculation and validation rules with `datalogic-rs` and the browser with
   `@goplasmatic/datalogic-wasm`, which are the same Rust core behind two
@@ -139,6 +147,19 @@ changed.
   RETURNING`: no read to race, and two scope values do not contend at all.
   Nothing numbers documents yet — the document surface is Sprint 9 — so a
   deployment carrying a configured rule keeps its counter and loses nothing.
+- **A `sum` that would silently evaluate to zero is refused when the form
+  definition is saved
+  ([#201](https://github.com/sujanto-gaws/kelir/issues/201), decision **D-22**).**
+  `sum` takes one argument and sums the array it evaluates to. Given an argument
+  *list* of any other length — `{"sum": [a, b]}`, the natural mistake, because
+  `+` sits beside it in the registry with the same bracket syntax and does take
+  a list of operands — it answered `0`. On both engines, identically, which is
+  what hid it: the server-side re-evaluation behind JFSS S8.1 catches a client
+  that *disagrees* with the server, so a shape both sides get wrong together was
+  confirmed rather than caught. Such a definition is now refused at the API with
+  `SUM_TAKES_ONE_ARRAY`. **Nothing about evaluation changed**, so no parity risk:
+  the shorthand `{"sum": {"var": "line_totals"}}` still works and is still
+  accepted, which was measured rather than assumed.
 - **A bad `page` or `pageSize` is refused inside the error envelope
   ([#122](https://github.com/sujanto-gaws/kelir/issues/122)).** The two
   parameters were deserialized by the extractor, so a value that was not a `u32`
