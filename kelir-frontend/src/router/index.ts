@@ -60,6 +60,20 @@ export const routes: RouteRecordRaw[] = [
         },
       },
       {
+        // The form id is the route, not a query parameter: a filled-in form is
+        // a place, and Sprint 9's document workspace links to one.
+        path: 'forms/:id',
+        name: 'form-render',
+        component: () => import('@/features/rad/FormRenderPage.vue'),
+        // The permission that opens a definition. A lookup field inside the
+        // form needs the master-data permission of whatever it points at, and
+        // that is enforced where it belongs — on `/rad/lookups/…`, per the
+        // reasoning #97 and D-12 have applied before. A caller who may read
+        // forms and not suppliers gets the form with one chooser that reports
+        // it could not load, not a route that refuses the whole form.
+        meta: { requiresAuth: true, permission: 'rad:form:read', title: 'Form' },
+      },
+      {
         path: 'admin/users',
         name: 'admin-users',
         component: () => import('@/features/admin/UserListPage.vue'),

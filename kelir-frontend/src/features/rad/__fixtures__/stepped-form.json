@@ -1,0 +1,27 @@
+{
+  "formId": "stepped-form",
+  "version": "2.0.1",
+  "title": "A form Kelir cannot fully show",
+  "components": [
+    {
+      "id": "wizard",
+      "role": "layout",
+      "type": "steps",
+      "tabs": [
+        {
+          "title": "First",
+          "components": [
+            {
+              "id": "first-field",
+              "role": "data",
+              "type": "textfield",
+              "key": "first",
+              "label": "First",
+              "validation": { "type": "string" }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

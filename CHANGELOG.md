@@ -137,6 +137,40 @@ changed.
   and which permission it needs, and a row that chose the second would make a
   misconfigured lookup a permission bypass that reads as a typo.
 
+- **A published form definition renders as a form (FR-RAD-010,
+  [#162](https://github.com/sujanto-gaws/kelir/issues/162)).** `/forms/{id}`
+  reads a definition through `GET /api/v1/rad/forms/{id}` and produces a form
+  from it — the first RAD surface in the frontend, and the first thing to
+  consume #161's lookup endpoint. Nine `data` types render (`textfield`,
+  `textarea`, `number`, `select`, `radio`, `checkbox`, `date`, `lookup`,
+  `datagrid`), four containers, four display types and `button`; every label,
+  help text, required marker, option list and column count comes from the
+  definition and nothing about a specific form is in the code.
+
+  **All three of JFSS §4.3.1's child-container shapes are traversed.** A
+  renderer that followed only `components` would silently drop every field
+  nested inside a `columns` or a `tabs` container, which §4.3.1 names as the
+  failure — so each container owns its own shape, and a repeater's `components`
+  is treated as the row template it is rather than as a set of siblings.
+  Inactive tabs stay mounted: a required field on a tab nobody opened must
+  still count once rules arrive.
+
+  **Kelir's component vocabulary is one file, and a test holds it there.**
+  JFSS §4.4 makes `type` an open vocabulary defined by each implementation's
+  registry, and the meta-schema enumerates none — so nothing upstream decides
+  which component types exist and the backend cannot refuse a definition for
+  using one this frontend has no component for. `features/rad/renderer/registry.ts`
+  is that vocabulary; a type it neither supports nor declares missing renders as
+  a **visible placeholder naming the type**, because a form silently missing a
+  field is indistinguishable from a form that never had one. The registry's test
+  discovers every JFSS fixture in the repository rather than listing types, so a
+  fixture using an undeclared type fails the suite.
+
+  **No rules, deliberately.** Validation is #163 and submitting is #164; the
+  evaluator is not imported by this surface at all, which is also what keeps its
+  588 KB off the render path per decision D-10. A button raises its action and
+  the page says submitting is not built yet, rather than appearing to work.
+
 ### Changed
 
 - **Roles are tenant-scoped, and the database now enforces it

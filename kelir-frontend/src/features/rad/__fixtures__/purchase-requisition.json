@@ -1,0 +1,199 @@
+{
+  "formId": "purchase-requisition",
+  "version": "2.0.1",
+  "title": "Purchase requisition",
+  "settings": {
+    "lookups": {
+      "supplier-field": "supplier"
+    }
+  },
+  "components": [
+    {
+      "id": "request-details",
+      "role": "layout",
+      "type": "panel",
+      "title": "Request details",
+      "components": [
+        {
+          "id": "title-field",
+          "role": "data",
+          "type": "textfield",
+          "key": "title",
+          "label": "Title",
+          "placeholder": "What is being requested",
+          "description": "A short description other people will search for.",
+          "validation": { "type": "string", "required": true, "maxLength": 200 }
+        },
+        {
+          "id": "supplier-field",
+          "role": "data",
+          "type": "lookup",
+          "key": "supplier_id",
+          "label": "Supplier",
+          "validation": { "type": "string", "required": true }
+        },
+        {
+          "id": "needed-by-field",
+          "role": "data",
+          "type": "date",
+          "key": "needed_by",
+          "label": "Needed by",
+          "validation": { "type": "string", "format": "date" }
+        }
+      ]
+    },
+    {
+      "id": "budget-and-priority",
+      "role": "layout",
+      "type": "columns",
+      "columns": [
+        {
+          "components": [
+            {
+              "id": "budget-field",
+              "role": "data",
+              "type": "number",
+              "key": "budget",
+              "label": "Budget",
+              "description": "In the requesting department's currency.",
+              "validation": { "type": "number", "minimum": 0 }
+            }
+          ]
+        },
+        {
+          "components": [
+            {
+              "id": "priority-field",
+              "role": "data",
+              "type": "select",
+              "key": "priority",
+              "label": "Priority",
+              "options": [
+                { "label": "Low", "value": "LOW" },
+                { "label": "Normal", "value": "NORMAL" },
+                { "label": "High", "value": "HIGH" },
+                { "label": "Urgent", "value": "URGENT" }
+              ],
+              "validation": { "type": "string", "required": true }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "detail-tabs",
+      "role": "layout",
+      "type": "tabs",
+      "tabs": [
+        {
+          "title": "Lines",
+          "components": [
+            {
+              "id": "line-items",
+              "role": "data",
+              "type": "datagrid",
+              "key": "line_items",
+              "label": "Line items",
+              "description": "One row per thing being ordered.",
+              "sequenceKey": "line_no",
+              "defaultItems": 1,
+              "validation": { "type": "array", "minItems": 1 },
+              "components": [
+                {
+                  "id": "line-no",
+                  "role": "data",
+                  "type": "number",
+                  "key": "line_no",
+                  "label": "Line",
+                  "readOnly": true,
+                  "validation": { "type": "integer" }
+                },
+                {
+                  "id": "line-description",
+                  "role": "data",
+                  "type": "textfield",
+                  "key": "description",
+                  "label": "Description",
+                  "validation": { "type": "string", "required": true }
+                },
+                {
+                  "id": "line-quantity",
+                  "role": "data",
+                  "type": "number",
+                  "key": "quantity",
+                  "label": "Quantity",
+                  "validation": { "type": "integer", "minimum": 1 }
+                },
+                {
+                  "id": "line-unit-price",
+                  "role": "data",
+                  "type": "number",
+                  "key": "unit_price",
+                  "label": "Unit price",
+                  "validation": { "type": "number", "minimum": 0 }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "Notes",
+          "components": [
+            {
+              "id": "notes-fieldset",
+              "role": "layout",
+              "type": "fieldset",
+              "title": "Anything else",
+              "components": [
+                {
+                  "id": "notes-field",
+                  "role": "data",
+                  "type": "textarea",
+                  "key": "notes",
+                  "label": "Notes",
+                  "validation": { "type": "string", "maxLength": 2000 }
+                },
+                {
+                  "id": "category-field",
+                  "role": "data",
+                  "type": "radio",
+                  "key": "category",
+                  "label": "Category",
+                  "validation": {
+                    "type": "string",
+                    "enum": ["CAPEX", "OPEX"]
+                  }
+                },
+                {
+                  "id": "urgent-field",
+                  "role": "data",
+                  "type": "checkbox",
+                  "key": "urgent",
+                  "label": "This request is urgent",
+                  "description": "Urgent requests are reviewed the same day.",
+                  "validation": { "type": "boolean" }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    { "id": "divider-1", "role": "display", "type": "divider" },
+    {
+      "id": "approval-note",
+      "role": "display",
+      "type": "alert",
+      "variant": "info",
+      "content": "Requests above the department threshold need a second approval."
+    },
+    {
+      "id": "submit-button",
+      "role": "action",
+      "type": "button",
+      "label": "Submit request",
+      "action": "submit",
+      "theme": "primary"
+    }
+  ]
+}
