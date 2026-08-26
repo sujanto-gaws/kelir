@@ -115,13 +115,14 @@ The MVP focuses on:
 │   │   ├── 0015_document.sql
 │   │   ├── 0016_numbering_gap_policy.sql
 │   │   ├── 0017_tenant_administration.sql
-│   │   ├── 0018_workflow.sql
-│   │   ├── 0019_attachment.sql
-│   │   ├── 0020_comment.sql
-│   │   ├── 0021_activity_audit.sql
-│   │   ├── 0022_notification.sql
-│   │   ├── 0023_integration.sql
-│   │   └── 0024_plugin.sql
+│   │   ├── 0018_party_code_is_not_released.sql
+│   │   ├── 0019_audit_hash_covers_the_payload.sql
+│   │   ├── 0020_numbering_buckets.sql
+│   │   └── …                   # workflow, attachment, comment, activity/audit,
+│   │                           # notification, integration, plugin — each takes
+│   │                           # the next free number when it is written. The
+│   │                           # Database Schema mapping table is the sequence;
+│   │                           # this tree does not restate it.
 │   └── src/
 │       ├── main.rs
 │       ├── config.rs

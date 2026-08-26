@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO document_type_sequence_buckets\n            (id, tenant_id, document_type_id, sequence_key, next_sequence)\n        VALUES ($1, $2, $3, $4, 2)\n        ON CONFLICT (document_type_id, sequence_key) DO UPDATE\n            SET next_sequence = document_type_sequence_buckets.next_sequence + 1,\n                updated_at = now()\n        RETURNING next_sequence - 1 AS \"allocated!\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "allocated!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Varchar"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "00ee59385ababd100cf867f7fa30033c3421262568c5530c7f72202f7d749309"
+}
