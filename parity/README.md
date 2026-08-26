@@ -73,7 +73,7 @@ environment hand-writes, which is how two environments end up subtly different.
 | Setting | Value | Why |
 |---|---|---|
 | `arithmetic_nan_handling` | coerce to zero | §7.3: a non-numeric operand yields 0, not NaN |
-| `division_by_zero` | return null | §3.1, as close as the engine gets; the numeric wrapper turns the null into 0 |
+| `division_by_zero` | throw error | §3.1 as **D-24** settles it: a division by zero does not produce a value. `ReturnNull` up to 2026-08-26, which normalized `10.5 / 0` to 0 while the integer path threw regardless of the setting — one expression behaving two ways. Pending on both sides with [#163](https://github.com/sujanto-gaws/kelir/issues/163) |
 | `loose_equality_errors` | false | The reference implementation compares across types silently |
 | `numeric_coercion` | null, empty string and bool coerce; non-numeric not rejected | A half-filled form is normal, not an error |
 
