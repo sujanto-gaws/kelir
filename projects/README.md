@@ -1,6 +1,6 @@
 # Kelir Project Management
 
-**Status:** Living · **Last updated:** 2026-08-24
+**Status:** Living · **Last updated:** 2026-08-26
 
 This folder holds Kelir's **project management artifacts** — the documents that govern *when and in what order* things get built. They live outside [docs/](../docs/) deliberately: `docs/` describes the system (requirements, architecture, design, standards — see its [README](../docs/README.md) for the full index and authority rules); `projects/` describes the work.
 
@@ -26,6 +26,7 @@ Each folder is a numbered series (`NN. Title Case.md`); `00.` files are template
 |---|---|
 | [01. Sprint Plan.md](planning/01.%20Sprint%20Plan.md) | Scope-sequenced sprint plan mapping the SDD roadmap phases (§14, Phases 1–9) onto a sprint cadence. Sprint contents are the commitment; calendar dates shift with measured velocity. |
 | [02. Product Backlog.md](planning/02.%20Product%20Backlog.md) | The scope inventory behind that sequence: all 164 SRS functional requirements mapped to epics, backlog items and target sprints, with the Definition of Ready, the MVP coverage check against SRS §9, and the scope decisions D-1…D-5 (all resolved 2026-08-11, with what each one changed and where it was applied). |
+| [03. Sprint 8 Form Renderer Construction Plan.md](planning/03.%20Sprint%208%20Form%20Renderer%20Construction%20Plan.md) | The three items behind FR-RAD-010 — render (#162), evaluate (#163), submit with the server re-evaluation behind it (#164) — decomposed into files, order and the decisions each takes before it is written. One level below the sprint plan, which still settles the scope; adds the `rad_form_submissions` landing place for a Sprint 8 submit, and names the two decisions owed before #163 |
 
 ### status/
 
