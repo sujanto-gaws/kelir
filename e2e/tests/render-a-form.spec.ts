@@ -1,9 +1,36 @@
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+
 import { expect, test } from '@playwright/test'
 
-import definition from '../../kelir-frontend/src/features/rad/__fixtures__/purchase-requisition.json'
 import { signInOverApi, type ApiSession } from '../support/api'
-import { publishForm, type SeededForm } from '../support/forms'
 import { credentials } from '../support/env'
+import { publishForm, type SeededForm } from '../support/forms'
+
+/**
+ * The fixture the unit tests use, read rather than imported.
+ *
+ * A second copy of a JFSS document is a second thing to keep in step, and the
+ * one that drifts is always the one only the slow suite reads — so this is the
+ * same file `JfssRenderer.spec.ts` mounts.
+ *
+ * `readFileSync` rather than `import … from '…json'`: this package is ESM, and
+ * Node requires an import attribute for a JSON module. `tsc --noEmit` resolves
+ * the bare import happily, so the type check passes and the spec then fails at
+ * run time with `needs an import attribute of "type: json"` — which is exactly
+ * how it failed in CI. Reading the file has no such gap between the two.
+ */
+const definition = JSON.parse(
+  readFileSync(
+    fileURLToPath(
+      new URL(
+        '../../kelir-frontend/src/features/rad/__fixtures__/purchase-requisition.json',
+        import.meta.url,
+      ),
+    ),
+    'utf8',
+  ),
+) as Record<string, unknown>
 
 /**
  * A published definition becomes a form a person can fill in (#162 AC4).
