@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT 1 AS \"found!\"\n            FROM mdm_facilities\n            WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL\n            FOR SHARE\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "found!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "83d09cac231d74aeeec8d20aa4f133c7cb0892a14fab9910297ffcce5a4cc754"
+}

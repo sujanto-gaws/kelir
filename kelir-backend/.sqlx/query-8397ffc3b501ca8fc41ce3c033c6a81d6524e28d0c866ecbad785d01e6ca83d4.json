@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE documents\n        SET deleted_at = now(), updated_by = $3, updated_at = now()\n        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL AND status = 'DRAFT'\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8397ffc3b501ca8fc41ce3c033c6a81d6524e28d0c866ecbad785d01e6ca83d4"
+}

@@ -1,0 +1,27 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE documents SET\n            title          = COALESCE($3, title),\n            form_data_json = COALESCE($4, form_data_json),\n            priority       = COALESCE($5, priority),\n            entity_type    = CASE WHEN $6  THEN $7  ELSE entity_type END,\n            entity_id      = CASE WHEN $8  THEN $9  ELSE entity_id END,\n            requested_for_department_id\n                           = CASE WHEN $10 THEN $11 ELSE requested_for_department_id END,\n            requested_for_facility_id\n                           = CASE WHEN $12 THEN $13 ELSE requested_for_facility_id END,\n            updated_by     = $14,\n            updated_at     = now()\n        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL AND status = 'DRAFT'\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Jsonb",
+        "Varchar",
+        "Bool",
+        "Varchar",
+        "Bool",
+        "Uuid",
+        "Bool",
+        "Uuid",
+        "Bool",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "12224143641015f77aaeead1b3d95619d4ec968251ea31e3fdd5a8077043401e"
+}

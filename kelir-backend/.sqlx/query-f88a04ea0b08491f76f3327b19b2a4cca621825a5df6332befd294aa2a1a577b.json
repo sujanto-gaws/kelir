@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE documents SET\n            status       = $4,\n            -- Which status means \"finished\" is decided in `DocumentStatus` and\n            -- passed in, rather than spelled again as a literal here. Two\n            -- copies of a lifecycle are two lifecycles, and this one would be\n            -- the copy nobody looks at.\n            completed_at = CASE WHEN $5 THEN now() ELSE completed_at END,\n            updated_by   = $6,\n            updated_at   = now()\n        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL AND status = $3\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Varchar",
+        "Bool",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f88a04ea0b08491f76f3327b19b2a4cca621825a5df6332befd294aa2a1a577b"
+}

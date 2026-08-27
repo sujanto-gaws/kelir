@@ -977,3 +977,334 @@ async fn allocate(app: &TestApp, type_id: Uuid, context: &AllocationContext) -> 
 
     number
 }
+
+// ---------------------------------------------------------------------------
+// The predicates that are the only guard on their behaviour (#218)
+// ---------------------------------------------------------------------------
+//
+// Every test above this line builds a database holding **one** document type,
+// so *scoped by type* and *not scoped at all* produce identical observations
+// and no assertion over that database can tell them apart. That is the single
+// cause the Sprint 8 verification (record 05, finding F2) found behind four of
+// the five predicates it reported, and it is the three-move rule (#200) one
+// level up: two moves cannot distinguish "separate" from "overwritten", and one
+// subject cannot distinguish "scoped" from "unscoped".
+//
+// Each test below therefore puts a **second document type** in the database —
+// and, where the predicate is about a bucket, a second bucket — and each names
+// the mutation it answers (coding standard §2.9).
+
+/// **A type with no rule is not numbered from another type's rule**
+/// ([#218](https://github.com/sujanto-gaws/kelir/issues/218), predicate 1).
+///
+/// `find_active_rule`'s `document_type_id = $2` is the only thing that makes
+/// `allocate_in` number a document from *its own* type's template and out of
+/// its own sequence. Defeat it and the query returns some active rule of the
+/// caller's tenant, so a document of type A is numbered from type B's template
+/// and consumes B's counter — a document numbered `SO-000001` that is not a
+/// sales order, and a sales order that never gets that number.
+///
+/// **The subject with no rule is what makes the mutation deterministic.** With
+/// the predicate defeated there is exactly one active rule in the tenant, so it
+/// *must* be the one found; asserting on which of two rules was picked would be
+/// asserting on the planner.
+///
+/// Seen red against `find_active_rule`'s `document_type_id = $2` weakened to
+/// `(document_type_id = $2 OR TRUE)`: the unnumbered type is handed `SO-000001`.
+#[tokio::test]
+async fn a_type_with_no_rule_is_not_numbered_from_another_types_rule() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let unnumbered = document_type(&app, &token, "PR_UNNUMBERED").await;
+    let numbered = document_type(&app, &token, "SO_NUMBERED").await;
+
+    set_rule(
+        &app,
+        &token,
+        numbered,
+        json!({ "ruleTemplate": "SO-{sequence}", "sequenceScope": "GLOBAL" }),
+    )
+    .await;
+
+    let mut transaction = app.pool.begin().await.expect("a transaction");
+    let outcome = numbering_service::allocate_in(
+        &mut transaction,
+        fixtures::SYSTEM_TENANT_ID,
+        unnumbered,
+        &context_at(2026, 8),
+    )
+    .await;
+
+    assert!(
+        outcome.is_err(),
+        "a type with no numbering rule was numbered from another type's: {outcome:?}"
+    );
+
+    drop(transaction);
+
+    // And the other type's sequence was not consumed on its behalf, which is
+    // the second half of the damage: the number would be missing from the
+    // series that owns it.
+    assert_eq!(
+        allocate(&app, numbered, &context_at(2026, 8)).await,
+        "SO-000001",
+        "the numbered type's sequence was advanced by a document of another type"
+    );
+}
+
+/// **A cleared rule reads back as cleared** ([#218](https://github.com/sujanto-gaws/kelir/issues/218), predicate 2).
+///
+/// `find_rule`'s `rule.is_active` is what makes `GET /numbering-rule` answer 404
+/// after `DELETE`. `clear_rule` deactivates the row rather than deleting it —
+/// keeping it is what lets a number issued years ago still be explained by the
+/// rule that produced it — so without the predicate the deactivated row is
+/// still the row this reads, and the endpoint reports a rule the type no longer
+/// has. An administrator would then see numbering configured, create documents,
+/// and have every submission refused by an allocator that correctly sees none.
+///
+/// **This is the state `clear_rule` creates and nothing read back**, which is
+/// why the predicate survived: the existing coverage clears a rule and then
+/// asserts that *allocation* fails, which goes through `find_active_rule`
+/// instead. AC3 of #218 asks for this read specifically.
+///
+/// Seen red against `find_rule`'s `rule.is_active` weakened to
+/// `(rule.is_active OR TRUE)`: the cleared type answers 200 with its old rule.
+#[tokio::test]
+async fn a_cleared_rule_is_not_read_back_as_though_it_were_still_there() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let cleared = document_type(&app, &token, "PR_READ_AFTER_CLEAR").await;
+    // The second subject. Its rule stays active, so "no active rule for this
+    // type" and "no active rule anywhere" are different states of the database.
+    let untouched = document_type(&app, &token, "SO_STILL_NUMBERED").await;
+
+    set_rule(
+        &app,
+        &token,
+        cleared,
+        json!({ "ruleTemplate": "PR-{sequence}", "sequenceScope": "GLOBAL" }),
+    )
+    .await;
+    set_rule(
+        &app,
+        &token,
+        untouched,
+        json!({ "ruleTemplate": "SO-{sequence}", "sequenceScope": "GLOBAL" }),
+    )
+    .await;
+
+    let removed = app
+        .send(
+            Method::DELETE,
+            &format!("/api/v1/document-types/{cleared}/numbering-rule"),
+            Some(&token),
+            None,
+        )
+        .await;
+
+    assert_eq!(removed.status, StatusCode::NO_CONTENT, "{}", removed.body);
+
+    let read = app
+        .send(
+            Method::GET,
+            &format!("/api/v1/document-types/{cleared}/numbering-rule"),
+            Some(&token),
+            None,
+        )
+        .await;
+
+    assert_eq!(
+        read.status,
+        StatusCode::NOT_FOUND,
+        "a cleared rule read back as though it were still in force: {}",
+        read.body
+    );
+
+    // The row is still there — the deactivation is what is being read past, not
+    // a deletion — so a green assertion above cannot be explained by the row
+    // having gone.
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM document_type_numbering_rules WHERE document_type_id = $1",
+    )
+    .bind(cleared)
+    .fetch_one(&app.pool)
+    .await
+    .expect("the rules are readable");
+
+    assert_eq!(rows, 1, "clear_rule deactivates rather than deletes");
+
+    // And the other type's rule is untouched by its neighbour's clearing.
+    let others = app
+        .send(
+            Method::GET,
+            &format!("/api/v1/document-types/{untouched}/numbering-rule"),
+            Some(&token),
+            None,
+        )
+        .await;
+
+    assert_eq!(others.status, StatusCode::OK, "{}", others.body);
+}
+
+/// **The closed-bucket refusal is decided from this type's own buckets**
+/// ([#218](https://github.com/sujanto-gaws/kelir/issues/218), predicate 3).
+///
+/// `furthest_key`'s `document_type_id = $2` scopes the "has this sequence moved
+/// on?" comparison to the type being allocated for. Defeat it and the
+/// comparison is made against the whole tenant's furthest bucket, which fails
+/// in both directions at once: a legitimate allocation is refused because some
+/// *other* type has reached a later year, and — since the same maximum is now
+/// shared — a genuinely back-dated allocation can be admitted whenever the
+/// other type is behind.
+///
+/// Both directions are asserted here, because a test covering only the refusal
+/// would stay green against a mutation that made everything refuse.
+///
+/// Seen red against `furthest_key`'s `document_type_id = $2` weakened to
+/// `(document_type_id = $2 OR TRUE)`: the second type's first allocation is
+/// refused with `CLOSED_SEQUENCE_BUCKET`.
+#[tokio::test]
+async fn a_closed_bucket_is_judged_against_this_types_own_buckets() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let ahead = document_type(&app, &token, "PR_AHEAD").await;
+    let behind = document_type(&app, &token, "SO_BEHIND").await;
+
+    for (type_id, template) in [
+        (ahead, "PR-{year}-{sequence}"),
+        (behind, "SO-{year}-{sequence}"),
+    ] {
+        set_rule(
+            &app,
+            &token,
+            type_id,
+            json!({ "ruleTemplate": template, "sequenceScope": "YEAR" }),
+        )
+        .await;
+    }
+
+    // One type's sequence reaches 2027. The other has no buckets at all.
+    assert_eq!(
+        allocate(&app, ahead, &context_at(2027, 3)).await,
+        "PR-2027-000001"
+    );
+
+    // Direction one: the type that is behind may still open its own 2026,
+    // because *its* sequence has not moved on. Unscoped, 2026 < 2027 refuses it.
+    assert_eq!(
+        allocate(&app, behind, &context_at(2026, 3)).await,
+        "SO-2026-000001",
+        "another type's later bucket closed this type's current one"
+    );
+
+    // Direction two: the refusal still works where it should. `ahead` really
+    // has moved on, so reaching back into its 2026 is refused.
+    let mut transaction = app.pool.begin().await.expect("a transaction");
+    let outcome = numbering_service::allocate_in(
+        &mut transaction,
+        fixtures::SYSTEM_TENANT_ID,
+        ahead,
+        &context_at(2026, 3),
+    )
+    .await;
+
+    assert!(
+        outcome.is_err(),
+        "a bucket this type's own sequence has passed was reopened: {outcome:?}"
+    );
+}
+
+/// **The rewind guard reads this type's own counter** ([#218](https://github.com/sujanto-gaws/kelir/issues/218), predicate 4).
+///
+/// `highest_issued`'s `document_type_id = $2` scopes the number a new rule's
+/// `nextSequence` may not be set below. Defeat it and the maximum is taken from
+/// whichever type in the tenant has counted furthest, so configuring a brand new
+/// type is refused because an unrelated type has issued more numbers — and the
+/// message names a number that type has never issued, which is unresolvable
+/// from where the administrator is standing.
+///
+/// **Predicate 4 of record 05 was `bucket_sequence`'s `sequence_key = $3`, and
+/// that function had no callers.** A test over it would have pinned dead code;
+/// it is deleted in the same change as this test, and the behaviour the finding
+/// described — a configuration path reporting a next number taken from the
+/// wrong bucket — belongs to `highest_issued`, which is what actually reads a
+/// bucket there. This is that predicate, held.
+///
+/// Seen red against `highest_issued`'s `document_type_id = $2` weakened to
+/// `(document_type_id = $2 OR TRUE)`: the new rule is refused for a
+/// `nextSequence` below a neighbouring type's counter.
+#[tokio::test]
+async fn a_rewind_is_judged_against_this_types_own_counter() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let counted = document_type(&app, &token, "PR_COUNTED").await;
+    let fresh = document_type(&app, &token, "SO_FRESH").await;
+
+    set_rule(
+        &app,
+        &token,
+        counted,
+        json!({ "ruleTemplate": "PR-{year}-{sequence}", "sequenceScope": "YEAR" }),
+    )
+    .await;
+
+    // Take five numbers on one type, in the bucket the clock is in — which is
+    // the bucket `set_rule` computes for the *other* type below.
+    let this_year = AllocationContext {
+        at: Utc::now(),
+        department_id: None,
+    };
+
+    for _ in 0..5 {
+        allocate(&app, counted, &this_year).await;
+    }
+
+    // The fresh type has issued nothing, so starting it at 2 is a legitimate
+    // migration from another system. Unscoped, it is compared against the
+    // neighbour's 6 and refused.
+    let configured = app
+        .send(
+            Method::PUT,
+            &format!("/api/v1/document-types/{fresh}/numbering-rule"),
+            Some(&token),
+            Some(json!({
+                "ruleTemplate": "SO-{year}-{sequence}",
+                "sequenceScope": "YEAR",
+                "nextSequence": 2
+            })),
+        )
+        .await;
+
+    assert_eq!(
+        configured.status,
+        StatusCode::OK,
+        "another type's counter refused this type's starting number: {}",
+        configured.body
+    );
+    assert_eq!(configured.body["data"]["nextSequence"], 2);
+
+    // And the guard still refuses a real rewind on the type that has issued.
+    let rewound = app
+        .send(
+            Method::PUT,
+            &format!("/api/v1/document-types/{counted}/numbering-rule"),
+            Some(&token),
+            Some(json!({
+                "ruleTemplate": "PR-{year}-{sequence}",
+                "sequenceScope": "YEAR",
+                "nextSequence": 2
+            })),
+        )
+        .await;
+
+    assert_eq!(
+        rewound.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a counter was rewound past a number already issued: {}",
+        rewound.body
+    );
+}

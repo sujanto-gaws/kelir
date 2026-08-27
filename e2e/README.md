@@ -50,11 +50,20 @@ video are kept for failures only.
 
 ## What it covers
 
-One flow, deliberately: **sign in → reach the supplier list → filter it**
-(`tests/find-a-supplier.spec.ts`). The suite seeds its two rows over the API and
-asserts only through the browser — arranging through HTTP is faster and fails
-where it is meant to, but an assertion made against the API would pass on a
-screen that renders nothing.
+Five flows, each the criterion that decides whether an item is Done rather than
+a broad sweep:
+
+| Flow | Item |
+|---|---|
+| Sign in → reach the supplier list → filter it (`find-a-supplier.spec.ts`) | #101 |
+| A published definition renders as a form (`render-a-form.spec.ts`) | #162 |
+| The rendered form evaluates its own rules as they are typed (`a-form-calculates-and-validates.spec.ts`) | #163 |
+| A filled-in form is submitted, and a payload tampered with in flight is overwritten (`a-form-is-submitted.spec.ts`) | #164 |
+| A document is created from a **type**, filled in, submitted, found in the list and moved through a transition (`a-document-is-created-and-submitted.spec.ts`) | #172, and the Phase 4 exit demo |
+
+The suites seed their rows over the API and assert only through the browser —
+arranging through HTTP is faster and fails where it is meant to, but an
+assertion made against the API would pass on a screen that renders nothing.
 
 Adding a flow means adding a file under `tests/`. Two rules the existing one
 follows:

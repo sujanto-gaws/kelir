@@ -189,25 +189,43 @@ pub async fn furthest_key<'e, E: PgExecutor<'e>>(
     .await
 }
 
-/// The number the next document in one bucket takes, if the bucket exists.
-pub async fn bucket_sequence<'e, E: PgExecutor<'e>>(
+/// The gap policy of a type's active rule, on an executor the caller supplies.
+///
+/// **[`find_rule`] cannot serve this, and the difference is a connection.** That
+/// function joins the furthest bucket and takes `E: PgExecutor + Copy`, which a
+/// `&mut PgConnection` is not — so [`super::numbering_service::allocate`] read
+/// the policy from the *pool* while its caller already held a transaction. Under
+/// concurrency that is two connections per submit, and Sprint 9's submit path
+/// exhausted a five-connection pool at twenty-four concurrent callers: every
+/// task held its transaction and waited for a second connection none of them
+/// would release.
+///
+/// It is [#118](https://github.com/sujanto-gaws/kelir/issues/118) exactly — a
+/// fix that closed a race and opened a pool-exhaustion deadlock — and it was
+/// invisible until a caller used `allocate` rather than `allocate_in` under
+/// load, which no test did before `documents_submit.rs`.
+///
+/// `allow_gaps` is a column on the rule row, so reading it needs no join and
+/// this can take the caller's own connection.
+pub async fn gap_policy<'e, E: PgExecutor<'e>>(
     executor: E,
     tenant_id: Uuid,
     document_type_id: Uuid,
-    sequence_key: &str,
-) -> Result<Option<i64>, sqlx::Error> {
-    sqlx::query_scalar!(
+) -> Result<Option<GapPolicy>, sqlx::Error> {
+    let row = sqlx::query_scalar!(
         r#"
-        SELECT next_sequence
-        FROM document_type_sequence_buckets
-        WHERE tenant_id = $1 AND document_type_id = $2 AND sequence_key = $3
+        SELECT allow_gaps
+        FROM document_type_numbering_rules
+        WHERE tenant_id = $1 AND document_type_id = $2
+          AND is_active AND deleted_at IS NULL
         "#,
         tenant_id,
-        document_type_id,
-        sequence_key
+        document_type_id
     )
     .fetch_optional(executor)
-    .await
+    .await?;
+
+    Ok(row.map(GapPolicy::from_db))
 }
 
 /// A type's active rule, reported with the counter of its furthest bucket.

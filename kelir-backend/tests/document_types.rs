@@ -1123,3 +1123,62 @@ async fn a_document_created_during_the_rebinding_is_not_missed() {
 
     assert_eq!(bound, first, "a refused rebinding writes nothing");
 }
+
+/// **The guard is scoped to the type being rebound** ([#218](https://github.com/sujanto-gaws/kelir/issues/218), predicate 5).
+///
+/// `count_documents_without_a_pinned_form` counts unpinned documents, and its
+/// `document_type_id = $2` is what makes it count *this* type's. Defeat it and
+/// any unpinned document anywhere in the tenant blocks every rebinding in it —
+/// **D-30**'s guarantee widened into a refusal nobody can clear, because the
+/// document that causes it belongs to a type the administrator is not editing
+/// and may not even be able to see.
+///
+/// **The fixture is the fix.** Every test above builds a database holding one
+/// document type, so *scoped by type* and *not scoped at all* produce identical
+/// observations and no assertion over that database can tell them apart
+/// (coding standard §2.9, the second-subject rule). This one puts the unpinned
+/// document on a **second** type.
+///
+/// Seen red against `count_documents_without_a_pinned_form`'s
+/// `document_type_id = $2` weakened to `(document_type_id = $2 OR TRUE)`: the
+/// rebinding is refused with `DOCUMENTS_WITHOUT_A_PINNED_FORM`.
+#[tokio::test]
+async fn an_unpinned_document_of_another_type_does_not_block_this_rebinding() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let first = published_form(&app, &token, "pr-other-type-1").await;
+    let next = published_form(&app, &token, "pr-other-type-2").await;
+
+    let rebound = bound_type(&app, &token, "REBOUND_TYPE", first).await;
+    let bystander = bound_type(&app, &token, "BYSTANDER_TYPE", first).await;
+
+    // The unpinned document is the bystander's, and the rebinding is the other
+    // type's. Nothing about this document is reachable from `rebound`'s
+    // binding.
+    seed_document(&app, bystander, "DOC-2026-000210", None).await;
+
+    let updated = app
+        .send(
+            Method::PUT,
+            &format!("/api/v1/document-types/{rebound}"),
+            Some(&token),
+            Some(json!({ "formId": next })),
+        )
+        .await;
+
+    assert_eq!(
+        updated.status,
+        StatusCode::OK,
+        "another type's unpinned document blocked this type's rebinding: {}",
+        updated.body
+    );
+
+    let bound: Uuid = sqlx::query_scalar("SELECT form_id FROM document_types WHERE id = $1")
+        .bind(rebound)
+        .fetch_one(&app.pool)
+        .await
+        .expect("the type is readable");
+
+    assert_eq!(bound, next, "the rebinding landed");
+}
