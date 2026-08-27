@@ -4,6 +4,8 @@ pub mod form;
 pub mod jfss;
 pub mod list;
 pub mod lookup;
+pub mod submission;
+pub mod validation;
 
 pub use form::{
     validate_create_form, validate_update_form, CreateFormRequest, Form, FormStatus, FormSummary,

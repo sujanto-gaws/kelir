@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT event_type, action, object_type, new_value_json\n        FROM audit_events\n        WHERE object_id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "event_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "action",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "object_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "new_value_json",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "927205c1757758d8e60a61ebe7de71dfbf2737d6105738f22570238386cc620a"
+}

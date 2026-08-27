@@ -234,7 +234,7 @@ fn walk_components(node: &Value, path: &str, details: &mut Vec<ValidationDetail>
 fn child_containers<'a>(component: &'a Value, here: &str) -> Vec<(&'a Value, String)> {
     let mut containers = vec![(component, format!("{here}.components"))];
 
-    for slot_key in ["columns", "tabs"] {
+    for slot_key in SLOT_KEYS {
         if let Some(slots) = component.get(slot_key).and_then(Value::as_array) {
             for (slot_index, slot) in slots.iter().enumerate() {
                 containers.push((slot, format!("{here}.{slot_key}.{slot_index}.components")));
@@ -243,6 +243,73 @@ fn child_containers<'a>(component: &'a Value, here: &str) -> Vec<(&'a Value, Str
     }
 
     containers
+}
+
+/// The two **named-slot** container shapes of JFSS §4.3.1.
+///
+/// `components` is the third and is spelled out at each use rather than listed
+/// here, because it is the one property whose meaning depends on the role that
+/// carries it: children on a layout container, a row template on a `data`
+/// component. A constant covering all three would invite a traversal that
+/// treats those two as the same thing, which is the mistake §4.3.1's own
+/// paragraph is written to prevent.
+pub(crate) const SLOT_KEYS: [&str; 2] = ["columns", "tabs"];
+
+/// A component's `role`, or `None` where a document omits it.
+pub(crate) fn role_of(component: &Value) -> Option<&str> {
+    component.get("role").and_then(Value::as_str)
+}
+
+/// Every **child** of a layout container, whatever slot shape holds them
+/// (§4.3.1).
+///
+/// Empty for every other role, and that asymmetry is the point: a `data`
+/// component's `components` is a row template whose `key`s address properties
+/// of a *row*, not siblings of the payload. Returning it here would put
+/// `quantity` and `unit_price` beside `line_items` in the form's own scope,
+/// which is the shape [`row_template`] exists to keep separate. The frontend's
+/// `childComponents` in `types/jfss.ts` draws the same line for the same
+/// reason, and the two walks have to agree or a rule means one thing per side.
+pub(crate) fn container_children(component: &Value) -> Vec<&Value> {
+    if role_of(component) != Some("layout") {
+        return Vec::new();
+    }
+
+    if let Some(children) = component.get("components").and_then(Value::as_array) {
+        return children.iter().collect();
+    }
+
+    let mut children = Vec::new();
+
+    for slot_key in SLOT_KEYS {
+        if let Some(slots) = component.get(slot_key).and_then(Value::as_array) {
+            for slot in slots {
+                if let Some(inner) = slot.get("components").and_then(Value::as_array) {
+                    children.extend(inner.iter());
+                }
+            }
+        }
+    }
+
+    children
+}
+
+/// A repeater's row template — the schema repeated per row (§4.3.1).
+pub(crate) fn row_template(component: &Value) -> Option<&Vec<Value>> {
+    if role_of(component) != Some("data") {
+        return None;
+    }
+
+    component.get("components").and_then(Value::as_array)
+}
+
+/// A `data` component's payload `key`, or `None` for every other role.
+pub(crate) fn data_key(component: &Value) -> Option<&str> {
+    if role_of(component) != Some("data") {
+        return None;
+    }
+
+    component.get("key").and_then(Value::as_str)
 }
 
 /// Collects operator keys from a JSON Logic expression and refuses unapproved
