@@ -189,27 +189,6 @@ pub async fn furthest_key<'e, E: PgExecutor<'e>>(
     .await
 }
 
-/// The number the next document in one bucket takes, if the bucket exists.
-pub async fn bucket_sequence<'e, E: PgExecutor<'e>>(
-    executor: E,
-    tenant_id: Uuid,
-    document_type_id: Uuid,
-    sequence_key: &str,
-) -> Result<Option<i64>, sqlx::Error> {
-    sqlx::query_scalar!(
-        r#"
-        SELECT next_sequence
-        FROM document_type_sequence_buckets
-        WHERE tenant_id = $1 AND document_type_id = $2 AND sequence_key = $3
-        "#,
-        tenant_id,
-        document_type_id,
-        sequence_key
-    )
-    .fetch_optional(executor)
-    .await
-}
-
 /// A type's active rule, reported with the counter of its furthest bucket.
 ///
 /// The API's `sequenceKey` and `nextSequence` are what they always were — the
