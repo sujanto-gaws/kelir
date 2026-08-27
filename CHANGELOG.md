@@ -20,11 +20,15 @@ the last piece of that loop. Two Phase 2 carry-overs land with them, and a third
 management — returns from the unscheduled backlog and takes multi-tenant mode
 with it.
 
-Two of the Sprint 7 verification pass's findings are closed with them. A
-department-scoped sequence keeps a counter per department rather than one per
-rule, which needed a migration and a table; and a `sum` that would silently
-total zero is refused when the definition is saved rather than confirmed by the
-server that re-evaluates it.
+**All seven of the Sprint 7 verification pass's findings are closed**, four of
+them in the sprint that inherited them. A department-scoped sequence keeps a
+counter per department rather than one per rule, which needed a migration and a
+table; a `sum` that would silently total zero is refused when the definition is
+saved rather than confirmed by the server that re-evaluates it; the
+forgot-password answer no longer waits for the mail server; the audit chain hash
+tells an absent field from an empty one; the last quarantined test in the suite
+runs; and the repository predicates that were the only guard on their behaviour
+have tests that go red when they are defeated.
 
 Alongside them, every open defect the three verification passes had filed and
 left standing is closed. Four of the eight are contract defects rather than
@@ -304,6 +308,31 @@ changed.
 
 ### Fixed
 
+- **A forgot-password request no longer waits for the mail server, and the
+  module no longer claims the answer is untimeable
+  ([#202](https://github.com/sujanto-gaws/kelir/issues/202), decision **D-31**).**
+  `request_reset` awaited a complete SMTP transaction before writing its `202`,
+  so the answer for a known account was measurably slower than for an unknown
+  one: against mailpit on the loopback interface, a p50 of **90.1ms against
+  9.8ms**, ranges not overlapping — an account-enumeration oracle on a route
+  that is deliberately not rate-limited. The send is now handed to the runtime
+  (`Mailer::send_detached`), which costs nothing, because a send never reported
+  a failure to the caller anyway. Re-measured: **26.4ms against 10.5ms**. The
+  oracle is narrowed rather than closed, and the module header now says so with
+  both numbers instead of promising "no branch a caller can time"; D-31 records
+  why the remaining local database work stays on the request's path.
+- **The audit chain hash tells an absent optional field from an empty one
+  ([#203](https://github.com/sujanto-gaws/kelir/issues/203)).** **A hash format
+  change**, the second and — like the first — taken while nothing has ever
+  verified a chain, so no stored value is invalidated in practice and no
+  re-chaining is owed. An absent field was hashed as zero bytes and so was a
+  present-but-empty one, so four entries differing only in whether `ip_address`
+  and `reason` were `NULL` or `''` produced one digest: either column could be
+  rewritten either way and the chain still verified. An absent field is now a
+  length prefix of `2^64-1`, which no present field can produce.
+  `0022_audit_hash_tells_absent_from_empty.sql` corrects the column comment
+  `0019` had just corrected, because a merged migration is never edited.
+
 - **A `DEPARTMENT_YEAR` numbering rule no longer issues `000001` to every
   document
   ([#200](https://github.com/sujanto-gaws/kelir/issues/200), decision **D-21**).**
@@ -415,6 +444,26 @@ changed.
   and the test seen to fail** (coding standard §2.9): the administering-tenant
   check on the tenant routes, and the composite foreign key that refuses a
   cross-tenant role grant. Each test names its mutation in a comment.
+- **The cross-tenant isolation test quarantined on decision D-7 now runs
+  ([#204](https://github.com/sujanto-gaws/kelir/issues/204)).** **D-18**
+  superseded D-7 inside the sprint that left the `#[ignore]` in place, and the
+  condition the quarantine named — a token that can carry a tenant other than
+  the default — was met by it. The test runs against a multi-tenant app with
+  the foreign caller holding `identity:user:read`, so it reaches tenant scoping
+  rather than stopping at the permission gate, which is what the quarantined
+  body would have done. The suite reports **zero** ignored tests.
+- **The predicates a repository writes as a second line of defence now have
+  tests, and a rule that outlives them
+  ([#206](https://github.com/sujanto-gaws/kelir/issues/206)).** Four predicates
+  that were the only guard on their behaviour gained tests that go red when they
+  are defeated — a form key being taken per tenant, a cleared numbering rule
+  stopping, a numbering rule belonging to one tenant, and a starting sequence
+  judged against its own bucket. The publish race that `AND status = 'DRAFT'`
+  exists for is now arranged rather than raced for, by holding the row's lock in
+  one transaction while the second statement blocks on it. Coding standard §2.5
+  carries the rule for the next such predicate, §2.9 carries the three-move rule
+  for tests over a shared resource, and sprint plan §2 names the per-sprint
+  mutation campaign whose ratio the status report reports.
 
 ## [0.3.0] — 2026-08-24
 
