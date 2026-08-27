@@ -2,6 +2,7 @@
 import { defineAsyncComponent, toRef } from 'vue'
 
 import { provideFieldScope } from '@/features/rad/renderer/useFieldScope'
+import { provideValueScope } from '@/features/rad/renderer/useFormEvaluation'
 import type { JfssComponent } from '@/types/jfss'
 
 const props = defineProps<{
@@ -22,6 +23,17 @@ const emit = defineEmits<{ (e: 'update:field', key: string, value: unknown): voi
  * it.
  */
 provideFieldScope(() => `row-${props.index}-`)
+
+/**
+ * And the row is the scope its template's `key`s address (JFSS §4.3.1).
+ *
+ * Provided beside the id prefix and for the same reason: a rule or a
+ * calculation written in a row template means *this* row's siblings, not the
+ * form's. Without it, `matchesField` targeting `unit_price` in row three would
+ * compare against a top-level field of that name, which on most forms does not
+ * exist — so the rule would compare against `undefined` and quietly hold.
+ */
+provideValueScope(() => props.values)
 
 /** Lazily imported for the cycle `DataGridField` documents. */
 const JfssRenderer = defineAsyncComponent(() => import('@/features/rad/renderer/JfssRenderer.vue'))

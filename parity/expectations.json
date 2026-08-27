@@ -241,11 +241,14 @@
  },
  {
   "id": "div-by-zero-float",
-  "ok": true,
-  "value": null
+  "ok": false
  },
  {
   "id": "div-zero-by-zero",
+  "ok": false
+ },
+ {
+  "id": "mod-by-zero",
   "ok": false
  },
  {

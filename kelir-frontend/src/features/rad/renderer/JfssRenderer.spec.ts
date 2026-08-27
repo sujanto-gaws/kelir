@@ -185,10 +185,19 @@ describe('the payload a rendered form starts with', () => {
     // user happened to click. `budget` and `priority` live inside a `columns`
     // container and `notes` inside a `tabs` one — a walk that followed only
     // `components` would lose all three.
+    //
+    // `justification` is here while its `conditional` keeps it off the screen,
+    // which is S10.1.1 rather than an oversight: a hidden key is submitted and
+    // the server discards it, because the alternative makes the two engines
+    // evaluate the same condition against different data.
     expect(Object.keys(payload).sort()).toEqual(
       [
+        'baseline_budget',
         'budget',
         'category',
+        'cost_centre',
+        'grand_total',
+        'justification',
         'line_items',
         'needed_by',
         'notes',
@@ -206,11 +215,31 @@ describe('the payload a rendered form starts with', () => {
     const wrapper = render()
 
     // Present and empty, rather than absent. A `null` where an array belongs is
-    // what turns `sum` over line items into an evaluation error in #163.
+    // what turns `sum` over line items into an evaluation error.
     const payload = (wrapper.vm as unknown as { values: Record<string, unknown> }).values
 
     expect(Array.isArray(payload.line_items)).toBe(true)
     expect(payload.title).toBeNull()
+  })
+
+  it('takes a number from a number field, which Vue hands over already cast', async () => {
+    // The regression test for a defect #162 shipped and none of its tests could
+    // reach: Vue's `vModelText` casts for `type="number"` without being asked,
+    // so `NumberField`'s setter was handed a `number` where it expected a
+    // `string` and threw `next.trim is not a function` on the first keystroke
+    // into any number field on any form. Nothing here typed into one until
+    // #163's first calculation test did.
+    const wrapper = render()
+
+    await flushPromises()
+    await wrapper.find('#jfss-budget-field').setValue('250')
+
+    const changes = wrapper.emitted('change')!
+    const payload = changes[changes.length - 1][0] as Record<string, unknown>
+
+    // And it is a number rather than the string the DOM carries, which is the
+    // property `NumberField` exists for.
+    expect(payload.budget).toBe(250)
   })
 
   it('fills a datagrid sequenceKey with the 1-based row index', async () => {

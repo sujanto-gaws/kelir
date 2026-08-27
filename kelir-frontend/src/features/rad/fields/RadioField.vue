@@ -41,11 +41,12 @@ function isSelected(option: JfssOption): boolean {
 </script>
 
 <template>
-  <FieldShell v-slot="{ describedBy }" :component="component">
+  <FieldShell v-slot="{ describedBy, invalid }" :component="component">
     <div
       class="space-y-2"
       role="radiogroup"
       :aria-label="component.label"
+      :aria-invalid="invalid"
       :aria-describedby="describedBy"
     >
       <div

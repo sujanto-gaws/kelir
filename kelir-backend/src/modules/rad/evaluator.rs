@@ -118,11 +118,12 @@ fn jfss_config() -> EvaluationConfig {
 
     // §7.3: a null or missing operand yields 0, not NaN.
     config.arithmetic_nan_handling = NanHandling::CoerceToZero;
-    // §3.1: division by zero is not a value. `ReturnNull` is the closest the
-    // engine offers and [`normalize_numeric`] turns that null into the 0 the
-    // registry asks for — **for the operands it reaches**. It does not reach
-    // all of them: see [`RuleEvaluator::evaluate_numeric`].
-    config.division_by_zero = DivisionByZeroHandling::ReturnNull;
+    // §3.1 as decision **D-24** settles it: a division by zero does not produce
+    // a value, so every one of them fails evaluation. `ReturnNull` up to
+    // 2026-08-26, which normalized `10.5 / 0` to 0 while the integer path threw
+    // regardless of the setting — one expression behaving two ways depending on
+    // whether the numerator happened to be fractional.
+    config.division_by_zero = DivisionByZeroHandling::ThrowError;
     // The reference implementation compares across types silently rather than
     // throwing, and a form that refuses to render because a blank field was
     // compared to a number is worse than one that treats it as absent.
@@ -179,17 +180,19 @@ impl RuleEvaluator {
     /// function: every caller that forgets the normalization stores a `null`
     /// in a numeric column.
     ///
-    /// **§3.1's "the result is 0" is not fully delivered here, and that is a
-    /// known gap rather than an oversight.** Measured on the adopted engine:
-    /// `10.5 / 0` returns `null` and normalizes to `0` as the registry asks,
-    /// while `10 / 0`, `0 / 0` and `10 % 0` **throw**, so no wrapper is
-    /// reached at all and the caller sees an error rather than a zero. The
-    /// inconsistency is the engine's, it is identical on the frontend build —
-    /// which is what makes it a parity-preserving gap rather than a divergence
-    /// — and correcting the normalization spec is where the
-    /// [spike](../../../../projects/spikes/01.%20JFSS%20Operator%20Parity.md)
-    /// §2.3 put it: with the renderer, not with the evaluator. The tests below
-    /// pin the measured behaviour so a version bump that changes it is loud.
+    /// **A division by zero never reaches this wrapper**, and since decision
+    /// **D-24** that is uniform rather than a gap. The registry asked for `0`
+    /// from v1.0.0 and the engine could not deliver it by configuration — its
+    /// integer division path throws under every `DivisionByZeroHandling`
+    /// setting — so under the `ReturnNull` this module carried until
+    /// 2026-08-26, `10.5 / 0` normalized to `0` while `10 / 0` threw: one
+    /// expression behaving two ways depending on whether the numerator happened
+    /// to be fractional. Registry v1.6.0 §3.1 now says a division by zero does
+    /// not produce a value at all, both sides configure `ThrowError`, and the
+    /// caller answers as it answers every other evaluation failure — the field
+    /// renders blank while the form is being filled in, and the submission is
+    /// refused with the S10.3 envelope naming it. The tests below pin that on
+    /// all four expressions so a version bump that changes it is loud.
     pub fn evaluate_numeric(
         &self,
         expression: &Value,
@@ -218,9 +221,10 @@ impl Default for RuleEvaluator {
 /// untouched. A finiteness test is what the rule means — anything that is not a
 /// finite number is `0`.
 ///
-/// A `null` reaching here is division by zero, which the configuration turns
-/// into `null` because the engine has no return-zero variant. It becomes `0`,
-/// which is what §3.1 asks for.
+/// A `null` reaching here is an overflow — `1e308 * 10` — rather than a
+/// division by zero, which since decision **D-24** fails evaluation and never
+/// arrives. It becomes `0`, because a numeric column has nowhere to put an
+/// infinity.
 pub fn normalize_numeric(value: &Value) -> f64 {
     match value {
         Value::Number(number) => number.as_f64().filter(|n| n.is_finite()).unwrap_or(0.0),
@@ -368,12 +372,17 @@ mod tests {
     }
 
     #[test]
-    fn a_fractional_division_by_zero_normalizes_to_zero() {
-        // §3.1 says the result is 0, and this is the path that delivers it:
-        // the engine returns `null` and the wrapper turns it into 0. The §7.3
-        // wrapper as written would not have — `Infinity || 0` is `Infinity` —
-        // which is why `normalize_numeric` tests finiteness instead.
-        assert_eq!(numeric(&evaluator(), json!({"/": [10.5, 0]})), 0.0);
+    fn a_fractional_division_by_zero_is_refused_like_every_other() {
+        // The case that used to be the odd one out. Under `ReturnNull` this
+        // returned `null` and the wrapper turned it into the 0 §3.1 then asked
+        // for, while `10 / 0` beside it threw — the same expression answering
+        // two ways on the numerator's type. **D-24** removed the split.
+        assert!(
+            evaluator()
+                .evaluate(&json!({"/": [10.5, 0]}), &json!({}))
+                .is_err(),
+            "a fractional division by zero must refuse like an integer one"
+        );
     }
 
     #[test]
@@ -383,16 +392,16 @@ mod tests {
         assert_eq!(numeric(&evaluator(), json!({"*": [1e308, 10]})), 0.0);
     }
 
-    /// The measured §3.1 gap, pinned so a version bump that changes it is loud.
+    /// Registry §3.1 at v1.6.0, pinned so a version bump that changes it is loud.
     ///
-    /// These three throw rather than returning the 0 the registry asks for.
-    /// The frontend build of the same engine throws on the same three, so
-    /// parity holds and the non-conformance is the registry-versus-engine gap
-    /// the spike §2.3 assigned to the renderer's normalization spec. This test
-    /// asserts what is, not what should be; the day it fails is the day the
-    /// gap closed or moved.
+    /// **The name no longer says "rather than normalizing", because there is
+    /// nothing left to normalize against.** These three threw while `10.5 / 0`
+    /// returned `null`, and decision **D-24** closed the split by requiring the
+    /// refusal of all four rather than the `0` that was never reachable. The
+    /// frontend build of the same engine refuses the same four, so parity holds
+    /// by construction and `parity/cases.json` asserts it from the gate.
     #[test]
-    fn integer_division_by_zero_throws_rather_than_normalizing() {
+    fn every_integer_division_by_zero_is_refused() {
         let evaluator = evaluator();
 
         for expression in [
@@ -402,7 +411,7 @@ mod tests {
         ] {
             assert!(
                 evaluator.evaluate(&expression, &json!({})).is_err(),
-                "{expression} was expected to throw on the adopted engine"
+                "{expression} must not produce a value (registry §3.1, D-24)"
             );
         }
     }

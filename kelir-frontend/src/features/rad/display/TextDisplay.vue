@@ -17,11 +17,17 @@ const props = defineProps<{ component: JfssDisplayComponent }>()
  * implementation to interpret it, and a heading that shows its own markup is a
  * visible defect where an injected script is an invisible one.
  *
- * **A `calculate`-only display renders empty here, and that is #163's.** §4.4
- * lets a display take its text from an expression instead of `content`.
- * Evaluating it is the next issue by the sprint plan's own split, so a
- * definition whose totals are computed shows its labels and not yet its
- * numbers.
+ * **`content` is whatever the definition resolved to, and this component does
+ * not know which.** §4.4 lets a display take its text from `calculate` instead
+ * of `content`; the renderer evaluates it and hands the result down as
+ * `content`, so there is one property here and no branch. A failed calculation
+ * arrives as an empty string, which is what construction plan §5.6 asks a
+ * failed calculation to look like everywhere.
+ *
+ * **And it is not formatted.** A computed total renders as the number the
+ * expression produced — no currency prefix, no fixed decimals. Formatting
+ * decided inside a renderer is the reference implementation's defect and #162
+ * AC3's stated anti-pattern.
  */
 const level = computed(() => (props.component.type === 'heading' ? 'h3' : 'p'))
 

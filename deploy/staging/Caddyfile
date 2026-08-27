@@ -55,10 +55,17 @@
 
 	# Everything else is the single-page app. try_files sends unknown paths to
 	# index.html so client-side routes such as /login survive a page refresh.
+	#
+	# `.vite` is hidden because the build writes a manifest there — the chunk
+	# graph, keyed by source module path — for the CI step that holds decision
+	# D-10's bundle condition (`scripts/check-bundle-split.mjs`). It is build
+	# metadata rather than application content and has no business being served.
 	handle {
 		root * /srv
 		try_files {path} /index.html
-		file_server
+		file_server {
+			hide .vite
+		}
 	}
 
 	# Baseline hardening. A stricter Content-Security-Policy belongs with the

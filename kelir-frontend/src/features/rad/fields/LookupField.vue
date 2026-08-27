@@ -92,7 +92,7 @@ watch(search, () => {
 </script>
 
 <template>
-  <FieldShell v-slot="{ controlId, describedBy }" :component="component">
+  <FieldShell v-slot="{ controlId, describedBy, invalid }" :component="component">
     <div class="space-y-2">
       <!-- No binding is a definition the backend should have refused, so it is
            reported rather than rendered as an empty chooser — which would read
@@ -115,6 +115,7 @@ watch(search, () => {
           v-model="selected"
           :options="choices"
           :disabled="component.readOnly || loading"
+          :invalid="invalid"
           :described-by="describedBy"
           placeholder="Select…"
         />
