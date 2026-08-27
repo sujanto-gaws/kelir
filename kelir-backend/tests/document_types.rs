@@ -1,9 +1,17 @@
-//! Document types and their bindings, through the API (#157).
+//! Document types and their bindings, through the API (#157, #165).
 //!
 //! The binding checks are what this file mostly exists for. A type that names a
 //! form which does not exist, or one that is still a draft, is a type whose
 //! documents cannot be rendered — and the second is the subtler of the two,
 //! because the form is right there and merely unfinished.
+//!
+//! **#165 added the third check and the two that were missing.** Re-pointing a
+//! type at a new form revision is allowed and existing documents keep the
+//! revision they pinned, which is the decision AC3 asks for — enforced by
+//! refusing the rebinding while any document exists that pinned *nothing*, since
+//! those are the only ones a rebinding can reach. And the create-path binding
+//! refusals #157 wrote were asserted on create alone: removing `check_bindings`
+//! from `update_type` left every test in this file green.
 
 mod common;
 
@@ -648,4 +656,470 @@ async fn a_type_in_another_tenant_is_not_found() {
          tenant's type; body {}",
         response.body
     );
+}
+
+// ---------------------------------------------------------------------------
+// Rebinding the form on a type that already has documents (#165 AC3)
+// ---------------------------------------------------------------------------
+
+/// Creates a type bound to `form`, and returns its id.
+async fn bound_type(app: &TestApp, token: &str, code: &str, form: Uuid) -> Uuid {
+    let created = app
+        .send(
+            Method::POST,
+            "/api/v1/document-types",
+            Some(token),
+            Some(json!({ "typeCode": code, "name": code, "formId": form })),
+        )
+        .await;
+
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+    id_of(&created.body["data"])
+}
+
+/// Inserts a document of `type_id`, pinning `form` where one is given.
+///
+/// Inserted directly, as `a_type_with_documents_is_refused_rather_than_retired`
+/// does and for the same reason: documents have no endpoint until Sprint 9, and
+/// the rule is written now precisely so that it does not have to be remembered
+/// then.
+async fn seed_document(app: &TestApp, type_id: Uuid, reference: &str, form: Option<Uuid>) {
+    sqlx::query(
+        "INSERT INTO documents (id, tenant_id, document_ref, document_type_id, form_id, title)
+         VALUES ($1, $2, $3, $4, $5, 'A document')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .bind(reference)
+    .bind(type_id)
+    .bind(form)
+    .execute(&app.pool)
+    .await
+    .expect("insert a document of this type");
+}
+
+/// **The decision #165 AC3 asks for, in the direction that keeps form revisions
+/// usable.**
+///
+/// A form is revised by publishing the next revision, so a type that could never
+/// be re-pointed would be stuck on revision 1 the moment one document existed.
+/// The rebinding is therefore allowed — and the documents that already exist
+/// keep the revision they pinned, which is what makes it safe.
+#[tokio::test]
+async fn a_type_whose_documents_pinned_their_form_can_be_rebound() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let first = published_form(&app, &token, "pr-revision-1").await;
+    let next = published_form(&app, &token, "pr-revision-2").await;
+    let id = bound_type(&app, &token, "REBINDABLE", first).await;
+
+    seed_document(&app, id, "DOC-2026-000001", Some(first)).await;
+    seed_document(&app, id, "DOC-2026-000002", Some(first)).await;
+
+    let updated = app
+        .send(
+            Method::PUT,
+            &format!("/api/v1/document-types/{id}"),
+            Some(&token),
+            Some(json!({ "formId": next })),
+        )
+        .await;
+
+    assert_eq!(
+        updated.status,
+        StatusCode::OK,
+        "a type whose documents each pinned a revision may be re-pointed: the \
+         pinned ones are unreachable from the type's binding. Body: {}",
+        updated.body
+    );
+    assert_eq!(updated.body["data"]["formId"], json!(next.to_string()));
+
+    // And the documents did not move with it. This is the half of the decision
+    // that matters: "existing documents keep the definition they were filled
+    // against" is a claim about these two rows.
+    let pinned: Vec<Uuid> =
+        sqlx::query_scalar("SELECT form_id FROM documents WHERE document_type_id = $1")
+            .bind(id)
+            .fetch_all(&app.pool)
+            .await
+            .expect("the documents are readable");
+
+    assert_eq!(
+        pinned,
+        vec![first, first],
+        "a pinned revision is never moved"
+    );
+}
+
+/// **The other half, and the reason the decision is enforced rather than
+/// described.**
+///
+/// `documents.form_id` is nullable (Database Schema §6.6), so a document may
+/// exist having pinned nothing — and such a document has only its type's
+/// *current* binding to render against. Moving that binding re-renders it
+/// against a definition nobody filled in, which is the data-integrity problem
+/// AC3 names and which looks like a UI bug from every direction.
+///
+/// **Seen red** against a build with the `guard_rebinding` call removed from
+/// `service::update_type`.
+#[tokio::test]
+async fn a_type_with_a_document_that_pinned_no_form_cannot_be_rebound() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let first = published_form(&app, &token, "pr-unpinned-1").await;
+    let next = published_form(&app, &token, "pr-unpinned-2").await;
+    let id = bound_type(&app, &token, "UNPINNED", first).await;
+
+    seed_document(&app, id, "DOC-2026-000010", None).await;
+
+    let updated = app
+        .send(
+            Method::PUT,
+            &format!("/api/v1/document-types/{id}"),
+            Some(&token),
+            Some(json!({ "formId": next })),
+        )
+        .await;
+
+    assert_eq!(
+        updated.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        updated.body
+    );
+    assert_eq!(
+        updated.body["error"]["details"][0]["code"], "DOCUMENTS_WITHOUT_A_PINNED_FORM",
+        "{}",
+        updated.body
+    );
+    assert_eq!(updated.body["error"]["details"][0]["path"], "formId");
+    // The count is in the message rather than the word "some": an administrator
+    // told "some documents" cannot tell one stray row from a year of them.
+    assert!(
+        updated.body["error"]["details"][0]["message"]
+            .as_str()
+            .expect("a message")
+            .contains('1'),
+        "{}",
+        updated.body
+    );
+
+    // And nothing moved.
+    let bound: Uuid = sqlx::query_scalar("SELECT form_id FROM document_types WHERE id = $1")
+        .bind(id)
+        .fetch_one(&app.pool)
+        .await
+        .expect("the type is readable");
+
+    assert_eq!(bound, first, "a refused rebinding writes nothing");
+}
+
+/// **Clearing the binding is a change like any other.**
+///
+/// `formId: null` leaves an unpinned document with nothing at all to render
+/// against, which is strictly worse than pointing it at the wrong definition —
+/// so the guard is on the *change*, not on the new value being present.
+#[tokio::test]
+async fn the_binding_cannot_be_cleared_out_from_under_an_unpinned_document() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let form = published_form(&app, &token, "pr-cleared").await;
+    let id = bound_type(&app, &token, "CLEARED", form).await;
+
+    seed_document(&app, id, "DOC-2026-000020", None).await;
+
+    let updated = app
+        .send(
+            Method::PUT,
+            &format!("/api/v1/document-types/{id}"),
+            Some(&token),
+            Some(json!({ "formId": Value::Null })),
+        )
+        .await;
+
+    assert_eq!(
+        updated.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        updated.body
+    );
+    assert_eq!(
+        updated.body["error"]["details"][0]["code"], "DOCUMENTS_WITHOUT_A_PINNED_FORM",
+        "{}",
+        updated.body
+    );
+}
+
+/// An unrelated edit is not a rebinding, and must not be refused as one.
+///
+/// The complement of the two above: a guard that fired whenever documents
+/// existed would make a type with one unpinned document unrenameable, which is
+/// the failure `an_update_may_leave_a_binding_alone_even_when_its_form_was_retired`
+/// exists to prevent one step earlier.
+#[tokio::test]
+async fn an_unpinned_document_does_not_stop_the_type_being_renamed() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let form = published_form(&app, &token, "pr-renameable").await;
+    let id = bound_type(&app, &token, "RENAMEABLE", form).await;
+
+    seed_document(&app, id, "DOC-2026-000030", None).await;
+
+    let updated = app
+        .send(
+            Method::PUT,
+            &format!("/api/v1/document-types/{id}"),
+            Some(&token),
+            Some(json!({ "name": "Renamed anyway" })),
+        )
+        .await;
+
+    assert_eq!(updated.status, StatusCode::OK, "{}", updated.body);
+    assert_eq!(updated.body["data"]["name"], "Renamed anyway");
+}
+
+/// Re-sending the binding at its current value is not a change either.
+///
+/// A client that PUTs the whole resource back sends `formId` on every edit, so
+/// a guard keyed on the property being *present* rather than on the value
+/// *moving* would refuse every such edit — and the update payload's other
+/// fields are already written to be re-sendable (`an_update_records_what_changed…`).
+#[tokio::test]
+async fn re_sending_the_same_binding_is_not_a_rebinding() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let form = published_form(&app, &token, "pr-resent").await;
+    let id = bound_type(&app, &token, "RESENT", form).await;
+
+    seed_document(&app, id, "DOC-2026-000040", None).await;
+
+    let updated = app
+        .send(
+            Method::PUT,
+            &format!("/api/v1/document-types/{id}"),
+            Some(&token),
+            Some(json!({ "name": "Resent", "formId": form })),
+        )
+        .await;
+
+    assert_eq!(updated.status, StatusCode::OK, "{}", updated.body);
+}
+
+// ---------------------------------------------------------------------------
+// The binding checks, on the update path (#165 AC2)
+// ---------------------------------------------------------------------------
+//
+// #157 covered these on create and left the update path asserted by nothing:
+// `an_update_may_leave_a_binding_alone_even_when_its_form_was_retired` asserts
+// the *absence* of a refusal, so removing `check_bindings` from `update_type`
+// left every test green. The two below are the same claims as the create-path
+// pair, made where AC2 also makes them.
+
+/// **Seen red** against a build with the `check_bindings` call removed from
+/// `service::update_type`.
+#[tokio::test]
+async fn a_type_cannot_be_rebound_to_a_draft_form() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let published = published_form(&app, &token, "pr-was-published").await;
+    let draft = draft_form(&app, &token, "pr-still-a-draft").await;
+    let id = bound_type(&app, &token, "REBIND_DRAFT", published).await;
+
+    let updated = app
+        .send(
+            Method::PUT,
+            &format!("/api/v1/document-types/{id}"),
+            Some(&token),
+            Some(json!({ "formId": draft })),
+        )
+        .await;
+
+    assert_eq!(
+        updated.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        updated.body
+    );
+    assert_eq!(
+        updated.body["error"]["details"][0]["code"], "NOT_PUBLISHED",
+        "a document pins the revision it was created against, so binding a \
+         draft pins a definition that can still change underneath it. Body: {}",
+        updated.body
+    );
+}
+
+#[tokio::test]
+async fn a_type_cannot_be_rebound_to_a_form_that_does_not_exist() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let published = published_form(&app, &token, "pr-exists").await;
+    let id = bound_type(&app, &token, "REBIND_MISSING", published).await;
+
+    let updated = app
+        .send(
+            Method::PUT,
+            &format!("/api/v1/document-types/{id}"),
+            Some(&token),
+            Some(json!({ "formId": Uuid::now_v7() })),
+        )
+        .await;
+
+    assert_eq!(
+        updated.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        updated.body
+    );
+    assert_eq!(
+        updated.body["error"]["details"][0]["code"], "NOT_FOUND",
+        "{}",
+        updated.body
+    );
+
+    // Nothing was written: the binding still names the form it did.
+    let bound: Uuid = sqlx::query_scalar("SELECT form_id FROM document_types WHERE id = $1")
+        .bind(id)
+        .fetch_one(&app.pool)
+        .await
+        .expect("the type is readable");
+
+    assert_eq!(bound, published);
+}
+
+/// A type retired before the write is not updated.
+///
+/// Coverage of behaviour that already held rather than a new guarantee, and it
+/// is written that way on purpose: `update_type` now reads the row three times
+/// — on the pool for its audit `before`, under the lock, and in the `UPDATE`'s
+/// own predicate — and each of the three refuses a retired row on its own. This
+/// asserts the outcome, so a refactor that removes one of them cannot turn the
+/// endpoint into one that writes onto a row no read returns.
+///
+/// The *race* it is the still-life of is `a_form_retired_during_the_write_is_refused`,
+/// which holds the row open across the request.
+#[tokio::test]
+async fn a_type_retired_before_the_write_is_not_updated() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let form = published_form(&app, &token, "pr-retired-type").await;
+    let id = bound_type(&app, &token, "RETIRED_MID", form).await;
+
+    sqlx::query("UPDATE document_types SET deleted_at = now() WHERE id = $1")
+        .bind(id)
+        .execute(&app.pool)
+        .await
+        .expect("retire the type");
+
+    let updated = app
+        .send(
+            Method::PUT,
+            &format!("/api/v1/document-types/{id}"),
+            Some(&token),
+            Some(json!({ "name": "Too late" })),
+        )
+        .await;
+
+    assert_eq!(updated.status, StatusCode::NOT_FOUND, "{}", updated.body);
+}
+
+/// **The rebinding guard reads `documents`, so the lock has to cover a document
+/// arriving** (coding standard §2.5).
+///
+/// A count on the pool followed by a write is check-then-act: a document created
+/// in the gap is one the guard never saw, and it renders against a binding that
+/// moved out from under it. `lock_type_binding` takes `FOR UPDATE` on the type
+/// row, and that is the row both sides go through — because inserting a document
+/// takes a `FOR KEY SHARE` on the `document_types` row its foreign key names,
+/// and `FOR UPDATE` conflicts with `FOR KEY SHARE`. **The lock is therefore
+/// enforced by the foreign key rather than by whatever Sprint 9's [#167]
+/// remembers to do**, which is the difference between a rule and a note.
+///
+/// The transaction below holds that key-share lock by inserting an unpinned
+/// document without committing. The rebinding request must block on it rather
+/// than read a stale zero, and refuse once it commits.
+///
+/// **Seen red** with `FOR UPDATE` weakened to `FOR NO KEY UPDATE`, which does
+/// *not* conflict with `FOR KEY SHARE`: the request then does not block at all,
+/// counts zero unpinned documents, and returns 200 having rebound the type out
+/// from under a document that was being created.
+///
+/// The timeout is a guard against the opposite failure: a request blocking on
+/// something that never releases would hang the suite rather than fail it.
+///
+/// [#167]: https://github.com/sujanto-gaws/kelir/issues/167
+#[tokio::test]
+async fn a_document_created_during_the_rebinding_is_not_missed() {
+    use std::time::Duration;
+
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let first = published_form(&app, &token, "pr-race-1").await;
+    let next = published_form(&app, &token, "pr-race-2").await;
+    let id = bound_type(&app, &token, "RACED", first).await;
+
+    // Hold the type's row by inserting a document that references it. The
+    // foreign key takes `FOR KEY SHARE` on `document_types` for the life of
+    // this transaction.
+    let mut holding = app.pool.begin().await.expect("a transaction opens");
+    sqlx::query(
+        "INSERT INTO documents (id, tenant_id, document_ref, document_type_id, form_id, title)
+         VALUES ($1, $2, 'DOC-2026-000099', $3, NULL, 'Created mid-rebinding')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .bind(id)
+    .execute(&mut *holding)
+    .await
+    .expect("the document inserts inside the transaction");
+
+    // Bound to a `let` so the borrow outlives the future, which `app.send`
+    // holds until it is awaited.
+    let route = format!("/api/v1/document-types/{id}");
+    let rebinding = app.send(
+        Method::PUT,
+        &route,
+        Some(&token),
+        Some(json!({ "formId": next })),
+    );
+
+    // Let the request reach the locked read before the insert commits. Without
+    // a conflicting lock it will already have finished by now, with a 200.
+    let committed = async {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        holding.commit().await.expect("the document commits");
+    };
+
+    let (response, ()) = tokio::time::timeout(
+        Duration::from_secs(20),
+        futures_lite_join(rebinding, committed),
+    )
+    .await
+    .expect("the rebinding request must not block forever");
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a document that pinned no form arrived while this rebinding was being \
+         written, so the rebinding must be refused rather than moving the \
+         definition that document renders against. Body: {}",
+        response.body
+    );
+
+    let bound: Uuid = sqlx::query_scalar("SELECT form_id FROM document_types WHERE id = $1")
+        .bind(id)
+        .fetch_one(&app.pool)
+        .await
+        .expect("the type is readable");
+
+    assert_eq!(bound, first, "a refused rebinding writes nothing");
 }

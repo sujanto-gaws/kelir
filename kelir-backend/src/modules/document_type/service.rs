@@ -1,13 +1,21 @@
 //! Document type use cases (FR-DTYPE-001, 002, 003).
 //!
-//! **The binding check and the write it guards are in one transaction, under a
-//! lock covering what the check read.** That is coding standard §2.5's rule and
-//! it was bought expensively: #133 found two callers each walking a path the
+//! **The binding checks and the write they guard are in one transaction, under
+//! a lock covering what the checks read.** That is coding standard §2.5's rule
+//! and it was bought expensively: #133 found two callers each walking a path the
 //! other was about to change, and #137 found a parent re-read that had happened
 //! a moment too early. Here the same shape is a document type bound to a form
 //! that is soft-deleted between "does this form exist?" and the insert — which
 //! leaves a type pointing at a definition no read returns, and a renderer with
 //! nothing to render.
+//!
+//! **There are two such checks on an update and they guard different things.**
+//! [`check_bindings`] asks whether the form being bound *may* be bound — it
+//! exists, it is live, it is published — and holds that form. [`guard_rebinding`]
+//! asks what the change does to documents that already exist, and holds the type
+//! row: a document's foreign key takes a `FOR KEY SHARE` on that row, which
+//! `FOR UPDATE` conflicts with, so the two serialize by construction rather than
+//! by anything Sprint 9 has to remember.
 
 use serde_json::json;
 use uuid::Uuid;
@@ -160,6 +168,13 @@ pub async fn update_type(
 
     let mut transaction = state.pool.begin().await?;
 
+    // The type row is read and held before anything below decides on it. Both
+    // guards that follow answer questions about state a concurrent writer could
+    // move, and coding standard §2.5 puts the lock on what the *check* read.
+    let bound_form = repo::lock_type_binding(&mut transaction, tenant_id, id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Document type"))?;
+
     // Only a binding the caller is *changing* is checked, and only when it
     // names something. Re-checking an unchanged binding would refuse an
     // unrelated edit because a form was retired weeks ago — which is a real
@@ -172,6 +187,12 @@ pub async fn update_type(
         request.list_id.flatten(),
     )
     .await?;
+
+    if let Some(next_form) = request.form_id {
+        if next_form != bound_form {
+            guard_rebinding(&mut transaction, tenant_id, id, &before.type_code).await?;
+        }
+    }
 
     let affected = repo::update_type(
         &mut *transaction,
@@ -315,6 +336,56 @@ pub async fn delete_type(
     .await;
 
     Ok(())
+}
+
+/// Refuses a form rebinding that would re-render documents nobody filled in
+/// that way (#165 AC3).
+///
+/// **The decision, stated where the code is rather than left to be inferred:
+/// changing a type's form binding is allowed, and existing documents keep the
+/// revision they were filled against.** Refusing outright was the alternative
+/// and it is worse — a form definition is revised by publishing the next
+/// revision, so a type that could never be re-pointed would be stuck on
+/// revision 1 forever the moment one document existed, which makes the
+/// revision mechanism unusable rather than safe.
+///
+/// **What makes "keep the revision they were filled against" true rather than
+/// hoped for.** A document carries its own `form_id`, pinned at creation
+/// ([Database Schema](../../../../docs/design/02.%20Database%20Schema.md) §6.6),
+/// and that column is what an old document re-renders through — so moving the
+/// *type's* binding cannot reach it. But §6.6 makes the column **nullable**, and
+/// a document that pinned nothing has only its type's current binding to render
+/// against. Those documents, and only those, are what this refuses over: it is
+/// the difference between a guarantee and a comment describing one.
+///
+/// It is deliberately not a `NOT NULL` on `documents.form_id`. That would
+/// forbid a document of a type that binds no form, which §6.2 permits, and it
+/// would settle a column Sprint 9's [#167] has not written to yet — a
+/// constraint reaching forward into an unbuilt surface rather than a rule about
+/// this one.
+///
+/// [#167]: https://github.com/sujanto-gaws/kelir/issues/167
+async fn guard_rebinding(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    id: Uuid,
+    type_code: &str,
+) -> Result<(), AppError> {
+    let unpinned =
+        repo::count_documents_without_a_pinned_form(&mut **transaction, tenant_id, id).await?;
+
+    if unpinned == 0 {
+        return Ok(());
+    }
+
+    Err(AppError::validation(vec![ValidationDetail::new(
+        "formId",
+        "reference",
+        "DOCUMENTS_WITHOUT_A_PINNED_FORM",
+        format!(
+            "`{type_code}` has {unpinned} document(s) that pinned no form revision, so              they render against whatever this type is bound to; changing the binding              would re-render them against a definition they were not filled against.              Documents created against a form pin it and are unaffected"
+        ),
+    )]))
 }
 
 /// Holds and checks whichever bindings this write is setting.
