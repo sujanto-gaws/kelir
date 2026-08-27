@@ -22,6 +22,7 @@ import {
   normalizeNumeric,
   type RuleEvaluator,
 } from '@/lib/jsonlogic'
+import type { ValidationDetail } from '@/types/api'
 import {
   childComponents,
   isDataComponent,
@@ -96,6 +97,28 @@ export interface FormEvaluation {
     component: JfssDataComponent,
     scope: Record<string, unknown>,
   ): FieldViolation | undefined
+  /**
+   * What the **server** said about this field when the form was last submitted.
+   *
+   * Addressed by JFSS S10.3 dot-notation path rather than by `key`, which is
+   * why the envelope calls it `path`: `line_items.2.quantity` is not a key.
+   *
+   * A message is dropped as soon as the value it was about changes, so a field
+   * the person has since corrected stops carrying the server's complaint about
+   * what it used to hold. The rest stand until the next submission is answered
+   * — they are the only thing that ever reports a `server`-scoped rule, and
+   * clearing them on any keystroke would erase a `unique` verdict because
+   * somebody edited a different box.
+   */
+  serverViolationFor(path: string): FieldViolation | undefined
+  /**
+   * Records the S10.3 details a refused submission came back with.
+   *
+   * Replaces whatever was there: they are the server's answer to *one* payload,
+   * and two answers to two payloads shown together would say nothing about
+   * either.
+   */
+  reportServerViolations(details: ValidationDetail[]): void
   /** Whether every visible field is acceptable and the definition is sound. */
   isValid: ComputedRef<boolean>
   /**
@@ -126,6 +149,43 @@ export function provideValueScope(scope: () => Record<string, unknown>): void {
   provide(
     VALUE_SCOPE_KEY,
     computed(() => scope()),
+  )
+}
+
+/**
+ * The **dot-notation path prefix** a component's `key` sits under (JFSS S10.3).
+ *
+ * Empty at the top of a form, `line_items.0.` inside the first row of a
+ * repeater. It is not the same thing as [`useFieldScope`](./useFieldScope.ts)'s
+ * prefix, and the two are deliberately separate: that one addresses the *DOM*
+ * (`jfss-row-0-line-total`) and this one addresses the *payload*. They look
+ * alike and they diverge the moment a `key` and an `id` differ, which they
+ * usually do.
+ *
+ * It exists because a server violation arrives keyed by path — S10.3 names the
+ * field `path` rather than `key` precisely so a row's address can be one — and
+ * a field has to be able to ask whether one of them is about it.
+ *
+ * Appending rather than replacing, for the reason `useFieldScope` gives about
+ * its own: a datagrid inside a datagrid row is a shape JFSS permits, and the
+ * inner row's fields live under the outer row's path.
+ */
+const VALUE_PATH_KEY: InjectionKey<ComputedRef<string>> = Symbol('jfss-value-path')
+
+export function provideValuePath(segment: () => string): void {
+  const parent = inject(VALUE_PATH_KEY, undefined)
+
+  provide(
+    VALUE_PATH_KEY,
+    computed(() => `${parent?.value ?? ''}${segment()}`),
+  )
+}
+
+/** The payload path prefix in force here — empty at the top level of a form. */
+export function useValuePath(): ComputedRef<string> {
+  return inject(
+    VALUE_PATH_KEY,
+    computed(() => ''),
   )
 }
 
@@ -272,6 +332,7 @@ export function createFormEvaluation(
 ): FormEvaluation {
   const engine = shallowRef<RuleEvaluator | undefined>()
   const revealed = ref(false)
+  const reported = ref<ReportedViolation[]>([])
 
   const expected = computed(() => needsEvaluator(definition.value.components))
   const ready = computed(() => engine.value !== undefined || !expected.value)
@@ -599,6 +660,46 @@ export function createFormEvaluation(
     return isValid.value
   }
 
+  /**
+   * The server's answer, kept beside the value it was about.
+   *
+   * Storing `at` is what lets a corrected field clear its message without
+   * clearing every other field's: the alternative — drop them all on the first
+   * keystroke — would erase a `unique` verdict because somebody edited an
+   * unrelated box, and that verdict is the only report a `server`-scoped rule
+   * ever gets (Validation Rule Registry §3.3).
+   */
+  function reportServerViolations(details: ValidationDetail[]): void {
+    reported.value = details.map((detail) => ({
+      path: detail.path,
+      rule: detail.rule,
+      message: detail.message,
+      at: JSON.stringify(valueAtPath(values, detail.path) ?? null),
+    }))
+  }
+
+  function serverViolationFor(path: string): FieldViolation | undefined {
+    const found = reported.value.find((violation) => violation.path === path)
+
+    if (!found) {
+      return undefined
+    }
+
+    // Still about what it was about. A changed value makes the message stale,
+    // and a stale message beside a corrected field is worse than none.
+    if (JSON.stringify(valueAtPath(values, path) ?? null) !== found.at) {
+      return undefined
+    }
+
+    return { rule: found.rule, message: found.message }
+  }
+
+  // A new definition is a new form; the previous form's server answers are not
+  // about it.
+  watch(definition, () => {
+    reported.value = []
+  })
+
   return {
     ready,
     defect,
@@ -607,7 +708,41 @@ export function createFormEvaluation(
     isEditable,
     displayContent,
     violationFor,
+    serverViolationFor,
+    reportServerViolations,
     isValid,
     reveal,
   }
+}
+
+/** One S10.3 detail, and the value it was raised about. */
+interface ReportedViolation {
+  path: string
+  rule: string
+  message: string
+  /** The value at `path` when the server answered, encoded for comparison. */
+  at: string
+}
+
+/**
+ * The value a JFSS S10.3 dot-notation path names, inside a payload.
+ *
+ * `line_items.2.quantity` is the third row's quantity. A `key` may not contain
+ * a `.` — JFSS §4.2 reserves it as the separator and the meta-schema enforces
+ * the pattern — so splitting on it is unambiguous.
+ */
+function valueAtPath(values: Record<string, unknown>, path: string): unknown {
+  let current: unknown = values
+
+  for (const segment of path.split('.')) {
+    if (Array.isArray(current)) {
+      current = current[Number(segment)]
+    } else if (typeof current === 'object' && current !== null) {
+      current = (current as Record<string, unknown>)[segment]
+    } else {
+      return undefined
+    }
+  }
+
+  return current
 }

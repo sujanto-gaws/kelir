@@ -59,3 +59,25 @@ export interface LookupQuery {
   pageSize?: number
   search?: string
 }
+
+/**
+ * A filled-in form, as the **server** re-evaluated it (`domain/submission.rs`).
+ *
+ * `payload` is the backend's own answer and never what was posted: JFSS S8.1
+ * makes it re-evaluate every `calculate` expression and overwrite the submitted
+ * value, and S10.2 makes it discard the values of components that resolve to
+ * hidden. It comes back so a caller can *see* that — a form that changes your
+ * number without saying so is its own defect (#164 AC5).
+ */
+export interface FormSubmission {
+  id: string
+  formId: string
+  /** The revision the form was filled in against. */
+  formRevision: number
+  /** The server's re-evaluated payload. */
+  payload: Record<string, unknown>
+  submittedAt: string
+  submittedBy: string | null
+  createdAt: string
+  updatedAt: string
+}

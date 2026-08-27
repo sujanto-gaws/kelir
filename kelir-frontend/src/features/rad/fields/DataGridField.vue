@@ -4,7 +4,11 @@ import { computed, onMounted } from 'vue'
 import DataGridRow from './DataGridRow.vue'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
-import { useFormEvaluation, useValueScope } from '@/features/rad/renderer/useFormEvaluation'
+import {
+  useFormEvaluation,
+  useValuePath,
+  useValueScope,
+} from '@/features/rad/renderer/useFormEvaluation'
 import { dataComponents, type JfssComponent, type JfssDataComponent } from '@/types/jfss'
 
 /**
@@ -49,7 +53,16 @@ const template = computed<JfssComponent[]>(() => props.component.components ?? [
 const evaluation = useFormEvaluation()
 const values = useValueScope()
 
-const violation = computed(() => evaluation?.violationFor(props.component, values.value))
+const valuePath = useValuePath()
+
+// The grid's own verdict, and the server's about the same array — a `uniqueBy`
+// is decided on both sides, and the server is the one that decided the stored
+// one.
+const violation = computed(
+  () =>
+    evaluation?.violationFor(props.component, values.value) ??
+    evaluation?.serverViolationFor(`${valuePath.value}${props.component.key}`),
+)
 
 /** A blank row: every template field present, so the payload shape is stable. */
 function blankRow(): Record<string, unknown> {
@@ -154,6 +167,7 @@ onMounted(() => {
         :template="template"
         :values="row"
         :index="index"
+        :array-key="component.key"
         @update:field="(key: string, value: unknown) => updateCell(index, key, value)"
       />
     </div>

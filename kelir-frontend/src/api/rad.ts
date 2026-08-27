@@ -1,6 +1,6 @@
-import { getItem, getPage } from './client'
+import { getItem, getPage, postItem } from './client'
 import type { Page } from '@/types/api'
-import type { Form, LookupOption, LookupQuery } from '@/types/rad'
+import type { Form, FormSubmission, LookupOption, LookupQuery } from '@/types/rad'
 
 /**
  * The RAD endpoints (`/api/v1/rad/*`).
@@ -48,4 +48,24 @@ export function listLookupOptions(
   }
 
   return getPage<LookupOption>(`/rad/lookups/${source}/options`, params)
+}
+
+/**
+ * Submits a filled-in form and returns what the server stored (#164).
+ *
+ * **Every data key goes**, visible or not, which is JFSS S10.1 and not an
+ * oversight: S10.1.1 errata'd v2.0.0's "omit hidden fields" as not
+ * implementable, because a conditional that depends on a hidden field would
+ * then be decided from different inputs on the two sides. The server discards
+ * the values of the components *it* computes as hidden.
+ *
+ * **What comes back is the server's payload, not the one that went out.** The
+ * caller is expected to look at it: a total the server recomputed differently
+ * is the one thing a submitting form must not swallow.
+ */
+export function submitForm(
+  formId: string,
+  payload: Record<string, unknown>,
+): Promise<FormSubmission> {
+  return postItem<FormSubmission>(`/rad/forms/${formId}/submissions`, { payload })
 }

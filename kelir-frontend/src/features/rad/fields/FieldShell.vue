@@ -3,7 +3,11 @@ import { computed } from 'vue'
 
 import { Label } from '@/components/ui/label'
 import { useFieldScope } from '@/features/rad/renderer/useFieldScope'
-import { useFormEvaluation, useValueScope } from '@/features/rad/renderer/useFormEvaluation'
+import {
+  useFormEvaluation,
+  useValuePath,
+  useValueScope,
+} from '@/features/rad/renderer/useFormEvaluation'
 import type { JfssDataComponent } from '@/types/jfss'
 
 /**
@@ -47,7 +51,33 @@ const describedBy = computed(() => `${controlId.value}-description`)
 /** The id of the message, so a screen reader hears why the box is refused. */
 const errorId = computed(() => `${controlId.value}-error`)
 
-const violation = computed(() => evaluation?.violationFor(props.component, values.value))
+/**
+ * The S10.3 dot-notation path this field's value sits at.
+ *
+ * `title` at the top of a form, `line_items.0.quantity` in a repeater's first
+ * row. Not the same as `controlId` above, which addresses the DOM: a server
+ * violation is about a place in the payload.
+ */
+const valuePath = useValuePath()
+const path = computed(() => `${valuePath.value}${props.component.key}`)
+
+/**
+ * What is wrong with this field, from whichever side noticed.
+ *
+ * **The definition's own rules first, the server's answer second.** The
+ * client's verdict is live and the server's is about the payload as it was when
+ * it was last submitted, so a field that has since become invalid on its own
+ * terms should say so rather than keep showing a stale complaint. What only the
+ * server can decide — a `unique`, an `exists`, a calculation that produced no
+ * value (**D-24**) — has no client verdict to compete with, and appears here
+ * because there is nowhere else it could (#164 AC6, Validation Rule Registry
+ * §3.3).
+ */
+const violation = computed(
+  () =>
+    evaluation?.violationFor(props.component, values.value) ??
+    evaluation?.serverViolationFor(path.value),
+)
 
 /**
  * Both ids when both are present.

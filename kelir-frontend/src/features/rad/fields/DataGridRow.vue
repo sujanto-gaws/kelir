@@ -2,13 +2,15 @@
 import { defineAsyncComponent, toRef } from 'vue'
 
 import { provideFieldScope } from '@/features/rad/renderer/useFieldScope'
-import { provideValueScope } from '@/features/rad/renderer/useFormEvaluation'
+import { provideValuePath, provideValueScope } from '@/features/rad/renderer/useFormEvaluation'
 import type { JfssComponent } from '@/types/jfss'
 
 const props = defineProps<{
   template: JfssComponent[]
   values: Record<string, unknown>
   index: number
+  /** The repeater's own payload `key`, for the S10.3 path its rows sit under. */
+  arrayKey: string
 }>()
 
 const emit = defineEmits<{ (e: 'update:field', key: string, value: unknown): void }>()
@@ -34,6 +36,17 @@ provideFieldScope(() => `row-${props.index}-`)
  * exist — so the rule would compare against `undefined` and quietly hold.
  */
 provideValueScope(() => props.values)
+
+/**
+ * And the S10.3 path that scope sits at (`line_items.0.`).
+ *
+ * Separate from the id prefix above because the two address different things —
+ * that one a DOM element, this one a place in the payload — and they are spelled
+ * differently: `jfss-row-0-line-total` against `line_items.0.line_total`. A
+ * server violation arrives keyed by the second, which is why the envelope names
+ * the field `path` rather than `key`.
+ */
+provideValuePath(() => `${props.arrayKey}.${props.index}.`)
 
 /** Lazily imported for the cycle `DataGridField` documents. */
 const JfssRenderer = defineAsyncComponent(() => import('@/features/rad/renderer/JfssRenderer.vue'))

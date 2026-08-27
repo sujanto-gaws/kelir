@@ -9,12 +9,26 @@ import {
 } from './renderer/useFormEvaluation'
 import { provideLookupBindings } from './renderer/useLookupBindings'
 import { Alert } from '@/components/ui/alert'
+import type { ValidationDetail } from '@/types/api'
 import { dataComponents, type JfssDefinition } from '@/types/jfss'
 
 const props = defineProps<{
   definition: JfssDefinition
   /** An existing payload, for a document being re-opened. */
   initialValues?: Record<string, unknown>
+  /**
+   * What the server said about the last submission (JFSS S10.3, #164).
+   *
+   * A prop rather than a method the page calls, so the messages a field shows
+   * are a function of what the page holds — a form whose errors were pushed
+   * into it can disagree with the page about whether a submission failed, and
+   * only one of the two is on screen.
+   *
+   * Every one of these is addressed by dot-notation `path`, which is why the
+   * envelope names the field `path` and not `key`: `line_items.2.quantity` is
+   * not a key.
+   */
+  serverViolations?: ValidationDetail[]
 }>()
 
 const emit = defineEmits<{
@@ -30,9 +44,9 @@ const emit = defineEmits<{
  * what made #163 possible without restructuring anything, because a derived
  * field is a value in this object that something else computes.
  *
- * **What this form still does not do:** submit. #164 owns what `submit` means
- * and where the payload goes; what is here is whether it may happen at all,
- * which is validation's question and therefore this issue's.
+ * **Submitting is the page's** (#164). What is here is whether a submit may
+ * happen at all — validation's question — and where the server's answer is
+ * shown when it turns out that it may not.
  */
 const values = reactive<Record<string, unknown>>({})
 
@@ -93,6 +107,20 @@ function resolveInitialValues(): void {
 // definition matters for a page that switches forms without unmounting.
 watch(() => props.definition, resolveInitialValues, { immediate: true, deep: false })
 
+/**
+ * The server's answer to the last submission, handed to the evaluation so a
+ * field can find the message that is about it.
+ *
+ * `immediate` because a page may mount already holding one — a submission
+ * refused, the route re-entered — and a message that appeared only on the
+ * *second* answer would be a message nobody saw the first time.
+ */
+watch(
+  () => props.serverViolations,
+  (details) => evaluation.reportServerViolations(details ?? []),
+  { immediate: true },
+)
+
 // Lookup bindings are read from `settings` (**D-23**) and reach the fields that
 // need them by injection — see `useLookupBindings.ts` for why not a prop.
 provideLookupBindings(props.definition.settings?.lookups)
@@ -117,9 +145,9 @@ watch(values, () => emit('change', { ...values }), { deep: true, flush: 'post' }
 /**
  * What a button means, and the one part of it that is this issue's.
  *
- * **`submit` is gated and every other action passes through.** #164 decides
- * what submitting *does*; whether the payload is fit to submit is what the
- * definition's rules answer, and answering it here is what makes AC1's
+ * **`submit` is gated and every other action passes through.** The page decides
+ * what submitting *does* (#164); whether the payload is fit to submit is what
+ * the definition's rules answer, and answering it here is what makes #163 AC1's
  * per-field messages appear where a person can act on them. A `reset` or a
  * `navigate` is not gated — refusing to let somebody leave a form because a
  * field they never reached is empty would be a worse form than one with no
