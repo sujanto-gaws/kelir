@@ -8,8 +8,11 @@
 
 mod common;
 
+use std::time::Duration;
+
 use axum::http::{Method, StatusCode};
-use common::TestApp;
+use common::{fixtures, TestApp};
+use kelir_backend::modules::rad::repository::form as form_repo;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -492,6 +495,188 @@ async fn creating_a_key_that_already_has_revisions_is_refused() {
         "guessing whether a caller meant a second form or a second revision \
          would silently fork a form's history; body {}",
         again.body
+    );
+}
+
+/// **A form key is taken per tenant, and `highest_revision` is the only thing
+/// that says so** (#206).
+///
+/// The conflict check above reads the highest revision of a key; if that read
+/// crosses tenants, tenant A is refused a `formKey` because tenant B uses one
+/// by that name — a functional block and an existence disclosure in the same
+/// refusal. `uq_rad_forms_tenant_id_form_key_revision` does not backstop it:
+/// the index is per-tenant, so it permits exactly the row this refusal would
+/// have prevented.
+///
+/// Seen red (coding standard §2.9) against `highest_revision`'s
+/// `tenant_id = $1` weakened to `(tenant_id = $1 OR TRUE)`: the create below
+/// answers 409 naming a key this tenant has never used.
+#[tokio::test]
+async fn a_form_key_another_tenant_uses_is_free_here() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    // Written directly rather than through the API: the API is tenant-scoped by
+    // the caller's token, which is the thing being probed, so the other
+    // tenant's row has to arrive some other way.
+    let other = fixtures::create_tenant(&app.pool, "TNT-FORMS", "Another Customer").await;
+    sqlx::query(
+        "INSERT INTO rad_forms (id, tenant_id, form_key, title, revision, jfss_version, definition_json)
+         VALUES ($1, $2, 'pr-shared-key', 'Theirs', 1, '2.0.1', $3)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(other)
+    .bind(definition("pr-shared-key"))
+    .execute(&app.pool)
+    .await
+    .expect("the other tenant's form is stored");
+
+    let created = app
+        .send(
+            Method::POST,
+            "/api/v1/rad/forms",
+            Some(&token),
+            Some(json!({
+                "formKey": "pr-shared-key",
+                "title": "Ours",
+                "definition": definition("pr-shared-key"),
+            })),
+        )
+        .await;
+
+    assert_eq!(
+        created.status,
+        StatusCode::CREATED,
+        "another tenant's key blocked this one: {}",
+        created.body
+    );
+    assert_eq!(created.body["data"]["revision"], 1, "and it starts at 1");
+}
+
+/// **The publish that lands between a service's read and its write** (#206).
+///
+/// `update_draft` and `publish` both carry `AND status = 'DRAFT'` in the
+/// statement, and the module comment says why: the service reads the row,
+/// refuses a published one, and then writes — and a concurrent publish can land
+/// in between. Every existing test exercises the *service* check, which fires
+/// first, so both predicates were unexercised while
+/// `a_published_revision_cannot_be_edited` and `publishing_twice_is_refused`
+/// passed.
+///
+/// The race is arranged rather than raced for: the publishing transaction takes
+/// the row's lock and holds it, the edit blocks on that lock, and the commit
+/// releases it. Under `READ COMMITTED` the blocked `UPDATE` re-evaluates its
+/// `WHERE` against the committed row — which is exactly the moment the
+/// predicate exists for, and the only moment it can be observed in.
+///
+/// Seen red (coding standard §2.9) against `AND status = 'DRAFT'` removed from
+/// each statement in turn: the edit applies to a published revision, and the
+/// second publish overwrites the first publisher's stamp.
+#[tokio::test]
+async fn an_edit_blocked_by_a_publish_applies_to_nothing() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let created = create_form(&app, &token, "pr-race", definition("pr-race")).await;
+    let id = id_of(&created);
+    let tenant = fixtures::SYSTEM_TENANT_ID;
+
+    // The publisher, holding the row lock and not yet committed.
+    let mut publishing = app.pool.begin().await.expect("a transaction");
+    let published = form_repo::publish(&mut *publishing, tenant, id, None)
+        .await
+        .expect("the publish runs");
+    assert_eq!(published, 1, "the publish is the one that wins the row");
+
+    // The editor, blocking on that lock. It reached the statement before the
+    // publish committed, which is the interleaving the service check cannot
+    // see.
+    let pool = app.pool.clone();
+    let editing = tokio::spawn(async move {
+        form_repo::update_draft(
+            &pool,
+            tenant,
+            id,
+            &form_repo::FormFields {
+                title: Some("Edited after the publish"),
+                definition_json: None,
+                entity_id: None,
+            },
+            None,
+        )
+        .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    publishing.commit().await.expect("the publish commits");
+
+    let edited = editing
+        .await
+        .expect("the edit task finishes")
+        .expect("the edit runs");
+
+    assert_eq!(
+        edited, 0,
+        "the edit applied to a revision that had just been published"
+    );
+
+    let after = app
+        .send(
+            Method::GET,
+            &format!("/api/v1/rad/forms/{id}"),
+            Some(&token),
+            None,
+        )
+        .await;
+
+    assert_eq!(after.body["data"]["status"], "PUBLISHED");
+    assert_eq!(
+        after.body["data"]["title"], "Purchase requisition",
+        "the published definition kept the title it was published with"
+    );
+}
+
+/// The same interleaving for the other statement: two publishes, one row.
+///
+/// Without `AND status = 'DRAFT'` the second publish rewrites `published_at`
+/// and `published_by`, so the record of who published a revision becomes
+/// whoever published it last.
+#[tokio::test]
+async fn a_publish_blocked_by_a_publish_writes_nothing() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let created = create_form(
+        &app,
+        &token,
+        "pr-race-publish",
+        definition("pr-race-publish"),
+    )
+    .await;
+    let id = id_of(&created);
+    let tenant = fixtures::SYSTEM_TENANT_ID;
+
+    let mut first = app.pool.begin().await.expect("a transaction");
+    assert_eq!(
+        form_repo::publish(&mut *first, tenant, id, None)
+            .await
+            .expect("the first publish runs"),
+        1
+    );
+
+    let pool = app.pool.clone();
+    let second = tokio::spawn(async move { form_repo::publish(&pool, tenant, id, None).await });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    first.commit().await.expect("the first publish commits");
+
+    assert_eq!(
+        second
+            .await
+            .expect("the second publish task finishes")
+            .expect("the second publish runs"),
+        0,
+        "the second publish rewrote a revision that was already published"
     );
 }
 

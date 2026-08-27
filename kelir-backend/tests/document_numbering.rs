@@ -516,6 +516,165 @@ async fn a_rewound_counter_is_refused_and_an_advanced_one_is_not() {
     assert_eq!(advanced.status, StatusCode::OK, "{}", advanced.body);
 }
 
+/// **Clearing a rule stops the numbering, and `is_active` is the whole of what
+/// "cleared" means** (#206).
+///
+/// `clear_rule` deactivates the row rather than deleting it, because the
+/// buckets it issued survive it. Nothing else distinguishes a cleared rule from
+/// a live one, so the predicate that reads only active rules *is* the feature.
+///
+/// Seen red (coding standard §2.9) against `find_active_rule`'s `is_active`
+/// weakened to `(is_active OR TRUE)`: the type keeps numbering from the rule an
+/// administrator cleared.
+#[tokio::test]
+async fn a_cleared_rule_stops_numbering_the_type() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let type_id = document_type(&app, &token, "PR_CLEARED").await;
+
+    set_rule(
+        &app,
+        &token,
+        type_id,
+        json!({ "ruleTemplate": "PR-{sequence}", "sequenceScope": "GLOBAL" }),
+    )
+    .await;
+
+    assert_eq!(
+        allocate(&app, type_id, &context_at(2026, 8)).await,
+        "PR-000001"
+    );
+
+    let cleared = app
+        .send(
+            Method::DELETE,
+            &format!("/api/v1/document-types/{type_id}/numbering-rule"),
+            Some(&token),
+            None,
+        )
+        .await;
+
+    assert_eq!(cleared.status, StatusCode::NO_CONTENT, "{}", cleared.body);
+
+    let mut transaction = app.pool.begin().await.expect("a transaction");
+    let outcome = numbering_service::allocate_in(
+        &mut transaction,
+        fixtures::SYSTEM_TENANT_ID,
+        type_id,
+        &context_at(2026, 8),
+    )
+    .await;
+
+    assert!(
+        outcome.is_err(),
+        "a cleared rule still numbered the type: {outcome:?}"
+    );
+}
+
+/// **A numbering rule belongs to one tenant's type** (#206).
+///
+/// `allocate_in` takes the tenant from the caller and the type id from the
+/// document being numbered, and nothing between them reads the type
+/// tenant-scoped first. The predicate in `find_active_rule` is therefore the
+/// only thing standing between another tenant's caller and this type's
+/// sequence — which it would both read and *advance*, since the allocation that
+/// follows writes a bucket.
+///
+/// Seen red (coding standard §2.9) against `find_active_rule`'s `tenant_id = $1`
+/// weakened to `(tenant_id = $1 OR TRUE)`: the foreign tenant is handed
+/// `PR-000002`.
+#[tokio::test]
+async fn another_tenants_caller_cannot_number_this_types_documents() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let type_id = document_type(&app, &token, "PR_TENANT_SCOPE").await;
+
+    set_rule(
+        &app,
+        &token,
+        type_id,
+        json!({ "ruleTemplate": "PR-{sequence}", "sequenceScope": "GLOBAL" }),
+    )
+    .await;
+
+    assert_eq!(
+        allocate(&app, type_id, &context_at(2026, 8)).await,
+        "PR-000001"
+    );
+
+    let other_tenant =
+        fixtures::create_tenant(&app.pool, "TNT-NUMBERING", "Another Customer").await;
+
+    let mut transaction = app.pool.begin().await.expect("a transaction");
+    let outcome = numbering_service::allocate_in(
+        &mut transaction,
+        other_tenant,
+        type_id,
+        &context_at(2026, 8),
+    )
+    .await;
+
+    assert!(
+        outcome.is_err(),
+        "another tenant took a number out of this type's sequence: {outcome:?}"
+    );
+}
+
+/// **The rewind check compares against the bucket being set, not against every
+/// bucket the type has** (#206).
+///
+/// `highest_issued`'s `sequence_key = $3` is what scopes it. Without it the
+/// comparison is against the type's high-water mark across all buckets, and a
+/// perfectly valid starting number in a bucket that has issued nothing is
+/// refused as a rewind — a wrong answer rather than a missing guard, which is
+/// why no test noticed: every other case in this file sets a rule against the
+/// bucket it has just been advancing.
+///
+/// Seen red (coding standard §2.9) against `highest_issued`'s
+/// `sequence_key = $3` removed: the set below answers 422 `ALREADY_ISSUED`
+/// against a bucket with no numbers in it.
+#[tokio::test]
+async fn a_start_sequence_is_judged_against_its_own_bucket() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let type_id = document_type(&app, &token, "PR_BUCKET_SCOPE").await;
+
+    set_rule(
+        &app,
+        &token,
+        type_id,
+        json!({ "ruleTemplate": "PR-{year}-{sequence}", "sequenceScope": "YEAR" }),
+    )
+    .await;
+
+    // A year far from the one the clock is in, so the bucket these numbers
+    // advance is not the bucket the rule below is set against. Three
+    // allocations put that bucket at 4.
+    for _ in 0..3 {
+        allocate(&app, type_id, &context_at(2099, 6)).await;
+    }
+
+    let seeded = app
+        .send(
+            Method::PUT,
+            &format!("/api/v1/document-types/{type_id}/numbering-rule"),
+            Some(&token),
+            Some(json!({
+                "ruleTemplate": "PR-{year}-{sequence}",
+                "sequenceScope": "YEAR",
+                "nextSequence": 2
+            })),
+        )
+        .await;
+
+    assert_eq!(
+        seeded.status,
+        StatusCode::OK,
+        "a start below another bucket's counter is not a rewind of this one;          body {}",
+        seeded.body
+    );
+}
+
 #[tokio::test]
 async fn replacing_a_rule_keeps_the_old_one_deactivated() {
     // The old rule is what explains a number issued last year. Deleting it
