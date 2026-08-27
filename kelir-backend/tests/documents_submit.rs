@@ -22,8 +22,6 @@ use std::time::Duration;
 use axum::http::{Method, StatusCode};
 use common::{fixtures, TestApp};
 use kelir_backend::modules::document::repository as document_repo;
-use kelir_backend::modules::document_type::numbering::AllocationContext;
-use kelir_backend::modules::document_type::numbering_service;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -327,99 +325,6 @@ async fn a_failed_submit_leaves_a_draft_and_burns_no_number() {
         format!("PR-{}-000001", chrono::Utc::now().format("%Y")),
         "a failed submit burned a number on a gapless rule: {}",
         submitted.body
-    );
-}
-
-/// **A validation failure burns no number on *either* policy, and the policy is
-/// still the difference it always was.**
-///
-/// This test exists because writing it disproved what it was first written to
-/// assert. The plan expected a gap-tolerant rule to consume a number on a failed
-/// submit — that is the trade **#158**'s `AllowGaps` names — and it does not,
-/// because [`service::submit`]'s order of operations re-evaluates at step 3 and
-/// allocates at step 4. A submission that fails validation never reaches the
-/// allocator, so no number is taken to lose. That is a better outcome than the
-/// policy promised and it is worth pinning: an implementation that allocated
-/// first would burn a number here on both policies, and this assertion is what
-/// would go red.
-///
-/// **The policy still decides everything after step 4**, which is asserted below
-/// against `allocate` directly: a gapless rule's counter rolls back with the
-/// caller's transaction and a gap-tolerant rule's does not. That difference is
-/// what makes concurrent submissions of one type contend or not, and it is the
-/// reason the two policies exist.
-///
-/// **Seen red** (coding standard §2.9) against a build where `service::submit`
-/// allocates the number before the re-evaluation: the refused submission
-/// commits `PR-2026-000001` on its way out and the next document is numbered
-/// `000002`. This is the only test in the file that catches that ordering — on
-/// a gapless rule the number rolls back and the wrong order is invisible.
-#[tokio::test]
-async fn a_validation_failure_burns_no_number_and_the_policy_still_decides_the_rest() {
-    let app = TestApp::spawn().await;
-    let token = app.administrator_token().await;
-    let type_id = numbered_type(&app, &token, "PR_GAPS", "ALLOW_GAPS").await;
-
-    let unfinished = draft(
-        &app,
-        &token,
-        type_id,
-        json!({"quantity": 2, "unit_price": 10}),
-    )
-    .await;
-    let refused = submit(&app, &token, unfinished).await;
-
-    assert_eq!(
-        refused.status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "{}",
-        refused.body
-    );
-
-    let finished = draft(&app, &token, type_id, filled_in()).await;
-    let submitted = submit(&app, &token, finished).await;
-
-    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
-    assert_eq!(
-        submitted.body["data"]["documentNumber"],
-        format!("PR-{}-000001", chrono::Utc::now().format("%Y")),
-        "a submission refused before the allocator still took a number, which          means the allocation runs before the re-evaluation: {}",
-        submitted.body
-    );
-
-    // The policy's own property, on the dispatcher the submit calls. A
-    // gap-tolerant rule commits its number in a transaction of its own, so the
-    // caller's rollback does not give it back.
-    let mut transaction = app.pool.begin().await.expect("a transaction");
-    let abandoned = numbering_service::allocate(
-        &app.state,
-        &mut transaction,
-        fixtures::SYSTEM_TENANT_ID,
-        type_id,
-        &AllocationContext {
-            at: chrono::Utc::now(),
-            department_id: None,
-        },
-    )
-    .await
-    .expect("a number is allocated");
-
-    transaction.rollback().await.expect("the rollback lands");
-
-    assert_eq!(
-        abandoned,
-        format!("PR-{}-000002", chrono::Utc::now().format("%Y"))
-    );
-
-    let next = draft(&app, &token, type_id, filled_in()).await;
-    let after = submit(&app, &token, next).await;
-
-    assert_eq!(after.status, StatusCode::OK, "{}", after.body);
-    assert_eq!(
-        after.body["data"]["documentNumber"],
-        format!("PR-{}-000003", chrono::Utc::now().format("%Y")),
-        "a gap-tolerant rule gave a rolled-back number back, which makes every          rule gapless and every submission of a busy type serialise: {}",
-        after.body
     );
 }
 
@@ -962,5 +867,173 @@ async fn a_second_submit_blocked_by_the_first_applies_to_nothing() {
         number.as_deref(),
         Some("PR-FIRST-000001"),
         "the second submit overwrote the number the first assigned"
+    );
+}
+
+/// **Concurrent submits of a gap-tolerant type do not exhaust the pool.**
+///
+/// The defect this holds is [#118](https://github.com/sujanto-gaws/kelir/issues/118)'s
+/// and coding standard §2.5's: a request that holds two pooled connections at
+/// once deadlocks at a concurrency equal to the pool ceiling, every task
+/// holding one and waiting for one nobody will release.
+///
+/// `allocate_committed` opens a transaction of its own — that is what
+/// `AllowGaps` *means* — so calling it from inside the submit's transaction was
+/// two connections per submit. `no_two_concurrent_submits_take_the_same_number`
+/// could not see it: that test uses a `GAPLESS` rule, where the allocation
+/// stays inside the caller's transaction. **This is the same test at the same
+/// concurrency with the other policy**, which is the only difference that
+/// matters and the reason the defect survived.
+///
+/// **Seen red** (coding standard §2.9) against the allocation moved back inside
+/// the transaction — `numbering_service::allocate(state, &mut transaction, …)`
+/// in place of the pre-allocation: most of the twenty-four submits answer 500
+/// after the acquire timeout.
+#[tokio::test]
+async fn concurrent_submits_of_a_gap_tolerant_type_do_not_exhaust_the_pool() {
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let type_id = numbered_type(&app, &token, "PR_GAPS_CONCURRENT", "ALLOW_GAPS").await;
+
+    let mut documents = Vec::with_capacity(CONCURRENT_SUBMITS);
+    for _ in 0..CONCURRENT_SUBMITS {
+        documents.push(draft(&app, &token, type_id, filled_in()).await);
+    }
+
+    let mut handles = Vec::with_capacity(CONCURRENT_SUBMITS);
+
+    for id in documents {
+        let app = Arc::clone(&app);
+        let token = token.clone();
+
+        handles.push(tokio::spawn(async move {
+            let response = submit(&app, &token, id).await;
+
+            (response.status, response.body.to_string())
+        }));
+    }
+
+    let mut numbers = Vec::with_capacity(CONCURRENT_SUBMITS);
+
+    for handle in handles {
+        let (status, body) = handle.await.expect("the submit task did not panic");
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a concurrent submit of a gap-tolerant type failed: {body}"
+        );
+
+        let parsed: Value = serde_json::from_str(&body).expect("a JSON body");
+        numbers.push(
+            parsed["data"]["documentNumber"]
+                .as_str()
+                .expect("a submitted document has a number")
+                .to_owned(),
+        );
+    }
+
+    let distinct: HashSet<&String> = numbers.iter().collect();
+
+    assert_eq!(
+        distinct.len(),
+        CONCURRENT_SUBMITS,
+        "{} of {CONCURRENT_SUBMITS} submits took a number another document already \
+         holds: {numbers:?}",
+        CONCURRENT_SUBMITS - distinct.len()
+    );
+}
+
+/// **A gap-tolerant rule loses the number a refused submission took.**
+///
+/// The trade `AllowGaps` names, and the behaviour that the pre-allocation above
+/// restores: the number is committed before the re-evaluation runs, so a
+/// submission the re-evaluation refuses leaves a hole.
+///
+/// A `GAPLESS` rule does not, which is the other half and the reason a rule
+/// carries a policy at all — see
+/// [`a_failed_submit_leaves_a_draft_and_burns_no_number`].
+#[tokio::test]
+async fn a_gap_tolerant_rule_loses_the_number_a_refused_submission_took() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let type_id = numbered_type(&app, &token, "PR_GAPS_BURN", "ALLOW_GAPS").await;
+
+    // `subject` is required and absent — legal in a draft, refused at submit.
+    let unfinished = draft(
+        &app,
+        &token,
+        type_id,
+        json!({"quantity": 2, "unit_price": 10}),
+    )
+    .await;
+    let refused = submit(&app, &token, unfinished).await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+
+    // And nothing was written to the document: the number it took is gone
+    // rather than attached to a draft.
+    let row = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT status, document_number FROM documents WHERE id = $1",
+    )
+    .bind(unfinished)
+    .fetch_one(&app.pool)
+    .await
+    .expect("the document is readable");
+
+    assert_eq!(row.0, "DRAFT");
+    assert_eq!(row.1, None, "a refused submit attached its number anyway");
+
+    // The hole: the next document takes 000002, because 000001 went with the
+    // submission that failed.
+    let finished = draft(&app, &token, type_id, filled_in()).await;
+    let submitted = submit(&app, &token, finished).await;
+
+    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+    assert_eq!(
+        submitted.body["data"]["documentNumber"],
+        format!("PR-{}-000002", chrono::Utc::now().format("%Y")),
+        "a gap-tolerant rule gave back the number a refused submission took, \
+         which makes every rule gapless and every submit of a busy type \
+         serialise: {}",
+        submitted.body
+    );
+}
+
+/// **A document that is not a draft is refused before a number is taken.**
+///
+/// The reason [`refuse_unless_draft`] is called twice. On a gap-tolerant rule
+/// the allocation happens before the transaction, so a submit of an
+/// already-submitted document would burn a number on its way to a 409 — a hole
+/// in the sequence caused by a request that was never going to succeed.
+#[tokio::test]
+async fn a_refused_second_submit_takes_no_number_on_a_gap_tolerant_rule() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let type_id = numbered_type(&app, &token, "PR_GAPS_TWICE", "ALLOW_GAPS").await;
+    let id = draft(&app, &token, type_id, filled_in()).await;
+
+    let first = submit(&app, &token, id).await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+
+    let second = submit(&app, &token, id).await;
+    assert_eq!(second.status, StatusCode::CONFLICT, "{}", second.body);
+
+    // The next document takes 000002, not 000003: the refused second submit
+    // took nothing.
+    let next = draft(&app, &token, type_id, filled_in()).await;
+    let after = submit(&app, &token, next).await;
+
+    assert_eq!(after.status, StatusCode::OK, "{}", after.body);
+    assert_eq!(
+        after.body["data"]["documentNumber"],
+        format!("PR-{}-000002", chrono::Utc::now().format("%Y")),
+        "a submit refused for not being a draft burned a number: {}",
+        after.body
     );
 }

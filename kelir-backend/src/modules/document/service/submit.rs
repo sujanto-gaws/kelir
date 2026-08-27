@@ -23,48 +23,54 @@
 //! # The order of operations, and why step 3 comes before step 4
 //!
 //! 1. `document:submit`, before anything is read.
-//! 2. Begin. Read the document `FOR UPDATE`. Not a draft, refused (AC5).
-//! 3. **Re-evaluate the payload at [`Strictness::Submit`]** — the full pipeline,
+//! 2. Read the document's status, type and department **on the pool**, and
+//!    refuse early if it is not a draft.
+//! 3. Read the rule's gap policy, and — **if it tolerates gaps** — allocate the
+//!    number now, committed, with nothing else held.
+//! 4. Begin. Read the document `FOR UPDATE`. Not a draft, refused (AC5) — this
+//!    is the answer that counts, because step 2's read was unlocked.
+//! 5. **Re-evaluate the payload at [`Strictness::Submit`]** — the full pipeline,
 //!    `required` and unenforced rules refusing as **D-28** says.
-//! 4. Allocate the number.
-//! 5. Write the number, the status, `submitted_at` and the **server's** payload.
-//! 6. Append the history row.
-//! 7. Commit, then audit as a submit carrying the number.
+//! 6. Allocate the number, if a gapless rule left it to be taken here.
+//! 7. Write the number, the status, `submitted_at` and the **server's** payload.
+//! 8. Append the history row.
+//! 9. Commit, then audit as a submit carrying the number.
 //!
-//! **Numbering before validating is the defect this order exists to avoid, and
-//! on a `Gapless` rule it is worse than a burned number**: the counter is held
-//! from the allocation to the commit, so a slow re-evaluation would serialise
-//! every concurrent submit of that type behind a document that is about to be
+//! **On a gapless rule the re-evaluation precedes the allocation, and that is
+//! the whole item.** Numbering first burns a number on every refused
+//! submission, and it is worse than a burned number: the counter is held from
+//! the allocation to the commit, so a slow re-evaluation would serialise every
+//! concurrent submit of that type behind a document that is about to be
 //! refused.
 //!
-//! # What the order makes true, which is more than #158's policy promised
+//! # Why a gap-tolerant rule allocates before the transaction, and what it costs
 //!
-//! **A submission refused by the re-evaluation burns no number on *either*
-//! policy**, because it never reaches step 4. #158's `AllowGaps` names "a number
-//! lost to a failed submission" as its trade, and the trade is real for
-//! everything that can fail *after* the allocation — it is simply not paid on
-//! the failure a person actually causes, which is an unfinished form.
+//! **Because §2.5 of the [coding standard](../../../../../docs/standards/01.%20Coding%20Standard.md)
+//! forbids the alternative.** A request MUST NOT hold more than one pooled
+//! connection at a time, and `allocate_committed` opens a transaction of its own
+//! — which is the policy's definition, not an implementation detail. Calling it
+//! from inside this function's transaction is two connections per submit, and
+//! that deadlocks a pool at the concurrency the pool can serve. It is
+//! [#118](https://github.com/sujanto-gaws/kelir/issues/118)'s shape, and this
+//! path had it twice: once in the policy *read*, fixed when a concurrency test
+//! went red, and once here, found only by re-reading the whole path against the
+//! rule. **A fix for a rule violation is checked against the rule, not against
+//! the test that exposed it.**
 //!
-//! That is a better outcome than the policy promised and it is not free: it is a
-//! property of this order and nothing else, so `documents_submit.rs` pins it.
-//! On a `Gapless` rule the wrong order is invisible — the number rolls back with
-//! the transaction — and the only test that catches it is the gap-tolerant one.
+//! **What it costs: a gap-tolerant rule loses its number to a submission the
+//! re-evaluation then refuses.** That is exactly the trade [#158]'s
+//! `AllowGaps` names — *a number allocated to a submission that then fails is
+//! gone* — so this restores the policy rather than weakening it. The earlier
+//! arrangement kept the number, which was an accident of ordering that this
+//! module had written down as a property, and it was bought with the violation
+//! above.
 //!
-//! # The connection cost, and the defect this path found in the allocator
-//!
-//! Everything from step 2 to step 7 runs on **one** connection. It has to: a
-//! submit that took a second connection while holding a transaction on the first
-//! deadlocks a pool at a concurrency below what the pool can serve, every task
-//! holding one and waiting for one nobody will release.
-//!
-//! `numbering_service::allocate` did exactly that until Sprint 9 — it read the
-//! rule's gap policy from `state.pool` — and twenty-four concurrent submits
-//! against a five-connection pool answered 500. It is
-//! [#118](https://github.com/sujanto-gaws/kelir/issues/118) exactly, and it
-//! survived Sprint 7 because no test called `allocate` under load. The fix is
-//! `numbering_repository::gap_policy`, which reads the policy on the caller's
-//! own connection; the rule for anything added here is that it does not open a
-//! second one.
+//! **Rejected: re-evaluating on the pool before allocating**, then writing under
+//! a lock that re-checks the payload has not moved. It keeps the no-burn
+//! behaviour and satisfies §2.5, and it buys that back with a new failure class
+//! — a 409 a concurrent edit can raise on a submit that was going to succeed —
+//! while making the two gap policies differ by less, which is the opposite of
+//! what having two of them is for.
 //!
 //! [#158]: https://github.com/sujanto-gaws/kelir/issues/158
 //! [#168]: https://github.com/sujanto-gaws/kelir/issues/168
@@ -80,8 +86,8 @@ use super::form;
 use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
 use crate::modules::audit::{self, AuditEntry};
-use crate::modules::document_type::numbering::AllocationContext;
-use crate::modules::document_type::numbering_service;
+use crate::modules::document_type::numbering::{AllocationContext, GapPolicy};
+use crate::modules::document_type::{numbering_repository, numbering_service};
 use crate::modules::rad::service::evaluation::Strictness;
 use crate::state::AppState;
 
@@ -96,20 +102,56 @@ pub async fn submit_document(
     let tenant_id = caller.tenant_id();
     let actor = Some(caller.user_id());
 
+    // Steps 1 and 2, **before** the transaction opens, which is what coding
+    // standard §2.5 means by resolving what the request points at first. On a
+    // gap-tolerant rule the number is one of those things: it is committed
+    // separately by design, and taking it while holding this request's own
+    // transaction is the two-connection defect §2.5 forbids.
+    let subject = repo::find_submission_subject(&state.pool, tenant_id, id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Document"))?;
+
+    refuse_unless_draft(subject.status)?;
+
+    let context = AllocationContext {
+        at: Utc::now(),
+        department_id: subject.requested_for_department_id,
+    };
+
+    let policy = numbering_repository::gap_policy(&state.pool, tenant_id, subject.document_type_id)
+        .await?
+        .unwrap_or(GapPolicy::Gapless);
+
+    // **A gap-tolerant rule takes its number here, and therefore loses it if
+    // anything below refuses.** That is the trade the policy names — a number
+    // allocated to a submission that then fails is gone — and it is what makes
+    // the two policies differ at all. The previous arrangement kept the number
+    // through a failed re-evaluation, which was an accident of ordering bought
+    // with a rule violation that deadlocks a pool at the concurrency the pool
+    // can serve.
+    let committed_number = if policy.allows_gaps() {
+        Some(
+            numbering_service::allocate_committed(
+                state,
+                tenant_id,
+                subject.document_type_id,
+                &context,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
     let mut transaction = state.pool.begin().await?;
 
     let locked = repo::lock_document(&mut transaction, tenant_id, id)
         .await?
         .ok_or_else(|| AppError::not_found("Document"))?;
 
-    // AC5: an already-submitted document is refused, not silently re-numbered.
-    if !locked.status.is_editable() {
-        return Err(AppError::conflict(format!(
-            "this document is {} and only a draft can be submitted; submitting \
-             again would take a second number for one document",
-            locked.status.as_db()
-        )));
-    }
+    // AC5 again, and this time authoritatively: the read above was unlocked,
+    // so a concurrent submit could have moved the document between the two.
+    refuse_unless_draft(locked.status)?;
 
     let pinned = form::pinned_form_of(&mut transaction, tenant_id, &locked).await?;
 
@@ -120,24 +162,22 @@ pub async fn submit_document(
     // could have replaced in between.
     let form_data = super::document::secure(&pinned, &locked.form_data, Strictness::Submit)?;
 
-    // Step 4. `allocate` reads the rule's own gap policy and picks: a `Gapless`
-    // rule allocates in *this* transaction, so a rollback below rolls the
-    // counter back with it; an `AllowGaps` rule allocates in one of its own and
-    // leaves a hole if this fails. That is #158's decision and this call is what
-    // honours it rather than re-taking it.
-    let context = AllocationContext {
-        at: Utc::now(),
-        department_id: locked.requested_for_department_id,
+    // Step 4. A `Gapless` rule allocates in *this* transaction, so a rollback
+    // below rolls the counter back with it. A gap-tolerant one already has its
+    // number from above, committed, and a rollback leaves it as a hole. That is
+    // #158's decision, honoured rather than re-taken.
+    let document_number = match committed_number {
+        Some(number) => number,
+        None => {
+            numbering_service::allocate_in(
+                &mut transaction,
+                tenant_id,
+                locked.document_type_id,
+                &context,
+            )
+            .await?
+        }
     };
-
-    let document_number = numbering_service::allocate(
-        state,
-        &mut transaction,
-        tenant_id,
-        locked.document_type_id,
-        &context,
-    )
-    .await?;
 
     let submitted_at = Utc::now();
 
@@ -214,4 +254,20 @@ pub async fn submit_document(
     .await;
 
     Ok(submitted)
+}
+
+/// Refuses a submission of a document that is not a draft (AC5).
+///
+/// Called twice on purpose: once on the unlocked read, so a gap-tolerant rule
+/// does not burn a number on a document that was never submittable, and once
+/// under the lock, which is the answer that counts.
+fn refuse_unless_draft(status: DocumentStatus) -> Result<(), AppError> {
+    if status.is_editable() {
+        return Ok(());
+    }
+
+    Err(AppError::conflict(format!(
+        "this document is {} and only a draft can be submitted; submitting again would take a second number for one document",
+        status.as_db()
+    )))
 }
