@@ -12,8 +12,11 @@
 
 mod common;
 
+use std::time::{Duration, Instant};
+
 use axum::http::{Method, StatusCode};
 use common::{fixtures, TestApp};
+use kelir_backend::mail::Mailer;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -50,8 +53,13 @@ async fn ask_for_a_link(app: &TestApp, identifier: &str) -> StatusCode {
 }
 
 /// The token out of the delivered message — the only way these tests get one.
-fn token_from_last_mail(app: &TestApp) -> String {
-    let sent = app.state.mailer.captured_messages();
+///
+/// `delivered` is how many messages this account's flow has produced by now,
+/// and it is a parameter rather than an assumption because the send is
+/// detached (#202): "the last message" is only well defined once the message
+/// the caller means has actually arrived.
+async fn token_from_last_mail(app: &TestApp, delivered: usize) -> String {
+    let sent = app.mail_delivered(delivered).await;
     let last = sent.last().expect("a message was delivered");
 
     let marker = "token=";
@@ -83,7 +91,7 @@ async fn a_person_resets_their_password_and_signs_in_with_the_new_one() {
 
     assert_eq!(ask_for_a_link(&app, &username).await, StatusCode::ACCEPTED);
 
-    let sent = app.state.mailer.captured_messages();
+    let sent = app.mail_delivered(1).await;
     assert_eq!(sent.len(), 1, "one link, to one person");
     assert_eq!(sent[0].to, email, "addressed to the account's own address");
     assert!(
@@ -91,7 +99,7 @@ async fn a_person_resets_their_password_and_signs_in_with_the_new_one() {
         "a reset email must not carry a password"
     );
 
-    let token = token_from_last_mail(&app);
+    let token = token_from_last_mail(&app, 1).await;
     let response = redeem(&app, &token, NEW_PASSWORD).await;
 
     assert_eq!(response.status, StatusCode::NO_CONTENT, "{}", response.body);
@@ -128,7 +136,44 @@ async fn the_identifier_may_be_an_email_address() {
     let (_, email) = user(&app, "byemail").await;
 
     assert_eq!(ask_for_a_link(&app, &email).await, StatusCode::ACCEPTED);
-    assert_eq!(app.state.mailer.captured_messages().len(), 1);
+    assert_eq!(app.mail_delivered(1).await.len(), 1);
+}
+
+/// **A caller waits for no part of delivery** (#202).
+///
+/// The property that closes the timing oracle, and the one nothing in this
+/// suite could assert before: `Mailer` is an enum, so a slow transport could
+/// not be injected, and a captured send was free — the two paths therefore
+/// looked identical to a test while differing by 80ms against a real SMTP
+/// server. `Mailer::captured_taking` is that slow transport.
+///
+/// Measured before the fix, against mailpit on the loopback interface: p50 90ms
+/// for a known account, 9.8ms for an unknown one, the ranges not overlapping.
+///
+/// Seen red (coding standard §2.9) against `send_detached` restored to
+/// `state.mailer.send(...).await`: the request takes the delay below and the
+/// assertion reports it.
+#[tokio::test]
+async fn the_answer_does_not_wait_for_the_mail_to_be_sent() {
+    // Long enough that awaiting it could not be mistaken for scheduling noise,
+    // short enough that the test still finishes if the property breaks.
+    const DELIVERY: Duration = Duration::from_secs(3);
+
+    let app = TestApp::spawn_with_mailer(|_| {}, Mailer::captured_taking(DELIVERY)).await;
+    let (username, _) = user(&app, "impatientcaller").await;
+
+    let started = Instant::now();
+    assert_eq!(ask_for_a_link(&app, &username).await, StatusCode::ACCEPTED);
+    let answered_in = started.elapsed();
+
+    assert!(
+        answered_in < DELIVERY / 2,
+        "the answer waited on the mail server: {answered_in:?} of a {DELIVERY:?} send"
+    );
+
+    // And the message is still sent — detaching it must not lose it.
+    let sent = app.mail_delivered(1).await;
+    assert_eq!(sent.len(), 1, "the detached send did not deliver");
 }
 
 /// **The enumeration property.** An identifier that belongs to nobody gets the
@@ -147,7 +192,7 @@ async fn an_unknown_identifier_is_answered_identically_and_sends_nothing() {
     );
     assert_eq!(unknown, StatusCode::ACCEPTED);
 
-    let sent = app.state.mailer.captured_messages();
+    let sent = app.mail_settled().await;
     assert_eq!(sent.len(), 1, "only the real account was written to");
 }
 
@@ -168,10 +213,7 @@ async fn an_inactive_account_gets_no_link_and_says_nothing_about_it() {
         StatusCode::ACCEPTED,
         "the same answer an active account gets"
     );
-    assert!(
-        app.state.mailer.captured_messages().is_empty(),
-        "but no link"
-    );
+    assert!(app.mail_settled().await.is_empty(), "but no link");
 }
 
 /// **Single use.** A token works once, and the second attempt is refused.
@@ -181,7 +223,7 @@ async fn a_token_cannot_be_used_twice() {
     let (username, _) = user(&app, "twice").await;
 
     ask_for_a_link(&app, &username).await;
-    let token = token_from_last_mail(&app);
+    let token = token_from_last_mail(&app, 1).await;
 
     assert_eq!(
         redeem(&app, &token, NEW_PASSWORD).await.status,
@@ -227,7 +269,7 @@ async fn two_concurrent_redemptions_of_one_token_change_the_password_once() {
     let (username, _) = user(&app, "concurrent").await;
 
     ask_for_a_link(&app, &username).await;
-    let token = token_from_last_mail(&app);
+    let token = token_from_last_mail(&app, 1).await;
 
     let first = {
         let app = Arc::clone(&app);
@@ -270,7 +312,7 @@ async fn an_expired_token_is_refused() {
     let (username, _) = user(&app, "expired").await;
 
     ask_for_a_link(&app, &username).await;
-    let token = token_from_last_mail(&app);
+    let token = token_from_last_mail(&app, 1).await;
 
     sqlx::query("UPDATE password_reset_tokens SET expires_at = now() - interval '1 minute'")
         .execute(&app.pool)
@@ -311,7 +353,7 @@ async fn a_reset_signs_the_account_out_everywhere() {
         .to_owned();
 
     ask_for_a_link(&app, &username).await;
-    let token = token_from_last_mail(&app);
+    let token = token_from_last_mail(&app, 1).await;
     redeem(&app, &token, NEW_PASSWORD).await;
 
     let refreshed = app
@@ -351,7 +393,7 @@ async fn a_reset_clears_a_lockout() {
     .expect("lock the account");
 
     ask_for_a_link(&app, &username).await;
-    let token = token_from_last_mail(&app);
+    let token = token_from_last_mail(&app, 1).await;
     redeem(&app, &token, NEW_PASSWORD).await;
 
     let signed_in = app
@@ -385,7 +427,7 @@ async fn asking_twice_in_quick_succession_sends_one_link() {
     }
 
     assert_eq!(
-        app.state.mailer.captured_messages().len(),
+        app.mail_settled().await.len(),
         1,
         "five requests, one email — and every one of them answered 202, so the \
          throttle is invisible to the caller"
@@ -399,7 +441,7 @@ async fn redeeming_one_link_invalidates_the_others() {
     let (username, _) = user(&app, "twolinks").await;
 
     ask_for_a_link(&app, &username).await;
-    let first = token_from_last_mail(&app);
+    let first = token_from_last_mail(&app, 1).await;
 
     // Past the resend cooldown, so a second link really is issued.
     sqlx::query("UPDATE password_reset_tokens SET created_at = now() - interval '1 hour'")
@@ -408,7 +450,7 @@ async fn redeeming_one_link_invalidates_the_others() {
         .expect("age the first token");
 
     ask_for_a_link(&app, &username).await;
-    let second = token_from_last_mail(&app);
+    let second = token_from_last_mail(&app, 2).await;
 
     assert_ne!(first, second, "two requests, two tokens");
 
@@ -434,7 +476,7 @@ async fn a_weak_new_password_is_refused_and_the_token_survives() {
     let (username, _) = user(&app, "weak").await;
 
     ask_for_a_link(&app, &username).await;
-    let token = token_from_last_mail(&app);
+    let token = token_from_last_mail(&app, 1).await;
 
     let refused = redeem(&app, &token, "short").await;
 
@@ -506,7 +548,7 @@ async fn the_audit_record_does_not_carry_the_token() {
     let (username, _) = user(&app, "audited").await;
 
     ask_for_a_link(&app, &username).await;
-    let token = token_from_last_mail(&app);
+    let token = token_from_last_mail(&app, 1).await;
     redeem(&app, &token, NEW_PASSWORD).await;
 
     let matching: i64 = sqlx::query_scalar(
