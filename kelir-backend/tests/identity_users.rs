@@ -276,33 +276,47 @@ async fn setting_a_password_ends_every_refresh_token_for_that_user() {
     assert_eq!(with_new.status, StatusCode::OK, "{}", with_new.body);
 }
 
-/// **Quarantined, and green would be the wrong outcome.**
+/// **The tenant boundary, asserted from outside it** (#204).
 ///
-/// The claim is that a caller confined to one tenant cannot read another
-/// tenant's user by id. It cannot be arranged today: sign-in resolves the
-/// configured default tenant for every credential (`resolve_for_sign_in`), so
-/// no token exists whose `tenant_id` is anything but the system tenant, and a
-/// user belonging to another tenant cannot sign in at all. Written as a
-/// happy-looking test it would assert the *administrator's* view — a case
-/// `listing_users_returns_only_the_callers_tenant` already covers — and quietly
-/// claim the harder one.
+/// Quarantined from Sprint 3 until 2026-08-27 on decision **D-7**, which
+/// deferred per-request tenant resolution: sign-in resolved the configured
+/// default tenant for every credential, so no token could carry another
+/// tenant and the caller this test needs could not be arranged. **D-18**
+/// superseded D-7 on 2026-08-25 — `resolve_for_sign_in` honours a requested
+/// code on a multi-tenant deployment — so the condition the `#[ignore]` named
+/// is met and the quarantine is gone.
 ///
-/// Decision **D-7** defers per-request tenant resolution past 1.0. Remove the
-/// `#[ignore]` when a token can carry a tenant other than the default; the body
-/// below is what should then run.
+/// **The caller holds `identity:user:read` deliberately, and taking that away
+/// turns this into a different test.** Without it the route answers `403` at
+/// the permission gate, before tenancy is consulted at all, and the assertion
+/// below would be green while guarding nothing about tenants. The quarantined
+/// body passed `&[]` and had exactly that defect: un-ignored as written it
+/// would have read as tenant isolation and asserted the permission check.
+///
+/// Seen red (coding standard §2.9) against `find_user`'s `tenant_id = $1`
+/// weakened to `(tenant_id = $1 OR TRUE)`: the foreign user's record comes
+/// back `200` with its username and address in it.
 #[tokio::test]
-#[ignore = "needs per-request tenant resolution; deferred by decision D-7 (see #59, #67)"]
 async fn reading_another_tenants_user_by_id_is_not_found() {
-    let app = TestApp::spawn().await;
+    // The tenant code has to reach sign-in, which needs the deployment mode
+    // D-7 refused to let anything run in.
+    let app = TestApp::spawn_with(|config| config.multi_tenant = true).await;
 
     let other_tenant = fixtures::create_tenant(&app.pool, "TNT-002", "Another Customer").await;
+    let reader = fixtures::create_role_with_permissions(
+        &app.pool,
+        other_tenant,
+        "OTHER-TENANT-READER",
+        &["identity:user:read"],
+    )
+    .await;
     fixtures::create_user(
         &app.pool,
         other_tenant,
         "tenant.caller",
         "tenant.caller@other.test",
         PASSWORD,
-        &[],
+        &[reader],
     )
     .await;
 
@@ -316,8 +330,7 @@ async fn reading_another_tenants_user_by_id_is_not_found() {
     )
     .await;
 
-    // Fails here today: the credential resolves against the default tenant.
-    let token = app.sign_in("tenant.caller", PASSWORD).await;
+    let token = app.sign_in_to("TNT-002", "tenant.caller", PASSWORD).await;
 
     let response = app
         .get(
@@ -329,6 +342,7 @@ async fn reading_another_tenants_user_by_id_is_not_found() {
     assert_eq!(
         response.status,
         StatusCode::NOT_FOUND,
-        "another tenant's user must be invisible, not merely unreadable"
+        "another tenant's user must be invisible, not merely unreadable: {}",
+        response.body
     );
 }
