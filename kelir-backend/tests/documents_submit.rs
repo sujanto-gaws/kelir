@@ -17,9 +17,11 @@ mod common;
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::http::{Method, StatusCode};
 use common::{fixtures, TestApp};
+use kelir_backend::modules::document::repository as document_repo;
 use kelir_backend::modules::document_type::numbering::AllocationContext;
 use kelir_backend::modules::document_type::numbering_service;
 use serde_json::{json, Value};
@@ -721,4 +723,244 @@ async fn submitting_needs_its_own_permission() {
             .expect("the document is readable");
 
     assert_eq!(number, None, "a refused submit assigned a number");
+}
+
+// ---------------------------------------------------------------------------
+// The second lines of defence, reached by arranging the interleaving
+// ---------------------------------------------------------------------------
+//
+// Three statements on this surface carry `AND status = 'DRAFT'` in a `WHERE`
+// clause the service has *already* checked — `update_document`, `soft_delete`
+// and `mark_submitted`. Coding standard §2.5 makes such a predicate carry
+// either a test that removes the first line or a comment saying it is
+// unexercised, because the first layer refuses before the statement runs and
+// the guard is therefore invisible to every ordinary test.
+//
+// **The interleaving is arranged rather than raced for**, the way
+// `an_edit_blocked_by_a_publish_applies_to_nothing` does it: a submit holds the
+// row's lock in one transaction while the second statement blocks on it, and
+// the second statement therefore reaches the database *after* the service check
+// that would have refused it had already passed. That is the window the
+// predicate exists for, and there is no other way to be inside it.
+
+/// **An edit that reaches the database after a submit applies to nothing.**
+///
+/// The service read `DRAFT`, decided the edit was legal, and by the time its
+/// statement ran the document had been submitted. Without the predicate the
+/// edit lands: a submitted document's payload is rewritten after its number was
+/// attached to the old one, which is the outcome #168 calls unrecoverable
+/// arriving through the edit path.
+///
+/// **Seen red** (coding standard §2.9) against `update_document`'s
+/// `AND status = 'DRAFT'` removed: the edit applies 1 row.
+#[tokio::test]
+async fn an_edit_blocked_by_a_submit_applies_to_nothing() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let type_id = numbered_type(&app, &token, "PR_EDIT_RACE", "GAPLESS").await;
+    let id = draft(&app, &token, type_id, filled_in()).await;
+    let tenant = fixtures::SYSTEM_TENANT_ID;
+
+    // The submitter, holding the row and not yet committed.
+    let mut submitting = app.pool.begin().await.expect("a transaction");
+    let submitted = document_repo::mark_submitted(
+        &mut submitting,
+        tenant,
+        id,
+        &document_repo::Submission {
+            document_number: "PR-RACE-000001",
+            form_data: &json!({"subject": "As submitted"}),
+            submitted_at: chrono::Utc::now(),
+        },
+        None,
+    )
+    .await
+    .expect("the submit runs");
+    assert_eq!(submitted, 1, "the submit is the one that wins the row");
+
+    // The editor, blocking on that lock. It reached the statement before the
+    // submit committed, which is the interleaving the service check cannot see.
+    let pool = app.pool.clone();
+    let editing = tokio::spawn(async move {
+        document_repo::update_document(
+            &pool,
+            tenant,
+            id,
+            &document_repo::DocumentFields {
+                title: Some("Edited after the submit"),
+                form_data: None,
+                priority: None,
+                entity_type: None,
+                entity_id: None,
+                requested_for_department_id: None,
+                requested_for_facility_id: None,
+            },
+            None,
+        )
+        .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    submitting.commit().await.expect("the submit commits");
+
+    let edited = editing
+        .await
+        .expect("the edit task finishes")
+        .expect("the edit runs");
+
+    assert_eq!(
+        edited, 0,
+        "the edit applied to a document that had just been submitted"
+    );
+
+    let row =
+        sqlx::query_as::<_, (String, String)>("SELECT status, title FROM documents WHERE id = $1")
+            .bind(id)
+            .fetch_one(&app.pool)
+            .await
+            .expect("the document is readable");
+
+    assert_eq!(row.0, "SUBMITTED");
+    assert_eq!(
+        row.1, "Two standing desks",
+        "the submitted document kept the title it was submitted with"
+    );
+}
+
+/// **A discard that reaches the database after a submit applies to nothing.**
+///
+/// The same window on the delete path. Without the predicate a submitted,
+/// numbered document is soft-deleted by a caller who read it as a draft — and
+/// its number goes with it, held by a row no list returns.
+///
+/// **Seen red** against `soft_delete`'s `AND status = 'DRAFT'` removed: the
+/// discard applies 1 row and the submitted document leaves the list.
+#[tokio::test]
+async fn a_discard_blocked_by_a_submit_applies_to_nothing() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let type_id = numbered_type(&app, &token, "PR_DISCARD_RACE", "GAPLESS").await;
+    let id = draft(&app, &token, type_id, filled_in()).await;
+    let tenant = fixtures::SYSTEM_TENANT_ID;
+
+    let mut submitting = app.pool.begin().await.expect("a transaction");
+    document_repo::mark_submitted(
+        &mut submitting,
+        tenant,
+        id,
+        &document_repo::Submission {
+            document_number: "PR-DISCARD-000001",
+            form_data: &json!({"subject": "As submitted"}),
+            submitted_at: chrono::Utc::now(),
+        },
+        None,
+    )
+    .await
+    .expect("the submit runs");
+
+    let pool = app.pool.clone();
+    let discarding =
+        tokio::spawn(async move { document_repo::soft_delete(&pool, tenant, id, None).await });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    submitting.commit().await.expect("the submit commits");
+
+    let discarded = discarding
+        .await
+        .expect("the discard task finishes")
+        .expect("the discard runs");
+
+    assert_eq!(
+        discarded, 0,
+        "a submitted document was discarded by a caller who read it as a draft"
+    );
+
+    let deleted: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT deleted_at FROM documents WHERE id = $1")
+            .bind(id)
+            .fetch_one(&app.pool)
+            .await
+            .expect("the document is readable");
+
+    assert_eq!(
+        deleted, None,
+        "a refused discard soft-deleted the row anyway"
+    );
+}
+
+/// **A second submit that reaches the database after the first applies to
+/// nothing, and its number is never attached.**
+///
+/// The window `mark_submitted`'s own predicate exists for, and the one that
+/// matters most: without it a document holds two numbers over its life, and the
+/// second one is the one anybody reconciling against a purchase order will
+/// find.
+///
+/// **Seen red** against `mark_submitted`'s `AND status = 'DRAFT'` removed: the
+/// second submit applies 1 row and the document's number changes.
+#[tokio::test]
+async fn a_second_submit_blocked_by_the_first_applies_to_nothing() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let type_id = numbered_type(&app, &token, "PR_SUBMIT_RACE", "GAPLESS").await;
+    let id = draft(&app, &token, type_id, filled_in()).await;
+    let tenant = fixtures::SYSTEM_TENANT_ID;
+
+    let mut first = app.pool.begin().await.expect("a transaction");
+    document_repo::mark_submitted(
+        &mut first,
+        tenant,
+        id,
+        &document_repo::Submission {
+            document_number: "PR-FIRST-000001",
+            form_data: &json!({"subject": "The first submit"}),
+            submitted_at: chrono::Utc::now(),
+        },
+        None,
+    )
+    .await
+    .expect("the first submit runs");
+
+    let pool = app.pool.clone();
+    let second = tokio::spawn(async move {
+        let mut transaction = pool.begin().await.expect("a transaction");
+        let moved = document_repo::mark_submitted(
+            &mut transaction,
+            tenant,
+            id,
+            &document_repo::Submission {
+                document_number: "PR-SECOND-000002",
+                form_data: &json!({"subject": "The second submit"}),
+                submitted_at: chrono::Utc::now(),
+            },
+            None,
+        )
+        .await
+        .expect("the second submit runs");
+        transaction.commit().await.expect("it commits");
+
+        moved
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    first.commit().await.expect("the first submit commits");
+
+    assert_eq!(
+        second.await.expect("the second task finishes"),
+        0,
+        "a document was submitted twice through the window the service cannot see"
+    );
+
+    let number: Option<String> =
+        sqlx::query_scalar("SELECT document_number FROM documents WHERE id = $1")
+            .bind(id)
+            .fetch_one(&app.pool)
+            .await
+            .expect("the document is readable");
+
+    assert_eq!(
+        number.as_deref(),
+        Some("PR-FIRST-000001"),
+        "the second submit overwrote the number the first assigned"
+    );
 }

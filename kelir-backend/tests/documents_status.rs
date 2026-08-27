@@ -16,6 +16,8 @@ use std::sync::Arc;
 
 use axum::http::{Method, StatusCode};
 use common::{fixtures, TestApp};
+use kelir_backend::modules::document::domain::DocumentStatus;
+use kelir_backend::modules::document::repository as document_repo;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -352,28 +354,37 @@ async fn no_transition_reaches_a_state_this_sprint_does_not_own() {
 // AC3, AC7 — the lost race
 // ---------------------------------------------------------------------------
 
-/// **A concurrent transition loses the race with a 409, not a silent
-/// overwrite** (AC3).
+/// **A concurrent transition loses the race, and exactly one caller decides the
+/// document** (AC3).
 ///
 /// Eight callers move one `SUBMITTED` document at once, four to `APPROVED` and
-/// four to `REJECTED`. Exactly one may win. The rest must be told the document
-/// changed underneath them — a decision recorded against a document somebody
-/// else already decided is a signature on the wrong paper.
+/// four to `REJECTED`. Exactly one may win. A decision recorded against a
+/// document somebody else already decided is a signature on the wrong paper.
 ///
-/// **The read is deliberately unlocked**, which is what makes this reachable:
-/// `FOR UPDATE` would serialise the eight into eight sequential attempts, and
-/// the seven losers would then be refused as *illegal moves* rather than as lost
-/// races — a correct outcome by a mechanism that leaves the compare-and-swap
-/// exercised by nothing. That is exactly what record 03 found in the facility
-/// arm of the master-data transition service (#139), and it is the reason
-/// `repository::document::find_status` exists beside `lock_document`.
+/// # A loser is refused two ways, and both are correct
 ///
-/// **Seen red** (coding standard §2.9) against `move_status`'s `status = $3`
-/// weakened to `(status = $3 OR TRUE)`: several callers answer 200, the last
-/// writer wins silently, and the document's history records two decisions that
-/// contradict each other.
+/// **409** when it read `SUBMITTED`, decided the move was legal, and lost the
+/// compare-and-swap. **422** when it acquired its connection *after* the winner
+/// committed, read `APPROVED`, and was refused as an illegal move before it
+/// reached the write at all. Which one a given caller gets depends on the
+/// scheduler, so this asserts the property that is true of both — **nobody
+/// succeeds who should not** — rather than a shape that holds only under a load
+/// the test cannot control.
+///
+/// **That distinction was found by this test being flaky.** The first version
+/// asserted every loser answered 409, passed alone and under the file, and went
+/// red on five of eighteen runs of the Sprint 9 mutation campaign — where six
+/// test binaries run concurrently against one database. Every one of those five
+/// reds was this test rather than the predicate being mutated, which made the
+/// campaign's ratio meaningless until it was fixed. Recorded as a finding of the
+/// mid-sprint pass: *a flaky test is worse than no test, because it makes every
+/// red run ambiguous.*
+///
+/// **The compare-and-swap itself is held by
+/// [`a_stale_transition_writes_nothing`]**, which drives the statement directly
+/// and is deterministic. This one holds the property a person cares about.
 #[tokio::test]
-async fn a_concurrent_transition_loses_the_race_with_a_conflict() {
+async fn only_one_concurrent_transition_decides_the_document() {
     let app = Arc::new(TestApp::spawn().await);
     let token = app.administrator_token().await;
     let id = submitted_document(&app, &token, "PR_RACE").await;
@@ -392,22 +403,22 @@ async fn a_concurrent_transition_loses_the_race_with_a_conflict() {
         handles.push(tokio::spawn(async move {
             let response = transition(&app, &token, id, json!({ "status": target })).await;
 
-            // The body travels with the status. A loser that answered anything
-            // but 409 is a finding rather than noise, and a bare `StatusCode`
-            // in the failure message would send whoever reads it back to
-            // reproduce a race.
+            // The body travels with the status. A loser refused for a reason
+            // that is neither of the two is a finding rather than noise, and a
+            // bare `StatusCode` in the failure message would send whoever reads
+            // it back to reproduce a race.
             (response.status, response.body.to_string())
         }));
     }
 
     let mut winners = 0;
-    let mut conflicts = 0;
+    let mut losers = 0;
     let mut other = Vec::new();
 
     for handle in handles {
         match handle.await.expect("the transition task did not panic") {
             (StatusCode::OK, _) => winners += 1,
-            (StatusCode::CONFLICT, _) => conflicts += 1,
+            (StatusCode::CONFLICT, _) | (StatusCode::UNPROCESSABLE_ENTITY, _) => losers += 1,
             outcome => other.push(outcome),
         }
     }
@@ -418,9 +429,9 @@ async fn a_concurrent_transition_loses_the_race_with_a_conflict() {
     );
     assert!(
         other.is_empty(),
-        "a loser was refused for a reason that is not a lost race: {other:?}"
+        "a loser was refused for a reason that is neither a lost race nor an          illegal move: {other:?}"
     );
-    assert_eq!(conflicts, CONCURRENT_TRANSITIONS - 1);
+    assert_eq!(losers, CONCURRENT_TRANSITIONS - 1);
 
     // And exactly one decision is on the record. Two contradictory rows is what
     // a silent overwrite leaves behind, and it is worse than the wrong status:
@@ -435,6 +446,61 @@ async fn a_concurrent_transition_loses_the_race_with_a_conflict() {
     .expect("the history is readable");
 
     assert_eq!(decisions, 1, "the history records more than one decision");
+}
+
+/// **A transition checked against a status the document has left writes
+/// nothing** (AC3, deterministically).
+///
+/// The compare-and-swap, driven at the statement rather than through a race, so
+/// that the guard has a test whose verdict does not depend on the scheduler.
+/// `from` is the status the *check* read; binding it is the whole mechanism, and
+/// this is the case a concurrent loser hits.
+///
+/// **Seen red** (coding standard §2.9) against `move_status`'s `status = $3`
+/// weakened to `(status = $3 OR TRUE)`: the stale transition writes, and a
+/// document that was approved a moment ago is rejected by a caller who never saw
+/// the approval.
+#[tokio::test]
+async fn a_stale_transition_writes_nothing() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let id = submitted_document(&app, &token, "PR_STALE").await;
+
+    // Somebody decides it.
+    let approved = transition(&app, &token, id, json!({ "status": "APPROVED" })).await;
+    assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
+
+    // And a caller holding the status from *before* that writes nothing. The
+    // legality check is bypassed deliberately: `SUBMITTED -> REJECTED` is a
+    // legal move, so what is under test is the predicate rather than the table.
+    let mut transaction = app.pool.begin().await.expect("a transaction");
+    let moved = document_repo::move_status(
+        &mut transaction,
+        fixtures::SYSTEM_TENANT_ID,
+        id,
+        DocumentStatus::Submitted,
+        DocumentStatus::Rejected,
+        None,
+    )
+    .await
+    .expect("the statement runs");
+    transaction.commit().await.expect("the transaction commits");
+
+    assert_eq!(
+        moved, 0,
+        "a transition checked against a status the document had left wrote anyway"
+    );
+
+    let status: String = sqlx::query_scalar("SELECT status FROM documents WHERE id = $1")
+        .bind(id)
+        .fetch_one(&app.pool)
+        .await
+        .expect("the document is readable");
+
+    assert_eq!(
+        status, "APPROVED",
+        "a stale transition overwrote somebody else's decision"
+    );
 }
 
 // ---------------------------------------------------------------------------
