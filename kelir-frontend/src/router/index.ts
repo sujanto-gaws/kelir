@@ -74,6 +74,44 @@ export const routes: RouteRecordRaw[] = [
         meta: { requiresAuth: true, permission: 'rad:form:read', title: 'Form' },
       },
       {
+        // The list, with its search and filters in the query string beside it
+        // so a filtered view can be linked to (#171).
+        path: 'documents',
+        name: 'documents',
+        component: () => import('@/features/documents/DocumentListPage.vue'),
+        meta: { requiresAuth: true, permission: 'document:read', title: 'Documents' },
+      },
+      {
+        // **The traversal Sprint 8's exit was missing.** That sprint could open
+        // a form by form id and no screen went from a document *type* to the
+        // form it binds; this one lists types and creates a document from the
+        // chosen one, which pins the binding.
+        path: 'documents/new',
+        name: 'new-document',
+        component: () => import('@/features/documents/NewDocumentPage.vue'),
+        // The create permission, not the read one: a caller who may only read
+        // documents would get a screen whose one button always answers 403.
+        // Listing the types needs `document-type:read` as well, and that is
+        // enforced where it belongs — on `/document-types`, so a caller with
+        // one and not the other gets a page that says the types could not be
+        // loaded rather than a route that refuses.
+        meta: { requiresAuth: true, permission: 'document:create', title: 'New document' },
+      },
+      {
+        // Declared **after** `documents/new`, which is not cosmetic: a param
+        // route registered first would match `/documents/new` and try to open a
+        // document called "new".
+        path: 'documents/:id',
+        name: 'document',
+        component: () => import('@/features/documents/DocumentWorkspace.vue'),
+        // The document's own read permission. The linked entity needs the
+        // master-data permission of whatever it points at, and that is enforced
+        // on `/documents/{id}/linked-entity` — a caller who may read documents
+        // and not suppliers gets the document with one field that says the name
+        // could not be loaded, not a route that refuses the whole workspace.
+        meta: { requiresAuth: true, permission: 'document:read', title: 'Document' },
+      },
+      {
         path: 'admin/users',
         name: 'admin-users',
         component: () => import('@/features/admin/UserListPage.vue'),

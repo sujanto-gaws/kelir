@@ -46,7 +46,7 @@ const navigation = [
     name: 'documents',
     label: 'Documents',
     icon: FileText,
-    enabled: false,
+    enabled: true,
     permission: 'document:read',
   },
   {
