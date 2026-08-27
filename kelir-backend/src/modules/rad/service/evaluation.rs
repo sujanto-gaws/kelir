@@ -63,6 +63,82 @@ use crate::error::ValidationDetail;
 /// The rule the S10.3 envelope names when an expression produced no value.
 const EVALUATION_FAILED: &str = "EVALUATION_FAILED";
 
+/// The codes a draft write forgives, by the pair the failure carries.
+const RULE_NOT_ENFORCED: &str = "RULE_NOT_ENFORCED";
+const VALIDATION_FAILED: &str = "VALIDATION_FAILED";
+const REQUIRED: &str = "required";
+
+/// How hard a write is held to the definition it is written against.
+///
+/// **One pipeline, two moments.** Sprint 9's [#167] validates form data on
+/// *every* write and not only at submit, because a draft holding data its own
+/// form would reject is a draft that cannot be submitted, discovered at the
+/// worst moment. Taken literally that makes an empty draft unsaveable —
+/// `required` is precisely the rule an unfinished document breaks — so the line
+/// is drawn where the sentence actually is:
+///
+/// > **A value that is present and wrong is refused on a draft. A value that is
+/// > missing is not wrong, it is unfinished.**
+///
+/// The two variants run the identical walk: the projection, the `sequenceKey`
+/// overwrite, the calculations, the conditional stripping and the validation
+/// all happen either way, and the payload a draft stores is the server's answer
+/// exactly as a submission's is. What differs is which of the collected
+/// failures is a refusal, and only three classes move — see
+/// [`Strictness::forgives`], which is where the reasoning for each one is.
+///
+/// A caller that wanted a second, laxer implementation of this walk would get
+/// two answers to one question, and the whole of [`secure_payload`] exists
+/// because two answers to *that* question is what the Tamper-Proof Pattern is
+/// about (construction plan §4.2).
+///
+/// [#167]: https://github.com/sujanto-gaws/kelir/issues/167
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Strictness {
+    /// A draft being edited. Absence, an expression that cannot yet resolve,
+    /// and a rule this build defers to submit are all forgiven.
+    Draft,
+    /// A submission. Everything refuses — JFSS S8.1.1 and **D-28**, unchanged.
+    Submit,
+}
+
+impl Strictness {
+    /// Whether this moment forgives one collected failure.
+    ///
+    /// Matched on the `(code, rule)` pair the walk emits rather than on message
+    /// text, so a reworded message cannot silently widen or narrow it.
+    fn forgives(self, detail: &ValidationDetail) -> bool {
+        if self == Self::Submit {
+            return false;
+        }
+
+        match detail.code.as_str() {
+            // **The definition of a draft.** `check_validation` short-circuits
+            // on an empty value, so `required` is the *only* verdict an empty
+            // field can produce — forgiving it removes nothing else.
+            VALIDATION_FAILED => detail.rule == REQUIRED,
+            // **D-28's own reasoning, not an exception to it.** It refuses an
+            // unenforced registry rule because "this side has nobody below it".
+            // On a draft it does: the submit. A `unique` that has to hold the
+            // moment somebody opens a form is a form nobody can start.
+            RULE_NOT_ENFORCED => true,
+            // **D-24 applied to the other write.** An average over zero rows
+            // fails before the first keystroke, and §5.6 of the Sprint 8 plan
+            // already settled that the answer *while a form is being filled in*
+            // is a blank field rather than an error. A draft is that moment on
+            // the server's side of the wire. The value is kept rather than
+            // discarded: an undecidable `conditional` resolves to visible, so
+            // nothing the user typed is thrown away by a rule that could not be
+            // decided.
+            EVALUATION_FAILED => true,
+            // `RULE_NOT_REGISTERED` is deliberately absent. A rule name nobody
+            // defines is a defect in the *definition*, and no amount of
+            // finishing the document makes it go away (JFSS S8.1.1).
+            _ => false,
+        }
+    }
+}
+
 /// A definition, a submitted payload, and the payload that may be stored.
 ///
 /// `Err` carries the S10.3 envelope's `details`: one entry per problem, each
@@ -76,6 +152,19 @@ pub fn secure_payload(
     secure_payload_with(&RuleEvaluator::new(), definition, submitted)
 }
 
+/// The same at a stated moment, for a caller that is storing a draft.
+///
+/// [`secure_payload`] and [`secure_payload_with`] are [`Strictness::Submit`],
+/// which is what they have always been.
+pub fn secure_payload_as(
+    evaluator: &RuleEvaluator,
+    definition: &Value,
+    submitted: &Value,
+    strictness: Strictness,
+) -> Result<Value, Vec<ValidationDetail>> {
+    secure(evaluator, definition, submitted, strictness)
+}
+
 /// The same, over an evaluator the caller already holds.
 ///
 /// The engine carries the operator table and the configuration, both read-only
@@ -86,6 +175,15 @@ pub fn secure_payload_with(
     evaluator: &RuleEvaluator,
     definition: &Value,
     submitted: &Value,
+) -> Result<Value, Vec<ValidationDetail>> {
+    secure(evaluator, definition, submitted, Strictness::Submit)
+}
+
+fn secure(
+    evaluator: &RuleEvaluator,
+    definition: &Value,
+    submitted: &Value,
+    strictness: Strictness,
 ) -> Result<Value, Vec<ValidationDetail>> {
     let Some(submitted) = submitted.as_object() else {
         return Err(vec![ValidationDetail::new(
@@ -146,6 +244,12 @@ pub fn secure_payload_with(
     // settles which side is right.
     let validation_failures = pass.validate_all(&visible, &payload);
     pass.failures.extend(validation_failures);
+
+    // The walk is identical at both strictnesses and the filter is the whole
+    // of the difference. Applied here rather than at each push site so there is
+    // one place to read what a draft forgives, and so a new failure class
+    // cannot be added to the walk and quietly be forgiven by omission.
+    pass.failures.retain(|detail| !strictness.forgives(detail));
 
     if pass.failures.is_empty() {
         Ok(Value::Object(payload))

@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO document_metadata\n                (id, tenant_id, document_id, metadata_key, metadata_value, data_type,\n                 created_by, updated_by)\n            VALUES ($1, $2, $3, $4, $5, $6, $7, $7)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Text",
+        "Varchar",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "03f64cbe4835ce9f018c365596119a4edd79225e326774fce8962bc239ebb36c"
+}

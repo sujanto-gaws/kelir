@@ -5,7 +5,7 @@ use utoipa::OpenApi;
 use crate::error::ValidationDetail;
 use crate::health;
 use crate::middleware::cors::cors_layer;
-use crate::modules::{auth, document_type, identity, master_data, organization, rad};
+use crate::modules::{auth, document, document_type, identity, master_data, organization, rad};
 use crate::response::{ErrorBody, ErrorEnvelope, PageMeta};
 use crate::state::AppState;
 
@@ -91,6 +91,15 @@ use crate::state::AppState;
         document_type::handlers::get_numbering_rule,
         document_type::handlers::set_numbering_rule,
         document_type::handlers::clear_numbering_rule,
+        document::handlers::list_documents,
+        document::handlers::get_document,
+        document::handlers::create_document,
+        document::handlers::update_document,
+        document::handlers::delete_document,
+        document::handlers::submit_document,
+        document::handlers::transition_document,
+        document::handlers::status_history,
+        document::handlers::resolve_linked_entity,
         organization::handlers::list_departments,
         organization::handlers::get_department,
         organization::handlers::create_department,
@@ -203,6 +212,20 @@ use crate::state::AppState;
         document_type::numbering::SetNumberingRuleRequest,
         document_type::numbering::SequenceScope,
         document_type::numbering::GapPolicy,
+        document::domain::Document,
+        document::domain::DocumentSummary,
+        document::domain::DocumentStatus,
+        document::domain::DocumentPriority,
+        document::domain::CreateDocumentRequest,
+        document::domain::UpdateDocumentRequest,
+        document::domain::TransitionRequest,
+        document::domain::TransitionResult,
+        document::domain::EntityType,
+        document::domain::EntityLink,
+        document::domain::ResolvedEntity,
+        document::domain::MetadataEntry,
+        document::domain::MetadataType,
+        document::service::StatusHistoryEntry,
         organization::department::Department,
         organization::department::DepartmentStatus,
         organization::department::CreateDepartmentRequest,
@@ -228,6 +251,10 @@ use crate::state::AppState;
         (
             name = "document-type",
             description = "Document types and the form, list and workflow bindings that configure them"
+        ),
+        (
+            name = "document",
+            description = "Documents — created from a type, filled through its form, submitted with a number, and moved through their own statuses"
         ),
         (
             name = "rad",
@@ -288,6 +315,7 @@ fn api_v1_router(state: AppState) -> Router<AppState> {
         .nest("/master-data", master_data::handlers::routes())
         .nest("/rad", rad::handlers::routes())
         .nest("/document-types", document_type::handlers::routes())
+        .nest("/documents", document::handlers::routes())
         .nest("/organization", organization::handlers::routes())
 }
 

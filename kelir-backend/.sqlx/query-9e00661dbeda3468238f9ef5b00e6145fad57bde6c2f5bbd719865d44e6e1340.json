@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO documents\n            (id, tenant_id, document_ref, document_type_id, form_id, title,\n             status, form_data_json, priority, entity_type, entity_id,\n             requested_by, requested_for_department_id, requested_for_facility_id,\n             created_by, updated_by)\n        VALUES ($1, $2, $3, $4, $5, $6, 'DRAFT', $7, $8, $9, $10, $11, $12, $13, $11, $11)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Jsonb",
+        "Varchar",
+        "Varchar",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9e00661dbeda3468238f9ef5b00e6145fad57bde6c2f5bbd719865d44e6e1340"
+}

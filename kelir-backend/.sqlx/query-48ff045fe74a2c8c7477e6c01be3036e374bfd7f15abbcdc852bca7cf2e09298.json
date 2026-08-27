@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM document_metadata WHERE tenant_id = $1 AND document_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "48ff045fe74a2c8c7477e6c01be3036e374bfd7f15abbcdc852bca7cf2e09298"
+}

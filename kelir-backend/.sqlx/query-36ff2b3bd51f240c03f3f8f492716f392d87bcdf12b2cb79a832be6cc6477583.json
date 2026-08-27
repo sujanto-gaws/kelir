@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO document_ref_sequences (id, tenant_id, reference_key, next_sequence)\n        VALUES ($1, $2, $3, 2)\n        ON CONFLICT (tenant_id, reference_key) DO UPDATE\n            SET next_sequence = document_ref_sequences.next_sequence + 1,\n                updated_at = now()\n        RETURNING next_sequence - 1 AS \"allocated!\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "allocated!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "36ff2b3bd51f240c03f3f8f492716f392d87bcdf12b2cb79a832be6cc6477583"
+}

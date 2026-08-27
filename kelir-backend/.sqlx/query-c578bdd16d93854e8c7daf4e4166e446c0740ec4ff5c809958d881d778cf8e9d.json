@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT metadata_key, metadata_value, data_type\n        FROM document_metadata\n        WHERE tenant_id = $1 AND document_id = $2 AND deleted_at IS NULL\n        ORDER BY metadata_key\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "metadata_key",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "metadata_value",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "data_type",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "c578bdd16d93854e8c7daf4e4166e446c0740ec4ff5c809958d881d778cf8e9d"
+}

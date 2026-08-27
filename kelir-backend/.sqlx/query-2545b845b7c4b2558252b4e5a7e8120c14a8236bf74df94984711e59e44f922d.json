@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE documents SET\n            document_number = $3,\n            form_data_json  = $4,\n            status          = 'SUBMITTED',\n            submitted_at    = $5,\n            requested_by    = COALESCE(requested_by, $6),\n            updated_by      = $6,\n            updated_at      = now()\n        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL AND status = 'DRAFT'\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Jsonb",
+        "Timestamptz",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2545b845b7c4b2558252b4e5a7e8120c14a8236bf74df94984711e59e44f922d"
+}
