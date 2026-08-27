@@ -50,19 +50,25 @@ pub async fn transition(
     let tenant_id = caller.tenant_id();
     let actor = Some(caller.user_id());
 
-    let mut transaction = state.pool.begin().await?;
-
-    let locked = repo::lock_document(&mut transaction, tenant_id, id)
+    // **Read without a lock, on purpose.** Locking the row here would serialise
+    // two simultaneous transitions into two sequential ones, and the second
+    // would then see the state the first wrote and be refused as an *illegal
+    // move* rather than as a lost race. That is a correct outcome reached by the
+    // wrong mechanism: it makes the compare-and-swap below unreachable, so the
+    // guard that would still hold if somebody wrote a second caller is a guard
+    // nothing exercises — which is what record 03 found in the facility arm of
+    // the master-data transition service (#139).
+    let current = repo::find_status(&state.pool, tenant_id, id)
         .await?
         .ok_or_else(|| AppError::not_found("Document"))?;
-
-    let current = locked.status;
 
     // A 422 naming both ends and what was possible. Refused before the write
     // rather than by it, because "you cannot go there from here" and "somebody
     // else moved it" are different failures and a caller fixes them
     // differently.
     current.check_move_to(request.status)?;
+
+    let mut transaction = state.pool.begin().await?;
 
     let moved = repo::move_status(
         &mut transaction,

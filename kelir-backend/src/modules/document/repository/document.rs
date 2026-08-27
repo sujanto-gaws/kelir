@@ -101,6 +101,43 @@ pub async fn lock_document(
     }))
 }
 
+/// Where a document is, read **without a lock**.
+///
+/// The transition path's read, and the absence of `FOR UPDATE` is the point
+/// rather than an omission. [`lock_document`] serialises its callers, which
+/// turns two simultaneous transitions into two sequential ones — and the second
+/// then sees the state the first wrote and is refused as an illegal move rather
+/// than as a lost race. That is a correct outcome reached by the wrong
+/// mechanism: it makes [`super::status::move_status`]'s compare-and-swap
+/// unreachable, so the guard that would still hold if somebody wrote a second
+/// caller is a guard nothing exercises.
+///
+/// Reading without the lock is the shape #99 used for `record_status`, which
+/// [record 03] called the strongest thing in Sprint 6, and it is what makes the
+/// 409 both real and testable. The write is conditional on this value, so the
+/// loser writes nothing.
+///
+/// [record 03]: ../../../../../projects/verifications/03.%20Sprint%206%20Surface%20Verification.md
+pub async fn find_status<'e, E: PgExecutor<'e>>(
+    executor: E,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<Option<DocumentStatus>, sqlx::Error> {
+    let row = sqlx::query_scalar!(
+        r#"
+        SELECT status
+        FROM documents
+        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+        "#,
+        tenant_id,
+        id
+    )
+    .fetch_optional(executor)
+    .await?;
+
+    Ok(row.as_deref().map(DocumentStatus::from_db))
+}
+
 pub async fn insert_document<'e, E: PgExecutor<'e>>(
     executor: E,
     document: &NewDocument<'_>,
