@@ -17,10 +17,30 @@
 //! in Rust's `Debug` and the other in a JS `Error`. What is compared is whether
 //! the expression produced a value at all, and which value — the same
 //! comparison the spike made when it reported 51/51 "error cases included".
+//!
+//! # Two corpora, because an expression is not a form
+//!
+//! `cases.json` holds expressions and is what #154 built. `forms.json` holds
+//! whole *submissions* — a definition, a payload a client sent, and the payload
+//! the server must store — and is what [#164] added, because the property the
+//! Tamper-Proof Pattern actually needs is not "the two engines agree about
+//! `sum`" but *"the number the server persists is the number the person filling
+//! in the form was looking at"*. Two engines can agree on every operator and
+//! still disagree about a whole form: `calculateMode`, the order the
+//! calculations settle in, and what happens to a hidden field are all decisions
+//! above the evaluator.
+//!
+//! The frontend's half of the form corpus is
+//! `src/features/rad/renderer/formParity.spec.ts` rather than
+//! `src/lib/jsonlogic.parity.spec.ts` — that file deliberately contains no Vue,
+//! and the client's answer to a whole form is a *rendered form*'s answer.
+//!
+//! [#164]: https://github.com/sujanto-gaws/kelir/issues/164
 
 use std::path::{Path, PathBuf};
 
 use kelir_backend::modules::rad::evaluator::RuleEvaluator;
+use kelir_backend::modules::rad::service::evaluation;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -141,5 +161,88 @@ fn the_backend_reproduces_every_committed_parity_expectation() {
         divergences.len(),
         cases.len(),
         divergences.join("\n"),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Whole-form submissions (#164 AC5)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FormCase {
+    id: String,
+    definition: Value,
+    payload: Value,
+    /// The payload the server must store, or `null` where the submission is
+    /// refused.
+    secure: Option<Value>,
+    /// For a refused case, the S10.3 paths the refusal must name.
+    #[serde(default)]
+    refused_paths: Vec<String>,
+}
+
+/// **The Tamper-Proof Pattern, held to the browser's answer** (#164 AC5).
+///
+/// Each case is a definition, the payload a client sent, and what the server
+/// must store. `formParity.spec.ts` renders the same definition with the same
+/// payload in a real `JfssForm` and asserts the settled values agree with
+/// `secure` — so between the two, *the number the server persists is the number
+/// the person filling in the form was looking at.*
+///
+/// Where the two disagree the submission is refused rather than silently
+/// corrected, which is what `refusedPaths` holds: **D-24**'s division by zero
+/// renders blank in the browser and is refused here, naming the field.
+#[test]
+fn the_backend_stores_what_the_form_corpus_says_it_must() {
+    let cases: Vec<FormCase> = read("forms.json");
+
+    assert!(
+        !cases.is_empty(),
+        "the form corpus is empty; a gate over nothing passes"
+    );
+
+    let mut divergences = Vec::new();
+
+    for case in &cases {
+        let outcome = evaluation::secure_payload(&case.definition, &case.payload);
+
+        match (&case.secure, outcome) {
+            (Some(expected), Ok(actual)) => {
+                if !agree(&actual, expected) {
+                    divergences.push(format!("  {}: expected {expected}, got {actual}", case.id));
+                }
+            }
+            (Some(expected), Err(details)) => divergences.push(format!(
+                "  {}: expected {expected}, and the submission was refused — {details:?}",
+                case.id
+            )),
+            (None, Ok(actual)) => divergences.push(format!(
+                "  {}: the submission was expected to be refused and stored {actual}",
+                case.id
+            )),
+            (None, Err(details)) => {
+                let named: Vec<&str> = details.iter().map(|detail| detail.path.as_str()).collect();
+
+                for path in &case.refused_paths {
+                    if !named.contains(&path.as_str()) {
+                        divergences.push(format!(
+                            "  {}: the refusal must name `{path}` and named {named:?}",
+                            case.id
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(
+        divergences.is_empty(),
+        "the server's answer differs from the committed form corpus on {} of {} cases.          A change here is a change to what a submission stores, so the frontend half          (`formParity.spec.ts`) moves with it.
+{}",
+        divergences.len(),
+        cases.len(),
+        divergences.join("
+"),
     );
 }

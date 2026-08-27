@@ -23,6 +23,15 @@ pub const FORM_READ: &str = "rad:form:read";
 pub const FORM_UPDATE: &str = "rad:form:update";
 pub const FORM_PUBLISH: &str = "rad:form:publish";
 pub const FORM_DELETE: &str = "rad:form:delete";
+/// Filling in a published form and recording the submission ([#164]).
+///
+/// **Distinct from [`FORM_READ`] on purpose.** Opening a requisition to read it
+/// and raising one are different questions, and a deployment that wants them to
+/// be the same person grants both — the same shape [`FORM_PUBLISH`] has beside
+/// [`FORM_UPDATE`].
+///
+/// [#164]: https://github.com/sujanto-gaws/kelir/issues/164
+pub const FORM_SUBMIT: &str = "rad:form:submit";
 pub const LIST_CREATE: &str = "rad:list:create";
 pub const LIST_READ: &str = "rad:list:read";
 pub const LIST_UPDATE: &str = "rad:list:update";

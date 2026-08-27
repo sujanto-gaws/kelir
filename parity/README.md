@@ -22,6 +22,7 @@ sides. This directory is what makes a drift between them loud.
 |---|---|---|---|
 | Backend | `datalogic-rs` (Apache-2.0) | `=5.2.0` | `kelir-backend/tests/jsonlogic_parity.rs` |
 | Frontend | `@goplasmatic/datalogic-wasm` (Apache-2.0) | `5.2.0` | `kelir-frontend/src/lib/jsonlogic.parity.spec.ts` |
+| Frontend, whole forms | — | — | `kelir-frontend/src/features/rad/renderer/formParity.spec.ts` |
 
 Both replaced `json-logic-js` (MIT) on the client and the never-published
 `json-logic-rs` on the server; the licence is Apache-2.0 on both sides now.
@@ -30,8 +31,23 @@ Both replaced `json-logic-js` (MIT) on the client and the never-published
 
 | File | What it is |
 |---|---|
-| `cases.json` | The corpus. 60 expressions, each derived from a claim the [Calculation Rule Registry](../docs/schema/JFSS%20Calculation%20Rule%20Registry.md) or [JFSS](../docs/schema/JSON%20Form%20Schema.md) makes |
+| `cases.json` | The expression corpus. 60 expressions, each derived from a claim the [Calculation Rule Registry](../docs/schema/JFSS%20Calculation%20Rule%20Registry.md) or [JFSS](../docs/schema/JSON%20Form%20Schema.md) makes |
 | `expectations.json` | What the adopted engine answers for each, `{id, ok, value}`. Generated from the frontend side; asserted by both |
+| `forms.json` | The **whole-form** corpus, added by [#164](https://github.com/sujanto-gaws/kelir/issues/164). 9 submissions, each a definition, the payload a client sent, and `secure` — what the server must store. Hand-authored, not generated: `secure` is an expectation about the two sides rather than a recording of one |
+
+## Why an expression corpus is not enough
+
+**Two engines can agree about every operator and still disagree about a form.** `calculateMode`, the order the calculations settle in, what happens to a field a `conditional` hides, whether a row's `sequenceKey` is the client's — every one of those is a decision *above* the evaluator, and every one is written twice. `cases.json` cannot see any of them.
+
+So `forms.json` holds the property the Tamper-Proof Pattern actually needs: **the number the server persists is the number the person filling in the form was looking at.** The backend half runs each case through `rad::service::evaluation` and asserts it produces `secure`; the frontend half mounts a real `JfssForm` over the same definition and payload, presses its submit button, and asserts the payload it would post agrees with `secure` on every key `secure` carries.
+
+Three things about how it compares:
+
+- **Only the keys `secure` carries.** A key it omits is one the server *discarded* under JFSS S10.2, and the browser is required to keep and submit it anyway (S10.1.1) — so a difference there is the pattern working rather than a divergence.
+- **A refused case has `secure: null` and a `refusedPaths` list.** That is decision **D-24** across both sides: a division by zero renders blank in the browser and refuses the submission on the server, naming the field. Each side is held to its own half.
+- **Every definition carries a submit button, and that is not decoration.** `JfssForm` gates the action on the definition's own rules, so a case that cannot be submitted in a browser cannot claim parity with what the server stores either.
+
+**The frontend half lives in `features/rad/` rather than beside `jsonlogic.parity.spec.ts`**, which deliberately contains no Vue: that file is about the engine, and the client's answer to a whole form is a *rendered form's* answer.
 
 ## How it runs
 
@@ -43,6 +59,8 @@ cd kelir-backend && cargo test --test jsonlogic_parity
 cd kelir-frontend && npm test
 ```
 
+Both corpora run inside those two commands: `jsonlogic_parity.rs` carries a test per corpus, and `npm test` picks up `formParity.spec.ts` with everything else.
+
 After a **deliberate** engine change, regenerate and bump both sides:
 
 ```bash
@@ -51,6 +69,11 @@ cd kelir-frontend && npm run parity:update
 
 Expect the backend test to fail until its pin is moved to match. That is what a
 parity-affecting change is supposed to look like.
+
+`forms.json` has no regenerator and will not get one. Its `secure` column is a
+claim about what a submission *must* store, and a file that rewrote itself from
+whichever side ran last would agree with today's behaviour by construction —
+which is not a gate. Editing it is editing what the product promises.
 
 ## What is compared, and what is not
 
@@ -77,7 +100,7 @@ environment hand-writes, which is how two environments end up subtly different.
 | `loose_equality_errors` | false | The reference implementation compares across types silently |
 | `numeric_coercion` | null, empty string and bool coerce; non-numeric not rejected | A half-filled form is normal, not an error |
 
-## Two things the corpus is honest about
+## Two things the expression corpus is honest about
 
 **It is 60 cases, not the spike's 51.** Each addition is marked with the issue
 that made it, `"added": "#154"` and `"added": "#163"`, so the count is
@@ -98,6 +121,12 @@ modulo by zero at all, so the gate could not have seen the fourth move. The
 other three needed no new case; what they needed was the configuration change,
 which turned `div-by-zero-float` from a `null` into a refusal and left the two
 that already refused alone.
+
+## And two the form corpus is honest about
+
+**It is 9 cases, and it is a floor rather than a survey.** Each was chosen because it exercises a decision the two sides make separately — the two `calculateMode` branches, a conditional in both directions, a chain declared backwards, the sequence overwrite, a computed field that is not a number, and a refusal. What it does not cover is every *component type*: a lookup, a datagrid inside a datagrid, and a `tabs` container appear in `purchase-requisition.json` and in neither corpus here.
+
+**The frontend half asserts what a form would post, not what it stored.** There is nothing on the client that strips hidden values or refuses a submission, because those are the server's job — so the client's half of a refused case is only that the field renders blank. The refusal itself is asserted on the backend side and in `kelir-backend/tests/rad_form_submissions.rs`.
 
 **Agreement here is not agreement with `json-logic-js`.** Against the JFSS
 reference the adopted engine agrees on 44/51 raw and 46/51 after the mandated

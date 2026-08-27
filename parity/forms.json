@@ -1,0 +1,667 @@
+[
+ {
+  "id": "invoice-total-tampered",
+  "added": "#164",
+  "note": "Calculation Rule Registry 6.1 — the invoice the Tamper-Proof argument is built on. The client claims every line is worth nothing; both sides compute 42.",
+  "definition": {
+   "formId": "parity-invoice",
+   "version": "2.0.1",
+   "components": [
+    {
+     "id": "lines",
+     "role": "data",
+     "type": "datagrid",
+     "key": "line_items",
+     "label": "Lines",
+     "sequenceKey": "line_no",
+     "validation": {
+      "type": "array"
+     },
+     "components": [
+      {
+       "id": "line-no",
+       "role": "data",
+       "type": "number",
+       "key": "line_no",
+       "label": "Line",
+       "readOnly": true,
+       "validation": {
+        "type": "integer"
+       }
+      },
+      {
+       "id": "line-quantity",
+       "role": "data",
+       "type": "number",
+       "key": "quantity",
+       "label": "Quantity",
+       "validation": {
+        "type": "integer"
+       }
+      },
+      {
+       "id": "line-unit-price",
+       "role": "data",
+       "type": "number",
+       "key": "unit_price",
+       "label": "Unit price",
+       "validation": {
+        "type": "number"
+       }
+      },
+      {
+       "id": "line-total",
+       "role": "data",
+       "type": "number",
+       "key": "line_total",
+       "label": "Line total",
+       "validation": {
+        "type": "number"
+       },
+       "calculate": {
+        "*": [
+         {
+          "var": "unit_price"
+         },
+         {
+          "var": "quantity"
+         }
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "id": "grand-total",
+     "role": "data",
+     "type": "number",
+     "key": "grand_total",
+     "label": "Grand total",
+     "validation": {
+      "type": "number"
+     },
+     "calculate": {
+      "sum": [
+       {
+        "map": [
+         {
+          "var": "line_items"
+         },
+         {
+          "*": [
+           {
+            "var": "unit_price"
+           },
+           {
+            "var": "quantity"
+           }
+          ]
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "id": "submit-button",
+     "role": "action",
+     "type": "button",
+     "label": "Submit",
+     "action": "submit"
+    }
+   ]
+  },
+  "payload": {
+   "line_items": [
+    {
+     "line_no": 9,
+     "quantity": 2,
+     "unit_price": 10,
+     "line_total": 0
+    },
+    {
+     "line_no": 9,
+     "quantity": 2,
+     "unit_price": 11,
+     "line_total": 0
+    }
+   ],
+   "grand_total": 0
+  },
+  "secure": {
+   "line_items": [
+    {
+     "line_no": 1,
+     "quantity": 2,
+     "unit_price": 10,
+     "line_total": 20
+    },
+    {
+     "line_no": 2,
+     "quantity": 2,
+     "unit_price": 11,
+     "line_total": 22
+    }
+   ],
+   "grand_total": 42
+  }
+ },
+ {
+  "id": "empty-repeater-sums-to-zero",
+  "added": "#164",
+  "note": "JFSS 8.2's null-safety rule over a whole form: an empty array sums to 0, not null and not NaN.",
+  "definition": {
+   "formId": "parity-empty-invoice",
+   "version": "2.0.1",
+   "components": [
+    {
+     "id": "lines",
+     "role": "data",
+     "type": "datagrid",
+     "key": "line_items",
+     "label": "Lines",
+     "validation": {
+      "type": "array"
+     },
+     "components": [
+      {
+       "id": "line-quantity",
+       "role": "data",
+       "type": "number",
+       "key": "quantity",
+       "label": "Quantity",
+       "validation": {
+        "type": "integer"
+       }
+      },
+      {
+       "id": "line-unit-price",
+       "role": "data",
+       "type": "number",
+       "key": "unit_price",
+       "label": "Unit price",
+       "validation": {
+        "type": "number"
+       }
+      }
+     ]
+    },
+    {
+     "id": "grand-total",
+     "role": "data",
+     "type": "number",
+     "key": "grand_total",
+     "label": "Grand total",
+     "validation": {
+      "type": "number"
+     },
+     "calculate": {
+      "sum": [
+       {
+        "map": [
+         {
+          "var": "line_items"
+         },
+         {
+          "*": [
+           {
+            "var": "unit_price"
+           },
+           {
+            "var": "quantity"
+           }
+          ]
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "id": "submit-button",
+     "role": "action",
+     "type": "button",
+     "label": "Submit",
+     "action": "submit"
+    }
+   ]
+  },
+  "payload": {
+   "line_items": [],
+   "grand_total": 999
+  },
+  "secure": {
+   "line_items": [],
+   "grand_total": 0
+  }
+ },
+ {
+  "id": "generated-keeps-a-resolved-value",
+  "added": "#164",
+  "note": "JFSS 4.2.3 Case C priority 1 — a persisted generated value is never recomputed, and 8.1.1 makes the mode declared rather than inferred.",
+  "definition": {
+   "formId": "parity-generated-resolved",
+   "version": "2.0.1",
+   "components": [
+    {
+     "id": "budget",
+     "role": "data",
+     "type": "number",
+     "key": "budget",
+     "label": "Budget",
+     "validation": {
+      "type": "number"
+     }
+    },
+    {
+     "id": "baseline",
+     "role": "data",
+     "type": "number",
+     "key": "baseline_budget",
+     "label": "Baseline budget",
+     "readOnly": true,
+     "defaultValue": 0,
+     "calculateMode": "generated",
+     "calculate": {
+      "var": "budget"
+     },
+     "validation": {
+      "type": "number"
+     }
+    },
+    {
+     "id": "doubled",
+     "role": "data",
+     "type": "number",
+     "key": "doubled",
+     "label": "Doubled",
+     "calculate": {
+      "*": [
+       {
+        "var": "budget"
+       },
+       2
+      ]
+     },
+     "validation": {
+      "type": "number"
+     }
+    },
+    {
+     "id": "submit-button",
+     "role": "action",
+     "type": "button",
+     "label": "Submit",
+     "action": "submit"
+    }
+   ]
+  },
+  "payload": {
+   "budget": 500,
+   "baseline_budget": 100,
+   "doubled": 7
+  },
+  "secure": {
+   "budget": 500,
+   "baseline_budget": 100,
+   "doubled": 1000
+  }
+ },
+ {
+  "id": "generated-resolves-a-null",
+  "added": "#164",
+  "note": "JFSS 4.2.3 Case C priority 2 — evaluated exactly when the existing value is null.",
+  "definition": {
+   "formId": "parity-generated-null",
+   "version": "2.0.1",
+   "components": [
+    {
+     "id": "budget",
+     "role": "data",
+     "type": "number",
+     "key": "budget",
+     "label": "Budget",
+     "validation": {
+      "type": "number"
+     }
+    },
+    {
+     "id": "baseline",
+     "role": "data",
+     "type": "number",
+     "key": "baseline_budget",
+     "label": "Baseline budget",
+     "readOnly": true,
+     "defaultValue": 0,
+     "calculateMode": "generated",
+     "calculate": {
+      "var": "budget"
+     },
+     "validation": {
+      "type": "number"
+     }
+    },
+    {
+     "id": "submit-button",
+     "role": "action",
+     "type": "button",
+     "label": "Submit",
+     "action": "submit"
+    }
+   ]
+  },
+  "payload": {
+   "budget": 500,
+   "baseline_budget": null
+  },
+  "secure": {
+   "budget": 500,
+   "baseline_budget": 500
+  }
+ },
+ {
+  "id": "conditional-hides-a-field",
+  "added": "#164",
+  "note": "JFSS 10.2 — the value the client submitted for a hidden field is discarded. `secure` omits the key; the browser keeps it in its own payload and submits it, which is S10.1.1 working, so the frontend half asserts only the keys `secure` carries.",
+  "definition": {
+   "formId": "parity-conditional-hidden",
+   "version": "2.0.1",
+   "components": [
+    {
+     "id": "budget",
+     "role": "data",
+     "type": "number",
+     "key": "budget",
+     "label": "Budget",
+     "validation": {
+      "type": "number"
+     }
+    },
+    {
+     "id": "justification",
+     "role": "data",
+     "type": "textarea",
+     "key": "justification",
+     "label": "Justification",
+     "conditional": {
+      "action": "show",
+      "logic": {
+       ">": [
+        {
+         "var": "budget"
+        },
+        1000
+       ]
+      }
+     },
+     "validation": {
+      "type": "string"
+     }
+    },
+    {
+     "id": "submit-button",
+     "role": "action",
+     "type": "button",
+     "label": "Submit",
+     "action": "submit"
+    }
+   ]
+  },
+  "payload": {
+   "budget": 500,
+   "justification": "smuggled past the conditional"
+  },
+  "secure": {
+   "budget": 500
+  }
+ },
+ {
+  "id": "conditional-shows-a-field",
+  "added": "#164",
+  "note": "The same definition on the branch that opens it — a control that discards everything is not a control.",
+  "definition": {
+   "formId": "parity-conditional-shown",
+   "version": "2.0.1",
+   "components": [
+    {
+     "id": "budget",
+     "role": "data",
+     "type": "number",
+     "key": "budget",
+     "label": "Budget",
+     "validation": {
+      "type": "number"
+     }
+    },
+    {
+     "id": "justification",
+     "role": "data",
+     "type": "textarea",
+     "key": "justification",
+     "label": "Justification",
+     "conditional": {
+      "action": "show",
+      "logic": {
+       ">": [
+        {
+         "var": "budget"
+        },
+        1000
+       ]
+      }
+     },
+     "validation": {
+      "type": "string"
+     }
+    },
+    {
+     "id": "submit-button",
+     "role": "action",
+     "type": "button",
+     "label": "Submit",
+     "action": "submit"
+    }
+   ]
+  },
+  "payload": {
+   "budget": 5000,
+   "justification": "The desks are failing."
+  },
+  "secure": {
+   "budget": 5000,
+   "justification": "The desks are failing."
+  }
+ },
+ {
+  "id": "chain-declared-backwards",
+  "added": "#164",
+  "note": "A chain c<-b<-a declared in the worst order. JFSS 9.2 asks for topological order and D-2 reserves the graph; both sides reach the fixed point instead, and this is what holds them to the same one.",
+  "definition": {
+   "formId": "parity-chain",
+   "version": "2.0.1",
+   "components": [
+    {
+     "id": "c",
+     "role": "data",
+     "type": "number",
+     "key": "c",
+     "label": "c",
+     "calculate": {
+      "+": [
+       {
+        "var": "b"
+       },
+       1
+      ]
+     },
+     "validation": {
+      "type": "number"
+     }
+    },
+    {
+     "id": "b",
+     "role": "data",
+     "type": "number",
+     "key": "b",
+     "label": "b",
+     "calculate": {
+      "+": [
+       {
+        "var": "a"
+       },
+       1
+      ]
+     },
+     "validation": {
+      "type": "number"
+     }
+    },
+    {
+     "id": "a",
+     "role": "data",
+     "type": "number",
+     "key": "a",
+     "label": "a",
+     "validation": {
+      "type": "number"
+     }
+    },
+    {
+     "id": "submit-button",
+     "role": "action",
+     "type": "button",
+     "label": "Submit",
+     "action": "submit"
+    }
+   ]
+  },
+  "payload": {
+   "a": 1,
+   "b": 0,
+   "c": 0
+  },
+  "secure": {
+   "a": 1,
+   "b": 2,
+   "c": 3
+  }
+ },
+ {
+  "id": "computed-text-is-not-normalized",
+  "added": "#164",
+  "note": "The 7.3 numeric wrapper is applied by declared type and by nothing else. A computed `string` field takes the raw result; putting it through the wrapper would turn every computed label into 0.",
+  "definition": {
+   "formId": "parity-computed-text",
+   "version": "2.0.1",
+   "components": [
+    {
+     "id": "title",
+     "role": "data",
+     "type": "textfield",
+     "key": "title",
+     "label": "Title",
+     "validation": {
+      "type": "string"
+     }
+    },
+    {
+     "id": "echo",
+     "role": "data",
+     "type": "textfield",
+     "key": "title_echo",
+     "label": "Title echo",
+     "readOnly": true,
+     "calculate": {
+      "var": "title"
+     },
+     "validation": {
+      "type": "string"
+     }
+    },
+    {
+     "id": "submit-button",
+     "role": "action",
+     "type": "button",
+     "label": "Submit",
+     "action": "submit"
+    }
+   ]
+  },
+  "payload": {
+   "title": "Two standing desks",
+   "title_echo": "something else"
+  },
+  "secure": {
+   "title": "Two standing desks",
+   "title_echo": "Two standing desks"
+  }
+ },
+ {
+  "id": "division-by-zero-blank-then-refused",
+  "added": "#164",
+  "note": "Decision D-24 across both sides. Every division by zero is an evaluation failure: the browser renders the field blank and does not block typing, and the submission is refused with the field named. `refusedPaths` is what each side is held to.",
+  "definition": {
+   "formId": "parity-division-by-zero",
+   "version": "2.0.1",
+   "components": [
+    {
+     "id": "total",
+     "role": "data",
+     "type": "number",
+     "key": "total",
+     "label": "Total",
+     "validation": {
+      "type": "number"
+     }
+    },
+    {
+     "id": "count",
+     "role": "data",
+     "type": "number",
+     "key": "count",
+     "label": "Count",
+     "validation": {
+      "type": "integer"
+     }
+    },
+    {
+     "id": "average",
+     "role": "data",
+     "type": "number",
+     "key": "average",
+     "label": "Average",
+     "readOnly": true,
+     "calculate": {
+      "/": [
+       {
+        "var": "total"
+       },
+       {
+        "var": "count"
+       }
+      ]
+     },
+     "validation": {
+      "type": "number"
+     }
+    },
+    {
+     "id": "submit-button",
+     "role": "action",
+     "type": "button",
+     "label": "Submit",
+     "action": "submit"
+    }
+   ]
+  },
+  "payload": {
+   "total": 10,
+   "count": 0,
+   "average": 5
+  },
+  "secure": null,
+  "refusedPaths": [
+   "average"
+  ]
+ }
+]

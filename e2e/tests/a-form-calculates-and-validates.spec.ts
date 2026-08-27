@@ -28,6 +28,11 @@ import { publishForm, type SeededForm } from '../support/forms'
  * be submitted at all — and the accepted path is half of what this file is
  * about. `render-a-form.spec.ts` deliberately asserts nothing about what master
  * data holds; this one has to.
+ *
+ * **Its two submit assertions moved from `form-action` to `submit-success` at
+ * #164** and mean the same thing. `FormRenderPage` recorded that an action had
+ * arrived while submitting was unbuilt; now it submits, and a submission that
+ * happened is what says the form let it through.
  */
 const definition = JSON.parse(
   readFileSync(
@@ -144,7 +149,11 @@ test('a form calculates as it is typed into, and refuses to be submitted incompl
   // invented.
   await page.getByRole('button', { name: 'Submit request' }).click()
 
-  await expect(page.getByTestId('form-action')).toHaveCount(0)
+  // `submit-success` rather than the `form-action` placeholder this asserted
+  // until #164: the page recorded that an action had arrived because submitting
+  // was not built, and it now submits. What is being asserted is unchanged —
+  // that pressing the button while the form refuses does nothing.
+  await expect(page.getByTestId('submit-success')).toHaveCount(0)
   await expect(page.locator('#jfss-title-field-error')).toHaveText('Every request needs a title.')
   await expect(page.locator('#jfss-justification-field-error')).toHaveText(
     'A request over 1,000 needs a justification.',
@@ -192,5 +201,8 @@ test('a form calculates as it is typed into, and refuses to be submitted incompl
 
   await page.getByRole('button', { name: 'Submit request' }).click()
 
-  await expect(page.getByTestId('form-action')).toContainText('submit')
+  // The other half of AC1: a form that refuses everything is not validating, it
+  // is broken. What the accepted submit then *does* is #164's, and
+  // `a-form-is-submitted.spec.ts` is where the stored answer is asserted.
+  await expect(page.getByTestId('submit-success')).toContainText('revision')
 })

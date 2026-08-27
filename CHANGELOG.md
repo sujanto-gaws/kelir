@@ -11,8 +11,10 @@ While the major version is `0`, the public API may change in any release.
 
 Phase 4 opens: the RAD metadata tables and the definition APIs over them, the
 document table group with document types and their numbering rules, one JSON
-Logic engine shared by both sides, and a browser harness that drives a real
-deployment. Two Phase 2 carry-overs land with them, and a third — tenant
+Logic engine shared by both sides, a browser harness that drives a real
+deployment, and the first form a person can actually fill in — rendered from a
+stored definition, evaluating its own rules as they type, and submitted through
+a server that recomputes every figure rather than trusting the one it was sent. Two Phase 2 carry-overs land with them, and a third — tenant
 management — returns from the unscheduled backlog and takes multi-tenant mode
 with it.
 
@@ -166,10 +168,76 @@ changed.
   discovers every JFSS fixture in the repository rather than listing types, so a
   fixture using an undeclared type fails the suite.
 
-  **No rules, deliberately.** Validation is #163 and submitting is #164; the
-  evaluator is not imported by this surface at all, which is also what keeps its
-  588 KB off the render path per decision D-10. A button raises its action and
-  the page says submitting is not built yet, rather than appearing to work.
+  **No rules, deliberately.** Validation and submitting are the two items below,
+  and the evaluator is not imported by this surface at all — which is also what
+  keeps its 588 KB off the render path per decision D-10.
+
+- **A rendered form evaluates its own rules as they are typed into (FR-RAD-010,
+  FR-RAD-006, [#163](https://github.com/sujanto-gaws/kelir/issues/163)).**
+  Validation and calculation in the browser, over the JSON Logic engine decision
+  **D-10** adopted. A `calculate` expression recomputes as its inputs change,
+  branched on the **declared** `calculateMode` and never on whether the
+  operators look deterministic (JFSS S8.1.1); a `conditional` shows, hides,
+  enables or disables the component that carries it; and §5's validation
+  keywords and §6's `rules` decide each field, in the definition's own words
+  where it supplies them.
+
+  **A form shows its verdict only once a submit has been attempted** (decision
+  **D-25**), after which the messages track live so a corrected field clears
+  immediately. Marking every empty box red on a form nobody has touched tells
+  the person in front of it nothing — and on a zero-filled payload an average
+  field fails before the first keystroke, so the same is true of the
+  calculations.
+
+  **A rule the Validation Rule Registry does not define is a defect that is
+  shown, and a rule it defines that the browser cannot decide is named rather
+  than skipped** (decision **D-26**). A check that quietly did not run is
+  indistinguishable from a check that passed, which is the whole of the argument.
+
+  **This is the evaluation, not the rule engine.** The catalogue, the dependency
+  graph, cycle detection and error mapping stay in Sprints 14–16 under decision
+  **D-2**.
+
+- **A filled-in form is submitted, and the server does not believe what the
+  browser computed (FR-RAD-010, FR-RAD-006,
+  [#164](https://github.com/sujanto-gaws/kelir/issues/164)).**
+  `POST /api/v1/rad/forms/{id}/submissions` takes a payload carrying every data
+  key the definition declares — visible or not, which is JFSS S10.1 — and stores
+  a row in `rad_form_submissions` whose payload is **the server's own answer**.
+
+  **This is the Tamper-Proof Pattern, and it is the security-critical control of
+  the phase.** JFSS S8.1 requires the backend to re-evaluate every `calculate`
+  expression and overwrite the submitted value before persistence; S10.2
+  requires the same for every `conditional`, discarding the values of components
+  that resolve to hidden. A submitted total the server accepted because the
+  browser said so is not a rounding bug — it is an invoice for the wrong amount.
+  A `sequenceKey` is overwritten with the row's real position for the same
+  reason, and a key the definition does not declare is dropped rather than
+  stored.
+
+  **A refusal is a refusal, never a partial write.** An expression that produces
+  no value — which since decision **D-24** includes every division by zero — a
+  field that fails its `validation`, and a rule name outside the registry each
+  refuse the whole submission with the S10.3 envelope, whose dot-notation `path`
+  names the field: `line_items.2.quantity` addresses a row. The frontend places
+  those messages against the fields they name.
+
+  **What the server stored comes back, and the page says so if it differs from
+  the screen.** Both sides run one engine compiled for two runtimes, and
+  `parity/forms.json` now holds them to the same answer over whole *submissions*
+  rather than over expressions alone — so a difference is a parity defect rather
+  than a routine correction, which is why it is on the screen instead of in a
+  log. *A form that changes your number without saying so is its own defect.*
+
+  **Filling in a form needs `rad:form:submit`**, which is separate from
+  `rad:form:read`: opening a requisition to read it and raising one are
+  different questions. Only a **published** revision can be filled in.
+
+  **It is not a document yet.** FR-DOC-001..007 — creating a document from a
+  type, its number, its status, its versions — are the next sprint's under
+  decision **D-16**, and the re-evaluation is deliberately callable without a
+  submission row so that it can run inside the transaction that takes a
+  document's number.
 
 ### Changed
 

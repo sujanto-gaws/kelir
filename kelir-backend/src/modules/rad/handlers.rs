@@ -14,6 +14,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use uuid::Uuid;
 
+use super::domain::submission::{Submission, SubmitFormRequest};
 use super::domain::{
     CreateFormRequest, CreateListRequest, Form, FormSummary, ListDefinition, ListSummary,
     LookupOption, LookupQuery, LookupSource, UpdateFormRequest, UpdateListRequest,
@@ -41,6 +42,12 @@ pub fn routes() -> Router<AppState> {
         // A new revision is a new row, so it is a POST that creates something
         // under the revision it is derived from.
         .route("/forms/{id}/revisions", post(create_revision))
+        // A filled-in form, as a sub-collection of the revision it was filled
+        // in against (naming convention §5). Not `POST /forms/{id}/submit`: the
+        // request creates a row that can be read back, which is a resource
+        // rather than a verb — and the row is what makes JFSS S8.1's overwrite
+        // provable rather than merely performed.
+        .route("/forms/{id}/submissions", post(submit_form))
         .route("/lists", get(list_lists).post(create_list))
         .route(
             "/lists/{id}",
@@ -173,6 +180,29 @@ async fn create_revision(
     let form = service::form::create_revision(&state, &caller, id, request).await?;
 
     Ok((StatusCode::CREATED, Json(ItemEnvelope::new(form))))
+}
+
+#[utoipa::path(
+    post, path = "/api/v1/rad/forms/{id}/submissions", tag = "rad",
+    request_body = SubmitFormRequest,
+    responses(
+        (status = 201, description = "Stored, carrying the server's own re-evaluated payload", body = Submission),
+        (status = 403, description = "Missing rad:form:submit"),
+        (status = 404, description = "No such form definition"),
+        (status = 409, description = "That revision is not published"),
+        (status = 422, description = "The payload failed validation, or an expression produced no value")
+    ),
+    security(("bearer" = []))
+)]
+async fn submit_form(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    PathParam(id): PathParam<Uuid>,
+    JsonBody(request): JsonBody<SubmitFormRequest>,
+) -> Result<(StatusCode, Json<ItemEnvelope<Submission>>), AppError> {
+    let submission = service::submission::submit_form(&state, &caller, id, request).await?;
+
+    Ok((StatusCode::CREATED, Json(ItemEnvelope::new(submission))))
 }
 
 #[utoipa::path(

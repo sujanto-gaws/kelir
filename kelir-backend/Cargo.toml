@@ -22,6 +22,24 @@ bumpalo = "3"
 # JWT access tokens (architecture 01 section 18.1).
 jsonwebtoken = "9"
 rand = "0.8"
+# JFSS §5's `pattern` keyword and the Validation Rule Registry §3.1 `regex`
+# rule, on the server side of a `both`-scoped check. Added by #164: the browser
+# decides both with `new RegExp`, and a server that could not decide them would
+# leave a data-integrity rule enforced on exactly the side that is not trusted.
+#
+# **The two engines do not read a pattern identically**, and the registry says
+# so under its own `regex` warning: this crate refuses lookahead and
+# backreferences at compile time, and reads the Perl classes as Unicode where
+# ECMA-262 reads them as ASCII. The interim guidance is to pin digit classes
+# explicitly (`[0-9]`), and resolving it properly is decision **D-15**. Default
+# features, so that behaviour is the one the registry already documents rather
+# than a second, undocumented one produced by a feature flag.
+#
+# Not adding the crate was the alternative and it is worse: it makes the rule
+# pass on this side by default, which is the failure the whole unknown-operator
+# argument is about. It costs nothing new to build — `jsonschema` already
+# depends on it.
+regex = "1"
 # Refresh tokens are stored as a SHA-256 digest, never in the clear.
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
