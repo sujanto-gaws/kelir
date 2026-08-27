@@ -483,7 +483,8 @@ mod tests {
             .collect();
         assert!(
             undocumented.is_empty(),
-            "annotated but absent from the published document — the handler is              probably missing from `paths(...)`: {undocumented:?}"
+            "annotated but absent from the published document — the handler is \
+             probably missing from `paths(...)`: {undocumented:?}"
         );
 
         // A served route is mounted under a prefix its annotation spells out in

@@ -62,7 +62,7 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use kelir_backend::config::{AppConfig, AppEnv, BootstrapAdmin};
-use kelir_backend::mail::Mailer;
+use kelir_backend::mail::{Mail, Mailer};
 use kelir_backend::state::AppState;
 use kelir_backend::{db, modules, router};
 
@@ -145,6 +145,15 @@ impl TestApp {
     /// administrator lands in, and that is the tenant every tenant-administration
     /// check compares against.
     pub async fn spawn_with(adjust: impl FnOnce(&mut AppConfig)) -> Self {
+        Self::spawn_with_mailer(adjust, Mailer::captured()).await
+    }
+
+    /// A [`TestApp::spawn_with`] whose mailer the caller supplies.
+    ///
+    /// Exists for one mailer: a [`Mailer::captured_taking`] with a delay, which
+    /// is the slow transport #202 needed and could not inject. Everything else
+    /// wants the default captured one.
+    pub async fn spawn_with_mailer(adjust: impl FnOnce(&mut AppConfig), mailer: Mailer) -> Self {
         let maintenance_url = server_url();
         let database_name = format!("kelir_test_{}", Uuid::now_v7().simple());
 
@@ -189,7 +198,7 @@ impl TestApp {
         // gets it. Fetching the token from `password_reset_tokens` instead
         // would prove the row was written and nothing about whether anybody
         // could have used it.
-        let state = AppState::with_mailer(pool.clone(), config, Mailer::captured());
+        let state = AppState::with_mailer(pool.clone(), config, mailer);
 
         Self {
             pool,
@@ -290,6 +299,51 @@ impl TestApp {
 
     pub async fn delete(&self, uri: &str, token: Option<&str>) -> TestResponse {
         self.send(Method::DELETE, uri, token, None).await
+    }
+
+    /// The messages delivered once `count` of them have arrived.
+    ///
+    /// **Why waiting is now part of reading.** The reset flow hands its send to
+    /// the runtime rather than awaiting it (#202), so a message is delivered
+    /// shortly *after* the response the test just read. Reading
+    /// `captured_messages()` straight away would be a race whose green result
+    /// depends on the scheduler.
+    ///
+    /// Panics as a harness failure if the count does not arrive, because a test
+    /// that hangs here is a broken send path rather than a slow one.
+    pub async fn mail_delivered(&self, count: usize) -> Vec<Mail> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+
+        loop {
+            let delivered = self.state.mailer.captured_messages();
+
+            if delivered.len() >= count {
+                return delivered;
+            }
+
+            if std::time::Instant::now() >= deadline {
+                harness_failure(
+                    &format!("wait for {count} delivered message(s)"),
+                    &format!("{} arrived", delivered.len()),
+                    &self.database_name,
+                );
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+    }
+
+    /// Whatever has been delivered once any detached send has had its turn.
+    ///
+    /// For the assertions that no mail was sent. There is no arrival to wait
+    /// for, so this yields to the runtime and gives a queued send a window
+    /// instead — small, because it is paid by every test that calls it, and
+    /// enough for an in-process captured send whose only cost is a lock.
+    pub async fn mail_settled(&self) -> Vec<Mail> {
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        self.state.mailer.captured_messages()
     }
 
     /// Signs in naming a tenant, as a multi-tenant deployment's client does.

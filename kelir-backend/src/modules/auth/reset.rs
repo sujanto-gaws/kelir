@@ -13,10 +13,38 @@
 //! # What the two endpoints are guarding against
 //!
 //! **Account enumeration.** `request_reset` answers identically whether the
-//! address belongs to an account or not — same status, same body, and no
-//! branch a caller can time. Everything that could differ (no such user, an
-//! inactive one, a send that failed) happens after the response is already
-//! decided.
+//! address belongs to an account or not — same status, same body, and nothing
+//! on the request's own path that waits on the network. Everything that could
+//! differ in kind (no such user, an inactive one, a send that failed) happens
+//! after the response is already decided, and the send is handed to the
+//! runtime rather than awaited ([`crate::mail::Mailer::send_detached`]).
+//!
+//! **What that leaves, measured rather than glossed** (#202). The two paths
+//! still do different amounts of *local* work: an unknown identifier is one
+//! indexed `SELECT`, and a known active one outside the cooldown is three
+//! `SELECT`s and two `INSERT`s. Against mailpit on the loopback interface, 29
+//! samples of each, p50:
+//!
+//! | | known account | unknown identifier |
+//! |---|---|---|
+//! | awaiting the send | 90.1ms | 9.8ms |
+//! | send detached | 26.4ms | 10.5ms |
+//!
+//! So the oracle is **narrowed, not closed** — 16ms rather than 80, and the two
+//! ranges still do not overlap. The claim this comment used to make, "no branch
+//! a caller can time", was false either way and is not made again: what is
+//! guaranteed is that no caller's measurement includes a mail server, which is
+//! the part that grows without bound when a relay is slow or blackholing.
+//!
+//! **Why the rest stays on the path.** Detaching the token issue as well would
+//! flatten both paths to that one `SELECT` — and would break the throttle
+//! below it, because [`RESEND_COOLDOWN_SECONDS`] is enforced by reading the
+//! last issued row before inserting the next, and nothing in the schema stops
+//! two of those interleaving. Concurrent requests would each see no recent
+//! token and each send a link, which is the mailbox flooding this endpoint has
+//! a control for. Closing the residual properly means padding the fast path to
+//! a fixed budget, which is a different control with a different failure mode
+//! and is not taken here (**D-31**).
 //!
 //! **Mailbox flooding.** A caller who knows an address could otherwise send its
 //! owner a reset link every second. [`RESEND_COOLDOWN`] is a per-account
@@ -179,22 +207,19 @@ pub async fn request_reset(
         token.token
     );
 
-    state
-        .mailer
-        .send(Mail {
-            to: email,
-            subject: format!("Reset your {} password", state.config.app_name),
-            body: format!(
-                "Somebody asked to reset the password for your {} account.\n\n\
-                 Open this link to choose a new one:\n\n  {link}\n\n\
-                 It stops working in {TOKEN_TTL_MINUTES} minutes, and using it \
-                 signs you out everywhere else.\n\n\
-                 If this was not you, nothing has changed and you can ignore \
-                 this message.\n",
-                state.config.app_name
-            ),
-        })
-        .await;
+    state.mailer.send_detached(Mail {
+        to: email,
+        subject: format!("Reset your {} password", state.config.app_name),
+        body: format!(
+            "Somebody asked to reset the password for your {} account.\n\n\
+             Open this link to choose a new one:\n\n  {link}\n\n\
+             It stops working in {TOKEN_TTL_MINUTES} minutes, and using it \
+             signs you out everywhere else.\n\n\
+             If this was not you, nothing has changed and you can ignore \
+             this message.\n",
+            state.config.app_name
+        ),
+    });
 
     // Audited as an event on the user, because it is one: somebody started a
     // credential change on that account. The token is not in the record — it is

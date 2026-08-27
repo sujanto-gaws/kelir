@@ -383,7 +383,11 @@ async fn guard_rebinding(
         "reference",
         "DOCUMENTS_WITHOUT_A_PINNED_FORM",
         format!(
-            "`{type_code}` has {unpinned} document(s) that pinned no form revision, so              they render against whatever this type is bound to; changing the binding              would re-render them against a definition they were not filled against.              Documents created against a form pin it and are unaffected"
+            "`{type_code}` has {unpinned} document(s) that pinned no form revision, so \
+             they render against whatever this type is bound to; changing the \
+             binding would re-render them against a definition they were not \
+             filled against. Documents created against a form pin it and are \
+             unaffected"
         ),
     )]))
 }

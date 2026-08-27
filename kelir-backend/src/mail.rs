@@ -14,6 +14,7 @@
 //! [`Mailer::send`]'s signature says so by returning `()`.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use lettre::message::header::ContentType;
 use lettre::transport::smtp::client::{Tls, TlsParameters};
@@ -54,6 +55,15 @@ pub enum Mailer {
     Captured {
         sent: Arc<Mutex<Vec<Mail>>>,
         from: String,
+        /// How long a send takes before the message is kept.
+        ///
+        /// Zero for the harness's ordinary mailer. It exists because #202 was a
+        /// timing defect that the suite could not see: `Mailer` is an enum, so
+        /// a slow transport could not be injected, and a captured send is free
+        /// — which made the one property worth asserting (that a caller waits
+        /// for no part of delivery) unassertable. A delay here is that slow
+        /// transport.
+        delay: Duration,
     },
 }
 
@@ -65,9 +75,10 @@ impl std::fmt::Debug for Mailer {
                 .debug_struct("Logged")
                 .field("from", from)
                 .finish(),
-            Self::Captured { sent, from } => formatter
+            Self::Captured { sent, from, delay } => formatter
                 .debug_struct("Captured")
                 .field("from", from)
+                .field("delay", delay)
                 .field(
                     "sent",
                     &sent.lock().map(|sent| sent.len()).unwrap_or_default(),
@@ -122,9 +133,20 @@ impl Mailer {
 
     /// A mailer that keeps what it is given, for tests.
     pub fn captured() -> Self {
+        Self::captured_taking(Duration::ZERO)
+    }
+
+    /// A [`Mailer::captured`] whose send takes `delay` before the message
+    /// appears.
+    ///
+    /// The injectable slow transport [`Mailer::Captured::delay`] describes. A
+    /// test that wants to prove a caller is not waiting for delivery needs
+    /// delivery to be slow enough that waiting for it would be obvious.
+    pub fn captured_taking(delay: Duration) -> Self {
         Self::Captured {
             sent: Arc::new(Mutex::new(Vec::new())),
             from: "no-reply@kelir.test".to_owned(),
+            delay,
         }
     }
 
@@ -137,11 +159,48 @@ impl Mailer {
         }
     }
 
+    /// Hands a message to the runtime and returns without waiting for it.
+    ///
+    /// **The request that causes a send must not wait for one** (#202).
+    /// `request_reset` awaited [`Mailer::send`], and `Smtp`'s send is a
+    /// complete SMTP transaction: measured against mailpit on the loopback
+    /// interface, a request for a known account answered in a p50 of 90ms and
+    /// one for an unknown account in 9.8ms, with the two ranges not
+    /// overlapping. That is an account-enumeration oracle on an endpoint that
+    /// is deliberately not rate-limited, and it sat behind a module comment
+    /// promising "no branch a caller can time".
+    ///
+    /// Nothing is lost by detaching it: [`Mailer::send`] already reports no
+    /// failure to anybody, so awaiting it only ever bought the caller a
+    /// measurement.
+    ///
+    /// **Two things it does cost, named rather than discovered.** A message
+    /// still in flight when the process stops is lost — the person asks again
+    /// and the next request sends one, which is the same outcome a failed
+    /// delivery already had. And the send is no longer throttled by the request
+    /// that caused it, so a flood of requests is a flood of concurrent SMTP
+    /// transactions; what bounds that today is
+    /// [`crate::modules::auth::reset::RESEND_COOLDOWN_SECONDS`], one message
+    /// per account per minute, which is a bound on the flood and not on the
+    /// number of accounts in it. Both belong to the notification module that
+    /// absorbs this one in Phase 6 (SDD §6.11), where the queue this should
+    /// hand to actually exists.
+    pub fn send_detached(&self, mail: Mail) {
+        let mailer = self.clone();
+
+        tokio::spawn(async move { mailer.send(mail).await });
+    }
+
     /// Sends, and never reports a failure to the caller.
     ///
     /// See the module comment: the one flow that sends mail must answer
     /// identically whether an address existed, so it cannot surface a delivery
     /// error either.
+    ///
+    /// **Called on the request's own path by nobody** — see
+    /// [`Mailer::send_detached`], which is what the reset flow uses. It stays
+    /// `pub` because the detached path calls it and its unit tests drive it
+    /// directly.
     pub async fn send(&self, mail: Mail) {
         match self {
             Self::Logged { from } => {
@@ -152,7 +211,11 @@ impl Mailer {
                     "no SMTP host is configured, so this message was not sent"
                 );
             }
-            Self::Captured { sent, .. } => {
+            Self::Captured { sent, delay, .. } => {
+                if !delay.is_zero() {
+                    tokio::time::sleep(*delay).await;
+                }
+
                 if let Ok(mut sent) = sent.lock() {
                     sent.push(mail);
                 }

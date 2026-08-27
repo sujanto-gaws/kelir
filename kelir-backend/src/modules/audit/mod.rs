@@ -218,24 +218,34 @@ fn genesis_hash() -> String {
 /// verifies a chain is a re-chaining migration plus a decision about what a row
 /// predating the version means to a verifier.
 ///
-/// It has been changed once, on 2026-08-26 for #145, while that was still free —
-/// nothing had ever verified a chain, so no stored value had ever been relied
-/// on. Two things changed together, because a second break would not have been
-/// free:
+/// **What the encoding guarantees.** Every present field is hashed as eight
+/// bytes of big-endian length followed by its bytes, and every absent one as
+/// the [`ABSENT`] sentinel length and no bytes. That is two properties, and
+/// each answers a way a rewrite could go unnoticed:
 ///
-/// * **`old_value`, `new_value` and `created_at` joined the hash.** They had
-///   never been in it. `record` writes all three, `GET /parties/{id}/audit`
-///   publishes all three, and each could be rewritten without disturbing this
-///   row's hash or any hash after it — the chain still verified. A control that
-///   covers who and when but not *what* protects the half nobody would bother to
-///   forge: the metadata says somebody changed this party at this time, and only
-///   the payload says from what, to what.
-/// * **Every field is length-prefixed.** Concatenating raw bytes leaves the
+/// * **A field boundary cannot be moved.** Concatenating raw bytes leaves the
 ///   boundaries floating: an `event_type` of `Party.Cre` with an `action` of
-///   `atedX` hashed identically to `Party.Created` with `X`. Eight bytes of
-///   big-endian length in front of each field removes the class, and gives
-///   *absent* a representation of its own — a `None` payload and a payload of
-///   JSON `null` are different rows to the hash.
+///   `atedX` hashed identically to `Party.Created` with `X`.
+/// * **Absent is not empty.** A `NULL` `ip_address` and an `''` one are
+///   different rows and hash differently, as are a `NULL` `reason` and an empty
+///   one, and an absent payload and a JSON `null` one. The sentinel is what
+///   makes that true of *every* optional field rather than only of the two
+///   whose empty form is already four bytes long.
+///
+/// It has been changed twice, both times while that was still free — nothing
+/// has ever verified a chain (FR-AUD-003 is Phase 6), so no stored value has
+/// ever been relied on:
+///
+/// * **2026-08-26, #145.** `old_value`, `new_value` and `created_at` joined the
+///   hash and the length prefixes arrived. The three had never been in it —
+///   `record` writes all three and `GET /parties/{id}/audit` publishes all
+///   three, and each could be rewritten without disturbing this row's hash or
+///   any hash after it. A control that covers who and when but not *what*
+///   protects the half nobody would bother to forge.
+/// * **2026-08-27, #203.** Absent stopped being hashed as zero bytes. The
+///   change above claimed the length prefix already told absent from
+///   present-but-empty; it did not, and the two `Option<&str>` columns were the
+///   proof.
 pub fn chain_hash(
     previous_hash: &str,
     id: &Uuid,
@@ -246,42 +256,57 @@ pub fn chain_hash(
     let new_value = entry.new_value.as_ref().map(canonical_json);
 
     let mut hasher = Sha256::new();
-    let mut field = |bytes: &[u8]| {
-        hasher.update((bytes.len() as u64).to_be_bytes());
-        hasher.update(bytes);
+    let mut field = |bytes: Option<&[u8]>| match bytes {
+        Some(bytes) => {
+            hasher.update((bytes.len() as u64).to_be_bytes());
+            hasher.update(bytes);
+        }
+        None => hasher.update(ABSENT.to_be_bytes()),
     };
 
-    field(previous_hash.as_bytes());
-    field(id.as_bytes());
-    field(entry.tenant_id.as_bytes());
-    field(
+    field(Some(previous_hash.as_bytes()));
+    field(Some(id.as_bytes()));
+    field(Some(entry.tenant_id.as_bytes()));
+    field(Some(
         created_at
             .to_rfc3339_opts(SecondsFormat::Micros, true)
             .as_bytes(),
-    );
-    field(entry.event_type.as_bytes());
-    field(entry.action.as_bytes());
-    field(entry.object_type.as_bytes());
-    field(entry.object_id.as_bytes());
-    field(optional(
+    ));
+    field(Some(entry.event_type.as_bytes()));
+    field(Some(entry.action.as_bytes()));
+    field(Some(entry.object_type.as_bytes()));
+    field(Some(entry.object_id.as_bytes()));
+    field(
         entry
             .actor_user_id
             .as_ref()
             .map(|actor| actor.as_bytes().as_slice()),
-    ));
-    field(optional(entry.ip_address.map(str::as_bytes)));
-    field(optional(entry.reason.map(str::as_bytes)));
-    field(optional(old_value.as_deref().map(str::as_bytes)));
-    field(optional(new_value.as_deref().map(str::as_bytes)));
+    );
+    field(entry.ip_address.map(str::as_bytes));
+    field(entry.reason.map(str::as_bytes));
+    field(old_value.as_deref().map(str::as_bytes));
+    field(new_value.as_deref().map(str::as_bytes));
 
     format!("sha256:{}", hex(&hasher.finalize()))
 }
 
-/// An absent field is zero bytes, which the length prefix keeps distinct from a
-/// present-but-empty one.
-fn optional(bytes: Option<&[u8]>) -> &[u8] {
-    bytes.unwrap_or(&[])
-}
+/// The length prefix an **absent** field is hashed as, in place of its bytes.
+///
+/// A present field is hashed as its own length followed by its bytes, so a
+/// present-but-empty one is a prefix of `0` and nothing. Absent needs a prefix
+/// no present field can produce, and `u64::MAX` is that: a field of that length
+/// is sixteen exabytes and cannot be constructed, let alone stored in the
+/// column this is hashing.
+///
+/// **The guarantee is the sentinel's, not the length prefix's.** It replaced a
+/// helper that hashed `None` as zero bytes and a doc comment claiming the
+/// prefix kept the two apart; it did not — `ip_address` `NULL` and `''` hashed
+/// identically, and so did `reason`, so either column could be rewritten either
+/// way without breaking the chain that exists to make a rewrite detectable
+/// (#203). The claim was true of *payloads* only, and for a different reason:
+/// `None` is SQL `NULL` while `Some(Value::Null)` canonicalises to the four
+/// bytes `null`, which is a present field of length four.
+const ABSENT: u64 = u64::MAX;
 
 /// The payload rendered the way PostgreSQL renders `jsonb`.
 ///
@@ -615,6 +640,63 @@ mod tests {
         assert_ne!(
             chain_hash(&genesis_hash(), &id, at(), &absent),
             chain_hash(&genesis_hash(), &id, at(), &null)
+        );
+    }
+
+    #[test]
+    fn an_absent_optional_field_is_not_the_same_as_an_empty_one() {
+        // #203: four entries differing only in whether `ip_address` and
+        // `reason` are absent or present-but-empty hashed to one value, so
+        // either column could be rewritten either way and the chain still
+        // verified. The four hashes below must be four.
+        //
+        // Seen red (coding standard §2.9) against `ABSENT` restored to `0`,
+        // which is what the previous `optional` helper hashed a `None` as: all
+        // four collapse to the same digest.
+        let tenant = Uuid::now_v7();
+        let id = Uuid::now_v7();
+
+        let bare = entry(tenant, "LOGIN");
+
+        let mut empty_ip = entry(tenant, "LOGIN");
+        empty_ip.ip_address = Some("");
+
+        let mut empty_reason = entry(tenant, "LOGIN");
+        empty_reason.reason = Some("");
+
+        let mut both_empty = entry(tenant, "LOGIN");
+        both_empty.ip_address = Some("");
+        both_empty.reason = Some("");
+
+        let hashes: Vec<String> = [&bare, &empty_ip, &empty_reason, &both_empty]
+            .iter()
+            .map(|entry| chain_hash(&genesis_hash(), &id, at(), entry))
+            .collect();
+
+        let distinct: std::collections::BTreeSet<&String> = hashes.iter().collect();
+
+        assert_eq!(
+            distinct.len(),
+            hashes.len(),
+            "absent and present-but-empty hash alike: {hashes:?}"
+        );
+    }
+
+    #[test]
+    fn an_absent_actor_is_not_the_same_as_the_nil_actor() {
+        // The other `Option` in the entry, and the one where "empty" has a
+        // natural spelling: an unauthenticated event writes no actor, and
+        // `Uuid::nil()` is sixteen zero bytes somebody could write instead.
+        let tenant = Uuid::now_v7();
+        let id = Uuid::now_v7();
+
+        let absent = entry(tenant, "LOGIN_FAILED");
+        let mut nil_actor = entry(tenant, "LOGIN_FAILED");
+        nil_actor.actor_user_id = Some(Uuid::nil());
+
+        assert_ne!(
+            chain_hash(&genesis_hash(), &id, at(), &absent),
+            chain_hash(&genesis_hash(), &id, at(), &nil_actor)
         );
     }
 
