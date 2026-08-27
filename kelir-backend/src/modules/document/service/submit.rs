@@ -37,6 +37,35 @@
 //! every concurrent submit of that type behind a document that is about to be
 //! refused.
 //!
+//! # What the order makes true, which is more than #158's policy promised
+//!
+//! **A submission refused by the re-evaluation burns no number on *either*
+//! policy**, because it never reaches step 4. #158's `AllowGaps` names "a number
+//! lost to a failed submission" as its trade, and the trade is real for
+//! everything that can fail *after* the allocation — it is simply not paid on
+//! the failure a person actually causes, which is an unfinished form.
+//!
+//! That is a better outcome than the policy promised and it is not free: it is a
+//! property of this order and nothing else, so `documents_submit.rs` pins it.
+//! On a `Gapless` rule the wrong order is invisible — the number rolls back with
+//! the transaction — and the only test that catches it is the gap-tolerant one.
+//!
+//! # The connection cost, and the defect this path found in the allocator
+//!
+//! Everything from step 2 to step 7 runs on **one** connection. It has to: a
+//! submit that took a second connection while holding a transaction on the first
+//! deadlocks a pool at a concurrency below what the pool can serve, every task
+//! holding one and waiting for one nobody will release.
+//!
+//! `numbering_service::allocate` did exactly that until Sprint 9 — it read the
+//! rule's gap policy from `state.pool` — and twenty-four concurrent submits
+//! against a five-connection pool answered 500. It is
+//! [#118](https://github.com/sujanto-gaws/kelir/issues/118) exactly, and it
+//! survived Sprint 7 because no test called `allocate` under load. The fix is
+//! `numbering_repository::gap_policy`, which reads the policy on the caller's
+//! own connection; the rule for anything added here is that it does not open a
+//! second one.
+//!
 //! [#158]: https://github.com/sujanto-gaws/kelir/issues/158
 //! [#168]: https://github.com/sujanto-gaws/kelir/issues/168
 

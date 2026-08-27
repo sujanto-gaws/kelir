@@ -345,9 +345,15 @@ pub async fn allocate(
     document_type_id: Uuid,
     context: &AllocationContext,
 ) -> Result<String, AppError> {
-    let policy = repo::find_rule(&state.pool, tenant_id, document_type_id)
+    // **On the caller's transaction, not on the pool.** Reading the policy from
+    // `state.pool` takes a second connection while the caller holds a
+    // transaction on the first, so a submit costs two — and twenty-four
+    // concurrent submits against a five-connection pool deadlock, every task
+    // holding one and waiting for one nobody will release. That is #118's shape
+    // and it survived here because no caller used `allocate` under load until
+    // Sprint 9's submit did.
+    let policy = repo::gap_policy(&mut **transaction, tenant_id, document_type_id)
         .await?
-        .map(|rule| rule.gap_policy)
         .unwrap_or(GapPolicy::Gapless);
 
     match policy {

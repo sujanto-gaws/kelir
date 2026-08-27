@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT allow_gaps\n        FROM document_type_numbering_rules\n        WHERE tenant_id = $1 AND document_type_id = $2\n          AND is_active AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "allow_gaps",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7d907ca895a44351f7fbdd454b4ea8e01585c218caf909f04901986ce6b1abe3"
+}
