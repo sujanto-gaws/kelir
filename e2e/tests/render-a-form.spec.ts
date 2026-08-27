@@ -167,15 +167,18 @@ test('a published definition renders as a form, and every part of it comes from 
 
   // --- An action reaches the form, and the form's own rules answer it ------
   //
-  // Submitting is #164; whether a submission may happen at all is the
-  // definition's rules, which #163 made this form evaluate. So a click on a
-  // form nobody has filled in is *received* and *refused*, and the refusal is
-  // the evidence the button is wired — the accepted path is
-  // `a-form-calculates-and-validates.spec.ts`, which seeds a supplier and fills
-  // the form in properly.
+  // Whether a submission may happen at all is the definition's rules, which
+  // #163 made this form evaluate. So a click on a form nobody has filled in is
+  // *received* and *refused*, and the refusal is the evidence the button is
+  // wired — the accepted path is `a-form-calculates-and-validates.spec.ts`,
+  // which seeds a supplier and fills the form in properly, and what an accepted
+  // submit then stores is `a-form-is-submitted.spec.ts`.
   await page.getByRole('button', { name: 'Submit request' }).click()
 
   await expect(page.getByText('Every request needs a title.')).toHaveCount(0)
   await expect(page.locator('#jfss-supplier-field-error')).toBeVisible()
-  await expect(page.getByTestId('form-action')).toHaveCount(0)
+  // `submit-success` rather than the `form-action` placeholder this asserted
+  // until #164: the page recorded that an action had arrived because submitting
+  // was not built, and it now submits. Nothing was stored, which is the claim.
+  await expect(page.getByTestId('submit-success')).toHaveCount(0)
 })
