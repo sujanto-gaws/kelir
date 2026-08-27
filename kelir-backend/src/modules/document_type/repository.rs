@@ -166,6 +166,79 @@ async fn workflows_of<'e, E: PgExecutor<'e>>(
         .collect())
 }
 
+/// Reads a type's current form binding **and holds the type row** for the rest
+/// of the transaction.
+///
+/// `FOR UPDATE` rather than `FOR SHARE`, and the strength is load-bearing.
+/// [`count_documents_without_a_pinned_form`] counts rows a concurrent document
+/// creation adds to, and coding standard §2.5 puts the lock on what the *check*
+/// read — so the question is what both sides of that race go through.
+///
+/// **The answer is the foreign key, not a convention.** Inserting a row into
+/// `documents` takes a `FOR KEY SHARE` on the `document_types` row its
+/// `document_type_id` names, and PostgreSQL's lock matrix makes `FOR UPDATE`
+/// conflict with `FOR KEY SHARE` while `FOR NO KEY UPDATE` does not. A rebinding
+/// therefore serializes against a document being created **whatever Sprint 9's
+/// [#167] does** — which is the difference between a rule and a note left for
+/// somebody to remember. `a_document_created_during_the_rebinding_is_not_missed`
+/// holds it, and goes green the moment the lock is weakened by one step.
+///
+/// The outer `Option` is "no such type"; the inner one is "the type is bound to
+/// no form", which is a real state — §6.2 makes `form_id` nullable.
+///
+/// [#167]: https://github.com/sujanto-gaws/kelir/issues/167
+pub async fn lock_type_binding(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<Option<Option<Uuid>>, sqlx::Error> {
+    let row = sqlx::query_scalar!(
+        r#"
+        SELECT form_id FROM document_types
+        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+        FOR UPDATE
+        "#,
+        tenant_id,
+        id
+    )
+    .fetch_optional(&mut **transaction)
+    .await?;
+
+    Ok(row)
+}
+
+/// How many live documents of this type pinned **no** form revision.
+///
+/// These are the only documents a rebinding could damage. A document that
+/// pinned one renders against that one forever, whatever the type is later
+/// pointed at (§6.2's comment on `documents.form_id`, and the whole reason a
+/// published revision is immutable); a document that pinned none has nothing to
+/// render against but its type's *current* binding, so moving that binding
+/// silently re-renders it against a definition nobody filled in.
+///
+/// Counted rather than tested for existence, because the refusal says how many
+/// — an administrator who is told "some documents" cannot tell a stray test row
+/// from a year of production.
+pub async fn count_documents_without_a_pinned_form<'e, E: PgExecutor<'e>>(
+    executor: E,
+    tenant_id: Uuid,
+    document_type_id: Uuid,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar!(
+        r#"
+        SELECT count(*) AS "count!" FROM documents
+        WHERE tenant_id = $1
+          AND document_type_id = $2
+          AND form_id IS NULL
+          AND deleted_at IS NULL
+        "#,
+        tenant_id,
+        document_type_id
+    )
+    .fetch_one(executor)
+    .await
+}
+
 /// Reads a form **and holds it** for the rest of the transaction.
 ///
 /// `FOR SHARE` rather than a plain read, and that is the whole point of this

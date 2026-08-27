@@ -14,7 +14,9 @@ document table group with document types and their numbering rules, one JSON
 Logic engine shared by both sides, a browser harness that drives a real
 deployment, and the first form a person can actually fill in — rendered from a
 stored definition, evaluating its own rules as they type, and submitted through
-a server that recomputes every figure rather than trusting the one it was sent. Two Phase 2 carry-overs land with them, and a third — tenant
+a server that recomputes every figure rather than trusting the one it was sent.
+An administrator binds a type to a published form without a developer, which is
+the last piece of that loop. Two Phase 2 carry-overs land with them, and a third — tenant
 management — returns from the unscheduled backlog and takes multi-tenant mode
 with it.
 
@@ -85,6 +87,42 @@ changed.
   `/api/v1/document-types` manages the types that documents are created from —
   each bound to a form definition, so a type whose form does not exist cannot be
   saved.
+- **A document type is configured against a published form, by an administrator
+  rather than by a developer (FR-RAD-008,
+  [#165](https://github.com/sujanto-gaws/kelir/issues/165)).** This closes the
+  loop Sprint 7 opened: form definitions are stored, document types are stored,
+  and the two are now joined through the API rather than through a migration or
+  a seed script. Choosing the form, choosing the numbering rule and saving a
+  type documents can be created from are all configuration.
+
+  **Re-pointing a type at a newer form revision is allowed, and existing
+  documents keep the revision they were filled against** (decision **D-30**).
+  Refusing outright was the alternative and it is worse: a form is revised by
+  publishing the next revision, so a type that could never be re-pointed would
+  be stuck on revision 1 from the moment its first document existed.
+
+  **It is refused in exactly one case — while a document of that type pinned no
+  revision at all.** A document carries its own `form_id` and renders through
+  that, so moving the type's binding cannot reach it; but the column is
+  nullable, and a document that pinned nothing has only the type's *current*
+  binding to render against. That is the difference between a guarantee and a
+  comment describing one, and it is enforced by the foreign key rather than by
+  a convention: creating a document takes a lock on the type row that a
+  rebinding conflicts with.
+
+  **Two refusals that #157 wrote were only ever checked on create.** Binding a
+  form that does not exist, or one that is still a draft, was asserted on
+  `POST` and by nothing on `PUT` — removing the check from the update path left
+  every test green. Both are now checked where the update makes them.
+
+  **And the three numbering-rule routes were serving traffic with their
+  authorization asserted by nobody.** #158 added them after the table that binds
+  each document-type route to its permission was written, and nothing extended
+  it. `GET` needs `document-type:read`; `PUT` and `DELETE` need
+  `document-type:update`. The behaviour has not changed — the checks were
+  always in the service — but until now a mutation removing one would have gone
+  unnoticed.
+
 - **Numbering rules (FR-DTYPE-002).** A document type carries a numbering rule
   with a scoped sequence, so numbers are unique within the scope that matters
   (tenant, facility, year) rather than globally. `0016_numbering_gap_policy.sql`

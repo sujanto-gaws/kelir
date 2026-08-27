@@ -72,6 +72,36 @@ fn type_routes(target: Uuid, nonce: usize) -> Vec<Route> {
             permission: "document-type:delete",
             body: None,
         },
+        // The numbering rule is a sub-resource of the type rather than a
+        // resource beside it, so it carries the type's permissions rather than
+        // three of its own — `read` to see the rule, `update` to set or clear
+        // it. **These three were serving traffic with their authorization
+        // asserted by nobody**: #158 built them and this table, written for
+        // #157, was never extended to cover them. Added by #165, whose AC4 is
+        // that the rule is selectable on the type — by somebody entitled to
+        // select it.
+        Route {
+            method: Method::GET,
+            path: format!("/api/v1/document-types/{target}/numbering-rule"),
+            permission: "document-type:read",
+            body: None,
+        },
+        Route {
+            method: Method::PUT,
+            path: format!("/api/v1/document-types/{target}/numbering-rule"),
+            permission: "document-type:update",
+            body: Some(json!({
+                "ruleTemplate": "TEST-{sequence}",
+                "sequenceScope": "GLOBAL",
+                "sequencePadding": 6,
+            })),
+        },
+        Route {
+            method: Method::DELETE,
+            path: format!("/api/v1/document-types/{target}/numbering-rule"),
+            permission: "document-type:update",
+            body: None,
+        },
     ]
 }
 
