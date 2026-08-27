@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { expect, test, type Page } from '@playwright/test'
 
 import { createSupplier, runSuffix, signInOverApi, type ApiSession } from '../support/api'
-import { createDocumentType, type SeededDocumentType } from '../support/documents'
+import { createDocumentType, createDraft, type SeededDocumentType } from '../support/documents'
 import { credentials } from '../support/env'
 import { publishForm, type SeededForm } from '../support/forms'
 
@@ -165,7 +165,16 @@ test('a document is created from a type, filled in, submitted, found and moved',
   expect(number, 'the submit assigned a number').toMatch(/^PR-/)
 
   // The form is read-only now, which is the mode the status decides.
-  await expect(page.getByTestId('document-form')).toBeDisabled()
+  //
+  // **Asserted on a control inside the fieldset rather than on the fieldset.**
+  // `toBeDisabled` follows the accessibility notion of disabled, and a
+  // `<fieldset disabled>` is not itself disabled by it — only its descendants
+  // are. The first CI run reported `unexpected value "enabled"` against an
+  // element whose own call log printed `<fieldset disabled …>`, which is the
+  // assertion being wrong rather than the product. Asserting a field is also
+  // the better claim: what matters is that nobody can type into it.
+  await expect(page.getByTestId('document-form')).toHaveAttribute('disabled', '')
+  await expect(page.locator('#jfss-title-field')).toBeDisabled()
 
   // --- It appears in the list, findable by what it is called ---------------
   await page.goto('/documents')
@@ -196,13 +205,17 @@ test('a tab a later phase fills says what will fill it', async ({ page }) => {
   // #172 AC4, in a browser: neither an empty tab nor a silent one. Asserted
   // here rather than only in the component spec because the failure it guards
   // against — a tab that renders blank — is a thing a person sees.
+  //
+  // **It seeds its own document rather than reusing the flow above's.** The
+  // first version opened the document that test created, and when that test
+  // failed on CI this one failed too — reporting a row it could not find rather
+  // than the tabs it is about. `README.md`'s first rule, learned again.
+  const own = await createDraft(session, documentType, `Tabs ${suffix}`)
+
   await signIn(page)
+  await page.goto(`/documents/${own}`)
 
-  await page.goto('/documents')
-  await page.getByTestId('documents-search').fill(title)
-  await page.getByTestId('documents-search').press('Enter')
-
-  await page.getByRole('row').filter({ hasText: title }).click()
+  await expect(page.getByTestId('document-title')).toHaveText(`Tabs ${suffix}`)
 
   await page.getByTestId('tab-attachments').click()
   await expect(page.getByTestId('panel-attachments')).toContainText('Phase 6')

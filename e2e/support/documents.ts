@@ -67,3 +67,30 @@ export async function createDocumentType(
 
   return { id, typeCode, name }
 }
+
+/**
+ * Creates a draft document of `documentType` over the API.
+ *
+ * **Seeding, not asserting.** `README.md`'s first rule is *seed what you assert
+ * on*: the deployment keeps its database between runs, so a spec that depends on
+ * a row another spec created is a spec that passes in the wrong order and fails
+ * in the right one. That is not a hypothetical — the tab spec below was written
+ * to reuse the document the flow spec creates, and it failed on CI the moment
+ * the flow spec did, reporting a missing row rather than the tabs it is about.
+ */
+export async function createDraft(
+  session: ApiSession,
+  documentType: SeededDocumentType,
+  title: string,
+): Promise<string> {
+  const created = await session.context.post(`${API_PREFIX}/documents`, {
+    data: { documentTypeId: documentType.id, title },
+  })
+
+  expect(
+    created.ok(),
+    `seeding the document failed: ${created.status()} ${await created.text()}`,
+  ).toBeTruthy()
+
+  return ((await created.json()) as { data: { id: string } }).data.id
+}
