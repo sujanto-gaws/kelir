@@ -188,11 +188,20 @@ pub async fn claim(
 /// The predicate is the whole guard: a task already decided produces zero rows,
 /// and the service turns that into a 409 naming the status rather than a silent
 /// second decision.
+///
+/// `comment` is the reason given with the decision (FR-TASK-006,
+/// [#182](https://github.com/sujanto-gaws/kelir/issues/182)), already trimmed
+/// and bounded by `domain::task::normalize_comment`. It is written **in the
+/// statement that completes the task** rather than in an update beside it, for
+/// the reason this module keeps everywhere: a task recorded as decided with the
+/// reason still in flight is a task whose reason can be lost by a failure
+/// between two writes.
 pub async fn complete(
     transaction: &mut sqlx::PgTransaction<'_>,
     tenant_id: Uuid,
     id: Uuid,
     action: DecisionAction,
+    comment: Option<&str>,
     actor: Uuid,
 ) -> Result<u64, sqlx::Error> {
     let affected = sqlx::query!(
@@ -200,13 +209,14 @@ pub async fn complete(
         UPDATE workflow_tasks SET
             status       = 'COMPLETED',
             action       = $3,
-            completed_by = $4,
+            comment      = $4,
+            completed_by = $5,
             completed_at = now(),
             -- A decision taken by a role holder who never claimed the task
             -- records them as the assignee, so the row says who did it rather
             -- than leaving an open question beside a completed task.
-            assignee_user_id = COALESCE(assignee_user_id, $4),
-            updated_by   = $4,
+            assignee_user_id = COALESCE(assignee_user_id, $5),
+            updated_by   = $5,
             updated_at   = now()
         WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
           AND status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')
@@ -214,6 +224,7 @@ pub async fn complete(
         tenant_id,
         id,
         action.as_db(),
+        comment,
         actor,
     )
     .execute(&mut **transaction)
@@ -281,8 +292,11 @@ pub struct TaskHistoryEntry {
 /// *what happened to this task*, and FR-WF-012 — the document's own account of
 /// how it got here — is Sprint 11's and is neither.
 ///
-/// `comment` is not written this sprint. FR-TASK-006 is #182; the column exists
-/// and the construction plan §7.5 states what the gap costs.
+/// `comment` is the reason the approver gave (FR-TASK-006,
+/// [#182](https://github.com/sujanto-gaws/kelir/issues/182)) — the same value
+/// this transaction writes to the task and to the history row, so the formal
+/// record and the account a person reads cannot say different things about one
+/// decision.
 pub async fn record_decision(
     transaction: &mut sqlx::PgTransaction<'_>,
     tenant_id: Uuid,
@@ -292,8 +306,9 @@ pub async fn record_decision(
         r#"
         INSERT INTO approval_decisions
             (id, tenant_id, document_id, workflow_instance_id, task_id,
-             approver_user_id, approver_role_id, decision, decision_level, created_by)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $6)
+             approver_user_id, approver_role_id, decision, decision_level,
+             comment, created_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $6)
         "#,
         Uuid::now_v7(),
         tenant_id,
@@ -304,6 +319,7 @@ pub async fn record_decision(
         decision.approver_role_id,
         decision.action.as_db(),
         decision.decision_level,
+        decision.comment,
     )
     .execute(&mut **transaction)
     .await?;
@@ -327,6 +343,9 @@ pub struct Decision<'a> {
     /// reporting query asks "who signed off at which step" with. Not invented
     /// here: it is the definition's word for this step.
     pub decision_level: Option<&'a str>,
+    /// The reason given with the decision. `None` where the edge did not ask
+    /// for one and the approver did not offer one.
+    pub comment: Option<&'a str>,
 }
 
 /// Whether the caller currently holds a role, **read from `user_roles` rather

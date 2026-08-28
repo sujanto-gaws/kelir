@@ -46,6 +46,8 @@ const suffix = runSuffix()
 
 const roleCode = `E2E-APPROVER-${suffix}`.toUpperCase()
 const title = `Ten ergonomic chairs ${suffix}`
+const reason = `Within the department budget ${suffix}`
+const refusal = `The quotation does not match the figure ${suffix}`
 
 /** One number field, which is all the approval needs the document to hold. */
 const definition = {
@@ -173,7 +175,13 @@ test('a submitted document is approved by somebody else, and its status follows'
     await expect(decider.getByTestId('task-document')).toContainText(title)
     await expect(decider.getByTestId('task-decisions')).toContainText('Completed')
 
-    // --- Approving moves the instance --------------------------------------
+    // --- Approving moves the instance, with the reason it was approved for --
+    //
+    // #182: the decision and the reason are entered together and sent in one
+    // request. The APPROVE edge of the seeded workflow does not *require* one —
+    // the REJECT does, and the test below drives that — so what this asserts is
+    // that an optional reason is kept rather than dropped.
+    await decider.getByLabel(/Reason/).fill(reason)
     await decider.getByTestId('decide-APPROVE').click()
 
     await expect(decider.getByTestId('task-notice')).toContainText('Completed')
@@ -194,6 +202,90 @@ test('a submitted document is approved by somebody else, and its status follows'
     await requester.getByTestId('tab-workflow').click()
     await expect(requester.getByTestId('workflow-state')).toHaveText('Completed')
     await expect(requester.getByTestId('workflow-tasks')).toContainText('Done')
+
+    // --- And the reason is visible where the decision is --------------------
+    //
+    // #182 AC2, driven rather than described: the requester — who did not take
+    // the decision and cannot see the task — reads why it went the way it did,
+    // in the history #181 records. A comment persisted and displayed nowhere
+    // would not have been worth capturing.
+    const history = requester.getByTestId('workflow-history')
+
+    await expect(history).toContainText('MANAGER_APPROVAL')
+    await expect(history).toContainText('APPROVE')
+    await expect(history).toContainText(approver.username)
+    await expect(history.getByTestId('history-comment')).toContainText(reason)
+  } finally {
+    await requester.close()
+    await decider.close()
+  }
+})
+
+test('a rejection cannot be recorded without a reason, and carries it once given', async ({
+  browser,
+}) => {
+  // #182 AC4 and AC1, from the side a person meets them. The seeded workflow
+  // marks its REJECT edge `requiresComment` and leaves the APPROVE alone
+  // (JWSS §4.1), so this flow is what shows the two ends agreeing: the screen
+  // refuses an empty box, and the same edge goes through once a reason is
+  // there.
+  const requester = await browser.newPage()
+  const decider = await browser.newPage()
+
+  try {
+    const { username, password } = credentials()
+    await signIn(requester, username, password)
+
+    await requester.goto('/documents/new')
+    await requester.getByTestId(`type-${documentType.typeCode}`).getByRole('radio').check()
+    await requester.getByTestId('new-document-title').fill(`Refused outright ${suffix}`)
+    await requester.getByTestId('create-document').click()
+
+    await expect(requester).toHaveURL(/\/documents\/[0-9a-f-]{36}$/)
+
+    const documentUrl = requester.url()
+
+    await requester.locator('#jfss-amount-field').fill('120000')
+    await requester.getByRole('button', { name: 'Submit request' }).click()
+
+    await expect(requester.getByTestId('document-status')).toHaveText('Pending approval')
+
+    const number = (await requester.getByTestId('document-number').textContent())?.trim() ?? ''
+
+    await signIn(decider, approver.username, approver.password)
+    await decider.goto('/tasks')
+
+    await decider
+      .getByRole('row')
+      .filter({ hasText: number })
+      .getByRole('button', { name: 'Open' })
+      .click()
+
+    await expect(decider.getByTestId('task-name')).toHaveText('Approve the request')
+
+    // Pressing reject with nothing in the box is refused on the screen, and the
+    // task is still there to decide — which is what makes this a refusal rather
+    // than a decision with a missing field.
+    await decider.getByTestId('decide-REJECT').click()
+
+    await expect(decider.getByTestId('comment-required')).toContainText('needs a reason')
+    await expect(decider.getByTestId('task-decided')).toHaveCount(0)
+
+    // The same edge, with a reason on it, goes through.
+    await decider.getByLabel(/Reason/).fill(refusal)
+    await decider.getByTestId('decide-REJECT').click()
+
+    await expect(decider.getByTestId('task-notice')).toContainText('Rejected')
+    await expect(decider.getByTestId('task-decided')).toContainText('has been decided')
+
+    // And the requester finds out why, without having to ask anybody.
+    await requester.goto(documentUrl)
+    await expect(requester.getByTestId('document-status')).toHaveText('Rejected')
+
+    await requester.getByTestId('tab-workflow').click()
+    await expect(
+      requester.getByTestId('workflow-history').getByTestId('history-comment'),
+    ).toContainText(refusal)
   } finally {
     await requester.close()
     await decider.close()

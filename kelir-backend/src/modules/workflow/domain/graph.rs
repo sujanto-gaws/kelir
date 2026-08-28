@@ -207,6 +207,18 @@ pub struct Transition {
     pub action: TransitionAction,
     pub allowed_by: Option<AssignmentRule>,
     pub condition: Option<Value>,
+    /// Whether firing this edge needs a reason (JWSS §4.1; FR-TASK-006).
+    ///
+    /// **Per edge, and that is the whole point of it being here rather than in
+    /// code**: an approval explains itself and a refusal does not, so a workflow
+    /// author marks `REJECT` and `RETURN` and leaves `APPROVE` alone. A
+    /// hard-coded *rejections always need a reason* would decide that for every
+    /// deployment.
+    ///
+    /// Absent reads as `false`, which is what a lenient parser must do with a
+    /// definition published before the property existed — and is the same answer
+    /// the meta-schema's `default` gives.
+    pub requires_comment: bool,
 }
 
 /// A workflow variable's declaration (JWSS §6.3).
@@ -315,6 +327,10 @@ fn parse_transition(value: &Value) -> Option<Transition> {
         action: TransitionAction::parse(value.get("action")?.as_str()?)?,
         allowed_by: value.get("allowedBy").and_then(AssignmentRule::parse),
         condition: value.get("condition").cloned(),
+        requires_comment: value
+            .get("requiresComment")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     })
 }
 

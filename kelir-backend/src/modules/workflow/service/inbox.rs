@@ -84,6 +84,25 @@ pub struct AvailableDecision {
     ///
     /// [#183]: https://github.com/sujanto-gaws/kelir/issues/183
     pub supported: bool,
+    /// Whether the definition requires a reason with this decision
+    /// (JWSS §4.1; FR-TASK-006, [#182]).
+    ///
+    /// **The screen must not derive this.** A client that decided for itself
+    /// which actions need a comment — *rejections do* — would be a second rule,
+    /// and the two would drift the first time a workflow marked an `APPROVE`.
+    /// Where they drifted, the screen would either refuse a decision the server
+    /// would have taken, or send one the server refuses from a control it drew.
+    /// [#182] AC4 is that both ends agree; the way they agree is that there is
+    /// one rule and this field is it.
+    ///
+    /// **It is the property of the edge, and `condition` can still choose a
+    /// different one.** Where a state offers two transitions for one action the
+    /// engine picks between them when the decision arrives, so this is what the
+    /// definition declares rather than a promise about which edge fires. The
+    /// engine checks again, against the edge it actually chose.
+    ///
+    /// [#182]: https://github.com/sujanto-gaws/kelir/issues/182
+    pub requires_comment: bool,
 }
 
 pub async fn list_inbox(
@@ -177,6 +196,7 @@ pub async fn get_task(
                         .map(|state| state.name.clone())
                         .unwrap_or_else(|| transition.to.clone()),
                     supported: matches!(transition.action.as_db(), "APPROVE" | "REJECT"),
+                    requires_comment: transition.requires_comment,
                 })
                 .collect(),
         ),

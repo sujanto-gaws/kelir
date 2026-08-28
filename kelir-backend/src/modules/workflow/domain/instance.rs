@@ -364,8 +364,16 @@ pub struct WorkflowHistoryEntry {
     pub action: Option<String>,
     /// The task the decision came from, when a decision moved it.
     pub task_id: Option<Uuid>,
-    /// The decision's reason. Empty until FR-TASK-006
-    /// ([#182](https://github.com/sujanto-gaws/kelir/issues/182)).
+    /// The reason given with the decision (FR-TASK-006,
+    /// [#182](https://github.com/sujanto-gaws/kelir/issues/182)).
+    ///
+    /// **This is the copy a person reads.** The same sentence is on the task
+    /// and on the formal decision record; this is the one the document
+    /// workspace renders beside the transition it explains, which is why #182
+    /// AC2 names the history rather than either of the others.
+    ///
+    /// `None` on a transition nobody gave a reason for, and on every row no
+    /// decision drove.
     pub comment: Option<String>,
     pub actor_user_id: Option<Uuid>,
     pub actor_username: Option<String>,

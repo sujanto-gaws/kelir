@@ -118,17 +118,91 @@ impl DecisionAction {
     }
 }
 
-/// The body of a decision request.
+/// Longest decision comment this API accepts.
 ///
-/// **There is no `comment` field, and its absence is a decision.** FR-TASK-006
-/// is [#182](https://github.com/sujanto-gaws/kelir/issues/182) in Sprint 11;
-/// `workflow_tasks.comment` and `approval_decisions.comment` exist from `0024`
-/// and nothing writes them. The cost is real and belongs where somebody will
-/// read it: **a rejection recorded this sprint has no reason on it.**
+/// `workflow_tasks.comment` and the two columns beside it are `TEXT`, so nothing
+/// in the schema bounds this and the bound has to be here. Four thousand
+/// characters is far more than a reason for a decision needs and far less than a
+/// body somebody could use to fill an append-only table: the history row is
+/// never edited or deleted ([#181] AC6), so an unbounded comment is an unbounded
+/// row nobody can take back out.
+///
+/// [#181]: https://github.com/sujanto-gaws/kelir/issues/181
+pub const MAX_COMMENT_LENGTH: usize = 4000;
+
+/// The body of a decision request (FR-TASK-006; [#182]).
+///
+/// **`comment` is optional here and may be mandatory there.** Whether a reason
+/// is required is the *definition's* to say, per transition
+/// ([JWSS](../../../../../docs/schema/JSON%20Workflow%20Schema.md) §4.1) — an
+/// approval explains itself and a refusal does not — so this type cannot know,
+/// and [`super::super::service::engine`] refuses against the edge that was
+/// actually chosen. A `#[serde(default)]` rather than a required field is what
+/// keeps an `APPROVE` on an unmarked edge one field long.
+///
+/// [#182]: https://github.com/sujanto-gaws/kelir/issues/182
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DecisionRequest {
     pub action: DecisionAction,
+    #[serde(default)]
+    pub comment: Option<String>,
+}
+
+/// The comment as the record should hold it, or a refusal.
+///
+/// Two normalizations, and each has a consequence rather than a tidiness
+/// motive:
+///
+/// * **Trimmed, and whitespace becomes absent.** `"   "` is not a reason, and a
+///   client that sends one has an empty box on the screen. Storing it would
+///   satisfy a `requiresComment` edge with nothing, which is the requirement
+///   defeated by a space bar.
+/// * **Bounded**, by [`MAX_COMMENT_LENGTH`], as a 422 naming the field rather
+///   than a `sqlx` error — the reason `master_data::domain` gives for checking a
+///   length the database would otherwise report in its own words.
+pub fn normalize_comment(comment: Option<String>) -> Result<Option<String>, AppError> {
+    let Some(comment) = comment else {
+        return Ok(None);
+    };
+
+    let trimmed = comment.trim();
+
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    if trimmed.chars().count() > MAX_COMMENT_LENGTH {
+        return Err(AppError::validation(vec![ValidationDetail::new(
+            "comment",
+            "maxLength",
+            "TOO_LONG",
+            format!("a decision comment is at most {MAX_COMMENT_LENGTH} characters"),
+        )]));
+    }
+
+    Ok(Some(trimmed.to_owned()))
+}
+
+/// Refuses a decision on an edge whose definition requires a reason
+/// ([#182](https://github.com/sujanto-gaws/kelir/issues/182) AC4).
+///
+/// A **422 naming `comment`**, which is what makes the client's half and this
+/// half the same rule: the screen refuses an empty box before sending, and a
+/// caller that is not the screen gets the same refusal against the same field
+/// path. A 409 would be wrong — nothing has changed underneath the caller — and
+/// a 403 would be wrong twice, because they may take this edge; they have not
+/// said why.
+pub fn comment_required(state: &str, action: &str) -> AppError {
+    AppError::validation(vec![ValidationDetail::new(
+        "comment",
+        "requiresComment",
+        "COMMENT_REQUIRED",
+        format!(
+            "the `{action}` transition out of `{state}` requires a comment; \
+             this workflow asks for the reason to be recorded with the decision"
+        ),
+    )])
 }
 
 /// How a task reached the caller who is looking at it ([#179] AC1).
@@ -344,6 +418,80 @@ mod tests {
             "{details:?}"
         );
         assert!(details[0].message.contains("REJECT"), "{details:?}");
+    }
+
+    #[test]
+    fn a_comment_of_whitespace_is_no_comment_at_all() {
+        // The load-bearing case, and the reason this is a function rather than
+        // an `Option` passed through: an edge that requires a reason must not be
+        // satisfied by a box the person tabbed past.
+        assert_eq!(
+            normalize_comment(Some("   \n\t ".to_owned())).unwrap(),
+            None
+        );
+        assert_eq!(normalize_comment(Some(String::new())).unwrap(), None);
+        assert_eq!(normalize_comment(None).unwrap(), None);
+    }
+
+    #[test]
+    fn a_comment_is_stored_without_the_whitespace_around_it() {
+        assert_eq!(
+            normalize_comment(Some("  over budget for Q3  ".to_owned())).unwrap(),
+            Some("over budget for Q3".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_comment_is_bounded_and_the_refusal_names_the_field() {
+        // Counted in characters rather than bytes, so a reason written in a
+        // non-Latin script is not refused at a quarter of the stated length.
+        let long = "\u{4e00}".repeat(MAX_COMMENT_LENGTH + 1);
+
+        let AppError::Validation { details } = normalize_comment(Some(long)).expect_err("too long")
+        else {
+            panic!("expected a validation failure");
+        };
+
+        assert_eq!(details[0].path, "comment");
+        assert_eq!(details[0].code, "TOO_LONG");
+
+        // And the boundary itself is accepted, so the limit is the limit.
+        let at_limit = "\u{4e00}".repeat(MAX_COMMENT_LENGTH);
+        assert!(normalize_comment(Some(at_limit)).is_ok());
+    }
+
+    #[test]
+    fn a_required_comment_is_refused_as_a_422_naming_the_edge() {
+        // #182 AC4's server half. It names the state and the action because the
+        // person reading it is looking at one task among several, and "a
+        // comment is required" does not say which decision wanted one.
+        let error = comment_required("MANAGER_APPROVAL", "REJECT");
+
+        let AppError::Validation { details } = error else {
+            panic!("expected a validation failure, not a conflict or a 403");
+        };
+
+        assert_eq!(details[0].path, "comment");
+        assert_eq!(details[0].code, "COMMENT_REQUIRED");
+        assert!(
+            details[0].message.contains("MANAGER_APPROVAL"),
+            "{details:?}"
+        );
+        assert!(details[0].message.contains("REJECT"), "{details:?}");
+    }
+
+    #[test]
+    fn a_decision_may_carry_a_comment_and_may_omit_it() {
+        // Both shapes deserialize, which is what keeps an APPROVE on an
+        // unmarked edge one field long while a REJECT on a marked one is two.
+        let with: DecisionRequest =
+            serde_json::from_str(r#"{"action": "REJECT", "comment": "over budget"}"#)
+                .expect("a decision with a reason");
+        assert_eq!(with.comment.as_deref(), Some("over budget"));
+
+        let without: DecisionRequest =
+            serde_json::from_str(r#"{"action": "APPROVE"}"#).expect("a decision without one");
+        assert_eq!(without.comment, None);
     }
 
     #[test]

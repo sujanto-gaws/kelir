@@ -40,7 +40,9 @@
 use serde_json::json;
 use uuid::Uuid;
 
-use super::super::domain::task::{claim_lost, refuse_unless_open, refuse_unless_theirs};
+use super::super::domain::task::{
+    claim_lost, normalize_comment, refuse_unless_open, refuse_unless_theirs,
+};
 use super::super::domain::{DecisionAction, Graph, TaskStatus, WorkflowTask};
 use super::super::repository::{
     definition as definition_repo, instance as instance_repo, task as repo,
@@ -182,11 +184,21 @@ pub async fn decide(
     caller: &Authenticated,
     id: Uuid,
     action: DecisionAction,
+    comment: Option<String>,
 ) -> Result<DecisionResult, AppError> {
     caller.require(TASK_EXECUTE)?;
 
     let tenant_id = caller.tenant_id();
     let user_id = caller.user_id();
+
+    // Normalized before anything is read, because it is the one refusal here
+    // that depends on nothing in the database: a comment of four thousand
+    // characters is too long whatever the task turns out to be, and finding
+    // that out after two queries and a lock would be two queries and a lock
+    // spent on a request that was never going to commit. Whether the *edge*
+    // needs one is `engine::fire`'s to say — that depends on which transition
+    // `condition` picks, which is not known until it is picked.
+    let comment = normalize_comment(comment)?;
 
     // **Everything the decision reads that cannot move is resolved before the
     // transaction opens**, which is coding standard §2.5's rule and the reason
@@ -277,7 +289,17 @@ pub async fn decide(
 
     // The write, carrying the predicate again: two callers who both passed the
     // check above produce one update of one row and one update of none.
-    if repo::complete(&mut transaction, tenant_id, id, action, user_id).await? == 0 {
+    if repo::complete(
+        &mut transaction,
+        tenant_id,
+        id,
+        action,
+        comment.as_deref(),
+        user_id,
+    )
+    .await?
+        == 0
+    {
         let now = repo::lock_task(&mut transaction, tenant_id, id)
             .await?
             .ok_or_else(|| AppError::not_found("Task"))?;
@@ -315,6 +337,7 @@ pub async fn decide(
             approver_role_id: task.candidate_role_id,
             action,
             decision_level: Some(&subject.task_definition_key),
+            comment: comment.as_deref(),
         },
     )
     .await?;
@@ -342,13 +365,16 @@ pub async fn decide(
             form_data: document.form_data.clone(),
             variables,
         },
-        // The history row's provenance. `comment` stays `None` until
-        // FR-TASK-006 (#182) gives the decision one to carry; the column and
-        // the path exist so that lands as a value rather than as a change to
-        // the signature every transition passes through.
+        // The history row's provenance, and the third of the three places one
+        // comment lands — the task (what was decided here), the decision record
+        // (what was decided about this document), and the history (how the
+        // document got here). Written from one value in one transaction, so the
+        // three cannot disagree about what the approver said; #182 AC2 is that
+        // the reason is visible where the decision is, and the history is the
+        // one of the three a person reads.
         engine::DecisionProvenance {
             task_id: Some(id),
-            comment: None,
+            comment: comment.as_deref(),
         },
     )
     .await?;
@@ -366,6 +392,22 @@ pub async fn decide(
             object_id: id,
             actor_user_id: Some(user_id),
             ip_address: None,
+            // **The comment is not copied here, and `commented` below says only
+            // that there was one.** `audit_events.reason` is the field for it
+            // and this is deliberately not written into it: the audit trail is
+            // read through `master-data:audit:read` by people who hold no
+            // permission over the document, and a decision comment is prose an
+            // approver wrote about somebody's requisition. **D-12** refused to
+            // hand a record's field values back through its change history
+            // without the record's own read permission, and **D-32** applied
+            // the same line to form data. The reason itself lives on the
+            // history row (§7.11), behind `workflow:instance:read`, which is
+            // the permission the people it was written for hold.
+            //
+            // The flag is what an auditor actually needs from here: whether a
+            // decision the workflow required a reason for was recorded with
+            // one. That is a question about the control, and it is answerable
+            // without reading the answer.
             reason: None,
             old_value: Some(json!({
                 "status": task.status,
@@ -385,6 +427,7 @@ pub async fn decide(
                 "instanceState": fired.to_state,
                 "documentStatus": fired.document_status,
                 "outcome": fired.outcome,
+                "commented": comment.is_some(),
             })),
         },
     )

@@ -7,6 +7,7 @@ import type {
   DocumentWorkflow,
   InboxTask,
   TaskDetail,
+  WorkflowHistoryEntry,
   WorkflowTask,
 } from '@/types/workflow'
 
@@ -61,15 +62,29 @@ export function claimTask(id: string): Promise<WorkflowTask> {
 }
 
 /**
- * Records a decision, which moves the process and the document's status with it.
+ * Records a decision and the reason for it (FR-TASK-006, #182).
  *
- * **There is no comment.** FR-TASK-006 is Sprint 11's #182; the columns exist
- * and nothing writes them, which means a rejection recorded by this release has
- * no reason on it. Said here as well as in the backend, because this is where a
- * screen would otherwise be tempted to invent a field the API does not accept.
+ * **The comment is omitted from the body when there is none**, rather than sent
+ * as `null` or `""`. The server treats blank as absent anyway — a box somebody
+ * tabbed past is not a reason — and sending nothing is what keeps an approval on
+ * an unmarked edge a one-field request, which is what it is.
+ *
+ * **Whether a reason is required is not decided here.** The definition marks the
+ * transition (JWSS §4.1) and `AvailableDecision.requiresComment` carries the
+ * answer to the screen; the server checks again against the edge it actually
+ * fires. A rule invented in this file would be a second one.
  */
-export function decideTask(id: string, action: DecisionAction): Promise<DecisionResult> {
-  return postItem<DecisionResult>(`/workflow/tasks/${id}/decision`, { action })
+export function decideTask(
+  id: string,
+  action: DecisionAction,
+  comment?: string,
+): Promise<DecisionResult> {
+  const trimmed = comment?.trim()
+
+  return postItem<DecisionResult>(`/workflow/tasks/${id}/decision`, {
+    action,
+    ...(trimmed ? { comment: trimmed } : {}),
+  })
 }
 
 /**
@@ -82,4 +97,25 @@ export function decideTask(id: string, action: DecisionAction): Promise<Decision
  */
 export function getDocumentWorkflow(documentId: string): Promise<DocumentWorkflow> {
   return getItem<DocumentWorkflow>(`/documents/${documentId}/workflow`)
+}
+
+/**
+ * How the document got here: one entry per transition, oldest first (#181).
+ *
+ * **Paginated at the API and read one page at a time here**, because a
+ * long-running process is exactly where an unpaginated list stops working —
+ * which is the reason the endpoint pages rather than an accident of it.
+ *
+ * Behind `workflow:instance:read`, deliberately not the audit permission: this
+ * is the document's own account, shown to the approver deciding it.
+ */
+export function listWorkflowHistory(
+  documentId: string,
+  page = 1,
+  pageSize = 20,
+): Promise<Page<WorkflowHistoryEntry>> {
+  return getPage<WorkflowHistoryEntry>(`/documents/${documentId}/workflow/history`, {
+    page,
+    pageSize,
+  })
 }

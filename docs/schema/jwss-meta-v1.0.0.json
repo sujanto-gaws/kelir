@@ -84,11 +84,17 @@
           ]
         },
         "condition": { "$ref": "#/$defs/jsonLogic" },
+        "requiresComment": { "type": "boolean", "default": false },
         "guards": { "type": "array", "items": { "$ref": "#/$defs/hookRegistrationEntry" } },
         "actions": { "type": "array", "items": { "$ref": "#/$defs/hookRegistrationEntry" } }
       },
       "if": { "properties": { "action": { "const": "AUTO" } } },
-      "then": { "not": { "required": ["allowedBy"] } },
+      "then": {
+        "allOf": [
+          { "not": { "required": ["allowedBy"] } },
+          { "properties": { "requiresComment": { "const": false } } }
+        ]
+      },
       "else": { "required": ["allowedBy"] }
     },
     "assignmentRule": {

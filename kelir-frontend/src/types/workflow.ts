@@ -125,6 +125,18 @@ export interface AvailableDecision {
    * offering it.
    */
   supported: boolean
+  /**
+   * Whether the definition requires a reason with this decision (JWSS §4.1).
+   *
+   * **Read, never derived.** A screen that decided for itself which actions
+   * need a comment — *rejections do* — would be a second rule, and the two would
+   * disagree the first time a workflow marked an `APPROVE`. Where they
+   * disagreed, this screen would either refuse a decision the server would have
+   * taken or send one the server refuses from a button the product drew. #182
+   * AC4 is that both ends agree, and the way they agree is that the server owns
+   * the rule and this field carries it.
+   */
+  requiresComment: boolean
 }
 
 /** One task, with everything its holder needs to decide it responsibly. */
@@ -154,6 +166,32 @@ export const TASK_STATUS_LABELS: Record<TaskStatus, string> = {
   DELEGATED: 'Delegated',
   ESCALATED: 'Escalated',
   CANCELLED: 'Cancelled',
+}
+
+/**
+ * One transition, as the document workspace renders it (FR-WF-012; #181).
+ *
+ * **`occurredAt` rather than `createdAt`**, mirroring the backend: the row is
+ * written in the transition's own transaction, so the write and the event are
+ * the same instant, and naming the field for the event is what stops a reader
+ * treating the list as a log of writes.
+ *
+ * `actorUsername` is `null` for an engine action and for a user since deleted,
+ * which is why the screen falls back to words rather than to a blank.
+ */
+export interface WorkflowHistoryEntry {
+  id: string
+  /** `null` on the first entry: the initial state came from nowhere. */
+  fromState: string | null
+  toState: string
+  /** `null` when nothing named an action — the start. */
+  action: string | null
+  taskId: string | null
+  /** The reason given with the decision (FR-TASK-006, #182). */
+  comment: string | null
+  actorUserId: string | null
+  actorUsername: string | null
+  occurredAt: string
 }
 
 /** What a person calls where a process is. */
