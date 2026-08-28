@@ -339,3 +339,35 @@ mod tests {
         assert_eq!(read_variable("lots", "NUMBER"), json!("lots"));
     }
 }
+
+/// One transition, as the document workspace renders it (FR-WF-012; [#181]).
+///
+/// **`occurredAt` rather than `createdAt`**, though the column is `created_at`.
+/// The row's creation and the event are the same instant here — it is written
+/// in the transition's own transaction — and naming the field for the event is
+/// what stops a reader treating the list as a log of writes rather than as an
+/// account of the process.
+///
+/// `actorUsername` is resolved for display beside the id, because a history
+/// showing UUIDs answers *how did this get here* only to somebody who can look
+/// them up. It is `None` for an engine action and for a user since deleted.
+///
+/// [#181]: https://github.com/sujanto-gaws/kelir/issues/181
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowHistoryEntry {
+    pub id: Uuid,
+    /// `None` on the first row: the initial state came from nowhere.
+    pub from_state: Option<String>,
+    pub to_state: String,
+    /// `None` when nothing named an action — the start.
+    pub action: Option<String>,
+    /// The task the decision came from, when a decision moved it.
+    pub task_id: Option<Uuid>,
+    /// The decision's reason. Empty until FR-TASK-006
+    /// ([#182](https://github.com/sujanto-gaws/kelir/issues/182)).
+    pub comment: Option<String>,
+    pub actor_user_id: Option<Uuid>,
+    pub actor_username: Option<String>,
+    pub occurred_at: DateTime<Utc>,
+}

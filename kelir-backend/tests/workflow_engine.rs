@@ -986,6 +986,270 @@ async fn concurrent_decisions_on_one_task_resolve_to_exactly_one_outcome() {
 }
 
 // ---------------------------------------------------------------------------
+// Workflow history (#181, FR-WF-012)
+// ---------------------------------------------------------------------------
+
+/// One document's history, as the workspace reads it.
+async fn history_of(app: &TestApp, token: &str, document: Uuid) -> Value {
+    let response = app
+        .get(
+            &format!("/api/v1/documents/{document}/workflow/history"),
+            Some(token),
+        )
+        .await;
+
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    response.body.clone()
+}
+
+/// **The whole of FR-WF-012 in one process**: the submit's row, the decision's
+/// row, both ends of each, who moved it and from which task.
+///
+/// **Seen red** against `engine::fire`'s `history::record` call removed: the
+/// approval completes and the history stops at the submit, which is the gap
+/// #181 AC1 is about — a transition that committed without its history.
+#[tokio::test]
+async fn every_transition_is_recorded_with_both_ends_and_its_actor() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let approver_token = approver(&app, "wf.historian").await;
+
+    let workflow = publish_workflow(&app, &token, role_workflow("wf_history")).await;
+    let type_id = document_type(&app, &token, "PR_HISTORY", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    // The submit's own row: into the initial state, from nowhere.
+    let started = history_of(&app, &token, id).await;
+    let rows = started["data"].as_array().expect("a list");
+    assert_eq!(rows.len(), 1, "the submit wrote no history: {started}");
+    assert_eq!(rows[0]["fromState"], Value::Null);
+    assert_eq!(rows[0]["toState"], "MANAGER_APPROVAL");
+    assert_eq!(rows[0]["action"], Value::Null);
+    assert_eq!(rows[0]["taskId"], Value::Null);
+
+    let task = open_task_of(&app, id).await;
+    let decided = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&approver_token),
+            json!({ "action": "APPROVE" }),
+        )
+        .await;
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+
+    let after = history_of(&app, &token, id).await;
+    let rows = after["data"].as_array().expect("a list");
+    assert_eq!(rows.len(), 2, "the decision wrote no history: {after}");
+
+    // Oldest first, so the decision is second — and it carries both ends, the
+    // action, the task it came from and who took it.
+    let moved = &rows[1];
+    assert_eq!(moved["fromState"], "MANAGER_APPROVAL");
+    assert_eq!(moved["toState"], "COMPLETED");
+    assert_eq!(moved["action"], "APPROVE");
+    assert_eq!(moved["taskId"], json!(task.to_string()));
+    assert_eq!(moved["actorUsername"], "wf.historian");
+    assert!(
+        moved["occurredAt"].is_string(),
+        "a history entry with no timestamp: {after}"
+    );
+
+    // FR-TASK-006 is #182. The column and the path exist; nothing fills them yet.
+    assert_eq!(moved["comment"], Value::Null);
+}
+
+/// The history and the transition are one transaction (#181 AC1).
+///
+/// A refused decision leaves no row behind: the `allowedBy` check in
+/// `engine::fire` (#226) rejects *after* the transition is chosen, so a history
+/// row written outside the transaction would survive the rollback and claim a
+/// transition that never occurred.
+#[tokio::test]
+async fn a_refused_transition_records_nothing() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    given_bare_role(&app, "WF-EDGE-ONLY").await;
+    let approver_token = approver(&app, "wf.refused").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &token,
+        split_control_workflow("wf_history_refused", "WF-EDGE-ONLY"),
+    )
+    .await;
+    let type_id = document_type(&app, &token, "PR_HIST_REFUSED", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let task = open_task_of(&app, id).await;
+    let refused = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&approver_token),
+            json!({ "action": "APPROVE" }),
+        )
+        .await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+
+    let after = history_of(&app, &token, id).await;
+    assert_eq!(
+        after["data"].as_array().expect("a list").len(),
+        1,
+        "a refused transition left a history row claiming it happened: {after}"
+    );
+}
+
+/// The read is paginated (#181 AC3), and its order is total.
+///
+/// **The ids across the pages must be distinct rows** — an `ORDER BY
+/// created_at` alone is not a total order when rows share a transaction's
+/// timestamp, and the failure it produces is a row appearing on two pages while
+/// another appears on none.
+#[tokio::test]
+async fn the_history_is_paginated_and_its_order_is_total() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let approver_token = approver(&app, "wf.pager").await;
+
+    let workflow = publish_workflow(&app, &token, role_workflow("wf_history_paged")).await;
+    let type_id = document_type(&app, &token, "PR_HIST_PAGED", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let task = open_task_of(&app, id).await;
+    app.post(
+        &format!("/api/v1/workflow/tasks/{task}/decision"),
+        Some(&approver_token),
+        json!({ "action": "APPROVE" }),
+    )
+    .await;
+
+    let whole = history_of(&app, &token, id).await;
+    let total = whole["data"].as_array().expect("a list").len();
+    assert_eq!(total, 2);
+    assert_eq!(whole["meta"]["total"], json!(total));
+
+    let mut seen: Vec<String> = Vec::new();
+    for page in 1..=total {
+        let response = app
+            .get(
+                &format!("/api/v1/documents/{id}/workflow/history?page={page}&pageSize=1"),
+                Some(&token),
+            )
+            .await;
+        assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+
+        let rows = response.body["data"].as_array().expect("a list");
+        assert_eq!(
+            rows.len(),
+            1,
+            "page {page} of a one-per-page read: {}",
+            response.body
+        );
+        seen.push(rows[0]["id"].as_str().expect("an id").to_owned());
+    }
+
+    let mut distinct = seen.clone();
+    distinct.sort();
+    distinct.dedup();
+    assert_eq!(
+        distinct.len(),
+        total,
+        "paging repeated a row and skipped another — the order is not total: {seen:?}"
+    );
+}
+
+/// #181 AC4: the history is **not** behind the governance permission.
+///
+/// An approver holds `workflow:instance:read` and no audit permission at all,
+/// and they are the person the history is for. A caller holding neither is
+/// refused, so the route is not simply open.
+#[tokio::test]
+async fn the_history_is_read_with_the_workflow_permission_not_the_audit_one() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let approver_token = approver(&app, "wf.reader").await;
+
+    let workflow = publish_workflow(&app, &token, role_workflow("wf_history_perm")).await;
+    let type_id = document_type(&app, &token, "PR_HIST_PERM", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let theirs = app
+        .get(
+            &format!("/api/v1/documents/{id}/workflow/history"),
+            Some(&approver_token),
+        )
+        .await;
+    assert_eq!(
+        theirs.status,
+        StatusCode::OK,
+        "the approver was refused the history of their own approval: {}",
+        theirs.body
+    );
+
+    let bare = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "WF-NO-INSTANCE",
+        &["document:read"],
+    )
+    .await;
+    fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "wf.nothing",
+        "wf.nothing@example.test",
+        common::ADMIN_PASSWORD,
+        &[bare],
+    )
+    .await;
+    let outsider = app.sign_in("wf.nothing", common::ADMIN_PASSWORD).await;
+
+    let refused = app
+        .get(
+            &format!("/api/v1/documents/{id}/workflow/history"),
+            Some(&outsider),
+        )
+        .await;
+    assert_eq!(
+        refused.status,
+        StatusCode::FORBIDDEN,
+        "the history was readable without workflow:instance:read: {}",
+        refused.body
+    );
+}
+
+/// #181 AC6: a history record is never edited or deleted, and the storage is
+/// shaped so that no route could.
+///
+/// **Asserted against the schema rather than against the router**, because a
+/// route that does not exist today is a route somebody adds tomorrow. The table
+/// has no `deleted_at`, no `updated_at` and no `updated_by`: a soft delete has
+/// nowhere to write and an edit has nothing to stamp, which is the argument
+/// `0027`'s header makes. This fails when somebody adds one back.
+#[tokio::test]
+async fn the_history_table_cannot_record_an_edit_or_a_deletion() {
+    let app = TestApp::spawn().await;
+
+    let mutable: Vec<String> = sqlx::query_scalar(
+        "SELECT column_name FROM information_schema.columns
+          WHERE table_name = 'workflow_history'
+            AND column_name IN ('deleted_at', 'updated_at', 'updated_by')",
+    )
+    .fetch_all(&app.pool)
+    .await
+    .expect("read the columns");
+
+    assert!(
+        mutable.is_empty(),
+        "workflow_history grew a column that lets a row be changed or hidden: {mutable:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // allowedBy — the edge's own control (#226)
 // ---------------------------------------------------------------------------
 
