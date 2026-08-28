@@ -197,6 +197,96 @@ async fn a_menu_cannot_be_its_own_parent() {
     assert!(refused.is_err(), "a menu must not be its own parent");
 }
 
+/// A form with one section, for the two tests below.
+async fn given_form_with_section(app: &TestApp, key: &str) -> (uuid::Uuid, uuid::Uuid) {
+    let form: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO rad_forms (id, tenant_id, form_key, title, jfss_version, definition_json)
+         VALUES (gen_random_uuid(), $1, $2, 'Form', '2.0.0', '{}') RETURNING id",
+    )
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .bind(key)
+    .fetch_one(&app.pool)
+    .await
+    .expect("a form inserts");
+
+    let section: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO rad_form_sections (id, tenant_id, form_id, section_key)
+         VALUES (gen_random_uuid(), $1, $2, 'S1') RETURNING id",
+    )
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .bind(form)
+    .fetch_one(&app.pool)
+    .await
+    .expect("a section inserts");
+
+    (form, section)
+}
+
+#[tokio::test]
+async fn a_form_section_cannot_be_its_own_parent() {
+    // `0014_rad.sql` gave `rad_menus` this constraint and not its sibling,
+    // though its own header named both columns together. The omission was not
+    // a decision, and `0026_form_section_not_its_own_parent.sql` corrects it
+    // (#191). The test above is the same assertion one table over — they are
+    // written separately rather than as a loop because a loop over two tables
+    // reads as a rule about tables, and this is a rule about a shape.
+    let app = TestApp::spawn().await;
+    let (_, section) = given_form_with_section(&app, "self-parent-section").await;
+
+    let refused = sqlx::query("UPDATE rad_form_sections SET parent_section_id = id WHERE id = $1")
+        .bind(section)
+        .execute(&app.pool)
+        .await;
+
+    assert!(
+        refused.is_err(),
+        "a form section must not be its own parent"
+    );
+}
+
+#[tokio::test]
+async fn a_ring_of_form_sections_is_still_creatable() {
+    // **This test asserts a defect, deliberately, and it is the honest half of
+    // the one above.** A `CHECK` sees one row; a cycle is a property of the
+    // path, so the constraint closes self-parenthood and nothing else. Reading
+    // the passing test above without this one beside it would leave
+    // `rad_form_sections` looking guarded when a ring of two goes straight in.
+    //
+    // It goes green the day the ancestor walk lands — the depth-bounded one
+    // `organization/department.rs` already does for `departments` — and turning
+    // red is what tells whoever writes that guard to come here and rewrite this
+    // test as the assertion it should then be. [#191] is what it is waiting on,
+    // and #191 waits on a surface that writes this column: no route, no
+    // projection and no seed does today.
+    //
+    // [#191]: https://github.com/sujanto-gaws/kelir/issues/191
+    let app = TestApp::spawn().await;
+    let (form, first) = given_form_with_section(&app, "ring-of-two").await;
+
+    let second: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO rad_form_sections (id, tenant_id, form_id, section_key, parent_section_id)
+         VALUES (gen_random_uuid(), $1, $2, 'S2', $3) RETURNING id",
+    )
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .bind(form)
+    .bind(first)
+    .fetch_one(&app.pool)
+    .await
+    .expect("a child section inserts");
+
+    let closed_the_ring =
+        sqlx::query("UPDATE rad_form_sections SET parent_section_id = $1 WHERE id = $2")
+            .bind(second)
+            .bind(first)
+            .execute(&app.pool)
+            .await;
+
+    assert!(
+        closed_the_ring.is_ok(),
+        "a ring of two was refused — if the ancestor walk has landed, this test          is now the wrong way round and #191 is what to close"
+    );
+}
+
 #[tokio::test]
 async fn a_list_page_size_is_bounded() {
     // Zero pages forever, and the upper bound matches the pagination cap the
