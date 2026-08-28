@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM workflow_transitions WHERE workflow_definition_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9f0fb451a37dded233b7a3de823b9c95e501e48580cfc6aa4571d8fb3d0ebed3"
+}

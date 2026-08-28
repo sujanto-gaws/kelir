@@ -1,0 +1,1501 @@
+//! The engine: an instance starts, a task is generated, somebody decides it,
+//! and the document's status follows (#175, #176, #177, #178, #187).
+//!
+//! **This file is about the seam as much as the engine.** Every test below
+//! asserts on the *row* rather than the response where it can, because what
+//! these items are about is what is durable: a document whose status disagrees
+//! with the process driving it is the defect #178 exists to prevent, and it is
+//! invisible from a response body that reports what the caller asked for.
+//!
+//! Every test that names a control has been seen to fail against a build with
+//! that control removed (coding standard §2.9), and the doc comment on each says
+//! what the mutation was and what it produced.
+
+mod common;
+
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use axum::http::{Method, StatusCode};
+use common::{fixtures, TestApp};
+use serde_json::{json, Value};
+use uuid::Uuid;
+
+/// Above the test pool's ceiling (`TEST_POOL_MAX_CONNECTIONS` is 5), which is
+/// the concurrency [#118] taught this project a harness has to actually reach:
+/// its own tests could not, so a fix that closed a race and opened a
+/// pool-exhaustion deadlock passed them all.
+///
+/// [#118]: https://github.com/sujanto-gaws/kelir/issues/118
+const CONCURRENT_CALLERS: usize = 24;
+
+const APPROVER_ROLE: &str = "WF-APPROVER";
+
+fn id_of(value: &Value) -> Uuid {
+    value["id"]
+        .as_str()
+        .expect("an id")
+        .parse()
+        .expect("a uuid")
+}
+
+/// A workflow whose one task is offered to a **role**, which is the case
+/// [#176] AC2 is about: a role task has no assignee until somebody claims it.
+fn role_workflow(key: &str) -> Value {
+    json!({
+        "workflowKey": key,
+        "version": "1.0.0",
+        "name": "Standard approval",
+        "initialState": "MANAGER_APPROVAL",
+        "states": [
+            { "code": "MANAGER_APPROVAL", "name": "Manager approval",
+              "mapsToDocumentStatus": "PENDING_APPROVAL",
+              "task": { "taskDefinitionKey": "manager_approval", "taskName": "Approve the request",
+                        "assignment": { "assigneeType": "ROLE", "roleCode": APPROVER_ROLE } } },
+            { "code": "COMPLETED", "name": "Completed", "mapsToDocumentStatus": "COMPLETED",
+              "isFinal": true },
+            { "code": "REJECTED", "name": "Rejected", "mapsToDocumentStatus": "REJECTED",
+              "isFinal": true }
+        ],
+        "transitions": [
+            { "from": "MANAGER_APPROVAL", "to": "COMPLETED", "action": "APPROVE",
+              "allowedBy": format!("ROLE:{APPROVER_ROLE}") },
+            { "from": "MANAGER_APPROVAL", "to": "REJECTED", "action": "REJECT",
+              "allowedBy": format!("ROLE:{APPROVER_ROLE}") }
+        ],
+        "variables": [
+            { "key": "amount", "dataType": "NUMBER",
+              "source": { "var": "formData.amount" } }
+        ]
+    })
+}
+
+async fn publish_workflow(app: &TestApp, token: &str, definition: Value) -> Uuid {
+    let key = definition["workflowKey"]
+        .as_str()
+        .expect("a key")
+        .to_owned();
+
+    let created = app
+        .post(
+            "/api/v1/workflow/definitions",
+            Some(token),
+            json!({ "workflowKey": key, "name": "Standard approval", "definition": definition }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+    let id = id_of(&created.body["data"]);
+
+    let publication = app
+        .post(
+            &format!("/api/v1/workflow/definitions/{id}/publication"),
+            Some(token),
+            json!({}),
+        )
+        .await;
+    assert_eq!(publication.status, StatusCode::OK, "{}", publication.body);
+
+    id
+}
+
+/// A form with the one field the workflow's variable reads.
+///
+/// A document type has to bind a published form before its documents can hold
+/// any data at all — the definition is what a write is validated against — and
+/// the variable `source` in [`role_workflow`] reads `formData.amount`, so this
+/// is the smallest form that makes the seam observable.
+async fn published_form(app: &TestApp, token: &str, key: &str) -> Uuid {
+    let created = app
+        .post(
+            "/api/v1/rad/forms",
+            Some(token),
+            json!({
+                "formKey": key,
+                "title": "Purchase requisition",
+                "definition": {
+                    "formId": key,
+                    "version": "2.0.1",
+                    "title": "Purchase requisition",
+                    "components": [{
+                        "id": "amount-field", "role": "data", "type": "number",
+                        "key": "amount", "label": "Amount",
+                        "validation": { "type": "number", "minimum": 0 }
+                    }]
+                },
+            }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+    let id = id_of(&created.body["data"]);
+
+    let published = app
+        .post(
+            &format!("/api/v1/rad/forms/{id}/publish"),
+            Some(token),
+            json!({}),
+        )
+        .await;
+    assert_eq!(published.status, StatusCode::OK, "{}", published.body);
+
+    id
+}
+
+/// A document type with a numbering rule and, optionally, a workflow binding.
+///
+/// **A second document type is created by every test that asserts anything is
+/// scoped** — coding standard §2.9 as of Sprint 8, and [#218]'s single root
+/// cause: one subject cannot distinguish *scoped* from *unscoped*.
+///
+/// [#218]: https://github.com/sujanto-gaws/kelir/issues/218
+async fn document_type(app: &TestApp, token: &str, code: &str, workflow: Option<Uuid>) -> Uuid {
+    let form = published_form(app, token, &code.to_lowercase().replace('_', "-")).await;
+    let mut body = json!({ "typeCode": code, "name": code, "formId": form });
+
+    if let Some(workflow) = workflow {
+        // The role the workflow assigns to has to exist before anything submits
+        // against this type — see `approver_role`.
+        approver_role(app).await;
+        body["workflows"] = json!([{ "workflowDefinitionId": workflow }]);
+    }
+
+    let created = app.post("/api/v1/document-types", Some(token), body).await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+    let type_id = id_of(&created.body["data"]);
+
+    let rule = app
+        .put(
+            &format!("/api/v1/document-types/{type_id}/numbering-rule"),
+            Some(token),
+            json!({
+                // The template carries the type code, and that is not
+                // decoration. `uq_documents_tenant_id_document_number` is
+                // tenant-wide while a numbering *bucket* is per type, so two
+                // types sharing one template both issue `PR-2026-000001` and the
+                // second submit collides — as a 500, because a unique violation
+                // on this path is not mapped. Recorded as a finding of this
+                // sprint's pass; the fixture works around it so that these tests
+                // are about the workflow rather than about #158's surface.
+                "ruleTemplate": format!("{code}-{{year}}-{{sequence}}"),
+                "sequenceScope": "YEAR",
+                "gapPolicy": "GAPLESS",
+            }),
+        )
+        .await;
+    assert_eq!(rule.status, StatusCode::OK, "{}", rule.body);
+
+    type_id
+}
+
+async fn draft(app: &TestApp, token: &str, type_id: Uuid) -> Uuid {
+    let created = app
+        .post(
+            "/api/v1/documents",
+            Some(token),
+            json!({
+                "documentTypeId": type_id,
+                "title": "Two standing desks",
+                "formData": { "amount": 45_000_000 },
+            }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+    id_of(&created.body["data"])
+}
+
+async fn submit(app: &TestApp, token: &str, id: Uuid) -> common::TestResponse {
+    app.send(
+        Method::POST,
+        &format!("/api/v1/documents/{id}/submission"),
+        Some(token),
+        None,
+    )
+    .await
+}
+
+/// Reads a document's status from the row rather than from a response.
+async fn stored_status(app: &TestApp, id: Uuid) -> String {
+    sqlx::query_scalar("SELECT status FROM documents WHERE id = $1")
+        .bind(id)
+        .fetch_one(&app.pool)
+        .await
+        .expect("read the document's status")
+}
+
+/// The instance of a document, straight from the table.
+async fn instance_of(app: &TestApp, document_id: Uuid) -> Option<(Uuid, String, String)> {
+    sqlx::query_as(
+        "SELECT id, current_state, status FROM workflow_instances WHERE document_id = $1",
+    )
+    .bind(document_id)
+    .fetch_optional(&app.pool)
+    .await
+    .expect("read the instance")
+}
+
+async fn open_task_of(app: &TestApp, document_id: Uuid) -> Uuid {
+    sqlx::query_scalar(
+        "SELECT id FROM workflow_tasks WHERE document_id = $1 AND status IN ('CREATED','ASSIGNED','IN_PROGRESS')",
+    )
+    .bind(document_id)
+    .fetch_one(&app.pool)
+    .await
+    .expect("read the open task")
+}
+
+/// The approver role, created once per database.
+///
+/// **It has to exist before the first submit, not before the first approver.**
+/// An assignment that resolves to nobody fails the transition ([#176] AC3's
+/// sibling rule), so a workflow naming a role no tenant holds cannot start at
+/// all — which is the behaviour
+/// `a_workflow_naming_a_role_nobody_holds_refuses_the_submit` asserts on
+/// purpose, and which every other test here has to set up around.
+async fn approver_role(app: &TestApp) -> Uuid {
+    let existing: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM roles WHERE tenant_id = $1 AND role_code = $2 AND deleted_at IS NULL",
+    )
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .bind(APPROVER_ROLE)
+    .fetch_optional(&app.pool)
+    .await
+    .expect("look the role up");
+
+    match existing {
+        Some(id) => id,
+        None => {
+            fixtures::create_role_with_permissions(
+                &app.pool,
+                fixtures::SYSTEM_TENANT_ID,
+                APPROVER_ROLE,
+                &[
+                    "workflow:task:read",
+                    "workflow:task:execute",
+                    "workflow:instance:read",
+                    "document:read",
+                ],
+            )
+            .await
+        }
+    }
+}
+
+/// A user holding the approver role plus everything the workflow surface needs.
+async fn approver(app: &TestApp, username: &str) -> String {
+    let role = approver_role(app).await;
+
+    fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        username,
+        &format!("{username}@example.test"),
+        common::ADMIN_PASSWORD,
+        &[role],
+    )
+    .await;
+
+    app.sign_in(username, common::ADMIN_PASSWORD).await
+}
+
+// ---------------------------------------------------------------------------
+// #178, #187 — the seam: a submit starts the process its type binds
+// ---------------------------------------------------------------------------
+
+/// **The whole seam in one test**: the submit starts an instance, links it,
+/// generates the task, and the document's status is the *workflow's* initial
+/// state rather than `SUBMITTED`.
+///
+/// The last clause is the one that matters. `mapsToDocumentStatus` on the
+/// initial state says `PENDING_APPROVAL`, so that is where the document is at
+/// the end of the submit's own transaction — which is the projection being real
+/// rather than described (#178 AC2, AC4).
+///
+/// **Seen red** against `engine::enter` with its `project_document_status` call
+/// removed: the instance runs in `MANAGER_APPROVAL` while the document says
+/// `SUBMITTED`, which is exactly the disagreement #178 exists to prevent.
+#[tokio::test]
+async fn submitting_starts_the_workflow_and_the_documents_status_follows_it() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let workflow = publish_workflow(&app, &token, role_workflow("wf_seam")).await;
+    let type_id = document_type(&app, &token, "PR_SEAM", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+
+    let submitted = submit(&app, &token, id).await;
+    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+
+    let (instance_id, state, status) = instance_of(&app, id).await.expect("an instance started");
+    assert_eq!(state, "MANAGER_APPROVAL");
+    assert_eq!(status, "RUNNING");
+
+    assert_eq!(
+        stored_status(&app, id).await,
+        "PENDING_APPROVAL",
+        "the document's status is a projection of the instance's state, not SUBMITTED"
+    );
+
+    // FR-DOC-012: the document points at the process deciding it, written in the
+    // same transaction.
+    let linked: Option<Uuid> =
+        sqlx::query_scalar("SELECT process_instance_id FROM documents WHERE id = $1")
+            .bind(id)
+            .fetch_one(&app.pool)
+            .await
+            .expect("read the link");
+    assert_eq!(linked, Some(instance_id));
+
+    // #176 AC1: the state declared a task, so the task exists — in the same
+    // transaction, not eventually.
+    let task_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM workflow_tasks WHERE document_id = $1")
+            .bind(id)
+            .fetch_one(&app.pool)
+            .await
+            .expect("count the tasks");
+    assert_eq!(task_count, 1);
+}
+
+/// **A type with no workflow submits and starts nothing** ([#187] AC4).
+///
+/// Not every document is approved, and a null binding is a valid configuration
+/// rather than a missing one. The second type in this test is what makes the
+/// assertion mean something: one type cannot tell *bound* from *unbound*.
+#[tokio::test]
+async fn a_document_type_with_no_workflow_still_submits() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let workflow = publish_workflow(&app, &token, role_workflow("wf_unbound")).await;
+    let bound = document_type(&app, &token, "PR_BOUND", Some(workflow)).await;
+    let unbound = document_type(&app, &token, "PR_UNBOUND", None).await;
+
+    let routed = draft(&app, &token, bound).await;
+    let plain = draft(&app, &token, unbound).await;
+
+    assert_eq!(submit(&app, &token, routed).await.status, StatusCode::OK);
+    let submitted = submit(&app, &token, plain).await;
+    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+
+    assert!(instance_of(&app, routed).await.is_some());
+    assert!(
+        instance_of(&app, plain).await.is_none(),
+        "a type binding no workflow started one"
+    );
+    assert_eq!(
+        stored_status(&app, plain).await,
+        "SUBMITTED",
+        "an unrouted document keeps the status the submit gave it"
+    );
+}
+
+/// **The synchronization is one-way** ([#178] AC2).
+///
+/// A workflow transition sets the document's status; setting the document's
+/// status does not move the workflow. So the transition route refuses a document
+/// a process is deciding, naming the instance — and lets it through again once
+/// the process has finished, which is not a loophole: nothing is deciding the
+/// document any more.
+///
+/// **Seen red** against `service::status::transition` with the
+/// `refuse_while_a_workflow_is_deciding` call removed: the document is moved to
+/// `APPROVED` while its instance still says `MANAGER_APPROVAL`, and the next
+/// decision overwrites it — a status that disagreed with its process and then
+/// silently stopped disagreeing.
+#[tokio::test]
+async fn a_document_under_a_workflow_cannot_have_its_status_set_by_hand() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let workflow = publish_workflow(&app, &token, role_workflow("wf_oneway")).await;
+    let type_id = document_type(&app, &token, "PR_ONEWAY", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let refused = app
+        .put(
+            &format!("/api/v1/documents/{id}/status"),
+            Some(&token),
+            json!({ "status": "APPROVED" }),
+        )
+        .await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::CONFLICT,
+        "a manual status change moved a document a workflow was deciding: {}",
+        refused.body
+    );
+    assert_eq!(
+        stored_status(&app, id).await,
+        "PENDING_APPROVAL",
+        "the refusal must leave the row where the process put it"
+    );
+
+    // And the other half: an unrouted document is unaffected, so the refusal is
+    // about the workflow rather than about the route being broken.
+    let unbound = document_type(&app, &token, "PR_ONEWAY_FREE", None).await;
+    let free = draft(&app, &token, unbound).await;
+    assert_eq!(submit(&app, &token, free).await.status, StatusCode::OK);
+
+    let moved = app
+        .put(
+            &format!("/api/v1/documents/{free}/status"),
+            Some(&token),
+            json!({ "status": "APPROVED" }),
+        )
+        .await;
+    assert_eq!(moved.status, StatusCode::OK, "{}", moved.body);
+}
+
+// ---------------------------------------------------------------------------
+// #175 — the instance, its version pin and its variables
+// ---------------------------------------------------------------------------
+
+/// **An instance runs the revision it started against** ([#175] AC1), and
+/// **rebinding the type leaves it there** ([#187] AC3).
+///
+/// The two acceptance criteria are one test because they are one claim: the
+/// instance pins a revision row, so nothing reachable through the *type* can
+/// move it. Which is also why there is no `guard_rebinding` for workflows —
+/// `workflow_instances.workflow_definition_id` is `NOT NULL`, so no instance can
+/// be in the unpinned condition **D-30** had to guard against for forms.
+#[tokio::test]
+async fn rebinding_the_type_leaves_a_running_approval_on_the_revision_it_started() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let first = publish_workflow(&app, &token, role_workflow("wf_pinned")).await;
+    let type_id = document_type(&app, &token, "PR_PINNED", Some(first)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let (instance_id, state_before, _) = instance_of(&app, id).await.expect("an instance");
+
+    // A second, different workflow, and the type is re-pointed at it.
+    let second = publish_workflow(&app, &token, role_workflow("wf_pinned_next")).await;
+    let rebound = app
+        .put(
+            &format!("/api/v1/document-types/{type_id}"),
+            Some(&token),
+            json!({ "workflows": [{ "workflowDefinitionId": second }] }),
+        )
+        .await;
+    assert_eq!(
+        rebound.status,
+        StatusCode::OK,
+        "rebinding a type with a running approval was refused: {}",
+        rebound.body
+    );
+
+    let pinned: Uuid =
+        sqlx::query_scalar("SELECT workflow_definition_id FROM workflow_instances WHERE id = $1")
+            .bind(instance_id)
+            .fetch_one(&app.pool)
+            .await
+            .expect("read the pin");
+
+    assert_eq!(
+        pinned, first,
+        "a running approval changed shape underneath itself"
+    );
+
+    let (_, state_after, _) = instance_of(&app, id).await.expect("still running");
+    assert_eq!(state_after, state_before, "its state moved as well");
+
+    // And the third move: the *next* document of that type routes to the new
+    // binding, which is what "future submissions use the new binding" means.
+    let next = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, next).await.status, StatusCode::OK);
+
+    let next_pin: Uuid = sqlx::query_scalar(
+        "SELECT workflow_definition_id FROM workflow_instances WHERE document_id = $1",
+    )
+    .bind(next)
+    .fetch_one(&app.pool)
+    .await
+    .expect("read the second pin");
+
+    assert_eq!(next_pin, second);
+}
+
+/// **A workflow variable is computed at start and stored with its declared
+/// type** ([#175] AC2).
+#[tokio::test]
+async fn an_instance_carries_the_variables_its_definition_declares() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let workflow = publish_workflow(&app, &token, role_workflow("wf_variables")).await;
+    let type_id = document_type(&app, &token, "PR_VARIABLES", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let (instance_id, _, _) = instance_of(&app, id).await.expect("an instance");
+
+    let stored: (String, String) = sqlx::query_as(
+        "SELECT variable_value, data_type FROM workflow_variables WHERE workflow_instance_id = $1 AND variable_key = 'amount'",
+    )
+    .bind(instance_id)
+    .fetch_one(&app.pool)
+    .await
+    .expect("read the variable");
+
+    assert_eq!(stored.1, "NUMBER");
+    assert_eq!(stored.0, "45000000");
+
+    // And it comes back through the API typed, rather than as the string it is
+    // stored as — the whole reason `data_type` sits beside the value.
+    let read = app
+        .get(&format!("/api/v1/documents/{id}/workflow"), Some(&token))
+        .await;
+    assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+    assert_eq!(
+        read.body["data"]["instance"]["variables"][0]["key"],
+        "amount"
+    );
+    assert_eq!(
+        read.body["data"]["instance"]["variables"][0]["value"],
+        json!(45_000_000.0)
+    );
+    assert_eq!(
+        read.body["data"]["instance"]["definitionVersion"], 1,
+        "the revision the approval is running, joined rather than stored twice"
+    );
+}
+
+/// **A second live instance is refused** ([#178] AC1).
+///
+/// The service refuses it after reading; `uq_workflow_instances_live_document`
+/// is what makes the refusal true under concurrency. This reaches the **index**
+/// rather than the service, by starting a second process for a document that
+/// already has one — which is what a second submit would do if the draft check
+/// were ever relaxed.
+///
+/// **Seen red** against `0025_workflow.sql` with
+/// `uq_workflow_instances_live_document` dropped: the insert succeeds and the
+/// document has two processes deciding it.
+#[tokio::test]
+async fn a_document_cannot_have_two_live_processes() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let workflow = publish_workflow(&app, &token, role_workflow("wf_second")).await;
+    let type_id = document_type(&app, &token, "PR_SECOND", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let refused = sqlx::query(
+        r#"
+        INSERT INTO workflow_instances
+            (id, tenant_id, instance_ref, workflow_definition_id, document_id,
+             status, current_state)
+        VALUES ($1, $2, 'WFI-2026-999999', $3, $4, 'RUNNING', 'MANAGER_APPROVAL')
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .bind(workflow)
+    .bind(id)
+    .execute(&app.pool)
+    .await;
+
+    let error = refused.expect_err("a second live instance was accepted");
+    assert!(
+        error
+            .as_database_error()
+            .is_some_and(|e| e.is_unique_violation()),
+        "expected the live-instance index to refuse it, got {error}"
+    );
+}
+
+/// **An instance cannot be in a state its definition does not declare**
+/// ([#175] AC4), enforced by the database rather than by convention.
+///
+/// **Seen red** against `0025_workflow.sql` with
+/// `fk_workflow_instances_current_state` dropped: the update succeeds and the
+/// instance sits in a state no transition leaves.
+#[tokio::test]
+async fn an_instance_cannot_be_moved_to_a_state_the_definition_does_not_have() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let workflow = publish_workflow(&app, &token, role_workflow("wf_state_fk")).await;
+    let type_id = document_type(&app, &token, "PR_STATE_FK", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let (instance_id, _, _) = instance_of(&app, id).await.expect("an instance");
+
+    let refused =
+        sqlx::query("UPDATE workflow_instances SET current_state = 'INVENTED' WHERE id = $1")
+            .bind(instance_id)
+            .execute(&app.pool)
+            .await;
+
+    let error = refused.expect_err("an invented state was accepted");
+    assert!(
+        error
+            .as_database_error()
+            .is_some_and(|e| e.is_foreign_key_violation()),
+        "expected the state foreign key to refuse it, got {error}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #176 — the task, its assignment, and the claim
+// ---------------------------------------------------------------------------
+
+/// **A role task has no assignee until somebody claims it** ([#176] AC2).
+#[tokio::test]
+async fn a_role_task_is_unassigned_and_names_the_role_it_is_offered_to() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let _approver = approver(&app, "wf.assignee").await;
+
+    let workflow = publish_workflow(&app, &token, role_workflow("wf_assignment")).await;
+    let type_id = document_type(&app, &token, "PR_ASSIGNMENT", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let row: (Option<Uuid>, Option<Uuid>, String) = sqlx::query_as(
+        "SELECT assignee_user_id, candidate_role_id, status FROM workflow_tasks WHERE document_id = $1",
+    )
+    .bind(id)
+    .fetch_one(&app.pool)
+    .await
+    .expect("read the task");
+
+    assert!(row.0.is_none(), "a role task was written with an assignee");
+    assert!(row.1.is_some(), "a role task named no role");
+    assert_eq!(row.2, "CREATED");
+}
+
+/// **An assignment that resolves to nobody fails the transition** rather than
+/// leaving an approval that has silently stopped.
+///
+/// The role the definition names does not exist in this tenant, so the submit is
+/// refused with the whole transaction rolled back — no document number burned,
+/// no instance, no task.
+#[tokio::test]
+async fn a_workflow_naming_a_role_nobody_holds_refuses_the_submit() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let mut definition = role_workflow("wf_no_role");
+    definition["states"][0]["task"]["assignment"]["roleCode"] = json!("ROLE-THAT-IS-NOT-THERE");
+
+    let workflow = publish_workflow(&app, &token, definition).await;
+    let type_id = document_type(&app, &token, "PR_NO_ROLE", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+
+    let refused = submit(&app, &token, id).await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a task assigned to nobody was created: {}",
+        refused.body
+    );
+    assert!(
+        refused.body.to_string().contains("ASSIGNMENT_UNRESOLVED"),
+        "{}",
+        refused.body
+    );
+
+    assert_eq!(
+        stored_status(&app, id).await,
+        "DRAFT",
+        "the whole submit must roll back, not half of it"
+    );
+    assert!(instance_of(&app, id).await.is_none());
+}
+
+/// **Two simultaneous claims produce one winner and one 409** ([#176] AC3).
+///
+/// Driven at a concurrency **above the pool ceiling**, which is the level [#118]
+/// showed a fix's own tests can fail to reach. It enumerates every status the
+/// product may legitimately answer rather than asserting `409` and treating
+/// anything else as a pass — the [Sprint 9 retrospective]'s second action.
+///
+/// **Seen red** against `repository::task::claim` with its
+/// `assignee_user_id IS NULL AND status = 'CREATED'` predicate removed: every
+/// one of the twenty-four callers is told it won, and the task ends up assigned
+/// to whichever wrote last.
+///
+/// [Sprint 9 retrospective]: ../../projects/retrospectives/07.%20Sprint%209%20Retrospective.md
+#[tokio::test]
+async fn two_users_claiming_one_task_produce_one_owner() {
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+
+    let workflow = publish_workflow(&app, &token, role_workflow("wf_claim")).await;
+    let type_id = document_type(&app, &token, "PR_CLAIM", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let task = open_task_of(&app, id).await;
+
+    // One role, many holders of it — which is the situation a queue is.
+    let mut tokens = Vec::new();
+    for index in 0..CONCURRENT_CALLERS {
+        tokens.push(approver(&app, &format!("wf.claimant{index}")).await);
+    }
+
+    let mut handles = Vec::new();
+
+    for token in tokens {
+        let app = Arc::clone(&app);
+        handles.push(tokio::spawn(async move {
+            app.post(
+                &format!("/api/v1/workflow/tasks/{task}/claim"),
+                Some(&token),
+                json!({}),
+            )
+            .await
+        }));
+    }
+
+    let mut won = 0usize;
+    let mut lost = 0usize;
+
+    for handle in handles {
+        let response = handle.await.expect("a claim finished");
+
+        match response.status {
+            StatusCode::OK => won += 1,
+            StatusCode::CONFLICT => lost += 1,
+            other => panic!(
+                "a claim answered {other}, which is neither winning nor losing: {}",
+                response.body
+            ),
+        }
+    }
+
+    assert_eq!(won, 1, "{won} callers were told they claimed one task");
+    assert_eq!(lost, CONCURRENT_CALLERS - 1);
+
+    let owners: i64 = sqlx::query_scalar(
+        "SELECT count(DISTINCT assignee_user_id) FROM workflow_tasks WHERE id = $1",
+    )
+    .bind(task)
+    .fetch_one(&app.pool)
+    .await
+    .expect("count the owners");
+
+    assert_eq!(owners, 1, "one task ended with more than one owner");
+}
+
+// ---------------------------------------------------------------------------
+// #177 — approve, reject, and the decision that must not happen twice
+// ---------------------------------------------------------------------------
+
+/// **Approving moves the instance and the document's status follows**
+/// ([#177] AC1, [#178] AC2, AC3).
+#[tokio::test]
+async fn approving_completes_the_process_and_the_document() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let approver = approver(&app, "wf.approver").await;
+
+    let workflow = publish_workflow(&app, &token, role_workflow("wf_approve")).await;
+    let type_id = document_type(&app, &token, "PR_APPROVE", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let task = open_task_of(&app, id).await;
+
+    let decided = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&approver),
+            json!({ "action": "APPROVE" }),
+        )
+        .await;
+
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+    assert_eq!(decided.body["data"]["previousState"], "MANAGER_APPROVAL");
+    assert_eq!(decided.body["data"]["currentState"], "COMPLETED");
+    assert_eq!(decided.body["data"]["documentStatus"], "COMPLETED");
+
+    let (_, state, status) = instance_of(&app, id).await.expect("the instance");
+    assert_eq!(state, "COMPLETED");
+    assert_eq!(status, "COMPLETED", "a final state ends the instance");
+
+    assert_eq!(stored_status(&app, id).await, "COMPLETED");
+
+    // The formal record, and the task's own history, both written in that
+    // transaction — and they are two rows because they answer two questions.
+    let decisions: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM approval_decisions WHERE task_id = $1")
+            .bind(task)
+            .fetch_one(&app.pool)
+            .await
+            .expect("count the decisions");
+    assert_eq!(decisions, 1);
+
+    let history: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM workflow_task_history WHERE task_id = $1")
+            .bind(task)
+            .fetch_one(&app.pool)
+            .await
+            .expect("count the history");
+    assert_eq!(history, 2, "created, then completed");
+}
+
+/// **Rejecting takes the other transition**, and the document lands on the
+/// status the definition mapped that state to.
+#[tokio::test]
+async fn rejecting_takes_the_definitions_other_edge() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let approver = approver(&app, "wf.rejecter").await;
+
+    let workflow = publish_workflow(&app, &token, role_workflow("wf_reject")).await;
+    let type_id = document_type(&app, &token, "PR_REJECT", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let task = open_task_of(&app, id).await;
+
+    let decided = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&approver),
+            json!({ "action": "REJECT" }),
+        )
+        .await;
+
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+    assert_eq!(decided.body["data"]["currentState"], "REJECTED");
+    assert_eq!(stored_status(&app, id).await, "REJECTED");
+
+    let outcome: Option<String> =
+        sqlx::query_scalar("SELECT outcome FROM workflow_instances WHERE document_id = $1")
+            .bind(id)
+            .fetch_one(&app.pool)
+            .await
+            .expect("read the outcome");
+    assert_eq!(outcome.as_deref(), Some("REJECTED"));
+}
+
+/// **A decided task cannot be decided again** ([#177] AC2, AC4).
+///
+/// Twenty-four concurrent callers, half approving and half rejecting, above the
+/// pool ceiling. Exactly one must win, and the instance, the document and the
+/// decision record must all agree with whichever it was. It enumerates every
+/// status the product may legitimately answer.
+///
+/// **Seen red** against `repository::task::complete` with its
+/// `status IN ('CREATED','ASSIGNED','IN_PROGRESS')` predicate removed: several
+/// callers are told they decided the task, `approval_decisions` holds several
+/// rows for one task, and the document's status is whichever transition
+/// committed last.
+#[tokio::test]
+async fn concurrent_decisions_on_one_task_resolve_to_exactly_one_outcome() {
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+
+    let workflow = publish_workflow(&app, &token, role_workflow("wf_race")).await;
+    let type_id = document_type(&app, &token, "PR_RACE", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let task = open_task_of(&app, id).await;
+
+    let mut tokens = Vec::new();
+    for index in 0..CONCURRENT_CALLERS {
+        tokens.push(approver(&app, &format!("wf.decider{index}")).await);
+    }
+
+    let mut handles = Vec::new();
+
+    for (index, token) in tokens.into_iter().enumerate() {
+        let app = Arc::clone(&app);
+        let action = if index % 2 == 0 { "APPROVE" } else { "REJECT" };
+
+        handles.push(tokio::spawn(async move {
+            app.post(
+                &format!("/api/v1/workflow/tasks/{task}/decision"),
+                Some(&token),
+                json!({ "action": action }),
+            )
+            .await
+        }));
+    }
+
+    let mut winners = HashSet::new();
+    let mut lost = 0usize;
+
+    for handle in handles {
+        let response = handle.await.expect("a decision finished");
+
+        match response.status {
+            StatusCode::OK => {
+                winners.insert(
+                    response.body["data"]["currentState"]
+                        .as_str()
+                        .expect("a state")
+                        .to_owned(),
+                );
+            }
+            // The task was already decided, or the process moved underneath the
+            // decision. Both are correct answers to losing.
+            StatusCode::CONFLICT => lost += 1,
+            other => panic!(
+                "a decision answered {other}, which is neither winning nor losing: {}",
+                response.body
+            ),
+        }
+    }
+
+    assert_eq!(
+        winners.len(),
+        1,
+        "more than one caller decided one task: {winners:?}"
+    );
+    assert_eq!(lost, CONCURRENT_CALLERS - 1);
+
+    let decisions: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM approval_decisions WHERE task_id = $1")
+            .bind(task)
+            .fetch_one(&app.pool)
+            .await
+            .expect("count the decisions");
+    assert_eq!(
+        decisions, 1,
+        "one task collected {decisions} decision records"
+    );
+
+    // And everything agrees: the instance's state, the document's status and the
+    // one decision that was recorded.
+    let winning_state = winners.into_iter().next().expect("a winner");
+    let (_, state, _) = instance_of(&app, id).await.expect("the instance");
+    assert_eq!(state, winning_state);
+
+    let expected_document_status = if winning_state == "COMPLETED" {
+        "COMPLETED"
+    } else {
+        "REJECTED"
+    };
+    assert_eq!(stored_status(&app, id).await, expected_document_status);
+}
+
+/// **Only the task's assignee, or a holder of the role it is offered to, may
+/// decide it** ([#177] AC5).
+///
+/// The third party below holds `workflow:task:execute` and not the role, which
+/// is the distinction that matters: the permission says they may work tasks at
+/// all, and the row says whether *this* one is theirs.
+///
+/// **Seen red** against `domain::task::refuse_unless_theirs` returning `Ok(())`
+/// unconditionally: the stranger decides somebody else's approval and the
+/// permission test in this file stays green, because a suite that only ever
+/// calls with the assignee cannot tell the two apart.
+#[tokio::test]
+async fn a_third_party_holding_the_permission_cannot_decide_somebody_elses_task() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let approver = approver(&app, "wf.rightful").await;
+
+    // Everything the approver has, except the approver role.
+    let role = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "WF-BYSTANDER",
+        &[
+            "workflow:task:read",
+            "workflow:task:execute",
+            "workflow:instance:read",
+            "document:read",
+        ],
+    )
+    .await;
+    fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "wf.bystander",
+        "wf.bystander@example.test",
+        common::ADMIN_PASSWORD,
+        &[role],
+    )
+    .await;
+    let bystander = app.sign_in("wf.bystander", common::ADMIN_PASSWORD).await;
+
+    let workflow = publish_workflow(&app, &token, role_workflow("wf_third_party")).await;
+    let type_id = document_type(&app, &token, "PR_THIRD_PARTY", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let task = open_task_of(&app, id).await;
+
+    let refused = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&bystander),
+            json!({ "action": "APPROVE" }),
+        )
+        .await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::FORBIDDEN,
+        "a third party decided somebody else's approval: {}",
+        refused.body
+    );
+    assert_eq!(stored_status(&app, id).await, "PENDING_APPROVAL");
+
+    // And the rightful holder can, so the refusal above is about the row rather
+    // than about the endpoint refusing everybody — the gate §2.9 warns about.
+    let decided = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&approver),
+            json!({ "action": "APPROVE" }),
+        )
+        .await;
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+}
+
+/// **An action the definition does not offer is a 422, not a 409.**
+///
+/// The request names something the process cannot do *from where it is*, which
+/// is a property of the payload against the resource; a 409 is what a concurrent
+/// change earns. The same split `DocumentStatus::check_move_to` makes one module
+/// over, and a caller fixes the two differently.
+#[tokio::test]
+async fn an_action_the_definition_does_not_offer_names_the_ones_it_does() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let approver = approver(&app, "wf.limited").await;
+
+    // A workflow that can only be rejected from its first state.
+    let definition = json!({
+        "workflowKey": "wf_reject_only",
+        "version": "1.0.0",
+        "name": "Reject only",
+        "initialState": "MANAGER_APPROVAL",
+        "states": [
+            { "code": "MANAGER_APPROVAL", "name": "Manager approval",
+              "mapsToDocumentStatus": "PENDING_APPROVAL",
+              "task": { "taskDefinitionKey": "manager_approval", "taskName": "Decide",
+                        "assignment": { "assigneeType": "ROLE", "roleCode": APPROVER_ROLE } } },
+            { "code": "REJECTED", "name": "Rejected", "mapsToDocumentStatus": "REJECTED",
+              "isFinal": true },
+            { "code": "CANCELLED", "name": "Cancelled", "mapsToDocumentStatus": "CANCELLED",
+              "isFinal": true }
+        ],
+        "transitions": [
+            { "from": "MANAGER_APPROVAL", "to": "REJECTED", "action": "REJECT",
+              "allowedBy": format!("ROLE:{APPROVER_ROLE}") },
+            { "from": "MANAGER_APPROVAL", "to": "CANCELLED", "action": "CANCEL",
+              "allowedBy": "OWNER" }
+        ]
+    });
+
+    let workflow = publish_workflow(&app, &token, definition).await;
+    let type_id = document_type(&app, &token, "PR_REJECT_ONLY", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let task = open_task_of(&app, id).await;
+
+    let refused = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&approver),
+            json!({ "action": "APPROVE" }),
+        )
+        .await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+
+    let body = refused.body.to_string();
+    assert!(body.contains("NO_SUCH_TRANSITION"), "{body}");
+    assert!(
+        body.contains("REJECT"),
+        "the refusal must name what is possible from here: {body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #187 — the binding, checked against a definition that exists and is published
+// ---------------------------------------------------------------------------
+
+/// **A binding must name a definition that exists and is `ACTIVE`**
+/// ([#187] AC2).
+///
+/// Both refusals, because they are different problems: an id that names nothing
+/// is a typo, and a draft is a workflow somebody has not finished. A draft bound
+/// to a type could still change under documents already routed by it, which is
+/// what publication exists to prevent — `check_bindings`' `NOT_PUBLISHED` arm,
+/// restated for the other artefact.
+///
+/// **Seen red** against `service::check_workflow_bindings` returning `Ok(())`
+/// before its loop: a document type is bound to a workflow that does not exist,
+/// and the failure surfaces at somebody's submit as a 500.
+#[tokio::test]
+async fn a_type_cannot_bind_a_workflow_that_does_not_exist_or_is_a_draft() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let missing = app
+        .post(
+            "/api/v1/document-types",
+            Some(&token),
+            json!({
+                "typeCode": "PR_BAD_BINDING",
+                "name": "PR_BAD_BINDING",
+                "workflows": [{ "workflowDefinitionId": Uuid::now_v7() }],
+            }),
+        )
+        .await;
+
+    assert_eq!(
+        missing.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        missing.body
+    );
+    assert_eq!(
+        missing.body["error"]["details"][0]["code"], "NOT_FOUND",
+        "{}",
+        missing.body
+    );
+    assert_eq!(
+        missing.body["error"]["details"][0]["path"], "workflows.0.workflowDefinitionId",
+        "{}",
+        missing.body
+    );
+
+    // A draft: it exists, and binding it would bind a definition that can still
+    // change under documents already routed by it.
+    let created = app
+        .post(
+            "/api/v1/workflow/definitions",
+            Some(&token),
+            json!({
+                "workflowKey": "wf_draft_binding",
+                "name": "Draft",
+                "definition": role_workflow("wf_draft_binding"),
+            }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let draft_id = id_of(&created.body["data"]);
+
+    let refused = app
+        .post(
+            "/api/v1/document-types",
+            Some(&token),
+            json!({
+                "typeCode": "PR_DRAFT_BINDING",
+                "name": "PR_DRAFT_BINDING",
+                "workflows": [{ "workflowDefinitionId": draft_id }],
+            }),
+        )
+        .await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a draft workflow was bound to a document type: {}",
+        refused.body
+    );
+    assert_eq!(
+        refused.body["error"]["details"][0]["code"], "NOT_PUBLISHED",
+        "{}",
+        refused.body
+    );
+
+    // And a published one binds, so the two refusals above are not green because
+    // every binding is refused.
+    let published = publish_workflow(&app, &token, role_workflow("wf_good_binding")).await;
+    let accepted = app
+        .post(
+            "/api/v1/document-types",
+            Some(&token),
+            json!({
+                "typeCode": "PR_GOOD_BINDING",
+                "name": "PR_GOOD_BINDING",
+                "workflows": [{ "workflowDefinitionId": published }],
+            }),
+        )
+        .await;
+    assert_eq!(accepted.status, StatusCode::CREATED, "{}", accepted.body);
+}
+
+/// **A definition with running approvals cannot be retired.**
+///
+/// `delete_type`'s decision one module over, and for its reason: an instance
+/// *is* its definition, so retiring one under a running approval leaves that
+/// approval unable to move.
+#[tokio::test]
+async fn a_workflow_with_running_approvals_cannot_be_retired() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let workflow = publish_workflow(&app, &token, role_workflow("wf_in_use")).await;
+    let spare = publish_workflow(&app, &token, role_workflow("wf_spare")).await;
+    let type_id = document_type(&app, &token, "PR_IN_USE", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let refused = app
+        .delete(
+            &format!("/api/v1/workflow/definitions/{workflow}"),
+            Some(&token),
+        )
+        .await;
+
+    assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.body);
+
+    // The unused one retires, so the refusal is about the running approval
+    // rather than about deletion being broken.
+    let deleted = app
+        .delete(
+            &format!("/api/v1/workflow/definitions/{spare}"),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
+}
+
+// ---------------------------------------------------------------------------
+// Closing what the mutation campaign found nothing held
+// ---------------------------------------------------------------------------
+
+/// **A stale move writes nothing** (M11).
+///
+/// `move_state` carries `AND current_state = $3` so that two callers who both
+/// chose a transition from one state produce one update of one row and one
+/// update of none. The campaign found the predicate unheld, and the reason is a
+/// **gate**: every decision reaches it through `workflow_tasks`' own
+/// `status IN (…)` guard, which refuses the loser one statement earlier. One
+/// test appeared to cover both and covered the first.
+///
+/// So this drives the repository, where the task guard is not in the way — the
+/// shape `documents_status.rs`'s `a_stale_transition_writes_nothing` uses one
+/// module over, and for the identical reason.
+///
+/// **Seen red** against the predicate defeated: the stale move updates one row
+/// and the instance is put into a state the definition does not reach from where
+/// it actually was.
+#[tokio::test]
+async fn a_stale_move_writes_nothing() {
+    use kelir_backend::modules::workflow::domain::InstanceOutcome;
+    use kelir_backend::modules::workflow::repository::instance as instance_repo;
+
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let workflow = publish_workflow(&app, &token, role_workflow("wf_stale")).await;
+    let type_id = document_type(&app, &token, "PR_STALE", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let (instance_id, state, _) = instance_of(&app, id).await.expect("an instance");
+    assert_eq!(state, "MANAGER_APPROVAL");
+
+    let mut transaction = app.pool.begin().await.expect("a transaction");
+
+    // The first move wins, from the state the instance is actually in.
+    let won = instance_repo::move_state(
+        &mut transaction,
+        fixtures::SYSTEM_TENANT_ID,
+        &instance_repo::StateMove {
+            id: instance_id,
+            from: "MANAGER_APPROVAL",
+            to: "COMPLETED",
+            final_state: true,
+            outcome: Some(InstanceOutcome::Approved),
+        },
+        None,
+    )
+    .await
+    .expect("the move runs");
+    assert_eq!(won, 1);
+
+    // The second was decided against `MANAGER_APPROVAL` too, and the process has
+    // left it. It must write nothing rather than overwrite the first decision.
+    let lost = instance_repo::move_state(
+        &mut transaction,
+        fixtures::SYSTEM_TENANT_ID,
+        &instance_repo::StateMove {
+            id: instance_id,
+            from: "MANAGER_APPROVAL",
+            to: "REJECTED",
+            final_state: true,
+            outcome: Some(InstanceOutcome::Rejected),
+        },
+        None,
+    )
+    .await
+    .expect("the stale move runs");
+
+    assert_eq!(
+        lost, 0,
+        "a decision taken against a state the process had left overwrote the one that won"
+    );
+
+    transaction.commit().await.expect("commit");
+
+    let (_, state, _) = instance_of(&app, id).await.expect("the instance");
+    assert_eq!(
+        state, "COMPLETED",
+        "the losing move changed the state anyway"
+    );
+}
+
+/// **A final state ends the instance whatever its status maps to.**
+///
+/// Found by re-reading `fire` against `move_state`: `isFinal` and the outcome
+/// were one argument, so a final state mapping to `IN_REVIEW` — which the JWSS
+/// meta-schema permits — left the instance `RUNNING` in a state nothing can
+/// leave. It would hold the one-live-instance index against its document
+/// forever, and the document could never be transitioned by hand either, because
+/// the seam refuses while a process is live.
+///
+/// **Seen red** against `move_state`'s `$5` reverted to the outcome: the
+/// instance is `RUNNING` after entering a final state, and `is_live()` is true.
+#[tokio::test]
+async fn a_final_state_ends_the_instance_whatever_its_status_maps_to() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let approver = approver(&app, "wf.finality").await;
+
+    // `REVIEWED` is final and maps to `IN_REVIEW`, which yields no outcome.
+    let definition = json!({
+        "workflowKey": "wf_finality",
+        "version": "1.0.0",
+        "name": "Ends in review",
+        "initialState": "MANAGER_APPROVAL",
+        "states": [
+            { "code": "MANAGER_APPROVAL", "name": "Manager approval",
+              "mapsToDocumentStatus": "PENDING_APPROVAL",
+              "task": { "taskDefinitionKey": "manager_approval", "taskName": "Decide",
+                        "assignment": { "assigneeType": "ROLE", "roleCode": APPROVER_ROLE } } },
+            { "code": "REVIEWED", "name": "Reviewed", "mapsToDocumentStatus": "IN_REVIEW",
+              "isFinal": true },
+            { "code": "CANCELLED", "name": "Cancelled", "mapsToDocumentStatus": "CANCELLED",
+              "isFinal": true }
+        ],
+        "transitions": [
+            { "from": "MANAGER_APPROVAL", "to": "REVIEWED", "action": "APPROVE",
+              "allowedBy": format!("ROLE:{APPROVER_ROLE}") },
+            { "from": "MANAGER_APPROVAL", "to": "CANCELLED", "action": "REJECT",
+              "allowedBy": format!("ROLE:{APPROVER_ROLE}") }
+        ]
+    });
+
+    let workflow = publish_workflow(&app, &token, definition).await;
+    let type_id = document_type(&app, &token, "PR_FINALITY", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let task = open_task_of(&app, id).await;
+
+    let decided = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&approver),
+            json!({ "action": "APPROVE" }),
+        )
+        .await;
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+
+    let (_, state, status) = instance_of(&app, id).await.expect("the instance");
+
+    assert_eq!(state, "REVIEWED");
+    assert_eq!(
+        status, "COMPLETED",
+        "an instance in a final state was left running, so nothing could ever move it \
+         and its document could never be transitioned by hand either"
+    );
+    assert_eq!(stored_status(&app, id).await, "IN_REVIEW");
+}
+
+/// **A document type bound to a deprecated workflow refuses the submit rather
+/// than starting one.**
+///
+/// #187 refuses a *binding* to anything but an `ACTIVE` definition, and a
+/// definition can be deprecated afterwards — at which point every later
+/// submission of that type would start a process against a revision nobody
+/// stands behind. `engine::start`'s documentation claimed this check and the
+/// code did not make it, which a re-read found.
+///
+/// **Approvals already running are unaffected**, and that is the other half of
+/// the decision: an instance pins its revision, so refusing at the decision
+/// would strand every approval in flight the moment an administrator retired the
+/// workflow.
+///
+/// **Seen red** against `engine::start` with the status check removed: the
+/// submit succeeds and a process starts against a `DEPRECATED` definition.
+#[tokio::test]
+async fn a_deprecated_workflow_refuses_the_submit_and_leaves_running_approvals_alone() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let approver = approver(&app, "wf.deprecated").await;
+
+    let workflow = publish_workflow(&app, &token, role_workflow("wf_deprecated")).await;
+    let type_id = document_type(&app, &token, "PR_DEPRECATED", Some(workflow)).await;
+
+    // One approval already running against it.
+    let running = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, running).await.status, StatusCode::OK);
+
+    sqlx::query("UPDATE workflow_definitions SET status = 'DEPRECATED' WHERE id = $1")
+        .bind(workflow)
+        .execute(&app.pool)
+        .await
+        .expect("deprecate the definition");
+
+    // A new document of that type cannot start one.
+    let next = draft(&app, &token, type_id).await;
+    let refused = submit(&app, &token, next).await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a process started against a deprecated definition: {}",
+        refused.body
+    );
+    assert!(
+        refused.body.to_string().contains("WORKFLOW_NOT_PUBLISHED"),
+        "{}",
+        refused.body
+    );
+    assert_eq!(
+        stored_status(&app, next).await,
+        "DRAFT",
+        "the whole submit must roll back"
+    );
+
+    // And the approval already in flight is still decidable, because it pinned
+    // the revision it started against.
+    let task = open_task_of(&app, running).await;
+    let decided = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&approver),
+            json!({ "action": "APPROVE" }),
+        )
+        .await;
+
+    assert_eq!(
+        decided.status,
+        StatusCode::OK,
+        "deprecating a workflow stranded an approval that was already running: {}",
+        decided.body
+    );
+    assert_eq!(stored_status(&app, running).await, "COMPLETED");
+}

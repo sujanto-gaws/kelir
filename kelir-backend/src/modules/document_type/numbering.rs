@@ -26,6 +26,29 @@
 //! - *A consumed gap.* A number allocated and then lost to a rolled-back
 //!   transaction. Acceptable for some rules and a compliance failure for
 //!   others, which is why [`GapPolicy`] is a column rather than an assumption.
+//!
+//! # A bucket is per type, and the number's uniqueness is per tenant
+//!
+//! **The two scopes are different, and a template that ignores it collides.**
+//! `document_type_sequence_buckets` counts per document type, and
+//! `uq_documents_tenant_id_document_number` is tenant-wide — so two types both
+//! templated `PR-{year}-{sequence}` each issue `PR-2026-000001`, and the second
+//! submit is refused. It is refused **naming the templates**, since Sprint 10
+//! ([`document::service::submit::colliding_number`][c]); before that the
+//! violation was unmapped and the answer was a 500.
+//!
+//! Nothing here prevents the configuration, and that is deliberate: this module
+//! validates one rule and cannot see the others, and a check that read every
+//! *other* type's template on every save would refuse a template that is going
+//! to be unique because the type it clashes with is about to be retired. The
+//! honest place for it is the refusal, which names what to change.
+//!
+//! **The uniqueness is not moved to be per type.** A document number is a
+//! business identifier people quote to each other and to suppliers; two
+//! documents in one tenant sharing one is exactly what that index exists to
+//! prevent.
+//!
+//! [c]: crate::modules::document::service::submit
 
 use chrono::{DateTime, Datelike, Utc};
 use serde::{Deserialize, Serialize};

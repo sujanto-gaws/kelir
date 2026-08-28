@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE workflow_definitions SET\n            status       = 'ACTIVE',\n            published_at = now(),\n            published_by = $3,\n            updated_by   = $3,\n            updated_at   = now()\n        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL AND status = 'DRAFT'\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ad2c88c0bcd5f06f4cf7d4eaad20bd848d193204056d1c4b322d00dd9efd6586"
+}

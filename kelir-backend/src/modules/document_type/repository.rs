@@ -475,3 +475,58 @@ pub async fn has_documents<'e, E: PgExecutor<'e>>(
     .fetch_one(executor)
     .await
 }
+
+/// The workflow a submitted document of this type routes to, or `None`
+/// ([#187](https://github.com/sujanto-gaws/kelir/issues/187) AC4).
+///
+/// `document_type_workflows` in `priority` order, **first match wins** — the
+/// ordering §6.4 documents and `check_workflows` refuses duplicates at, so the
+/// order is a decision an administrator made rather than a row order.
+///
+/// Three conditions narrow it and each is the column's own:
+///
+/// * `status = 'ACTIVE'`, so a binding can be turned off without deleting it;
+/// * the `valid_from` / `valid_to` window, evaluated against today;
+/// * `condition_expression IS NULL`.
+///
+/// **The third is the one worth arguing.** That column holds the *superseded*
+/// string form of a condition (`'amount <= 10000000'`) — JWSS §1.1 replaces it
+/// with JSON Logic — and evaluating a binding-selection condition is FR-WF-015's
+/// territory ([#186](https://github.com/sujanto-gaws/kelir/issues/186), Sprint
+/// 11). A binding carrying one is therefore **skipped rather than treated as
+/// unconditional**, because treating it as unconditional would route a document
+/// by a rule nobody wrote — and the skip is visible: `select_workflow` warns.
+///
+/// Read on the pool before the submit's transaction opens, which is coding
+/// standard §2.5's "resolve what the request points at first": nothing about
+/// this answer needs to be held, because a binding changed a microsecond later
+/// is a binding that applies to the *next* document.
+pub async fn workflow_binding<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
+    tenant_id: Uuid,
+    document_type_id: Uuid,
+) -> Result<Option<(Uuid, bool)>, sqlx::Error> {
+    let row = sqlx::query!(
+        r#"
+        SELECT workflow_definition_id, condition_expression
+        FROM document_type_workflows
+        WHERE tenant_id = $1 AND document_type_id = $2 AND deleted_at IS NULL
+          AND status = 'ACTIVE'
+          AND (valid_from IS NULL OR valid_from <= current_date)
+          AND (valid_to   IS NULL OR valid_to   >= current_date)
+        ORDER BY priority, created_at
+        LIMIT 1
+        "#,
+        tenant_id,
+        document_type_id
+    )
+    .fetch_optional(executor)
+    .await?;
+
+    Ok(row.map(|row| {
+        (
+            row.workflow_definition_id,
+            row.condition_expression.is_some(),
+        )
+    }))
+}

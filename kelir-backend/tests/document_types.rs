@@ -104,12 +104,68 @@ fn id_of(value: &Value) -> Uuid {
         .expect("a uuid")
 }
 
+/// A published workflow definition, which a type may bind.
+///
+/// **New in Sprint 10.** Before [#187](https://github.com/sujanto-gaws/kelir/issues/187)
+/// a workflow binding named a table that did not exist and was stored as given;
+/// now it must name a definition that exists in this tenant and is `ACTIVE`,
+/// checked in the write's transaction under a share lock. The tests below were
+/// written against the old behaviour and are updated rather than deleted,
+/// because what they assert — that a binding round-trips, and that a sent
+/// collection replaces the stored set — is still the thing worth asserting.
+async fn published_workflow(app: &TestApp, token: &str, key: &str) -> Uuid {
+    let created = app
+        .send(
+            Method::POST,
+            "/api/v1/workflow/definitions",
+            Some(token),
+            Some(json!({
+                "workflowKey": key,
+                "name": "Standard approval",
+                "definition": {
+                    "workflowKey": key,
+                    "version": "1.0.0",
+                    "name": "Standard approval",
+                    "initialState": "APPROVAL",
+                    "states": [
+                        { "code": "APPROVAL", "name": "Approval",
+                          "mapsToDocumentStatus": "PENDING_APPROVAL",
+                          "task": { "taskDefinitionKey": "approval", "taskName": "Approve",
+                                    "assignment": { "assigneeType": "OWNER" } } },
+                        { "code": "COMPLETED", "name": "Completed",
+                          "mapsToDocumentStatus": "COMPLETED", "isFinal": true }
+                    ],
+                    "transitions": [
+                        { "from": "APPROVAL", "to": "COMPLETED", "action": "APPROVE",
+                          "allowedBy": "OWNER" }
+                    ]
+                },
+            })),
+        )
+        .await;
+
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let id = id_of(&created.body["data"]);
+
+    let publication = app
+        .send(
+            Method::POST,
+            &format!("/api/v1/workflow/definitions/{id}/publication"),
+            Some(token),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(publication.status, StatusCode::OK, "{}", publication.body);
+
+    id
+}
+
 #[tokio::test]
 async fn a_type_is_created_with_its_bindings_and_read_back() {
     let app = TestApp::spawn().await;
     let token = app.administrator_token().await;
     let form = published_form(&app, &token, "pr-type-form").await;
-    let workflow = Uuid::now_v7();
+    let workflow = published_workflow(&app, &token, "wf_type_binding").await;
 
     let created = app
         .send(
@@ -155,19 +211,25 @@ async fn a_type_is_created_with_its_bindings_and_read_back() {
     assert_eq!(workflows[0]["workflowDefinitionId"], workflow.to_string());
 }
 
-/// A workflow binding names a table that does not exist yet, and is stored as
-/// given.
+/// A workflow binding that names nothing is refused and not stored.
 ///
-/// Worth asserting rather than assuming: it is the one reference on this
-/// aggregate that nothing can check, and a future reader should find that
-/// recorded rather than discover it.
+/// **This test used to assert the opposite**, and the change is the point.
+/// Until Sprint 10 `workflow_definitions` did not exist, so this was the one
+/// reference on the aggregate that nothing could check and the old test recorded
+/// that fact rather than letting a reader discover it. `0025_workflow.sql` added
+/// the table and the foreign key `0015_document.sql` deferred, and
+/// [#187](https://github.com/sujanto-gaws/kelir/issues/187) AC2 made the check
+/// real — so the assertion inverts, in place, where the history is visible.
+///
+/// The full behaviour, including the draft arm and the accepted case, is in
+/// `workflow_engine.rs`; what is here is that this surface refuses.
 #[tokio::test]
-async fn a_workflow_binding_is_stored_unverified_until_phase_5() {
+async fn a_workflow_binding_that_names_nothing_is_refused_and_not_stored() {
     let app = TestApp::spawn().await;
     let token = app.administrator_token().await;
     let invented = Uuid::now_v7();
 
-    let created = app
+    let refused = app
         .send(
             Method::POST,
             "/api/v1/document-types",
@@ -181,11 +243,27 @@ async fn a_workflow_binding_is_stored_unverified_until_phase_5() {
         .await;
 
     assert_eq!(
-        created.status,
-        StatusCode::CREATED,
-        "workflow_definitions does not exist until 0016; the binding is stored \
-         as given and the foreign key arrives with that migration. Body: {}",
-        created.body
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a document type was bound to a workflow that does not exist: {}",
+        refused.body
+    );
+    assert_eq!(
+        refused.body["error"]["details"][0]["path"], "workflows.0.workflowDefinitionId",
+        "{}",
+        refused.body
+    );
+
+    // And nothing was stored, so the refusal is not a message over a write that
+    // happened anyway.
+    let listed = app
+        .send(Method::GET, "/api/v1/document-types", Some(&token), None)
+        .await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    assert!(
+        !listed.body.to_string().contains("UNVERIFIED_WORKFLOW"),
+        "the type was created despite the refusal: {}",
+        listed.body
     );
 }
 
@@ -333,6 +411,13 @@ async fn an_update_records_what_changed_and_replaces_the_bindings_it_is_sent() {
     let app = TestApp::spawn().await;
     let token = app.administrator_token().await;
 
+    // Three published workflows, because the assertion is that a *sent*
+    // collection replaces the stored set: two bindings become one, and the one
+    // has to be a definition that exists (#187).
+    let first_workflow = published_workflow(&app, &token, "wf_audited_one").await;
+    let second_workflow = published_workflow(&app, &token, "wf_audited_two").await;
+    let third_workflow = published_workflow(&app, &token, "wf_audited_three").await;
+
     let created = app
         .send(
             Method::POST,
@@ -343,8 +428,8 @@ async fn an_update_records_what_changed_and_replaces_the_bindings_it_is_sent() {
                 "name": "Audited",
                 "category": "PROCUREMENT",
                 "workflows": [
-                    { "workflowDefinitionId": Uuid::now_v7(), "priority": 1 },
-                    { "workflowDefinitionId": Uuid::now_v7(), "priority": 2 }
+                    { "workflowDefinitionId": first_workflow, "priority": 1 },
+                    { "workflowDefinitionId": second_workflow, "priority": 2 }
                 ]
             })),
         )
@@ -362,7 +447,7 @@ async fn an_update_records_what_changed_and_replaces_the_bindings_it_is_sent() {
             Some(json!({
                 "name": "Renamed",
                 "category": "PROCUREMENT",
-                "workflows": [{ "workflowDefinitionId": Uuid::now_v7(), "priority": 5 }]
+                "workflows": [{ "workflowDefinitionId": third_workflow, "priority": 5 }]
             })),
         )
         .await;

@@ -1037,3 +1037,73 @@ async fn a_refused_second_submit_takes_no_number_on_a_gap_tolerant_rule() {
         after.body
     );
 }
+
+// ---------------------------------------------------------------------------
+// Found by the Sprint 10 pass: two types, one template, one 500
+// ---------------------------------------------------------------------------
+
+/// **Two document types whose rule templates render the same string collide,
+/// and the collision is a 422 rather than a 500.**
+///
+/// `uq_documents_tenant_id_document_number` is **tenant-wide** while a numbering
+/// bucket is **per document type**, so two types templated alike both issue
+/// `PR-2026-000001` and the second submit violates the index. Nothing mapped
+/// that violation, so it surfaced as an `INTERNAL_ERROR` — on a submit the
+/// product knows exactly why it refused.
+///
+/// **It was found by a fixture rather than by a reader**: no test before Sprint
+/// 10 put two numbered types in one database, which is coding standard §2.9's
+/// second-subject rule paying for itself in a direction it was not written for.
+///
+/// **Seen red** against `service::submit`'s `map_err(colliding_number)` removed:
+/// the second submit answers `500 INTERNAL_ERROR` with no detail, which is what
+/// this test was written from.
+#[tokio::test]
+async fn two_types_whose_templates_collide_are_refused_rather_than_failing() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    // `numbered_type` gives every type the same `PR-{year}-{sequence}` template,
+    // which is exactly the configuration this is about.
+    let first = numbered_type(&app, &token, "PR_COLLIDE_A", "GAPLESS").await;
+    let second = numbered_type(&app, &token, "PR_COLLIDE_B", "GAPLESS").await;
+
+    let one = draft(&app, &token, first, filled_in()).await;
+    let two = draft(&app, &token, second, filled_in()).await;
+
+    let submitted = submit(&app, &token, one).await;
+    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+
+    let refused = submit(&app, &token, two).await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a colliding document number was answered with something other than a          refusal naming it: {}",
+        refused.body
+    );
+    assert_eq!(
+        refused.body["error"]["details"][0]["code"], "DUPLICATE_DOCUMENT_NUMBER",
+        "{}",
+        refused.body
+    );
+    // The message has to name what an administrator changes, because trying
+    // again produces the same collision on every document forever.
+    assert!(
+        refused.body.to_string().contains("templates"),
+        "the refusal must point at the rule template: {}",
+        refused.body
+    );
+
+    // And the first document keeps its number, so the refusal cost nothing
+    // beyond the submit it refused.
+    let intact = app
+        .send(
+            Method::GET,
+            &format!("/api/v1/documents/{one}"),
+            Some(&token),
+            None,
+        )
+        .await;
+    assert_eq!(intact.body["data"]["status"], "SUBMITTED");
+}

@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import DocumentHeader from './DocumentHeader.vue'
 import EmptyTab from './EmptyTab.vue'
+import WorkflowTab from '@/features/workflow/WorkflowTab.vue'
 import {
   getDocument,
   getStatusHistory,
@@ -29,10 +30,17 @@ import type { Form } from '@/types/rad'
 /**
  * The document detail workspace (FR-DOC-014, #172).
  *
- * **A shell, deliberately.** The tabs Phase 5 and Phase 6 fill — workflow,
- * attachments, comments, the activity timeline — do not exist yet. What lands
- * here is the workspace that holds the form and has somewhere for them to go,
- * so that adding one later is adding a tab rather than rebuilding a screen.
+ * **A shell, and Sprint 10 filled the first of its empty tabs.** Workflow is
+ * real now (#178); attachments and comments are still Phase 6. That the
+ * addition was a component and a `v-show` rather than a rebuild is the shell
+ * having worked — which is what #172 built it for.
+ *
+ * **The status shown here can be one a workflow wrote.** For a document with a
+ * live process, `documents.status` is a *projection* of the instance's state and
+ * the transition buttons below are refused by the backend — so this screen shows
+ * them and the API says why, rather than the screen guessing. That refusal is
+ * #178 AC2 and it is deliberate: a status set here would disagree with the
+ * process the moment it moved.
  *
  * **The form is rendered through #162's renderer, unchanged.** A workspace that
  * needed the renderer modified would mean #162 rendered a page rather than a
@@ -342,7 +350,11 @@ function onChange(values: Record<string, unknown>): void {
       </div>
 
       <div v-show="tab === 'workflow'" data-testid="panel-workflow">
-        <EmptyTab subject="Approvals" arrives="Phase 5" />
+        <!-- Mounted only once the tab is opened, so a workspace on a document
+             nothing is deciding does not spend a request on a 404 every time it
+             loads. `v-if` rather than `v-show` for exactly that reason; the
+             other tabs have nothing to fetch. -->
+        <WorkflowTab v-if="tab === 'workflow'" :document-id="document.id" />
       </div>
 
       <div v-show="tab === 'attachments'" data-testid="panel-attachments">

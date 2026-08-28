@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE workflow_definitions SET\n            name            = COALESCE($3, name),\n            description     = COALESCE($4, description),\n            definition_json = COALESCE($5, definition_json),\n            initial_state   = COALESCE($6, initial_state),\n            jwss_version    = COALESCE($7, jwss_version),\n            updated_by      = $8,\n            updated_at      = now()\n        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL AND status = 'DRAFT'\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Text",
+        "Jsonb",
+        "Varchar",
+        "Varchar",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1e4c4610785a99bdf08179c9ebe798a0c5e908a020e63b54f363b8e96415187f"
+}

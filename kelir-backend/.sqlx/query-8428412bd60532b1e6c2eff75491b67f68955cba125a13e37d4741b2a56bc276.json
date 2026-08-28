@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT variable_key, variable_value, data_type\n        FROM workflow_variables\n        WHERE tenant_id = $1 AND workflow_instance_id = $2 AND deleted_at IS NULL\n        ORDER BY variable_key\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "variable_key",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "variable_value",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "data_type",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "8428412bd60532b1e6c2eff75491b67f68955cba125a13e37d4741b2a56bc276"
+}

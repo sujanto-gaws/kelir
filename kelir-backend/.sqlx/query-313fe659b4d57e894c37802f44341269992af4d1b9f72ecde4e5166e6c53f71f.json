@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE documents SET\n            status       = $3,\n            completed_at = CASE WHEN $4 THEN now() ELSE completed_at END,\n            updated_at   = now()\n        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "313fe659b4d57e894c37802f44341269992af4d1b9f72ecde4e5166e6c53f71f"
+}

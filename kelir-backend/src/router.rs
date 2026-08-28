@@ -5,7 +5,9 @@ use utoipa::OpenApi;
 use crate::error::ValidationDetail;
 use crate::health;
 use crate::middleware::cors::cors_layer;
-use crate::modules::{auth, document, document_type, identity, master_data, organization, rad};
+use crate::modules::{
+    auth, document, document_type, identity, master_data, organization, rad, task_inbox, workflow,
+};
 use crate::response::{ErrorBody, ErrorEnvelope, PageMeta};
 use crate::state::AppState;
 
@@ -100,6 +102,19 @@ use crate::state::AppState;
         document::handlers::transition_document,
         document::handlers::status_history,
         document::handlers::resolve_linked_entity,
+        workflow::handlers::list_definitions,
+        workflow::handlers::get_definition,
+        workflow::handlers::create_definition,
+        workflow::handlers::update_definition,
+        workflow::handlers::publish_definition,
+        workflow::handlers::create_revision,
+        workflow::handlers::delete_definition,
+        workflow::handlers::get_instance,
+        workflow::handlers::claim_task,
+        workflow::handlers::decide_task,
+        document::handlers::document_workflow,
+        task_inbox::handlers::list_tasks,
+        task_inbox::handlers::get_task,
         organization::handlers::list_departments,
         organization::handlers::get_department,
         organization::handlers::create_department,
@@ -226,6 +241,25 @@ use crate::state::AppState;
         document::domain::MetadataEntry,
         document::domain::MetadataType,
         document::service::StatusHistoryEntry,
+        workflow::domain::WorkflowDefinition,
+        workflow::domain::WorkflowDefinitionSummary,
+        workflow::domain::WorkflowDefinitionStatus,
+        workflow::domain::CreateWorkflowRequest,
+        workflow::domain::UpdateWorkflowRequest,
+        workflow::domain::WorkflowInstance,
+        workflow::domain::WorkflowVariable,
+        workflow::domain::InstanceStatus,
+        workflow::domain::InstanceOutcome,
+        workflow::domain::WorkflowTask,
+        workflow::domain::TaskStatus,
+        workflow::domain::DecisionAction,
+        workflow::domain::DecisionRequest,
+        workflow::domain::Assignment,
+        workflow::service::instance::DocumentWorkflow,
+        workflow::service::task::DecisionResult,
+        workflow::service::inbox::InboxTask,
+        workflow::service::inbox::TaskDetail,
+        workflow::service::inbox::AvailableDecision,
         organization::department::Department,
         organization::department::DepartmentStatus,
         organization::department::CreateDepartmentRequest,
@@ -255,6 +289,14 @@ use crate::state::AppState;
         (
             name = "document",
             description = "Documents — created from a type, filled through its form, submitted with a number, and moved through their own statuses"
+        ),
+        (
+            name = "workflow",
+            description = "Workflow definitions, the processes running against them, and the tasks they generate"
+        ),
+        (
+            name = "task",
+            description = "The caller's own task inbox — what is waiting for them, and what one task is asking"
         ),
         (
             name = "rad",
@@ -316,6 +358,8 @@ fn api_v1_router(state: AppState) -> Router<AppState> {
         .nest("/rad", rad::handlers::routes())
         .nest("/document-types", document_type::handlers::routes())
         .nest("/documents", document::handlers::routes())
+        .nest("/workflow", workflow::handlers::routes())
+        .nest("/tasks", task_inbox::handlers::routes())
         .nest("/organization", organization::handlers::routes())
 }
 

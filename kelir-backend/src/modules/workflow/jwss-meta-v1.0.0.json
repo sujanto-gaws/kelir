@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kelir.dev/schemas/jwss-meta-v1.0.0.json",
+  "title": "JWSS Workflow Definition",
+  "type": "object",
+  "required": ["workflowKey", "version", "name", "initialState", "states", "transitions"],
+  "additionalProperties": false,
+  "properties": {
+    "workflowKey": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "maxLength": 100 },
+    "version": { "type": "string", "pattern": "^1\\.[0-9]+\\.[0-9]+$" },
+    "name": { "type": "string", "minLength": 1 },
+    "description": { "type": "string" },
+    "initialState": { "$ref": "#/$defs/stateCode" },
+    "states": { "type": "array", "minItems": 2, "items": { "$ref": "#/$defs/state" } },
+    "transitions": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/transition" } },
+    "variables": { "type": "array", "items": { "$ref": "#/$defs/variable" } },
+    "settings": { "type": "object" }
+  },
+  "$defs": {
+    "stateCode": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$", "maxLength": 60 },
+    "documentStatus": { "enum": ["DRAFT", "SUBMITTED", "IN_REVIEW", "PENDING_APPROVAL", "APPROVED",
+                                 "REJECTED", "RETURNED", "COMPLETED", "ARCHIVED", "CANCELLED"] },
+    "jsonLogic": { "type": "object" },
+    "hookRegistrationEntry": {
+      "type": "object",
+      "required": ["handler"],
+      "additionalProperties": false,
+      "properties": {
+        "hook": { "type": "string" },
+        "handler": { "type": "string", "minLength": 1 },
+        "priority": { "type": "integer" },
+        "config": { "type": "object" },
+        "isEnabled": { "type": "boolean" }
+      }
+    },
+    "state": {
+      "type": "object",
+      "required": ["code", "name", "mapsToDocumentStatus"],
+      "additionalProperties": false,
+      "properties": {
+        "code": { "$ref": "#/$defs/stateCode" },
+        "name": { "type": "string", "minLength": 1 },
+        "mapsToDocumentStatus": { "$ref": "#/$defs/documentStatus" },
+        "isFinal": { "type": "boolean", "default": false },
+        "task": { "$ref": "#/$defs/taskSpec" }
+      }
+    },
+    "taskSpec": {
+      "type": "object",
+      "required": ["taskDefinitionKey", "taskName", "assignment"],
+      "additionalProperties": false,
+      "properties": {
+        "taskDefinitionKey": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "taskName": { "type": "string", "minLength": 1 },
+        "taskType": { "enum": ["USER_TASK", "APPROVAL_TASK", "REVIEW_TASK", "SERVICE_TASK",
+                               "SIGNATURE_TASK", "DATA_ENTRY_TASK"], "default": "APPROVAL_TASK" },
+        "assignment": { "$ref": "#/$defs/assignmentRule" },
+        "dueInHours": { "type": "number", "exclusiveMinimum": 0 },
+        "escalation": {
+          "type": "object",
+          "required": ["afterHours", "assignment"],
+          "additionalProperties": false,
+          "properties": {
+            "afterHours": { "type": "number", "exclusiveMinimum": 0 },
+            "assignment": { "$ref": "#/$defs/assignmentRule" }
+          }
+        },
+        "priority": { "enum": ["LOW", "NORMAL", "HIGH", "URGENT"], "default": "NORMAL" }
+      }
+    },
+    "transition": {
+      "type": "object",
+      "required": ["from", "to", "action"],
+      "additionalProperties": false,
+      "properties": {
+        "from": { "$ref": "#/$defs/stateCode" },
+        "to": { "$ref": "#/$defs/stateCode" },
+        "action": { "enum": ["SUBMIT", "APPROVE", "REJECT", "RETURN", "RESUBMIT", "DELEGATE",
+                             "ESCALATE", "CANCEL", "COMPLETE", "AUTO"] },
+        "allowedBy": {
+          "oneOf": [
+            { "type": "string", "pattern": "^(OWNER|(ROLE|USER):[A-Za-z0-9._-]+)$" },
+            { "$ref": "#/$defs/assignmentRule" }
+          ]
+        },
+        "condition": { "$ref": "#/$defs/jsonLogic" },
+        "guards": { "type": "array", "items": { "$ref": "#/$defs/hookRegistrationEntry" } },
+        "actions": { "type": "array", "items": { "$ref": "#/$defs/hookRegistrationEntry" } }
+      },
+      "if": { "properties": { "action": { "const": "AUTO" } } },
+      "then": { "not": { "required": ["allowedBy"] } },
+      "else": { "required": ["allowedBy"] }
+    },
+    "assignmentRule": {
+      "type": "object",
+      "required": ["assigneeType"],
+      "additionalProperties": false,
+      "properties": {
+        "assigneeType": { "enum": ["USER", "ROLE", "DEPARTMENT_ROLE", "OWNER",
+                                   "MANAGER_OF_OWNER", "EXPRESSION"] },
+        "userId": { "type": "string" },
+        "roleCode": { "type": "string" },
+        "departmentScope": { "type": "string" },
+        "expression": { "$ref": "#/$defs/jsonLogic" }
+      },
+      "allOf": [
+        { "if": { "properties": { "assigneeType": { "const": "USER" } } },
+          "then": { "required": ["userId"] } },
+        { "if": { "properties": { "assigneeType": { "enum": ["ROLE", "DEPARTMENT_ROLE"] } } },
+          "then": { "required": ["roleCode"] } },
+        { "if": { "properties": { "assigneeType": { "const": "EXPRESSION" } } },
+          "then": { "required": ["expression"] } }
+      ]
+    },
+    "variable": {
+      "type": "object",
+      "required": ["key", "dataType"],
+      "additionalProperties": false,
+      "properties": {
+        "key": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "dataType": { "enum": ["STRING", "NUMBER", "BOOLEAN", "DATE", "JSON"] },
+        "source": { "$ref": "#/$defs/jsonLogic" }
+      }
+    }
+  }
+}

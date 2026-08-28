@@ -105,6 +105,7 @@ describe('DocumentWorkspace', () => {
   let current: Record<string, unknown>
   let onSubmit: (request: RecordedRequest) => FakeReply
   let onUpdate: (request: RecordedRequest) => FakeReply
+  let onWorkflow: (request: RecordedRequest) => FakeReply
 
   beforeEach(() => {
     setActivePinia(createPinia())
@@ -117,10 +118,21 @@ describe('DocumentWorkspace', () => {
       body: itemBody({ ...current, status: 'SUBMITTED', documentNumber: 'PR-2026-000001' }),
     })
     onUpdate = () => ({ status: 200, body: itemBody(current) })
+    // Nothing is deciding this document unless a test says otherwise, which is
+    // the ordinary case: a type that binds no workflow has no process, and the
+    // API answers 404. See `the Workflow tab` below.
+    onWorkflow = () => ({
+      status: 404,
+      body: errorBody('NOT_FOUND', 'Workflow instance not found'),
+    })
 
     backend = installFakeBackend((request) => {
       if (request.url.includes('/submission')) {
         return onSubmit(request)
+      }
+
+      if (request.url.includes('/workflow')) {
+        return onWorkflow(request)
       }
 
       if (request.url.includes('/status-history')) {
@@ -244,10 +256,14 @@ describe('DocumentWorkspace', () => {
 
   it('names every tab a later phase will fill', async () => {
     // AC4: neither an empty tab nor a silent one.
+    //
+    // **Workflow has left this list**, and its departure is the assertion:
+    // Sprint 10 filled it (#178), so a tab still saying "Phase 5 fills this" at
+    // the end of Phase 5's first sprint would be a true statement about a broken
+    // promise. What is below is what genuinely has not arrived.
     const wrapper = await render()
 
     for (const [tab, phase] of [
-      ['workflow', 'Phase 5'],
       ['attachments', 'Phase 6'],
       ['comments', 'Phase 6'],
     ]) {
@@ -260,6 +276,83 @@ describe('DocumentWorkspace', () => {
       const empty = wrapper.get(`[data-testid="panel-${tab}"] [data-testid="empty-tab"]`)
       expect(empty.text()).toContain(phase)
     }
+  })
+
+  it('says so plainly when nothing is deciding the document', async () => {
+    // A type that binds no workflow has no process, which is a valid
+    // configuration (#187 AC4) rather than a failure — so the panel says it in
+    // words. A screen that showed an error here would report a defect on every
+    // document of every unrouted type.
+    const wrapper = await render()
+
+    await wrapper.get('[data-testid="tab-workflow"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="workflow-none"]').text()).toContain('No approval')
+  })
+
+  it('shows the process deciding the document, and the steps it has generated', async () => {
+    // #178's seam, from the side a person sees it: the workflow's own name for
+    // the state it is in, beside the steps the process has produced.
+    onWorkflow = () => ({
+      status: 200,
+      body: itemBody({
+        instance: {
+          id: '0199a1a0-0000-7000-8000-0000000000e1',
+          instanceRef: 'WFI-2026-000001',
+          documentId: DOCUMENT_ID,
+          workflowDefinitionId: '0199a1a0-0000-7000-8000-0000000000e2',
+          workflowKey: 'purchase_requisition_standard',
+          workflowName: 'Standard approval',
+          definitionVersion: 1,
+          status: 'RUNNING',
+          currentState: 'MANAGER_APPROVAL',
+          currentStateName: 'Manager approval',
+          outcome: null,
+          businessKey: 'PR-2026-000001',
+          startedBy: null,
+          startedAt: '2026-08-28T00:00:00Z',
+          completedAt: null,
+          variables: [{ key: 'amount', dataType: 'NUMBER', value: 45000000 }],
+        },
+        tasks: [
+          {
+            id: '0199a1a0-0000-7000-8000-0000000000e3',
+            taskRef: 'TASK-2026-000001',
+            workflowInstanceId: '0199a1a0-0000-7000-8000-0000000000e1',
+            documentId: DOCUMENT_ID,
+            taskDefinitionKey: 'manager_approval',
+            taskName: 'Approve the request',
+            taskType: 'APPROVAL_TASK',
+            status: 'CREATED',
+            assigneeUserId: null,
+            candidateRoleId: null,
+            candidateRoleCode: 'APPROVER',
+            candidateDepartmentId: null,
+            priority: 'NORMAL',
+            dueAt: null,
+            action: null,
+            completedBy: null,
+            completedAt: null,
+            createdAt: '2026-08-28T00:00:00Z',
+          },
+        ],
+      }),
+    })
+
+    const wrapper = await render()
+
+    await wrapper.get('[data-testid="tab-workflow"]').trigger('click')
+    await flushPromises()
+
+    // The definition's own name for the step, not its code: `MANAGER_APPROVAL`
+    // is what the database holds and "Manager approval" is what somebody was
+    // told to expect.
+    expect(wrapper.get('[data-testid="workflow-state"]').text()).toBe('Manager approval')
+    expect(wrapper.get('[data-testid="workflow-instance"]').text()).toContain('Standard approval')
+    expect(wrapper.get('[data-testid="workflow-task-TASK-2026-000001"]').text()).toContain(
+      'Approve the request',
+    )
   })
 
   it('offers only the transitions the backend will accept', async () => {

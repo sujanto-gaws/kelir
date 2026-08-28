@@ -133,6 +133,25 @@ Validators MUST accept both forms; the engine normalizes to the object form befo
 
 ---
 
+### 5.3 What Kelir resolves, and what it refuses
+
+**Informative — an implementation note, not a change to the vocabulary above.** JWSS declares six `assigneeType` values. Kelir resolves four and **refuses the other two at save time**, naming what would have to exist first; a definition using one of them cannot be stored, let alone published. Recorded here because a specification that lists six and an implementation that serves four is exactly the gap a workflow author discovers at the worst moment.
+
+| `assigneeType` | Kelir | Why |
+| :--- | :--- | :--- |
+| `USER` | resolves | `users` |
+| `ROLE` | resolves | `roles.role_code` — an unclaimed role task is claimed by whoever takes it |
+| `DEPARTMENT_ROLE` | resolves | `roles` plus `user_roles.department_id`, which has carried a department-scoped grant since `0002` |
+| `OWNER` | resolves | `documents.created_by` |
+| `MANAGER_OF_OWNER` | **refused** | There is no user-to-manager edge in the schema. `departments.manager_party_id` names a **party**, and party-to-user is not a resolvable relation — FR-ORG-002's reporting line is unbuilt. Resolving it by guesswork would route an approval to somebody chosen by a coincidence of data |
+| `EXPRESSION` | **refused** | The evaluator exists; the context does not. §6.1's condition context is document, formData, variables and actor, and an expression resolving to a *principal* needs a directory nothing reads |
+
+Refused at **save** rather than at run time, for the reason JFSS gives about a stored definition generally: a definition is written once and executed many times, and the execution path has no good failure. A workflow that publishes cleanly and then cannot assign its first task is a stalled instance nobody is told about.
+
+The same applies to `guards` and `actions`: they are **stored and not executed** as of `v0.5.0`, because there is no hook chain to merge them into (architectures/01 §12.4.2 is unbuilt). They are accepted rather than refused so that definitions authored now do not have to be rewritten when the chain lands, and the workflow engine states in one place that it does not invoke them — a stored handler must not be read as evidence that it runs.
+
+---
+
 ## 6. Conditions and Variables
 
 ### 6.1 Condition Context
@@ -300,6 +319,18 @@ Publish-time rules. A definition failing any rule MUST remain `DRAFT`.
     "documentStatus": { "enum": ["DRAFT", "SUBMITTED", "IN_REVIEW", "PENDING_APPROVAL", "APPROVED",
                                  "REJECTED", "RETURNED", "COMPLETED", "ARCHIVED", "CANCELLED"] },
     "jsonLogic": { "type": "object" },
+    "hookRegistrationEntry": {
+      "type": "object",
+      "required": ["handler"],
+      "additionalProperties": false,
+      "properties": {
+        "hook": { "type": "string" },
+        "handler": { "type": "string", "minLength": 1 },
+        "priority": { "type": "integer" },
+        "config": { "type": "object" },
+        "isEnabled": { "type": "boolean" }
+      }
+    },
     "state": {
       "type": "object",
       "required": ["code", "name", "mapsToDocumentStatus"],
@@ -351,10 +382,8 @@ Publish-time rules. A definition failing any rule MUST remain `DRAFT`.
           ]
         },
         "condition": { "$ref": "#/$defs/jsonLogic" },
-        "guards": { "type": "array",
-                    "items": { "$ref": "https://kelir.dev/schemas/lhcs-meta-v1.0.0.json#/$defs/hookRegistrationEntry" } },
-        "actions": { "type": "array",
-                     "items": { "$ref": "https://kelir.dev/schemas/lhcs-meta-v1.0.0.json#/$defs/hookRegistrationEntry" } }
+        "guards": { "type": "array", "items": { "$ref": "#/$defs/hookRegistrationEntry" } },
+        "actions": { "type": "array", "items": { "$ref": "#/$defs/hookRegistrationEntry" } }
       },
       "if": { "properties": { "action": { "const": "AUTO" } } },
       "then": { "not": { "required": ["allowedBy"] } },
@@ -395,4 +424,8 @@ Publish-time rules. A definition failing any rule MUST remain `DRAFT`.
 }
 ```
 
-The meta-schema will be extracted to `docs/schema/jwss-meta-v1.0.0.json` when the publish validator is implemented; until then, this block is the normative artifact. Reachability (S6), fallback ordering (S7), and handler resolution (S11) are beyond JSON Schema expressiveness and MUST be enforced by the publish validator in code.
+**Extracted to [`jwss-meta-v1.0.0.json`](jwss-meta-v1.0.0.json) on 2026-08-28**, when the validator was implemented ([#174](https://github.com/sujanto-gaws/kelir/issues/174)). That file and this block are the same document, and `tests/workflow_jwss_meta_schema.rs` compares them — a duplicate nothing checks would drift silently, with the validator enforcing one version while the specification described another.
+
+**The Hook Registration Entry is defined locally rather than referenced across documents.** The block above used to `$ref` `lhcs-meta-v1.0.0.json`, and there is no such file — the [Lifecycle Hook Contract](Lifecycle%20Hook%20Contract.md) §3 defines the shape in prose and has never been extracted. A `$ref` to a schema that does not exist is not resolvable by any validator, so extracting this one had to resolve it: `$defs/hookRegistrationEntry` is §3's table, transcribed, with `hook` optional because §3 makes it optional in this position. When an LHCS meta-schema is extracted, this definition is what it must agree with.
+
+Reachability (S6), fallback ordering (S7), and handler resolution (S11) are beyond JSON Schema expressiveness and MUST be enforced by the publish validator in code. **S11 is not enforced by Kelir as of `v0.5.0`**, and §5.3 says what that means.

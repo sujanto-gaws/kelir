@@ -36,10 +36,13 @@ const router = useRouter()
 const navigation = [
   { name: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, enabled: true },
   {
+    // Enabled in Sprint 10 (#179). The permission was already right: the inbox
+    // reads the workflow module's task rows, so it borrows that module's read
+    // permission rather than inventing one of its own.
     name: 'tasks',
     label: 'My Tasks',
     icon: Inbox,
-    enabled: false,
+    enabled: true,
     permission: 'workflow:task:read',
   },
   {

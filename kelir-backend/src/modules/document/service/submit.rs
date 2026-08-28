@@ -72,8 +72,29 @@
 //! while making the two gap policies differ by less, which is the opposite of
 //! what having two of them is for.
 //!
+//! # Sprint 10 adds one step, inside the transaction that already exists
+//!
+//! After the status is written and the history row appended, the type's workflow
+//! binding is resolved and [`workflow::service::engine::start`][start] is called
+//! — **in this transaction**, so a document can never be submitted without the
+//! approval that was supposed to decide it, or carry an instance that decided a
+//! submission which then rolled back. That is [#178] AC3.
+//!
+//! **A type with no binding submits and starts nothing** ([#187] AC4). Not every
+//! document is approved, and a null binding is a valid configuration rather than
+//! a missing one — so the shape below is *if a binding resolves*, never *the
+//! binding must resolve*.
+//!
+//! `engine::start` takes `&mut PgTransaction` and never `AppState`, which is
+//! stated at its own signature: this path already holds a numbering counter, and
+//! **D-35** is what this project paid to learn that a second pooled connection
+//! taken inside a transaction deadlocks at the concurrency the pool can serve.
+//!
 //! [#158]: https://github.com/sujanto-gaws/kelir/issues/158
 //! [#168]: https://github.com/sujanto-gaws/kelir/issues/168
+//! [#178]: https://github.com/sujanto-gaws/kelir/issues/178
+//! [#187]: https://github.com/sujanto-gaws/kelir/issues/187
+//! [start]: crate::modules::workflow::service::engine::start
 
 use chrono::Utc;
 use serde_json::json;
@@ -87,8 +108,12 @@ use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
 use crate::modules::audit::{self, AuditEntry};
 use crate::modules::document_type::numbering::{AllocationContext, GapPolicy};
-use crate::modules::document_type::{numbering_repository, numbering_service};
+use crate::modules::document_type::{
+    numbering_repository, numbering_service, repository as document_type_repository,
+};
 use crate::modules::rad::service::evaluation::Strictness;
+use crate::modules::workflow::service::assignment::AssignmentContext;
+use crate::modules::workflow::service::engine;
 use crate::state::AppState;
 
 /// Submits a draft: one transaction, one number, one status change.
@@ -117,6 +142,17 @@ pub async fn submit_document(
         at: Utc::now(),
         department_id: subject.requested_for_department_id,
     };
+
+    // Resolved on the pool with the gap policy, for the same reason: it is a
+    // fact about the *type*, not a thing this transaction has to hold. A binding
+    // changed a microsecond later is a binding that applies to the next
+    // document.
+    let binding = document_type_repository::workflow_binding(
+        &state.pool,
+        tenant_id,
+        subject.document_type_id,
+    )
+    .await?;
 
     let policy = numbering_repository::gap_policy(&state.pool, tenant_id, subject.document_type_id)
         .await?
@@ -195,7 +231,8 @@ pub async fn submit_document(
         },
         actor,
     )
-    .await?;
+    .await
+    .map_err(colliding_number)?;
 
     if affected == 0 {
         // Somebody else submitted it while this transaction held its lock —
@@ -218,6 +255,33 @@ pub async fn submit_document(
         DocumentStatus::Submitted,
         actor,
         None,
+    )
+    .await?;
+
+    // Step 7 — the seam (#178, #187). In *this* transaction: a document that is
+    // submitted and an approval that never started are two writes that must not
+    // be able to disagree.
+    let started = start_workflow(
+        &mut transaction,
+        tenant_id,
+        id,
+        &subject,
+        binding,
+        &document_number,
+        &engine::EvaluationContext {
+            // The facts as they are **after** this submit: the status the write
+            // above set and the number it took. A workflow condition asking
+            // "is this submitted" must not be told about the draft it was a
+            // statement ago.
+            document: engine::document_facts(
+                DocumentStatus::Submitted,
+                subject.document_type_id,
+                Some(&document_number),
+            ),
+            form_data: form_data.clone(),
+            variables: serde_json::json!({}),
+        },
+        actor,
     )
     .await?;
 
@@ -245,15 +309,60 @@ pub async fn submit_document(
             reason: None,
             old_value: Some(json!({ "status": DocumentStatus::Draft })),
             new_value: Some(json!({
-                "status": DocumentStatus::Submitted,
+                // The document's status after the whole transaction, which is
+                // the workflow's initial state when one started. Reporting
+                // `SUBMITTED` unconditionally would make the trail disagree with
+                // the row it describes.
+                "status": submitted.status,
                 "documentNumber": submitted.document_number,
                 "submittedAt": submitted.submitted_at,
+                // The instance, when a workflow started one. A submit that
+                // routed and a submit that did not are different events, and an
+                // auditor should not have to join two tables to tell them apart.
+                "workflowInstanceRef": started.as_ref().map(|started| &started.instance_ref),
             })),
         },
     )
     .await;
 
     Ok(submitted)
+}
+
+/// Turns a colliding document number into a refusal an administrator can act on.
+///
+/// **Found by the Sprint 10 pass, against a configuration nobody had tried.**
+/// `uq_documents_tenant_id_document_number` is **tenant-wide**, and a numbering
+/// bucket is **per document type** — so two types whose templates render the
+/// same string both issue `PR-2026-000001`, and the second submit violates the
+/// index. Nothing mapped that violation, so it surfaced as a 500: an
+/// `INTERNAL_ERROR` on a submit that was refused for a reason the product knows
+/// exactly.
+///
+/// **The refusal names the template rather than the number**, because the number
+/// is the symptom: two types sharing a template will collide again on the next
+/// document and on every one after it, and what has to change is one of the two
+/// templates. It is a 422 rather than a 409 — a 409 would say "try again", and
+/// trying again produces the same collision forever.
+///
+/// **Not fixed by making the index per type.** The number is a *business*
+/// identifier that people quote to each other and to suppliers, so two documents
+/// in one tenant sharing one is the thing the index exists to prevent — the
+/// collision is real and the only defect was the answer given for it.
+fn colliding_number(error: sqlx::Error) -> AppError {
+    match &error {
+        sqlx::Error::Database(database) if database.is_unique_violation() => {
+            AppError::validation(vec![crate::error::ValidationDetail::new(
+                "documentNumber",
+                "unique",
+                "DUPLICATE_DOCUMENT_NUMBER",
+                "this number is already held by another document in this tenant. A \
+                 document number is unique tenant-wide and a numbering sequence is \
+                 per document type, so two types whose rule templates render the same \
+                 string will collide on every document — change one of the templates",
+            )])
+        }
+        _ => error.into(),
+    }
 }
 
 /// Refuses a submission of a document that is not a draft (AC5).
@@ -270,4 +379,81 @@ fn refuse_unless_draft(status: DocumentStatus) -> Result<(), AppError> {
         "this document is {} and only a draft can be submitted; submitting again would take a second number for one document",
         status.as_db()
     )))
+}
+
+/// Starts the approval a submitted document routes into, if its type binds one.
+///
+/// Returns `None` when the type binds nothing, which is [#187] AC4 — *a document
+/// type with no workflow still works; submission completes without starting an
+/// instance*. That is a valid configuration rather than a missing one, so the
+/// absence is a value here rather than an error.
+///
+/// **The document's status after this is the workflow's, not `SUBMITTED`.** The
+/// initial state's `mapsToDocumentStatus` is what the engine projects, which is
+/// the whole of the seam: a workflow whose first state maps to `PENDING_APPROVAL`
+/// leaves the document in `PENDING_APPROVAL` at the end of the same transaction
+/// that submitted it. The `document_status_history` row above still says
+/// `DRAFT -> SUBMITTED`, and that is accurate — the submit happened, and then
+/// the process moved it.
+///
+/// [#187]: https://github.com/sujanto-gaws/kelir/issues/187
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the submit's own locals, passed rather than re-read: a struct here \
+              would name them a second time and hide that every one of them comes \
+              from the transaction this runs inside"
+)]
+async fn start_workflow(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    document_id: Uuid,
+    subject: &repo::SubmissionSubject,
+    binding: Option<(Uuid, bool)>,
+    document_number: &str,
+    evaluation: &engine::EvaluationContext,
+    actor: Option<Uuid>,
+) -> Result<Option<engine::Started>, AppError> {
+    let Some((workflow_definition_id, has_condition)) = binding else {
+        return Ok(None);
+    };
+
+    if has_condition {
+        // See `document_type::repository::workflow_binding`: the column holds
+        // the superseded string form, evaluating it is FR-WF-015's, and treating
+        // it as unconditional would route a document by a rule nobody wrote. The
+        // warning is what stops the skip being silent.
+        tracing::warn!(
+            document_id = %document_id,
+            document_type_id = %subject.document_type_id,
+            "the document type's workflow binding carries a condition expression, which \
+             this release does not evaluate (FR-WF-015); no approval was started"
+        );
+
+        return Ok(None);
+    }
+
+    let started = engine::start(
+        transaction,
+        &engine::StartRequest {
+            tenant_id,
+            document_id,
+            workflow_definition_id,
+            business_key: Some(document_number),
+            actor,
+            context: AssignmentContext {
+                owner_user_id: actor,
+                requested_department_id: subject.requested_for_department_id,
+                owner_department_id: None,
+            },
+            evaluation,
+        },
+    )
+    .await?;
+
+    // FR-DOC-012, in the transaction that created the instance: a document never
+    // has a process nothing points at, and an instance never exists with the
+    // document unaware of it.
+    repo::link_process_instance(transaction, tenant_id, document_id, started.instance_id).await?;
+
+    Ok(Some(started))
 }

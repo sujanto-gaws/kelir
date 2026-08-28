@@ -16,6 +16,12 @@
 //!
 //! `GET /{id}/status-history` is a part of the document rather than a resource
 //! beside it, and it needs nothing but the document's own read permission.
+//!
+//! `GET /{id}/workflow` is the other side of the seam and is **not** a part of
+//! the document: it reads the workflow module's rows, so it requires that
+//! module's `workflow:instance:read` and delegates to its service. The route
+//! lives here because a workspace asks "what is deciding *this document*", and
+//! the answer is addressed by the document's id.
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -31,6 +37,7 @@ use super::service::{self, StatusHistoryEntry};
 use crate::error::AppError;
 use crate::extract::{JsonBody, PathParam, QueryParams};
 use crate::middleware::auth::Authenticated;
+use crate::modules::workflow::service::instance::{self as workflow_instance, DocumentWorkflow};
 use crate::response::{ItemEnvelope, ListEnvelope};
 use crate::state::AppState;
 
@@ -47,6 +54,7 @@ pub fn routes() -> Router<AppState> {
         .route("/{id}/status", put(transition_document))
         .route("/{id}/status-history", get(status_history))
         .route("/{id}/linked-entity", get(resolve_linked_entity))
+        .route("/{id}/workflow", get(document_workflow))
 }
 
 #[utoipa::path(
@@ -226,5 +234,24 @@ async fn resolve_linked_entity(
 ) -> Result<Json<ItemEnvelope<ResolvedEntity>>, AppError> {
     Ok(Json(ItemEnvelope::new(
         service::resolve_link(&state, &caller, id).await?,
+    )))
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/documents/{id}/workflow", tag = "document",
+    responses(
+        (status = 200, description = "The process deciding this document, its variables and its tasks", body = DocumentWorkflow),
+        (status = 403, description = "Missing workflow:instance:read"),
+        (status = 404, description = "No such document, or no process has been started for it")
+    ),
+    security(("bearer" = []))
+)]
+async fn document_workflow(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    PathParam(id): PathParam<Uuid>,
+) -> Result<Json<ItemEnvelope<DocumentWorkflow>>, AppError> {
+    Ok(Json(ItemEnvelope::new(
+        workflow_instance::workflow_of_document(&state, &caller, id).await?,
     )))
 }

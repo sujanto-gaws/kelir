@@ -35,14 +35,17 @@ cd ../../e2e
 npm ci
 npx playwright install --with-deps chromium
 KELIR_E2E_BASE_URL=http://127.0.0.1:8080 \
+KELIR_E2E_USERNAME=admin \
 KELIR_E2E_PASSWORD='a-real-bootstrap-password' \
   npm test
 ```
 
+**`KELIR_E2E_USERNAME` is in that block even though it has a default**, and it is there because the default is a trap. It matches the `KELIR_BOOTSTRAP_ADMIN_USERNAME` three lines above it, so a stack whose administrator is called anything else signs in as an account that does not exist — and every flow fails on a `401` that reads like a product defect rather than a misconfigured harness. Naming both halves in one command is what keeps them equal. Found by the `v0.4.0` rehearsal ([release 04](../projects/releases/04.%20Release%20v0.4.0.md)).
+
 | Variable | Default | What it is |
 |---|---|---|
 | `KELIR_E2E_BASE_URL` | `http://127.0.0.1:8080` | Where the deployed stack answers |
-| `KELIR_E2E_USERNAME` | `admin` | The account the flow signs in as |
+| `KELIR_E2E_USERNAME` | `admin` | The account the flow signs in as. **Must equal the stack's `KELIR_BOOTSTRAP_ADMIN_USERNAME`** |
 | `KELIR_E2E_PASSWORD` | — **required** | That account's password. No default: a default password in a repository is a credential in a repository |
 
 `npm run report` opens the HTML report of the last run. Traces, screenshots and
@@ -50,7 +53,7 @@ video are kept for failures only.
 
 ## What it covers
 
-Five flows, each the criterion that decides whether an item is Done rather than
+Six flows, each the criterion that decides whether an item is Done rather than
 a broad sweep:
 
 | Flow | Item |
@@ -60,10 +63,18 @@ a broad sweep:
 | The rendered form evaluates its own rules as they are typed (`a-form-calculates-and-validates.spec.ts`) | #163 |
 | A filled-in form is submitted, and a payload tampered with in flight is overwritten (`a-form-is-submitted.spec.ts`) | #164 |
 | A document is created from a **type**, filled in, submitted, found in the list and moved through a transition (`a-document-is-created-and-submitted.spec.ts`) | #172, and the Phase 4 exit demo |
+| A submitted document is approved **by somebody else**, and its status follows (`a-document-is-approved.spec.ts`) | #179, and the Sprint 10 exit demo |
 
 The suites seed their rows over the API and assert only through the browser —
 arranging through HTTP is faster and fails where it is meant to, but an
 assertion made against the API would pass on a screen that renders nothing.
+
+**`a-document-is-approved.spec.ts` is the first flow with two people in it**, and
+that is the point rather than an incidental detail: an approval one person
+raises and the same person approves exercises the mechanism and proves nothing
+about the seam it exists for. The task has to reach somebody else's inbox, and
+the requester has to see the result without doing anything. It drives two browser
+pages in one test for that reason.
 
 Adding a flow means adding a file under `tests/`. Two rules the existing one
 follows:

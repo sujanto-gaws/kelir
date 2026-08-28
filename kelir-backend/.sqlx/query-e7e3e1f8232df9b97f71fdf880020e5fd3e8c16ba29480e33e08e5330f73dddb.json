@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE workflow_tasks SET\n            status       = 'COMPLETED',\n            action       = $3,\n            completed_by = $4,\n            completed_at = now(),\n            -- A decision taken by a role holder who never claimed the task\n            -- records them as the assignee, so the row says who did it rather\n            -- than leaving an open question beside a completed task.\n            assignee_user_id = COALESCE(assignee_user_id, $4),\n            updated_by   = $4,\n            updated_at   = now()\n        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL\n          AND status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e7e3e1f8232df9b97f71fdf880020e5fd3e8c16ba29480e33e08e5330f73dddb"
+}
