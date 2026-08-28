@@ -7,11 +7,18 @@ import { ApiError } from '@/api/error'
 import { Alert } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
 import { DOCUMENT_STATUS_LABELS } from '@/types/document'
-import { TASK_STATUS_LABELS, type DecisionAction, type TaskDetail } from '@/types/workflow'
+import {
+  TASK_STATUS_LABELS,
+  type AvailableDecision,
+  type DecisionAction,
+  type TaskDetail,
+} from '@/types/workflow'
 
 /**
- * One task, and what it is asking (FR-TASK-003; #179 AC4).
+ * One task, and what it is asking (FR-TASK-003, 004, 005, 006; #179 AC4, #182).
  *
  * *"A task that says only 'approve?' is a task its holder cannot responsibly
  * action."* So this screen names the document, the process, the step, and every
@@ -26,10 +33,23 @@ import { TASK_STATUS_LABELS, type DecisionAction, type TaskDetail } from '@/type
  * FR-WF-008, Sprint 11's #183 — is **shown without being offered**: drawing a
  * button that produces a 422 would be the product refusing a control it drew.
  *
- * **There is no comment box.** FR-TASK-006 is Sprint 11's #182 and the API takes
- * no comment, so a rejection recorded here has no reason on it. That is a real
- * cost and it is said on the screen rather than left for somebody to discover
- * after refusing a colleague's requisition.
+ * # The comment is part of the decision, not a step after it
+ *
+ * FR-TASK-006. One box, filled before the button is pressed, sent in the same
+ * request — because a decision and the reason for it are entered together, and a
+ * screen that recorded the decision and then asked for a reason would have
+ * already committed the half nobody can take back.
+ *
+ * **Whether a reason is required is the definition's to say** (JWSS §4.1), and
+ * this screen reads `requiresComment` rather than deciding that rejections need
+ * one. Deciding it here would be a second rule: the first workflow that marked
+ * an `APPROVE` would have this screen sending a request the server refuses, from
+ * a button the product itself drew. #182 AC4 is that both ends agree, and they
+ * agree by there being one rule.
+ *
+ * **The client-side refusal is a courtesy and the server's is the control.**
+ * Nothing here is trusted — `engine::fire` checks again, against the edge
+ * `condition` actually selects, which this screen cannot know in advance.
  */
 const route = useRoute()
 const router = useRouter()
@@ -40,15 +60,52 @@ const failed = ref(false)
 const busy = ref(false)
 const problem = ref('')
 const notice = ref('')
+const comment = ref('')
+/** Set when the person pressed a decision that needs a reason and gave none. */
+const missingComment = ref(false)
 
-/** Only what this release can perform is offered as a button. */
-const offered = computed(() =>
-  (task.value?.decisions ?? []).filter((decision) => decision.supported),
-)
+/**
+ * Only what this release can perform, one entry per action.
+ *
+ * **Collapsed by action**, because a state may declare two transitions for one
+ * verb with disjoint conditions (JWSS §4, S7) and the engine picks between them
+ * when the decision arrives. Two buttons both saying "Approve" would ask the
+ * person to choose something they cannot see, and the request carries the verb
+ * rather than the edge.
+ *
+ * A collapsed entry **requires a comment if any of its edges does**. The screen
+ * cannot know which edge will fire, and of the two ways to be wrong, asking for
+ * a reason that turns out to be optional costs a sentence — while not asking
+ * produces a refusal from a button the product drew.
+ */
+const offered = computed<AvailableDecision[]>(() => {
+  const byAction = new Map<string, AvailableDecision>()
+
+  for (const decision of task.value?.decisions ?? []) {
+    if (!decision.supported) {
+      continue
+    }
+
+    const seen = byAction.get(decision.action)
+
+    if (seen) {
+      seen.requiresComment = seen.requiresComment || decision.requiresComment
+    } else {
+      byAction.set(decision.action, { ...decision })
+    }
+  }
+
+  return [...byAction.values()]
+})
 
 /** Declared by the definition and not performable yet — shown, not offered. */
 const deferred = computed(() =>
   (task.value?.decisions ?? []).filter((decision) => !decision.supported),
+)
+
+/** True when any decision on offer would refuse an empty box. */
+const commentEverRequired = computed(() =>
+  offered.value.some((decision) => decision.requiresComment),
 )
 
 /** A task that has been decided is read, not acted on. */
@@ -68,6 +125,7 @@ async function load(id: string): Promise<void> {
   failed.value = false
   problem.value = ''
   notice.value = ''
+  missingComment.value = false
 
   try {
     task.value = await getTask(id)
@@ -81,9 +139,16 @@ async function load(id: string): Promise<void> {
   }
 }
 
+// **The comment is cleared here and not in `load`**, because `load` also runs
+// after a claim and after a decision — and a person who typed a reason, then
+// claimed the task so nobody else took it, should not find the box empty.
+// A different task is the one thing that makes a half-written reason wrong.
 watch(
   () => route.params.id,
-  (id) => load(String(id)),
+  (id) => {
+    comment.value = ''
+    void load(String(id))
+  },
   { immediate: true },
 )
 
@@ -114,17 +179,28 @@ async function claim(): Promise<void> {
   }
 }
 
-async function decide(action: DecisionAction): Promise<void> {
+async function decide(decision: AvailableDecision): Promise<void> {
   if (!task.value || busy.value) {
+    return
+  }
+
+  // The client half of #182 AC4. Refused here so the person is told beside the
+  // box rather than by a round trip — and refused again by the server, which is
+  // the half that counts.
+  if (decision.requiresComment && !comment.value.trim()) {
+    missingComment.value = true
+    problem.value = ''
+    notice.value = ''
     return
   }
 
   busy.value = true
   problem.value = ''
   notice.value = ''
+  missingComment.value = false
 
   try {
-    const result = await decideTask(task.value.id, action)
+    const result = await decideTask(task.value.id, decision.action as DecisionAction, comment.value)
     await load(task.value.id)
     notice.value = `Recorded. The document is now ${DOCUMENT_STATUS_LABELS[result.documentStatus]}.`
   } catch (error) {
@@ -203,6 +279,41 @@ function openDocument(): void {
         </p>
 
         <template v-else>
+          <!-- The reason, entered with the decision rather than after it. The
+               box is above the buttons because that is the order the two are
+               done in, and a field below the control that sends it reads as an
+               afterthought. -->
+          <div v-if="offered.length" class="mt-3 space-y-2" data-testid="task-comment">
+            <Label for="decision-comment">
+              Reason
+              <span v-if="commentEverRequired" class="text-destructive">*</span>
+              <span v-else class="font-normal text-muted-foreground"> (optional)</span>
+            </Label>
+
+            <Textarea
+              id="decision-comment"
+              v-model="comment"
+              :rows="3"
+              :disabled="busy"
+              :invalid="missingComment"
+              described-by="decision-comment-help"
+              placeholder="Why you are deciding this way"
+            />
+
+            <p
+              v-if="missingComment"
+              id="decision-comment-help"
+              class="text-sm text-destructive"
+              data-testid="comment-required"
+            >
+              This decision needs a reason. It is recorded with the decision and shown to whoever
+              raised the document.
+            </p>
+            <p v-else id="decision-comment-help" class="text-sm text-muted-foreground">
+              Recorded with the decision and shown in the document's approval history.
+            </p>
+          </div>
+
           <div class="mt-3 flex flex-wrap gap-2">
             <Button
               v-if="claimable"
@@ -220,10 +331,11 @@ function openDocument(): void {
               :variant="decision.action === 'APPROVE' ? 'default' : 'destructive'"
               :disabled="busy"
               :data-testid="`decide-${decision.action}`"
-              @click="decide(decision.action as DecisionAction)"
+              @click="decide(decision)"
             >
               {{ decision.action === 'APPROVE' ? 'Approve' : 'Reject' }} →
               {{ decision.toStateName }}
+              <span v-if="decision.requiresComment" aria-hidden="true"> *</span>
             </Button>
           </div>
 
@@ -242,11 +354,6 @@ function openDocument(): void {
               <span v-if="index < deferred.length - 1">, </span>
             </template>
             . Those arrive in a later release.
-          </p>
-
-          <p class="mt-3 text-sm text-muted-foreground" data-testid="task-no-comment">
-            A decision recorded here carries no comment yet — that arrives with the approval screen
-            in a later release. Say anything that needs saying on the document itself.
           </p>
         </template>
       </div>

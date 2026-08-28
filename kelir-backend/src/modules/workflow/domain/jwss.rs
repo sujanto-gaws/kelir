@@ -25,6 +25,13 @@
 //! none of it is expressible in JSON Schema, and §8's own closing paragraph
 //! says so.
 //!
+//! **S5 and S12 are the two §8 rules that *are*, and they live in the
+//! meta-schema alone.** Both are conditions on one transition object —
+//! `AUTO` must not declare `allowedBy`, and must not demand a comment nobody
+//! is there to give — and the meta-schema's `if`/`then`/`else` on that object
+//! expresses each directly. Restating them in [`structural_errors`] would be a
+//! second answer to a question the normative artifact already answers.
+//!
 //! # Which operator set a condition is bounded by, and why it is not `calculate`'s
 //!
 //! JWSS §6.2 says conditions use "only operators registered in the Calculation
@@ -286,11 +293,12 @@ fn check_assignee_type(rule: &Value, path: &str, details: &mut Vec<ValidationDet
     ));
 }
 
-/// JWSS §8's S1–S10, in order.
+/// JWSS §8's S1–S10, in order, less the two the meta-schema owns.
 ///
-/// S11 is absent and the module documentation says why. The rules are numbered
-/// in the `rule` field of each detail so that a caller can look one up in the
-/// specification rather than pattern-matching on prose.
+/// S5 and S12 have no arm here — see the module documentation, and the note
+/// beside S5 below. S11 is absent for a different reason, also there. The rules
+/// are numbered in the `rule` field of each detail so that a caller can look one
+/// up in the specification rather than pattern-matching on prose.
 fn structural_errors(definition: &Value) -> Vec<ValidationDetail> {
     let mut details = Vec::new();
 
@@ -408,10 +416,12 @@ fn structural_errors(definition: &Value) -> Vec<ValidationDetail> {
         }
     }
 
-    // S5 is the meta-schema's `if`/`then`/`else` on the transition object, which
-    // is why it has no arm here: `AUTO` must not declare `allowedBy` and
-    // everything else must. Restating it would be a second answer to a question
-    // the normative artifact already answers.
+    // S5 and S12 are the meta-schema's `if`/`then`/`else` on the transition
+    // object, which is why neither has an arm here: `AUTO` must not declare
+    // `allowedBy` and everything else must (S5), and `AUTO` must not declare
+    // `requiresComment: true` (S12) because there is no caller to give one, so
+    // the edge could never fire. Restating either would be a second answer to a
+    // question the normative artifact already answers.
 
     details.extend(reachability_errors(initial, &codes, &finals, transitions));
     details.extend(fallback_errors(transitions));

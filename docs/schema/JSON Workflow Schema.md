@@ -2,7 +2,7 @@
 **Version:** 1.0.0
 **Status:** Draft Standard
 **Target Stack:** Rust (Workflow Engine), Vue.js (Workflow Designer)
-**Last updated:** 2026-08-11
+**Last updated:** 2026-08-28
 
 ---
 
@@ -96,10 +96,19 @@ Where this document and the Meta-Schema disagree, **the Meta-Schema is normative
 | `action` | `string` | Yes | Enum: `SUBMIT`, `APPROVE`, `REJECT`, `RETURN`, `RESUBMIT`, `DELEGATE`, `ESCALATE`, `CANCEL`, `COMPLETE`, `AUTO`. |
 | `allowedBy` | `string` \| `object` | Conditional | Assignment Rule (Section 5) or shorthand string (§5.2). REQUIRED unless `action` is `AUTO` (S5). |
 | `condition` | `object` | No | JSON Logic expression over the condition context (Section 6). The transition is eligible only when it evaluates `true`. |
+| `requiresComment` | `boolean` | No | Default `false`. When `true`, the caller MUST supply a comment with the decision that fires this transition; an engine MUST refuse the transition otherwise (S12). MUST NOT be `true` on an `AUTO` transition. |
 | `guards` | `array` | No | Hook Registration Entries (Lifecycle Hook Contract §3) merged into the `before_workflow_transition` chain, scoped to this transition. |
 | `actions` | `array` | No | Hook Registration Entries merged into the `after_workflow_transition` chain, scoped to this transition. |
 
 Multiple transitions MAY share `from` and `action` with disjoint `condition`s; the engine evaluates them in document order and fires the first eligible one (S7).
+
+### 4.1 `requiresComment` is per edge, not per workflow
+
+A comment is mandatory on the **transition**, because that is the granularity at which the answer differs: an approval is self-explaining and a refusal is not, so `REJECT` and `RETURN` are the edges a workflow author usually marks and `APPROVE` is the one they usually do not. A workflow-level setting could not express that, and a hard-coded rule — *rejections always need a reason* — would decide for every deployment a question that belongs to whoever writes the workflow.
+
+The comment itself is stored on the decision record and on the history row (Database Schema §7.6, §7.8, §7.11), which is what makes the requirement worth stating: a reason captured where the decision is not visible would not be read.
+
+**`AUTO` is excluded** for the reason §5.3 refuses two assignee types at save: there is no caller on an `AUTO` transition, so `requiresComment: true` on one would be an edge that can never fire — a stalled instance nobody is told about, produced by a definition that published cleanly.
 
 ---
 
@@ -215,6 +224,7 @@ Publish-time rules. A definition failing any rule MUST remain `DRAFT`.
 | **S9** | Every `mapsToDocumentStatus` value is a member of the platform enum. At least one state maps to `COMPLETED` or `CANCELLED`. |
 | **S10** | All `condition`, `expression`, and variable `source` logic uses registered operators only (§6.2). |
 | **S11** | Guard/action handler references resolve at publish time: `core:*` handlers exist; `plugin:*` handlers belong to an installed plugin (a disabled plugin is a WARNING, an unknown one an ERROR). |
+| **S12** | An `AUTO` transition MUST NOT declare `requiresComment: true`. There is no caller to supply one, so the edge could never fire (§4.1). |
 
 ---
 
@@ -273,12 +283,12 @@ Publish-time rules. A definition failing any rule MUST remain `DRAFT`.
                      "handler": "plugin:erp-connector:reserve_budget", "priority": 320 } ]
     },
     { "from": "MANAGER_APPROVAL", "to": "RETURNED", "action": "RETURN",
-      "allowedBy": { "assigneeType": "MANAGER_OF_OWNER" } },
+      "allowedBy": { "assigneeType": "MANAGER_OF_OWNER" }, "requiresComment": true },
     { "from": "FINANCE_APPROVAL", "to": "COMPLETED", "action": "APPROVE",
       "allowedBy": "ROLE:FINANCE_APPROVER",
       "condition": { "<=": [ { "var": "document.amount" }, 10000000 ] } },
     { "from": "FINANCE_APPROVAL", "to": "REJECTED", "action": "REJECT",
-      "allowedBy": "ROLE:FINANCE_APPROVER" },
+      "allowedBy": "ROLE:FINANCE_APPROVER", "requiresComment": true },
     { "from": "RETURNED", "to": "MANAGER_APPROVAL", "action": "RESUBMIT", "allowedBy": "OWNER" },
     { "from": "DRAFT",    "to": "CANCELLED", "action": "CANCEL", "allowedBy": "OWNER" },
     { "from": "RETURNED", "to": "CANCELLED", "action": "CANCEL", "allowedBy": "OWNER" }
@@ -296,6 +306,16 @@ Publish-time rules. A definition failing any rule MUST remain `DRAFT`.
 | [JFSS Calculation Rule Registry](JFSS%20Calculation%20Rule%20Registry.md) | The only operators permitted in conditions and expressions |
 | [architectures/01 §12](../architectures/01.%20Basic%20Framework%20Concept%20and%20Architecture.md) | Document lifecycle and hook execution semantics |
 | [Database Schema §7](../design/02.%20Database%20Schema.md) | Storage tables and projections |
+
+---
+
+## 12. Revision History
+
+This specification is a **`Draft Standard`** ([naming convention](../standards/02.%20Naming%20Convention.md) §10.1): *the shape may still change; implement at your own risk.* That status is what signals instability, so a change to the shape is recorded here rather than by moving the version — the version starts carrying that signal when the specification becomes an `Active Standard`, where §10.1 makes it the thing that means backwards compatibility. The `1.x` line is validated by one meta-schema, which §2 already states: *"a validator for the 1.x line MUST reject a different major version."*
+
+| Revision | Date | Change |
+| :--- | :--- | :--- |
+| **R-1** | 2026-08-28 | **`transitions[].requiresComment` added** (§4, §4.1, S12), for FR-TASK-006 — [#182](https://github.com/sujanto-gaws/kelir/issues/182). A **strict widening**: the property is optional and defaults to `false`, so every document valid before this revision is valid after it and no stored definition needs rewriting. The §10 example marks its `REJECT` and `RETURN` edges, because those are the edges the property exists for. |
 
 ---
 
@@ -388,11 +408,17 @@ Publish-time rules. A definition failing any rule MUST remain `DRAFT`.
           ]
         },
         "condition": { "$ref": "#/$defs/jsonLogic" },
+        "requiresComment": { "type": "boolean", "default": false },
         "guards": { "type": "array", "items": { "$ref": "#/$defs/hookRegistrationEntry" } },
         "actions": { "type": "array", "items": { "$ref": "#/$defs/hookRegistrationEntry" } }
       },
       "if": { "properties": { "action": { "const": "AUTO" } } },
-      "then": { "not": { "required": ["allowedBy"] } },
+      "then": {
+        "allOf": [
+          { "not": { "required": ["allowedBy"] } },
+          { "properties": { "requiresComment": { "const": false } } }
+        ]
+      },
       "else": { "required": ["allowedBy"] }
     },
     "assignmentRule": {

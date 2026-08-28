@@ -85,6 +85,7 @@ use chrono::{Datelike, Utc};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use super::super::domain::task as task_domain;
 use super::super::domain::{
     DecisionAction, Graph, InstanceOutcome, State, TaskStatus, TransitionAction,
 };
@@ -319,10 +320,15 @@ pub async fn start(
 pub struct DecisionProvenance<'a> {
     /// The task the decision was recorded against.
     pub task_id: Option<Uuid>,
-    /// The reason given with it. `None` until FR-TASK-006
-    /// ([#182](https://github.com/sujanto-gaws/kelir/issues/182)) captures one —
-    /// threaded now so that lands as a value rather than as a signature change
-    /// through the one function every transition passes through.
+    /// The reason given with it (FR-TASK-006,
+    /// [#182](https://github.com/sujanto-gaws/kelir/issues/182)), already
+    /// trimmed and bounded by
+    /// [`domain::task::normalize_comment`][task_domain::normalize_comment].
+    ///
+    /// **`None` and `Some("")` are the same thing and only one of them is
+    /// representable here**, which is what `requiresComment` above depends on:
+    /// a caller who sent a box full of spaces has given no reason, and an edge
+    /// that asks for one must not be satisfied by the space bar.
     pub comment: Option<&'a str>,
 }
 
@@ -395,6 +401,22 @@ pub async fn fire(
         if !assignment::permits(transaction, tenant_id, rule, context, actor, &path).await? {
             return Err(AppError::Forbidden);
         }
+    }
+
+    // **`requiresComment` is checked against the chosen edge, and after the
+    // authorization** (JWSS §4.1; FR-TASK-006, #182). Against the *chosen* edge
+    // for `allowedBy`'s reason one paragraph up: the definition marks an edge,
+    // and `condition` is what picks between two of them — a caller cannot know
+    // which they will land on, so neither the client nor the request type can
+    // decide this and the engine is where it is decided.
+    //
+    // After the authorization because the two refusals disclose different
+    // things. A 422 saying *this edge wants a reason* is feedback about the
+    // payload, and offering it to somebody who may not take the edge at all
+    // would answer a question they have not earned. The caller who may take it
+    // gets the field-level refusal the screen already applied.
+    if chosen.requires_comment && decision.comment.is_none() {
+        return Err(task_domain::comment_required(from_state, action.as_db()));
     }
 
     let target = graph.state(&chosen.to).ok_or_else(|| AppError::Internal {

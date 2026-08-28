@@ -42,6 +42,35 @@ whose process has finished is transitionable again.
 
 ### Added
 
+- **Approve and reject from the task, with the reason** (FR-TASK-004, 005, 006,
+  [#182](https://github.com/sujanto-gaws/kelir/issues/182)). A decision and the
+  reason for it are entered together on the task screen and sent in one request,
+  because they are one interaction: a screen that recorded the decision and then
+  asked for a reason would have already committed the half nobody can take back.
+
+  The comment lands on three rows in one transaction — `workflow_tasks.comment`,
+  `approval_decisions.comment` and `workflow_history.comment` — so the task
+  surface, reporting and the account a person reads cannot disagree about what
+  an approver said. **The document workspace's Workflow tab now shows the
+  history** #181 records, which is where the reason becomes visible: one
+  captured where the decision is not visible would not be read.
+
+  **A transition may require it.** JWSS gains `transitions[].requiresComment`
+  (§4.1), defaulting to `false`, and the engine refuses the transition without
+  one — a 422 on `comment`, checked against the edge `condition` actually
+  selected. Per *transition* rather than hard-coded, because that is where the
+  answer differs: an approval explains itself and a refusal does not, and which
+  is which belongs to whoever wrote the workflow (**D-41**). The task detail
+  carries `requiresComment` so the screen refuses an empty box before sending,
+  under the server's rule rather than one of its own.
+
+  **The comment is not copied into the audit trail**, which records only that
+  there was one. `audit_events` is read through `master-data:audit:read` by
+  people holding no permission over the document, and a decision comment is
+  prose an approver wrote about somebody's requisition — the line **D-12** and
+  **D-32** already drew. The reason itself is on the history row, behind
+  `workflow:instance:read`, which is what the people it was written for hold.
+
 - **A workflow history record per transition** (FR-WF-012,
   [#181](https://github.com/sujanto-gaws/kelir/issues/181)). Every move a
   process makes writes a row — the submit entering the initial state and every
@@ -84,9 +113,9 @@ whose process has finished is transitionable again.
 - **User tasks generated on transition** (FR-WF-004), assigned to a user *or*
   offered to a role. Claiming a role task is a compare-and-swap: two people
   claiming at once produce one owner and one refusal.
-- **Approve and reject** (FR-WF-006, 007), as an API. A task already decided
-  cannot be decided again, and the check runs in the transaction that writes,
-  under a lock covering what it read.
+- **Approve and reject** (FR-WF-006, 007), the API the task screen above sits
+  on. A task already decided cannot be decided again, and the check runs in the
+  transaction that writes, under a lock covering what it read.
 - **The document–workflow seam** (FR-DOC-012, FR-WF-013). A document links to at
   most one live process, and its status is a projection of that process's state
   — mapped by the *definition*, so a new workflow says what its own states mean
@@ -138,9 +167,6 @@ whose process has finished is transitionable again.
 
 ### Known limitations
 
-- **A decision carries no comment.** `workflow_tasks.comment` and
-  `approval_decisions.comment` exist and nothing writes them, so a rejection
-  recorded by this release has no reason on it. FR-TASK-006 fills them.
 - **Return, delegate, conditional routing, due dates and escalation are not
   built.** A definition may declare `RETURN`; the task detail shows the
   transition and does not offer it.

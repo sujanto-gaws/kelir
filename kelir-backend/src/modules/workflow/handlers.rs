@@ -243,7 +243,9 @@ async fn claim_task(
         (status = 403, description = "Missing workflow:task:execute, or this task is not the caller's"),
         (status = 404, description = "No such task"),
         (status = 409, description = "The task was already decided, or the process moved underneath the decision"),
-        (status = 422, description = "The definition has no such transition from where the process is")
+        (status = 422, description = "The definition has no such transition from where the process is, \
+                                      or the transition requires a comment and none was given, \
+                                      or the comment is too long")
     ),
     security(("bearer" = []))
 )]
@@ -254,6 +256,6 @@ async fn decide_task(
     JsonBody(request): JsonBody<DecisionRequest>,
 ) -> Result<Json<ItemEnvelope<DecisionResult>>, AppError> {
     Ok(Json(ItemEnvelope::new(
-        task_service::decide(&state, &caller, id, request.action).await?,
+        task_service::decide(&state, &caller, id, request.action, request.comment).await?,
     )))
 }

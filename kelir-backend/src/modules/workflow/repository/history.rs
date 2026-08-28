@@ -48,9 +48,10 @@ pub struct NewHistoryEntry<'a> {
     pub action: Option<TransitionAction>,
     /// The task the decision came from, when a decision is what moved it.
     pub task_id: Option<Uuid>,
-    /// The decision's reason. Written by nothing until FR-TASK-006
-    /// ([#182](https://github.com/sujanto-gaws/kelir/issues/182)); threaded
-    /// through now so that lands as a value rather than as a migration.
+    /// The reason given with the decision (FR-TASK-006,
+    /// [#182](https://github.com/sujanto-gaws/kelir/issues/182)), trimmed and
+    /// bounded before it reaches here. `None` where a transition carried none —
+    /// the start, and any edge the definition did not mark.
     pub comment: Option<&'a str>,
     pub actor_user_id: Option<Uuid>,
 }

@@ -83,6 +83,11 @@ export async function publishWorkflow(
         to: 'REJECTED',
         action: 'REJECT',
         allowedBy: `ROLE:${roleCode}`,
+        // A refusal has to say why (JWSS §4.1, FR-TASK-006). Marked here and
+        // not on the APPROVE, because the asymmetry is what the browser flow
+        // has to be able to show: a screen that asked for a reason on both
+        // would pass against a product that hard-coded the rule.
+        requiresComment: true,
       },
     ],
   }

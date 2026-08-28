@@ -1055,7 +1055,8 @@ async fn every_transition_is_recorded_with_both_ends_and_its_actor() {
         "a history entry with no timestamp: {after}"
     );
 
-    // FR-TASK-006 is #182. The column and the path exist; nothing fills them yet.
+    // No comment was sent, so none is recorded. The `requiresComment` tests
+    // below are where the filled case is asserted.
     assert_eq!(moved["comment"], Value::Null);
 }
 
@@ -2155,4 +2156,417 @@ async fn a_deprecated_workflow_refuses_the_submit_and_leaves_running_approvals_a
         decided.body
     );
     assert_eq!(stored_status(&app, running).await, "COMPLETED");
+}
+
+// ---------------------------------------------------------------------------
+// The decision comment (#182, FR-TASK-006), and `requiresComment` (JWSS §4.1)
+// ---------------------------------------------------------------------------
+
+/// A workflow whose `REJECT` edge demands a reason and whose `APPROVE` does not.
+///
+/// **The asymmetry is the subject.** A definition that marked both would let a
+/// test pass against an implementation that required a comment for every
+/// decision, which is the hard-coded rule JWSS §4.1 exists to avoid — so the two
+/// edges differ, and the tests below assert on both.
+fn comment_workflow(key: &str) -> Value {
+    json!({
+        "workflowKey": key,
+        "version": "1.0.0",
+        "name": "Approval with a reason",
+        "initialState": "MANAGER_APPROVAL",
+        "states": [
+            { "code": "MANAGER_APPROVAL", "name": "Manager approval",
+              "mapsToDocumentStatus": "PENDING_APPROVAL",
+              "task": { "taskDefinitionKey": "manager_approval", "taskName": "Decide",
+                        "assignment": { "assigneeType": "ROLE", "roleCode": APPROVER_ROLE } } },
+            { "code": "COMPLETED", "name": "Completed", "mapsToDocumentStatus": "COMPLETED",
+              "isFinal": true },
+            { "code": "REJECTED", "name": "Rejected", "mapsToDocumentStatus": "REJECTED",
+              "isFinal": true }
+        ],
+        "transitions": [
+            { "from": "MANAGER_APPROVAL", "to": "COMPLETED", "action": "APPROVE",
+              "allowedBy": format!("ROLE:{APPROVER_ROLE}") },
+            { "from": "MANAGER_APPROVAL", "to": "REJECTED", "action": "REJECT",
+              "allowedBy": format!("ROLE:{APPROVER_ROLE}"), "requiresComment": true }
+        ]
+    })
+}
+
+/// **One comment, three rows, one transaction** (#182 AC1, AC2).
+///
+/// The reason an approver gives lands on the task, on the formal decision record
+/// and on the history — and the three are asserted separately rather than
+/// through the response, because what this item is about is what is durable.
+/// The history is the one a person reads, which is why AC2 names it.
+///
+/// **Seen red** against `repository::history::record` binding `None` for
+/// `comment`: the task and the decision record carry the reason, the two
+/// assertions above pass, and the account somebody actually opens is blank.
+///
+/// That mutation rather than the more obvious one — `None` in the
+/// `DecisionProvenance` — because the obvious one is not isolating. `fire`
+/// reads the same field to enforce `requiresComment`, so blanking it there
+/// makes this test fail at the decision with a 422 and says nothing about
+/// whether the history was written.
+#[tokio::test]
+async fn a_decision_comment_reaches_the_task_the_record_and_the_history() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let approver_token = approver(&app, "wf.commenter").await;
+
+    let workflow = publish_workflow(&app, &token, comment_workflow("wf_comment")).await;
+    let type_id = document_type(&app, &token, "PR_COMMENT", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let task = open_task_of(&app, id).await;
+
+    let decided = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&approver_token),
+            json!({
+                "action": "REJECT",
+                "comment": "  The figure does not match the quotation.  "
+            }),
+        )
+        .await;
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+
+    // Trimmed on the way in, so the stored value is the sentence rather than the
+    // sentence plus whatever the textarea kept around it.
+    let expected = "The figure does not match the quotation.";
+
+    let on_task: Option<String> =
+        sqlx::query_scalar("SELECT comment FROM workflow_tasks WHERE id = $1")
+            .bind(task)
+            .fetch_one(&app.pool)
+            .await
+            .expect("read the task");
+    assert_eq!(
+        on_task.as_deref(),
+        Some(expected),
+        "the task kept no reason"
+    );
+
+    let on_record: Option<String> =
+        sqlx::query_scalar("SELECT comment FROM approval_decisions WHERE task_id = $1")
+            .bind(task)
+            .fetch_one(&app.pool)
+            .await
+            .expect("read the decision record");
+    assert_eq!(
+        on_record.as_deref(),
+        Some(expected),
+        "the formal decision record kept no reason"
+    );
+
+    // AC2, and the one that matters most: the reason is visible where the
+    // decision is, through the API a person's screen reads.
+    let history = history_of(&app, &token, id).await;
+    let rows = history["data"].as_array().expect("a list");
+    let moved = rows.last().expect("the decision's row");
+
+    assert_eq!(moved["action"], "REJECT");
+    assert_eq!(
+        moved["comment"], expected,
+        "the history does not carry the reason: {history}"
+    );
+}
+
+/// **A required comment is refused, and the refusal names the field** (AC4).
+///
+/// A 422 rather than a 409 or a 403: nothing has changed underneath the caller
+/// and they may take this edge — what is missing is something they can supply.
+/// The path is `comment`, which is what makes the server's refusal and the
+/// screen's the same rule expressed twice rather than two rules.
+///
+/// **Seen red** against `engine::fire` with the `requires_comment` check
+/// removed: the rejection is recorded with no reason on it, which is precisely
+/// the outcome the Sprint 10 construction plan §7.5 named as this item's cost.
+#[tokio::test]
+async fn a_transition_that_requires_a_reason_refuses_a_decision_without_one() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let approver_token = approver(&app, "wf.silent").await;
+
+    let workflow = publish_workflow(&app, &token, comment_workflow("wf_comment_required")).await;
+    let type_id = document_type(&app, &token, "PR_COMMENT_REQUIRED", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let task = open_task_of(&app, id).await;
+
+    let refused = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&approver_token),
+            json!({ "action": "REJECT" }),
+        )
+        .await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a rejection was recorded with no reason on it: {}",
+        refused.body
+    );
+
+    let body = refused.body.to_string();
+    assert!(body.contains("COMMENT_REQUIRED"), "{body}");
+    assert!(
+        body.contains("MANAGER_APPROVAL") && body.contains("REJECT"),
+        "the refusal must say which decision wanted a reason: {body}"
+    );
+
+    // Nothing happened. The refusal is raised inside the transaction, so the
+    // task is still open and the document has not moved — a refusal that left
+    // the task completed would be worse than the missing comment.
+    assert_eq!(stored_status(&app, id).await, "PENDING_APPROVAL");
+    assert_eq!(open_task_of(&app, id).await, task);
+
+    // And a whitespace-only comment is the same as none, which is the rule that
+    // stops the requirement being satisfied by the space bar.
+    let blank = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&approver_token),
+            json!({ "action": "REJECT", "comment": "   \n  " }),
+        )
+        .await;
+    assert_eq!(
+        blank.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a box full of spaces satisfied a required reason: {}",
+        blank.body
+    );
+
+    // The same edge, with a reason, goes through — so the refusal above is about
+    // the missing comment rather than about the edge refusing everybody, which
+    // is the gate coding standard §2.9 warns about.
+    let decided = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&approver_token),
+            json!({ "action": "REJECT", "comment": "Duplicate of PR-2026-000004." }),
+        )
+        .await;
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+    assert_eq!(stored_status(&app, id).await, "REJECTED");
+}
+
+/// **An edge the definition did not mark takes a decision with no reason** (AC4).
+///
+/// The other half of the asymmetry, and the reason it is a separate test: an
+/// implementation that required a comment for every decision would pass the one
+/// above. The `APPROVE` edge of [`comment_workflow`] is unmarked, and a comment
+/// given anyway is still recorded — optional does not mean discarded.
+#[tokio::test]
+async fn an_unmarked_transition_needs_no_reason_and_still_keeps_one() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let approver_token = approver(&app, "wf.optional").await;
+
+    let workflow = publish_workflow(&app, &token, comment_workflow("wf_comment_optional")).await;
+    let type_id = document_type(&app, &token, "PR_COMMENT_OPTIONAL", Some(workflow)).await;
+
+    // No reason at all, on the edge that does not ask for one.
+    let bare = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, bare).await.status, StatusCode::OK);
+
+    let bare_task = open_task_of(&app, bare).await;
+    let decided = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{bare_task}/decision"),
+            Some(&approver_token),
+            json!({ "action": "APPROVE" }),
+        )
+        .await;
+    assert_eq!(
+        decided.status,
+        StatusCode::OK,
+        "an unmarked edge demanded a reason: {}",
+        decided.body
+    );
+    assert_eq!(stored_status(&app, bare).await, "COMPLETED");
+
+    // And one given anyway on the same edge is kept.
+    let told = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, told).await.status, StatusCode::OK);
+
+    let told_task = open_task_of(&app, told).await;
+    let decided = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{told_task}/decision"),
+            Some(&approver_token),
+            json!({ "action": "APPROVE", "comment": "Within the department budget." }),
+        )
+        .await;
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+
+    let history = history_of(&app, &token, told).await;
+    let rows = history["data"].as_array().expect("a list");
+    assert_eq!(
+        rows.last().expect("the decision's row")["comment"],
+        "Within the department budget.",
+        "an optional reason was discarded: {history}"
+    );
+}
+
+/// **The comment is bounded, and the refusal names the field** (#182).
+///
+/// `workflow_tasks.comment` is `TEXT`, so nothing in the schema bounds it and a
+/// caller could otherwise write an unbounded row into a table [#181] AC6 makes
+/// impossible to edit or delete. A 422 naming `comment`, not a `sqlx` error
+/// surfacing as a 500.
+#[tokio::test]
+async fn a_comment_longer_than_the_limit_is_refused_before_anything_is_written() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let approver_token = approver(&app, "wf.verbose").await;
+
+    let workflow = publish_workflow(&app, &token, role_workflow("wf_comment_long")).await;
+    let type_id = document_type(&app, &token, "PR_COMMENT_LONG", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let task = open_task_of(&app, id).await;
+
+    let refused = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&approver_token),
+            json!({ "action": "APPROVE", "comment": "x".repeat(4001) }),
+        )
+        .await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+    assert!(
+        refused.body.to_string().contains("TOO_LONG"),
+        "{}",
+        refused.body
+    );
+    assert_eq!(stored_status(&app, id).await, "PENDING_APPROVAL");
+}
+
+/// **The task detail tells the screen which decisions need a reason** (AC4).
+///
+/// This is what makes *both ends agree* true by construction rather than by two
+/// implementations happening to match: the definition marks the edge, the detail
+/// carries the mark, and the screen reads it. A client deriving the rule for
+/// itself would disagree with the server the first time a workflow marked an
+/// `APPROVE` — so the payload is asserted here, on the field the screen binds
+/// to.
+#[tokio::test]
+async fn the_task_detail_says_which_decisions_require_a_reason() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let approver_token = approver(&app, "wf.informed").await;
+
+    let workflow = publish_workflow(&app, &token, comment_workflow("wf_comment_detail")).await;
+    let type_id = document_type(&app, &token, "PR_COMMENT_DETAIL", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let task = open_task_of(&app, id).await;
+
+    let detail = app
+        .get(&format!("/api/v1/tasks/{task}"), Some(&approver_token))
+        .await;
+    assert_eq!(detail.status, StatusCode::OK, "{}", detail.body);
+
+    let decisions = detail.body["data"]["decisions"]
+        .as_array()
+        .expect("the decisions on offer");
+
+    let approve = decisions
+        .iter()
+        .find(|decision| decision["action"] == "APPROVE")
+        .expect("the APPROVE edge");
+    let reject = decisions
+        .iter()
+        .find(|decision| decision["action"] == "REJECT")
+        .expect("the REJECT edge");
+
+    assert_eq!(
+        approve["requiresComment"], false,
+        "an unmarked edge reported as needing a reason: {}",
+        detail.body
+    );
+    assert_eq!(
+        reject["requiresComment"], true,
+        "a marked edge did not reach the screen: {}",
+        detail.body
+    );
+}
+
+/// **`requiresComment: true` on an `AUTO` transition is refused at save** (S12).
+///
+/// An `AUTO` transition fires without a caller, so an edge asking one for a
+/// reason is an edge that can never fire — a stalled instance nobody is told
+/// about, produced by a definition that published cleanly. It is the failure
+/// **D-37** refuses two assignee types at save time to avoid, and it is refused
+/// the same way and for the same reason.
+#[tokio::test]
+async fn an_auto_transition_cannot_demand_a_reason_nobody_can_give() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let definition = json!({
+        "workflowKey": "wf_auto_comment",
+        "version": "1.0.0",
+        "name": "Auto with a reason",
+        "initialState": "MANAGER_APPROVAL",
+        "states": [
+            { "code": "MANAGER_APPROVAL", "name": "Manager approval",
+              "mapsToDocumentStatus": "PENDING_APPROVAL",
+              "task": { "taskDefinitionKey": "manager_approval", "taskName": "Decide",
+                        "assignment": { "assigneeType": "ROLE", "roleCode": APPROVER_ROLE } } },
+            { "code": "COMPLETED", "name": "Completed", "mapsToDocumentStatus": "COMPLETED",
+              "isFinal": true }
+        ],
+        "transitions": [
+            { "from": "MANAGER_APPROVAL", "to": "COMPLETED", "action": "AUTO",
+              "requiresComment": true }
+        ]
+    });
+
+    let refused = app
+        .post(
+            "/api/v1/workflow/definitions",
+            Some(&token),
+            json!({ "workflowKey": "wf_auto_comment", "name": "Auto", "definition": definition }),
+        )
+        .await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "an AUTO edge demanding a reason was stored: {}",
+        refused.body
+    );
+
+    // And the same definition without the flag is accepted, so the refusal is
+    // about `requiresComment` rather than about `AUTO`.
+    let mut allowed = definition.clone();
+    allowed["transitions"][0]
+        .as_object_mut()
+        .expect("the transition")
+        .remove("requiresComment");
+    allowed["workflowKey"] = json!("wf_auto_plain");
+
+    let stored = app
+        .post(
+            "/api/v1/workflow/definitions",
+            Some(&token),
+            json!({ "workflowKey": "wf_auto_plain", "name": "Auto", "definition": allowed }),
+        )
+        .await;
+    assert_eq!(stored.status, StatusCode::CREATED, "{}", stored.body);
 }
