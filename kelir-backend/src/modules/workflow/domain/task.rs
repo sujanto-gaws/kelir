@@ -84,13 +84,24 @@ impl TaskStatus {
     }
 }
 
-/// What a caller may do to a task in Sprint 10.
+/// What a caller may do to a task.
 ///
-/// **Two of them**, and the rest of JWSS's transition vocabulary is deliberately
-/// absent: `RETURN` is FR-WF-008 ([#183]) and `DELEGATE` is FR-WF-009 ([#184]),
-/// both Sprint 11. Accepting a verb this engine cannot complete would be a 500
-/// where the contract promises a refusal, so the request type does not have the
-/// variant at all and an unknown value is refused by `serde` at the boundary.
+/// **Three of them**, and the rest of JWSS's transition vocabulary is
+/// deliberately absent: `DELEGATE` is FR-WF-009 ([#184]) and `ESCALATE` is
+/// FR-WF-010, unscheduled. Accepting a verb this engine cannot complete would be
+/// a 500 where the contract promises a refusal, so the request type does not
+/// have the variant at all and an unknown value is refused by `serde` at the
+/// boundary.
+///
+/// # `RETURN` is here and `RESUBMIT` is not, and that asymmetry is the design
+///
+/// A return is taken **on a task**, by the approver holding it, which is what
+/// makes it a decision like the other two. A resubmission is taken on the
+/// *document*, by its owner, from a state that declares no task at all — JWSS's
+/// own §10 example has `RETURNED` stateless with a `RESUBMIT` edge `allowedBy`
+/// the owner. So it arrives through `POST /documents/{id}/submission`
+/// ([`crate::modules::document::service::submit`]), and a `Resubmit` variant
+/// here would be a verb with no task to name in the path.
 ///
 /// [#183]: https://github.com/sujanto-gaws/kelir/issues/183
 /// [#184]: https://github.com/sujanto-gaws/kelir/issues/184
@@ -99,6 +110,13 @@ impl TaskStatus {
 pub enum DecisionAction {
     Approve,
     Reject,
+    /// Send it back for correction (FR-WF-008, [#183]).
+    ///
+    /// **Not a rejection with a softer name.** Reject is terminal and return is
+    /// not: the document goes to the state the definition's `RETURN` edge names,
+    /// becomes editable again, and comes back with the same number, the same
+    /// history and the same place in the queue.
+    Return,
 }
 
 impl DecisionAction {
@@ -106,6 +124,7 @@ impl DecisionAction {
         match self {
             Self::Approve => "APPROVE",
             Self::Reject => "REJECT",
+            Self::Return => "RETURN",
         }
     }
 
@@ -114,6 +133,7 @@ impl DecisionAction {
         match self {
             Self::Approve => TransitionAction::Approve,
             Self::Reject => TransitionAction::Reject,
+            Self::Return => TransitionAction::Return,
         }
     }
 }
@@ -503,9 +523,14 @@ mod tests {
             serde_json::from_str(r#"{"decision": "APPROVE"}"#);
         assert!(refused.is_err());
 
-        // And a verb Sprint 11 owns is refused at the boundary rather than
-        // reaching an engine that cannot complete it.
-        let refused: Result<DecisionRequest, _> = serde_json::from_str(r#"{"action": "RETURN"}"#);
+        // And a verb this engine cannot complete is refused at the boundary
+        // rather than reaching an engine that cannot complete it. `RETURN`
+        // moved out of this list when #183 built it; `DELEGATE` is #184 and is
+        // what the assertion is about now.
+        let refused: Result<DecisionRequest, _> = serde_json::from_str(r#"{"action": "DELEGATE"}"#);
         assert!(refused.is_err());
+
+        let accepted: Result<DecisionRequest, _> = serde_json::from_str(r#"{"action": "RETURN"}"#);
+        assert!(accepted.is_ok(), "RETURN is a decision this engine takes");
     }
 }

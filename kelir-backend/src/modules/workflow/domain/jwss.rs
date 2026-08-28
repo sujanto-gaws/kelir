@@ -20,10 +20,10 @@
 //! sides — and two runtimes agreeing on an operator nobody approved is two
 //! runtimes agreeing on something the registry calls FORBIDDEN.
 //!
-//! **Structure**, S1–S10 of JWSS §8. Reachability, dead ends, duplicate
-//! triples, a transition out of a final state, a fallback that is not last:
-//! none of it is expressible in JSON Schema, and §8's own closing paragraph
-//! says so.
+//! **Structure**, S1–S4, S6, S7, S9 and S10 of JWSS §8. Reachability, dead ends,
+//! duplicate triples, a transition out of a final state, a fallback that is not
+//! last: none of it is expressible in JSON Schema, and §8's own closing
+//! paragraph says so.
 //!
 //! **S5 and S12 are the two §8 rules that *are*, and they live in the
 //! meta-schema alone.** Both are conditions on one transition object —
@@ -47,6 +47,27 @@
 //! than numbers, and that reason makes them exactly what a condition wants. So
 //! the bound here is [`CONDITIONAL_OPERATORS`], the same constant, and when
 //! **D-15** makes that tier normative it moves for both consumers at once.
+//!
+//! # S8 emits nothing, and S11 is not implemented
+//!
+//! **S8 is a `SHOULD`** — *"every state that is the target of a non-`AUTO`
+//! transition and is not final SHOULD declare a `task`; a stateless wait is a
+//! publish WARNING"* — and this validator has no warning channel:
+//! [`validate_definition`] returns refusals, and a `ValidationDetail` is a
+//! refusal. Emitting one would turn a `SHOULD` into a `MUST` and refuse a
+//! definition the specification permits.
+//!
+//! That is not hypothetical. [#183](https://github.com/sujanto-gaws/kelir/issues/183)
+//! is the first item to depend on it: JWSS §10's own `RETURNED` state declares
+//! no task, because a returned document is with its author rather than in
+//! anybody's inbox, and the `RESUBMIT` edge out of it is authorized by its
+//! `allowedBy`. **A stateless wait is the shape return has**, so refusing it
+//! would refuse the specification's own example.
+//!
+//! What is missing is the warning, not the permission — a definition whose
+//! *approval* state forgot its task publishes silently and generates work for
+//! nobody. That needs a channel this API does not have, and it is recorded here
+//! rather than left to be discovered.
 //!
 //! # S11 is not implemented, and this file is where a reader finds that out
 //!
@@ -293,12 +314,13 @@ fn check_assignee_type(rule: &Value, path: &str, details: &mut Vec<ValidationDet
     ));
 }
 
-/// JWSS §8's S1–S10, in order, less the two the meta-schema owns.
+/// JWSS §8's structural rules, in order, less the four this function does not own.
 ///
-/// S5 and S12 have no arm here — see the module documentation, and the note
-/// beside S5 below. S11 is absent for a different reason, also there. The rules
-/// are numbered in the `rule` field of each detail so that a caller can look one
-/// up in the specification rather than pattern-matching on prose.
+/// S5 and S12 belong to the meta-schema; **S8 is a `SHOULD` with no warning
+/// channel to emit into**, and S11 has nothing to resolve against. The module
+/// documentation says why for each. The rules are numbered in the `rule` field
+/// of each detail so that a caller can look one up in the specification rather
+/// than pattern-matching on prose.
 fn structural_errors(definition: &Value) -> Vec<ValidationDetail> {
     let mut details = Vec::new();
 

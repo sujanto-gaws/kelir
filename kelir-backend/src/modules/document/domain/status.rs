@@ -104,13 +104,36 @@ impl DocumentStatus {
         }
     }
 
-    /// Whether the document may still be edited and discarded.
+    /// Whether the document's own content may still be changed.
     ///
-    /// One predicate rather than `== Draft` written in four services: the
-    /// question "may this be edited" is asked by the update path, the delete
-    /// path, the submit path and the renderer's mode, and four spellings of it
-    /// are four chances for one of them to disagree.
+    /// One predicate rather than a status comparison written in four services:
+    /// the question is asked by the update path, the submit path and the
+    /// renderer's mode, and three spellings of it are three chances for one of
+    /// them to disagree.
+    ///
+    /// **`RETURNED` is editable, and that is what return is for**
+    /// ([#183](https://github.com/sujanto-gaws/kelir/issues/183) AC1). A
+    /// document sent back for correction that could not be corrected would be a
+    /// rejection with a longer name. It re-enters the approval through
+    /// `POST /documents/{id}/submission`, keeping the number it already has.
     pub fn is_editable(self) -> bool {
+        matches!(self, Self::Draft | Self::Returned)
+    }
+
+    /// Whether the document may be discarded.
+    ///
+    /// **Narrower than [`is_editable`][Self::is_editable], and it was the same
+    /// predicate until [#183](https://github.com/sujanto-gaws/kelir/issues/183)
+    /// separated them.** They answered one question while only a draft could be
+    /// either. A returned document is not a draft: it has a **number**, a
+    /// status history and a live process waiting for it to come back, so
+    /// deleting it would strand the instance that returned it and retire a
+    /// number an auditor can see was issued.
+    ///
+    /// *I opened this by mistake* and *this request is withdrawn* stay two
+    /// different questions, and the second is still `super::status`'s
+    /// `CANCELLED` transition rather than a delete.
+    pub fn is_discardable(self) -> bool {
         matches!(self, Self::Draft)
     }
 
@@ -377,15 +400,35 @@ mod tests {
     }
 
     #[test]
-    fn only_a_draft_is_editable() {
+    fn a_draft_and_a_returned_document_are_the_editable_ones() {
         for status in ALL {
             assert_eq!(
                 status.is_editable(),
-                status == DocumentStatus::Draft,
+                matches!(status, DocumentStatus::Draft | DocumentStatus::Returned),
                 "{} disagreed about being editable",
                 status.as_db()
             );
         }
+    }
+
+    #[test]
+    fn only_a_draft_is_discardable() {
+        // The half that did *not* widen with #183. A returned document has a
+        // number and a live process waiting for it; deleting it would strand
+        // the instance and retire a number an auditor can see was issued.
+        for status in ALL {
+            assert_eq!(
+                status.is_discardable(),
+                status == DocumentStatus::Draft,
+                "{} disagreed about being discardable",
+                status.as_db()
+            );
+        }
+
+        assert!(
+            DocumentStatus::Returned.is_editable() && !DocumentStatus::Returned.is_discardable(),
+            "the two predicates must differ on RETURNED, or splitting them bought nothing"
+        );
     }
 
     #[test]

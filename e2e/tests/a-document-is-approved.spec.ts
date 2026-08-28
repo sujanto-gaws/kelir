@@ -48,6 +48,7 @@ const roleCode = `E2E-APPROVER-${suffix}`.toUpperCase()
 const title = `Ten ergonomic chairs ${suffix}`
 const reason = `Within the department budget ${suffix}`
 const refusal = `The quotation does not match the figure ${suffix}`
+const correction = `Use the revised quotation ${suffix}`
 
 /** One number field, which is all the approval needs the document to hold. */
 const definition = {
@@ -286,6 +287,99 @@ test('a rejection cannot be recorded without a reason, and carries it once given
     await expect(
       requester.getByTestId('workflow-history').getByTestId('history-comment'),
     ).toContainText(refusal)
+  } finally {
+    await requester.close()
+    await decider.close()
+  }
+})
+
+test('a returned document is corrected, sent again, and keeps its number', async ({ browser }) => {
+  // #183, the loop that reject cannot make: the approver sends it back with a
+  // reason, the requester corrects it without losing the number, and the second
+  // pass approves. Driven through both people's screens, because the whole point
+  // of return is what it saves the *requester* — and that is invisible from the
+  // approver's side.
+  const requester = await browser.newPage()
+  const decider = await browser.newPage()
+
+  try {
+    const { username, password } = credentials()
+    await signIn(requester, username, password)
+
+    await requester.goto('/documents/new')
+    await requester.getByTestId(`type-${documentType.typeCode}`).getByRole('radio').check()
+    await requester.getByTestId('new-document-title').fill(`Sent back once ${suffix}`)
+    await requester.getByTestId('create-document').click()
+
+    await expect(requester).toHaveURL(/\/documents\/[0-9a-f-]{36}$/)
+    const documentUrl = requester.url()
+
+    await requester.locator('#jfss-amount-field').fill('99000')
+    await requester.getByRole('button', { name: 'Submit request' }).click()
+
+    await expect(requester.getByTestId('document-status')).toHaveText('Pending approval')
+
+    const number = (await requester.getByTestId('document-number').textContent())?.trim() ?? ''
+    expect(number).not.toEqual('')
+
+    // --- The approver sends it back, with the reason -----------------------
+    await signIn(decider, approver.username, approver.password)
+    await decider.goto('/tasks')
+
+    await decider
+      .getByRole('row')
+      .filter({ hasText: number })
+      .getByRole('button', { name: 'Open' })
+      .click()
+
+    // The button says what it does and is not styled like the terminal one.
+    await expect(decider.getByTestId('decide-RETURN')).toContainText('Send back')
+
+    await decider.getByLabel(/Reason/).fill(correction)
+    await decider.getByTestId('decide-RETURN').click()
+
+    await expect(decider.getByTestId('task-notice')).toContainText('Returned')
+    await expect(decider.getByTestId('task-decided')).toContainText('has been decided')
+
+    // --- The requester finds it back, editable, with its number intact -----
+    await requester.goto(documentUrl)
+
+    await expect(requester.getByTestId('document-status')).toHaveText('Returned')
+    await expect(requester.getByTestId('document-number')).toHaveText(number)
+
+    // The form is live again — this is the assertion that separates a return
+    // from a rejection with a softer name.
+    await expect(requester.getByTestId('document-form')).not.toHaveAttribute('data-readonly', 'true')
+
+    // And they are told why, without having to ask anybody.
+    await requester.getByTestId('tab-workflow').click()
+    await expect(
+      requester.getByTestId('workflow-history').getByTestId('history-comment'),
+    ).toContainText(correction)
+
+    // --- Corrected and sent again ------------------------------------------
+    await requester.getByTestId('tab-form').click()
+    await requester.locator('#jfss-amount-field').fill('64000')
+    await requester.getByRole('button', { name: 'Submit request' }).click()
+
+    await expect(requester.getByTestId('document-status')).toHaveText('Pending approval')
+    await expect(requester.getByTestId('document-number')).toHaveText(number)
+
+    // --- The second pass approves, and the loop closes ---------------------
+    await decider.goto('/tasks')
+
+    await decider
+      .getByRole('row')
+      .filter({ hasText: number })
+      .getByRole('button', { name: 'Open' })
+      .click()
+
+    await decider.getByTestId('decide-APPROVE').click()
+    await expect(decider.getByTestId('task-notice')).toContainText('Completed')
+
+    await requester.goto(documentUrl)
+    await expect(requester.getByTestId('document-status')).toHaveText('Completed')
+    await expect(requester.getByTestId('document-number')).toHaveText(number)
   } finally {
     await requester.close()
     await decider.close()

@@ -33,8 +33,16 @@ export type TaskStatus =
  */
 export type TaskAssignment = 'MINE' | 'ROLE'
 
-/** What this release can actually do to a task. */
-export type DecisionAction = 'APPROVE' | 'REJECT'
+/**
+ * What this release can actually do to a task.
+ *
+ * **`RESUBMIT` is not here, and that is the shape rather than a gap.** A return
+ * is taken on a *task* by the approver holding it; a resubmission is taken on
+ * the *document* by its owner, from a state that declares no task at all. It
+ * goes through `POST /documents/{id}/submission` — the same button the first
+ * submit used — so there is no task id for it to name.
+ */
+export type DecisionAction = 'APPROVE' | 'REJECT' | 'RETURN'
 
 export interface WorkflowVariable {
   key: string
@@ -119,10 +127,11 @@ export interface AvailableDecision {
   /**
    * Whether this release can perform it.
    *
-   * A definition may declare `RETURN` — FR-WF-008 is Sprint 11 — and a screen
-   * that drew a button for it would produce a 422 from a control the product
-   * itself put there. The flag is what lets the screen *show* the edge without
-   * offering it.
+   * A definition may declare `DELEGATE` — FR-WF-009 is #184 — and a screen that
+   * drew a button for it would produce a 422 from a control the product itself
+   * put there. The flag is what lets the screen *show* the edge without
+   * offering it. `RETURN` was the original example and left the list when #183
+   * built it, which is the flag working rather than a reason to remove it.
    */
   supported: boolean
   /**
@@ -192,6 +201,29 @@ export interface WorkflowHistoryEntry {
   actorUserId: string | null
   actorUsername: string | null
   occurredAt: string
+}
+
+/**
+ * What a person calls each decision, and how firmly the button should read.
+ *
+ * **`RETURN` is not destructive and must not look it.** Reject ends the request;
+ * return sends it back to be corrected and keeps its number, its history and its
+ * place in the queue. A button styled like the terminal one would misdescribe
+ * the safer of the two at the moment somebody is choosing between them.
+ *
+ * "Send back" rather than "Return", because *return* on its own does not say
+ * which direction: the target state's name follows it on the button.
+ */
+export const DECISION_LABELS: Record<DecisionAction, string> = {
+  APPROVE: 'Approve',
+  REJECT: 'Reject',
+  RETURN: 'Send back',
+}
+
+export const DECISION_VARIANTS: Record<DecisionAction, 'default' | 'destructive' | 'outline'> = {
+  APPROVE: 'default',
+  REJECT: 'destructive',
+  RETURN: 'outline',
 }
 
 /** What a person calls where a process is. */

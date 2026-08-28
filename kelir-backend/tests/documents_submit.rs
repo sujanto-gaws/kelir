@@ -673,7 +673,7 @@ async fn an_edit_blocked_by_a_submit_applies_to_nothing() {
         tenant,
         id,
         &document_repo::Submission {
-            document_number: "PR-RACE-000001",
+            document_number: Some("PR-RACE-000001"),
             form_data: &json!({"subject": "As submitted"}),
             submitted_at: chrono::Utc::now(),
         },
@@ -754,7 +754,7 @@ async fn a_discard_blocked_by_a_submit_applies_to_nothing() {
         tenant,
         id,
         &document_repo::Submission {
-            document_number: "PR-DISCARD-000001",
+            document_number: Some("PR-DISCARD-000001"),
             form_data: &json!({"subject": "As submitted"}),
             submitted_at: chrono::Utc::now(),
         },
@@ -817,7 +817,7 @@ async fn a_second_submit_blocked_by_the_first_applies_to_nothing() {
         tenant,
         id,
         &document_repo::Submission {
-            document_number: "PR-FIRST-000001",
+            document_number: Some("PR-FIRST-000001"),
             form_data: &json!({"subject": "The first submit"}),
             submitted_at: chrono::Utc::now(),
         },
@@ -834,7 +834,7 @@ async fn a_second_submit_blocked_by_the_first_applies_to_nothing() {
             tenant,
             id,
             &document_repo::Submission {
-                document_number: "PR-SECOND-000002",
+                document_number: Some("PR-SECOND-000002"),
                 form_data: &json!({"subject": "The second submit"}),
                 submitted_at: chrono::Utc::now(),
             },

@@ -70,6 +70,15 @@ export async function publishWorkflow(
         mapsToDocumentStatus: 'REJECTED',
         isFinal: true,
       },
+      // **Stateless, and that is JWSS §10's own shape** (#183). A returned
+      // document is with its author, not in anybody's inbox, so the state
+      // declares no task and the `RESUBMIT` edge out of it is authorized by its
+      // own `allowedBy` instead.
+      {
+        code: 'RETURNED',
+        name: 'Sent back',
+        mapsToDocumentStatus: 'RETURNED',
+      },
     ],
     transitions: [
       {
@@ -88,6 +97,23 @@ export async function publishWorkflow(
         // has to be able to show: a screen that asked for a reason on both
         // would pass against a product that hard-coded the rule.
         requiresComment: true,
+      },
+      {
+        from: 'MANAGER_APPROVAL',
+        to: 'RETURNED',
+        action: 'RETURN',
+        allowedBy: `ROLE:${roleCode}`,
+        // "Why is this back with me" is the question return exists to answer,
+        // so the definition asks for it.
+        requiresComment: true,
+      },
+      {
+        from: 'RETURNED',
+        to: 'MANAGER_APPROVAL',
+        action: 'RESUBMIT',
+        // The owner sends it back up, through the same submit button they used
+        // the first time — not through a task, because there is none.
+        allowedBy: 'OWNER',
       },
     ],
   }

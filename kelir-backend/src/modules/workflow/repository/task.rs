@@ -454,16 +454,20 @@ pub async fn find_task<'e, E: PgExecutor<'e>>(
     }))
 }
 
-/// The stored action as the two-value vocabulary this sprint issues.
+/// The stored action as the vocabulary this binary issues.
 ///
-/// `None` for a verb Sprint 11 writes, rather than a panic or a fabricated
-/// value: a Sprint 11 database read by a rolled-back Sprint 10 binary is
-/// exactly the N−1 case [release process](../../../../../docs/standards/04.%20Release%20Process.md)
-/// §6 requires to keep working.
+/// `None` for a verb a later release writes, rather than a panic or a
+/// fabricated value: a newer database read by a rolled-back binary is exactly
+/// the N−1 case [release process](../../../../../docs/standards/04.%20Release%20Process.md)
+/// §6 requires to keep working. `RETURN` joined the list with
+/// [#183](https://github.com/sujanto-gaws/kelir/issues/183), and `DELEGATE`,
+/// `ESCALATE`, `SIGN` and the rest of §7.6's `CHECK` are still what this arm
+/// answers `None` for.
 fn parse_action(value: &str) -> Option<DecisionAction> {
     match value {
         "APPROVE" => Some(DecisionAction::Approve),
         "REJECT" => Some(DecisionAction::Reject),
+        "RETURN" => Some(DecisionAction::Return),
         _ => None,
     }
 }

@@ -83,6 +83,25 @@ pub struct SubmissionSubject {
     pub status: DocumentStatus,
     pub document_type_id: Uuid,
     pub requested_for_department_id: Option<Uuid>,
+    /// The number the document already holds, which is `Some` only on a
+    /// resubmission ([#183](https://github.com/sujanto-gaws/kelir/issues/183)
+    /// AC5). It is what tells the submit not to allocate a second one.
+    pub document_number: Option<String>,
+    /// Who owns the document, for an `OWNER` assignment rule.
+    ///
+    /// **Not the caller.** The two coincide on a first submit and do not on a
+    /// resubmission, where anybody holding `document:submit` could be the one
+    /// sending it back up — and `allowedBy: "OWNER"` on the `RESUBMIT` edge must
+    /// refuse them. `workflow::service::task` reads the same column for the same
+    /// reason.
+    pub created_by: Option<Uuid>,
+    /// The process currently deciding it, when one is (FR-DOC-012).
+    ///
+    /// Present on a returned document, because a return leaves the instance
+    /// **running** — that is what makes the loop a loop. Its presence is what
+    /// sends the submit down the `RESUBMIT` path rather than starting a second
+    /// process, which the one-live-instance index would refuse anyway.
+    pub workflow_instance_id: Option<Uuid>,
 }
 
 pub async fn find_submission_subject<'e, E: PgExecutor<'e>>(
@@ -92,7 +111,8 @@ pub async fn find_submission_subject<'e, E: PgExecutor<'e>>(
 ) -> Result<Option<SubmissionSubject>, sqlx::Error> {
     let row = sqlx::query!(
         r#"
-        SELECT status, document_type_id, requested_for_department_id
+        SELECT status, document_type_id, requested_for_department_id,
+               document_number, created_by, process_instance_id
         FROM documents
         WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
         "#,
@@ -106,6 +126,9 @@ pub async fn find_submission_subject<'e, E: PgExecutor<'e>>(
         status: DocumentStatus::from_db(&row.status),
         document_type_id: row.document_type_id,
         requested_for_department_id: row.requested_for_department_id,
+        document_number: row.document_number,
+        created_by: row.created_by,
+        workflow_instance_id: row.process_instance_id,
     }))
 }
 
@@ -215,11 +238,17 @@ pub async fn insert_document<'e, E: PgExecutor<'e>>(
 
 /// Applies whichever fields the update is setting.
 ///
-/// **The `WHERE` carries `status = 'DRAFT'`**, and it is not redundant with the
-/// caller's check even though the caller holds the row: it is what makes the
+/// **The `WHERE` carries the editable statuses**, and it is not redundant with
+/// the caller's check even though the caller holds the row: it is what makes the
 /// editable rule a property of the statement rather than of whoever remembered
 /// to call `lock_document` first. A future caller that forgets writes nothing
 /// and gets `0` back.
+///
+/// `RETURNED` joined `DRAFT` with
+/// [#183](https://github.com/sujanto-gaws/kelir/issues/183) — a document sent
+/// back for correction that could not be corrected would be a rejection with a
+/// longer name. It is the one place this list widened;
+/// [`soft_delete`] deliberately did not follow, and says why.
 pub async fn update_document<'e, E: PgExecutor<'e>>(
     executor: E,
     tenant_id: Uuid,
@@ -241,7 +270,8 @@ pub async fn update_document<'e, E: PgExecutor<'e>>(
                            = CASE WHEN $12 THEN $13 ELSE requested_for_facility_id END,
             updated_by     = $14,
             updated_at     = now()
-        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL AND status = 'DRAFT'
+        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+          AND status IN ('DRAFT', 'RETURNED')
         "#,
         tenant_id,
         id,
@@ -271,6 +301,14 @@ pub async fn update_document<'e, E: PgExecutor<'e>>(
 /// deleted — the two answer different questions ("I opened this by mistake"
 /// against "this request is withdrawn") and the second has to leave a row an
 /// auditor can find, which is [`super::status`]'s transition and not this.
+///
+/// **`RETURNED` deliberately does not join this predicate**, though it joined
+/// [`update_document`]'s with
+/// [#183](https://github.com/sujanto-gaws/kelir/issues/183). A returned
+/// document is not a draft that happens to be elsewhere: it has a **number**, a
+/// status history and a live process waiting for it to come back. Deleting it
+/// would strand the instance that returned it and retire a number an auditor
+/// can see was issued.
 pub async fn soft_delete<'e, E: PgExecutor<'e>>(
     executor: E,
     tenant_id: Uuid,
@@ -346,21 +384,34 @@ pub async fn find_document<'e, E: PgExecutor<'e> + Copy>(
 
 /// What the submit writes, in the transaction that took the number.
 pub struct Submission<'a> {
-    pub document_number: &'a str,
+    /// The number to assign, or `None` on a resubmission — the document already
+    /// has one and it is the thing return exists to preserve.
+    pub document_number: Option<&'a str>,
     pub form_data: &'a Value,
     pub submitted_at: DateTime<Utc>,
 }
 
-/// Moves a draft to `SUBMITTED`, assigning its number and storing the server's
-/// payload.
+/// Moves a draft — or a returned document — to `SUBMITTED`, assigning its
+/// number and storing the server's payload.
 ///
-/// **One statement, conditional on the document still being a draft.** Two
+/// **One statement, conditional on the document still being submittable.** Two
 /// callers submitting the same document at once cannot both succeed, and the
 /// loser gets `0` rather than a second number — which is [#168]'s AC5 as a
 /// property of the statement rather than of the order the service happened to
 /// do things in.
 ///
+/// # `document_number` is `COALESCE`d, and that is [#183] AC5
+///
+/// A resubmission passes `None` and the column keeps what it holds. Writing the
+/// number unconditionally would be the same statement for both paths and would
+/// need the caller to hand back the number it just read — a round trip whose
+/// only possible outcome is writing the value that is already there, or
+/// overwriting it with a different one. **A returned-then-resubmitted document
+/// keeping its number is the outcome return exists to preserve**, so the
+/// statement is what guarantees it rather than the caller.
+///
 /// [#168]: https://github.com/sujanto-gaws/kelir/issues/168
+/// [#183]: https://github.com/sujanto-gaws/kelir/issues/183
 pub async fn mark_submitted(
     transaction: &mut sqlx::PgTransaction<'_>,
     tenant_id: Uuid,
@@ -371,14 +422,15 @@ pub async fn mark_submitted(
     let affected = sqlx::query!(
         r#"
         UPDATE documents SET
-            document_number = $3,
+            document_number = COALESCE($3, document_number),
             form_data_json  = $4,
             status          = 'SUBMITTED',
             submitted_at    = $5,
             requested_by    = COALESCE(requested_by, $6),
             updated_by      = $6,
             updated_at      = now()
-        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL AND status = 'DRAFT'
+        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+          AND status IN ('DRAFT', 'RETURNED')
         "#,
         tenant_id,
         id,

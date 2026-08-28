@@ -112,6 +112,10 @@ use crate::modules::document_type::{
     numbering_repository, numbering_service, repository as document_type_repository,
 };
 use crate::modules::rad::service::evaluation::Strictness;
+use crate::modules::workflow::domain::{Graph, TransitionAction};
+use crate::modules::workflow::repository::{
+    definition as definition_repo, instance as instance_repo,
+};
 use crate::modules::workflow::service::assignment::AssignmentContext;
 use crate::modules::workflow::service::engine;
 use crate::state::AppState;
@@ -136,7 +140,18 @@ pub async fn submit_document(
         .await?
         .ok_or_else(|| AppError::not_found("Document"))?;
 
-    refuse_unless_draft(subject.status)?;
+    refuse_unless_submittable(subject.status)?;
+
+    // **A resubmission is a submit that takes no number** ([#183] AC5). The
+    // document has one, and keeping it is the outcome return exists to preserve:
+    // a returned document that came back with a new number would have lost its
+    // place in every report, every reference and every conversation about it.
+    //
+    // Read from the status rather than from the number's presence, because the
+    // two answer different questions and only one of them is the rule. A draft
+    // with a number is not a state this codebase can produce, but writing the
+    // condition as *has a number* would make it one the day something does.
+    let resubmission = subject.status == DocumentStatus::Returned;
 
     let context = AllocationContext {
         at: Utc::now(),
@@ -165,7 +180,12 @@ pub async fn submit_document(
     // through a failed re-evaluation, which was an accident of ordering bought
     // with a rule violation that deadlocks a pool at the concurrency the pool
     // can serve.
-    let committed_number = if policy.allows_gaps() {
+    //
+    // **A resubmission allocates nothing, under either policy.** It is not that
+    // the number would be discarded — it is that asking for one at all would
+    // consume a value from the sequence for a document that already has its own.
+    // On a gap-tolerant rule that is a permanent hole per correction round.
+    let committed_number = if policy.allows_gaps() && !resubmission {
         Some(
             numbering_service::allocate_committed(
                 state,
@@ -187,7 +207,7 @@ pub async fn submit_document(
 
     // AC5 again, and this time authoritatively: the read above was unlocked,
     // so a concurrent submit could have moved the document between the two.
-    refuse_unless_draft(locked.status)?;
+    refuse_unless_submittable(locked.status)?;
 
     let pinned = form::pinned_form_of(&mut transaction, tenant_id, &locked).await?;
 
@@ -202,16 +222,38 @@ pub async fn submit_document(
     // below rolls the counter back with it. A gap-tolerant one already has its
     // number from above, committed, and a rollback leaves it as a hole. That is
     // #158's decision, honoured rather than re-taken.
-    let document_number = match committed_number {
-        Some(number) => number,
-        None => {
+    //
+    // **A resubmission takes neither path**, and `assigned` stays `None` so the
+    // statement below leaves the column alone.
+    let assigned = match (resubmission, committed_number) {
+        (true, _) => None,
+        (false, Some(number)) => Some(number),
+        (false, None) => Some(
             numbering_service::allocate_in(
                 &mut transaction,
                 tenant_id,
                 locked.document_type_id,
                 &context,
             )
-            .await?
+            .await?,
+        ),
+    };
+
+    // What the document will carry after this statement, which is the new number
+    // on a first submit and the existing one on a resubmission. The workflow
+    // below reads it as the business key and as `document.documentNumber`, and
+    // a condition asking about the number must not be told `null` for a document
+    // that has had one since its first submission.
+    let document_number = match (&assigned, &subject.document_number) {
+        (Some(number), _) => number.clone(),
+        (None, Some(existing)) => existing.clone(),
+        (None, None) => {
+            return Err(AppError::Internal {
+                source: anyhow::anyhow!(
+                    "document {id} is being resubmitted and holds no number, which \
+                     `mark_submitted` has assigned on every path that reaches RETURNED"
+                ),
+            })
         }
     };
 
@@ -225,7 +267,7 @@ pub async fn submit_document(
         tenant_id,
         id,
         &Submission {
-            document_number: &document_number,
+            document_number: assigned.as_deref(),
             form_data: &form_data,
             submitted_at,
         },
@@ -247,11 +289,15 @@ pub async fn submit_document(
 
     // Step 6, in the same transaction. A document cannot end in a state its own
     // history does not explain.
+    // `locked.status` rather than a literal `DRAFT`: the row says where the
+    // document actually came from, which is `RETURNED` on a resubmission. A
+    // history claiming every submit began at a draft would erase the correction
+    // round it is there to record.
     repo::record_transition(
         &mut transaction,
         tenant_id,
         id,
-        Some(DocumentStatus::Draft),
+        Some(locked.status),
         DocumentStatus::Submitted,
         actor,
         None,
@@ -261,29 +307,57 @@ pub async fn submit_document(
     // Step 7 — the seam (#178, #187). In *this* transaction: a document that is
     // submitted and an approval that never started are two writes that must not
     // be able to disagree.
-    let started = start_workflow(
-        &mut transaction,
-        tenant_id,
-        id,
-        &subject,
-        binding,
-        &document_number,
-        &engine::EvaluationContext {
-            // The facts as they are **after** this submit: the status the write
-            // above set and the number it took. A workflow condition asking
-            // "is this submitted" must not be told about the draft it was a
-            // statement ago.
-            document: engine::document_facts(
-                DocumentStatus::Submitted,
-                subject.document_type_id,
-                Some(&document_number),
-            ),
-            form_data: form_data.clone(),
-            variables: serde_json::json!({}),
-        },
-        actor,
-    )
-    .await?;
+    //
+    // **A resubmission moves the process it already has instead of starting
+    // one** ([#183] AC5). The instance stayed running through the return — that
+    // is what makes the loop a loop — so there is nothing to start, and starting
+    // anyway would be refused by `uq_workflow_instances_one_live_per_document`
+    // after the fact rather than by the code on purpose.
+    let started = if resubmission {
+        resubmit_workflow(
+            &mut transaction,
+            tenant_id,
+            id,
+            &subject,
+            &engine::EvaluationContext {
+                document: engine::document_facts(
+                    DocumentStatus::Submitted,
+                    subject.document_type_id,
+                    Some(&document_number),
+                ),
+                form_data: form_data.clone(),
+                variables: serde_json::json!({}),
+            },
+            actor,
+        )
+        .await?;
+
+        None
+    } else {
+        start_workflow(
+            &mut transaction,
+            tenant_id,
+            id,
+            &subject,
+            binding,
+            &document_number,
+            &engine::EvaluationContext {
+                // The facts as they are **after** this submit: the status the
+                // write above set and the number it took. A workflow condition
+                // asking "is this submitted" must not be told about the draft it
+                // was a statement ago.
+                document: engine::document_facts(
+                    DocumentStatus::Submitted,
+                    subject.document_type_id,
+                    Some(&document_number),
+                ),
+                form_data: form_data.clone(),
+                variables: serde_json::json!({}),
+            },
+            actor,
+        )
+        .await?
+    };
 
     transaction.commit().await?;
 
@@ -307,7 +381,12 @@ pub async fn submit_document(
             actor_user_id: actor,
             ip_address: None,
             reason: None,
-            old_value: Some(json!({ "status": DocumentStatus::Draft })),
+            // Where the document actually came from, which is `RETURNED` on a
+            // resubmission ([#183]). A trail claiming every submit began at a
+            // draft would erase the correction round — and an audit record that
+            // disagrees with the row it describes is the defect this module
+            // already fixed once for `status` below.
+            old_value: Some(json!({ "status": subject.status })),
             new_value: Some(json!({
                 // The document's status after the whole transaction, which is
                 // the workflow's initial state when one started. Reporting
@@ -365,20 +444,127 @@ fn colliding_number(error: sqlx::Error) -> AppError {
     }
 }
 
-/// Refuses a submission of a document that is not a draft (AC5).
+/// Refuses a submission of a document that is not submittable (AC5).
 ///
 /// Called twice on purpose: once on the unlocked read, so a gap-tolerant rule
 /// does not burn a number on a document that was never submittable, and once
 /// under the lock, which is the answer that counts.
-fn refuse_unless_draft(status: DocumentStatus) -> Result<(), AppError> {
+///
+/// **A returned document is submittable** ([#183] AC5) and takes no second
+/// number — the old refusal named that consequence, and it no longer applies to
+/// the one status it now lets through.
+///
+/// [#183]: https://github.com/sujanto-gaws/kelir/issues/183
+fn refuse_unless_submittable(status: DocumentStatus) -> Result<(), AppError> {
     if status.is_editable() {
         return Ok(());
     }
 
     Err(AppError::conflict(format!(
-        "this document is {} and only a draft can be submitted; submitting again would take a second number for one document",
+        "this document is {} and only a draft or a returned document can be \
+         submitted; submitting a document already under approval would take a \
+         second number for one document",
         status.as_db()
     )))
+}
+
+/// Sends a returned document back up the process it never left ([#183] AC5).
+///
+/// **The instance is still running.** A return moves it to the state the
+/// definition's `RETURN` edge names and stops there; nothing completed it, which
+/// is the whole difference between a return and a rejection. So this fires the
+/// next transition on the instance the document already points at rather than
+/// starting a second one.
+///
+/// # Why the action is `RESUBMIT` and not `SUBMIT`
+///
+/// They leave different states and mean different things.
+/// [JWSS](../../../../../docs/schema/JSON%20Workflow%20Schema.md) §10's own
+/// example has `DRAFT --SUBMIT--> MANAGER_APPROVAL` and
+/// `RETURNED --RESUBMIT--> MANAGER_APPROVAL`, and a definition is entitled to
+/// route the two differently — a correction that skips a step it has already
+/// passed is the obvious case. Firing `SUBMIT` from `RETURNED` would ask for an
+/// edge the specification does not put there.
+///
+/// # There is no task, and that is the shape rather than an omission
+///
+/// A `RETURNED` state declares none in JWSS's example: the document is with its
+/// author, not in anybody's queue. So this cannot go through
+/// `workflow::service::task::decide`, which is addressed by a task id — and the
+/// authorization falls to the edge's own `allowedBy`, which is exactly what
+/// [#226](https://github.com/sujanto-gaws/kelir/issues/226) built `permits` for
+/// and the first caller to need it.
+///
+/// **`owner_user_id` is the document's `created_by`, not the caller.** They
+/// coincide on a first submit and need not here: anybody holding
+/// `document:submit` can reach this path, and `allowedBy: "OWNER"` on the
+/// `RESUBMIT` edge has to refuse them. Reading the caller into the owner slot
+/// would make that rule authorize everybody it was written to exclude.
+///
+/// [#183]: https://github.com/sujanto-gaws/kelir/issues/183
+async fn resubmit_workflow(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    document_id: Uuid,
+    subject: &repo::SubmissionSubject,
+    evaluation: &engine::EvaluationContext,
+    actor: Option<Uuid>,
+) -> Result<(), AppError> {
+    let Some(instance_id) = subject.workflow_instance_id else {
+        // A document returned by the *manual* status route on a type that binds
+        // no workflow. `may_move_to` allows `RETURNED -> SUBMITTED`, so this is
+        // a real state and not a corruption: there is simply no process to move.
+        return Ok(());
+    };
+
+    // Instance first, then task — `engine`'s ordering rule, on every path. There
+    // is no open task to take second here, and taking the instance is still what
+    // makes the state this reads the state the transition fires against.
+    let instance = instance_repo::lock_instance(transaction, tenant_id, instance_id)
+        .await?
+        .ok_or_else(|| AppError::Internal {
+            source: anyhow::anyhow!(
+                "document {document_id} points at instance {instance_id}, which does not exist"
+            ),
+        })?;
+
+    let definition = definition_repo::definition_of_instance(
+        &mut **transaction,
+        instance.workflow_definition_id,
+    )
+    .await?
+    .ok_or_else(|| AppError::Internal {
+        source: anyhow::anyhow!(
+            "instance {instance_id} runs definition {} which does not exist",
+            instance.workflow_definition_id
+        ),
+    })?;
+
+    let graph = Graph::parse(&definition.definition_json);
+
+    engine::fire(
+        transaction,
+        tenant_id,
+        instance.id,
+        document_id,
+        &graph,
+        &instance.current_state,
+        TransitionAction::Resubmit,
+        actor,
+        AssignmentContext {
+            owner_user_id: subject.created_by,
+            requested_department_id: subject.requested_for_department_id,
+            owner_department_id: None,
+        },
+        evaluation,
+        // No task drove this and no comment came with it. The correction is the
+        // document's own new payload, which the history's `to_state` and this
+        // row's timestamp already place.
+        engine::DecisionProvenance::default(),
+    )
+    .await?;
+
+    Ok(())
 }
 
 /// Starts the approval a submitted document routes into, if its type binds one.

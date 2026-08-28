@@ -42,6 +42,41 @@ whose process has finished is transitionable again.
 
 ### Added
 
+- **The return action, and the resubmission that closes the loop** (FR-WF-008,
+  [#183](https://github.com/sujanto-gaws/kelir/issues/183)). An approver's third
+  answer. **Reject is terminal and return is not**: a document with a wrong
+  figure and a right intent goes back to its author, is corrected, and comes back
+  up **with the same number, the same history and the same place in the queue** —
+  which is the outcome return exists to preserve, and previously cost a
+  recreation from scratch.
+
+  **The target is the definition's, never inferred.** A `RETURN` transition's
+  `to` names where the document lands; *send it back one step* is ambiguous the
+  moment a workflow has a branch, and each reader would resolve it differently.
+  **No JWSS change was needed** — the specification already declared `RETURN`,
+  `RESUBMIT`, and the stateless `RETURNED` state its §10 example uses.
+
+  **The resubmission comes back through `POST /documents/{id}/submission`** —
+  the same button the first submit used (**D-42**). A `RETURNED` state declares
+  no task, because the document is with its author and not in anybody's inbox,
+  so there is no task id to address; the edge is authorized by its own
+  `allowedBy` instead, which is the first caller of the control
+  [#226](https://github.com/sujanto-gaws/kelir/issues/226) built. A resubmission
+  **allocates no number at all** under either gap policy — not one it then
+  discards, which would leave a permanent hole per correction round on a
+  gap-tolerant rule.
+
+  **A returned document is editable and is not deletable**, and those are now two
+  predicates rather than one. It holds a number, a status history and a live
+  process waiting for it: deleting it would strand the instance that returned it
+  and retire a number an auditor can see was issued. *I opened this by mistake*
+  and *this request is withdrawn* stay different questions.
+
+  Returning is subject to the same one-decision-per-task rule as approve and
+  reject, at the same concurrency, and the history records the return, its target
+  and its reason — *"why is this back with me"* is the question history exists to
+  answer.
+
 - **Approve and reject from the task, with the reason** (FR-TASK-004, 005, 006,
   [#182](https://github.com/sujanto-gaws/kelir/issues/182)). A decision and the
   reason for it are entered together on the task screen and sent in one request,
@@ -167,9 +202,9 @@ whose process has finished is transitionable again.
 
 ### Known limitations
 
-- **Return, delegate, conditional routing, due dates and escalation are not
-  built.** A definition may declare `RETURN`; the task detail shows the
-  transition and does not offer it.
+- **Delegate, conditional routing, due dates and escalation are not built.** A
+  definition may declare `DELEGATE`; the task detail shows the transition and
+  does not offer it. `RETURN` left this list when #183 built it.
 - **Guards and actions are stored and never executed**, because there is no
   lifecycle hook chain yet. A stored handler is not evidence that it runs.
 - **`AUTO` transitions do not fire.** Nothing drives one until system tasks land.
