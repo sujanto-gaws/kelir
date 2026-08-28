@@ -129,11 +129,16 @@ pub async fn count_role_view(
 /// near-identical queries is what keeps the search, the filters and the paging
 /// from drifting apart between the views.
 ///
-/// A party appears once per live role row. `mdm_party_roles` is meant to hold
-/// at most one per (party, role type) and #105 records that concurrent
-/// assignment can break that — deliberately not papered over with `DISTINCT`
-/// here, because a list that hides the duplicate would leave the defect
-/// invisible from the surface most likely to reveal it.
+/// A party appears once per live role row, and `mdm_party_roles` holds at most
+/// one per (party, role type) — since #115 that is the database's own
+/// invariant, `uq_mdm_party_roles_party_id_role_type_id`, rather than a
+/// property the service was trusted to maintain (#105 is what happened when it
+/// was).
+///
+/// Still no `DISTINCT`. The duplicate it would hide is unconstructible now, so
+/// the clause would buy nothing and cost the reader the same question this
+/// comment used to answer: a list that quietly collapses rows cannot be used to
+/// tell whether there were two.
 pub async fn list_role_view(
     pool: &PgPool,
     tenant_id: Uuid,

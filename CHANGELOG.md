@@ -9,7 +9,40 @@ While the major version is `0`, the public API may change in any release.
 
 ## [Unreleased]
 
-Nothing yet.
+**Upgrading:** one new migration, `0024_one_live_role_per_party.sql`, which
+tightens one unique index on `mdm_party_roles` and adds no tables or columns. It
+is compatible with the `v0.4.0` binary: that binary's only writer into the table
+holds the party row under `FOR UPDATE` and updates in place, so it cannot reach
+the violation the index now refuses. **A database that already holds a party
+with the same role type twice will refuse the migration by name** rather than
+apply it — see below. No released binary can have written such a row, so this is
+a guard for development databases rather than an expected upgrade step.
+
+### Changed
+
+- **A party holds a role once, and the database is what says so**
+  ([#115](https://github.com/sujanto-gaws/kelir/issues/115)).
+  `uq_mdm_party_roles_party_id_role_type_id_starts_at` included the assignment's
+  start date, so two live rows for one party and one role type were legal
+  whenever their `fromDate`s differed — the hole
+  [#105](https://github.com/sujanto-gaws/kelir/issues/105) fell through, where
+  `assign_role` checked for an existing assignment and the database did not.
+  `0024_one_live_role_per_party.sql` replaces it with
+  `uq_mdm_party_roles_party_id_role_type_id` on `(party_id, role_type_id) WHERE
+  deleted_at IS NULL`. The lock #105 added stays: the index catches what a
+  future writer forgets, the lock keeps the outcome a correct 200/201 rather
+  than the 500 a unique violation surfaces as.
+
+  **No API behaviour changes.** `assign_role` was already idempotent, and a role
+  that is ended and assigned again still keeps both periods, because the closed
+  one carries `deleted_at` and the partial index does not see it — which is why
+  `starts_at` was never load-bearing in the key, and why taking it out is safe.
+
+  **The migration refuses rather than repairs.** Two live rows differ in
+  `starts_at`, `comments` and `attributes_json` and share one profile, so
+  choosing which survives is not a migration's call. It names every offending
+  pair and stops, as `0018_party_code_is_not_released.sql` does for a duplicated
+  party code.
 
 ## [0.4.0] — 2026-08-28
 

@@ -64,10 +64,14 @@ pub async fn list_party_roles(
 
 /// The live assignment of one role type to one party, if there is one.
 ///
-/// "Live" is what keeps a party holding a role once rather than twice: the
-/// unique index covers `starts_at` as well, so a second assignment with a
-/// different start date would be accepted by the database. The service asks
-/// here first and updates in place instead.
+/// "Live" is what decides between an update and an insert: the service asks
+/// here under the party's lock and updates in place when the answer is `Some`.
+///
+/// This used to be the only thing keeping a party from holding a role twice,
+/// because the unique index covered `starts_at` and a second assignment with a
+/// different start date was therefore legal (#105). Since #115 the index is
+/// `(party_id, role_type_id) WHERE deleted_at IS NULL` and refuses it outright,
+/// so a caller that forgets this read gets a violation rather than a duplicate.
 pub async fn find_live_party_role(
     executor: impl PgExecutor<'_>,
     tenant_id: Uuid,
