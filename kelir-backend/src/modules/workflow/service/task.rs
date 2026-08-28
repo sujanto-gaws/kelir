@@ -100,7 +100,18 @@ pub async fn claim_task(
     // is the one that matters.
     let role_id = locked.candidate_role_id.ok_or(AppError::Forbidden)?;
 
-    if !repo::holds_role(&mut *transaction, tenant_id, user_id, role_id).await? {
+    // The department travels with the role (#225). A `DEPARTMENT_ROLE`
+    // assignment resolved to both and stored both; checking only the role
+    // would let Procurement's approver claim Finance's task.
+    if !repo::holds_role(
+        &mut *transaction,
+        tenant_id,
+        user_id,
+        role_id,
+        locked.candidate_department_id,
+    )
+    .await?
+    {
         return Err(AppError::Forbidden);
     }
 
@@ -246,8 +257,19 @@ pub async fn decide(
 
     refuse_unless_open(task.status)?;
 
+    // Both halves of the grant, for the reason `claim_task` gives one screen up
+    // and `repository::task::holds_role` gives in full (#225).
     let holds_candidate_role = match task.candidate_role_id {
-        Some(role_id) => repo::holds_role(&mut *transaction, tenant_id, user_id, role_id).await?,
+        Some(role_id) => {
+            repo::holds_role(
+                &mut *transaction,
+                tenant_id,
+                user_id,
+                role_id,
+                task.candidate_department_id,
+            )
+            .await?
+        }
         None => false,
     };
 

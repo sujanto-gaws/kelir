@@ -1066,17 +1066,17 @@ async fn scope_grant_to(app: &TestApp, username: &str, department: Uuid) {
 /// [record 08](../../projects/verifications/08.%20Sprint%2010%20Independent%20Pass.md)
 /// exists.
 ///
-/// **Quarantined red, not green.** This test states the behaviour
-/// [JWSS](../../docs/schema/JSON%20Workflow%20Schema.md) §5.3 specifies, and it
-/// fails today — the approver from the wrong department gets `200` and the
-/// document reaches `COMPLETED`. It is committed rather than left in the issue
-/// so that the defect is executable, following the quarantine `identity_users.rs`
-/// used for the tenant boundary: the `#[ignore]` names the condition that lifts
-/// it, and **#225 closing is that condition**. Remove the attribute in the same
-/// change as the fix, and add the positive case beside it — a Finance-scoped
-/// approver *can* decide — so the fix cannot be "refuse everyone".
+/// **Quarantined red for one commit, and lifted by the fix.** It was committed
+/// failing so the defect was executable rather than only described — the
+/// quarantine `identity_users.rs` used for the tenant boundary — and the
+/// `#[ignore]` named #225 closing as the condition. That has happened;
+/// `a_department_scoped_task_is_decidable_by_that_department` is the positive
+/// case it asked for, so the fix cannot be "refuse everyone".
+///
+/// **Seen red** (coding standard §2.9) against `holds_role`'s department
+/// predicate removed: the Procurement approver decides Finance's task and the
+/// document reaches `COMPLETED`, which is the 200 this asserts is a 403.
 #[tokio::test]
-#[ignore = "red until #225: candidate_department_id is written by the resolver and read by no check"]
 async fn a_department_scoped_task_is_not_decidable_from_another_department() {
     let app = TestApp::spawn().await;
     let token = app.administrator_token().await;
@@ -1130,6 +1130,113 @@ async fn a_department_scoped_task_is_not_decidable_from_another_department() {
         refused.body
     );
     assert_eq!(stored_status(&app, id).await, "PENDING_APPROVAL");
+}
+
+/// The other half of [#225](https://github.com/sujanto-gaws/kelir/issues/225):
+/// **the approver the definition meant can still decide.**
+///
+/// Without this the fix passes its own negative test by refusing everybody,
+/// which would turn an authorization gap into a stalled process — the outcome
+/// [JWSS §5.3](../../docs/schema/JSON%20Workflow%20Schema.md) refuses assignee
+/// types at *save* time to avoid.
+#[tokio::test]
+async fn a_department_scoped_task_is_decidable_by_that_department() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let finance = department(&app, "DEPT-FIN", "Finance").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &token,
+        department_workflow("wf_department_right", "DEPT-FIN"),
+    )
+    .await;
+    let type_id = document_type(&app, &token, "PR_DEPT_RIGHT", Some(workflow)).await;
+
+    let insider = approver(&app, "wf.finance").await;
+    scope_grant_to(&app, "wf.finance", finance).await;
+
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let task = open_task_of(&app, id).await;
+
+    let decided = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&insider),
+            json!({ "action": "APPROVE" }),
+        )
+        .await;
+
+    assert_eq!(
+        decided.status,
+        StatusCode::OK,
+        "the department's own approver was refused their task: {}",
+        decided.body
+    );
+    assert_eq!(stored_status(&app, id).await, "COMPLETED");
+}
+
+/// **The inbox and the decision answer the same question** (#225 AC2).
+///
+/// A queue that lists work the API then refuses is its own defect, so the
+/// department predicate has to reach both. This asserts the listing half: the
+/// outsider's inbox does not carry a task they could not decide, and the
+/// insider's does.
+///
+/// **Seen red** against the `candidate_department_id` clause removed from
+/// `repository::inbox`'s candidate arm: the Procurement approver's inbox lists
+/// Finance's task.
+#[tokio::test]
+async fn a_department_scoped_task_is_listed_only_to_that_department() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let finance = department(&app, "DEPT-FIN", "Finance").await;
+    let procurement = department(&app, "DEPT-PROC", "Procurement").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &token,
+        department_workflow("wf_department_inbox", "DEPT-FIN"),
+    )
+    .await;
+    let type_id = document_type(&app, &token, "PR_DEPT_INBOX", Some(workflow)).await;
+
+    let insider = approver(&app, "wf.fin.inbox").await;
+    scope_grant_to(&app, "wf.fin.inbox", finance).await;
+    let outsider = approver(&app, "wf.proc.inbox").await;
+    scope_grant_to(&app, "wf.proc.inbox", procurement).await;
+
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+    let task = open_task_of(&app, id).await;
+
+    let listed = |body: &Value| -> bool {
+        body["data"]
+            .as_array()
+            .expect("the inbox is a list")
+            .iter()
+            .any(|row| row["id"] == json!(task.to_string()))
+    };
+
+    let theirs = app.get("/api/v1/tasks", Some(&outsider)).await;
+    assert_eq!(theirs.status, StatusCode::OK, "{}", theirs.body);
+    assert!(
+        !listed(&theirs.body),
+        "Procurement's approver was offered Finance's task: {}",
+        theirs.body
+    );
+
+    let ours = app.get("/api/v1/tasks", Some(&insider)).await;
+    assert_eq!(ours.status, StatusCode::OK, "{}", ours.body);
+    assert!(
+        listed(&ours.body),
+        "Finance's approver was not offered their own task: {}",
+        ours.body
+    );
 }
 
 /// **Only the task's assignee, or a holder of the role it is offered to, may
