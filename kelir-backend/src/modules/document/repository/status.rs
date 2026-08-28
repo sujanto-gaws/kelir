@@ -98,3 +98,81 @@ pub async fn record_transition(
 
     Ok(())
 }
+
+/// Writes a document's status from the workflow that drives it (FR-WF-013,
+/// [#178] AC2, AC3).
+///
+/// **Unconditional, and that is the one place in this codebase where a status
+/// write should be.** Every other one is a compare-and-swap because two callers
+/// could be deciding at once; this one is a *projection* of a decision that has
+/// just been made under a lock — [`workflow::repository::instance::move_state`]
+/// moved the instance conditionally on the state the transition was chosen
+/// against, and this write is that outcome being copied onto the document. A
+/// predicate on the document's previous status would make the projection fail
+/// when the document is exactly where the workflow says it should be.
+///
+/// **It writes no history row of its own.** The workflow's own record of the
+/// move is `workflow_task_history` and `approval_decisions`; a
+/// `document_status_history` row beside them is FR-WF-012's question — "how did
+/// this document get here" — which [#181] answers in Sprint 11, and which its
+/// own text requires to distinguish itself from what already exists. Writing one
+/// here would pre-empt that decision with a row nobody designed.
+///
+/// [#178]: https://github.com/sujanto-gaws/kelir/issues/178
+/// [#181]: https://github.com/sujanto-gaws/kelir/issues/181
+/// [`workflow::repository::instance::move_state`]: crate::modules::workflow::repository::instance::move_state
+pub async fn set_status_from_workflow(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    id: Uuid,
+    status: DocumentStatus,
+) -> Result<u64, sqlx::Error> {
+    let affected = sqlx::query!(
+        r#"
+        UPDATE documents SET
+            status       = $3,
+            completed_at = CASE WHEN $4 THEN now() ELSE completed_at END,
+            updated_at   = now()
+        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+        "#,
+        tenant_id,
+        id,
+        status.as_db(),
+        status == DocumentStatus::Completed,
+    )
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+
+    Ok(affected)
+}
+
+/// Links a document to the process instance now deciding it (FR-DOC-012).
+///
+/// Written in the transaction that started the instance, so a document never
+/// has a process nothing points at, and an instance never exists with the
+/// document unaware of it — the pair of writes [#168] calls unrecoverable when
+/// they are not one transaction, one seam over.
+///
+/// [#168]: https://github.com/sujanto-gaws/kelir/issues/168
+pub async fn link_process_instance(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    id: Uuid,
+    instance_id: Uuid,
+) -> Result<u64, sqlx::Error> {
+    let affected = sqlx::query!(
+        r#"
+        UPDATE documents SET process_instance_id = $3, updated_at = now()
+        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+        "#,
+        tenant_id,
+        id,
+        instance_id,
+    )
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+
+    Ok(affected)
+}

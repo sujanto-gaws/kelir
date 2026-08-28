@@ -96,10 +96,14 @@ impl DocumentTypeStatus {
 pub struct WorkflowBinding {
     /// The workflow definition this type routes to.
     ///
-    /// **Unverifiable until Phase 5.** `workflow_definitions` does not exist
-    /// yet, so nothing here can check that this id names one — the column
-    /// carries no foreign key for the same reason (`0015_document.sql`). It is
-    /// stored as given, and the workflow migration is what makes it checkable.
+    /// **Checked since [#187](https://github.com/sujanto-gaws/kelir/issues/187).**
+    /// It must name a definition that exists in this tenant and is `ACTIVE`,
+    /// verified in the write's transaction under a share lock on the row the
+    /// check read (`service::check_workflow_bindings`), and `0025_workflow.sql`
+    /// added the foreign key `0015_document.sql` deferred. Before Sprint 10 this
+    /// comment said the id was unverifiable, which stopped being true the moment
+    /// the workflow table existed — a comment describing a state that has ended
+    /// is worse than no comment (**D-34**, one document over).
     pub workflow_definition_id: Uuid,
     /// `null` means this is the default binding.
     pub condition_expression: Option<String>,

@@ -195,6 +195,13 @@ export const ENTITY_TYPE_LABELS: Record<EntityType, string> = {
  *
  * `DRAFT` is empty on purpose — a draft is submitted through
  * `POST /{id}/submission`, which the workspace offers as its own button.
+ *
+ * **`PENDING_APPROVAL` is empty for a different reason, and Sprint 10 made it
+ * the load-bearing one.** A document in that state is being decided by a
+ * workflow, and the backend refuses a manual transition on any document with a
+ * live process — the synchronization is one-way (**D-36**). The way on is the
+ * task, not this table. That refusal is what the product enforces; this entry
+ * is what stops the workspace offering a button for it in the first place.
  */
 export const ALLOWED_TRANSITIONS: Record<DocumentStatus, DocumentStatus[]> = {
   DRAFT: [],

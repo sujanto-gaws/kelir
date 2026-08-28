@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO workflow_transitions\n                (id, tenant_id, workflow_definition_id, from_state, to_state, action,\n                 allowed_by_json, condition_json, sort_order, created_by)\n            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Jsonb",
+        "Jsonb",
+        "Int4",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5f735b4fcb39aac60ad5e62a9b076a3f5ef30f376aa79f2c5c60dbc51e8c2861"
+}

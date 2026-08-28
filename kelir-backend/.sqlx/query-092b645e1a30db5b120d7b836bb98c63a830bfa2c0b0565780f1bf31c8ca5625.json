@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE workflow_tasks SET\n            assignee_user_id = $3,\n            status           = 'ASSIGNED',\n            updated_by       = $3,\n            updated_at       = now()\n        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL\n          AND assignee_user_id IS NULL AND status = 'CREATED'\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "092b645e1a30db5b120d7b836bb98c63a830bfa2c0b0565780f1bf31c8ca5625"
+}

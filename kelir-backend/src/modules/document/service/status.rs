@@ -11,7 +11,28 @@
 //! transaction, and [`DocumentStatus::check_move_to`] refuses it by name with a
 //! message pointing at the endpoint that does it.
 //!
+//! # And from Sprint 10, not reachable at all while a workflow is deciding
+//!
+//! [#178] AC2 makes the synchronization **one-way**: a workflow transition sets
+//! the document's status, and setting the document's status does not move the
+//! workflow. This route is where that costs something, and the cost is paid
+//! deliberately — a document with a live process instance is refused here,
+//! naming the instance and the action that would move it.
+//!
+//! Letting it through was the alternative and it is worse: it produces a
+//! document whose status disagrees with the process driving it, which is the
+//! exact defect #178 exists to prevent, and it produces it silently on the
+//! screen a person is most likely to trust. AC2 allows for a manual override as
+//! *"a separate, audited action rather than a side effect"*; nothing has asked
+//! for one, so none is built, and this refusal is what makes the need visible if
+//! anything ever does.
+//!
+//! **A document whose process has finished is transitionable again**, which is
+//! not a loophole: `COMPLETED` and `CANCELLED` are not live, nothing is deciding
+//! the document, and the legality table is back to being the only rule.
+//!
 //! [#169]: https://github.com/sujanto-gaws/kelir/issues/169
+//! [#178]: https://github.com/sujanto-gaws/kelir/issues/178
 
 use serde_json::json;
 use uuid::Uuid;
@@ -61,6 +82,12 @@ pub async fn transition(
     let current = repo::find_status(&state.pool, tenant_id, id)
         .await?
         .ok_or_else(|| AppError::not_found("Document"))?;
+
+    // #178 AC2, and it is checked before the legality table on purpose: a
+    // caller whose document is under a workflow needs to be told *that*, not
+    // that SUBMITTED cannot become APPROVED. The two refusals send them to
+    // different places.
+    refuse_while_a_workflow_is_deciding(state, tenant_id, id).await?;
 
     // A 422 naming both ends and what was possible. Refused before the write
     // rather than by it, because "you cannot go there from here" and "somebody
@@ -125,6 +152,38 @@ pub async fn transition(
         previous_status: current,
         status: request.status,
     })
+}
+
+/// Refuses a manual transition on a document a workflow is deciding
+/// ([#178](https://github.com/sujanto-gaws/kelir/issues/178) AC2).
+///
+/// Read on the pool rather than under the transaction's lock, and that is
+/// correct rather than a lapse: this is not a check that guards a write against
+/// a concurrent change, it is a check that this **surface** does not apply. A
+/// process that starts a microsecond after this read is a process whose own
+/// transition will then set the status the manual one just wrote — an ordering
+/// no lock here can improve, because the two writers are the whole point of the
+/// rule rather than a race inside it. What makes the outcome consistent is that
+/// the workflow's write is the projection and always lands last.
+async fn refuse_while_a_workflow_is_deciding(
+    state: &AppState,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<(), AppError> {
+    let Some(instance_id) =
+        crate::modules::workflow::repository::instance::live_instance_of_document(
+            &state.pool,
+            tenant_id,
+            id,
+        )
+        .await?
+    else {
+        return Ok(());
+    };
+
+    Err(AppError::conflict(format!(
+        "this document is being decided by workflow instance {instance_id}; its status          follows that process rather than being set directly. Act on the task instead —          a status written here would disagree with the process the moment it moved"
+    )))
 }
 
 /// A document's status history, oldest first.

@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE workflow_instances SET\n            current_state = $4,\n            -- **Entering a final state ends the instance, and the outcome is\n            -- separate.** Which states end it is the definition's to say\n            -- (`isFinal`), so this statement is told rather than deciding — and\n            -- it is told the two things apart, because a final state whose\n            -- `mapsToDocumentStatus` yields no outcome would otherwise leave the\n            -- instance `RUNNING` in a state nothing can leave.\n            status        = CASE WHEN $5 THEN 'COMPLETED' ELSE status END,\n            outcome       = COALESCE($6, outcome),\n            completed_at  = CASE WHEN $5 THEN now() ELSE completed_at END,\n            updated_by    = $7,\n            updated_at    = now()\n        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL AND current_state = $3\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Varchar",
+        "Bool",
+        "Varchar",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c3714f4b4c33494c7b5af17e73fe2c6e187286966e757398ffe17f4328916009"
+}

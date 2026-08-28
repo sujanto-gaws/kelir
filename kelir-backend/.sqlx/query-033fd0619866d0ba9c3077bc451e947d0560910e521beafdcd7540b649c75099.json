@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT 1 AS \"found!\"\n        FROM workflow_instances\n        WHERE tenant_id = $1 AND workflow_definition_id = $2 AND deleted_at IS NULL\n          AND status IN ('STARTED', 'RUNNING', 'SUSPENDED')\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "found!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "033fd0619866d0ba9c3077bc451e947d0560910e521beafdcd7540b649c75099"
+}

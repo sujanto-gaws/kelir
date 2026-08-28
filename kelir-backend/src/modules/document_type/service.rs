@@ -22,13 +22,14 @@ use uuid::Uuid;
 
 use super::domain::{
     validate_create, validate_update, CreateDocumentTypeRequest, DocumentType, DocumentTypeStatus,
-    DocumentTypeSummary, SecurityLevel, UpdateDocumentTypeRequest,
+    DocumentTypeSummary, SecurityLevel, UpdateDocumentTypeRequest, WorkflowBinding,
 };
 use super::repository::{self as repo, DocumentTypeFields, NewDocumentType};
 use super::{TYPE_CREATE, TYPE_DELETE, TYPE_READ, TYPE_UPDATE};
 use crate::error::{AppError, ValidationDetail};
 use crate::middleware::auth::Authenticated;
 use crate::modules::audit::{self, AuditEntry, ChangeSet};
+use crate::modules::workflow::repository::definition as workflow_repository;
 use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
 
@@ -115,6 +116,8 @@ pub async fn create_type(
     )
     .await
     .map_err(insert_error)?;
+
+    check_workflow_bindings(&mut transaction, tenant_id, &request.workflows).await?;
 
     repo::replace_workflows(&mut transaction, tenant_id, id, &request.workflows, actor).await?;
 
@@ -229,6 +232,7 @@ pub async fn update_type(
     }
 
     if let Some(workflows) = &request.workflows {
+        check_workflow_bindings(&mut transaction, tenant_id, workflows).await?;
         repo::replace_workflows(&mut transaction, tenant_id, id, workflows, actor).await?;
     }
 
@@ -390,6 +394,74 @@ async fn guard_rebinding(
              unaffected"
         ),
     )]))
+}
+
+/// Holds and checks the workflow definitions this write is binding
+/// ([#187](https://github.com/sujanto-gaws/kelir/issues/187) AC2).
+///
+/// `SELECT ... FOR SHARE` inside the write's transaction, before the write, on
+/// each definition named — coding standard §2.5's rule and [`check_bindings`]'
+/// shape for the form binding beside it. A share lock blocks the retirement that
+/// would invalidate the check and does not block a second type binding the same
+/// workflow, which is the normal case rather than a rare one.
+///
+/// **A draft is refused, and that is the same argument publishing settles for a
+/// form.** A running approval executes the revision it started against, so
+/// binding a draft would bind a definition that can still change under
+/// documents already routed by it — which is what publication exists to
+/// prevent.
+///
+/// # Rebinding, decided rather than defaulted (AC3)
+///
+/// > **Changing a type's workflow binding is allowed, running instances are
+/// > unaffected, and future submissions of that type use the new binding.**
+///
+/// There is no [`guard_rebinding`] for workflows, and the reason is a real
+/// difference rather than an inconsistency between two similar surfaces.
+/// **D-30** needed a guard because `documents.form_id` is *nullable*: a document
+/// that pinned no revision renders against whatever its type currently binds, so
+/// re-pointing the type reaches backwards into documents already created.
+/// `workflow_instances.workflow_definition_id` is `NOT NULL` and names a
+/// revision row, so **no instance can be in that condition** — every running
+/// approval has already pinned one, and nothing reaches it through the type. The
+/// guard D-30 needed has nothing here to guard.
+///
+/// `workflow_seam.rs` holds the test that makes this checkable rather than
+/// merely stated: a type bound to A, a document submitted and running, the type
+/// rebound to B, and the running instance still on A with its state intact.
+async fn check_workflow_bindings(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    workflows: &[WorkflowBinding],
+) -> Result<(), AppError> {
+    for (index, binding) in workflows.iter().enumerate() {
+        let path = format!("workflows.{index}.workflowDefinitionId");
+        let id = binding.workflow_definition_id;
+
+        match workflow_repository::lock_bindable_definition(transaction, tenant_id, id).await? {
+            None => {
+                return Err(binding_error(
+                    &path,
+                    "NOT_FOUND",
+                    format!("no workflow definition {id} in this tenant"),
+                ))
+            }
+            Some(status) if status != "ACTIVE" => {
+                return Err(binding_error(
+                    &path,
+                    "NOT_PUBLISHED",
+                    format!(
+                        "workflow definition {id} is {status} and only a published \
+                         revision may be bound — a running approval executes the \
+                         revision it started against"
+                    ),
+                ))
+            }
+            Some(_) => {}
+        }
+    }
+
+    Ok(())
 }
 
 /// Holds and checks whichever bindings this write is setting.

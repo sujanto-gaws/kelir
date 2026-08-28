@@ -83,6 +83,65 @@ async fn applies_every_migration_in_the_migrations_directory() {
     assert!(on_disk > 0, "guard against an empty migrations directory");
 }
 
+/// **No two migrations share a version number.**
+///
+/// `sqlx::migrate!` takes the leading digits of a filename as the version and
+/// `_sqlx_migrations` has that as its primary key, so two files numbered alike
+/// make *every* migration run fail — on a fresh database, with
+/// `duplicate key value violates unique constraint "_sqlx_migrations_pkey"`.
+/// That is four steps from the cause: the harness reports a setup failure, the
+/// setup failure names a constraint, the constraint names a table, and the table
+/// does not name the two files.
+///
+/// **It is not hypothetical.** It happened during Sprint 10, when a bug-fix
+/// migration and the workflow migration were written the same day and both took
+/// `0024` — one of them by this session and one beside it. Every integration
+/// test in the suite went red at once, none of them about migrations.
+///
+/// A filesystem test rather than a database one: it costs nothing, it runs in
+/// every job that runs any test, and the answer it gives names both files.
+#[test]
+fn no_two_migrations_share_a_version_number() {
+    use std::collections::BTreeMap;
+
+    let mut by_version: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+    for entry in std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations"))
+        .expect("the migrations directory is readable")
+        .filter_map(Result::ok)
+    {
+        let name = entry.file_name().to_string_lossy().into_owned();
+
+        if !name.ends_with(".sql") {
+            continue;
+        }
+
+        // The version is the leading digits, which is exactly what `sqlx`
+        // parses — reading it the same way is what makes this test about the
+        // thing that breaks rather than about a naming convention.
+        let version: String = name.chars().take_while(char::is_ascii_digit).collect();
+
+        assert!(
+            !version.is_empty(),
+            "`{name}` has no leading version number, so sqlx cannot order it"
+        );
+
+        by_version.entry(version).or_default().push(name);
+    }
+
+    assert!(!by_version.is_empty(), "guard against an empty directory");
+
+    let collisions: Vec<_> = by_version
+        .iter()
+        .filter(|(_, files)| files.len() > 1)
+        .collect();
+
+    assert!(
+        collisions.is_empty(),
+        "two migrations share a version number, which makes every migration run          fail with a primary-key violation naming neither file: {collisions:?}"
+    );
+}
+
 #[tokio::test]
 async fn seeds_the_permission_catalogue_and_the_admin_role() {
     let app = TestApp::spawn().await;

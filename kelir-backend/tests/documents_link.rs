@@ -471,3 +471,98 @@ async fn a_link_is_cleared_by_sending_both_halves_as_null() {
     assert_eq!(cleared.body["data"]["entityType"], Value::Null);
     assert_eq!(cleared.body["data"]["entityId"], Value::Null);
 }
+
+// ---------------------------------------------------------------------------
+// The facility arm — the same three assertions, on the branch nothing reached
+// ---------------------------------------------------------------------------
+
+/// **A document links to a facility, resolves it, and is refused a facility
+/// that is gone.**
+///
+/// Every test above links to a **party**, so `lock_linked_entity`'s
+/// `EntityType::Facility` arm and `resolve_link`'s were the only guard on their
+/// behaviour and nothing exercised either — the category [record 06] closed five
+/// of and the [Sprint 9 status report] carried forward as its second blocker.
+/// It is [#218](https://github.com/sujanto-gaws/kelir/issues/218)'s shape one
+/// entity type over: a branch that is *identical to a held one* is not thereby
+/// held, because the thing being asserted is that the two are different.
+///
+/// **Seen red** (coding standard §2.9) against
+/// `repository::link::lock_linked_entity`'s facility arm reading
+/// `mdm_parties` instead of `mdm_facilities` — the copy-paste an unexercised
+/// duplicated branch invites. Seven tests in this file stay green and this one
+/// answers 422 where it expects 201, which is what "the only guard on its
+/// behaviour" means.
+///
+/// [record 06]: ../../projects/verifications/06.%20Sprint%209%20Surface%20Verification.md
+/// [Sprint 9 status report]: ../../projects/status/10.%20Sprint%209%20Status.md
+#[tokio::test]
+async fn a_document_links_to_a_facility_and_the_facility_arm_is_checked() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let type_id = plain_type(&app, &token, "PR_LINK_FACILITY").await;
+
+    let created_facility = app
+        .send(
+            Method::POST,
+            "/api/v1/master-data/facilities",
+            Some(&token),
+            Some(json!({
+                "facilityId": "FAC-LINK-1",
+                "name": "Central warehouse",
+                "facilityTypeId": "WAREHOUSE",
+            })),
+        )
+        .await;
+    assert_eq!(
+        created_facility.status,
+        StatusCode::CREATED,
+        "{}",
+        created_facility.body
+    );
+    let facility = id_of(&created_facility.body["data"]);
+
+    // A facility id that names nothing is refused by the facility arm, which is
+    // the branch a party fixture can never reach.
+    let refused = create(
+        &app,
+        &token,
+        json!({
+            "documentTypeId": type_id,
+            "title": "Concerns a warehouse that does not exist",
+            "entityType": "FACILITY",
+            "entityId": Uuid::now_v7(),
+        }),
+    )
+    .await;
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a document was linked to a facility that does not exist: {}",
+        refused.body
+    );
+    assert_eq!(refused.body["error"]["details"][0]["path"], "entityId");
+
+    let created = create(
+        &app,
+        &token,
+        json!({
+            "documentTypeId": type_id,
+            "title": "Concerns a warehouse",
+            "entityType": "FACILITY",
+            "entityId": facility,
+        }),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let id = id_of(&created.body["data"]);
+
+    // And it resolves through `master_data::service::get_facility`, so the
+    // facility half of `resolve_link` is exercised as well as the write check.
+    let resolved = linked_entity(&app, &token, id).await;
+
+    assert_eq!(resolved.status, StatusCode::OK, "{}", resolved.body);
+    assert_eq!(resolved.body["data"]["entityType"], "FACILITY");
+    assert_eq!(resolved.body["data"]["code"], "FAC-LINK-1");
+    assert_eq!(resolved.body["data"]["name"], "Central warehouse");
+}

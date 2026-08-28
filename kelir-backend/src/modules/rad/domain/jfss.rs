@@ -83,7 +83,7 @@ const CALCULATE_OPERATORS: &[&str] = &[
 /// comparison and logical ones — derived from §2.3's own stated reason for
 /// forbidding them in `calculate`, which is that they return booleans rather
 /// than numbers. That reason makes them exactly what a conditional wants.
-const CONDITIONAL_OPERATORS: &[&str] = &[
+pub(crate) const CONDITIONAL_OPERATORS: &[&str] = &[
     "var",
     "+",
     "-",
@@ -323,7 +323,7 @@ pub(crate) fn data_key(component: &Value) -> Option<&str> {
 /// string or an array of two, neither of which is an object — so it needs no
 /// special case. A path that *is* an object would be malformed, and reporting
 /// its key as an unapproved operator says so accurately enough.
-fn check_operators(
+pub(crate) fn check_operators(
     expression: &Value,
     approved: &[&str],
     path: &str,

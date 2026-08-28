@@ -63,6 +63,44 @@ log "Checking ${KELIR_APP_DIR}/.env"
 # shellcheck disable=SC1091
 set -a; . "${KELIR_APP_DIR}/.env"; set +a
 
+# `.env.staging.example` is the list, and this loop is what keeps the script and
+# the backend in step.
+#
+# The `v0.4.0` rehearsal found the script asserting four variables while the
+# backend read seven, so a missing bootstrap credential surfaced as a container
+# restarting with the reason buried in `docker compose logs` — on a script whose
+# whole design is to fail fast and name the value. Hard-coding the longer list
+# would have fixed that deploy and drifted again at the next variable, because
+# **a duplicated list is only ever correct on the day it is written**.
+#
+# The example file is not a third list: it is the file an operator copies to
+# make `.env`, so it is already the thing both sides agree on. A variable added
+# to the backend reaches a deployment by being documented here, and this check
+# turns that document into an assertion.
+example_env="${KELIR_APP_DIR}/.env.staging.example"
+
+if [[ -f "${example_env}" ]]; then
+    while read -r declared; do
+        # `KELIR_VERSION` is declared in the example because an operator who
+        # drives compose by hand has nowhere else to put it. This script is the
+        # other caller and it takes the version as its argument — section 3
+        # exports it over whatever `.env` holds. Requiring it here would refuse
+        # a deployment for omitting the one value the command line supplied,
+        # which is how CI found it: the browser job writes a `.env` for the
+        # length of one run and passes the version on the command line.
+        if [[ "${declared}" == "KELIR_VERSION" ]]; then
+            continue
+        fi
+
+        # Declared-but-empty is fine and is the point of the distinction: the
+        # bootstrap trio below is legitimately empty on a deployment that
+        # already has users. What this catches is a `.env` copied from an older
+        # release, which does not mention the variable at all.
+        grep -Eq "^[[:space:]]*(export[[:space:]]+)?${declared}=" "${KELIR_APP_DIR}/.env" \
+            || die "${declared} is not set in .env — it is new since this file was copied; see .env.staging.example"
+    done < <(grep -Eo '^[[:space:]]*KELIR_[A-Z0-9_]+=' "${example_env}" | tr -d ' =' )
+fi
+
 for required in KELIR_DB_PASSWORD KELIR_JWT_SECRET KELIR_MINIO_USER KELIR_MINIO_PASSWORD; do
     value="${!required:-}"
     [[ -n "${value}" ]] || die "${required} is empty in .env"
@@ -73,6 +111,30 @@ for required in KELIR_DB_PASSWORD KELIR_JWT_SECRET KELIR_MINIO_USER KELIR_MINIO_
             ;;
     esac
 done
+
+# The bootstrap administrator is all-or-nothing, which is the backend's own rule
+# (`config::bootstrap_admin`): username without password is a startup error, and
+# both unset is a deployment that intends to create its first user another way.
+# Stating it here costs one comparison and saves a container restart loop.
+bootstrap_username="${KELIR_BOOTSTRAP_ADMIN_USERNAME:-}"
+bootstrap_password="${KELIR_BOOTSTRAP_ADMIN_PASSWORD:-}"
+
+if [[ -n "${bootstrap_username}" && -z "${bootstrap_password}" ]]; then
+    die "KELIR_BOOTSTRAP_ADMIN_USERNAME is set and KELIR_BOOTSTRAP_ADMIN_PASSWORD is empty; the backend refuses to start on that pair"
+fi
+
+if [[ -z "${bootstrap_username}" && -n "${bootstrap_password}" ]]; then
+    die "KELIR_BOOTSTRAP_ADMIN_PASSWORD is set and KELIR_BOOTSTRAP_ADMIN_USERNAME is empty; the backend refuses to start on that pair"
+fi
+
+if [[ -z "${bootstrap_username}" ]]; then
+    # A warning rather than a refusal, because the backend treats it that way:
+    # the bootstrap is a no-op once any user exists, so an established
+    # deployment leaves these empty on purpose. On an empty database it is an
+    # application nobody can enter, which is worth saying out loud here rather
+    # than leaving to be discovered at the login page.
+    printf '\033[1;33mwarning:\033[0m no KELIR_BOOTSTRAP_ADMIN_* in .env — a deployment with no users will have no way in\n' >&2
+fi
 
 # ---------------------------------------------------------------------------
 # 2. Obtain the images

@@ -112,6 +112,29 @@ export const routes: RouteRecordRaw[] = [
         meta: { requiresAuth: true, permission: 'document:read', title: 'Document' },
       },
       {
+        // What is waiting for the person signed in — theirs, and their roles'
+        // (FR-TASK-001, 002). The scope and the page live in the query string
+        // beside it, so a view can be linked to (#179).
+        path: 'tasks',
+        name: 'tasks',
+        component: () => import('@/features/tasks/TaskInboxPage.vue'),
+        // The workflow module's own task permission, not one of the inbox's:
+        // the inbox reads those rows, and a permission of its own would let a
+        // deployment grant the list without granting the task.
+        meta: { requiresAuth: true, permission: 'workflow:task:read', title: 'My tasks' },
+      },
+      {
+        path: 'tasks/:id',
+        name: 'task',
+        component: () => import('@/features/tasks/TaskDetailPage.vue'),
+        // Reading the task needs this; *acting* on it needs
+        // `workflow:task:execute`, which is enforced where it belongs — on the
+        // decision endpoint. A caller who may read tasks and not decide them
+        // gets a working screen whose buttons are refused, rather than a route
+        // that hides the task they were told about.
+        meta: { requiresAuth: true, permission: 'workflow:task:read', title: 'Task' },
+      },
+      {
         path: 'admin/users',
         name: 'admin-users',
         component: () => import('@/features/admin/UserListPage.vue'),

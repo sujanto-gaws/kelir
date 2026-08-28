@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT 1 AS \"found!\"\n        FROM user_roles\n        WHERE tenant_id = $1 AND user_id = $2 AND role_id = $3 AND deleted_at IS NULL\n          AND (valid_from IS NULL OR valid_from <= current_date)\n          AND (valid_to   IS NULL OR valid_to   >= current_date)\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "found!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "285a741e0c565b9e1a81a8c06721f4f4dadd43c15d5d6311fe1793107eb090a5"
+}

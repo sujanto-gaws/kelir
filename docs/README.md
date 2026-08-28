@@ -62,6 +62,8 @@ Early exploratory documents. Still valid for intent and examples, but **supersed
 
 The JSON standards family. Each specification carries its own version, RFC 2119 conformance language, and an embedded normative meta-schema.
 
+**Two of those meta-schemas are also extracted as files**, once a validator exists to compile them: `jfss-meta-v2.0.1.json` and — since 2026-08-28 — [`jwss-meta-v1.0.0.json`](schema/jwss-meta-v1.0.0.json). The extracted file and the specification's own fenced block are **one document**, and a test in `kelir-backend/tests/` compares them: a specification describing a schema the product does not enforce is worse than no specification, because an author would write to it and be refused.
+
 | Standard | Version | Defines |
 |---|---|---|
 | [JSON Form Schema.md](schema/JSON%20Form%20Schema.md) (JFSS) | 2.0.1 (errata E-1) | Dynamic form definitions: components, validation, conditional logic, calculations |

@@ -9,14 +9,68 @@ While the major version is `0`, the public API may change in any release.
 
 ## [Unreleased]
 
-**Upgrading:** one new migration, `0024_one_live_role_per_party.sql`, which
-tightens one unique index on `mdm_party_roles` and adds no tables or columns. It
-is compatible with the `v0.4.0` binary: that binary's only writer into the table
-holds the party row under `FOR UPDATE` and updates in place, so it cannot reach
-the violation the index now refuses. **A database that already holds a party
-with the same role type twice will refuse the migration by name** rather than
-apply it — see below. No released binary can have written such a row, so this is
-a guard for development databases rather than an expected upgrade step.
+Phase 5 opens: **a submitted document enters an approval it cannot leave by
+accident.** A workflow definition is authored and published; a document type
+carries one; submitting a document of that type starts a process in the same
+transaction that numbers it; the process generates a task; somebody else
+approves or rejects it from their inbox; and the document's status follows from
+that rather than beside it.
+
+**Upgrading:** two new migrations. `0025_workflow.sql` adds ten tables, three
+constraints and eight permission rows; `0024_one_live_role_per_party.sql`
+tightens one unique index on `mdm_party_roles` (see *Changed*). Both are
+compatible with the `v0.4.0` binary, which starts against a `v0.5.0` schema —
+the workflow one because it is additive, the index one because `v0.4.0`'s only
+writer into that table holds the party row under `FOR UPDATE` and updates in
+place, so it cannot reach the violation the index now refuses. **A database that
+already holds a party with the same role type twice will refuse that migration
+by name** rather than apply it; no released binary can have written such a row,
+so it is a guard for development databases rather than an expected upgrade step.
+`ROLE-ADMIN`
+receives the eight `workflow:*` permissions automatically; every other role
+receives none, so an approver needs `workflow:task:read` and
+`workflow:task:execute` granted deliberately.
+
+**One behaviour changes for a document under an approval.** Setting a document's
+status by hand through `PUT /api/v1/documents/{id}/status` is now **refused
+while a workflow is deciding it**, naming the process. The synchronization is
+one-way by design: a transition sets the status, and the status does not move
+the process. A document of a type that binds no workflow is unaffected, and one
+whose process has finished is transitionable again.
+
+### Added
+
+- **Workflow definitions** (FR-WF-001, 002, 003). Authored as
+  [JWSS](docs/schema/JSON%20Workflow%20Schema.md) documents, validated **on
+  save** against the meta-schema, the operator registry and the structural rules
+  S1–S10 — so a workflow that could deadlock, strand a state or route
+  ambiguously is refused before it is stored rather than discovered by whoever
+  was waiting for an approval that could not move. Published revisions are
+  immutable and project their states and transitions.
+- **Process instances with workflow variables** (FR-WF-014). An instance pins
+  the definition revision it started against, so a running approval does not
+  change shape underneath its approver, and it cannot be in a state its own
+  definition does not declare — held by a foreign key rather than by convention.
+- **User tasks generated on transition** (FR-WF-004), assigned to a user *or*
+  offered to a role. Claiming a role task is a compare-and-swap: two people
+  claiming at once produce one owner and one refusal.
+- **Approve and reject** (FR-WF-006, 007), as an API. A task already decided
+  cannot be decided again, and the check runs in the transaction that writes,
+  under a lock covering what it read.
+- **The document–workflow seam** (FR-DOC-012, FR-WF-013). A document links to at
+  most one live process, and its status is a projection of that process's state
+  — mapped by the *definition*, so a new workflow says what its own states mean
+  for a document without a backend change.
+- **A workflow on a document type** (FR-RAD-009), checked against a definition
+  that exists and is published. A type binding nothing still submits: not every
+  document is approved.
+- **The task inbox and task detail** (FR-TASK-001, 002, 003) at `/tasks`. Tasks
+  assigned to you and tasks offered to roles you hold, shown apart because they
+  are different situations, with a detail that names the document, the process
+  and the decision being asked.
+- The JWSS meta-schema is **extracted** to
+  [`docs/schema/jwss-meta-v1.0.0.json`](docs/schema/jwss-meta-v1.0.0.json), and
+  a test keeps it identical to the specification's own block.
 
 ### Changed
 
@@ -43,6 +97,31 @@ a guard for development databases rather than an expected upgrade step.
   choosing which survives is not a migration's call. It names every offending
   pair and stops, as `0018_party_code_is_not_released.sql` does for a duplicated
   party code.
+
+- `deploy.sh` checks every `KELIR_*` variable `.env.staging.example` declares,
+  rather than a hard-coded list of four that had fallen behind the seven the
+  backend reads. A `.env` copied from an older release now fails fast naming the
+  variable instead of restarting a container. `KELIR_VERSION` is excluded,
+  because the script takes the version as its argument and exports it over
+  `.env` — demanding it would refuse a deployment for omitting the one value
+  the caller had already supplied.
+
+### Known limitations
+
+- **A decision carries no comment.** `workflow_tasks.comment` and
+  `approval_decisions.comment` exist and nothing writes them, so a rejection
+  recorded by this release has no reason on it. FR-TASK-006 fills them.
+- **Return, delegate, conditional routing, due dates and escalation are not
+  built.** A definition may declare `RETURN`; the task detail shows the
+  transition and does not offer it.
+- **Guards and actions are stored and never executed**, because there is no
+  lifecycle hook chain yet. A stored handler is not evidence that it runs.
+- **`AUTO` transitions do not fire.** Nothing drives one until system tasks land.
+- **Two of JWSS's six assignee types are refused at save** —
+  `MANAGER_OF_OWNER` and `EXPRESSION` — with a message naming what to use
+  instead. [JWSS §5.3](docs/schema/JSON%20Workflow%20Schema.md) records why.
+- **Approvals are sequential.** One open task per process, held by a database
+  index rather than by intention.
 
 ## [0.4.0] — 2026-08-28
 
@@ -1277,7 +1356,8 @@ outstanding. Treat `0.1.0` as cut, not proven.
 - No business endpoints. `/api/v1` is mounted and empty.
 - No production environment, image registry, or rehearsed database restore.
 
-[Unreleased]: https://github.com/sujanto-gaws/kelir/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/sujanto-gaws/kelir/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/sujanto-gaws/kelir/releases/tag/v0.4.0
 [0.3.0]: https://github.com/sujanto-gaws/kelir/releases/tag/v0.3.0
 [0.2.0]: https://github.com/sujanto-gaws/kelir/releases/tag/v0.2.0
 [0.1.0]: https://github.com/sujanto-gaws/kelir/releases/tag/v0.1.0

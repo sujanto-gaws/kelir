@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO workflow_tasks\n            (id, tenant_id, task_ref, workflow_instance_id, document_id,\n             task_definition_key, task_name, task_type, status, priority,\n             assignee_user_id, candidate_role_id, candidate_department_id, created_by)\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8,\n                -- A task with a named assignee is `ASSIGNED` from the moment it\n                -- exists; one offered to a role is `CREATED` until somebody\n                -- claims it. The two statuses are what the inbox's `MINE` and\n                -- `ROLE` are derived from, so deriving them here from the\n                -- assignment keeps one answer rather than two.\n                CASE WHEN $10::uuid IS NULL THEN 'CREATED' ELSE 'ASSIGNED' END,\n                $9, $10, $11, $12, $13)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ae9c2cc4c4700a37fb6dc772f6cad9c5fb2287aef21f4448c1fe699b68dbb991"
+}

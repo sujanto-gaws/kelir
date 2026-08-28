@@ -220,6 +220,15 @@ test('a tab a later phase fills says what will fill it', async ({ page }) => {
   await page.getByTestId('tab-attachments').click()
   await expect(page.getByTestId('panel-attachments')).toContainText('Phase 6')
 
+  await page.getByTestId('tab-comments').click()
+  await expect(page.getByTestId('panel-comments')).toContainText('Phase 6')
+
+  // **Workflow has left this list**, and its departure is the assertion. It
+  // said "Phase 5 fills this" until Sprint 10 filled it (#178); a tab still
+  // saying so at the end of Phase 5's first sprint would be a true statement
+  // about a broken promise. This document's type binds no workflow, so what the
+  // panel now says is that nothing is deciding it — which is a state rather
+  // than a failure (#187 AC4).
   await page.getByTestId('tab-workflow').click()
-  await expect(page.getByTestId('panel-workflow')).toContainText('Phase 5')
+  await expect(page.getByTestId('workflow-none')).toContainText('No approval')
 })
