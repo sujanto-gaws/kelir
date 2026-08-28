@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT count(*)\n        FROM workflow_tasks t\n        WHERE t.tenant_id = $1 AND t.deleted_at IS NULL\n          AND (\n                t.assignee_user_id = $2\n             OR (t.assignee_user_id IS NULL AND EXISTS (\n                    SELECT 1 FROM user_roles ur\n                    WHERE ur.tenant_id = $1 AND ur.user_id = $2 AND ur.deleted_at IS NULL\n                      AND ur.role_id = t.candidate_role_id\n                      AND (ur.valid_from IS NULL OR ur.valid_from <= current_date)\n                      AND (ur.valid_to   IS NULL OR ur.valid_to   >= current_date)\n                      AND (t.candidate_department_id IS NULL\n                           OR ur.department_id IS NULL\n                           OR ur.department_id = t.candidate_department_id)\n                ))\n          )\n          AND ($3 = false OR t.status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS'))\n          AND ($4::uuid IS NULL OR t.document_id = $4)\n          AND ($5::uuid IS NULL OR t.id = $5)\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Bool",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "5d8b4f8a8599887a9f97b512fef2e38c08a0f0983b04f825213674adc5c0778d"
+}

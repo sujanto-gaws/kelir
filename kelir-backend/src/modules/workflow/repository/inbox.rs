@@ -4,7 +4,17 @@
 //!
 //! > A caller sees a task when it is in their tenant **and** either they are its
 //! > `assignee_user_id`, **or** it has no assignee and its `candidate_role_id`
-//! > is a role the caller currently holds.
+//! > is a role the caller currently holds **in the task's
+//! > `candidate_department_id`, if it has one**.
+//!
+//! The last clause arrived with
+//! [#225](https://github.com/sujanto-gaws/kelir/issues/225) and closes the half
+//! of `DEPARTMENT_ROLE` that was resolved, stored, and then read by nothing. A
+//! grant naming no department satisfies a department-scoped task — an
+//! *optional* department-scoped grant (`0002`) is the role held generally, not
+//! the role held nowhere — and `repository::task::holds_role` carries the
+//! reasoning in full, because the inbox and the decision must answer this
+//! identically or the queue lists work the API then refuses.
 //!
 //! Enforced here, in the `WHERE` clause, and **not in the handler** ([#179]
 //! AC3). A rule in a handler is a rule the next caller of the repository can
@@ -120,11 +130,15 @@ pub async fn list_for_caller(
         WHERE t.tenant_id = $1 AND t.deleted_at IS NULL
           AND (
                 t.assignee_user_id = $2
-             OR (t.assignee_user_id IS NULL AND t.candidate_role_id IN (
-                    SELECT ur.role_id FROM user_roles ur
+             OR (t.assignee_user_id IS NULL AND EXISTS (
+                    SELECT 1 FROM user_roles ur
                     WHERE ur.tenant_id = $1 AND ur.user_id = $2 AND ur.deleted_at IS NULL
+                      AND ur.role_id = t.candidate_role_id
                       AND (ur.valid_from IS NULL OR ur.valid_from <= current_date)
                       AND (ur.valid_to   IS NULL OR ur.valid_to   >= current_date)
+                      AND (t.candidate_department_id IS NULL
+                           OR ur.department_id IS NULL
+                           OR ur.department_id = t.candidate_department_id)
                 ))
           )
           AND ($3 = false OR t.status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS'))
@@ -190,11 +204,15 @@ pub async fn count_for_caller(
         WHERE t.tenant_id = $1 AND t.deleted_at IS NULL
           AND (
                 t.assignee_user_id = $2
-             OR (t.assignee_user_id IS NULL AND t.candidate_role_id IN (
-                    SELECT ur.role_id FROM user_roles ur
+             OR (t.assignee_user_id IS NULL AND EXISTS (
+                    SELECT 1 FROM user_roles ur
                     WHERE ur.tenant_id = $1 AND ur.user_id = $2 AND ur.deleted_at IS NULL
+                      AND ur.role_id = t.candidate_role_id
                       AND (ur.valid_from IS NULL OR ur.valid_from <= current_date)
                       AND (ur.valid_to   IS NULL OR ur.valid_to   >= current_date)
+                      AND (t.candidate_department_id IS NULL
+                           OR ur.department_id IS NULL
+                           OR ur.department_id = t.candidate_department_id)
                 ))
           )
           AND ($3 = false OR t.status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS'))
@@ -231,11 +249,15 @@ pub async fn is_visible_to(
         WHERE t.tenant_id = $1 AND t.id = $3 AND t.deleted_at IS NULL
           AND (
                 t.assignee_user_id = $2
-             OR (t.assignee_user_id IS NULL AND t.candidate_role_id IN (
-                    SELECT ur.role_id FROM user_roles ur
+             OR (t.assignee_user_id IS NULL AND EXISTS (
+                    SELECT 1 FROM user_roles ur
                     WHERE ur.tenant_id = $1 AND ur.user_id = $2 AND ur.deleted_at IS NULL
+                      AND ur.role_id = t.candidate_role_id
                       AND (ur.valid_from IS NULL OR ur.valid_from <= current_date)
                       AND (ur.valid_to   IS NULL OR ur.valid_to   >= current_date)
+                      AND (t.candidate_department_id IS NULL
+                           OR ur.department_id IS NULL
+                           OR ur.department_id = t.candidate_department_id)
                 ))
           )
         "#,

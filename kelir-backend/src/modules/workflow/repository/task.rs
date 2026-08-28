@@ -36,6 +36,11 @@ pub struct LockedTask {
     pub status: TaskStatus,
     pub assignee_user_id: Option<Uuid>,
     pub candidate_role_id: Option<Uuid>,
+    /// The department the assignment resolved to, when the rule was a
+    /// `DEPARTMENT_ROLE`. Read under the lock because the authorization that
+    /// follows depends on it (#225) — a locked row missing a field the check
+    /// needs is a check made against the pool.
+    pub candidate_department_id: Option<Uuid>,
 }
 
 pub async fn insert_task(
@@ -90,7 +95,7 @@ pub async fn lock_open_task_of_instance(
     let row = sqlx::query!(
         r#"
         SELECT id, workflow_instance_id, document_id, status,
-               assignee_user_id, candidate_role_id
+               assignee_user_id, candidate_role_id, candidate_department_id
         FROM workflow_tasks
         WHERE tenant_id = $1 AND workflow_instance_id = $2 AND deleted_at IS NULL
           AND status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')
@@ -109,6 +114,7 @@ pub async fn lock_open_task_of_instance(
         status: TaskStatus::from_db(&row.status),
         assignee_user_id: row.assignee_user_id,
         candidate_role_id: row.candidate_role_id,
+        candidate_department_id: row.candidate_department_id,
     }))
 }
 
@@ -121,7 +127,7 @@ pub async fn lock_task(
     let row = sqlx::query!(
         r#"
         SELECT id, workflow_instance_id, document_id, status,
-               assignee_user_id, candidate_role_id
+               assignee_user_id, candidate_role_id, candidate_department_id
         FROM workflow_tasks
         WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
         FOR UPDATE
@@ -139,6 +145,7 @@ pub async fn lock_task(
         status: TaskStatus::from_db(&row.status),
         assignee_user_id: row.assignee_user_id,
         candidate_role_id: row.candidate_role_id,
+        candidate_department_id: row.candidate_department_id,
     }))
 }
 
@@ -331,11 +338,36 @@ pub struct Decision<'a> {
 /// on an approval they may no longer act on, which is a leak that looks like a
 /// working control. The validity window is honoured in the same predicate,
 /// because a grant that has expired is not a grant.
+///
+/// # The department half, and what an unscoped grant means
+///
+/// `DEPARTMENT_ROLE` resolves to a role **and** a department
+/// ([JSON Workflow Schema](../../../../../docs/schema/JSON%20Workflow%20Schema.md)
+/// §5.3: *"`roles` plus `user_roles.department_id`"*), and `department` is the
+/// task's `candidate_department_id`. Until
+/// [#225](https://github.com/sujanto-gaws/kelir/issues/225) this function
+/// filtered on the role alone, so a task offered to Finance's approver was
+/// decidable by any holder of that role in any department.
+///
+/// **A grant with no department satisfies a department-scoped task**, and that
+/// is a decision rather than a fallthrough. `0002` calls the column an
+/// *optional* department-scoped grant: a row naming a department is a grant
+/// *within* it, and a row naming none is the same role held generally. Reading
+/// the null as "no departments" instead would be the stricter rule and the
+/// wrong one twice over — it would strand every approval in every deployment
+/// whose grants predate this column being read, which is all of them, and it
+/// would make the unscoped grant weaker than the scoped one it is a
+/// generalization of.
+///
+/// **A task with no department is unchanged**: a plain `ROLE` assignment
+/// carries no `candidate_department_id`, so every holder of the role qualifies
+/// exactly as before.
 pub async fn holds_role<'e, E: PgExecutor<'e>>(
     executor: E,
     tenant_id: Uuid,
     user_id: Uuid,
     role_id: Uuid,
+    department: Option<Uuid>,
 ) -> Result<bool, sqlx::Error> {
     let found = sqlx::query_scalar!(
         r#"
@@ -344,11 +376,13 @@ pub async fn holds_role<'e, E: PgExecutor<'e>>(
         WHERE tenant_id = $1 AND user_id = $2 AND role_id = $3 AND deleted_at IS NULL
           AND (valid_from IS NULL OR valid_from <= current_date)
           AND (valid_to   IS NULL OR valid_to   >= current_date)
+          AND ($4::uuid IS NULL OR department_id IS NULL OR department_id = $4)
         LIMIT 1
         "#,
         tenant_id,
         user_id,
-        role_id
+        role_id,
+        department
     )
     .fetch_optional(executor)
     .await?;

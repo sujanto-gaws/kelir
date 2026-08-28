@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, workflow_instance_id, document_id, status,\n               assignee_user_id, candidate_role_id\n        FROM workflow_tasks\n        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL\n        FOR UPDATE\n        ",
+  "query": "\n        SELECT id, workflow_instance_id, document_id, status,\n               assignee_user_id, candidate_role_id, candidate_department_id\n        FROM workflow_tasks\n        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL\n        FOR UPDATE\n        ",
   "describe": {
     "columns": [
       {
@@ -32,6 +32,11 @@
         "ordinal": 5,
         "name": "candidate_role_id",
         "type_info": "Uuid"
+      },
+      {
+        "ordinal": 6,
+        "name": "candidate_department_id",
+        "type_info": "Uuid"
       }
     ],
     "parameters": {
@@ -46,8 +51,9 @@
       false,
       false,
       true,
+      true,
       true
     ]
   },
-  "hash": "13911e9546d2c6d177d8fdae5a38006c431334b56d057aa2ac147dcfbb752595"
+  "hash": "54e338f043787d53b081cee81c42366856798ec3f9a1080913a359d31fee831f"
 }
