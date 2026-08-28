@@ -9,6 +9,30 @@ While the major version is `0`, the public API may change in any release.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.4.0] — 2026-08-28
+
+Phase 4, whole: **a document exists.** It is created from a configured document
+type, rendered as the form that type binds, validated on every write by a server
+that recomputes what the browser computed, submitted with its number taken in
+the same transaction, moved through a lifecycle of its own, found in a list and
+opened in a workspace. Everything the two sprints before it built was
+scaffolding for this one, and the phase's exit demo now runs end to end in a
+real browser rather than being described.
+
+**Upgrading:** one new migration (`0023_document.sql`) adding one table, one
+index and six permission rows. It is additive — the `v0.3.0` binary starts
+against a `v0.4.0` schema, rehearsed. No configuration action is required. One
+behaviour changes for anyone who set a numbering rule to `ALLOW_GAPS`: a
+submission the server refuses now loses the number it took, which is what that
+policy has always meant and did not do.
+
+**Read the *Fixed* section before deploying under load.** The most serious defect
+this release closes is one it also introduced: a submit held two pooled
+connections and self-deadlocked at a concurrency the pool could otherwise serve.
+It was written twice in one function and the first fix did not find the second.
+
 Phase 4 opens: the RAD metadata tables and the definition APIs over them, the
 document table group with document types and their numbering rules, one JSON
 Logic engine shared by both sides, a browser harness that drives a real
@@ -281,6 +305,62 @@ changed.
   submission row so that it can run inside the transaction that takes a
   document's number.
 
+- **Documents (FR-DOC-001..007, 011, 013, 014) — the thing the platform is
+  about.** A document is created from a document type, holds the data somebody
+  fills into the form that type binds, takes a number when it is submitted, and
+  moves through its own statuses until it is finished. Nine routes under
+  `/api/v1/documents`, six permissions, and a screen for each half of it.
+  - **The form revision is pinned at creation.** A document renders against the
+    definition it was actually filled in against, not against whatever its type
+    points at today — which is what makes **D-30**'s guarantee true rather than
+    described, and what keeps a type re-pointable once documents exist.
+  - **Form data is validated on every write, not only at submit.** A draft
+    holding data its own form would reject is a draft that cannot be submitted,
+    discovered at the worst moment. A value that is *present and wrong* is
+    refused; a value that is *missing* is unfinished (**D-33**).
+  - **The stored payload is always the server's answer.** The Tamper-Proof
+    Pattern applies to a draft save as much as to a submission, so a client
+    cannot launder a computed total through storage and submit it later.
+- **Submit, with the number taken in the same transaction (FR-DOC-003, 004).**
+  One transaction re-evaluates the payload, takes the number, moves the status
+  and writes the history — committing whole or not at all. The re-evaluation
+  runs **before** the allocation: numbering first burns a number on every
+  refused submission, and on a gapless rule it also holds the counter for the
+  length of the re-evaluation, so one document about to be refused would
+  serialise every concurrent submit of its type.
+- **The document's own status and its transitions (FR-DOC-007).** A legality
+  table decides what may move where; an illegal move is refused naming both
+  ends, and a concurrent one loses a compare-and-swap with a 409.
+  `PENDING_APPROVAL` and `ARCHIVED` are in the column and reachable from
+  nothing — the first is the workflow's, the second is FR-DOC-010's, and the
+  table says which rather than leaving a reader to grep.
+- **A link to the master-data entity a document concerns (FR-DOC-011).**
+  Reading a document hands back `entityType` and `entityId` and nothing about
+  the record they name; resolving them requires the entity's **own** read
+  permission, enforced by calling the master-data service rather than by
+  checking a string. A document cannot open what the master-data surface does
+  not — the same answer the lookup fields gave.
+- **The document list, with search and filter (FR-DOC-013, FR-SRH-001).** Paged,
+  searchable by number, reference or title, filterable by type, status, priority
+  and linked entity. FR-SRH-001 is this list rather than a second endpoint, per
+  the SRS's own note. Its visibility rule is stated in full — tenant scope plus
+  `document:read`, and no third condition.
+- **The document workspace (FR-DOC-014).** Status, number, reference and linked
+  entity visible without opening a tab; the form rendered through the renderer
+  in read or edit mode by status; submit and the transitions reachable from it.
+  The tabs Phase 5 and Phase 6 will fill say what will fill them and when —
+  neither empty nor silent.
+- **A screen that goes from a document *type* to a document.** Sprint 8 could
+  open a form by form id and nothing traversed the type-to-form binding; now
+  nobody types a form id, because choosing a type is how a document is started.
+- **`document_ref_sequences`** (`0023_document.sql`), the tenant-and-year counter
+  behind `documents.document_ref` — a shape the schema documented and nothing
+  produced.
+- **Six permissions**: `document:create`, `read`, `update`, `delete`, `submit`,
+  `transition`. `submit` and `transition` are separate from `update` and neither
+  is a convenience — submitting takes a number the document keeps forever, and a
+  transition has a from-state, a legal set and its own audit action.
+
 ### Changed
 
 - **Roles are tenant-scoped, and the database now enforces it
@@ -305,6 +385,23 @@ changed.
   to set them; a deployment that relays for a real domain must own the address
   in `KELIR_MAIL_FROM`. `KELIR_FRONTEND_URL` now also determines what a reset
   link points at, so it must be an address a person's browser can reach.
+
+- **A form-data change is audited by its changed *keys*, not its values**
+  (**D-32**). A form's data is arbitrary tenant content — salaries, bank
+  details, the medical grounds for a leave request — and the audit trail is read
+  through its own permission by people who hold none over the document. **D-12**
+  already refused to hand a record's field values back through its change
+  history; copying every keystroke of every form into that table would be that
+  finding at scale, over data nobody classified. Every other field audits
+  normally, with its values.
+- **A gap-tolerant numbering rule loses the number a refused submission took**
+  (**D-35**). It did not before, and the arrangement that kept it was bought
+  with a rule violation — see *Fixed*. This is the trade that policy has always
+  named.
+- **Database Schema section headers stop naming a migration that is not written
+  yet** (**D-34**), and say what the migration creates instead. Seven of them
+  named files two numbers out of date; the mapping table is the sequence and a
+  header is not.
 
 ### Fixed
 
@@ -434,6 +531,25 @@ changed.
   `<aside>` rather than on the `<nav>` inside it, so assistive technology found
   no named navigation landmark. Found by the browser harness on its first run.
 
+- **A submit took two pooled connections and deadlocked under load, twice over.**
+  `numbering_service::allocate` read the rule's gap policy from the pool while
+  its caller held a transaction; and on a gap-tolerant rule the allocation
+  itself then committed in a transaction of its own, *also* while the caller
+  held one. Twenty-four concurrent submits answered `500` after the acquire
+  timeout. Both halves lived in one function twelve lines apart, and the first
+  fix — aimed at the test that had gone red — did not find the second, which
+  took a re-read against the coding standard's one-connection rule. The number
+  is now taken before the submit's transaction opens.
+- **One document's metadata edit could have wiped every document's metadata in
+  the tenant.** `replace_metadata` deletes before it inserts and its
+  `document_id` predicate was the only thing scoping that delete; nothing
+  exercised it. Found by reading the mutation campaign's survivors one at a
+  time.
+- **Five predicates that were the only guard on their behaviour**
+  ([#218](https://github.com/sujanto-gaws/kelir/issues/218)) have tests that go
+  red when they are defeated. One of the five turned out to be dead code and was
+  deleted rather than pinned.
+
 ### Testing
 
 - **A browser harness (`e2e/`).** Playwright drives a real deployment — the
@@ -464,6 +580,59 @@ changed.
   carries the rule for the next such predicate, §2.9 carries the three-move rule
   for tests over a shared resource, and sprint plan §2 names the per-sprint
   mutation campaign whose ratio the status report reports.
+
+- **The Phase 4 exit demo is driven rather than described.**
+  `e2e/tests/a-document-is-created-and-submitted.spec.ts` configures a type,
+  creates a document from it, fills the form with live calculation, watches an
+  unfinished submit refused, submits, sees the number, finds the document in the
+  list, opens it and moves it through a transition. Eight browser flows now run
+  against the release stack in CI.
+- **The predicate-coverage ratio rose for the first time: 48%**, against 22%,
+  37% and 65% for the three sprints before it. It did not rise by itself — the
+  campaign was run twice and the first run's number was discarded, because five
+  of its reds were one flaky test rather than the predicates being mutated.
+- **A flaky test was found and repaired by the campaign it contaminated.** It
+  asserted that every loser of a concurrent transition answered 409; a caller
+  that acquires its connection after the winner commits reads the new status and
+  is refused as an *illegal move* instead, which is equally correct. Six clean
+  runs had not shown it.
+- **Three second lines of defence are reached rather than commented**: an edit,
+  a discard and a second submit each blocked by a submit that reached the row
+  first, with the interleaving arranged rather than raced for.
+
+### Known limitations
+
+- **No Sprint 9 item is independently verified.** The sprint that closes this
+  phase had one author, who built it, verified it and wrote its record. Every
+  row of the [Sprint 9 status report](projects/status/10.%20Sprint%209%20Status.md)
+  reads `author-verified` rather than Done, and
+  [record 06](projects/verifications/06.%20Sprint%209%20Surface%20Verification.md)
+  §1 states what that costs before it states anything else. An independent read
+  of `modules/document/` is Sprint 10's first action.
+- **Phase 4 ships its `Must` scope and none of its `Should` scope** — attachment
+  and metadata rules (FR-DTYPE-005, 006), the document security level
+  (FR-DTYPE-008), version history (FR-DOC-008), cancel-and-archive storage
+  (FR-DOC-009, 010) and retention storage (FR-DTYPE-007). Decision **D-16**
+  accepted that when it gave the phase a third sprint instead of a fourth.
+  `documents.security_level` therefore exists in the column and **nothing reads
+  it**: document visibility is tenant scope plus `document:read`, stated in full
+  rather than inherited from a requirement that did not ship.
+- **`PENDING_APPROVAL` and `ARCHIVED` are values nothing can reach.** The first
+  belongs to the workflow Phase 5 builds; the second to FR-DOC-010. The legality
+  table says so rather than leaving a reader to find out by trying.
+- **`lock_linked_entity`'s facility arm is exercised by no test**, because no
+  test links a document to a facility. The predicate is identical to the party
+  arm's, which is held; the gap is named in record 06 §6 rather than left for
+  the next campaign to find.
+- **[#122](https://github.com/sujanto-gaws/kelir/issues/122) is still open.** The
+  document list refuses a bad `page` inside the error envelope; the routes that
+  answer outside it are unchanged.
+- **No staging host and no production environment** (decision **D-9**). The
+  release check runs against the Docker Compose stack built from the release
+  images, which does not serve TLS — an IP address cannot be issued a
+  certificate — so NFR-SEC-010 is not exercised by it.
+- **Rolling back to `0.1.0` still needs manual work.** That binary predates
+  `set_ignore_missing`. Rollback to `0.2.0` and later is rehearsed and works.
 
 ## [0.3.0] — 2026-08-24
 

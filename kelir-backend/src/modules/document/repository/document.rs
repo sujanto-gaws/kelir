@@ -67,6 +67,48 @@ pub struct LockedDocument {
     pub requested_for_department_id: Option<Uuid>,
 }
 
+/// What the submit has to know **before** it opens its transaction.
+///
+/// Coding standard §2.5: *"Resolve what the request points at before the
+/// transaction opens."* On a rule whose policy tolerates gaps the number is one
+/// of the things the request points at — it is allocated and committed
+/// separately by design — so the submit needs the document's type and
+/// department before it holds a connection of its own.
+///
+/// **Reading the type outside the lock is safe because a document's type never
+/// moves.** No update path writes `document_type_id`, and there is no route
+/// that would; the status read here is a cheap early refusal that the locked
+/// read repeats authoritatively.
+pub struct SubmissionSubject {
+    pub status: DocumentStatus,
+    pub document_type_id: Uuid,
+    pub requested_for_department_id: Option<Uuid>,
+}
+
+pub async fn find_submission_subject<'e, E: PgExecutor<'e>>(
+    executor: E,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<Option<SubmissionSubject>, sqlx::Error> {
+    let row = sqlx::query!(
+        r#"
+        SELECT status, document_type_id, requested_for_department_id
+        FROM documents
+        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+        "#,
+        tenant_id,
+        id
+    )
+    .fetch_optional(executor)
+    .await?;
+
+    Ok(row.map(|row| SubmissionSubject {
+        status: DocumentStatus::from_db(&row.status),
+        document_type_id: row.document_type_id,
+        requested_for_department_id: row.requested_for_department_id,
+    }))
+}
+
 /// Reads a document **and holds it** for the rest of the transaction.
 ///
 /// `FOR UPDATE`, and coding standard §2.5 is why: every caller of this reads the

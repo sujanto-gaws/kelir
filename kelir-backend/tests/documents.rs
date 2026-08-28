@@ -999,3 +999,355 @@ pub async fn foreign_caller(app: &TestApp, tenant_code: &str, username: &str) ->
     app.sign_in_to(tenant_code, username, common::ADMIN_PASSWORD)
         .await
 }
+
+// ---------------------------------------------------------------------------
+// The predicates the Sprint 9 campaign found unheld (record 06, F3)
+// ---------------------------------------------------------------------------
+//
+// Five of the campaign's nineteen greens are not defence in depth: nothing else
+// enforces what they enforce, and defeating each produces a **wrong answer
+// about another subject** rather than a missing refusal. That is #218's
+// category, one sprint later, on this sprint's own surface — so they are closed
+// here rather than filed, which is what the sprint plan means by a coverage
+// finding being worth most while there is sprint left to close it in.
+//
+// Each test below names the mutation it answers (coding standard §2.9), and each
+// fixture holds a **second subject**, because one cannot distinguish *scoped*
+// from *unscoped*.
+
+/// **Replacing one document's metadata does not touch another's**
+/// (`replace_metadata` · `document_id = $2`).
+///
+/// The most destructive of the five. `replace_metadata` deletes before it
+/// inserts, so without the predicate a single metadata edit wipes **every**
+/// document's metadata in the tenant — silently, and with no way back short of
+/// a restore. Nothing else scopes that delete: the service passes the document
+/// id and trusts the statement.
+///
+/// Seen red against `replace_metadata`'s `DELETE … AND document_id = $2`
+/// weakened to `(document_id = $2 OR TRUE)`: the bystander's metadata is gone.
+#[tokio::test]
+async fn replacing_one_documents_metadata_leaves_another_documents_alone() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let type_id = document_type(&app, &token, "PR_METADATA_SCOPE", None).await;
+
+    let edited = create(
+        &app,
+        &token,
+        json!({
+            "documentTypeId": type_id,
+            "title": "The one being edited",
+            "metadata": {"costCentre": {"value": "CC-1"}},
+        }),
+    )
+    .await;
+    assert_eq!(edited.status, StatusCode::CREATED, "{}", edited.body);
+    let edited = id_of(&edited.body["data"]);
+
+    // The second subject. Without it, "scoped to this document" and "not scoped
+    // at all" are the same observation.
+    let bystander = create(
+        &app,
+        &token,
+        json!({
+            "documentTypeId": type_id,
+            "title": "The one nobody touched",
+            "metadata": {"costCentre": {"value": "CC-2"}, "batch": {"value": "B-9"}},
+        }),
+    )
+    .await;
+    assert_eq!(bystander.status, StatusCode::CREATED, "{}", bystander.body);
+    let bystander = id_of(&bystander.body["data"]);
+
+    let replaced = app
+        .send(
+            Method::PUT,
+            &format!("/api/v1/documents/{edited}"),
+            Some(&token),
+            Some(json!({ "metadata": {"costCentre": {"value": "CC-99"}} })),
+        )
+        .await;
+    assert_eq!(replaced.status, StatusCode::OK, "{}", replaced.body);
+
+    let untouched = app
+        .send(
+            Method::GET,
+            &format!("/api/v1/documents/{bystander}"),
+            Some(&token),
+            None,
+        )
+        .await;
+
+    assert_eq!(untouched.status, StatusCode::OK, "{}", untouched.body);
+    assert_eq!(
+        untouched.body["data"]["metadata"]["costCentre"]["value"], "CC-2",
+        "editing one document's metadata rewrote another's: {}",
+        untouched.body
+    );
+    assert_eq!(
+        untouched.body["data"]["metadata"]["batch"]["value"], "B-9",
+        "editing one document's metadata deleted another's: {}",
+        untouched.body
+    );
+}
+
+/// **A document cannot be created from another tenant's document type**
+/// (`lock_pinned_form` · `tenant_id = $1`).
+///
+/// This is the *first* read on the create path — nothing scopes the type before
+/// it — so the predicate is the only thing between a caller and a foreign
+/// tenant's configuration. Defeating it pins that tenant's form revision onto a
+/// document in this one, which is a cross-tenant read of a form definition
+/// wearing a document's clothes.
+///
+/// Seen red against `lock_pinned_form`'s `tenant_id = $1` weakened to
+/// `(tenant_id = $1 OR TRUE)`: the document is created and pins the foreign
+/// form.
+#[tokio::test]
+async fn a_document_cannot_be_created_from_another_tenants_type() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    // A type that exists, in a tenant that is not the caller's. Inserted
+    // directly: creating it through the API would need a session in that
+    // tenant, and what is under test is the read rather than the write.
+    let tenant = fixtures::create_tenant(&app.pool, "TNT-DOC-TYPE", "Another Customer").await;
+    let foreign_type = Uuid::now_v7();
+
+    sqlx::query(
+        "INSERT INTO document_types (id, tenant_id, type_code, name)
+         VALUES ($1, $2, 'THEIR_TYPE', 'Their type')",
+    )
+    .bind(foreign_type)
+    .bind(tenant)
+    .execute(&app.pool)
+    .await
+    .expect("insert the other tenant's document type");
+
+    let refused = create(
+        &app,
+        &token,
+        json!({ "documentTypeId": foreign_type, "title": "From somebody else's type" }),
+    )
+    .await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a document was created from another tenant's type: {}",
+        refused.body
+    );
+    assert_eq!(
+        refused.body["error"]["details"][0]["code"], "NOT_FOUND",
+        "{}",
+        refused.body
+    );
+
+    // And nothing was written — including no reference, which the allocator
+    // would have consumed had the create got that far.
+    let documents: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM documents WHERE document_type_id = $1")
+            .bind(foreign_type)
+            .fetch_one(&app.pool)
+            .await
+            .expect("the documents are readable");
+
+    assert_eq!(documents, 0);
+}
+
+/// **A document cannot be linked to another tenant's master-data record**
+/// (`lock_linked_entity` · `tenant_id = $1`).
+///
+/// The write-time existence check is the *only* constraint on
+/// `documents.entity_id` — the column carries no foreign key, because what it
+/// points at is polymorphic. Defeating its tenant predicate lets a document in
+/// one tenant name a supplier in another, and the resolution endpoint then
+/// refuses it in a way that looks like a permission problem rather than the
+/// tenancy breach it is.
+///
+/// Seen red against `lock_linked_entity`'s party arm `tenant_id = $1` weakened
+/// to `(tenant_id = $1 OR TRUE)`: the document is created carrying a foreign
+/// supplier's id.
+#[tokio::test]
+async fn a_document_cannot_be_linked_to_another_tenants_record() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let type_id = document_type(&app, &token, "PR_LINK_TENANT", None).await;
+
+    let tenant = fixtures::create_tenant(&app.pool, "TNT-DOC-PARTY", "Another Customer").await;
+    let foreign_party = Uuid::now_v7();
+
+    sqlx::query(
+        "INSERT INTO mdm_parties (id, tenant_id, party_code, party_type)
+         VALUES ($1, $2, 'THEIR-SUPPLIER', 'PARTY_GROUP')",
+    )
+    .bind(foreign_party)
+    .bind(tenant)
+    .execute(&app.pool)
+    .await
+    .expect("insert the other tenant's party");
+
+    let refused = create(
+        &app,
+        &token,
+        json!({
+            "documentTypeId": type_id,
+            "title": "Concerns somebody else's supplier",
+            "entityType": "PARTY",
+            "entityId": foreign_party,
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a document was linked to another tenant's supplier: {}",
+        refused.body
+    );
+    assert_eq!(refused.body["error"]["details"][0]["path"], "entityId");
+}
+
+/// **Another tenant's caller cannot submit this tenant's document**
+/// (`find_submission_subject` and `lock_document` · `tenant_id = $1`, in
+/// series).
+///
+/// The submit path reads the row twice — once unlocked, to resolve the type and
+/// the gap policy before the transaction opens, and once `FOR UPDATE` inside
+/// it — so this refusal is guarded **twice**. That is coding standard §2.5's
+/// second-line case, and the rule it names is *a test that removes the first
+/// line*, which is what the mutation runs below do.
+///
+/// **The verdicts, all three run:** defeating `find_submission_subject`'s
+/// tenant predicate alone leaves the test green, because `lock_document` holds
+/// it; defeating `lock_document`'s alone leaves it green, because
+/// `find_submission_subject` holds it; **defeating both together turns it red**
+/// — the foreign caller gets past both reads and the assertion fails. Each
+/// layer is therefore exercised with the other removed, which is more than a
+/// single red would have shown.
+///
+/// It is worth stating that this was *not* true when the test was written. The
+/// second read arrived with the fix for the two-connection defect (record 06,
+/// F2), and the comment that shipped with the test claimed `lock_document` was
+/// the only guard. It was, for about an hour.
+#[tokio::test]
+async fn another_tenants_caller_cannot_submit_this_tenants_document() {
+    let app = TestApp::spawn_with(|config| config.multi_tenant = true).await;
+    let token = app
+        .sign_in_to("SYSTEM", common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await;
+
+    let form = published_form(&app, &token, "pr-submit-tenant").await;
+    let type_id = document_type(&app, &token, "PR_SUBMIT_TENANT", Some(form)).await;
+
+    let rule = app
+        .send(
+            Method::PUT,
+            &format!("/api/v1/document-types/{type_id}/numbering-rule"),
+            Some(&token),
+            Some(json!({ "ruleTemplate": "PR-{sequence}", "sequenceScope": "GLOBAL" })),
+        )
+        .await;
+    assert_eq!(rule.status, StatusCode::OK, "{}", rule.body);
+
+    let id = draft(&app, &token, type_id, json!({"subject": "Ours to submit"})).await;
+
+    let foreign = foreign_caller(&app, "TNT-DOC-SUBMIT", "submit.outsider").await;
+
+    let refused = app
+        .send(
+            Method::POST,
+            &format!("/api/v1/documents/{id}/submission"),
+            Some(&foreign),
+            None,
+        )
+        .await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::NOT_FOUND,
+        "another tenant submitted this document: {}",
+        refused.body
+    );
+
+    let number: Option<String> =
+        sqlx::query_scalar("SELECT document_number FROM documents WHERE id = $1")
+            .bind(id)
+            .fetch_one(&app.pool)
+            .await
+            .expect("the document is readable");
+
+    assert_eq!(
+        number, None,
+        "a refused cross-tenant submit assigned a number"
+    );
+}
+
+/// **Another tenant's caller cannot transition this tenant's document**
+/// (`find_status` · `tenant_id = $1`).
+///
+/// `find_status` is the transition path's only read before the write, and the
+/// write's own tenant predicate is a second line behind it. Defeating this one
+/// lets a foreign caller with `document:transition` read a status they may not
+/// see — and the compare-and-swap then succeeds, because it was handed the
+/// right `from`.
+///
+/// Seen red against `find_status`'s `tenant_id = $1` weakened to
+/// `(tenant_id = $1 OR TRUE)`: the foreign caller approves the document.
+#[tokio::test]
+async fn another_tenants_caller_cannot_transition_this_tenants_document() {
+    let app = TestApp::spawn_with(|config| config.multi_tenant = true).await;
+    let token = app
+        .sign_in_to("SYSTEM", common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await;
+
+    let type_id = document_type(&app, &token, "PR_TRANSITION_TENANT", None).await;
+
+    let created = create(
+        &app,
+        &token,
+        json!({ "documentTypeId": type_id, "title": "Ours to decide" }),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let id = id_of(&created.body["data"]);
+
+    // Moved out of DRAFT directly: what is under test is the transition route's
+    // tenant scoping, and a document in DRAFT would be refused by the legality
+    // table before the predicate mattered.
+    sqlx::query("UPDATE documents SET status = 'SUBMITTED' WHERE id = $1")
+        .bind(id)
+        .execute(&app.pool)
+        .await
+        .expect("move the document out of draft");
+
+    let foreign = foreign_caller(&app, "TNT-DOC-MOVE", "move.outsider").await;
+
+    let refused = app
+        .send(
+            Method::PUT,
+            &format!("/api/v1/documents/{id}/status"),
+            Some(&foreign),
+            Some(json!({ "status": "APPROVED" })),
+        )
+        .await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::NOT_FOUND,
+        "another tenant decided this document: {}",
+        refused.body
+    );
+
+    let status: String = sqlx::query_scalar("SELECT status FROM documents WHERE id = $1")
+        .bind(id)
+        .fetch_one(&app.pool)
+        .await
+        .expect("the document is readable");
+
+    assert_eq!(
+        status, "SUBMITTED",
+        "a refused cross-tenant transition moved it"
+    );
+}
