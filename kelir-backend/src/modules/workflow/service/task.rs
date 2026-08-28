@@ -342,6 +342,14 @@ pub async fn decide(
             form_data: document.form_data.clone(),
             variables,
         },
+        // The history row's provenance. `comment` stays `None` until
+        // FR-TASK-006 (#182) gives the decision one to carry; the column and
+        // the path exist so that lands as a value rather than as a change to
+        // the signature every transition passes through.
+        engine::DecisionProvenance {
+            task_id: Some(id),
+            comment: None,
+        },
     )
     .await?;
 

@@ -8,13 +8,15 @@
 
 use uuid::Uuid;
 
-use super::super::domain::{Graph, WorkflowInstance, WorkflowTask};
+use super::super::domain::{Graph, WorkflowHistoryEntry, WorkflowInstance, WorkflowTask};
 use super::super::repository::{
-    definition as definition_repo, instance as repo, task as task_repo,
+    definition as definition_repo, history as history_repo, instance as repo, task as task_repo,
 };
 use super::super::{INSTANCE_READ, TASK_READ};
 use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
+use crate::modules::document::repository as document_repo;
+use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
 
 /// The process of one document, with the tasks it has generated.
@@ -27,9 +29,15 @@ pub struct DocumentWorkflow {
     ///
     /// **The decided ones are the point.** A workflow tab showing only what is
     /// outstanding cannot answer "who approved this and when", which is the
-    /// first question anybody opens it with. FR-WF-012's fuller account of how
-    /// the document got here is [#181] in Sprint 11; this is what exists now,
-    /// and the tab says so rather than implying it is the whole history.
+    /// first question anybody opens it with.
+    ///
+    /// **This is the tasks, not the history.** FR-WF-012's account of how the
+    /// document got here arrived with [#181] and is
+    /// `GET /api/v1/documents/{id}/workflow/history`, paginated — a long-running
+    /// process is exactly where a list embedded in another payload stops
+    /// working, which is why it is a route of its own rather than a third field
+    /// here. The two overlap and are not the same: a task tells you who was
+    /// asked, a history row tells you what moved.
     ///
     /// [#181]: https://github.com/sujanto-gaws/kelir/issues/181
     pub tasks: Vec<WorkflowTask>,
@@ -112,4 +120,59 @@ async fn load_instance(
     };
 
     Ok(DocumentWorkflow { instance, tasks })
+}
+
+/// One document's workflow history, oldest first and paginated ([#181] AC3).
+///
+/// **`workflow:instance:read`, and deliberately not `master-data:audit:read`**
+/// ([#181] AC4). This is the document's own account of its progress, shown to
+/// the approver deciding it; requiring the governance permission would refuse
+/// it to exactly the people it is for, and would make a user-facing screen
+/// depend on a row the audit trail exists to keep unchangeable. It is the same
+/// permission [`workflow_of_document`] takes, for the reason stated there: the
+/// thing being read is the workflow module's own.
+///
+/// **Paginated rather than whole.** A process that is returned and resubmitted
+/// several times accumulates rows without bound, and the read that stops
+/// working is the one nobody capped — which `get_task` already had to learn
+/// once, when it asked for a thousand rows and `find`-ed the one it wanted.
+///
+/// [#181]: https://github.com/sujanto-gaws/kelir/issues/181
+pub async fn history_of_document(
+    state: &AppState,
+    caller: &Authenticated,
+    document_id: Uuid,
+    pagination: &Pagination,
+) -> Result<(Vec<WorkflowHistoryEntry>, PageMeta), AppError> {
+    caller.require(INSTANCE_READ)?;
+
+    let tenant_id = caller.tenant_id();
+
+    // **The document is resolved first, so an unknown id is a 404 rather than
+    // an empty page.** A document nobody has submitted has no history and
+    // neither has one that does not exist, and answering both with `[]` would
+    // make a typo look like a document waiting to be approved.
+    if document_repo::find_document(&state.pool, tenant_id, document_id)
+        .await?
+        .is_none()
+    {
+        return Err(AppError::not_found("Document"));
+    }
+
+    let total = history_repo::count_for_document(&state.pool, tenant_id, document_id).await?;
+
+    let entries = history_repo::list_for_document(
+        &state.pool,
+        tenant_id,
+        document_id,
+        pagination.limit(),
+        pagination.offset(),
+    )
+    .await?;
+
+    #[allow(
+        clippy::cast_sign_loss,
+        reason = "count(*) over a table with no negative rows"
+    )]
+    Ok((entries, pagination.meta(total as u64)))
 }

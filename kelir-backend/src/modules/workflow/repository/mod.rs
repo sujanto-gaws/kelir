@@ -6,6 +6,7 @@
 //! functions — `inbox` is here rather than there for that reason, and says so.
 
 pub mod definition;
+pub mod history;
 pub mod inbox;
 pub mod instance;
 pub mod projection;

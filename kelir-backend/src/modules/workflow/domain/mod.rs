@@ -13,5 +13,7 @@ pub use definition::{
 pub use graph::{
     AssigneeType, AssignmentRule, Graph, State, TaskSpec, Transition, TransitionAction,
 };
-pub use instance::{InstanceOutcome, InstanceStatus, WorkflowInstance, WorkflowVariable};
+pub use instance::{
+    InstanceOutcome, InstanceStatus, WorkflowHistoryEntry, WorkflowInstance, WorkflowVariable,
+};
 pub use task::{Assignment, DecisionAction, DecisionRequest, TaskStatus, WorkflowTask};

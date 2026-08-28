@@ -25,6 +25,22 @@
 //! defect no single-threaded test can see — which is why it is a rule stated
 //! here rather than an observation about the current code.
 //!
+//! # Every move through here is recorded, in the same transaction
+//!
+//! [`history::record`] appends a row for the instance's first state and for
+//! every transition after it (FR-WF-012, [#181]). It is written from the
+//! caller's transaction because a transition that commits without its history
+//! leaves a gap in *how did this document get here* that nothing can see — and
+//! `fire` is the one place a process moves, which is what makes "every
+//! transition" a property of this file rather than a rule callers must keep.
+//!
+//! **It is not the audit trail.** [`super::super::repository::history`] carries
+//! the distinction in full: this answers how the document got here and is shown
+//! to the approver; `audit_events` answers whether it was tampered with and is
+//! shown to somebody investigating. Neither is derived from the other.
+//!
+//! [#181]: https://github.com/sujanto-gaws/kelir/issues/181
+//!
 //! # A task's `assignment` and a transition's `allowedBy` are two controls
 //!
 //! Both apply, and neither substitutes for the other. `assignment` says who the
@@ -73,7 +89,9 @@ use super::super::domain::{
     DecisionAction, Graph, InstanceOutcome, State, TaskStatus, TransitionAction,
 };
 use super::super::repository::reference::RefKind;
-use super::super::repository::{definition as definition_repo, instance as repo, reference, task};
+use super::super::repository::{
+    definition as definition_repo, history, instance as repo, reference, task,
+};
 use super::assignment::{self, AssignmentContext};
 use crate::error::{AppError, ValidationDetail};
 use crate::modules::document::domain::DocumentStatus;
@@ -250,6 +268,27 @@ pub async fn start(
 
     write_variables(transaction, request, &graph, instance_id).await?;
 
+    // **The instance's first row, and the reason the list starts with it.** A
+    // history that began at the first *decision* would answer "how did this get
+    // here" from halfway: the submit is how it got into the approval at all.
+    // `from_state` is null because the initial state came from nowhere, and no
+    // action names it because none was taken.
+    history::record(
+        &mut **transaction,
+        &history::NewHistoryEntry {
+            tenant_id: request.tenant_id,
+            workflow_instance_id: instance_id,
+            document_id: request.document_id,
+            from_state: None,
+            to_state: &graph.initial_state,
+            action: None,
+            task_id: None,
+            comment: None,
+            actor_user_id: request.actor,
+        },
+    )
+    .await?;
+
     let document_status = enter(
         transaction,
         request.tenant_id,
@@ -267,6 +306,24 @@ pub async fn start(
         instance_ref,
         document_status,
     })
+}
+
+/// Where a transition came from, for the history row it writes.
+///
+/// **A struct rather than two more arguments**, because both are about the same
+/// thing — the decision that moved the process — and both are absent together
+/// for a transition that no decision drove. `Default` is that case, and naming
+/// it is what stops a caller passing `None, None` and meaning nothing in
+/// particular.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DecisionProvenance<'a> {
+    /// The task the decision was recorded against.
+    pub task_id: Option<Uuid>,
+    /// The reason given with it. `None` until FR-TASK-006
+    /// ([#182](https://github.com/sujanto-gaws/kelir/issues/182)) captures one —
+    /// threaded now so that lands as a value rather than as a signature change
+    /// through the one function every transition passes through.
+    pub comment: Option<&'a str>,
 }
 
 /// What a decision produced.
@@ -309,6 +366,7 @@ pub async fn fire(
     actor: Option<Uuid>,
     context: AssignmentContext,
     evaluation: &EvaluationContext,
+    decision: DecisionProvenance<'_>,
 ) -> Result<Fired, AppError> {
     let candidates = graph.candidates(from_state, action);
 
@@ -388,6 +446,25 @@ pub async fn fire(
              reload the task and decide again",
         ));
     }
+
+    // Recorded after the move and before the new state is entered, so the row
+    // exists whether or not entering succeeds — and inside the same transaction,
+    // so it does not exist if the move is rolled back.
+    history::record(
+        &mut **transaction,
+        &history::NewHistoryEntry {
+            tenant_id,
+            workflow_instance_id: instance_id,
+            document_id,
+            from_state: Some(from_state),
+            to_state: &chosen.to,
+            action: Some(action),
+            task_id: decision.task_id,
+            comment: decision.comment,
+            actor_user_id: actor,
+        },
+    )
+    .await?;
 
     let document_status = enter(
         transaction,

@@ -37,8 +37,9 @@ use super::service::{self, StatusHistoryEntry};
 use crate::error::AppError;
 use crate::extract::{JsonBody, PathParam, QueryParams};
 use crate::middleware::auth::Authenticated;
+use crate::modules::workflow::domain::WorkflowHistoryEntry;
 use crate::modules::workflow::service::instance::{self as workflow_instance, DocumentWorkflow};
-use crate::response::{ItemEnvelope, ListEnvelope};
+use crate::response::{ItemEnvelope, ListEnvelope, Pagination};
 use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
@@ -55,6 +56,7 @@ pub fn routes() -> Router<AppState> {
         .route("/{id}/status-history", get(status_history))
         .route("/{id}/linked-entity", get(resolve_linked_entity))
         .route("/{id}/workflow", get(document_workflow))
+        .route("/{id}/workflow/history", get(document_workflow_history))
 }
 
 #[utoipa::path(
@@ -254,4 +256,26 @@ async fn document_workflow(
     Ok(Json(ItemEnvelope::new(
         workflow_instance::workflow_of_document(&state, &caller, id).await?,
     )))
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/documents/{id}/workflow/history", tag = "document",
+    params(Pagination),
+    responses(
+        (status = 200, description = "How this document got here: one entry per transition, oldest first", body = [WorkflowHistoryEntry]),
+        (status = 403, description = "Missing workflow:instance:read"),
+        (status = 404, description = "No such document")
+    ),
+    security(("bearer" = []))
+)]
+async fn document_workflow_history(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    PathParam(id): PathParam<Uuid>,
+    QueryParams(pagination): QueryParams<Pagination>,
+) -> Result<Json<ListEnvelope<WorkflowHistoryEntry>>, AppError> {
+    let (entries, meta) =
+        workflow_instance::history_of_document(&state, &caller, id, &pagination).await?;
+
+    Ok(Json(ListEnvelope::new(entries, meta)))
 }

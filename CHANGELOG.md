@@ -16,9 +16,11 @@ transaction that numbers it; the process generates a task; somebody else
 approves or rejects it from their inbox; and the document's status follows from
 that rather than beside it.
 
-**Upgrading:** two new migrations. `0025_workflow.sql` adds ten tables, three
-constraints and eight permission rows; `0024_one_live_role_per_party.sql`
-tightens one unique index on `mdm_party_roles` (see *Changed*). Both are
+**Upgrading:** four new migrations. `0025_workflow.sql` adds ten tables, three
+constraints and eight permission rows; `0027_workflow_history.sql` adds one
+table; `0024_one_live_role_per_party.sql` tightens one unique index on
+`mdm_party_roles` (see *Changed*); and `0026_form_section_not_its_own_parent.sql`
+adds a self-parent `CHECK` to a table nothing writes yet. Both are
 compatible with the `v0.4.0` binary, which starts against a `v0.5.0` schema —
 the workflow one because it is additive, the index one because `v0.4.0`'s only
 writer into that table holds the party row under `FOR UPDATE` and updates in
@@ -39,6 +41,34 @@ the process. A document of a type that binds no workflow is unaffected, and one
 whose process has finished is transitionable again.
 
 ### Added
+
+- **A workflow history record per transition** (FR-WF-012,
+  [#181](https://github.com/sujanto-gaws/kelir/issues/181)). Every move a
+  process makes writes a row — the submit entering the initial state and every
+  decision after it — carrying both ends, the action, the actor, the task it
+  came from and the timestamp. It is written in the transition's own
+  transaction, from `engine::fire`, which is the one place a process moves: a
+  transition that committed without its history would leave a gap in the answer
+  to *how did this document get here* that nothing could see.
+
+  Read at `GET /api/v1/documents/{id}/workflow/history`, oldest first and
+  **paginated** — a returned-and-resubmitted document accumulates rows without
+  bound. Behind `workflow:instance:read` and deliberately **not**
+  `master-data:audit:read`: this is the document's own account of its progress,
+  shown to the approver deciding it, and requiring the governance permission
+  would refuse it to the people it is for.
+
+  **It is not the audit trail, and Database Schema §7.11 states the
+  relationship** rather than leaving it to be inferred — three tables record
+  something about a workflow event, and history, task history and
+  `audit_events` answer three different questions for three different readers.
+  Neither history is derived from the audit trail: an audit row a user-facing
+  screen depends on becomes an audit row nobody can correct.
+
+  **Append-only by construction.** `workflow_history` has no `deleted_at`,
+  `updated_at` or `updated_by`, so a soft delete has nowhere to write and an
+  edit has nothing to stamp.
+
 
 - **Workflow definitions** (FR-WF-001, 002, 003). Authored as
   [JWSS](docs/schema/JSON%20Workflow%20Schema.md) documents, validated **on
