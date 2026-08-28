@@ -116,10 +116,18 @@ pub async fn assign_role(
     // This used to read the party and its existing role on the pool and then
     // open a transaction to act on what it read — check-then-act across a
     // connection boundary. Two concurrent assignments both read *no such role*
-    // and both inserted, and the database did not catch it because
-    // `uq_mdm_party_roles_party_id_role_type_id_starts_at` includes `starts_at`,
-    // so two rows with different `fromDate` do not collide. It left the party
-    // holding one role twice, 28 times in 30 (#105).
+    // and both inserted, and the database did not catch it because the unique
+    // index of the day included `starts_at`, so two rows with different
+    // `fromDate` did not collide. It left the party holding one role twice, 28
+    // times in 30 (#105).
+    //
+    // The index no longer includes it: `uq_mdm_party_roles_party_id_role_type_id`
+    // is `(party_id, role_type_id) WHERE deleted_at IS NULL` as of #115, so the
+    // second insert is refused whatever date it carries. **The lock is still
+    // what makes this correct rather than merely safe.** Without it the loser of
+    // the race gets a unique violation, which is a 500 for a request that did
+    // nothing wrong; with it the loser waits, reads the winner's committed row,
+    // and updates. Belt and braces, in that order.
     //
     // Waiting on the lock rather than trying it, unlike the bootstrap's: both
     // requests are legitimate and both must finish, one creating and one

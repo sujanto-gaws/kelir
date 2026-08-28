@@ -12,6 +12,24 @@
 //! `deleted_at`, and every mutation turned a named test red;
 //! `find_role_type_id` likewise on `tenant_id`.
 //!
+//! **One of those mutations stopped being observable with #115, and saying so
+//! is the point of this paragraph.** `find_live_party_role`'s `tenant_id`
+//! predicate was probed by putting another tenant's row on this party for a
+//! role this party also held, and asserting that assigning was a create rather
+//! than an update of their row. `uq_mdm_party_roles_party_id_role_type_id` is
+//! not tenant-scoped, so that state can no longer be built: the mutant now
+//! passes, because there is nothing for the unscoped query to find. The
+//! predicate stays as defence in depth — the same standing #108 left the
+//! `tenant_id`/`party_id` pair in `update_party_role` on — and the protection
+//! it provided is now structural rather than asserted.
+//! `a_role_row_stamped_with_another_tenant_is_not_mine_to_read_or_remove`
+//! carries the replacement: the database refuses the row outright.
+//!
+//! `find_live_party_role`'s `deleted_at` half is still probed, by
+//! `a_role_ended_and_assigned_again_is_two_rows_and_one_live_one` — a query
+//! that ignored it would update the closed period instead of opening a new
+//! one, answering 200 where the test demands 201.
+//!
 //! `a_party_in_another_tenant_has_no_roles_to_reach` is kept, and now claims
 //! only what it covers: mutating `find_party` is the one thing that turns it
 //! red, because the gate refuses ahead of every query it appears to exercise.
@@ -78,8 +96,13 @@ fn supplier_profile(number: &str) -> Value {
 /// [`supplier_profile`] with a chosen `fromDate`.
 ///
 /// Two assignments that differ only in their date are the shape a concurrency
-/// test needs: the role's unique index includes `starts_at`, so identical dates
-/// collide in the database and hide whatever the service did or did not do.
+/// test needs. The reason changed with #115 and the helper outlived it: while
+/// the role's unique index included `starts_at`, identical dates collided in
+/// the database and hid whatever the service did. The index no longer includes
+/// it, so identical dates would now be caught either way — but they would be
+/// caught *by the index*, and what these tests are about is the lock. Distinct
+/// dates keep the two requests legitimate, so the only thing that can make one
+/// of them fail is the service getting the ordering wrong.
 fn supplier_profile_from(number: &str, from_date: &str) -> Value {
     let mut body = supplier_profile(number);
     body["fromDate"] = json!(from_date);
@@ -302,9 +325,16 @@ async fn an_employee_profile_links_a_department_and_a_manager() {
 
 #[tokio::test]
 async fn assigning_a_role_the_party_already_holds_updates_it_rather_than_doubling_it() {
-    // The unique index covers `starts_at`, so a second assignment with a
-    // different fromDate would be accepted by the database — a party holding
-    // SUPPLIER twice, which nothing downstream could make sense of.
+    // A party holding SUPPLIER twice is something nothing downstream could
+    // make sense of. Until #115 the database would have allowed it — the unique
+    // index covered `starts_at`, so a second assignment with a different
+    // fromDate was a legal second row — and this test was the only thing
+    // asserting that `assign_role` does not write one. It is now the assertion
+    // that the service *updates* rather than the assertion that it must:
+    // `the_database_refuses_a_second_live_role_of_the_same_type` covers the
+    // must. The difference matters, because an `assign_role` that inserted
+    // blindly would now fail loudly instead of quietly doubling the row, and a
+    // reader should not have to infer which of the two this test caught.
     let app = TestApp::spawn().await;
     let token = app.administrator_token().await;
     let party = create_party(&app, &token, party_group("PARTY-ACME", "Acme")).await;
@@ -900,9 +930,11 @@ async fn a_role_row_stamped_with_another_tenant_is_not_mine_to_read_or_remove() 
     let supplier = role_type_id(&app, "SUPPLIER").await;
     let foreign_role = Uuid::now_v7();
 
-    // A `starts_at` of its own: `uq_mdm_party_roles_party_id_role_type_id_starts_at`
-    // does not include the tenant, so a row sharing this party's date would
-    // collide with the assignment below and hide what the service did.
+    // A `starts_at` of its own, which until #115 was what kept this row from
+    // colliding with an assignment of ours. The key no longer includes the
+    // date, so the two can only coexist while this party holds no live
+    // SUPPLIER of its own — which is the state the three probes below run in,
+    // and the fourth probe is rebuilt around that.
     sqlx::query(
         "INSERT INTO mdm_party_roles (id, tenant_id, party_id, role_type_id, starts_at)
          VALUES ($1, $2, $3, $4, TIMESTAMPTZ '2025-01-01T00:00:00Z')",
@@ -935,25 +967,43 @@ async fn a_role_row_stamped_with_another_tenant_is_not_mine_to_read_or_remove() 
         "removing a role this party does not hold closed another tenant's row"
     );
 
-    // `find_live_party_role`: assigning is a create, because what exists is not
-    // this tenant's. A 200 here would mean the service had updated their row.
-    let assigned = app
-        .put(
-            &role_path(party, "SUPPLIER"),
-            Some(&token),
-            supplier_profile("SUP-0001"),
-        )
-        .await;
-    assert_eq!(
-        assigned.status,
-        StatusCode::CREATED,
-        "the assignment updated another tenant's role row: {}",
-        assigned.body
+    // `find_live_party_role`: this used to assign over the top of their row and
+    // assert a 201 rather than a 200 — the service treating their row as
+    // absent. **That probe is unconstructible since #115** and is not quietly
+    // dropped: `uq_mdm_party_roles_party_id_role_type_id` is not tenant-scoped,
+    // so their row and ours cannot both be live on one party and role type. The
+    // database refuses the state the probe needed.
+    //
+    // What replaces it is stronger than what it proved. The old assertion said
+    // the service's tenant filter ignores their row; this says the row cannot
+    // sit beside ours at all, which is the same protection without depending on
+    // a predicate anyone can forget to write.
+    let refused = sqlx::query(
+        "INSERT INTO mdm_party_roles (id, tenant_id, party_id, role_type_id, starts_at)
+         VALUES ($1, (SELECT tenant_id FROM mdm_parties WHERE id = $2), $2, $3, now())",
+    )
+    .bind(Uuid::now_v7())
+    .bind(party)
+    .bind(supplier)
+    .execute(&app.pool)
+    .await
+    .expect_err("our own live SUPPLIER row was accepted beside another tenant's");
+
+    assert!(
+        refused
+            .as_database_error()
+            .is_some_and(|error| error.is_unique_violation()),
+        "the second live row was refused, but not by the unique index: {refused}"
     );
-    assert_eq!(listed_roles(&app, &token, party).await, vec!["SUPPLIER"]);
+
+    // Their row is untouched by the refusal, and this party still holds nothing.
     assert!(
         !is_closed(&app, foreign_role).await,
-        "the assignment rewrote another tenant's role row"
+        "the refused insert closed another tenant's role row"
+    );
+    assert!(
+        listed_roles(&app, &token, party).await.is_empty(),
+        "the refused insert left this party holding a role"
     );
 }
 
@@ -1477,6 +1527,217 @@ async fn live_roles(app: &TestApp, party: Uuid) -> i64 {
     .expect("query runs")
 }
 
+// ---------------------------------------------------------------------------
+// One live role per party per role type (#115)
+// ---------------------------------------------------------------------------
+
+/// The guard from `0024_one_live_role_per_party.sql`, lifted out of the file
+/// rather than copied into this one.
+///
+/// A copy would go on passing while the migration's own SQL drifted away from
+/// it, which is the failure a test of a migration is most likely to have.
+/// `include_str!` makes the two the same text by construction.
+fn migration_guard() -> &'static str {
+    const MIGRATION: &str = include_str!("../migrations/0024_one_live_role_per_party.sql");
+
+    let start = MIGRATION
+        .find("DO $$")
+        .expect("0024 no longer opens its guard with `DO $$`");
+    let end = MIGRATION[start..]
+        .find("$$;")
+        .expect("0024's guard no longer closes with `$$;`")
+        + "$$;".len();
+
+    &MIGRATION[start..start + end]
+}
+
+#[tokio::test]
+async fn the_database_refuses_a_second_live_role_of_the_same_type() {
+    // #115 acceptance criterion 2, and it is written against the database
+    // rather than the route on purpose. `assign_role` holds the party row under
+    // `FOR UPDATE` and updates in place, so no request it accepts can produce a
+    // second live row — which means a test that went through the service would
+    // pass against an index that had never changed. This inserts the row the
+    // service will not.
+    //
+    // The date is deliberately different from the assignment's. Under the old
+    // key that made the row legal; under `uq_mdm_party_roles_party_id_role_type_id`
+    // it makes no difference, which is the whole change.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let party = create_party(&app, &token, party_group("PARTY-ACME", "Acme")).await;
+    let supplier = role_type_id(&app, "SUPPLIER").await;
+
+    let assigned = app
+        .put(
+            &role_path(party, "SUPPLIER"),
+            Some(&token),
+            supplier_profile("SUP-0001"),
+        )
+        .await;
+    assert_eq!(assigned.status, StatusCode::CREATED, "{}", assigned.body);
+
+    let refused = sqlx::query(
+        "INSERT INTO mdm_party_roles (id, tenant_id, party_id, role_type_id, starts_at)
+         VALUES ($1, (SELECT tenant_id FROM mdm_parties WHERE id = $2), $2, $3,
+                 TIMESTAMPTZ '2025-01-01T00:00:00Z')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(party)
+    .bind(supplier)
+    .execute(&app.pool)
+    .await
+    .expect_err("the database accepted a second live SUPPLIER row for one party");
+
+    assert!(
+        refused
+            .as_database_error()
+            .is_some_and(|error| error.is_unique_violation()),
+        "the second live row was refused, but not by the unique index: {refused}"
+    );
+
+    assert_eq!(
+        live_roles(&app, party).await,
+        1,
+        "the refused insert left the party holding SUPPLIER more than once"
+    );
+}
+
+#[tokio::test]
+async fn a_role_ended_and_assigned_again_is_two_rows_and_one_live_one() {
+    // The case that made `starts_at` look load-bearing, and the reason it was
+    // not: a party that was a supplier, stopped, and started again keeps both
+    // periods. The earlier one carries `deleted_at`, so the partial index does
+    // not see it and the second assignment is not a collision.
+    //
+    // Without this the migration would rest on a doc comment. `remove_role`
+    // setting `deleted_at` alongside `ends_at` is the entire reason the tighter
+    // key is safe, and nothing else here would fail if it stopped doing so.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let party = create_party(&app, &token, party_group("PARTY-ACME", "Acme")).await;
+
+    let first = app
+        .put(
+            &role_path(party, "SUPPLIER"),
+            Some(&token),
+            supplier_profile("SUP-0001"),
+        )
+        .await;
+    assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
+
+    assert_eq!(
+        app.delete(&role_path(party, "SUPPLIER"), Some(&token))
+            .await
+            .status,
+        StatusCode::NO_CONTENT
+    );
+
+    let again = app
+        .put(
+            &role_path(party, "SUPPLIER"),
+            Some(&token),
+            supplier_profile("SUP-0002"),
+        )
+        .await;
+    assert_eq!(
+        again.status,
+        StatusCode::CREATED,
+        "re-assigning an ended role was refused — the closed period collided with the new one: {}",
+        again.body
+    );
+
+    assert_eq!(
+        live_roles(&app, party).await,
+        1,
+        "the party holds SUPPLIER more than once after being re-assigned it"
+    );
+
+    let all: i64 = sqlx::query_scalar("SELECT count(*) FROM mdm_party_roles WHERE party_id = $1")
+        .bind(party)
+        .fetch_one(&app.pool)
+        .await
+        .expect("query runs");
+    assert_eq!(
+        all, 2,
+        "the ended period was overwritten rather than kept beside the new one"
+    );
+}
+
+#[tokio::test]
+async fn the_migration_guard_names_a_duplicate_rather_than_repairing_it() {
+    // #115 acceptance criterion 4. The migration refuses to choose which of two
+    // live assignments is the real one — they differ in `starts_at`, `comments`
+    // and `attributes_json`, and one profile sits behind both — so it names
+    // them and stops, exactly as `0018` does for a duplicated party code.
+    //
+    // Building the state it looks for means taking the index off first, which
+    // is what the migration itself does after the guard runs. The whole thing
+    // is a transaction that rolls back, and each test owns its database, so no
+    // other test sees the schema move.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let party = create_party(&app, &token, party_group("PARTY-ACME", "Acme")).await;
+    let supplier = role_type_id(&app, "SUPPLIER").await;
+
+    app.put(
+        &role_path(party, "SUPPLIER"),
+        Some(&token),
+        supplier_profile("SUP-0001"),
+    )
+    .await;
+
+    let mut transaction = app.pool.begin().await.expect("open a transaction");
+
+    sqlx::query("DROP INDEX uq_mdm_party_roles_party_id_role_type_id")
+        .execute(&mut *transaction)
+        .await
+        .expect("drop the index the migration creates");
+
+    sqlx::query(
+        "INSERT INTO mdm_party_roles (id, tenant_id, party_id, role_type_id, starts_at)
+         VALUES ($1, (SELECT tenant_id FROM mdm_parties WHERE id = $2), $2, $3,
+                 TIMESTAMPTZ '2025-01-01T00:00:00Z')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(party)
+    .bind(supplier)
+    .execute(&mut *transaction)
+    .await
+    .expect("seed the duplicate the guard exists to find");
+
+    let raised = sqlx::query(migration_guard())
+        .execute(&mut *transaction)
+        .await
+        .expect_err("the guard passed a database holding one role twice");
+
+    let message = raised
+        .as_database_error()
+        .map(|error| error.message().to_owned())
+        .unwrap_or_default();
+
+    assert!(
+        message.contains("issue #115"),
+        "the guard raised something other than its own exception: {message}"
+    );
+    assert!(
+        message.contains(&party.to_string()),
+        "the guard refused without naming the offending party, which is what makes it actionable: {message}"
+    );
+
+    transaction
+        .rollback()
+        .await
+        .expect("roll back the dropped index");
+
+    // The rollback took the seeded duplicate with it, and the index is back.
+    assert_eq!(
+        live_roles(&app, party).await,
+        1,
+        "the transaction leaked its duplicate into the database"
+    );
+}
+
 #[tokio::test]
 async fn two_concurrent_assignments_leave_the_party_holding_the_role_once() {
     // #105, and the reason it is written as a loop rather than as one attempt:
@@ -1485,10 +1746,14 @@ async fn two_concurrent_assignments_leave_the_party_holding_the_role_once() {
     // evidence**, so this runs the race twenty times and every round has to
     // hold.
     //
-    // The two requests carry different `fromDate` values on purpose. The unique
-    // index includes `starts_at`, so identical dates would collide in the
-    // database and the service would look correct for a reason that is not the
-    // one under test.
+    // The two requests carry different `fromDate` values on purpose, and since
+    // #115 that is about the lock rather than about the index. The index is now
+    // `(party_id, role_type_id)`, so a lost race is refused whatever dates the
+    // two requests carry — which means the count below can no longer tell a
+    // working lock from a missing one on its own. **The status assertion is
+    // what carries the test now**: without the lock the loser takes a unique
+    // violation and answers 500, so a round that ends in two live rows and a
+    // round that ends in a 500 are both failures, and both are checked.
     let app = TestApp::spawn().await;
     let token = app.administrator_token().await;
     given_role_type_without_a_profile(&app, "DISTRIBUTOR").await;
@@ -1573,11 +1838,14 @@ async fn concurrent_assignment_of_a_profiled_role_is_not_a_conflict() {
         let path = role_path(party, "SUPPLIER");
         let number = format!("SUP-{round:04}");
 
-        // Different `fromDate`s, for the same reason as the test above: with
-        // identical ones the *role* index collides and the profile index never
-        // gets the chance to produce the spurious 409 this is about. The first
-        // version of this test sent the same date twice and could not fail —
-        // the mutation that restores the defect left it green.
+        // Different `fromDate`s, for the same reason as the test above. The
+        // original reason was that identical ones made the *role* index collide
+        // so the profile index never got the chance to produce the spurious 409
+        // this is about — the first version of this test sent the same date
+        // twice and could not fail, and the mutation that restores the defect
+        // left it green. Since #115 the role index collides on any date, so the
+        // dates no longer decide which index speaks first; the lock does, by
+        // making sure only one insert is ever attempted.
         let (first, second) = tokio::join!(
             app.put(
                 &path,
@@ -1932,8 +2200,17 @@ async fn deleting_a_party_closes_this_tenants_roles_and_leaves_anothers_alone() 
     .await;
 
     let other_tenant = fixtures::create_tenant(&app.pool, "TNT-002", "Other").await;
-    let supplier = role_type_id(&app, "SUPPLIER").await;
     let foreign_role = Uuid::now_v7();
+
+    // **Their own SUPPLIER role type, not ours.** This used to reuse our role
+    // type id, on the reasoning that a row differing from one of ours only by
+    // `tenant_id` is the strongest probe available. Since #115 that row cannot
+    // exist beside the assignment above, and the substitute costs this test
+    // nothing: `soft_delete_party_roles` closes by `(tenant_id, party_id)` and
+    // never looks at the role type at all, so its tenant predicate is still the
+    // only thing standing between the sweep and this row. The probe is intact;
+    // only the fixture moved.
+    let their_supplier = given_foreign_role_type(&app, other_tenant, "SUPPLIER").await;
 
     sqlx::query(
         "INSERT INTO mdm_party_roles (id, tenant_id, party_id, role_type_id, starts_at)
@@ -1942,7 +2219,7 @@ async fn deleting_a_party_closes_this_tenants_roles_and_leaves_anothers_alone() 
     .bind(foreign_role)
     .bind(other_tenant)
     .bind(party)
-    .bind(supplier)
+    .bind(their_supplier)
     .execute(&app.pool)
     .await
     .expect("insert the other tenant's role row");
