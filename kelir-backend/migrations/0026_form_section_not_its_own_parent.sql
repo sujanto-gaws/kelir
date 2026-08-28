@@ -1,0 +1,49 @@
+-- 0026_form_section_not_its_own_parent.sql — the one hop a constraint can
+-- express, on the second of the two RAD hierarchies (#191).
+--
+-- `0014_rad.sql` created two self-referencing trees and guarded one of them:
+--
+--   * `rad_menus.parent_menu_id` carries `ck_rad_menus_not_its_own_parent`.
+--   * `rad_form_sections.parent_section_id` carries nothing at all.
+--
+-- The asymmetry was not a decision. #191 records it as part of a larger hazard
+-- and `0014`'s own header names both columns in the same breath; the constraint
+-- simply went on one of them. This puts the same one on the other, so the two
+-- tables say the same thing about the same shape.
+--
+-- **This does not close #191, and must not be read as closing it.** A ring of
+-- three is still creatable and no `CHECK` can see it — a row-level constraint
+-- sees one row, and a cycle is a property of the path. The real guard is a
+-- depth-bounded ancestor walk inside the writing transaction, which is what
+-- `master_data/service/facility.rs::refuse_cycle` does for `mdm_facilities`
+-- (#141, #133, #134) and what `organization/department.rs` now does for
+-- `departments` — the fresher template of the two, and the one a reader should
+-- copy.
+--
+-- **It has no service to live in yet, which is why it is still deferred rather
+-- than written here.** Nothing in the backend writes either RAD column: no
+-- route, no projection, no seed. #191 says it in the form that matters — *a
+-- check nothing calls is a check nobody maintains* — and it closes when the
+-- menu configuration surface or the form-section projection lands, whichever
+-- comes first, with the walk built beside the writer rather than ahead of it.
+--
+-- **So why add this now, if the walk is deferred?** Because a `CHECK` is not a
+-- check that needs calling. The database applies it to every write there will
+-- ever be, including the first one from a surface nobody has written yet, and
+-- it costs one line to have the self-parent case already refused when that
+-- surface arrives. It is the half that needs no caller.
+--
+-- **N−1 compatibility — schema half.** No column changes, nothing dropped or
+-- renamed, and every query the previous release holds still type-checks. The
+-- constraint cannot reject a write the previous binary makes, because that
+-- binary makes none: `rad_form_sections` has no writer in any released version.
+-- The table is empty in every deployment for the same reason, so the
+-- constraint validates against nothing and takes no meaningful lock.
+--
+-- No guard block, unlike `0018` and `0024`. Those tightened keys over tables
+-- holding rows somebody may have written; this one cannot fail on existing
+-- data, because there is none and there is no path by which there could be.
+
+ALTER TABLE rad_form_sections
+    ADD CONSTRAINT ck_rad_form_sections_not_its_own_parent
+    CHECK (parent_section_id IS DISTINCT FROM id);
