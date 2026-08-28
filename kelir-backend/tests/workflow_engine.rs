@@ -985,6 +985,153 @@ async fn concurrent_decisions_on_one_task_resolve_to_exactly_one_outcome() {
     assert_eq!(stored_status(&app, id).await, expected_document_status);
 }
 
+// ---------------------------------------------------------------------------
+// DEPARTMENT_ROLE — the department half of the grant
+// ---------------------------------------------------------------------------
+
+/// A workflow whose task is offered to a role **within one named department**.
+fn department_workflow(key: &str, department_code: &str) -> Value {
+    let mut definition = role_workflow(key);
+
+    definition["states"][0]["task"]["assignment"] = json!({
+        "assigneeType": "DEPARTMENT_ROLE",
+        "roleCode": APPROVER_ROLE,
+        "departmentScope": department_code,
+    });
+
+    definition
+}
+
+/// A department, by code.
+async fn department(app: &TestApp, code: &str, name: &str) -> Uuid {
+    let id = Uuid::now_v7();
+
+    sqlx::query(
+        "INSERT INTO departments (id, tenant_id, department_code, name)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(id)
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .bind(code)
+    .bind(name)
+    .execute(&app.pool)
+    .await
+    .expect("insert the department");
+
+    id
+}
+
+/// Scopes a user's approver grant to one department.
+///
+/// `user_roles.department_id` is the "optional department-scoped grant" `0002`
+/// created and [JSON Workflow Schema](../../docs/schema/JSON%20Workflow%20Schema.md)
+/// §5.3 names as the column `DEPARTMENT_ROLE` resolves against.
+async fn scope_grant_to(app: &TestApp, username: &str, department: Uuid) {
+    let updated = sqlx::query(
+        "UPDATE user_roles SET department_id = $1
+          WHERE user_id = (SELECT id FROM users WHERE username = $2)",
+    )
+    .bind(department)
+    .bind(username)
+    .execute(&app.pool)
+    .await
+    .expect("scope the grant");
+
+    assert_eq!(
+        updated.rows_affected(),
+        1,
+        "the approver's grant was not scoped — the fixture is not testing what it says"
+    );
+}
+
+/// **A `DEPARTMENT_ROLE` task is decided by an approver from another department.**
+///
+/// [JSON Workflow Schema](../../docs/schema/JSON%20Workflow%20Schema.md) §5.3 is
+/// explicit about what this assignee type resolves against — *"`roles` plus
+/// `user_roles.department_id`, which has carried a department-scoped grant since
+/// `0002`"* — and §5.1's own worked example is a `FINANCE_APPROVER` scoped to
+/// `REQUESTED_DEPARTMENT`.
+///
+/// The resolver honours it: `assignment::resolve` looks the department up,
+/// refuses a code that names no live department, and stores the id on the task
+/// as `candidate_department_id`. **Nothing reads it after that.**
+/// `repository::task::holds_role` filters on `user_roles` by tenant, user, role
+/// and validity window and not by department, and the inbox's candidate arm
+/// matches `candidate_role_id` alone. So the column is written, displayed, and
+/// never enforced.
+///
+/// A mutation campaign over `WHERE` predicates cannot find this: the defect is
+/// an **absent** predicate rather than a wrong one, and there is no clause to
+/// mutate. That is why 34 mutations at 68% red went past it, and why
+/// [record 08](../../projects/verifications/08.%20Sprint%2010%20Independent%20Pass.md)
+/// exists.
+///
+/// **Quarantined red, not green.** This test states the behaviour
+/// [JWSS](../../docs/schema/JSON%20Workflow%20Schema.md) §5.3 specifies, and it
+/// fails today — the approver from the wrong department gets `200` and the
+/// document reaches `COMPLETED`. It is committed rather than left in the issue
+/// so that the defect is executable, following the quarantine `identity_users.rs`
+/// used for the tenant boundary: the `#[ignore]` names the condition that lifts
+/// it, and **#225 closing is that condition**. Remove the attribute in the same
+/// change as the fix, and add the positive case beside it — a Finance-scoped
+/// approver *can* decide — so the fix cannot be "refuse everyone".
+#[tokio::test]
+#[ignore = "red until #225: candidate_department_id is written by the resolver and read by no check"]
+async fn a_department_scoped_task_is_not_decidable_from_another_department() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let finance = department(&app, "DEPT-FIN", "Finance").await;
+    let procurement = department(&app, "DEPT-PROC", "Procurement").await;
+
+    // The task is offered to the approver role *in Finance*.
+    let workflow = publish_workflow(
+        &app,
+        &token,
+        department_workflow("wf_department_scope", "DEPT-FIN"),
+    )
+    .await;
+    let type_id = document_type(&app, &token, "PR_DEPT_SCOPE", Some(workflow)).await;
+
+    // This approver holds the role, but their grant is Procurement's.
+    let outsider = approver(&app, "wf.procurement").await;
+    scope_grant_to(&app, "wf.procurement", procurement).await;
+
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let task = open_task_of(&app, id).await;
+
+    // The resolver did its half: the task carries Finance.
+    let carried: Option<Uuid> =
+        sqlx::query_scalar("SELECT candidate_department_id FROM workflow_tasks WHERE id = $1")
+            .bind(task)
+            .fetch_one(&app.pool)
+            .await
+            .expect("read the task's department");
+    assert_eq!(
+        carried,
+        Some(finance),
+        "the assignment did not record the department it resolved"
+    );
+
+    let refused = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&outsider),
+            json!({ "action": "APPROVE" }),
+        )
+        .await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::FORBIDDEN,
+        "an approver whose grant is Procurement's decided a task scoped to Finance: {}",
+        refused.body
+    );
+    assert_eq!(stored_status(&app, id).await, "PENDING_APPROVAL");
+}
+
 /// **Only the task's assignee, or a holder of the role it is offered to, may
 /// decide it** ([#177] AC5).
 ///
