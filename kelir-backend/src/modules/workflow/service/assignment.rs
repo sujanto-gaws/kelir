@@ -49,6 +49,7 @@
 use uuid::Uuid;
 
 use super::super::domain::{AssigneeType, AssignmentRule};
+use super::super::repository::task as task_repo;
 use crate::error::{AppError, ValidationDetail};
 
 /// What the task row's three assignment columns are set to.
@@ -97,6 +98,60 @@ pub struct AssignmentContext {
     pub requested_department_id: Option<Uuid>,
     /// The owner's own department, for `OWNER_DEPARTMENT`.
     pub owner_department_id: Option<Uuid>,
+}
+
+/// Whether `actor` satisfies an assignment rule.
+///
+/// **The other question a rule can be asked.** [`resolve`] asks *who is this
+/// for*, and its answer is written onto a task. This asks *may this person take
+/// this edge*, and its answer is a yes or a no — [JWSS](../../../../../docs/schema/JSON%20Workflow%20Schema.md)
+/// §4's `allowedBy`, which S5 requires on every non-`AUTO` transition and which
+/// nothing read until [#226](https://github.com/sujanto-gaws/kelir/issues/226).
+///
+/// **It is built on `resolve` rather than beside it**, which is the whole point:
+/// `OWNER`, `USER`, `ROLE` and `DEPARTMENT_ROLE` mean the same thing on an edge
+/// as they do on a task, because the same function decides what they mean. A
+/// second resolver would be a second dialect on the surface that decides who
+/// approves an invoice — the failure **D-10** was paid to avoid one layer down.
+/// It also inherits [#225](https://github.com/sujanto-gaws/kelir/issues/225)'s
+/// fix for free: a `DEPARTMENT_ROLE` edge is checked against both halves of the
+/// grant because [`task_repo::holds_role`] is the same one the decision uses.
+///
+/// **An actorless caller is refused when a rule names anybody.** Nothing
+/// reaches here without an actor today — `fire`'s only caller is a decision —
+/// and an edge that declares who may take it, taken by nobody identifiable, is
+/// the case the declaration exists to prevent. `AUTO` transitions are not an
+/// exception waiting to happen: S5 forbids them an `allowedBy` at all, so they
+/// arrive here as `None` and never call this.
+pub async fn permits(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    rule: &AssignmentRule,
+    context: AssignmentContext,
+    actor: Option<Uuid>,
+    path: &str,
+) -> Result<bool, AppError> {
+    let Some(actor) = actor else {
+        return Ok(false);
+    };
+
+    let resolved = resolve(transaction, tenant_id, rule, context, path).await?;
+
+    if resolved.assignee_user_id == Some(actor) {
+        return Ok(true);
+    }
+
+    match resolved.candidate_role_id {
+        Some(role_id) => Ok(task_repo::holds_role(
+            &mut **transaction,
+            tenant_id,
+            actor,
+            role_id,
+            resolved.candidate_department_id,
+        )
+        .await?),
+        None => Ok(false),
+    }
 }
 
 /// A rule, resolved to the row a task is written with.

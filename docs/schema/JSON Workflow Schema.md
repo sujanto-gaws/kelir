@@ -150,6 +150,12 @@ Refused at **save** rather than at run time, for the reason JFSS gives about a s
 
 The same applies to `guards` and `actions`: they are **stored and not executed** as of `v0.5.0`, because there is no hook chain to merge them into (architectures/01 §12.4.2 is unbuilt). They are accepted rather than refused so that definitions authored now do not have to be rewritten when the chain lands, and the workflow engine states in one place that it does not invoke them — a stored handler must not be read as evidence that it runs.
 
+**`allowedBy` is enforced**, and this sentence exists because for one release it was not. It was parsed, validated here at save, projected to `workflow_transitions.allowed_by_json` and read by nothing ([#226](https://github.com/sujanto-gaws/kelir/issues/226)) — a control that looked like the one beside it and was the one above it. The engine now checks the chosen transition's rule against the actor before it moves the instance, using the same resolver a task's `assignment` uses, so the four resolvable assignee types mean the same thing on an edge as on a task.
+
+**It authorizes; it does not select.** Where a state offers two transitions for one action, `condition` chooses between them (S7, fallback last) and `allowedBy` is then applied to the one chosen. A caller who may not take that edge is refused rather than routed down the next — an approver silently taking a branch the definition did not point them at is a worse outcome than the refusal, because a rejection routed as a return reads as their own decision.
+
+**A task's `assignment` and a transition's `allowedBy` are two controls and both apply.** They coincide in the common shape and §8's example has them differ: a `RESUBMIT` out of `RETURNED`, a state that declares no task at all.
+
 ---
 
 ## 6. Conditions and Variables

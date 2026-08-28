@@ -25,6 +25,23 @@
 //! defect no single-threaded test can see — which is why it is a rule stated
 //! here rather than an observation about the current code.
 //!
+//! # A task's `assignment` and a transition's `allowedBy` are two controls
+//!
+//! Both apply, and neither substitutes for the other. `assignment` says who the
+//! *task* is for and is checked by [`super::task::decide`] before it calls in
+//! here; `allowedBy` says who may take the *edge* and is checked below, against
+//! the transition actually chosen. They coincide in the common shape — a state
+//! whose task and whose outgoing transitions name the same role — and JWSS's own
+//! example has them differ, with a `RESUBMIT` out of a state that declares no
+//! task at all.
+//!
+//! `allowedBy` was parsed, validated at save and projected to
+//! `workflow_transitions.allowed_by_json` and **read by nothing** until
+//! [#226](https://github.com/sujanto-gaws/kelir/issues/226). It was latent
+//! rather than open: `fire` has one caller, so every transition was reached
+//! through a decision the task's own assignment had already gated. The return
+//! action is what would have made it live, and this landed first.
+//!
 //! # `guards` and `actions` are stored and not executed
 //!
 //! JWSS §7 declares them as hook registration entries merged into the
@@ -302,6 +319,25 @@ pub async fn fire(
             Some(condition) => holds(condition, evaluation, actor),
         })
         .ok_or_else(|| no_transition(graph, from_state, action))?;
+
+    // **`allowedBy` authorizes; it does not select** (#226). The edge is chosen
+    // by `condition` — S7, fallback last — and *then* the actor is checked
+    // against it. Letting the check pick a different edge instead would mean an
+    // approver silently taking a branch the definition did not point them at,
+    // which is a worse failure than the refusal: a rejection routed as a return
+    // reads as the approver's own decision.
+    //
+    // Refused as a 403 rather than a 422, and it is the same 403
+    // `refuse_unless_theirs` gives one module over. Nothing about the request
+    // is malformed — this caller may work tasks, and may work *this* task — so
+    // what is wrong is who they are, not what they sent.
+    if let Some(rule) = &chosen.allowed_by {
+        let path = format!("transitions.{from_state}.{}.allowedBy", action.as_db());
+
+        if !assignment::permits(transaction, tenant_id, rule, context, actor, &path).await? {
+            return Err(AppError::Forbidden);
+        }
+    }
 
     let target = graph.state(&chosen.to).ok_or_else(|| AppError::Internal {
         source: anyhow::anyhow!(

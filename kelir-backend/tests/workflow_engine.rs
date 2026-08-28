@@ -986,6 +986,145 @@ async fn concurrent_decisions_on_one_task_resolve_to_exactly_one_outcome() {
 }
 
 // ---------------------------------------------------------------------------
+// allowedBy — the edge's own control (#226)
+// ---------------------------------------------------------------------------
+
+/// [`role_workflow`] with its **APPROVE edge** handed to a different role than
+/// the task.
+///
+/// The shape that separates the two controls: the state's task is offered to
+/// `APPROVER_ROLE`, so a holder of that role may work the task, and the APPROVE
+/// transition out of it is `allowedBy` somebody else. REJECT is left alone, so
+/// one task carries one edge the caller may take and one they may not.
+fn split_control_workflow(key: &str, edge_role: &str) -> Value {
+    let mut definition = role_workflow(key);
+
+    definition["transitions"][0]["allowedBy"] = json!(format!("ROLE:{edge_role}"));
+
+    definition
+}
+
+/// A role that exists and grants nothing, so `allowedBy` resolves and the
+/// refusal is the check's rather than the resolver's.
+async fn given_bare_role(app: &TestApp, code: &str) -> Uuid {
+    fixtures::create_role_with_permissions(&app.pool, fixtures::SYSTEM_TENANT_ID, code, &[]).await
+}
+
+/// **A transition the task permits and `allowedBy` does not is refused** (#226).
+///
+/// The task's `assignment` and the transition's `allowedBy` are two controls and
+/// both apply. This caller passes the first — they hold the role the task is
+/// offered to, and `refuse_unless_theirs` lets them through — and fails the
+/// second on the APPROVE edge only.
+///
+/// **REJECT from the same task still succeeds**, which is the assertion that
+/// makes this about the edge rather than about the task. A check that had landed
+/// on the task by mistake would refuse both.
+///
+/// **Seen red** (coding standard §2.9) against the `allowed_by` block removed
+/// from `engine::fire`: the approver takes an edge the definition handed to
+/// somebody else and the document reaches `COMPLETED`.
+#[tokio::test]
+async fn a_transition_the_task_permits_but_allowed_by_refuses_is_forbidden() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    given_bare_role(&app, "WF-EDGE-ONLY").await;
+    let approver = approver(&app, "wf.taskonly").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &token,
+        split_control_workflow("wf_allowed_by", "WF-EDGE-ONLY"),
+    )
+    .await;
+    let type_id = document_type(&app, &token, "PR_ALLOWED_BY", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let task = open_task_of(&app, id).await;
+    let decision = format!("/api/v1/workflow/tasks/{task}/decision");
+
+    let refused = app
+        .post(&decision, Some(&approver), json!({ "action": "APPROVE" }))
+        .await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::FORBIDDEN,
+        "the approver took an APPROVE edge the definition handed to another role: {}",
+        refused.body
+    );
+    assert_eq!(stored_status(&app, id).await, "PENDING_APPROVAL");
+
+    // The other edge out of the same state, which this caller *is* allowed.
+    let rejected = app
+        .post(&decision, Some(&approver), json!({ "action": "REJECT" }))
+        .await;
+
+    assert_eq!(
+        rejected.status,
+        StatusCode::OK,
+        "the refusal reached an edge it was not about: {}",
+        rejected.body
+    );
+    assert_eq!(stored_status(&app, id).await, "REJECTED");
+}
+
+/// The other half: **the role the edge names can take it.**
+///
+/// Without this, `a_transition_the_task_permits_but_allowed_by_refuses_is_forbidden`
+/// passes against a check that refuses everybody, which would make every
+/// `allowedBy` a dead end rather than a control.
+#[tokio::test]
+async fn a_transition_is_taken_by_the_role_its_allowed_by_names() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let edge_role = given_bare_role(&app, "WF-EDGE-ONLY").await;
+
+    // Holds the task's role and the edge's, which is the deployment that works.
+    let both = approver(&app, "wf.both").await;
+    sqlx::query(
+        "INSERT INTO user_roles (id, tenant_id, user_id, role_id)
+         SELECT gen_random_uuid(), $1, u.id, $2 FROM users u WHERE u.username = 'wf.both'",
+    )
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .bind(edge_role)
+    .execute(&app.pool)
+    .await
+    .expect("grant the edge role");
+
+    let workflow = publish_workflow(
+        &app,
+        &token,
+        split_control_workflow("wf_allowed_by_ok", "WF-EDGE-ONLY"),
+    )
+    .await;
+    let type_id = document_type(&app, &token, "PR_ALLOWED_BY_OK", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let task = open_task_of(&app, id).await;
+
+    let approved = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&both),
+            json!({ "action": "APPROVE" }),
+        )
+        .await;
+
+    assert_eq!(
+        approved.status,
+        StatusCode::OK,
+        "the role the edge names was refused its own transition: {}",
+        approved.body
+    );
+    assert_eq!(stored_status(&app, id).await, "COMPLETED");
+}
+
+// ---------------------------------------------------------------------------
 // DEPARTMENT_ROLE — the department half of the grant
 // ---------------------------------------------------------------------------
 
