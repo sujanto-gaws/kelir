@@ -377,5 +377,20 @@ pub struct WorkflowHistoryEntry {
     pub comment: Option<String>,
     pub actor_user_id: Option<Uuid>,
     pub actor_username: Option<String>,
+    /// Whose authority the actor was exercising, where a delegation put the
+    /// task in their hands ([#184] AC4).
+    ///
+    /// **The reason the history is where the pair is recorded** rather than
+    /// `approval_decisions`: §7.8 is the formal record and its approver is the
+    /// one who signed, while this is the account somebody reads to answer *who
+    /// approved this, and on whose authority*. A delegated approval that showed
+    /// only the delegate would answer the first half and lose the second, which
+    /// is the accountability delegation was supposed to preserve.
+    ///
+    /// `None` on every row nobody was standing in for.
+    ///
+    /// [#184]: https://github.com/sujanto-gaws/kelir/issues/184
+    pub on_behalf_of_user_id: Option<Uuid>,
+    pub on_behalf_of_username: Option<String>,
     pub occurred_at: DateTime<Utc>,
 }

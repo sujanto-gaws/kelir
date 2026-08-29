@@ -128,6 +128,10 @@ Used by `transitions[].allowedBy`, `task.assignment`, and `task.escalation.assig
 
 Delegation windows (`delegations`, Database Schema §3.8) are applied by the assignment resolver after the rule resolves; they are not part of the rule.
 
+A window applies **only where the rule resolves to a person** — `USER` or `OWNER`. A `ROLE` or `DEPARTMENT_ROLE` assignment produces a task with no assignee, offered to everybody who holds the role, and there is no one person's work in it to redirect; redirecting it would turn a queue item into somebody's task at the moment it was created.
+
+A window also does not reach back: a task already assigned when a window opens stays where it is. Handing over work already in somebody's hands is a separate action taken on the task itself (`POST /api/v1/workflow/tasks/{id}/delegation`), which changes who the open task is for and **does not fire a transition**. `DELEGATE` remains in §4's `action` vocabulary and is fired by nothing, for the reason `AUTO` is: a definition may declare such an edge, and no caller reaches it.
+
 ### 5.2 Shorthand Strings
 
 For compactness, `allowedBy` MAY be a string, normalized as:
@@ -316,6 +320,7 @@ This specification is a **`Draft Standard`** ([naming convention](../standards/0
 | Revision | Date | Change |
 | :--- | :--- | :--- |
 | **R-1** | 2026-08-28 | **`transitions[].requiresComment` added** (§4, §4.1, S12), for FR-TASK-006 — [#182](https://github.com/sujanto-gaws/kelir/issues/182). A **strict widening**: the property is optional and defaults to `false`, so every document valid before this revision is valid after it and no stored definition needs rewriting. The §10 example marks its `REJECT` and `RETURN` edges, because those are the edges the property exists for. |
+| **R-2** | 2026-08-29 | **§5.1 says what a delegation window does and does not do**, for FR-IDM-006, FR-WF-009 and FR-TASK-008 — [#184](https://github.com/sujanto-gaws/kelir/issues/184). **No change to the shape**: no property is added, removed or re-typed, and the meta-schema is untouched. What changes is the specification being explicit that a window applies only where the rule resolves to a person, that it does not reach back for tasks already assigned, and that the `DELEGATE` action in §4's vocabulary is still fired by nothing — a reader who knew delegation had been built could otherwise have concluded that such an edge now drives it. |
 
 ---
 

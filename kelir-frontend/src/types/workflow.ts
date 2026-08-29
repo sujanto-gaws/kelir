@@ -84,6 +84,13 @@ export interface WorkflowTask {
   candidateRoleId: string | null
   candidateRoleCode: string | null
   candidateDepartmentId: string | null
+  /**
+   * Whose authority the assignee is exercising (#184).
+   *
+   * Set when a delegation window routed this task past the person the
+   * definition named, and when its holder handed it over.
+   */
+  delegatedFromUserId: string | null
   priority: string
   dueAt: string | null
   action: DecisionAction | null
@@ -109,6 +116,16 @@ export interface InboxTask {
   dueAt: string | null
   assignment: TaskAssignment
   candidateRoleCode: string | null
+  /**
+   * Whose work this is, when the holder is standing in for somebody (#184).
+   *
+   * **A field beside `assignment`, not a third value of it.** A delegated task
+   * is unambiguously mine — it is assigned to me and I am the one who has to
+   * decide it. What is different is whose approval it is, which is a second
+   * sentence on the row rather than a different answer to *is this mine*.
+   */
+  delegatedFromUserId: string | null
+  delegatedFromDisplayName: string | null
   workflowInstanceId: string
   workflowName: string
   currentState: string
@@ -127,11 +144,18 @@ export interface AvailableDecision {
   /**
    * Whether this release can perform it.
    *
-   * A definition may declare `DELEGATE` — FR-WF-009 is #184 — and a screen that
-   * drew a button for it would produce a 422 from a control the product itself
-   * put there. The flag is what lets the screen *show* the edge without
-   * offering it. `RETURN` was the original example and left the list when #183
-   * built it, which is the flag working rather than a reason to remove it.
+   * A definition may declare a transition this release cannot fire, and a
+   * screen that drew a button for it would produce a 422 from a control the
+   * product itself put there. The flag is what lets the screen *show* the edge
+   * without offering it. `RETURN` was the original example and left the list
+   * when #183 built it, which is the flag working rather than a reason to
+   * remove it.
+   *
+   * **`DELEGATE` stays outside this list even now that #184 has built
+   * delegation**, and that is not an oversight. Handing a task to somebody else
+   * does not move the process, so it is not one of the decisions this list
+   * describes; it has its own control on the task screen and its own route. A
+   * `DELEGATE` edge in a definition is still fired by nothing.
    */
   supported: boolean
   /**
@@ -172,6 +196,9 @@ export const TASK_STATUS_LABELS: Record<TaskStatus, string> = {
   ASSIGNED: 'In your queue',
   IN_PROGRESS: 'In progress',
   COMPLETED: 'Done',
+  // Nothing writes it. A delegated task stays `ASSIGNED` — it is an open task
+  // somebody else now holds, and `DELEGATED` would take it out of the open-task
+  // index and out of the inbox. The label is here because the vocabulary is.
   DELEGATED: 'Delegated',
   ESCALATED: 'Escalated',
   CANCELLED: 'Cancelled',
@@ -200,6 +227,15 @@ export interface WorkflowHistoryEntry {
   comment: string | null
   actorUserId: string | null
   actorUsername: string | null
+  /**
+   * Whose authority the actor was exercising (#184 AC4).
+   *
+   * `null` on every entry nobody was standing in for. A delegated approval that
+   * showed only the delegate would lose the accountability delegation exists to
+   * preserve, so the screen renders both names when this is set.
+   */
+  onBehalfOfUserId: string | null
+  onBehalfOfUsername: string | null
   occurredAt: string
 }
 

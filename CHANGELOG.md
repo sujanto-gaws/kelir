@@ -16,9 +16,10 @@ transaction that numbers it; the process generates a task; somebody else
 approves or rejects it from their inbox; and the document's status follows from
 that rather than beside it.
 
-**Upgrading:** four new migrations. `0025_workflow.sql` adds ten tables, three
+**Upgrading:** five new migrations. `0025_workflow.sql` adds ten tables, three
 constraints and eight permission rows; `0027_workflow_history.sql` adds one
-table; `0024_one_live_role_per_party.sql` tightens one unique index on
+table; `0028_delegation.sql` adds one nullable column to it;
+`0024_one_live_role_per_party.sql` tightens one unique index on
 `mdm_party_roles` (see *Changed*); and `0026_form_section_not_its_own_parent.sql`
 adds a self-parent `CHECK` to a table nothing writes yet. Both are
 compatible with the `v0.4.0` binary, which starts against a `v0.5.0` schema —
@@ -41,6 +42,86 @@ the process. A document of a type that binds no workflow is unaffected, and one
 whose process has finished is transitionable again.
 
 ### Added
+
+- **Delegation, end to end** (FR-IDM-006, FR-WF-009, FR-TASK-008,
+  [#184](https://github.com/sujanto-gaws/kelir/issues/184)). Somebody goes on
+  leave and their approvals keep moving. Three surfaces, one item by decision
+  **D-17**: the identity-side **window**, the workflow-side **hand-off**, and the
+  **record** that keeps both names on a decision one person made for another.
+
+  **A window is opened in your own name and nobody else's.**
+  `POST /api/v1/identity/delegations` takes a delegate, a start and an end — and
+  no delegator, because the request type does not have the field. That omission
+  is the security property rather than a UI choice: a holder of
+  `identity:delegation:create` who could name somebody else would be able to
+  point the finance director's approvals at themselves, and the row would look
+  exactly like legitimate cover. Reading and ending are administrative
+  (`identity:delegation:read`, `:delete`), because the window somebody has to be
+  able to find is the one whose owner went on leave without ending it. The
+  `delegations` table has carried its window and not-self checks since
+  `0002_identity.sql`; what arrived here is a writer and — the point of **D-17**
+  scheduling all three requirements together — a reader.
+
+  **The reader sits exactly where JWSS §5.1 says it does.** Sprint 10 left the
+  assignment resolver in two named halves and a paragraph saying a window applies
+  between them ([#176](https://github.com/sujanto-gaws/kelir/issues/176) AC4);
+  `redirect` is now that function, and neither half changed to accommodate it.
+  A task the definition addressed to Ani reaches Budi while the window is open,
+  and the task records that it is still Ani's approval.
+
+  **A window redirects a person's work and never a role's.** A task offered to a
+  role has no assignee to redirect — it is unclaimed, and every other holder is
+  still being offered it — so `ROLE`-scoped windows are refused at creation with
+  that reason rather than stored as rows that would route nothing. `ALL` and
+  `DOCUMENT_TYPE` are honoured, most specific first.
+
+  **Tasks already assigned when a window opens do not move**, and the hand-off is
+  why that is a decision rather than a gap. `POST /api/v1/workflow/tasks/{id}/delegation`
+  gives one open task to somebody else, explicitly, by the person holding it.
+  Opening a window that silently reassigned work already in progress would move
+  approvals out from under people mid-decision on a schedule nobody triggered;
+  a window with no complement would strand those tasks for the length of the
+  leave. **It is not a decision**: nothing about the document is answered and the
+  process does not move, which is why it is its own route rather than a fourth
+  `DecisionAction`, and why it writes to the task's history and not the
+  document's. An unclaimed role task is refused with a 409 saying to claim it
+  first.
+
+  **A delegated decision records both parties** —
+  `workflow_history.on_behalf_of_user_id`, new in `0028_delegation.sql`, rendered
+  in the document workspace as "budi on ani's behalf". It goes on the history and
+  not on `approval_decisions`, whose approver is the signature: a history showing
+  only the delegate answers *who decided* and loses *on whose authority*, which
+  is the accountability delegation exists to preserve. It is read off the task
+  row the server wrote, never off a request, so acting on somebody's behalf is
+  not something a caller can assert.
+
+  **Delegation grants nothing.** The delegate acts with their own account and
+  their own permissions: without `workflow:task:execute` they are refused at the
+  gate, holding a task addressed to them. What the hand-off does give them is the
+  *delegator's* satisfaction of a transition's `allowedBy` — checked against the
+  rule as that person, so they can do what the delegator could and nothing the
+  delegator could not. A second hand-off keeps the original name: the authority
+  being exercised has not changed hands, only the work has.
+
+  **A window stops the moment it is over.** Expired, switched off, or pointing at
+  an account that has since been deactivated — each is a clause in the one
+  statement that routes, so it stops on the next transition rather than on a
+  sweep, and work falls back to the person the definition named.
+
+  **`workflow_tasks.status` gains no new value.** A delegated task stays
+  `ASSIGNED`; `DELEGATED` is in the column's `CHECK` and outside both the
+  one-open-task-per-instance index and the inbox's open filter, so writing it
+  would leave a running process with no open task and hide the work from the
+  person just given it. Who holds a task and where the work has got to are two
+  questions, and `delegated_from_user_id` answers the first.
+
+  **A known limitation, stated rather than hidden:** the "hand it to" picker on
+  the task screen reads the user list, so it needs `identity:user:read` — the
+  narrowest read the identity module has that answers *who could take this*. A
+  deployment that has not granted it to its approvers sees the panel say so
+  instead of opening onto nothing. A narrower "people I may delegate to" read is
+  not built.
 
 - **The return action, and the resubmission that closes the loop** (FR-WF-008,
   [#183](https://github.com/sujanto-gaws/kelir/issues/183)). An approver's third

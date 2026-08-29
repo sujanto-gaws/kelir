@@ -2,13 +2,16 @@
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { claimTask, decideTask, getTask } from '@/api/tasks'
+import { listUsers } from '@/api/identity'
+import { claimTask, decideTask, delegateTask, getTask } from '@/api/tasks'
 import { ApiError } from '@/api/error'
 import { Alert } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
+import { Select } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
+import { useAuthStore } from '@/stores/auth'
 import { DOCUMENT_STATUS_LABELS } from '@/types/document'
 import {
   DECISION_LABELS,
@@ -18,6 +21,7 @@ import {
   type DecisionAction,
   type TaskDetail,
 } from '@/types/workflow'
+import type { User } from '@/types/identity'
 
 /**
  * One task, and what it is asking (FR-TASK-003, 004, 005, 006; #179 AC4, #182).
@@ -31,10 +35,19 @@ import {
  * **The decisions come from the backend, not from a list here.** A workflow's
  * transitions are its own, so a screen that enumerated them would be a screen
  * that only works for the workflows somebody thought of. It also carries
- * `supported`, which is how a transition this release cannot perform —
- * `DELEGATE`, FR-WF-009, #184 — is **shown without being offered**: drawing a
- * button that produces a 422 would be the product refusing a control it drew.
- * `RETURN` left that list when #183 built it.
+ * `supported`, which is how a transition this release cannot fire is **shown
+ * without being offered**: drawing a button that produces a 422 would be the
+ * product refusing a control it drew. `RETURN` left that list when #183 built
+ * it, and `DELEGATE` is still on it — #184 built delegation and deliberately did
+ * not make it a transition, so a definition declaring a `DELEGATE` edge is
+ * declaring one nothing fires.
+ *
+ * # Handing it over is below the decisions, because it is not one
+ *
+ * FR-WF-009, FR-TASK-008 (#184). Nothing about the document is answered and the
+ * process does not move — what changes is who the open task is for. So it is not
+ * a fourth button in that row; it is the thing you do *instead* of deciding, and
+ * it goes through its own route.
  *
  * # The comment is part of the decision, not a step after it
  *
@@ -56,6 +69,7 @@ import {
  */
 const route = useRoute()
 const router = useRouter()
+const auth = useAuthStore()
 
 const task = ref<TaskDetail | null>(null)
 const loading = ref(true)
@@ -66,6 +80,11 @@ const notice = ref('')
 const comment = ref('')
 /** Set when the person pressed a decision that needs a reason and gave none. */
 const missingComment = ref(false)
+
+const handingOver = ref(false)
+const delegateUserId = ref('')
+const handOverReason = ref('')
+const people = ref<User[]>([])
 
 /**
  * Only what this release can perform, one entry per action.
@@ -123,6 +142,97 @@ const open = computed(
 /** Claiming is offered only for work that is going spare. */
 const claimable = computed(() => open.value && task.value?.assignment === 'ROLE')
 
+// ---------------------------------------------------------------------------
+// Handing it over (FR-WF-009, FR-TASK-008; #184)
+// ---------------------------------------------------------------------------
+
+/**
+ * **Only a task that is already yours can be handed on.**
+ *
+ * The server refuses an unclaimed role task with a 409 saying to claim it
+ * first — it has no holder, and giving it to one named person would take it out
+ * of every other holder's queue without anybody asking. The screen draws the
+ * control on the same condition rather than drawing it and being refused.
+ */
+const handOverable = computed(() => open.value && task.value?.assignment === 'MINE')
+
+/**
+ * **The picker borrows `identity:user:read`, and that is a stated limitation.**
+ *
+ * There is no "people I may hand work to" read in the identity module — the
+ * narrowest thing that answers *who could take this* is the user list, which is
+ * an administrative permission. A deployment that has not granted it to its
+ * approvers therefore gets the panel with a sentence saying why it is empty,
+ * rather than a control that opens onto nothing. Inventing a client-side
+ * substitute would be worse: who somebody may hand work to is not this screen's
+ * to decide.
+ */
+const canPickPeople = computed(() => auth.can('identity:user:read'))
+
+const peopleOptions = computed(() =>
+  people.value.map((person) => ({ value: person.id, label: person.displayName })),
+)
+
+async function loadPeople(): Promise<void> {
+  if (people.value.length || !canPickPeople.value) {
+    return
+  }
+
+  try {
+    // One page. A tenant with more people than this needs a search, which is
+    // the same unbuilt read named above rather than a bigger number here.
+    const page = await listUsers({ page: 1, pageSize: 100 })
+
+    people.value = page.items.filter(
+      // Not yourself, and nobody who cannot sign in: the server refuses both,
+      // and offering a choice it declines would be the product drawing a
+      // control it then refuses.
+      (person) => person.id !== auth.user?.id && person.status === 'ACTIVE',
+    )
+  } catch {
+    people.value = []
+  }
+}
+
+function startHandOver(): void {
+  handingOver.value = true
+  problem.value = ''
+  notice.value = ''
+  void loadPeople()
+}
+
+function cancelHandOver(): void {
+  handingOver.value = false
+  delegateUserId.value = ''
+  handOverReason.value = ''
+}
+
+async function handOver(): Promise<void> {
+  if (!task.value || busy.value || !delegateUserId.value) {
+    return
+  }
+
+  busy.value = true
+  problem.value = ''
+  notice.value = ''
+
+  const recipient = people.value.find((person) => person.id === delegateUserId.value)
+
+  try {
+    await delegateTask(task.value.id, delegateUserId.value, handOverReason.value)
+    const id = task.value.id
+    cancelHandOver()
+    await load(id)
+    notice.value = recipient
+      ? `${recipient.displayName} has it now. It is still your approval — the record says so.`
+      : 'Handed over. It is still your approval — the record says so.'
+  } catch (error) {
+    report(error)
+  } finally {
+    busy.value = false
+  }
+}
+
 async function load(id: string): Promise<void> {
   loading.value = true
   failed.value = false
@@ -150,6 +260,7 @@ watch(
   () => route.params.id,
   (id) => {
     comment.value = ''
+    cancelHandOver()
     void load(String(id))
   },
   { immediate: true },
@@ -240,6 +351,16 @@ function openDocument(): void {
         </div>
 
         <div class="flex items-center gap-2">
+          <!-- Whose work it is, when the holder is standing in for somebody
+               (#184). Beside "Mine" rather than instead of it: the task *is*
+               theirs to decide, and whose approval it is is a second fact. -->
+          <Badge
+            v-if="task.delegatedFromDisplayName"
+            variant="secondary"
+            data-testid="task-on-behalf-of"
+          >
+            On {{ task.delegatedFromDisplayName }}’s behalf
+          </Badge>
           <Badge v-if="task.assignment === 'MINE'" data-testid="task-assignment">Mine</Badge>
           <Badge v-else variant="secondary" data-testid="task-assignment">
             Unclaimed{{ task.candidateRoleCode ? ` · ${task.candidateRoleCode}` : '' }}
@@ -340,6 +461,90 @@ function openDocument(): void {
               {{ decision.toStateName }}
               <span v-if="decision.requiresComment" aria-hidden="true"> *</span>
             </Button>
+          </div>
+
+          <!-- Handing it over is not a decision, so it is not in the row of
+               them: nothing about the document is answered and the process does
+               not move. It sits below, as the thing you do *instead* of
+               deciding. (FR-WF-009, FR-TASK-008; #184) -->
+          <div v-if="handOverable" class="mt-4 border-t border-border pt-4">
+            <Button
+              v-if="!handingOver"
+              variant="outline"
+              size="sm"
+              :disabled="busy"
+              data-testid="start-hand-over"
+              @click="startHandOver"
+            >
+              Hand it over…
+            </Button>
+
+            <div v-else class="space-y-3" data-testid="hand-over">
+              <p class="text-sm text-muted-foreground">
+                They decide it in your place. The record keeps your name beside theirs — it is still
+                your approval.
+              </p>
+
+              <p
+                v-if="!canPickPeople"
+                class="text-sm text-destructive"
+                data-testid="hand-over-unavailable"
+              >
+                You cannot see the list of people to hand this to. Ask an administrator for
+                permission to view users.
+              </p>
+
+              <template v-else>
+                <div class="space-y-2">
+                  <Label for="delegate-user">Hand it to</Label>
+                  <Select
+                    id="delegate-user"
+                    v-model="delegateUserId"
+                    :options="peopleOptions"
+                    placeholder="Choose somebody"
+                    :disabled="busy"
+                    data-testid="delegate-user"
+                  />
+                </div>
+
+                <div class="space-y-2">
+                  <Label for="hand-over-reason">
+                    Why
+                    <span class="font-normal text-muted-foreground">(optional)</span>
+                  </Label>
+                  <Textarea
+                    id="hand-over-reason"
+                    v-model="handOverReason"
+                    :rows="2"
+                    :disabled="busy"
+                    described-by="hand-over-reason-help"
+                    placeholder="Off from tomorrow"
+                  />
+                  <p id="hand-over-reason-help" class="text-sm text-muted-foreground">
+                    Recorded against this task, not against the document — nothing has been decided.
+                  </p>
+                </div>
+              </template>
+
+              <div class="flex flex-wrap gap-2">
+                <Button
+                  v-if="canPickPeople"
+                  :disabled="busy || !delegateUserId"
+                  data-testid="confirm-hand-over"
+                  @click="handOver"
+                >
+                  Hand it over
+                </Button>
+                <Button
+                  variant="outline"
+                  :disabled="busy"
+                  data-testid="cancel-hand-over"
+                  @click="cancelHandOver"
+                >
+                  Cancel
+                </Button>
+              </div>
+            </div>
           </div>
 
           <!-- Shown and not offered. A definition may declare a transition this

@@ -29,6 +29,21 @@
 //! API ([#177]), and the buttons that call it are FR-TASK-004/005 in Sprint 11
 //! ([#182]). This module surfaces tasks.
 //!
+//! That sentence was tested by FR-TASK-008. The [System Design Document] planned
+//! task delegation as `POST /tasks/{id}/delegate` — here, under this prefix —
+//! and [#184] put it at `POST /workflow/tasks/{id}/delegation` instead, beside
+//! claim and decision. Two things you can do to a task under one prefix and a
+//! third under another would be a difference with no reason behind it, and this
+//! module would have had to grow a service that writes. The design document was
+//! corrected rather than this boundary bent.
+//!
+//! What *did* arrive here is a field: an inbox row now says whose work it is
+//! when its holder is standing in for somebody, because the queue is where that
+//! has to be readable.
+//!
+//! [System Design Document]: ../../../../docs/design/01.%20System%20Design%20Document.md
+//! [#184]: https://github.com/sujanto-gaws/kelir/issues/184
+//!
 //! [#177]: https://github.com/sujanto-gaws/kelir/issues/177
 //! [#179]: https://github.com/sujanto-gaws/kelir/issues/179
 //! [#182]: https://github.com/sujanto-gaws/kelir/issues/182

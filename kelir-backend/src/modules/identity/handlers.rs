@@ -5,6 +5,8 @@ use serde::Deserialize;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use super::delegation::{CreateDelegationRequest, Delegation};
+use super::delegation_service;
 use super::domain::{
     CreateRoleRequest, CreateUserRequest, Permission, Role, UpdateRoleRequest, UpdateUserRequest,
     User,
@@ -34,6 +36,11 @@ pub fn routes() -> Router<AppState> {
         .route("/roles/{id}", get(get_role).put(update_role))
         .route("/roles/{id}", delete(delete_role))
         .route("/permissions", get(list_permissions))
+        .route(
+            "/delegations",
+            get(list_delegations).post(create_delegation),
+        )
+        .route("/delegations/{id}", delete(end_delegation))
 }
 
 #[utoipa::path(
@@ -239,4 +246,72 @@ async fn list_permissions(
     Ok(Json(ItemEnvelope::new(
         service::list_permissions(&state, &caller).await?,
     )))
+}
+
+// ---------------------------------------------------------------------------
+// Delegation windows (FR-IDM-006, #184)
+// ---------------------------------------------------------------------------
+
+#[utoipa::path(
+    get, path = "/api/v1/identity/delegations", tag = "identity",
+    params(Pagination),
+    responses(
+        (status = 200, description = "The tenant's delegation windows, newest first", body = [Delegation]),
+        (status = 403, description = "Missing identity:delegation:read")
+    ),
+    security(("bearer" = []))
+)]
+async fn list_delegations(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    QueryParams(pagination): QueryParams<Pagination>,
+) -> Result<Json<ListEnvelope<Delegation>>, AppError> {
+    let (delegations, meta) =
+        delegation_service::list_delegations(&state, &caller, &pagination).await?;
+
+    Ok(Json(ListEnvelope::new(delegations, meta)))
+}
+
+#[utoipa::path(
+    post, path = "/api/v1/identity/delegations", tag = "identity",
+    request_body = CreateDelegationRequest,
+    responses(
+        (status = 201, description = "Opened, in the caller's own name", body = Delegation),
+        (status = 403, description = "Missing identity:delegation:create"),
+        (status = 422, description = "The delegate is not an active user in this tenant, \
+                                      the window has already ended or ends before it starts, \
+                                      or the scope names something this engine cannot honour")
+    ),
+    security(("bearer" = []))
+)]
+async fn create_delegation(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    JsonBody(request): JsonBody<CreateDelegationRequest>,
+) -> Result<(axum::http::StatusCode, Json<ItemEnvelope<Delegation>>), AppError> {
+    let delegation = delegation_service::create_delegation(&state, &caller, request).await?;
+
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(ItemEnvelope::new(delegation)),
+    ))
+}
+
+#[utoipa::path(
+    delete, path = "/api/v1/identity/delegations/{id}", tag = "identity",
+    responses(
+        (status = 204, description = "Ended; it stops routing from this moment"),
+        (status = 403, description = "Missing identity:delegation:delete"),
+        (status = 404, description = "No such delegation in this tenant")
+    ),
+    security(("bearer" = []))
+)]
+async fn end_delegation(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    PathParam(id): PathParam<Uuid>,
+) -> Result<axum::http::StatusCode, AppError> {
+    delegation_service::end_delegation(&state, &caller, id).await?;
+
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }

@@ -11,6 +11,7 @@ import {
   Moon,
   ShieldCheck,
   Sun,
+  UserRoundCheck,
   UserCog,
   Users,
 } from 'lucide-vue-next'
@@ -72,6 +73,13 @@ const navigation = [
     icon: ShieldCheck,
     enabled: true,
     permission: 'identity:role:read',
+  },
+  {
+    name: 'admin-delegations',
+    label: 'Delegations',
+    icon: UserRoundCheck,
+    enabled: true,
+    permission: 'identity:delegation:read',
   },
   {
     name: 'admin-tenants',

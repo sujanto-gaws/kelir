@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT h.id, h.from_state, h.to_state, h.action, h.task_id, h.comment,\n               h.actor_user_id, u.username AS \"actor_username?\", h.created_at\n        FROM workflow_history h\n        LEFT JOIN users u ON u.id = h.actor_user_id AND u.tenant_id = h.tenant_id\n        WHERE h.tenant_id = $1 AND h.document_id = $2\n        ORDER BY h.created_at, h.id\n        LIMIT $3 OFFSET $4\n        ",
+  "query": "\n        SELECT h.id, h.from_state, h.to_state, h.action, h.task_id, h.comment,\n               h.actor_user_id, u.username AS \"actor_username?\",\n               h.on_behalf_of_user_id, b.username AS \"on_behalf_of_username?\",\n               h.created_at\n        FROM workflow_history h\n        LEFT JOIN users u ON u.id = h.actor_user_id AND u.tenant_id = h.tenant_id\n        LEFT JOIN users b ON b.id = h.on_behalf_of_user_id AND b.tenant_id = h.tenant_id\n        WHERE h.tenant_id = $1 AND h.document_id = $2\n        ORDER BY h.created_at, h.id\n        LIMIT $3 OFFSET $4\n        ",
   "describe": {
     "columns": [
       {
@@ -45,6 +45,16 @@
       },
       {
         "ordinal": 8,
+        "name": "on_behalf_of_user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 9,
+        "name": "on_behalf_of_username?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 10,
         "name": "created_at",
         "type_info": "Timestamptz"
       }
@@ -66,8 +76,10 @@
       true,
       true,
       false,
+      true,
+      false,
       false
     ]
   },
-  "hash": "25c19df091d55e6c3e161ff9800c8b5b5e1c53260aab32ea61d94edf0125a344"
+  "hash": "377fbcc2838e60dcff92ed6e239426e935e357a3ac35e6fa09711cbbd6add72f"
 }

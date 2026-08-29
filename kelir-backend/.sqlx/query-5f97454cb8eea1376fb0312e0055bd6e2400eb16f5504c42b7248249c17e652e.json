@@ -1,0 +1,96 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT d.id, d.delegator_user_id,\n               dor.display_name AS \"delegator_display_name!\",\n               d.delegate_user_id,\n               dee.display_name AS \"delegate_display_name!\",\n               d.scope, d.document_type_id, d.starts_at, d.ends_at, d.reason,\n               d.is_active,\n               (d.is_active AND d.starts_at <= now() AND now() < d.ends_at) AS \"is_routing!\",\n               d.created_at\n        FROM delegations d\n        JOIN users dor ON dor.id = d.delegator_user_id\n        JOIN users dee ON dee.id = d.delegate_user_id\n        WHERE d.tenant_id = $1 AND d.deleted_at IS NULL\n        ORDER BY d.created_at DESC, d.id DESC\n        LIMIT $2 OFFSET $3\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "delegator_user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "delegator_display_name!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "delegate_user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "delegate_display_name!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "scope",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "document_type_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 7,
+        "name": "starts_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "ends_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "reason",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "is_active",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 11,
+        "name": "is_routing!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 12,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      false,
+      null,
+      false
+    ]
+  },
+  "hash": "5f97454cb8eea1376fb0312e0055bd6e2400eb16f5504c42b7248249c17e652e"
+}

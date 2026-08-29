@@ -10,9 +10,22 @@
 //!   for every instance that will run it. `rad::handlers`' spelling for the same
 //!   operation on a form; two names for one thing across two modules would be a
 //!   difference with no reason behind it.
-//! * `POST /tasks/{id}/claim` and `POST /tasks/{id}/decision` — taking a task,
-//!   and deciding it. Both have their own permission and their own
-//!   preconditions, which is why neither is a `PUT` of a field.
+//! * `POST /tasks/{id}/claim`, `POST /tasks/{id}/decision` and
+//!   `POST /tasks/{id}/delegation` — taking a task, deciding it, and handing it
+//!   to somebody else. Each has its own preconditions, which is why none of them
+//!   is a `PUT` of a field.
+//!
+//! # Why the delegation route is here and not at `/tasks/{id}/delegate`
+//!
+//! The [System Design Document](../../../../docs/design/01.%20System%20Design%20Document.md)
+//! §12.2 planned it under `/tasks`, beside the inbox. It lands here instead, and
+//! the design document has been corrected rather than the code bent to it.
+//! `/api/v1/tasks` is [`crate::modules::task_inbox`], whose own module
+//! documentation says in as many words that **acting on a task is not there** —
+//! it surfaces what is waiting for you, and the two things you can already do to
+//! a task are the two routes above. A third verb split across two path prefixes
+//! would be a difference between endpoints with no reason behind it, and the
+//! inbox module would have to grow a service that writes.
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -21,8 +34,8 @@ use axum::{Json, Router};
 use uuid::Uuid;
 
 use super::domain::{
-    CreateWorkflowRequest, DecisionRequest, UpdateWorkflowRequest, WorkflowDefinition,
-    WorkflowDefinitionSummary, WorkflowTask,
+    CreateWorkflowRequest, DecisionRequest, DelegateRequest, UpdateWorkflowRequest,
+    WorkflowDefinition, WorkflowDefinitionSummary, WorkflowTask,
 };
 use super::service::instance::DocumentWorkflow;
 use super::service::task::DecisionResult;
@@ -52,6 +65,7 @@ pub fn routes() -> Router<AppState> {
         .route("/instances/{id}", get(get_instance))
         .route("/tasks/{id}/claim", post(claim_task))
         .route("/tasks/{id}/decision", post(decide_task))
+        .route("/tasks/{id}/delegation", post(delegate_task))
 }
 
 #[utoipa::path(
@@ -257,5 +271,29 @@ async fn decide_task(
 ) -> Result<Json<ItemEnvelope<DecisionResult>>, AppError> {
     Ok(Json(ItemEnvelope::new(
         task_service::decide(&state, &caller, id, request.action, request.comment).await?,
+    )))
+}
+
+#[utoipa::path(
+    post, path = "/api/v1/workflow/tasks/{id}/delegation", tag = "workflow",
+    request_body = DelegateRequest,
+    responses(
+        (status = 200, description = "Handed over; it is now the delegate's task and the process has not moved", body = WorkflowTask),
+        (status = 403, description = "Missing workflow:task:execute, or this task is somebody else's to hand over"),
+        (status = 404, description = "No such task"),
+        (status = 409, description = "The task is no longer open, or is unclaimed and so has no holder to hand it over"),
+        (status = 422, description = "The delegate is not an active user in this tenant, is the caller, \
+                                      or the comment is too long")
+    ),
+    security(("bearer" = []))
+)]
+async fn delegate_task(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    PathParam(id): PathParam<Uuid>,
+    JsonBody(request): JsonBody<DelegateRequest>,
+) -> Result<Json<ItemEnvelope<WorkflowTask>>, AppError> {
+    Ok(Json(ItemEnvelope::new(
+        task_service::delegate(&state, &caller, id, request).await?,
     )))
 }

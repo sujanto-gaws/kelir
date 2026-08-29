@@ -34,16 +34,37 @@
 //! [#105]: https://github.com/sujanto-gaws/kelir/issues/105
 //! [#133]: https://github.com/sujanto-gaws/kelir/issues/133
 //! [#137]: https://github.com/sujanto-gaws/kelir/issues/137
+//! # Handing a task on is a third thing, and it is not a decision
+//!
+//! [`delegate`] (FR-WF-009, FR-TASK-008; [#184]) changes who an open task is
+//! for. It records no `approval_decisions` row, writes no `workflow_history`
+//! row and does not call [`super::engine::fire`] — **the process has not
+//! moved**. A `workflow_history` row could not be written for it even if that
+//! were wanted: `ck_workflow_history_moved` refuses `from_state IS NOT DISTINCT
+//! FROM to_state`, which is exactly what a hand-off would produce, and the
+//! constraint is right. What the hand-off does write is a
+//! `workflow_task_history` row, which is the record of *what happened to this
+//! task* — and that is precisely what happened to it.
+//!
+//! A JWSS definition may still declare a `DELEGATE` transition; nothing fires
+//! one, for the reason [`super::engine`] gives about `AUTO`. It is said here so
+//! that the vocabulary in §7.3 does not read as evidence that this route drives
+//! it.
+//!
 //! [#176]: https://github.com/sujanto-gaws/kelir/issues/176
 //! [#177]: https://github.com/sujanto-gaws/kelir/issues/177
+//! [#184]: https://github.com/sujanto-gaws/kelir/issues/184
 
 use serde_json::json;
 use uuid::Uuid;
 
 use super::super::domain::task::{
-    claim_lost, normalize_comment, refuse_unless_open, refuse_unless_theirs,
+    claim_lost, delegate_unavailable, normalize_comment, refuse_self_delegation,
+    refuse_unless_held_by, refuse_unless_open, refuse_unless_theirs,
 };
-use super::super::domain::{DecisionAction, Graph, TaskStatus, WorkflowTask};
+use super::super::domain::{
+    DecisionAction, DelegateRequest, Graph, TaskStatus, TransitionAction, WorkflowTask,
+};
 use super::super::repository::{
     definition as definition_repo, instance as instance_repo, task as repo,
 };
@@ -54,6 +75,7 @@ use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
 use crate::modules::audit::{self, AuditEntry};
 use crate::modules::document::repository as document_repo;
+use crate::modules::identity::delegation_repository as delegation_repo;
 use crate::state::AppState;
 
 /// What a decision answers with.
@@ -139,6 +161,7 @@ pub async fn claim_task(
             from: Some(locked.status),
             to: TaskStatus::Assigned,
             action: None,
+            comment: None,
             actor: Some(user_id),
         },
     )
@@ -169,6 +192,156 @@ pub async fn claim_task(
     .await;
 
     Ok(claimed)
+}
+
+/// Hands an open task to somebody else (FR-WF-009, FR-TASK-008; [#184]).
+///
+/// # What it is for, against what a delegation window is for
+///
+/// A window ([`crate::modules::identity::delegation_service`]) is **prospective**:
+/// it redirects work that has not arrived yet, and [#184] AC3 is the decision
+/// that it does not reach back for tasks already sitting on somebody's desk.
+/// This is the other half of that decision — the retrospective one. A task
+/// already assigned when a person goes on leave is handed over here, explicitly,
+/// by the person who holds it.
+///
+/// Neither substitutes for the other, and the pair is what makes AC3 a design
+/// rather than a limitation: opening a window silently reassigning work already
+/// in progress would move approvals out from under people mid-decision, and a
+/// window that could not be complemented by a hand-off would leave those tasks
+/// stranded for the length of the leave.
+///
+/// # One lock, and it is the task's
+///
+/// [`super::engine`]'s ordering rule is *instance first, then task*, and this
+/// path takes only the second of them — which keeps the rule rather than bending
+/// it, because a path that takes one lock cannot invert an order. The instance
+/// is not read and not moved: nothing here depends on where the process is, only
+/// on who holds the task, and locking a running instance to change an assignee
+/// would block every decision on it for no benefit.
+///
+/// [#184]: https://github.com/sujanto-gaws/kelir/issues/184
+pub async fn delegate(
+    state: &AppState,
+    caller: &Authenticated,
+    id: Uuid,
+    request: DelegateRequest,
+) -> Result<WorkflowTask, AppError> {
+    // **The same permission a decision needs, and no second one beside it.**
+    // `workflow:task:execute` is "may this account work tasks"; whether *this*
+    // task is theirs to hand over is a question about the row, answered by
+    // `refuse_unless_held_by` below. A `workflow:task:delegate` would be a
+    // permission to split off the ability to stop working on something, which
+    // is `mod.rs`'s argument against splitting `claim` off `execute`.
+    caller.require(TASK_EXECUTE)?;
+
+    let tenant_id = caller.tenant_id();
+    let user_id = caller.user_id();
+
+    refuse_self_delegation(user_id, request.delegate_user_id)?;
+
+    // Normalized before the lock, for the reason `decide` gives: a comment too
+    // long is too long whatever the task turns out to be.
+    let comment = normalize_comment(request.comment)?;
+
+    let mut transaction = state.pool.begin().await?;
+
+    let task = repo::lock_task(&mut transaction, tenant_id, id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Task"))?;
+
+    refuse_unless_open(task.status)?;
+    refuse_unless_held_by(user_id, task.assignee_user_id)?;
+
+    // Read inside the transaction rather than before it — coding standard §2.5
+    // is satisfied either way, and here it buys correctness: an account
+    // deactivated between the check and the write would otherwise receive the
+    // task anyway, and this is the one write in the codebase whose whole point
+    // is that somebody else can act.
+    if !delegation_repo::user_is_available(&mut *transaction, tenant_id, request.delegate_user_id)
+        .await?
+    {
+        return Err(delegate_unavailable());
+    }
+
+    if repo::delegate(
+        &mut transaction,
+        tenant_id,
+        id,
+        request.delegate_user_id,
+        user_id,
+    )
+    .await?
+        == 0
+    {
+        // The predicate carried the check again and lost. Under this
+        // transaction's lock that is unreachable through this service; it is
+        // mapped rather than assumed away, because the statement is what makes
+        // the refusal true for a caller this service does not have.
+        return Err(AppError::conflict(
+            "this task changed hands while it was being handed over",
+        ));
+    }
+
+    repo::record_task_history(
+        &mut transaction,
+        tenant_id,
+        &repo::TaskHistoryEntry {
+            task_id: id,
+            instance_id: task.workflow_instance_id,
+            document_id: task.document_id,
+            // **From its own status to its own status**, which is the honest
+            // shape: nothing about the task's progress changed. The row is here
+            // for its `action` and its actor — the record that this task changed
+            // hands, and who did it — and it is the only place the *chain* of
+            // hand-offs survives, since the task's own column names whose
+            // authority rather than who passed it on.
+            from: Some(task.status),
+            to: task.status,
+            action: Some(TransitionAction::Delegate),
+            comment: comment.as_deref(),
+            actor: Some(user_id),
+        },
+    )
+    .await?;
+
+    transaction.commit().await?;
+
+    let delegated = load(state, tenant_id, id).await?;
+
+    audit::record_or_warn(
+        &state.pool,
+        AuditEntry {
+            tenant_id,
+            event_type: "Workflow.TaskDelegated",
+            action: TransitionAction::Delegate.as_db(),
+            object_type: TASK_OBJECT_TYPE,
+            object_id: id,
+            actor_user_id: Some(user_id),
+            ip_address: None,
+            // **Not the comment**, which is `decide`'s rule and its reason:
+            // this trail is read through `master-data:audit:read` by people who
+            // hold no permission over the document, and a note about why an
+            // approval was handed over is prose about somebody's requisition.
+            // **D-12** and **D-32** drew that line; the note lives on the task's
+            // own history row, behind `workflow:task:read`.
+            reason: None,
+            old_value: Some(json!({
+                "assigneeUserId": task.assignee_user_id,
+                "delegatedFromUserId": task.delegated_from_user_id,
+            })),
+            new_value: Some(json!({
+                "assigneeUserId": delegated.assignee_user_id,
+                "delegatedFromUserId": delegated.delegated_from_user_id,
+                "documentId": task.document_id,
+                "workflowInstanceId": task.workflow_instance_id,
+                "commented": comment.is_some(),
+            })),
+        },
+    )
+    .await;
+
+    Ok(delegated)
 }
 
 /// Records a decision, moves the process, and projects the document's status
@@ -320,7 +493,8 @@ pub async fn decide(
             document_id: task.document_id,
             from: Some(task.status),
             to: TaskStatus::Completed,
-            action: Some(action),
+            action: Some(action.transition()),
+            comment: comment.as_deref(),
             actor: Some(user_id),
         },
     )
@@ -352,6 +526,7 @@ pub async fn decide(
         engine::transition_of(action),
         Some(user_id),
         AssignmentContext {
+            document_type_id: document.document_type_id,
             owner_user_id: document.created_by,
             requested_department_id: document.requested_for_department_id,
             owner_department_id: None,
@@ -374,6 +549,13 @@ pub async fn decide(
         // one of the three a person reads.
         engine::DecisionProvenance {
             task_id: Some(id),
+            // Off the locked row, which is the only place it could honestly
+            // come from: the server wrote it when a window redirected this task
+            // or when its holder handed it over, so it is a fact rather than a
+            // claim (#184 AC4). It reaches the history row, and it reaches the
+            // `allowedBy` check, which measures this caller against the rule as
+            // the person whose work they are doing.
+            on_behalf_of: task.delegated_from_user_id,
             comment: comment.as_deref(),
         },
     )
@@ -428,6 +610,12 @@ pub async fn decide(
                 "documentStatus": fired.document_status,
                 "outcome": fired.outcome,
                 "commented": comment.is_some(),
+                // Both parties, for the reason the history row records them
+                // (#184 AC4) — an approval taken on somebody else's authority
+                // is a different fact from one taken on the approver's own, and
+                // an audit trail that showed only the signature could not tell
+                // them apart. Null on every decision nobody was standing in for.
+                "onBehalfOfUserId": task.delegated_from_user_id,
             })),
         },
     )

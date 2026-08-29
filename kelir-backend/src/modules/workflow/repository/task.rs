@@ -4,7 +4,9 @@
 use sqlx::{PgExecutor, PgPool};
 use uuid::Uuid;
 
-use crate::modules::workflow::domain::{DecisionAction, TaskStatus, WorkflowTask};
+use crate::modules::workflow::domain::{
+    DecisionAction, TaskStatus, TransitionAction, WorkflowTask,
+};
 
 /// The columns a transition writes when it generates a task.
 ///
@@ -25,6 +27,16 @@ pub struct NewTask<'a> {
     pub assignee_user_id: Option<Uuid>,
     pub candidate_role_id: Option<Uuid>,
     pub candidate_department_id: Option<Uuid>,
+    /// Whose authority the assignee is exercising, when a delegation window put
+    /// the task in their hands rather than the delegator's
+    /// ([#184](https://github.com/sujanto-gaws/kelir/issues/184) AC2).
+    ///
+    /// Written by the same statement that writes the assignee, from the same
+    /// [`ResolvedAssignment`][r]: a task that says who it is for and does not
+    /// say why them is a task whose decision cannot record both parties.
+    ///
+    /// [r]: super::super::service::assignment::ResolvedAssignment
+    pub delegated_from_user_id: Option<Uuid>,
     pub created_by: Option<Uuid>,
 }
 
@@ -41,6 +53,13 @@ pub struct LockedTask {
     /// follows depends on it (#225) — a locked row missing a field the check
     /// needs is a check made against the pool.
     pub candidate_department_id: Option<Uuid>,
+    /// Whose authority this task's holder is exercising, if anybody's.
+    ///
+    /// Read under the lock because both things that follow depend on it: the
+    /// `allowedBy` check measures the actor against this person as well as
+    /// themselves, and the history row records the pair
+    /// ([#184](https://github.com/sujanto-gaws/kelir/issues/184) AC4, AC5).
+    pub delegated_from_user_id: Option<Uuid>,
 }
 
 pub async fn insert_task(
@@ -52,15 +71,24 @@ pub async fn insert_task(
         INSERT INTO workflow_tasks
             (id, tenant_id, task_ref, workflow_instance_id, document_id,
              task_definition_key, task_name, task_type, status, priority,
-             assignee_user_id, candidate_role_id, candidate_department_id, created_by)
+             assignee_user_id, candidate_role_id, candidate_department_id,
+             delegated_from_user_id, created_by)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
                 -- A task with a named assignee is `ASSIGNED` from the moment it
                 -- exists; one offered to a role is `CREATED` until somebody
                 -- claims it. The two statuses are what the inbox's `MINE` and
                 -- `ROLE` are derived from, so deriving them here from the
                 -- assignment keeps one answer rather than two.
+                --
+                -- **A delegated task is `ASSIGNED`, not `DELEGATED`** (#184).
+                -- `DELEGATED` is in §7.6's `CHECK` and outside
+                -- `uq_workflow_tasks_open_per_instance` and outside the inbox's
+                -- open filter, so writing it would leave a running process with
+                -- no open task and hide the work from the person just given it.
+                -- Who holds the task is the assignee; the status says where the
+                -- work has got to.
                 CASE WHEN $10::uuid IS NULL THEN 'CREATED' ELSE 'ASSIGNED' END,
-                $9, $10, $11, $12, $13)
+                $9, $10, $11, $12, $13, $14)
         "#,
         task.id,
         task.tenant_id,
@@ -74,6 +102,7 @@ pub async fn insert_task(
         task.assignee_user_id,
         task.candidate_role_id,
         task.candidate_department_id,
+        task.delegated_from_user_id,
         task.created_by,
     )
     .execute(&mut **transaction)
@@ -95,7 +124,8 @@ pub async fn lock_open_task_of_instance(
     let row = sqlx::query!(
         r#"
         SELECT id, workflow_instance_id, document_id, status,
-               assignee_user_id, candidate_role_id, candidate_department_id
+               assignee_user_id, candidate_role_id, candidate_department_id,
+               delegated_from_user_id
         FROM workflow_tasks
         WHERE tenant_id = $1 AND workflow_instance_id = $2 AND deleted_at IS NULL
           AND status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')
@@ -115,6 +145,7 @@ pub async fn lock_open_task_of_instance(
         assignee_user_id: row.assignee_user_id,
         candidate_role_id: row.candidate_role_id,
         candidate_department_id: row.candidate_department_id,
+        delegated_from_user_id: row.delegated_from_user_id,
     }))
 }
 
@@ -127,7 +158,8 @@ pub async fn lock_task(
     let row = sqlx::query!(
         r#"
         SELECT id, workflow_instance_id, document_id, status,
-               assignee_user_id, candidate_role_id, candidate_department_id
+               assignee_user_id, candidate_role_id, candidate_department_id,
+               delegated_from_user_id
         FROM workflow_tasks
         WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
         FOR UPDATE
@@ -146,6 +178,7 @@ pub async fn lock_task(
         assignee_user_id: row.assignee_user_id,
         candidate_role_id: row.candidate_role_id,
         candidate_department_id: row.candidate_department_id,
+        delegated_from_user_id: row.delegated_from_user_id,
     }))
 }
 
@@ -234,6 +267,66 @@ pub async fn complete(
     Ok(affected)
 }
 
+/// Hands an assigned task to somebody else, **conditionally on it still being
+/// the caller's** (FR-WF-009, FR-TASK-008; [#184]).
+///
+/// One statement, carrying the predicate the service already checked, for
+/// `claim`'s and `complete`'s reason: two callers who both read a task as theirs
+/// produce one update of one row and one update of none. The predicate names the
+/// current assignee rather than only the status, because the failure this
+/// prevents is not "already decided" — it is handing on a task that somebody
+/// else has meanwhile been handed.
+///
+/// # `delegated_from_user_id` names whose authority, not who passed it on
+///
+/// `COALESCE` is the whole of that distinction. A task that reaches Budi because
+/// Ani's window redirected it already names Ani; if Budi then hands it to Citra,
+/// the column still says Ani — because the authority being exercised is still
+/// Ani's, and that is the question the `allowedBy` check and the history row
+/// both ask it. Overwriting it with Budi would make an edge Ani was allowed to
+/// take unreachable by the person now holding her task, and it would drop her
+/// name from the record of a decision made on her behalf.
+///
+/// The *chain* is not lost by this: each hand-off writes its own
+/// `workflow_task_history` row, with the person who made it as the actor.
+///
+/// # The status does not move
+///
+/// See [`insert_task`]: `DELEGATED` would take the row out of the open set the
+/// unique index and the inbox are both written in terms of. The task is still
+/// open, still this instance's one open task, and now somebody else's.
+///
+/// [#184]: https://github.com/sujanto-gaws/kelir/issues/184
+pub async fn delegate(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    id: Uuid,
+    delegate_user_id: Uuid,
+    from_user_id: Uuid,
+) -> Result<u64, sqlx::Error> {
+    let affected = sqlx::query!(
+        r#"
+        UPDATE workflow_tasks SET
+            assignee_user_id       = $3,
+            delegated_from_user_id = COALESCE(delegated_from_user_id, $4),
+            updated_by             = $4,
+            updated_at             = now()
+        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+          AND assignee_user_id = $4
+          AND status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')
+        "#,
+        tenant_id,
+        id,
+        delegate_user_id,
+        from_user_id,
+    )
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+
+    Ok(affected)
+}
+
 /// Appends one row to `workflow_task_history` (§7.7).
 ///
 /// Append-only: the table has no `updated_at` and no `deleted_at`, so a history
@@ -245,14 +338,14 @@ pub async fn complete(
 pub async fn record_task_history(
     transaction: &mut sqlx::PgTransaction<'_>,
     tenant_id: Uuid,
-    entry: &TaskHistoryEntry,
+    entry: &TaskHistoryEntry<'_>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query!(
         r#"
         INSERT INTO workflow_task_history
             (id, tenant_id, task_id, workflow_instance_id, document_id,
-             old_status, new_status, action, actor_user_id)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             old_status, new_status, action, comment, actor_user_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         "#,
         Uuid::now_v7(),
         tenant_id,
@@ -261,7 +354,8 @@ pub async fn record_task_history(
         entry.document_id,
         entry.from.map(TaskStatus::as_db),
         entry.to.as_db(),
-        entry.action.map(DecisionAction::as_db),
+        entry.action.map(TransitionAction::as_db),
+        entry.comment,
         entry.actor,
     )
     .execute(&mut **transaction)
@@ -275,13 +369,31 @@ pub async fn record_task_history(
 /// A record rather than nine positional arguments: three of them are `Uuid` and
 /// two are `Option<Uuid>`, so a transposition would compile and file a task's
 /// history under another task's document.
-pub struct TaskHistoryEntry {
+pub struct TaskHistoryEntry<'a> {
     pub task_id: Uuid,
     pub instance_id: Uuid,
     pub document_id: Uuid,
     pub from: Option<TaskStatus>,
     pub to: TaskStatus,
-    pub action: Option<DecisionAction>,
+    /// **A transition verb, not a decision verb** (#184).
+    ///
+    /// It was `DecisionAction` — three values — while the only actions a task
+    /// carried were the three a decision issues. `DELEGATE` is a fourth thing
+    /// that happens to a task and is not a decision about the document, and
+    /// widening `DecisionAction` to hold it would put a verb in the request
+    /// type that `POST /decision` must refuse. §7.7's column is `VARCHAR(40)`
+    /// and §7.3's vocabulary is the transition one, which is what this now
+    /// spells.
+    pub action: Option<TransitionAction>,
+    /// What the person said about it, where they said anything.
+    ///
+    /// Written by the hand-off (#184) and by nothing else so far: a decision's
+    /// reason has three homes already (§7.6, §7.8, §7.11) and this is not a
+    /// fourth. §7.7's `comment` column existed with no writer until a task
+    /// could change hands without being decided — which is the one thing that
+    /// happens to a task where the *only* place a reason could live is the
+    /// task's own history.
+    pub comment: Option<&'a str>,
     pub actor: Option<Uuid>,
 }
 
@@ -420,7 +532,8 @@ pub async fn find_task<'e, E: PgExecutor<'e>>(
         SELECT t.id, t.task_ref, t.workflow_instance_id, t.document_id,
                t.task_definition_key, t.task_name, t.task_type, t.status,
                t.assignee_user_id, t.candidate_role_id, r.role_code AS "candidate_role_code?",
-               t.candidate_department_id, t.priority, t.due_at, t.action,
+               t.candidate_department_id, t.delegated_from_user_id,
+               t.priority, t.due_at, t.action,
                t.completed_by, t.completed_at, t.created_at
         FROM workflow_tasks t
         LEFT JOIN roles r ON r.id = t.candidate_role_id
@@ -445,6 +558,7 @@ pub async fn find_task<'e, E: PgExecutor<'e>>(
         candidate_role_id: row.candidate_role_id,
         candidate_role_code: row.candidate_role_code,
         candidate_department_id: row.candidate_department_id,
+        delegated_from_user_id: row.delegated_from_user_id,
         priority: row.priority,
         due_at: row.due_at,
         action: row.action.as_deref().and_then(parse_action),
@@ -483,7 +597,8 @@ pub async fn tasks_of_instance(
         SELECT t.id, t.task_ref, t.workflow_instance_id, t.document_id,
                t.task_definition_key, t.task_name, t.task_type, t.status,
                t.assignee_user_id, t.candidate_role_id, r.role_code AS "candidate_role_code?",
-               t.candidate_department_id, t.priority, t.due_at, t.action,
+               t.candidate_department_id, t.delegated_from_user_id,
+               t.priority, t.due_at, t.action,
                t.completed_by, t.completed_at, t.created_at
         FROM workflow_tasks t
         LEFT JOIN roles r ON r.id = t.candidate_role_id
@@ -511,6 +626,7 @@ pub async fn tasks_of_instance(
             candidate_role_id: row.candidate_role_id,
             candidate_role_code: row.candidate_role_code,
             candidate_department_id: row.candidate_department_id,
+            delegated_from_user_id: row.delegated_from_user_id,
             priority: row.priority,
             due_at: row.due_at,
             action: row.action.as_deref().and_then(parse_action),

@@ -552,6 +552,7 @@ async fn resubmit_workflow(
         TransitionAction::Resubmit,
         actor,
         AssignmentContext {
+            document_type_id: subject.document_type_id,
             owner_user_id: subject.created_by,
             requested_department_id: subject.requested_for_department_id,
             owner_department_id: None,
@@ -627,6 +628,7 @@ async fn start_workflow(
             business_key: Some(document_number),
             actor,
             context: AssignmentContext {
+                document_type_id: subject.document_type_id,
                 owner_user_id: actor,
                 requested_department_id: subject.requested_for_department_id,
                 owner_department_id: None,
