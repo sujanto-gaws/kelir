@@ -37,6 +37,17 @@ pub struct NewTask<'a> {
     ///
     /// [r]: super::super::service::assignment::ResolvedAssignment
     pub delegated_from_user_id: Option<Uuid>,
+    /// The declared window, in seconds, or `None` for a task with no deadline
+    /// (FR-WF-011, [#185](https://github.com/sujanto-gaws/kelir/issues/185)).
+    ///
+    /// **A duration rather than an instant**, because the statement below is
+    /// what turns it into one. [`TaskSpec::due_in_seconds`][d] carries the
+    /// reason in full: the stamp and every later *is this overdue* comparison
+    /// have to come from one clock, and the database's is the only one they can
+    /// share.
+    ///
+    /// [d]: super::super::domain::graph::TaskSpec::due_in_seconds
+    pub due_in_seconds: Option<f64>,
     pub created_by: Option<Uuid>,
 }
 
@@ -72,7 +83,7 @@ pub async fn insert_task(
             (id, tenant_id, task_ref, workflow_instance_id, document_id,
              task_definition_key, task_name, task_type, status, priority,
              assignee_user_id, candidate_role_id, candidate_department_id,
-             delegated_from_user_id, created_by)
+             delegated_from_user_id, due_at, created_by)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
                 -- A task with a named assignee is `ASSIGNED` from the moment it
                 -- exists; one offered to a role is `CREATED` until somebody
@@ -88,7 +99,17 @@ pub async fn insert_task(
                 -- Who holds the task is the assignee; the status says where the
                 -- work has got to.
                 CASE WHEN $10::uuid IS NULL THEN 'CREATED' ELSE 'ASSIGNED' END,
-                $9, $10, $11, $12, $13, $14)
+                $9, $10, $11, $12, $13,
+                -- **The deadline is stamped here, from the database's clock,
+                -- and never read from the definition again** (#185 AC2, AC4).
+                -- Computing it on read would let a task's deadline move because
+                -- somebody published a new revision afterwards, which is a
+                -- deadline nobody agreed to; computing it from the application's
+                -- clock would put the stamp and the later overdue comparison on
+                -- two clocks that drift.
+                CASE WHEN $14::double precision IS NULL THEN NULL
+                     ELSE now() + make_interval(secs => $14) END,
+                $15)
         "#,
         task.id,
         task.tenant_id,
@@ -103,6 +124,7 @@ pub async fn insert_task(
         task.candidate_role_id,
         task.candidate_department_id,
         task.delegated_from_user_id,
+        task.due_in_seconds,
         task.created_by,
     )
     .execute(&mut **transaction)

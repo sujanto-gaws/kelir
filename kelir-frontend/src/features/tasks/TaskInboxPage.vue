@@ -17,7 +17,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { useQueryBackedList, type ListQuery } from '@/composables/useQueryBackedList'
-import { TASK_STATUS_LABELS, type InboxTask } from '@/types/workflow'
+import { TASK_STATUS_LABELS, type InboxScope, type InboxTask } from '@/types/workflow'
 
 /**
  * The task inbox — what is waiting for the person looking at it (FR-TASK-001,
@@ -51,15 +51,38 @@ const list = useQueryBackedList<InboxTask>(listTasks)
 /**
  * What the inbox may be narrowed to.
  *
- * Two values, not a status filter. FR-TASK-009 (completed tasks) is unscheduled,
- * so an inbox that offered `CANCELLED` would be asking a question nobody has
- * specified — and the backend refuses it, which would be a control the screen
- * drew and the API rejected.
+ * Three values, not a status filter. FR-TASK-009 (completed tasks) is
+ * unscheduled, so an inbox that offered `CANCELLED` would be asking a question
+ * nobody has specified — and the backend refuses it, which would be a control
+ * the screen drew and the API rejected.
+ *
+ * **`overdue` is a narrowing of `open`, not a checkbox beside it** (#185 AC3).
+ * `all ⊃ open ⊃ overdue`: a late task is still open, because a finished one is
+ * not late, it is done. One axis, so one control.
  */
-const scopeOptions = [
+const scopeOptions: { value: InboxScope; label: string }[] = [
   { value: 'open', label: 'Waiting for me' },
+  { value: 'overdue', label: 'Late' },
   { value: 'all', label: 'Everything I have held' },
 ]
+
+/**
+ * What an empty list means, which depends on what was asked for.
+ *
+ * "Nothing is waiting for you" is wrong under `overdue` — it says the queue is
+ * empty when what is empty is the late part of it, which is the opposite of the
+ * news. Three questions, three answers.
+ */
+const emptyMessage = computed(() => {
+  switch (list.filters.value.scope) {
+    case 'overdue':
+      return 'Nothing of yours is late.'
+    case 'all':
+      return 'Nothing has been through your hands yet.'
+    default:
+      return 'Nothing is waiting for you.'
+  }
+})
 
 const currentQuery = computed<ListQuery>(() => {
   const query: ListQuery = {}
@@ -93,6 +116,17 @@ function navigate(changes: ListQuery, resetPage = true): void {
 
 function goToPage(next: number): void {
   navigate({ page: String(Math.min(Math.max(1, next), list.totalPages.value)) }, false)
+}
+
+/**
+ * The deadline as a person reads it.
+ *
+ * Formatting only — **no comparison happens here.** Whether the date has passed
+ * is `isOverdue`, which the server answered; this turns the instant into
+ * something local and legible beside it.
+ */
+function dueLabel(dueAt: string): string {
+  return new Date(dueAt).toLocaleString()
 }
 
 function openTask(id: string): void {
@@ -143,7 +177,7 @@ watch(
 
     <template v-else-if="!list.error.value">
       <p v-if="list.isEmpty.value" class="text-sm text-muted-foreground" data-testid="tasks-empty">
-        Nothing is waiting for you.
+        {{ emptyMessage }}
       </p>
 
       <Table v-else data-testid="tasks-table">
@@ -153,6 +187,7 @@ watch(
             <TableHead>Document</TableHead>
             <TableHead>Workflow</TableHead>
             <TableHead>Whose</TableHead>
+            <TableHead>Due</TableHead>
             <TableHead>Status</TableHead>
             <TableHead class="sr-only">Open</TableHead>
           </TableRow>
@@ -180,6 +215,20 @@ watch(
               <Badge v-else variant="secondary" data-testid="assignment-role">
                 Unclaimed{{ task.candidateRoleCode ? ` · ${task.candidateRoleCode}` : '' }}
               </Badge>
+            </TableCell>
+            <TableCell>
+              <!-- **`isOverdue` is read, never derived** (#185 AC4). Comparing
+                   `dueAt` to the browser's clock here would be a second opinion,
+                   and a task late on one machine and not on another is the bug
+                   report that requirement exists to prevent. -->
+              <Badge v-if="task.isOverdue" variant="destructive" data-testid="task-overdue">
+                Late
+              </Badge>
+              <span v-else-if="task.dueAt" class="text-sm">{{ dueLabel(task.dueAt) }}</span>
+              <span v-else class="text-sm text-muted-foreground">—</span>
+              <span v-if="task.isOverdue && task.dueAt" class="block text-sm text-muted-foreground">
+                {{ dueLabel(task.dueAt) }}
+              </span>
             </TableCell>
             <TableCell>{{ TASK_STATUS_LABELS[task.status] }}</TableCell>
             <TableCell class="text-right">

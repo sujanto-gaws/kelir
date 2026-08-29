@@ -83,6 +83,10 @@ Where this document and the Meta-Schema disagree, **the Meta-Schema is normative
 | `assignment` | `object` | Yes | Assignment Rule (Section 5). |
 | `dueInHours` | `number` | No | Relative due time; sets `workflow_tasks.due_at`. |
 | `escalation` | `object` | No | `{ "afterHours": number, "assignment": AssignmentRule }` — consumed by the escalation scheduler. |
+
+`dueInHours` is **relative and not absolute** because a definition outlives every instance that runs it: an absolute date in one would be wrong for every instance after the first. An engine MUST stamp `workflow_tasks.due_at` when the task is generated and MUST NOT recompute it afterwards — a deadline that moved when the definition was revised is a deadline nobody agreed to. Kelir computes the stamp in the database, so it shares a clock with every later comparison against it ([#185](https://github.com/sujanto-gaws/kelir/issues/185)).
+
+`escalation` is **stored and not executed**, for the reason §7's `guards` and `actions` are: FR-WF-010 is unscheduled and there is no scheduler. A definition may declare one and nothing will act on it. Lateness is made *visible* — `workflow_tasks.due_at` and the inbox's overdue indicator — and nothing acts on it automatically.
 | `priority` | `string` | No (default `NORMAL`) | Enum: `LOW`, `NORMAL`, `HIGH`, `URGENT`. |
 
 ---
@@ -321,6 +325,7 @@ This specification is a **`Draft Standard`** ([naming convention](../standards/0
 | :--- | :--- | :--- |
 | **R-1** | 2026-08-28 | **`transitions[].requiresComment` added** (§4, §4.1, S12), for FR-TASK-006 — [#182](https://github.com/sujanto-gaws/kelir/issues/182). A **strict widening**: the property is optional and defaults to `false`, so every document valid before this revision is valid after it and no stored definition needs rewriting. The §10 example marks its `REJECT` and `RETURN` edges, because those are the edges the property exists for. |
 | **R-2** | 2026-08-29 | **§5.1 says what a delegation window does and does not do**, for FR-IDM-006, FR-WF-009 and FR-TASK-008 — [#184](https://github.com/sujanto-gaws/kelir/issues/184). **No change to the shape**: no property is added, removed or re-typed, and the meta-schema is untouched. What changes is the specification being explicit that a window applies only where the rule resolves to a person, that it does not reach back for tasks already assigned, and that the `DELEGATE` action in §4's vocabulary is still fired by nothing — a reader who knew delegation had been built could otherwise have concluded that such an edge now drives it. |
+| **R-3** | 2026-08-29 | **§3.1 says what an engine must do with `dueInHours`, and what it must not do with `escalation`**, for FR-WF-011 and FR-TASK-007 — [#185](https://github.com/sujanto-gaws/kelir/issues/185). **No change to the shape**: `dueInHours` was already declared and already constrained by the meta-schema (`exclusiveMinimum: 0`), and nothing is added, removed or re-typed. What changes is the specification stating that the stamp happens at generation and is never recomputed — otherwise two engines could both claim conformance while one let a republished revision shorten a deadline somebody was working to — and that `escalation` is stored and not executed, which a reader could not tell from a table that describes it as *consumed by the escalation scheduler*. |
 
 ---
 

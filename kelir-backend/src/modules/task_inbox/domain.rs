@@ -37,13 +37,21 @@ pub struct InboxQuery {
     pub page: Option<u32>,
     /// Rows per page, clamped to `response::MAX_PAGE_SIZE`.
     pub page_size: Option<u32>,
-    /// `open` (the default) or `all`.
+    /// `open` (the default), `overdue`, or `all`.
     ///
     /// **Not a status filter**, and that is deliberate: FR-TASK-009 (completed
     /// tasks) is unscheduled, so an inbox that could be asked for `CANCELLED`
-    /// would be answering a question nobody has specified. The two values are
-    /// what a screen needs — *what is waiting for me* against *what has been
-    /// through my hands*.
+    /// would be answering a question nobody has specified. The values are what
+    /// a screen needs — *what is waiting for me*, *what is late*, and *what has
+    /// been through my hands*.
+    ///
+    /// **`overdue` is a third point on one axis rather than a second axis**
+    /// ([#185](https://github.com/sujanto-gaws/kelir/issues/185) AC3).
+    /// `all ⊃ open ⊃ overdue`: a task that is late is by definition still open,
+    /// because a finished task is not late, it is done. Offering `overdue` as a
+    /// flag that combined with `scope` would let a caller ask for *completed and
+    /// overdue*, which is a question with no answer — and the screen would need
+    /// two controls to express one choice.
     pub scope: Option<String>,
     /// Narrow the inbox to one document, which is what the document workspace
     /// asks for when it renders "your task on this document".
@@ -62,21 +70,26 @@ impl InboxQuery {
 
     /// The filtering half, parsed, or a 422 naming what was wrong.
     pub fn filters(&self) -> Result<InboxFilters, AppError> {
-        let open_only = match self.scope.as_deref().map(str::trim) {
-            None | Some("") | Some("open") => true,
-            Some("all") => false,
+        let (open_only, overdue_only) = match self.scope.as_deref().map(str::trim) {
+            None | Some("") | Some("open") => (true, false),
+            // Overdue narrows open rather than replacing it, so both are set —
+            // which is also what keeps the filter honest if the two predicates
+            // ever disagree about what "still open" means.
+            Some("overdue") => (true, true),
+            Some("all") => (false, false),
             Some(other) => {
                 return Err(AppError::validation(vec![ValidationDetail::new(
                     "scope",
                     "enum",
                     "UNKNOWN_VALUE",
-                    format!("`{other}` is not a scope. Must be one of: open, all"),
+                    format!("`{other}` is not a scope. Must be one of: open, overdue, all"),
                 )]))
             }
         };
 
         Ok(InboxFilters {
             open_only,
+            overdue_only,
             document_id: self.document_id,
             // Never from the query string: the list is a list, and one task by
             // id is `GET /tasks/{id}`.
@@ -106,7 +119,28 @@ mod tests {
 
     #[test]
     fn all_widens_it_to_what_has_been_through_my_hands() {
-        assert!(!query(Some("all")).filters().expect("all").open_only);
+        let filters = query(Some("all")).filters().expect("all");
+
+        assert!(!filters.open_only);
+        assert!(!filters.overdue_only);
+    }
+
+    #[test]
+    fn overdue_narrows_open_rather_than_replacing_it() {
+        // The two are one axis. A task that is late is still open — a finished
+        // one is not late, it is done — so asking for `overdue` asks for both,
+        // and there is no way to ask for the combination that has no answer.
+        let filters = query(Some("overdue")).filters().expect("overdue");
+
+        assert!(filters.open_only);
+        assert!(filters.overdue_only);
+    }
+
+    #[test]
+    fn a_default_inbox_is_not_narrowed_to_what_is_late() {
+        // Opening the inbox shows what is waiting, not only what is already
+        // late — the indicator is what distinguishes them on the row.
+        assert!(!query(None).filters().expect("a default").overdue_only);
     }
 
     #[test]
@@ -120,6 +154,9 @@ mod tests {
         };
 
         assert_eq!(details[0].path, "scope");
-        assert!(details[0].message.contains("open, all"), "{details:?}");
+        assert!(
+            details[0].message.contains("open, overdue, all"),
+            "{details:?}"
+        );
     }
 }

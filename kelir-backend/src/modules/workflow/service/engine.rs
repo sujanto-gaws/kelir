@@ -565,6 +565,27 @@ async fn enter(
 ) -> Result<DocumentStatus, AppError> {
     if let Some(spec) = &state.task {
         let path = format!("states.{}.task.assignment", state.code);
+
+        // **A `dueInHours` no interval can hold leaves the task without a
+        // deadline rather than failing the transition** (FR-WF-011, [#185]).
+        // The value comes from a published definition, so the person it would
+        // fail is whoever happened to submit the next document — **D-24**'s
+        // direction, applied to a field that decorates an approval rather than
+        // deciding it. The warning is what stops the drop being silent.
+        //
+        // [#185]: https://github.com/sujanto-gaws/kelir/issues/185
+        let due = spec.due_in_seconds();
+
+        if due.is_none() && spec.due_in_hours.is_some() {
+            tracing::warn!(
+                state = %state.code,
+                task = %spec.task_definition_key,
+                due_in_hours = ?spec.due_in_hours,
+                "a task's `dueInHours` is not a duration this engine can stamp; \
+                 the task is created with no due date"
+            );
+        }
+
         let resolved =
             assignment::resolve(transaction, tenant_id, &spec.assignment, context, &path).await?;
 
@@ -593,6 +614,11 @@ async fn enter(
                 // Set when a window redirected this task and null otherwise, in
                 // the statement that writes the assignee it explains (#184 AC2).
                 delegated_from_user_id: resolved.delegated_from_user_id,
+                // A duration, not an instant: the statement adds it to the
+                // database's `now()`, which is the clock #185 AC4 asks to be
+                // named. `None` for a state that declares no window, and for a
+                // `dueInHours` no interval can hold — see below.
+                due_in_seconds: due,
                 created_by: actor,
             },
         )

@@ -44,6 +44,17 @@ export type TaskAssignment = 'MINE' | 'ROLE'
  */
 export type DecisionAction = 'APPROVE' | 'REJECT' | 'RETURN'
 
+/**
+ * How wide the inbox is asked to be.
+ *
+ * **One axis, three points**: `all ⊃ open ⊃ overdue`. A task that is late is by
+ * definition still open — a finished one is not late, it is done — so this is a
+ * narrowing rather than a second filter beside `open`. Offering it as a separate
+ * flag would let a screen ask for *completed and overdue*, which is a question
+ * with no answer, and would need two controls to express one choice.
+ */
+export type InboxScope = 'open' | 'overdue' | 'all'
+
 export interface WorkflowVariable {
   key: string
   dataType: string
@@ -115,6 +126,21 @@ export interface InboxTask {
   priority: string
   dueAt: string | null
   assignment: TaskAssignment
+  /**
+   * Whether this task is late (FR-TASK-007, #185).
+   *
+   * **The server's answer, and the only one this client has.** `dueAt` is beside
+   * it so a screen can say *when*; this says *whether*, computed by the database
+   * against the clock that stamped the deadline. A component comparing `dueAt`
+   * to `Date.now()` would be a second opinion, and a task late on one machine
+   * and not on another is a bug report nobody can reproduce — which is the
+   * failure #185 AC4 names.
+   *
+   * `false` for a task with no deadline, and for one already decided: the
+   * indicator says what needs doing now, and a task finished after its date
+   * passed is done rather than late.
+   */
+  isOverdue: boolean
   candidateRoleCode: string | null
   /**
    * Whose work this is, when the holder is standing in for somebody (#184).

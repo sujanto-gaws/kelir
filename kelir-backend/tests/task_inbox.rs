@@ -634,8 +634,11 @@ async fn an_unknown_scope_is_refused_with_the_values_that_work() {
 
     assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(refused.body["error"]["details"][0]["path"], "scope");
+    // The list grew when #185 added `overdue`, and this assertion is what made
+    // that visible rather than leaving a refusal message describing two of the
+    // three values it accepts.
     assert!(
-        refused.body.to_string().contains("open, all"),
+        refused.body.to_string().contains("open, overdue, all"),
         "{}",
         refused.body
     );

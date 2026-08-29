@@ -324,6 +324,14 @@ async function decide(decision: AvailableDecision): Promise<void> {
   }
 }
 
+/**
+ * The deadline as a person reads it. Formatting only — whether it has passed is
+ * `isOverdue`, which the server answered.
+ */
+function dueLabel(dueAt: string): string {
+  return new Date(dueAt).toLocaleString()
+}
+
 function openDocument(): void {
   if (task.value) {
     void router.push({ name: 'document', params: { id: task.value.documentId } })
@@ -361,6 +369,11 @@ function openDocument(): void {
           >
             On {{ task.delegatedFromDisplayName }}’s behalf
           </Badge>
+          <!-- Late, as the server judged it (#185 AC4) — never as this screen
+               would by comparing `dueAt` to the browser's clock. -->
+          <Badge v-if="task.isOverdue" variant="destructive" data-testid="task-overdue">
+            Late
+          </Badge>
           <Badge v-if="task.assignment === 'MINE'" data-testid="task-assignment">Mine</Badge>
           <Badge v-else variant="secondary" data-testid="task-assignment">
             Unclaimed{{ task.candidateRoleCode ? ` · ${task.candidateRoleCode}` : '' }}
@@ -382,6 +395,13 @@ function openDocument(): void {
           <div>
             <dt class="text-muted-foreground">Title</dt>
             <dd class="font-medium">{{ task.documentTitle }}</dd>
+          </div>
+          <div v-if="task.dueAt">
+            <dt class="text-muted-foreground">Due</dt>
+            <dd class="font-medium" data-testid="task-due">
+              {{ dueLabel(task.dueAt) }}
+              <span v-if="task.isOverdue" class="text-destructive"> · past due</span>
+            </dd>
           </div>
         </dl>
         <Button
