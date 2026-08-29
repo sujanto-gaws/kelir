@@ -89,6 +89,7 @@ function entry(overrides: Record<string, unknown> = {}): Record<string, unknown>
     actorUsername: 'dina',
     onBehalfOfUserId: null,
     onBehalfOfUsername: null,
+    routing: null,
     occurredAt: '2026-08-28T01:00:00Z',
     ...overrides,
   }
@@ -242,5 +243,55 @@ describe('WorkflowTab', () => {
     const wrapper = await render()
 
     expect(wrapper.find('[data-testid="history-on-behalf-of"]').exists()).toBe(false)
+  })
+
+  it('says which branches were considered and what each one said', async () => {
+    // #186 AC5. The `false` is the half that answers why *not* the other
+    // branch — an entry that showed only the winner would be a tautology.
+    onHistory = () => ({
+      status: 200,
+      body: historyBody([
+        entry({
+          routing: [
+            { to: 'DIRECTOR_APPROVAL', condition: { '>': [1, 2] }, outcome: false },
+            { to: 'FINANCE_APPROVAL', condition: { '>': [2, 1] }, outcome: true },
+          ],
+        }),
+      ]),
+    })
+
+    const wrapper = await render()
+    const routing = wrapper.get('[data-testid="history-routing"]').text()
+
+    expect(routing).toContain('DIRECTOR_APPROVAL')
+    expect(routing).toContain('condition not met')
+    expect(routing).toContain('FINANCE_APPROVAL')
+    expect(routing).toContain('condition met')
+  })
+
+  it('does not render the expression itself', async () => {
+    // It is on the wire for whoever needs it, and off the screen because the
+    // person reading an approval history is not debugging JSON Logic.
+    onHistory = () => ({
+      status: 200,
+      body: historyBody([
+        entry({
+          routing: [{ to: 'DIRECTOR_APPROVAL', condition: { '>': [1, 2] }, outcome: false }],
+        }),
+      ]),
+    })
+
+    const wrapper = await render()
+
+    expect(wrapper.text()).not.toContain('"$gt"')
+    expect(wrapper.text()).not.toContain('[1,2]')
+  })
+
+  it('shows nothing where nothing was deliberated', async () => {
+    // Most transitions. An empty list under every entry would be noise on the
+    // rows that had no choice to make.
+    const wrapper = await render()
+
+    expect(wrapper.find('[data-testid="history-routing"]').exists()).toBe(false)
   })
 })

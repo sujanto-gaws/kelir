@@ -16,9 +16,10 @@ transaction that numbers it; the process generates a task; somebody else
 approves or rejects it from their inbox; and the document's status follows from
 that rather than beside it.
 
-**Upgrading:** five new migrations. `0025_workflow.sql` adds ten tables, three
+**Upgrading:** six new migrations. `0025_workflow.sql` adds ten tables, three
 constraints and eight permission rows; `0027_workflow_history.sql` adds one
-table; `0028_delegation.sql` adds one nullable column to it;
+table; `0028_delegation.sql` and `0029_workflow_routing.sql` add one nullable column
+to it each;
 `0024_one_live_role_per_party.sql` tightens one unique index on
 `mdm_party_roles` (see *Changed*); and `0026_form_section_not_its_own_parent.sql`
 adds a self-parent `CHECK` to a table nothing writes yet. Both are
@@ -42,6 +43,50 @@ the process. A document of a type that binds no workflow is unaffected, and one
 whose process has finished is transitionable again.
 
 ### Added
+
+- **Conditional routing** (FR-WF-015,
+  [#186](https://github.com/sujanto-gaws/kelir/issues/186)). A transition taken
+  because a condition holds — the approval that goes to a senior approver above
+  a threshold.
+
+  **Most of it was already built, and that was the point of the item.** The
+  evaluator is `rad::evaluator` and has been since **D-10** adopted
+  `datalogic-rs` on both sides; the operator bound is the registry's, checked at
+  save; `engine::fire` has selected an edge by condition since Sprint 10, with
+  S7's fallback-last ordering. So this item is mostly *binding an existing
+  evaluator to a new context*, and the tests for those parts say plainly that
+  they are regression assertions rather than new behaviour.
+
+  **What changed is what happens when a condition breaks.** An expression that
+  fails to evaluate — a division by zero, an argument of the wrong shape — now
+  **stops the transition** with a refusal naming the edge. It used to read as
+  `false`, which sent the process down the fallback: a *different branch, chosen
+  because the intended one broke*, with nothing anywhere recording that the
+  routing rule never ran. A workflow that routes wrongly on a bad expression is
+  worse than one that refuses to move. **This reverses Kelir's own earlier
+  answer**, and the reasoning that produced it is quoted where it was replaced.
+
+  Because the failure depends on the data, no save-time check can catch it: the
+  expression may be well formed, use only registered operators, and break on the
+  third document it meets.
+
+  **A state whose conditions were all false, with no fallback, now says so.**
+  That is a different problem for an administrator than an action the state does
+  not declare at all — the definition has a gap, and the process is sitting still
+  because of it. The refusal names how many conditions were tried, and the trail
+  is logged.
+
+  **And the history answers "why did this go to her and not to him."**
+  `workflow_history.routing_json` records every condition the engine actually
+  evaluated, in order, each with its outcome — including the ones that said no,
+  which are the half that explains why *not* the other branch. The chosen edge's
+  own condition is a tautology on a history row, so recording only that would
+  have answered half the question and looked like all of it. The document
+  workspace renders which branches were considered and what each said; the
+  expression travels on the wire and is deliberately not drawn, because a JSON
+  Logic blob is not what the person deciding an approval needs.
+
+  **Upgrading:** `0029_workflow_routing.sql` adds one nullable column.
 
 - **Task due dates, and the indicator that makes them mean something**
   (FR-WF-011, FR-TASK-007,

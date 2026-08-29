@@ -230,6 +230,22 @@ watch(() => props.documentId, load, { immediate: true })
               </span>
               · {{ entry.occurredAt }}
             </p>
+            <!-- Why this branch (#186 AC5). "Why did this go to her and not
+                 to him" is answered by which edges were considered and what
+                 each one said — not by the expression, which is in the
+                 definition and is noise on an approval screen. -->
+            <ul
+              v-if="entry.routing?.length"
+              class="mt-2 space-y-1 text-xs text-muted-foreground"
+              data-testid="history-routing"
+            >
+              <li v-for="step in entry.routing" :key="step.to">
+                → {{ step.to }} ·
+                <span :class="step.outcome ? 'font-medium text-foreground' : ''">
+                  {{ step.outcome ? 'condition met' : 'condition not met' }}
+                </span>
+              </li>
+            </ul>
             <!-- The reason, where the decision is. #182 AC2: a comment shown
                  anywhere else would be a comment nobody reads. -->
             <p v-if="entry.comment" class="mt-2 whitespace-pre-line" data-testid="history-comment">

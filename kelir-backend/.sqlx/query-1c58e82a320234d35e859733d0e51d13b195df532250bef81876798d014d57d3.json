@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT h.id, h.from_state, h.to_state, h.action, h.task_id, h.comment,\n               h.actor_user_id, u.username AS \"actor_username?\",\n               h.on_behalf_of_user_id, b.username AS \"on_behalf_of_username?\",\n               h.created_at\n        FROM workflow_history h\n        LEFT JOIN users u ON u.id = h.actor_user_id AND u.tenant_id = h.tenant_id\n        LEFT JOIN users b ON b.id = h.on_behalf_of_user_id AND b.tenant_id = h.tenant_id\n        WHERE h.tenant_id = $1 AND h.document_id = $2\n        ORDER BY h.created_at, h.id\n        LIMIT $3 OFFSET $4\n        ",
+  "query": "\n        SELECT h.id, h.from_state, h.to_state, h.action, h.task_id, h.comment,\n               h.actor_user_id, u.username AS \"actor_username?\",\n               h.on_behalf_of_user_id, b.username AS \"on_behalf_of_username?\",\n               h.routing_json, h.created_at\n        FROM workflow_history h\n        LEFT JOIN users u ON u.id = h.actor_user_id AND u.tenant_id = h.tenant_id\n        LEFT JOIN users b ON b.id = h.on_behalf_of_user_id AND b.tenant_id = h.tenant_id\n        WHERE h.tenant_id = $1 AND h.document_id = $2\n        ORDER BY h.created_at, h.id\n        LIMIT $3 OFFSET $4\n        ",
   "describe": {
     "columns": [
       {
@@ -55,6 +55,11 @@
       },
       {
         "ordinal": 10,
+        "name": "routing_json",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 11,
         "name": "created_at",
         "type_info": "Timestamptz"
       }
@@ -78,8 +83,9 @@
       false,
       true,
       false,
+      true,
       false
     ]
   },
-  "hash": "377fbcc2838e60dcff92ed6e239426e935e357a3ac35e6fa09711cbbd6add72f"
+  "hash": "1c58e82a320234d35e859733d0e51d13b195df532250bef81876798d014d57d3"
 }

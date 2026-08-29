@@ -392,5 +392,27 @@ pub struct WorkflowHistoryEntry {
     /// [#184]: https://github.com/sujanto-gaws/kelir/issues/184
     pub on_behalf_of_user_id: Option<Uuid>,
     pub on_behalf_of_username: Option<String>,
+    /// Why this branch and not the other one (FR-WF-015, [#186] AC5).
+    ///
+    /// Every transition condition the engine evaluated, in the order S7 puts
+    /// them, each with its outcome:
+    ///
+    /// ```json
+    /// [{"to": "DIRECTOR_APPROVAL", "condition": {"…": …}, "outcome": false},
+    ///  {"to": "FINANCE_APPROVAL",  "condition": {"…": …}, "outcome": true}]
+    /// ```
+    ///
+    /// **The expression travels and the screen does not have to render it.**
+    /// What a person reads is which branch was considered and whether it
+    /// applied; the rule itself is in the workflow definition, where somebody
+    /// who needs to change it is going anyway. It is on the wire because a
+    /// history that answers *why* only for people with database access is a
+    /// history that does not answer it.
+    ///
+    /// `null` on every row where nothing was evaluated — the instance's first
+    /// state, and every action leaving one unconditioned edge.
+    ///
+    /// [#186]: https://github.com/sujanto-gaws/kelir/issues/186
+    pub routing: Option<serde_json::Value>,
     pub occurred_at: DateTime<Utc>,
 }

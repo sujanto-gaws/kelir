@@ -30,6 +30,7 @@
 //! [#178]: https://github.com/sujanto-gaws/kelir/issues/178
 //! [#181]: https://github.com/sujanto-gaws/kelir/issues/181
 
+use serde_json::Value;
 use sqlx::{PgExecutor, PgPool};
 use uuid::Uuid;
 
@@ -68,6 +69,18 @@ pub struct NewHistoryEntry<'a> {
     /// It comes from `workflow_tasks.delegated_from_user_id`, which the server
     /// wrote when the task was assigned or handed over — never from the request.
     pub on_behalf_of_user_id: Option<Uuid>,
+    /// Every transition condition the engine evaluated to choose this edge, in
+    /// S7 order, each with the boolean it produced (FR-WF-015,
+    /// [#186](https://github.com/sujanto-gaws/kelir/issues/186) AC5).
+    ///
+    /// **The working, not the conclusion.** The chosen edge's own condition is
+    /// a tautology on a history row — it held, or it was the fallback that
+    /// needed nothing — so recording only that would answer half of *why this
+    /// branch and not the other* and look like all of it. Edges after the
+    /// winner were never evaluated and are absent rather than false.
+    ///
+    /// `None` where nothing was evaluated, which is most rows.
+    pub routing: Option<Value>,
 }
 
 /// Appends a transition to the history.
@@ -86,9 +99,9 @@ pub async fn record<'e, E: PgExecutor<'e>>(
         INSERT INTO workflow_history (
             id, tenant_id, workflow_instance_id, document_id,
             from_state, to_state, action, task_id, comment,
-            actor_user_id, on_behalf_of_user_id
+            actor_user_id, on_behalf_of_user_id, routing_json
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         "#,
         Uuid::now_v7(),
         entry.tenant_id,
@@ -100,7 +113,8 @@ pub async fn record<'e, E: PgExecutor<'e>>(
         entry.task_id,
         entry.comment,
         entry.actor_user_id,
-        entry.on_behalf_of_user_id
+        entry.on_behalf_of_user_id,
+        entry.routing
     )
     .execute(executor)
     .await
@@ -127,7 +141,7 @@ pub async fn list_for_document(
         SELECT h.id, h.from_state, h.to_state, h.action, h.task_id, h.comment,
                h.actor_user_id, u.username AS "actor_username?",
                h.on_behalf_of_user_id, b.username AS "on_behalf_of_username?",
-               h.created_at
+               h.routing_json, h.created_at
         FROM workflow_history h
         LEFT JOIN users u ON u.id = h.actor_user_id AND u.tenant_id = h.tenant_id
         LEFT JOIN users b ON b.id = h.on_behalf_of_user_id AND b.tenant_id = h.tenant_id
@@ -156,6 +170,7 @@ pub async fn list_for_document(
             actor_username: row.actor_username,
             on_behalf_of_user_id: row.on_behalf_of_user_id,
             on_behalf_of_username: row.on_behalf_of_username,
+            routing: row.routing_json,
             occurred_at: row.created_at,
         })
         .collect())
