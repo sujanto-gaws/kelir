@@ -194,7 +194,7 @@ The MVP focuses on:
         └── .env.example
 ```
 
-Migrations `0001`–`0016` exist; `0017` onward are planned. The authoritative
+Migrations `0001`–`0029` exist. The authoritative
 migration list is the mapping table at the top of
 [docs/design/02. Database Schema.md](docs/design/02.%20Database%20Schema.md) —
 numbers follow the order migrations are applied, so an early arrival shifts
