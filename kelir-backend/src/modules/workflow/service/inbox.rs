@@ -195,7 +195,7 @@ pub async fn get_task(
                         .state(&transition.to)
                         .map(|state| state.name.clone())
                         .unwrap_or_else(|| transition.to.clone()),
-                    supported: matches!(transition.action.as_db(), "APPROVE" | "REJECT"),
+                    supported: matches!(transition.action.as_db(), "APPROVE" | "REJECT" | "RETURN"),
                     requires_comment: transition.requires_comment,
                 })
                 .collect(),

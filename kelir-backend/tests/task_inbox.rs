@@ -434,14 +434,18 @@ async fn a_task_detail_says_what_is_being_decided_and_about_what() {
 
 /// **A transition this release cannot perform is shown and not offered.**
 ///
-/// `RETURN` is FR-WF-008, Sprint 11's [#183]. A definition may declare it now,
-/// and a screen that drew a button for it would produce a 422 from a control the
-/// product itself put there — so the payload says `supported: false` and the
-/// screen can render the edge without offering it.
+/// `ESCALATE` is FR-WF-010, `Could` and unscheduled. A definition may declare it
+/// now, and a screen that drew a button for it would produce a 422 from a
+/// control the product itself put there — so the payload says
+/// `supported: false` and the screen can render the edge without offering it.
+///
+/// **`RETURN` was this test's subject until [#183] built it**, and the
+/// assertion below now pins the other side: the flag moved because the
+/// capability did, which is the flag working rather than a reason to delete it.
 ///
 /// [#183]: https://github.com/sujanto-gaws/kelir/issues/183
 #[tokio::test]
-async fn a_transition_sprint_eleven_owns_is_reported_as_unsupported() {
+async fn a_transition_this_release_cannot_perform_is_reported_as_unsupported() {
     let app = TestApp::spawn().await;
     let token = app.administrator_token().await;
 
@@ -461,6 +465,9 @@ async fn a_transition_sprint_eleven_owns_is_reported_as_unsupported() {
               "mapsToDocumentStatus": "RETURNED",
               "task": { "taskDefinitionKey": "correct_it", "taskName": "Correct the request",
                         "assignment": { "assigneeType": "OWNER" } } },
+            { "code": "ESCALATED", "name": "Escalated", "mapsToDocumentStatus": "PENDING_APPROVAL",
+              "task": { "taskDefinitionKey": "escalated_approval", "taskName": "Decide",
+                        "assignment": { "assigneeType": "ROLE", "roleCode": "TI-RETURN" } } },
             { "code": "COMPLETED", "name": "Completed", "mapsToDocumentStatus": "COMPLETED",
               "isFinal": true }
         ],
@@ -468,6 +475,10 @@ async fn a_transition_sprint_eleven_owns_is_reported_as_unsupported() {
             { "from": "MANAGER_APPROVAL", "to": "COMPLETED", "action": "APPROVE",
               "allowedBy": "ROLE:TI-RETURN" },
             { "from": "MANAGER_APPROVAL", "to": "RETURNED", "action": "RETURN",
+              "allowedBy": "ROLE:TI-RETURN" },
+            { "from": "MANAGER_APPROVAL", "to": "ESCALATED", "action": "ESCALATE",
+              "allowedBy": "ROLE:TI-RETURN" },
+            { "from": "ESCALATED", "to": "COMPLETED", "action": "APPROVE",
               "allowedBy": "ROLE:TI-RETURN" },
             { "from": "RETURNED", "to": "MANAGER_APPROVAL", "action": "RESUBMIT",
               "allowedBy": "OWNER" }
@@ -504,23 +515,39 @@ async fn a_transition_sprint_eleven_owns_is_reported_as_unsupported() {
         .as_array()
         .expect("the decisions");
 
+    let escalate = decisions
+        .iter()
+        .find(|decision| decision["action"] == "ESCALATE")
+        .expect("the escalate edge is visible");
+
+    assert_eq!(
+        escalate["supported"], false,
+        "a transition this release cannot perform must not be offered"
+    );
+
+    // And `RETURN` is offered, because #183 built it. Both halves in one test:
+    // an implementation that reported everything as supported would pass the
+    // second assertion and fail the first, and one that reported everything as
+    // unsupported would do the opposite.
     let returned = decisions
         .iter()
         .find(|decision| decision["action"] == "RETURN")
         .expect("the return edge is visible");
 
     assert_eq!(
-        returned["supported"], false,
-        "a transition this release cannot perform must not be offered"
+        returned["supported"], true,
+        "return has been performable since #183, and the screen is told so here"
     );
+    assert_eq!(returned["toState"], "RETURNED");
+    assert_eq!(returned["toStateName"], "Returned to the author");
 
-    // And it really cannot be performed, which is what makes the flag true
-    // rather than a claim: the request type has no such variant.
+    // The unsupported one really cannot be performed, which is what makes the
+    // flag true rather than a claim: the request type has no such variant.
     let refused = app
         .post(
             &format!("/api/v1/workflow/tasks/{task}/decision"),
             Some(&approver),
-            json!({ "action": "RETURN" }),
+            json!({ "action": "ESCALATE" }),
         )
         .await;
     assert_eq!(

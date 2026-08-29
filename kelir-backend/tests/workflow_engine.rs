@@ -2570,3 +2570,470 @@ async fn an_auto_transition_cannot_demand_a_reason_nobody_can_give() {
         .await;
     assert_eq!(stored.status, StatusCode::CREATED, "{}", stored.body);
 }
+
+// ---------------------------------------------------------------------------
+// The return action (#183, FR-WF-008), and the resubmission that closes the loop
+// ---------------------------------------------------------------------------
+
+/// A workflow with a return target, and the resubmission that comes back up.
+///
+/// `RETURNED` **declares no task**, which is JWSS §10's own shape and the reason
+/// this item needed a path that fires a transition without one: the document is
+/// with its author, not in anybody's queue. The `RESUBMIT` edge out of it is
+/// `allowedBy: "OWNER"`, so the owner is who may send it back up — and #226's
+/// `permits` is what enforces that.
+///
+/// `RETURN` requires a comment (#182), because *"why is this back with me"* is
+/// the question return exists to answer and the definition is where that is
+/// said.
+fn returnable_workflow(key: &str) -> Value {
+    json!({
+        "workflowKey": key,
+        "version": "1.0.0",
+        "name": "Approval that can send back",
+        "initialState": "MANAGER_APPROVAL",
+        "states": [
+            { "code": "MANAGER_APPROVAL", "name": "Manager approval",
+              "mapsToDocumentStatus": "PENDING_APPROVAL",
+              "task": { "taskDefinitionKey": "manager_approval", "taskName": "Decide",
+                        "assignment": { "assigneeType": "ROLE", "roleCode": APPROVER_ROLE } } },
+            { "code": "RETURNED", "name": "Sent back", "mapsToDocumentStatus": "RETURNED" },
+            { "code": "COMPLETED", "name": "Completed", "mapsToDocumentStatus": "COMPLETED",
+              "isFinal": true },
+            { "code": "REJECTED", "name": "Rejected", "mapsToDocumentStatus": "REJECTED",
+              "isFinal": true }
+        ],
+        "transitions": [
+            { "from": "MANAGER_APPROVAL", "to": "COMPLETED", "action": "APPROVE",
+              "allowedBy": format!("ROLE:{APPROVER_ROLE}") },
+            { "from": "MANAGER_APPROVAL", "to": "REJECTED", "action": "REJECT",
+              "allowedBy": format!("ROLE:{APPROVER_ROLE}"), "requiresComment": true },
+            { "from": "MANAGER_APPROVAL", "to": "RETURNED", "action": "RETURN",
+              "allowedBy": format!("ROLE:{APPROVER_ROLE}"), "requiresComment": true },
+            { "from": "RETURNED", "to": "MANAGER_APPROVAL", "action": "RESUBMIT",
+              "allowedBy": "OWNER" }
+        ]
+    })
+}
+
+/// The document's number, straight from the row.
+async fn stored_number(app: &TestApp, id: Uuid) -> Option<String> {
+    sqlx::query_scalar("SELECT document_number FROM documents WHERE id = $1")
+        .bind(id)
+        .fetch_one(&app.pool)
+        .await
+        .expect("read the document number")
+}
+
+/// **The whole loop** (#183 AC1, AC4, AC5): approve is not the only way out.
+///
+/// A document is submitted, returned with a reason, corrected by its owner,
+/// sent back up, and approved. The number is captured before the return and
+/// asserted after the resubmission, because **keeping it is the outcome return
+/// exists to preserve** — a document that came back with a new number would have
+/// lost its place in every report and every conversation about it.
+///
+/// **Seen red** against `repository::document::mark_submitted` with
+/// `COALESCE($3, document_number)` reduced to `$3`: the resubmission writes
+/// `NULL` over the number and the document comes back up anonymous.
+#[tokio::test]
+async fn a_returned_document_is_corrected_resubmitted_and_keeps_its_number() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let approver_token = approver(&app, "wf.returner").await;
+
+    let workflow = publish_workflow(&app, &token, returnable_workflow("wf_return")).await;
+    let type_id = document_type(&app, &token, "PR_RETURN", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let number = stored_number(&app, id).await.expect("a number at submit");
+    let task = open_task_of(&app, id).await;
+
+    // --- The approver sends it back, with the reason -----------------------
+    let returned = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&approver_token),
+            json!({ "action": "RETURN", "comment": "The quotation is for 12 chairs, not 10." }),
+        )
+        .await;
+    assert_eq!(returned.status, StatusCode::OK, "{}", returned.body);
+    assert_eq!(returned.body["data"]["currentState"], "RETURNED");
+    assert_eq!(returned.body["data"]["documentStatus"], "RETURNED");
+    assert_eq!(stored_status(&app, id).await, "RETURNED");
+
+    // **The instance is still running.** That is the whole difference between a
+    // return and a rejection: nothing ended, so there is something to come back
+    // to.
+    let (_, state, instance_status) = instance_of(&app, id).await.expect("the instance");
+    assert_eq!(state, "RETURNED");
+    assert_eq!(
+        instance_status, "RUNNING",
+        "a return ended the process, which makes it a rejection with a softer name"
+    );
+
+    // --- AC1: it is editable again -----------------------------------------
+    let corrected = app
+        .put(
+            &format!("/api/v1/documents/{id}"),
+            Some(&token),
+            json!({ "formData": { "amount": 12000 } }),
+        )
+        .await;
+    assert_eq!(
+        corrected.status,
+        StatusCode::OK,
+        "a returned document could not be corrected, which makes return a rejection: {}",
+        corrected.body
+    );
+
+    // --- AC5: the owner sends it back up, and the number does not move ------
+    let resubmitted = submit(&app, &token, id).await;
+    assert_eq!(resubmitted.status, StatusCode::OK, "{}", resubmitted.body);
+
+    assert_eq!(
+        stored_number(&app, id).await.as_deref(),
+        Some(number.as_str()),
+        "the resubmission changed the document's number, which is what return exists to avoid"
+    );
+    assert_eq!(stored_status(&app, id).await, "PENDING_APPROVAL");
+
+    let (_, state, _) = instance_of(&app, id).await.expect("the instance");
+    assert_eq!(
+        state, "MANAGER_APPROVAL",
+        "the resubmission did not move the process"
+    );
+
+    // --- AC4: the history says how it got here, and why ---------------------
+    let history = history_of(&app, &token, id).await;
+    let rows = history["data"].as_array().expect("a list");
+
+    let sent_back = rows
+        .iter()
+        .find(|row| row["action"] == "RETURN")
+        .unwrap_or_else(|| panic!("the return is not in the history: {history}"));
+
+    assert_eq!(sent_back["fromState"], "MANAGER_APPROVAL");
+    assert_eq!(
+        sent_back["toState"], "RETURNED",
+        "the target is the definition's, not inferred"
+    );
+    assert_eq!(
+        sent_back["comment"], "The quotation is for 12 chairs, not 10.",
+        "the reason a document is back with its author is the question history answers"
+    );
+
+    let came_back = rows
+        .iter()
+        .find(|row| row["action"] == "RESUBMIT")
+        .unwrap_or_else(|| panic!("the resubmission is not in the history: {history}"));
+
+    assert_eq!(came_back["fromState"], "RETURNED");
+    assert_eq!(came_back["toState"], "MANAGER_APPROVAL");
+
+    // --- And the loop closes: the new task approves ------------------------
+    let next_task = open_task_of(&app, id).await;
+    assert_ne!(next_task, task, "the resubmission reused the decided task");
+
+    let approved = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{next_task}/decision"),
+            Some(&approver_token),
+            json!({ "action": "APPROVE" }),
+        )
+        .await;
+    assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
+    assert_eq!(stored_status(&app, id).await, "COMPLETED");
+    assert_eq!(
+        stored_number(&app, id).await.as_deref(),
+        Some(number.as_str()),
+        "the number moved somewhere in the round trip"
+    );
+}
+
+/// **AC6: return is refused where the definition names no return target.**
+///
+/// The error envelope rather than a silent no-op, and the same 422 an
+/// unavailable `APPROVE` earns — the request names an action the process cannot
+/// take *from where it is*, which is a property of the payload against the
+/// resource.
+///
+/// The second half is what makes the first mean something: the same workflow
+/// takes a `REJECT` from the same task, so the refusal is about the missing
+/// `RETURN` edge rather than about the task refusing everything.
+#[tokio::test]
+async fn return_is_refused_where_the_definition_names_no_return_target() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let approver_token = approver(&app, "wf.noreturn").await;
+
+    // `role_workflow` offers APPROVE and REJECT and no way back.
+    let workflow = publish_workflow(&app, &token, role_workflow("wf_no_return")).await;
+    let type_id = document_type(&app, &token, "PR_NO_RETURN", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let task = open_task_of(&app, id).await;
+
+    let refused = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&approver_token),
+            json!({ "action": "RETURN" }),
+        )
+        .await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a return fired against a definition with no return target: {}",
+        refused.body
+    );
+
+    let body = refused.body.to_string();
+    assert!(body.contains("NO_SUCH_TRANSITION"), "{body}");
+    assert!(
+        body.contains("APPROVE") && body.contains("REJECT"),
+        "the refusal must name what is possible from here: {body}"
+    );
+
+    // Nothing happened, and the task is still there to decide.
+    assert_eq!(stored_status(&app, id).await, "PENDING_APPROVAL");
+    assert_eq!(open_task_of(&app, id).await, task);
+
+    let decided = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&approver_token),
+            json!({ "action": "REJECT", "comment": "No." }),
+        )
+        .await;
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+}
+
+/// **AC3: one decision per task, and return is not an exception.**
+///
+/// The same compare-and-swap #177 established, at the same concurrency, with
+/// `RETURN` in the mix — which is the point: a verb that reached the write
+/// through a different branch would be a verb the predicate did not cover, and
+/// the failure would be two decisions recorded against one task.
+///
+/// **Seen red** against `repository::task::complete` with its status predicate
+/// removed **and** `service::task::decide`'s locked `refuse_unless_open` gone:
+/// several callers win and the winners disagree about where the process went.
+///
+/// **Both, and the reason is the lock.** `FOR UPDATE` serialises these callers,
+/// so the second one reads a `COMPLETED` task and is refused by the service
+/// before it ever reaches the statement — which is the same thing `engine::fire`
+/// says about its own compare-and-swap. The statement's predicate is what still
+/// holds if somebody writes a second caller that forgets the check, so removing
+/// only one of the two leaves a build that is still correct.
+#[tokio::test]
+async fn concurrent_returns_and_approvals_still_resolve_to_one_outcome() {
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+
+    let workflow = publish_workflow(&app, &token, returnable_workflow("wf_return_race")).await;
+    let type_id = document_type(&app, &token, "PR_RETURN_RACE", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let task = open_task_of(&app, id).await;
+
+    let mut tokens = Vec::new();
+    for index in 0..CONCURRENT_CALLERS {
+        tokens.push(approver(&app, &format!("wf.returner{index}")).await);
+    }
+
+    let mut handles = Vec::new();
+
+    for (index, token) in tokens.into_iter().enumerate() {
+        let app = Arc::clone(&app);
+        // Every third caller sends it back; the rest approve. Both verbs reach
+        // the same statement, which is what this is about.
+        let body = if index % 3 == 0 {
+            json!({ "action": "RETURN", "comment": "Sent back." })
+        } else {
+            json!({ "action": "APPROVE" })
+        };
+
+        handles.push(tokio::spawn(async move {
+            app.post(
+                &format!("/api/v1/workflow/tasks/{task}/decision"),
+                Some(&token),
+                body,
+            )
+            .await
+        }));
+    }
+
+    let mut winners = HashSet::new();
+    let mut lost = 0usize;
+
+    for handle in handles {
+        let response = handle.await.expect("a decision finished");
+
+        match response.status {
+            StatusCode::OK => {
+                winners.insert(
+                    response.body["data"]["currentState"]
+                        .as_str()
+                        .expect("a state")
+                        .to_owned(),
+                );
+            }
+            StatusCode::CONFLICT => lost += 1,
+            other => panic!(
+                "a decision answered {other}, which is neither winning nor losing: {}",
+                response.body
+            ),
+        }
+    }
+
+    assert_eq!(
+        winners.len(),
+        1,
+        "more than one caller decided one task: {winners:?}"
+    );
+    assert_eq!(lost, CONCURRENT_CALLERS - 1, "every loser must be told");
+
+    // And the row agrees with the one winner, whichever verb it was.
+    let recorded: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM approval_decisions WHERE task_id = $1")
+            .bind(task)
+            .fetch_one(&app.pool)
+            .await
+            .expect("count the decisions");
+    assert_eq!(recorded, 1, "one task, one formal decision");
+}
+
+/// **A returned document is corrected, not discarded** ([#183], `is_discardable`).
+///
+/// The half of the editable predicate that did **not** widen. A returned
+/// document has a number, a status history and a live process waiting for it, so
+/// deleting it would strand the instance that returned it — and the refusal says
+/// so rather than repeating "only a draft" at somebody who has just been told
+/// they may edit it.
+///
+/// **Seen red** against `is_discardable` returning `is_editable()` **and**
+/// `repository::document::soft_delete`'s `WHERE` widened to match: the delete
+/// succeeds and the workflow instance is left pointing at a soft-deleted
+/// document.
+///
+/// **Both, because either alone still refuses**, which is worth knowing rather
+/// than hiding behind a one-line mutation. The service checks the predicate and
+/// the statement carries its own — `soft_delete` says why it is not redundant —
+/// so a build with one of them opened is still correct, and only a build with
+/// both opened is the defect this asserts against.
+#[tokio::test]
+async fn a_returned_document_may_be_edited_and_may_not_be_deleted() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let approver_token = approver(&app, "wf.undeletable").await;
+
+    let workflow = publish_workflow(&app, &token, returnable_workflow("wf_return_delete")).await;
+    let type_id = document_type(&app, &token, "PR_RETURN_DELETE", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let task = open_task_of(&app, id).await;
+    let returned = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&approver_token),
+            json!({ "action": "RETURN", "comment": "Please attach the quotation." }),
+        )
+        .await;
+    assert_eq!(returned.status, StatusCode::OK, "{}", returned.body);
+
+    let refused = app
+        .delete(&format!("/api/v1/documents/{id}"), Some(&token))
+        .await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::CONFLICT,
+        "a returned document was deleted, stranding the process that returned it: {}",
+        refused.body
+    );
+    assert!(
+        refused.body.to_string().contains("RETURNED"),
+        "the refusal must name where the document is: {}",
+        refused.body
+    );
+
+    // Still there, and still correctable — which is the pair that makes the two
+    // predicates different rather than one of them simply narrower.
+    assert_eq!(stored_status(&app, id).await, "RETURNED");
+
+    let corrected = app
+        .put(
+            &format!("/api/v1/documents/{id}"),
+            Some(&token),
+            json!({ "title": "Twelve ergonomic chairs" }),
+        )
+        .await;
+    assert_eq!(corrected.status, StatusCode::OK, "{}", corrected.body);
+}
+
+/// **A resubmission takes no number from the sequence** ([#183] AC5).
+///
+/// Stronger than *the document keeps its number*, and the failure it catches is
+/// different: a submit that allocated and then discarded would leave the
+/// document correct and the **sequence** short by one per correction round. On a
+/// gap-tolerant rule that hole is permanent.
+///
+/// Asserted through the next document's number rather than through the counter,
+/// because the counter is an implementation detail and the number a person sees
+/// is not.
+#[tokio::test]
+async fn a_resubmission_does_not_consume_a_number_from_the_sequence() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let approver_token = approver(&app, "wf.sequence").await;
+
+    let workflow = publish_workflow(&app, &token, returnable_workflow("wf_return_sequence")).await;
+    let type_id = document_type(&app, &token, "PR_RETURN_SEQ", Some(workflow)).await;
+
+    let first = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, first).await.status, StatusCode::OK);
+    let first_number = stored_number(&app, first).await.expect("a number");
+
+    // Send it back and up again, twice, so a leak would be unmistakable.
+    for round in 0..2 {
+        let task = open_task_of(&app, first).await;
+        let returned = app
+            .post(
+                &format!("/api/v1/workflow/tasks/{task}/decision"),
+                Some(&approver_token),
+                json!({ "action": "RETURN", "comment": format!("Round {round}.") }),
+            )
+            .await;
+        assert_eq!(returned.status, StatusCode::OK, "{}", returned.body);
+        assert_eq!(submit(&app, &token, first).await.status, StatusCode::OK);
+    }
+
+    // The next document takes the number immediately after the first one's. If
+    // a resubmission had allocated, this would be three higher.
+    let second = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, second).await.status, StatusCode::OK);
+    let second_number = stored_number(&app, second).await.expect("a number");
+
+    let next_of = |number: &str| -> u64 {
+        number
+            .rsplit('-')
+            .next()
+            .expect("a numeric tail")
+            .parse()
+            .expect("a number")
+    };
+
+    assert_eq!(
+        next_of(&second_number),
+        next_of(&first_number) + 1,
+        "two resubmissions consumed {} numbers from the sequence ({first_number} then \
+         {second_number})",
+        next_of(&second_number) - next_of(&first_number) - 1
+    );
+}

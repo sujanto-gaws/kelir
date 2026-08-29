@@ -11,6 +11,8 @@ import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { DOCUMENT_STATUS_LABELS } from '@/types/document'
 import {
+  DECISION_LABELS,
+  DECISION_VARIANTS,
   TASK_STATUS_LABELS,
   type AvailableDecision,
   type DecisionAction,
@@ -29,9 +31,10 @@ import {
  * **The decisions come from the backend, not from a list here.** A workflow's
  * transitions are its own, so a screen that enumerated them would be a screen
  * that only works for the workflows somebody thought of. It also carries
- * `supported`, which is how a transition this release cannot perform — `RETURN`,
- * FR-WF-008, Sprint 11's #183 — is **shown without being offered**: drawing a
+ * `supported`, which is how a transition this release cannot perform —
+ * `DELEGATE`, FR-WF-009, #184 — is **shown without being offered**: drawing a
  * button that produces a 422 would be the product refusing a control it drew.
+ * `RETURN` left that list when #183 built it.
  *
  * # The comment is part of the decision, not a step after it
  *
@@ -328,12 +331,12 @@ function openDocument(): void {
             <Button
               v-for="decision in offered"
               :key="decision.action"
-              :variant="decision.action === 'APPROVE' ? 'default' : 'destructive'"
+              :variant="DECISION_VARIANTS[decision.action as DecisionAction]"
               :disabled="busy"
               :data-testid="`decide-${decision.action}`"
               @click="decide(decision)"
             >
-              {{ decision.action === 'APPROVE' ? 'Approve' : 'Reject' }} →
+              {{ DECISION_LABELS[decision.action as DecisionAction] }} →
               {{ decision.toStateName }}
               <span v-if="decision.requiresComment" aria-hidden="true"> *</span>
             </Button>

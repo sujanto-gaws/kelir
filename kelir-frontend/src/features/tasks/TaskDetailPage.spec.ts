@@ -155,8 +155,9 @@ describe('TaskDetailPage', () => {
   })
 
   it('shows a transition this release cannot perform without offering it', async () => {
-    // A definition may declare `RETURN` — FR-WF-008 is Sprint 11 — and a button
-    // for it would produce a 422 from a control the product itself drew.
+    // A definition may declare `DELEGATE` — FR-WF-009 is #184 — and a button for
+    // it would produce a 422 from a control the product itself drew. It was
+    // `RETURN` until #183 built that one.
     current = detail({
       decisions: [
         {
@@ -167,19 +168,19 @@ describe('TaskDetailPage', () => {
           requiresComment: false,
         },
         {
-          action: 'RETURN',
-          toState: 'RETURNED',
-          toStateName: 'Returned',
+          action: 'DELEGATE',
+          toState: 'MANAGER_APPROVAL',
+          toStateName: 'Manager approval',
           supported: false,
-          requiresComment: true,
+          requiresComment: false,
         },
       ],
     })
 
     const wrapper = await render()
 
-    expect(wrapper.find('[data-testid="decide-RETURN"]').exists()).toBe(false)
-    expect(wrapper.get('[data-testid="task-deferred"]').text()).toContain('RETURN')
+    expect(wrapper.find('[data-testid="decide-DELEGATE"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="task-deferred"]').text()).toContain('DELEGATE')
   })
 
   it('offers a claim only for work that is going spare', async () => {

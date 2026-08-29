@@ -87,8 +87,17 @@ type TabKey = (typeof TABS)[number]['key']
 
 const tab = ref<TabKey>('form')
 
-/** A draft is edited; anything else is read. */
-const editable = computed(() => document.value?.status === 'DRAFT')
+/**
+ * A draft is edited, a returned document is corrected; anything else is read.
+ *
+ * **`RETURNED` is here because that is what return is for** (#183 AC1). A
+ * document sent back that could not be changed would be a rejection with a
+ * longer name — and the same submit button sends it up again, keeping the
+ * number it already has.
+ */
+const editable = computed(
+  () => document.value?.status === 'DRAFT' || document.value?.status === 'RETURNED',
+)
 
 /** The moves the backend will accept from where this document is. */
 const transitions = computed<DocumentStatus[]>(() =>

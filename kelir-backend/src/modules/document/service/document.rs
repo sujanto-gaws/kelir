@@ -68,7 +68,7 @@ use uuid::Uuid;
 
 use super::super::domain::{
     link, validate_create, validate_update, CreateDocumentRequest, Document, DocumentPriority,
-    MetadataSet, UpdateDocumentRequest,
+    DocumentStatus, MetadataSet, UpdateDocumentRequest,
 };
 use super::super::repository::{self as repo, DocumentFields, LockedDocument, NewDocument};
 use super::super::{DOCUMENT_CREATE, DOCUMENT_DELETE, DOCUMENT_READ, DOCUMENT_UPDATE, OBJECT_TYPE};
@@ -296,9 +296,9 @@ pub async fn update_document(
 
     if affected == 0 {
         // Submitted or deleted between the locked read and the write. The
-        // statement carries `status = 'DRAFT'` of its own, so this is what that
-        // predicate answering zero looks like from here.
-        return Err(not_a_draft(&locked));
+        // statement carries its own status predicate, so this is what that
+        // answering zero looks like from here.
+        return Err(not_editable(&locked));
     }
 
     if let Some(metadata) = &request.metadata {
@@ -391,10 +391,10 @@ pub async fn delete_document(
         .await?
         .ok_or_else(|| AppError::not_found("Document"))?;
 
-    refuse_unless_editable(&locked)?;
+    refuse_unless_discardable(&locked)?;
 
     if repo::soft_delete(&mut *transaction, tenant_id, id, actor).await? == 0 {
-        return Err(not_a_draft(&locked));
+        return Err(not_discardable(&locked));
     }
 
     transaction.commit().await?;
@@ -458,19 +458,60 @@ pub fn secure(
     .map_err(AppError::validation)
 }
 
-/// Refuses a write to a document that is no longer a draft (AC4).
+/// Refuses a write to a document whose content is fixed (AC4).
+///
+/// **A returned document passes**, which is [#183] AC1: it was sent back to be
+/// corrected, and one that could not be corrected would be a rejection with a
+/// longer name.
+///
+/// [#183]: https://github.com/sujanto-gaws/kelir/issues/183
 fn refuse_unless_editable(locked: &LockedDocument) -> Result<(), AppError> {
     if locked.status.is_editable() {
         return Ok(());
     }
 
-    Err(not_a_draft(locked))
+    Err(not_editable(locked))
 }
 
-fn not_a_draft(locked: &LockedDocument) -> AppError {
+/// Refuses a delete of a document that is more than a draft.
+///
+/// **Separate from [`refuse_unless_editable`] since [#183]**, and the two now
+/// differ on exactly one status. A returned document may be *edited* and may
+/// not be *discarded*: it holds a number, a status history and a live process
+/// waiting for it to come back, so deleting it would strand the instance that
+/// returned it.
+///
+/// [#183]: https://github.com/sujanto-gaws/kelir/issues/183
+fn refuse_unless_discardable(locked: &LockedDocument) -> Result<(), AppError> {
+    if locked.status.is_discardable() {
+        return Ok(());
+    }
+
+    Err(not_discardable(locked))
+}
+
+fn not_editable(locked: &LockedDocument) -> AppError {
     AppError::conflict(format!(
-        "this document is {} and only a draft can be edited or discarded; a \
-         submitted document is moved through PUT /documents/{{id}}/status",
+        "this document is {} and only a draft or a returned document can be \
+         edited; a submitted document is moved through PUT /documents/{{id}}/status",
+        locked.status.as_db()
+    ))
+}
+
+fn not_discardable(locked: &LockedDocument) -> AppError {
+    // `RETURNED` is named rather than lumped in with the rest: it is the one
+    // status a caller has just been told it may *edit*, so "only a draft" on
+    // its own reads as a contradiction.
+    let extra = if locked.status == DocumentStatus::Returned {
+        " — a returned document has a number and a process waiting for it, so it \
+          is corrected and sent again, or cancelled"
+    } else {
+        ""
+    };
+
+    AppError::conflict(format!(
+        "this document is {} and only a draft can be discarded; a submitted \
+         document is withdrawn through PUT /documents/{{id}}/status{extra}",
         locked.status.as_db()
     ))
 }
