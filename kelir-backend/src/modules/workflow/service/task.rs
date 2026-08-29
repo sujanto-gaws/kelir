@@ -39,12 +39,22 @@
 //! [`delegate`] (FR-WF-009, FR-TASK-008; [#184]) changes who an open task is
 //! for. It records no `approval_decisions` row, writes no `workflow_history`
 //! row and does not call [`super::engine::fire`] — **the process has not
-//! moved**. A `workflow_history` row could not be written for it even if that
-//! were wanted: `ck_workflow_history_moved` refuses `from_state IS NOT DISTINCT
-//! FROM to_state`, which is exactly what a hand-off would produce, and the
-//! constraint is right. What the hand-off does write is a
-//! `workflow_task_history` row, which is the record of *what happened to this
-//! task* — and that is precisely what happened to it.
+//! moved**. What the hand-off does write is a `workflow_task_history` row,
+//! which is the record of *what happened to this task* — and that is precisely
+//! what happened to it.
+//!
+//! **This paragraph used to rest on a constraint that no longer exists**, and
+//! is restated rather than reworded because the correction is the interesting
+//! part. It read: *a `workflow_history` row could not be written for it even if
+//! that were wanted — `ck_workflow_history_moved` refuses `from_state IS NOT
+//! DISTINCT FROM to_state`, which is exactly what a hand-off would produce, and
+//! the constraint is right.* The constraint was not right: it also refused a
+//! legal self-transition, and [#259] dropped it. Nothing about the hand-off
+//! changes. A `from_state = to_state` row is now writable and this path still
+//! does not write one, because it does not call `fire` — which is the reason it
+//! writes none, and always was.
+//!
+//! [#259]: https://github.com/sujanto-gaws/kelir/issues/259
 //!
 //! A JWSS definition may still declare a `DELEGATE` transition; nothing fires
 //! one, for the reason [`super::engine`] gives about `AUTO`. It is said here so

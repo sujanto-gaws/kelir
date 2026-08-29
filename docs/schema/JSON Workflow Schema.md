@@ -2,7 +2,7 @@
 **Version:** 1.0.0
 **Status:** Draft Standard
 **Target Stack:** Rust (Workflow Engine), Vue.js (Workflow Designer)
-**Last updated:** 2026-08-28
+**Last updated:** 2026-08-30
 
 ---
 
@@ -61,6 +61,8 @@ Where this document and the Meta-Schema disagree, **the Meta-Schema is normative
 | `variables` | `array` | No | Declared workflow variables (Section 6). |
 | `settings` | `object` | No | Engine options (e.g. `cancelableBy`, default due hours). |
 
+Every string property this document declares that an engine stores in a column carries a `maxLength` equal to that column's, and §9.1 collects them. A property that is bounded only by the storage is a property whose definition publishes and then fails while somebody is holding the task ([#259](https://github.com/sujanto-gaws/kelir/issues/259)).
+
 ---
 
 ## 3. State Object
@@ -113,6 +115,14 @@ A comment is mandatory on the **transition**, because that is the granularity at
 The comment itself is stored on the decision record and on the history row (Database Schema §7.6, §7.8, §7.11), which is what makes the requirement worth stating: a reason captured where the decision is not visible would not be read.
 
 **`AUTO` is excluded** for the reason §5.3 refuses two assignee types at save: there is no caller on an `AUTO` transition, so `requiresComment: true` on one would be an edge that can never fire — a stalled instance nobody is told about, produced by a definition that published cleanly.
+
+### 4.2 `from` and `to` MAY name the same state
+
+A transition whose `from` equals its `to` is legal, and it means *send it round again*: the state is re-entered, its `task` generates a fresh task, and the document does not move. Nothing in this section requires the two to differ, and the rules that constrain such an edge are the ones that constrain every other — S3 keeps the `(from, action, to)` triples unique, S4 keeps it off a final state, and **S6 is what stops a self-edge becoming a process that cannot end**, because a final state must still be reachable and a self-edge alone does not reach one.
+
+An engine MUST record it in the history like any other transition. That row is the one a reader most needs and the one an engine is most tempted to drop: somebody decided something, at a time, with a reason, and the document stayed where it was. A history missing it has a gap exactly where a person acted, and nothing on the screen says the gap is there.
+
+Kelir enforced the opposite until [#259](https://github.com/sujanto-gaws/kelir/issues/259) — a `CHECK` constraint on the history table required the two states to differ — so a definition using a self-edge saved, published, and then failed on the decision that fired it. The constraint was dropped rather than the construct: this specification is the normative document, and an implementation detail is not a reason to narrow it.
 
 ---
 
@@ -255,6 +265,27 @@ Publish-time rules. A definition failing any rule MUST remain `DRAFT`.
 - Publishing sets `status = 'ACTIVE'` and freezes the row. Editing an `ACTIVE` definition creates a new row with `version + 1` in `DRAFT`.
 - Running instances reference `workflow_definition_id` (a specific revision) — a newly published revision affects only instances started after it.
 
+### 9.1 A stored string is bounded where it is declared
+
+Every string property an engine projects into a column MUST carry a `maxLength` in the meta-schema, and that bound MUST equal the column's. Kelir's:
+
+| Property | Stored as | `maxLength` |
+| :--- | :--- | :--- |
+| `version` | `workflow_definitions.jwss_version VARCHAR(40)` | 40 |
+| `initialState`, `states[].code`, `transitions[].from` / `.to` | `VARCHAR(64)` columns | 60, via `stateCode` |
+| `states[].name` | `workflow_states.name VARCHAR(200)` | 200 |
+| `states[].task.taskDefinitionKey` | `workflow_tasks.task_definition_key VARCHAR(64)` | 64 |
+| `states[].task.taskName` | `workflow_tasks.task_name VARCHAR(200)` | 200 |
+| `variables[].key` | `workflow_variables.variable_key VARCHAR(64)` | 64 |
+
+**A `MUST`, because the failure it prevents is not an implementation's private business.** A definition bounded only by the storage passes every gate this specification defines and then fails at run time, in front of whoever is holding the task and nowhere near the definition that caused it. `stateCode` already carried its bound, which is what shows the omission was an oversight rather than a position: the bound was thought about for one property and not for its neighbours.
+
+**The bound goes in the meta-schema and not into §8**, for the reason S5 and S12 are there rather than in prose: §1.3 makes the meta-schema normative, and a constraint expressible as a keyword is one an off-the-shelf validator enforces for every implementation rather than one each implementation reimplements.
+
+`workflowKey` is deliberately absent from the table. Kelir takes the stored key from the create request rather than from the document, so the document's own `workflowKey` reaches no column; its `maxLength: 100` bounds the identifier this specification defines and is not a storage bound.
+
+An engine whose columns are narrower than a bound above is **not** conforming, and the remedy is to widen the column rather than to refuse the document.
+
 ---
 
 ## 10. Example
@@ -339,6 +370,7 @@ This specification is a **`Draft Standard`** ([naming convention](../standards/0
 | **R-2** | 2026-08-29 | **§5.1 says what a delegation window does and does not do**, for FR-IDM-006, FR-WF-009 and FR-TASK-008 — [#184](https://github.com/sujanto-gaws/kelir/issues/184). **No change to the shape**: no property is added, removed or re-typed, and the meta-schema is untouched. What changes is the specification being explicit that a window applies only where the rule resolves to a person, that it does not reach back for tasks already assigned, and that the `DELEGATE` action in §4's vocabulary is still fired by nothing — a reader who knew delegation had been built could otherwise have concluded that such an edge now drives it. |
 | **R-3** | 2026-08-29 | **§3.1 says what an engine must do with `dueInHours`, and what it must not do with `escalation`**, for FR-WF-011 and FR-TASK-007 — [#185](https://github.com/sujanto-gaws/kelir/issues/185). **No change to the shape**: `dueInHours` was already declared and already constrained by the meta-schema (`exclusiveMinimum: 0`), and nothing is added, removed or re-typed. What changes is the specification stating that the stamp happens at generation and is never recomputed — otherwise two engines could both claim conformance while one let a republished revision shorten a deadline somebody was working to — and that `escalation` is stored and not executed, which a reader could not tell from a table that describes it as *consumed by the escalation scheduler*. |
 | **R-4** | 2026-08-29 | **§6.2 gains the one-evaluator rule, §6.4 says what an engine does when a condition cannot be evaluated, and S7 gains the no-match case**, for FR-WF-015 — [#186](https://github.com/sujanto-gaws/kelir/issues/186). **No change to the shape**: no property is added, removed or re-typed, and the meta-schema is untouched. §6.4 is new text rather than a clarification, and it settles a question two conforming engines could previously answer opposite ways — Kelir itself answered it the other way until this revision, treating an evaluation failure as `false` and falling through to the fallback. S7's addition is the matching obligation at the other end: a definition may leave a gap, and an engine must not paper over it silently. |
+| **R-5** | 2026-08-30 | **§4.2 says a self-transition is legal, §9.1 requires every stored string to be bounded where it is declared, and the meta-schema gains five `maxLength` keywords** — [#259](https://github.com/sujanto-gaws/kelir/issues/259), finding 1 of the Sprint 11 independent pass. **A narrowing, and the first one on this line**: R-1 was a strict widening and R-2 to R-4 changed no shape at all. `version` (40), `states[].name` (200), `states[].task.taskDefinitionKey` (64), `states[].task.taskName` (200) and `variables[].key` (64) are bounds a document already had to respect to be storable, so **no document that could ever have run is refused by them** — what changes is that one which could not is refused at save instead of at run time. §4.2 settles the other half the opposite way: Kelir's own `CHECK` forbade a construct this specification permits, and the constraint was dropped rather than the construct. |
 
 ---
 
@@ -354,7 +386,7 @@ This specification is a **`Draft Standard`** ([naming convention](../standards/0
   "additionalProperties": false,
   "properties": {
     "workflowKey": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "maxLength": 100 },
-    "version": { "type": "string", "pattern": "^1\\.[0-9]+\\.[0-9]+$" },
+    "version": { "type": "string", "pattern": "^1\\.[0-9]+\\.[0-9]+$", "maxLength": 40 },
     "name": { "type": "string", "minLength": 1 },
     "description": { "type": "string" },
     "initialState": { "$ref": "#/$defs/stateCode" },
@@ -386,7 +418,7 @@ This specification is a **`Draft Standard`** ([naming convention](../standards/0
       "additionalProperties": false,
       "properties": {
         "code": { "$ref": "#/$defs/stateCode" },
-        "name": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
         "mapsToDocumentStatus": { "$ref": "#/$defs/documentStatus" },
         "isFinal": { "type": "boolean", "default": false },
         "task": { "$ref": "#/$defs/taskSpec" }
@@ -397,8 +429,8 @@ This specification is a **`Draft Standard`** ([naming convention](../standards/0
       "required": ["taskDefinitionKey", "taskName", "assignment"],
       "additionalProperties": false,
       "properties": {
-        "taskDefinitionKey": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
-        "taskName": { "type": "string", "minLength": 1 },
+        "taskDefinitionKey": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "maxLength": 64 },
+        "taskName": { "type": "string", "minLength": 1, "maxLength": 200 },
         "taskType": { "enum": ["USER_TASK", "APPROVAL_TASK", "REVIEW_TASK", "SERVICE_TASK",
                                "SIGNATURE_TASK", "DATA_ENTRY_TASK"], "default": "APPROVAL_TASK" },
         "assignment": { "$ref": "#/$defs/assignmentRule" },
@@ -470,7 +502,7 @@ This specification is a **`Draft Standard`** ([naming convention](../standards/0
       "required": ["key", "dataType"],
       "additionalProperties": false,
       "properties": {
-        "key": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "key": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "maxLength": 64 },
         "dataType": { "enum": ["STRING", "NUMBER", "BOOLEAN", "DATE", "JSON"] },
         "source": { "$ref": "#/$defs/jsonLogic" }
       }
