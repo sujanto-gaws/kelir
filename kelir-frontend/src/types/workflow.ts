@@ -262,7 +262,36 @@ export interface WorkflowHistoryEntry {
    */
   onBehalfOfUserId: string | null
   onBehalfOfUsername: string | null
+  /**
+   * Why this branch and not the other one (FR-WF-015, #186 AC5).
+   *
+   * Every transition condition the engine evaluated to choose this edge, in the
+   * order it evaluated them, each with its outcome. Edges after the winner were
+   * never evaluated and are absent rather than `false`.
+   *
+   * `null` on every entry where nothing was evaluated — the instance's first
+   * state, and every action leaving one unconditioned edge, which is most of
+   * them.
+   */
+  routing: RoutingStep[] | null
   occurredAt: string
+}
+
+/**
+ * One condition the engine evaluated while choosing a transition.
+ *
+ * `condition` is the JSON Logic expression as the definition wrote it. It is on
+ * the wire and **deliberately not rendered**: the workspace's history is read by
+ * the person deciding the document, and an expression is not what answers their
+ * question — *which branch was considered, and did it apply* is. The rule itself
+ * lives in the workflow definition, where somebody who needs to change it is
+ * going anyway.
+ */
+export interface RoutingStep {
+  /** The state that edge would have led to. */
+  to: string
+  condition: unknown
+  outcome: boolean
 }
 
 /**

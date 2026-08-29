@@ -194,6 +194,8 @@ The same applies to `guards` and `actions`: they are **stored and not executed**
 
 Conditions MUST use only operators registered in the [JFSS Calculation Rule Registry](JFSS%20Calculation%20Rule%20Registry.md). Custom operators require registration there first — the same polyglot-parity rule as form calculations (JFSS S8.1.1).
 
+An engine MUST evaluate a condition with the **same evaluator it evaluates form logic with**. A routing condition is the same kind of expression against different data, and a second evaluator here would lose polyglot parity on the surface that decides who approves a document.
+
 ### 6.3 Variable Declaration
 
 | Property | Type | Required | Description |
@@ -201,6 +203,16 @@ Conditions MUST use only operators registered in the [JFSS Calculation Rule Regi
 | `key` | `string` | Yes | Pattern `^[a-z][a-z0-9_]*$`; stored in `workflow_variables`. |
 | `dataType` | `string` | Yes | Enum: `STRING`, `NUMBER`, `BOOLEAN`, `DATE`, `JSON`. |
 | `source` | `object` | No | JSON Logic computing the initial value from the condition context at instance start. |
+
+### 6.4 Evaluation Failure
+
+A condition that **cannot be evaluated** — an operator that throws, a division by zero, an argument of the wrong shape — MUST stop the transition. An engine MUST NOT treat the failure as `false`.
+
+The distinction matters because `false` is not a neutral answer. It sends the process down the fallback S7 declares, which is a *different branch chosen because the intended one broke*, and the instance then continues as though the routing rule had been consulted and had declined. Nothing in the record would say that it never ran. A workflow that routes wrongly on a bad expression is worse than one that refuses to move.
+
+An expression that evaluates cleanly to a non-boolean is a different case: JSON Logic is truthy-typed, and `0` or `""` has told the engine something. Only a failure to evaluate at all is unknown.
+
+Because the failure depends on the data, it cannot be caught by §8's S10 at save time: the expression may be entirely well formed and use only registered operators, and break on the third document it meets.
 
 ---
 
@@ -227,7 +239,7 @@ Publish-time rules. A definition failing any rule MUST remain `DRAFT`.
 | **S4** | No transition originates from a state with `isFinal: true`. |
 | **S5** | Every non-`AUTO` transition declares `allowedBy`; `AUTO` transitions MUST NOT declare it. |
 | **S6** | Every state is reachable from `initialState`, and at least one final state is reachable from every non-final state (no dead ends, no orphans). |
-| **S7** | Transitions sharing `from` + `action`: at most one of them MAY omit `condition` (the fallback), and it is evaluated last regardless of document order. |
+| **S7** | Transitions sharing `from` + `action`: at most one of them MAY omit `condition` (the fallback), and it is evaluated last regardless of document order. Where every condition is false and no fallback is declared, the instance MUST NOT move, and the refusal MUST distinguish that case from an action the state does not declare at all. |
 | **S8** | Every state that is the target of a non-`AUTO` transition and is not final SHOULD declare a `task`; a stateless wait is a publish WARNING. |
 | **S9** | Every `mapsToDocumentStatus` value is a member of the platform enum. At least one state maps to `COMPLETED` or `CANCELLED`. |
 | **S10** | All `condition`, `expression`, and variable `source` logic uses registered operators only (§6.2). |
@@ -326,6 +338,7 @@ This specification is a **`Draft Standard`** ([naming convention](../standards/0
 | **R-1** | 2026-08-28 | **`transitions[].requiresComment` added** (§4, §4.1, S12), for FR-TASK-006 — [#182](https://github.com/sujanto-gaws/kelir/issues/182). A **strict widening**: the property is optional and defaults to `false`, so every document valid before this revision is valid after it and no stored definition needs rewriting. The §10 example marks its `REJECT` and `RETURN` edges, because those are the edges the property exists for. |
 | **R-2** | 2026-08-29 | **§5.1 says what a delegation window does and does not do**, for FR-IDM-006, FR-WF-009 and FR-TASK-008 — [#184](https://github.com/sujanto-gaws/kelir/issues/184). **No change to the shape**: no property is added, removed or re-typed, and the meta-schema is untouched. What changes is the specification being explicit that a window applies only where the rule resolves to a person, that it does not reach back for tasks already assigned, and that the `DELEGATE` action in §4's vocabulary is still fired by nothing — a reader who knew delegation had been built could otherwise have concluded that such an edge now drives it. |
 | **R-3** | 2026-08-29 | **§3.1 says what an engine must do with `dueInHours`, and what it must not do with `escalation`**, for FR-WF-011 and FR-TASK-007 — [#185](https://github.com/sujanto-gaws/kelir/issues/185). **No change to the shape**: `dueInHours` was already declared and already constrained by the meta-schema (`exclusiveMinimum: 0`), and nothing is added, removed or re-typed. What changes is the specification stating that the stamp happens at generation and is never recomputed — otherwise two engines could both claim conformance while one let a republished revision shorten a deadline somebody was working to — and that `escalation` is stored and not executed, which a reader could not tell from a table that describes it as *consumed by the escalation scheduler*. |
+| **R-4** | 2026-08-29 | **§6.2 gains the one-evaluator rule, §6.4 says what an engine does when a condition cannot be evaluated, and S7 gains the no-match case**, for FR-WF-015 — [#186](https://github.com/sujanto-gaws/kelir/issues/186). **No change to the shape**: no property is added, removed or re-typed, and the meta-schema is untouched. §6.4 is new text rather than a clarification, and it settles a question two conforming engines could previously answer opposite ways — Kelir itself answered it the other way until this revision, treating an evaluation failure as `false` and falling through to the fallback. S7's addition is the matching obligation at the other end: a definition may leave a gap, and an engine must not paper over it silently. |
 
 ---
 

@@ -290,6 +290,10 @@ pub async fn start(
             // owner raised it, and a window redirects the approvals that follow
             // rather than the act of asking for them.
             on_behalf_of_user_id: None,
+            // And nothing chose this state — it is the one the definition
+            // starts in, reached without a transition and so without a
+            // condition to evaluate.
+            routing: None,
         },
     )
     .await?;
@@ -390,15 +394,58 @@ pub async fn fire(
     evaluation: &EvaluationContext,
     decision: DecisionProvenance<'_>,
 ) -> Result<Fired, AppError> {
-    let candidates = graph.candidates(from_state, action);
+    // **Choosing the edge, and keeping the working** (FR-WF-015, [#186]).
+    //
+    // S7's order comes from `Graph::candidates` — conditioned edges in document
+    // order, the fallback last — and the first condition that holds wins. What
+    // is new here is that the *evaluation* is kept: each condition actually
+    // reached, with the boolean it produced, so the history row can answer why
+    // this branch and not the other one. Edges after the winner are never
+    // evaluated and are therefore absent rather than recorded as false.
+    //
+    // [#186]: https://github.com/sujanto-gaws/kelir/issues/186
+    let mut routing: Vec<Value> = Vec::new();
+    let mut selected = None;
 
-    let chosen = candidates
-        .into_iter()
-        .find(|transition| match &transition.condition {
-            None => true,
-            Some(condition) => holds(condition, evaluation, actor),
-        })
-        .ok_or_else(|| no_transition(graph, from_state, action))?;
+    for transition in graph.candidates(from_state, action) {
+        let Some(condition) = &transition.condition else {
+            // The fallback. S7 put it last, so reaching it means every
+            // condition before it was evaluated and none held.
+            selected = Some(transition);
+            break;
+        };
+
+        let outcome = evaluate_condition(condition, evaluation, actor).map_err(|error| {
+            // **The engine's own words go to the log and not to the caller.**
+            // `EvaluationError::message` names operators and argument shapes;
+            // `rad::evaluator` says it is diagnostic, and a routing expression
+            // is the definition's rather than the caller's, so the refusal
+            // names the edge and the log carries the rest.
+            tracing::error!(
+                workflow = %graph.workflow_key,
+                from = %from_state,
+                to = %transition.to,
+                action = %action.as_db(),
+                error = %error,
+                "a transition condition could not be evaluated; the transition is refused"
+            );
+
+            unevaluable_condition(from_state, action, &transition.to)
+        })?;
+
+        routing.push(json!({
+            "to": transition.to,
+            "condition": condition,
+            "outcome": outcome,
+        }));
+
+        if outcome {
+            selected = Some(transition);
+            break;
+        }
+    }
+
+    let chosen = selected.ok_or_else(|| no_transition(graph, from_state, action, &routing))?;
 
     // **A delegate is measured against the rule as the person they stand in
     // for** (#184 AC5). `on_behalf_of` comes off the task, so an edge the
@@ -517,6 +564,10 @@ pub async fn fire(
             comment: decision.comment,
             actor_user_id: actor,
             on_behalf_of_user_id: decision.on_behalf_of,
+            // **Absent where nothing was evaluated** (#186 AC5). An action that
+            // leaves one unconditioned edge evaluated no condition, and an
+            // empty array would record a deliberation that did not happen.
+            routing: (!routing.is_empty()).then_some(Value::Array(routing)),
         },
     )
     .await?;
@@ -766,18 +817,77 @@ async fn write_variables(
     Ok(())
 }
 
-/// Whether a transition's condition holds.
+/// Whether a transition's condition holds (FR-WF-015, [#186] AC1, AC3).
 ///
-/// A condition that **fails to evaluate is false**, not an error: an unevaluable
-/// condition means this branch cannot be shown to apply, and the fallback — the
-/// unconditioned transition S7 puts last — is what the process then takes. The
-/// alternative is an approval that cannot be decided because of an expression
-/// nobody can fix from the screen they are on.
-fn holds(condition: &Value, evaluation: &EvaluationContext, actor: Option<Uuid>) -> bool {
+/// **Through [`RuleEvaluator`] and nothing else.** A condition is the same kind
+/// of expression as a form's, against different data, and **D-10** bought
+/// Polyglot Parity by there being one evaluator on both sides. A second one
+/// here would lose it on the surface that decides who approves an invoice —
+/// which is [#186]'s own warning, and the reason this function is three lines
+/// rather than a parser.
+///
+/// # A condition that cannot be evaluated stops the transition
+///
+/// **This reverses what this function used to do, and the reversal is the
+/// item.** It returned `false` on an evaluation failure, so an unevaluable
+/// condition fell through to the fallback S7 puts last. The reasoning was that
+/// an approval nobody can decide is worse than one that takes the safe branch —
+/// and it is wrong in the way [#186] AC3 names: *a workflow that routes wrongly
+/// on a bad expression is worse than one that refuses to move.* The fallback is
+/// not a safe branch. It is a different branch, chosen because the intended one
+/// broke, and the process then continues as though the routing rule had been
+/// consulted and had said no. Nothing anywhere records that it never ran.
+///
+/// The refusal is loud, names the edge, and leaves the instance where it was.
+///
+/// **A non-boolean result is `false`, and that is not the same case.** JSON
+/// Logic is truthy-typed and an expression that evaluates cleanly to `0` or
+/// `""` has told us something; only a failure to evaluate at all is unknown.
+///
+/// **It is also not [`write_variables`]'s rule, deliberately.** A `source` that
+/// cannot be computed leaves a variable unset and lets the submit through
+/// (**D-24**) — that happens at instance start, before anybody is waiting, and
+/// the cost is a missing value. This decides *where an approval goes*, with a
+/// person holding the task.
+///
+/// [#186]: https://github.com/sujanto-gaws/kelir/issues/186
+fn evaluate_condition(
+    condition: &Value,
+    evaluation: &EvaluationContext,
+    actor: Option<Uuid>,
+) -> Result<bool, crate::modules::rad::evaluator::EvaluationError> {
     RuleEvaluator::new()
         .evaluate(condition, &evaluation.as_json(actor))
         .map(|value| value.as_bool().unwrap_or(false))
-        .unwrap_or(false)
+}
+
+/// Refuses a transition whose condition could not be evaluated ([#186] AC3).
+///
+/// **A 422, and the same shape `assignment::unresolvable` uses.** Nothing the
+/// caller sent is wrong: the definition names an expression that does not run
+/// against this document, which is a property of the stored configuration. So
+/// the path points at the *definition's* transition and the message names the
+/// edge, because "the condition failed" tells an administrator nothing they can
+/// act on.
+///
+/// The evaluator's own diagnostic is deliberately absent — it names operators
+/// and argument shapes, `rad::evaluator` calls it log-only, and the person
+/// holding the task is not the person who can fix it.
+///
+/// [#186]: https://github.com/sujanto-gaws/kelir/issues/186
+fn unevaluable_condition(from_state: &str, action: TransitionAction, to: &str) -> AppError {
+    AppError::validation(vec![ValidationDetail::new(
+        format!("transitions.{from_state}.{}.condition", action.as_db()),
+        "condition",
+        "CONDITION_UNEVALUABLE",
+        format!(
+            "the condition on the {} transition from `{from_state}` to `{to}` could not be \
+             evaluated against this document, so the process is left where it is rather than \
+             sent down a branch its routing rule never chose. An administrator can see the \
+             expression in the workflow definition; the engine's diagnostic is in the server log",
+            action.as_db()
+        ),
+    )])
 }
 
 fn parse_document_status(value: &str) -> Option<DocumentStatus> {
@@ -790,20 +900,65 @@ fn parse_document_status(value: &str) -> Option<DocumentStatus> {
     (parsed.as_db() == value).then_some(parsed)
 }
 
-fn no_transition(graph: &Graph, from_state: &str, action: TransitionAction) -> AppError {
+/// Refuses a move with nowhere to go, and says which kind of nowhere ([#186] AC4).
+///
+/// **Three situations, and a person needs to tell them apart.** The state is
+/// final and nothing leaves it; the action does not apply here at all; or the
+/// action applies and **every condition on it was false with no fallback
+/// declared**. The third is the one conditional routing creates, and it is the
+/// one an administrator has to recognise: the definition has a gap, and the
+/// instance is sitting still because of it rather than because somebody asked
+/// for the wrong thing.
+///
+/// AC4 asks that such a failure be *visible*. It is a refusal rather than a
+/// silent no-op, it names how many conditions were tried, and the trail is
+/// logged — a stalled process nobody is told about is the failure mode this
+/// item most easily creates.
+///
+/// [#186]: https://github.com/sujanto-gaws/kelir/issues/186
+fn no_transition(
+    graph: &Graph,
+    from_state: &str,
+    action: TransitionAction,
+    routing: &[Value],
+) -> AppError {
     let available: Vec<&str> = graph
         .actions_from(from_state)
         .into_iter()
         .map(|transition| transition.action.as_db())
         .collect();
 
+    if !routing.is_empty() {
+        let trail = Value::Array(routing.to_vec());
+
+        tracing::warn!(
+            workflow = %graph.workflow_key,
+            from = %from_state,
+            action = %action.as_db(),
+            evaluated = routing.len(),
+            routing = %trail,
+            "every condition on this action was false and the definition declares no \
+             fallback; the process was not moved"
+        );
+    }
+
     let message = if available.is_empty() {
         format!("`{from_state}` is final; nothing moves the process from there")
-    } else {
+    } else if routing.is_empty() {
         format!(
-            "`{from_state}` has no {} transition whose condition holds. From here: {}",
+            "`{from_state}` has no {} transition. From here: {}",
             action.as_db(),
             available.join(", ")
+        )
+    } else {
+        // The gap conditional routing creates: edges exist, every one of them
+        // was consulted, none applied, and the definition names no default.
+        format!(
+            "`{from_state}` has {} {} transition(s) and the condition on every one of them \
+             was false, with no fallback declared — so this workflow says nothing about what \
+             should happen to this document here. The process was not moved",
+            routing.len(),
+            action.as_db()
         )
     };
 
