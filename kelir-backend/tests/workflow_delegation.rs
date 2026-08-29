@@ -721,7 +721,10 @@ async fn a_task_already_assigned_stays_put_when_a_window_opens_and_is_handed_ove
     assert_eq!(recorded.2, Some(ani.id));
 
     // And nothing was written to the *document's* history: the process did not
-    // move, and `ck_workflow_history_moved` would refuse a row saying it had.
+    // move. **This assertion got stronger when #259 dropped
+    // `ck_workflow_history_moved`.** It used to be guarded by the database as
+    // well as by the code, so it could not have failed; now only `delegate` not
+    // calling `fire` keeps it true, and this is what says so.
     let moves: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM workflow_history WHERE document_id = $1 AND action = 'DELEGATE'",
     )

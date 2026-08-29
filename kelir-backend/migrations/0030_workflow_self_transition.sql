@@ -1,0 +1,45 @@
+-- 0030_workflow_self_transition.sql — a history row records a decision, not
+-- necessarily a move (#259, finding 1 of the Sprint 11 independent pass).
+--
+-- `0027` created `workflow_history` with
+-- `CONSTRAINT ck_workflow_history_moved CHECK (from_state IS DISTINCT FROM to_state)`.
+-- It is the only choice in that file with no paragraph arguing for it, and this
+-- one drops it.
+--
+-- **A self-transition is a legal JWSS construct and the constraint made it a
+-- 500.** `REVIEW --RETURN--> REVIEW` — *send it round again* — satisfies S3
+-- (the `(from, action, to)` triples are still unique), S4 (the state is not
+-- final), S6 (a final state is still reachable) and S7. Nothing in JWSS §4 says
+-- `from` and `to` must differ. So the definition saved, published, and then
+-- refused the decision that fired the edge, with a database error surfacing as
+-- a 500 to whoever was holding the task. The bound the meta-schema now carries
+-- for the other half of #259 could not have caught this one: it is not a length
+-- and not a shape, it is a relation between two properties that JWSS permits.
+--
+-- **The constraint is the wrong side of the choice, and the reason is what the
+-- table is for.** `workflow_history` answers *how did this document get here*,
+-- read in the workspace by the approver deciding it. A reviewer who sent a
+-- document round again made a decision, at a time, with a comment, and that is
+-- exactly the row a reader most needs — it is what stands between an account of
+-- the process and one with a person-shaped gap in it. `ck_workflow_history_moved`
+-- read the table as a log of state changes, which is `workflow_transitions`'
+-- vocabulary, not this one; the name `moved` is the assumption showing.
+--
+-- The alternative was to refuse `from == to` at publish as a new §8 rule. It was
+-- rejected: JWSS is the normative document and the specification does not
+-- forbid the construct, so Kelir would have been narrowing its own standard to
+-- fit a `CHECK` nobody had argued for. Recorded in JWSS **R-5** and §4.
+--
+-- **Nothing about the first row changes.** `from_state` stays nullable and
+-- `to_state` stays `NOT NULL`; the instance's opening row still comes from
+-- nowhere, and `IS DISTINCT FROM` was never what made that true.
+--
+-- **N−1 compatibility.** Dropping a `CHECK` only widens what the table accepts,
+-- so the previous release's binary writes exactly the rows it wrote before and
+-- reads every row this one writes. Nothing is added, altered or dropped from the
+-- shape. The one direction that does not hold is a downgrade *after* a
+-- self-transition has run — re-adding the constraint would then fail on real
+-- rows — which is a property of the data and not of the binary, and is the
+-- normal cost of widening a bound.
+
+ALTER TABLE workflow_history DROP CONSTRAINT ck_workflow_history_moved;
