@@ -12,6 +12,7 @@ import {
   type FakeReply,
   type RecordedRequest,
 } from '@/lib/testing/fake-backend'
+import { useAuthStore } from '@/stores/auth'
 import { ALLOWED_TRANSITIONS, type DocumentStatus } from '@/types/document'
 
 /**
@@ -110,6 +111,25 @@ describe('DocumentWorkspace', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     window.localStorage.clear()
+
+    // **Signed in, and with the two workflow reads.** This spec created a store
+    // and left it empty, so `auth.can` answered false for everything — which
+    // was invisible until the Workflow tab started asking
+    // ([#263](https://github.com/sujanto-gaws/kelir/issues/263)). The workflow
+    // scenario below is a person reading the steps a process has generated, so
+    // the caller it depicts is one who may; an empty store made it a caller who
+    // may not, and the test passed anyway because the tab did not ask.
+    //
+    // Only these two. Every other permission stays denied, so no other
+    // assertion here moves.
+    useAuthStore().user = {
+      id: '0199a1a0-0000-7000-8000-0000000000f8',
+      username: 'ani',
+      displayName: 'Ani Wijaya',
+      email: 'ani@example.com',
+      roles: ['APPROVER'],
+      permissions: ['workflow:instance:read', 'workflow:task:read'],
+    }
 
     current = document() as Record<string, unknown>
 

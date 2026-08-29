@@ -1,7 +1,10 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
+import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import WorkflowTab from './WorkflowTab.vue'
+import { useAuthStore } from '@/stores/auth'
+import type { CurrentUser } from '@/types/auth'
 import {
   errorBody,
   installFakeBackend,
@@ -100,6 +103,12 @@ describe('WorkflowTab', () => {
   let onHistory: () => FakeReply
 
   beforeEach(() => {
+    setActivePinia(createPinia())
+    // The tab reads `workflow:task:read` to tell *not allowed to look* from
+    // *looked and there is nothing* (#263). Every spec below that is not about
+    // that distinction holds it, which is the state the screen was written for.
+    signIn(['workflow:instance:read', 'workflow:task:read'])
+
     onHistory = () => ({ status: 200, body: historyBody([entry()]) })
 
     backend = installFakeBackend((request) => {
@@ -118,6 +127,19 @@ describe('WorkflowTab', () => {
   afterEach(() => {
     backend.restore()
   })
+
+  function signIn(permissions: string[]): void {
+    const user: CurrentUser = {
+      id: '0199a1a0-0000-7000-8000-0000000000f9',
+      username: 'ani',
+      displayName: 'Ani Wijaya',
+      email: 'ani@example.com',
+      roles: ['REQUESTER'],
+      permissions,
+    }
+
+    useAuthStore().user = user
+  }
 
   async function render(): Promise<VueWrapper> {
     const wrapper = mount(WorkflowTab, { props: { documentId: DOCUMENT_ID } })
@@ -293,5 +315,107 @@ describe('WorkflowTab', () => {
     const wrapper = await render()
 
     expect(wrapper.find('[data-testid="history-routing"]').exists()).toBe(false)
+  })
+
+  // -------------------------------------------------------------------------
+  // An empty task list is not one thing (#263)
+  // -------------------------------------------------------------------------
+
+  /**
+   * **The defect [#263](https://github.com/sujanto-gaws/kelir/issues/263) was
+   * raised for**, and the reason it is worth a screen change rather than a
+   * sentence change: the API answers 200 with an empty task list to a caller
+   * without `workflow:task:read`, deliberately, and the panel used to render
+   * that under *"These are the steps this approval has generated"* — while the
+   * history directly below listed the decisions people had taken on those
+   * steps.
+   *
+   * The combination is the requester's: somebody who raised a document holds no
+   * tasks.
+   *
+   * **Seen red**, and isolating, with the refusal branch's `v-if` forced false:
+   * this test alone fails, the note reappears and the refusal is gone. The
+   * cruder mutation — inverting the branch to `v-if="canReadTasks"` — reddens
+   * all three of these and so proves less about this one.
+   */
+  it('says the steps cannot be seen rather than that there are none', async () => {
+    signIn(['workflow:instance:read'])
+    backend.restore()
+    backend = installFakeBackend((request) => {
+      if (request.url.includes('/workflow/history')) {
+        return onHistory()
+      }
+
+      const body = workflowBody() as { data: Record<string, unknown> }
+      body.data.tasks = []
+
+      return { status: 200, body }
+    })
+
+    const wrapper = await render()
+    const steps = wrapper.get('[data-testid="workflow-tasks"]')
+
+    expect(wrapper.get('[data-testid="workflow-tasks-forbidden"]').text()).toContain(
+      'permission to view tasks',
+    )
+    expect(steps.text()).not.toContain('These are the steps this approval has generated')
+    expect(wrapper.find('[data-testid="workflow-tasks-empty"]').exists()).toBe(false)
+
+    // And the half they *can* read is untouched: the refusal above must not
+    // read as the history being missing too.
+    expect(wrapper.get('[data-testid="workflow-history"]').text()).toContain('REJECTED')
+  })
+
+  /**
+   * The other empty list, which is a different piece of news.
+   *
+   * A caller who may read tasks and is shown none has looked and found nothing —
+   * a pass-through state generates no task, and an instance can sit in one.
+   * Telling them they lack a permission would be as wrong as the defect this
+   * pairs with.
+   *
+   * **Seen red**, and isolating, with this branch deleted so an empty list
+   * falls through to nothing at all.
+   */
+  it('says an approval has generated no steps when the reader may look', async () => {
+    backend.restore()
+    backend = installFakeBackend((request) => {
+      if (request.url.includes('/workflow/history')) {
+        return onHistory()
+      }
+
+      const body = workflowBody() as { data: Record<string, unknown> }
+      body.data.tasks = []
+
+      return { status: 200, body }
+    })
+
+    const wrapper = await render()
+
+    expect(wrapper.get('[data-testid="workflow-tasks-empty"]').text()).toContain(
+      'generated no steps',
+    )
+    expect(wrapper.find('[data-testid="workflow-tasks-forbidden"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="workflow-history-note"]').exists()).toBe(false)
+  })
+
+  /**
+   * The unchanged case, pinned so the fix cannot be a regression.
+   *
+   * **Seen red**, and isolating, with the note deleted from the populated
+   * branch. Inverting the permission branch reddens this too, along with the
+   * other two, which is why the note is the mutation recorded here.
+   */
+  it('still lists the steps, with its own note, for a reader who holds both', async () => {
+    const wrapper = await render()
+
+    expect(wrapper.get('[data-testid="workflow-task-TASK-2026-000001"]').text()).toContain(
+      'Approve the request',
+    )
+    expect(wrapper.get('[data-testid="workflow-history-note"]').text()).toContain(
+      'These are the steps this approval has generated',
+    )
+    expect(wrapper.find('[data-testid="workflow-tasks-forbidden"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="workflow-tasks-empty"]').exists()).toBe(false)
   })
 })
