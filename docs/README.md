@@ -1,6 +1,6 @@
 # Kelir Documentation
 
-**Status:** Living · **Last updated:** 2026-08-25
+**Status:** Living · **Last updated:** 2026-08-29
 
 Kelir is a metadata-driven, document-centric, workflow-enabled full-stack framework for building enterprise business applications rapidly — Rust (Axum + SQLx + PostgreSQL) on the backend, Vue 3 (Vite + Pinia + shadcn-vue + Tailwind CSS v4) on the frontend. This folder is the complete documentation set; this file is its map.
 
@@ -56,7 +56,7 @@ Early exploratory documents. Still valid for intent and examples, but **supersed
 | Document | Content |
 |---|---|
 | [01. System Design Document.md](design/01.%20System%20Design%20Document.md) | The SDD: architecture overview, stacks, module map, table groups, workflow/RAD/integration/plugin/security design, roadmap |
-| [02. Database Schema.md](design/02.%20Database%20Schema.md) | Column-level DDL for all 95 tables across 17 migrations, with conventions, indexes, and enum vocabularies |
+| [02. Database Schema.md](design/02.%20Database%20Schema.md) | Column-level DDL for every table, with conventions, indexes, and enum vocabularies. **Its own §4 mapping table is the authoritative migration list, and its own table count is the authoritative total** — both are deliberately not restated here, because the pair written on this line went stale twice (Sprint 4 to 2026-08-27, and again by Sprint 10) and a number that is only ever adjusted by whoever remembers is a number nobody can check |
 
 ### schema/
 
@@ -133,9 +133,9 @@ When documents disagree, precedence is explicit:
 | Requirements (SRS v0.8) | **Draft** — the scope authority, and §9 is the MVP gate, but approval is still an open action (SDD §16 step 1) |
 | Architecture 01–05 | **Adopted** |
 | System Design Document v0.1 | **Draft** — approval open, as above |
-| Database Schema | **Draft** — 95 tables / 17 migrations; adopted with the SDD |
+| Database Schema | **Draft** — adopted with the SDD. Counts live in the document itself (§4 and its closing total), not here |
 | Schema standards | JFSS **Final Standard**; rule registries **Active Standard**; JWSS / LHCS / PMS / EES / DTDS **Draft Standard** |
 | Standards 01–05 | **Adopted** — CI enforces the coding standard, branch protection implements the git workflow |
 | Concepts 01–04 | **Superseded** — background and intent only (authority rule 7) |
-| Planning | Complete — sprint plan and product backlog cover all 164 FRs. Scope decisions D-1…D-18 are recorded in [Product Backlog](../projects/planning/02.%20Product%20Backlog.md) §6; all are resolved except **D-15**, and **D-7** is superseded by **D-18** |
-| Implementation | Phase 1 released as `v0.1.0` and closed; staging retired by decision D-9. Phase 2 backend done (Sprint 3): Argon2id authentication with rotating refresh tokens, users, roles, permissions enforced per route, and the hash-chained audit write path. Remaining in Phase 2: the frontend auth flow, admin screens, delegation, departments and rate limiting. See [Sprint 3 Status](../projects/status/04.%20Sprint%203%20Status.md) |
+| Planning | Complete — sprint plan and product backlog cover all 164 FRs. Scope decisions **D-1…D-44** are recorded in [Product Backlog](../projects/planning/02.%20Product%20Backlog.md) §6; all are resolved except **D-15**, and **D-7** is superseded by **D-18**. Sprints 0–13 are detailed in [Sprint Plan](../projects/planning/01.%20Sprint%20Plan.md) §5; 14–21 remain an outline in §6, detailed at each phase boundary |
+| Implementation | **Phases 1–4 released** — `v0.1.0` through `v0.4.0`; staging retired by **D-9**. **Phase 5's scope is complete and the phase is not closed**: all six of Sprint 11's construction items are merged, so a submitted document runs an approval end to end — definitions, instances, tasks, an inbox, approve/reject/return, delegation, due dates, conditional routing and a history that says how the document got here. What remains before `v0.5.0` is the exit rather than the work: the demo, an independent verification pass, and the release rehearsal. **`v0.5.0` is not the MVP** (**D-1**) — that is `v0.6.0` at the end of Phase 6. See [Sprint 11 Status](../projects/status/12.%20Sprint%2011%20Status.md) |
