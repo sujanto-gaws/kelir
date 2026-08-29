@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 
 import TaskDetailPage from './TaskDetailPage.vue'
+import { useAuthStore } from '@/stores/auth'
+import type { CurrentUser } from '@/types/auth'
 import {
   errorBody,
   installFakeBackend,
@@ -31,8 +33,39 @@ import {
 
 const blank = { template: '<div />' }
 
+const CALLER_ID = '0199a1a0-0000-7000-8000-0000000000c9'
 const TASK_ID = '0199a1a0-0000-7000-8000-0000000000a1'
 const DOCUMENT_ID = '0199a1a0-0000-7000-8000-0000000000d1'
+
+/** Who the hand-over picker is offered, when the caller may read users. */
+const people = [
+  {
+    id: CALLER_ID,
+    username: 'ani',
+    email: 'ani@example.com',
+    displayName: 'Ani Wijaya',
+    status: 'ACTIVE',
+    departmentId: null,
+    mustChangePassword: false,
+    lastLoginAt: null,
+    lockedUntil: null,
+    createdAt: '2026-01-01T00:00:00Z',
+    roles: [],
+  },
+  {
+    id: 'u-budi',
+    username: 'budi',
+    email: 'budi@example.com',
+    displayName: 'Budi Santoso',
+    status: 'ACTIVE',
+    departmentId: null,
+    mustChangePassword: false,
+    lastLoginAt: null,
+    lockedUntil: null,
+    createdAt: '2026-01-01T00:00:00Z',
+    roles: [],
+  },
+]
 
 function detail(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -45,6 +78,8 @@ function detail(overrides: Record<string, unknown> = {}): Record<string, unknown
     dueAt: null,
     assignment: 'ROLE',
     candidateRoleCode: 'FINANCE_APPROVER',
+    delegatedFromUserId: null,
+    delegatedFromDisplayName: null,
     workflowInstanceId: '0199a1a0-0000-7000-8000-0000000000b1',
     workflowName: 'Standard approval',
     workflowKey: 'purchase_requisition_standard',
@@ -80,6 +115,7 @@ describe('TaskDetailPage', () => {
   let router: Router
   let current: Record<string, unknown>
   let onDecision: (request: RecordedRequest) => FakeReply
+  let onDelegation: (request: RecordedRequest) => FakeReply
 
   beforeEach(() => {
     setActivePinia(createPinia())
@@ -98,9 +134,26 @@ describe('TaskDetailPage', () => {
       }),
     })
 
+    onDelegation = () => ({ status: 200, body: itemBody(current) })
+
     backend = installFakeBackend((request) => {
       if (request.url.includes('/decision')) {
         return onDecision(request)
+      }
+
+      if (request.url.includes('/delegation')) {
+        return onDelegation(request)
+      }
+
+      if (request.url.startsWith('/identity/users')) {
+        return {
+          status: 200,
+          body: {
+            success: true,
+            data: people,
+            meta: { page: 1, pageSize: 100, total: people.length },
+          },
+        }
       }
 
       if (request.url.includes('/claim')) {
@@ -123,6 +176,25 @@ describe('TaskDetailPage', () => {
   afterEach(() => {
     backend.restore()
   })
+
+  /**
+   * Signs the caller in with the permissions given.
+   *
+   * The hand-over picker is gated on `identity:user:read` — see the component,
+   * which says why it borrows an administrative permission and what that costs.
+   */
+  function signIn(permissions: string[]): void {
+    const user: CurrentUser = {
+      id: CALLER_ID,
+      username: 'ani',
+      displayName: 'Ani Wijaya',
+      email: 'ani@example.com',
+      roles: ['APPROVER'],
+      permissions,
+    }
+
+    useAuthStore().user = user
+  }
 
   async function render(): Promise<VueWrapper> {
     await router.push({ name: 'task', params: { id: TASK_ID } })
@@ -361,5 +433,129 @@ describe('TaskDetailPage', () => {
     const wrapper = await render()
 
     expect(wrapper.get('[data-testid="task-error"]').text()).toContain('could not be opened')
+  })
+
+  // -------------------------------------------------------------------------
+  // Handing it over (FR-WF-009, FR-TASK-008; #184)
+  // -------------------------------------------------------------------------
+
+  it('does not offer to hand over a task nobody has taken', async () => {
+    // The server refuses an unclaimed role task with a 409 saying to claim it
+    // first: it has no holder, and giving it to one named person would take it
+    // out of every other holder's queue without anybody asking. Drawing the
+    // control and being refused would be the product refusing itself.
+    signIn(['workflow:task:execute', 'identity:user:read'])
+
+    const wrapper = await render()
+
+    expect(wrapper.find('[data-testid="start-hand-over"]').exists()).toBe(false)
+  })
+
+  it('offers to hand over a task that is already yours', async () => {
+    signIn(['workflow:task:execute', 'identity:user:read'])
+    current = detail({ assignment: 'MINE', status: 'ASSIGNED' })
+
+    const wrapper = await render()
+
+    expect(wrapper.find('[data-testid="start-hand-over"]').exists()).toBe(true)
+  })
+
+  it('offers everybody but you, and says so plainly when it cannot see anybody', async () => {
+    // The picker borrows `identity:user:read`, which is administrative. A
+    // deployment that has not granted it to its approvers gets a sentence
+    // saying why rather than an empty box.
+    signIn(['workflow:task:execute', 'identity:user:read'])
+    current = detail({ assignment: 'MINE', status: 'ASSIGNED' })
+
+    const wrapper = await render()
+    await wrapper.get('[data-testid="start-hand-over"]').trigger('click')
+    await flushPromises()
+
+    const labels = wrapper
+      .get('#delegate-user')
+      .findAll('option')
+      .map((option) => option.text())
+
+    expect(labels).toContain('Budi Santoso')
+    expect(labels).not.toContain('Ani Wijaya')
+    expect(wrapper.find('[data-testid="hand-over-unavailable"]').exists()).toBe(false)
+  })
+
+  it('says why the picker is empty when the caller cannot read users', async () => {
+    signIn(['workflow:task:execute'])
+    current = detail({ assignment: 'MINE', status: 'ASSIGNED' })
+
+    const wrapper = await render()
+    await wrapper.get('[data-testid="start-hand-over"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="hand-over-unavailable"]').text()).toContain(
+      'permission to view users',
+    )
+    expect(wrapper.find('[data-testid="confirm-hand-over"]').exists()).toBe(false)
+  })
+
+  it('hands the task over through its own route, not through a decision', async () => {
+    // It is not a fourth `DecisionAction`: nothing about the document is
+    // answered and the process does not move.
+    signIn(['workflow:task:execute', 'identity:user:read'])
+    current = detail({ assignment: 'MINE', status: 'ASSIGNED' })
+
+    const wrapper = await render()
+    await wrapper.get('[data-testid="start-hand-over"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('#delegate-user').setValue('u-budi')
+    await wrapper.get('#hand-over-reason').setValue('  Off from tomorrow  ')
+    await wrapper.get('[data-testid="confirm-hand-over"]').trigger('click')
+    await flushPromises()
+
+    const posted = backend.requests.find((request) => request.url.includes('/delegation'))
+
+    expect(posted?.url).toBe(`/workflow/tasks/${TASK_ID}/delegation`)
+    expect(posted?.body).toMatchObject({
+      delegateUserId: 'u-budi',
+      comment: 'Off from tomorrow',
+    })
+    expect(backend.requests.some((request) => request.url.includes('/decision'))).toBe(false)
+    expect(wrapper.get('[data-testid="task-notice"]').text()).toContain('Budi Santoso has it now')
+  })
+
+  it("keeps the panel closed over the server's refusal rather than reporting success", async () => {
+    signIn(['workflow:task:execute', 'identity:user:read'])
+    current = detail({ assignment: 'MINE', status: 'ASSIGNED' })
+
+    onDelegation = () => ({
+      status: 409,
+      body: errorBody('CONFLICT', 'this task changed hands while it was being handed over'),
+    })
+
+    const wrapper = await render()
+    await wrapper.get('[data-testid="start-hand-over"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('#delegate-user').setValue('u-budi')
+    await wrapper.get('[data-testid="confirm-hand-over"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="task-problem"]').text()).toContain('changed hands')
+    expect(wrapper.find('[data-testid="task-notice"]').exists()).toBe(false)
+  })
+
+  it('says whose approval a delegated task is', async () => {
+    // Beside "Mine" rather than instead of it: the task *is* theirs to decide,
+    // and whose approval it is is a second fact (#184 AC4).
+    signIn(['workflow:task:execute'])
+    current = detail({
+      assignment: 'MINE',
+      status: 'ASSIGNED',
+      delegatedFromUserId: '0199a1a0-0000-7000-8000-0000000000f2',
+      delegatedFromDisplayName: 'Ani Wijaya',
+    })
+
+    const wrapper = await render()
+
+    expect(wrapper.get('[data-testid="task-on-behalf-of"]').text()).toContain('Ani Wijaya')
+    expect(wrapper.get('[data-testid="task-assignment"]').text()).toBe('Mine')
   })
 })

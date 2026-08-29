@@ -220,7 +220,15 @@ watch(() => props.documentId, load, { immediate: true })
               <!-- "The system" rather than a blank: an entry with no actor is
                    the engine having moved the process, and an empty space beside
                    a timestamp reads as missing data. -->
-              {{ entry.actorUsername ?? 'The system' }} · {{ entry.occurredAt }}
+              {{ entry.actorUsername ?? 'The system' }}
+              <!-- Both parties, where a delegation put the task in somebody
+                   else's hands (#184 AC4). An account showing only the delegate
+                   loses the accountability delegation exists to preserve: the
+                   approval was the delegator's to give. -->
+              <span v-if="entry.onBehalfOfUsername" data-testid="history-on-behalf-of">
+                on {{ entry.onBehalfOfUsername }}’s behalf
+              </span>
+              · {{ entry.occurredAt }}
             </p>
             <!-- The reason, where the decision is. #182 AC2: a comment shown
                  anywhere else would be a comment nobody reads. -->

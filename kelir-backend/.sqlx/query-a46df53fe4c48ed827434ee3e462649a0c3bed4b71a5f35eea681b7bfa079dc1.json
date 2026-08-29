@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT d.delegate_user_id AS \"delegate_user_id!\"\n        FROM delegations d\n        JOIN users u ON u.id = d.delegate_user_id\n                    AND u.tenant_id = d.tenant_id\n                    AND u.deleted_at IS NULL\n                    AND u.status = 'ACTIVE'\n        WHERE d.tenant_id = $1\n          AND d.delegator_user_id = $2\n          AND d.deleted_at IS NULL\n          AND d.is_active\n          AND d.starts_at <= now()\n          AND now() < d.ends_at\n          AND (d.scope = 'ALL'\n               OR (d.scope = 'DOCUMENT_TYPE' AND d.document_type_id = $3))\n        ORDER BY (d.scope = 'DOCUMENT_TYPE') DESC, d.created_at DESC, d.id DESC\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "delegate_user_id!",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a46df53fe4c48ed827434ee3e462649a0c3bed4b71a5f35eea681b7bfa079dc1"
+}

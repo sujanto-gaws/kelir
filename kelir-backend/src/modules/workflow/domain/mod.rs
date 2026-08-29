@@ -16,4 +16,6 @@ pub use graph::{
 pub use instance::{
     InstanceOutcome, InstanceStatus, WorkflowHistoryEntry, WorkflowInstance, WorkflowVariable,
 };
-pub use task::{Assignment, DecisionAction, DecisionRequest, TaskStatus, WorkflowTask};
+pub use task::{
+    Assignment, DecisionAction, DecisionRequest, DelegateRequest, TaskStatus, WorkflowTask,
+};

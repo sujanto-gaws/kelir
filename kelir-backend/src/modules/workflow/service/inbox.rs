@@ -39,6 +39,21 @@ pub struct InboxTask {
     /// on the screen.
     pub assignment: Assignment,
     pub candidate_role_code: Option<String>,
+    /// Whose work this is, when the holder is standing in for somebody
+    /// ([#184] AC2).
+    ///
+    /// **A field beside `assignment` rather than a third variant of it.**
+    /// `Assignment` answers *is this mine or is it going spare*, and a delegated
+    /// task is unambiguously mine — it is assigned to me, I am the one who has
+    /// to decide it, and the queue behaves for me exactly as it would for work
+    /// the definition had named me for. What is different is whose approval it
+    /// is, which is a second sentence on the same row rather than a different
+    /// answer to the first question. Folding it into the enum would make every
+    /// existing client's `MINE` branch quietly wrong for these tasks.
+    ///
+    /// [#184]: https://github.com/sujanto-gaws/kelir/issues/184
+    pub delegated_from_user_id: Option<Uuid>,
+    pub delegated_from_display_name: Option<String>,
     pub workflow_instance_id: Uuid,
     pub workflow_name: String,
     pub current_state: String,
@@ -230,6 +245,8 @@ fn to_task(row: inbox::InboxRow, caller: Uuid) -> InboxTask {
         priority: row.priority,
         due_at: row.due_at,
         candidate_role_code: row.candidate_role_code,
+        delegated_from_user_id: row.delegated_from_user_id,
+        delegated_from_display_name: row.delegated_from_display_name,
         workflow_instance_id: row.workflow_instance_id,
         workflow_name: row.workflow_name,
         current_state: row.current_state,

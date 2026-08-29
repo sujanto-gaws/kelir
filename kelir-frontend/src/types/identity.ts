@@ -113,3 +113,64 @@ export interface UpdateRoleRequest {
 export interface SetPasswordRequest {
   password: string
 }
+
+/**
+ * How wide a delegation window is (`delegations.scope`).
+ *
+ * **`ROLE` is not here**, and that is the backend's rule rather than an
+ * omission on this side: a window redirects a task that resolves to a *person*,
+ * and a task offered to a role has no assignee to redirect — every other holder
+ * of the role is still being offered it. The API refuses a `ROLE`-scoped window
+ * with that reason, so a control offering one would be the product drawing a
+ * choice it then declines.
+ */
+export type DelegationScope = 'ALL' | 'DOCUMENT_TYPE'
+
+/**
+ * One person's approvals reaching another for a stretch of time (FR-IDM-006,
+ * #184).
+ *
+ * Both parties carry a display name beside their id, because a list of windows
+ * naming people by UUID is a list nobody can read.
+ */
+export interface Delegation {
+  id: string
+  delegatorUserId: string
+  delegatorDisplayName: string
+  delegateUserId: string
+  delegateDisplayName: string
+  scope: DelegationScope
+  documentTypeId: string | null
+  startsAt: string
+  endsAt: string
+  reason: string | null
+  /**
+   * Whether the window is still standing.
+   *
+   * **Not the same as whether it is routing**, which is why both are on the
+   * wire. A window ends by being switched off *or* by its end passing, and a
+   * screen showing only this flag would report finished cover as live.
+   */
+  isActive: boolean
+  /** Whether it would redirect work right now. Computed by the server. */
+  isRouting: boolean
+  createdAt: string
+}
+
+/**
+ * What opening a window asks for.
+ *
+ * **There is no `delegatorUserId`.** The delegator is always the caller: nobody
+ * hands over another person's authority, and a field here would be the one shape
+ * of this feature that escalates — a holder of `identity:delegation:create`
+ * could point somebody else's approvals at themselves, and the row would look
+ * exactly like legitimate cover.
+ */
+export interface CreateDelegationRequest {
+  delegateUserId: string
+  startsAt: string
+  endsAt: string
+  scope?: DelegationScope
+  documentTypeId?: string
+  reason?: string
+}

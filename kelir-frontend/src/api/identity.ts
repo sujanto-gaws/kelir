@@ -1,8 +1,10 @@
 import { deleteItem, getItem, getPage, postItem, postVoid, putItem } from './client'
 import type { Page, PageQuery } from '@/types/api'
 import type {
+  CreateDelegationRequest,
   CreateRoleRequest,
   CreateUserRequest,
+  Delegation,
   Permission,
   Role,
   SetPasswordRequest,
@@ -27,6 +29,7 @@ import type {
 
 const USERS = '/identity/users'
 const ROLES = '/identity/roles'
+const DELEGATIONS = '/identity/delegations'
 
 /** Paginated. `page` is 1-based; `pageSize` is clamped server-side to 1..=100. */
 export function listUsers(query: PageQuery = {}): Promise<Page<User>> {
@@ -94,4 +97,46 @@ export function deleteRole(id: string): Promise<void> {
  */
 export function listPermissions(): Promise<Permission[]> {
   return getItem<Permission[]>('/identity/permissions')
+}
+
+/**
+ * The tenant's delegation windows, newest first (FR-IDM-006, #184).
+ *
+ * Newest first rather than by the window's own start: the question this list is
+ * opened with is *what has been set up*, and cover arranged this morning for
+ * next month belongs above cover that is already over.
+ *
+ * Requires `identity:delegation:read`, which is administrative — the row
+ * somebody has to be able to find is the one whose owner went on leave without
+ * ending it.
+ */
+export function listDelegations(query: PageQuery = {}): Promise<Page<Delegation>> {
+  return getPage<Delegation>(DELEGATIONS, query)
+}
+
+/**
+ * Opens a window **in the caller's own name**.
+ *
+ * Requires `identity:delegation:create`. 422 when the delegate is not an active
+ * user in this tenant, when the window has already ended or ends before it
+ * starts, or when the scope names something the engine cannot honour.
+ */
+export function createDelegation(request: CreateDelegationRequest): Promise<Delegation> {
+  return postItem<Delegation>(DELEGATIONS, request)
+}
+
+/**
+ * Ends a window. It stops routing from that moment.
+ *
+ * **Not a delete**, whatever the verb says: the row stays and the list keeps
+ * showing it, because a window that covered somebody's leave is part of how a
+ * month of approvals were routed. What ending it does is stop it. Sending it
+ * twice is a no-op rather than a refusal.
+ *
+ * Tasks already handed to the delegate stay theirs — ending a window is
+ * prospective in exactly the way opening one is, and a task on somebody's desk
+ * is handed back the same way it was handed over.
+ */
+export function endDelegation(id: string): Promise<void> {
+  return deleteItem(`${DELEGATIONS}/${id}`)
 }

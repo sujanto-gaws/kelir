@@ -88,6 +88,31 @@ export function decideTask(
 }
 
 /**
+ * Hands an open task to somebody else (FR-WF-009, FR-TASK-008; #184).
+ *
+ * **This is not a decision.** Nothing about the document is answered and the
+ * process does not move — what changes is who the open task is for. So it is
+ * its own route rather than a fourth `DecisionAction`, and the response is the
+ * task, now somebody else's, still open.
+ *
+ * Refused with a **409** when the task is unclaimed: an unclaimed role task has
+ * no holder, and giving it to one named person would take it out of every other
+ * holder's queue without anybody asking. Claim it first.
+ */
+export function delegateTask(
+  id: string,
+  delegateUserId: string,
+  comment?: string,
+): Promise<WorkflowTask> {
+  const trimmed = comment?.trim()
+
+  return postItem<WorkflowTask>(`/workflow/tasks/${id}/delegation`, {
+    delegateUserId,
+    ...(trimmed ? { comment: trimmed } : {}),
+  })
+}
+
+/**
  * The process deciding a document, if one is.
  *
  * **404 when nothing is deciding it**, which is a true statement rather than an

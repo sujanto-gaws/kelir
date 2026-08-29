@@ -1,0 +1,27 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO workflow_tasks\n            (id, tenant_id, task_ref, workflow_instance_id, document_id,\n             task_definition_key, task_name, task_type, status, priority,\n             assignee_user_id, candidate_role_id, candidate_department_id,\n             delegated_from_user_id, created_by)\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8,\n                -- A task with a named assignee is `ASSIGNED` from the moment it\n                -- exists; one offered to a role is `CREATED` until somebody\n                -- claims it. The two statuses are what the inbox's `MINE` and\n                -- `ROLE` are derived from, so deriving them here from the\n                -- assignment keeps one answer rather than two.\n                --\n                -- **A delegated task is `ASSIGNED`, not `DELEGATED`** (#184).\n                -- `DELEGATED` is in §7.6's `CHECK` and outside\n                -- `uq_workflow_tasks_open_per_instance` and outside the inbox's\n                -- open filter, so writing it would leave a running process with\n                -- no open task and hide the work from the person just given it.\n                -- Who holds the task is the assignee; the status says where the\n                -- work has got to.\n                CASE WHEN $10::uuid IS NULL THEN 'CREATED' ELSE 'ASSIGNED' END,\n                $9, $10, $11, $12, $13, $14)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7c911fea53cb0598fe86d516c89f16f5da1e1edbb6299d0a34343afc44b6693e"
+}

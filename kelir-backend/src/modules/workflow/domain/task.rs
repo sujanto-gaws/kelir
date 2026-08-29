@@ -76,9 +76,26 @@ impl TaskStatus {
     ///
     /// The one predicate the claim statement, the decision statement, the
     /// "one open task per instance" index and the inbox filter are all written
-    /// in terms of. `DELEGATED` is open — Sprint 11's delegation moves a task
-    /// to another person rather than finishing it — and `ESCALATED` is too, for
-    /// the same reason.
+    /// in terms of.
+    ///
+    /// **`DELEGATED` and `ESCALATED` are outside it, and nothing writes
+    /// either.** This comment used to say the opposite about `DELEGATED` — that
+    /// Sprint 11's delegation would leave a task open under that status — and
+    /// [#184](https://github.com/sujanto-gaws/kelir/issues/184) is the sprint
+    /// that found out it cannot. `uq_workflow_tasks_open_per_instance` and the
+    /// inbox's open filter are `CHECK`- and `WHERE`-clause copies of this list
+    /// in the database; a delegated task carrying a status outside it would
+    /// leave its instance with no open task, stop guarding the instance against
+    /// a second one, and vanish from the inbox of the person who had just been
+    /// given it.
+    ///
+    /// So delegation does not move the status at all: it moves
+    /// `assignee_user_id` and records `delegated_from_user_id`. **Who holds a
+    /// task and where the work has got to are two questions**, and putting the
+    /// first into a column that answers the second is the failure this schema
+    /// has refused before. `DELEGATED` keeps `STARTED`'s standing on
+    /// `workflow_instances`: it is in §7.6's `CHECK` because it was specified,
+    /// and the product does not produce it.
     pub fn is_open(self) -> bool {
         matches!(self, Self::Created | Self::Assigned | Self::InProgress)
     }
@@ -86,12 +103,19 @@ impl TaskStatus {
 
 /// What a caller may do to a task.
 ///
-/// **Three of them**, and the rest of JWSS's transition vocabulary is
-/// deliberately absent: `DELEGATE` is FR-WF-009 ([#184]) and `ESCALATE` is
-/// FR-WF-010, unscheduled. Accepting a verb this engine cannot complete would be
-/// a 500 where the contract promises a refusal, so the request type does not
-/// have the variant at all and an unknown value is refused by `serde` at the
-/// boundary.
+/// **Three of them, and `DELEGATE` is still not one** — which is the shape of
+/// [#184] rather than an omission it left behind. A decision is an answer about
+/// the document that moves the process; handing a task to somebody else answers
+/// nothing and moves nothing, so it is its own route
+/// (`POST /workflow/tasks/{id}/delegation`) with its own request type rather
+/// than a fourth variant here. A `Delegate` in this enum would be a verb
+/// `POST /decision` had to accept and then refuse, at the layer below the one
+/// that knows why.
+///
+/// `ESCALATE` is FR-WF-010 and unscheduled. Accepting a verb this engine cannot
+/// complete would be a 500 where the contract promises a refusal, so the request
+/// type does not have the variant at all and an unknown value is refused by
+/// `serde` at the boundary.
 ///
 /// # `RETURN` is here and `RESUBMIT` is not, and that asymmetry is the design
 ///
@@ -255,12 +279,91 @@ pub struct WorkflowTask {
     pub candidate_role_id: Option<Uuid>,
     pub candidate_role_code: Option<String>,
     pub candidate_department_id: Option<Uuid>,
+    /// Whose authority the assignee is exercising ([#184] AC2, AC4).
+    ///
+    /// Set when a delegation window routed this task past the person the
+    /// definition named, and when its holder handed it over. `None` on a task
+    /// nobody is standing in for, which is almost all of them.
+    pub delegated_from_user_id: Option<Uuid>,
     pub priority: String,
     pub due_at: Option<DateTime<Utc>>,
     pub action: Option<DecisionAction>,
     pub completed_by: Option<Uuid>,
     pub completed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+}
+
+/// The body of a delegation request (FR-WF-009, FR-TASK-008; [#184]).
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DelegateRequest {
+    /// Who is to hold the task instead.
+    pub delegate_user_id: Uuid,
+    /// Why, if the person handing it over wants to say.
+    ///
+    /// Lands on the task's own history row and nowhere else. It is not a
+    /// decision comment — nothing was decided — so the three columns
+    /// FR-TASK-006 fills stay untouched, and `workflow_task_history.comment`
+    /// gets its first writer.
+    #[serde(default)]
+    pub comment: Option<String>,
+}
+
+/// Refuses a hand-off of a task the caller does not personally hold ([#184]).
+///
+/// **Stricter than [`refuse_unless_theirs`], deliberately.** That one lets an
+/// unclaimed role task be decided by any holder of the role, because deciding it
+/// is what the queue is for. Handing it on is different: an unclaimed task is
+/// still being offered to everybody who holds the role, and giving it to one
+/// named person would be one holder taking it out of everybody else's queue and
+/// assigning it — a claim and a delegation at once, neither of them asked for.
+///
+/// The refusal names the way out, because there is one and it is one request:
+/// claim it, then hand it on.
+pub fn refuse_unless_held_by(caller: Uuid, assignee: Option<Uuid>) -> Result<(), AppError> {
+    match assignee {
+        Some(assignee) if assignee == caller => Ok(()),
+        Some(_) => Err(AppError::Forbidden),
+        None => Err(AppError::conflict(
+            "this task is offered to a role and nobody has taken it, so there is \
+             nothing yet to hand over; claim it first, then delegate it",
+        )),
+    }
+}
+
+/// Refuses a delegation to the person already holding the task.
+///
+/// `ck_delegations_not_self` says the same thing about a window, one module
+/// over; this is the point-in-time hand-off's copy of it, and the reason is the
+/// same — a delegation to yourself changes nothing and reads, to whoever finds
+/// the record, as cover that is not there.
+pub fn refuse_self_delegation(caller: Uuid, delegate: Uuid) -> Result<(), AppError> {
+    if caller != delegate {
+        return Ok(());
+    }
+
+    Err(AppError::validation(vec![ValidationDetail::new(
+        "delegateUserId",
+        "notSelf",
+        "DELEGATE_IS_HOLDER",
+        "this task is already yours; a delegation hands it to somebody else",
+    )]))
+}
+
+/// Refuses a delegation to somebody who cannot act on it.
+///
+/// **`ACTIVE`, not merely present** — `identity::delegation_repository::user_is_available`
+/// carries the reasoning, and this is the same refusal at the other end of the
+/// same feature: a task handed to an account that cannot sign in is an approval
+/// that has stopped, and it looks assigned the whole time.
+pub fn delegate_unavailable() -> AppError {
+    AppError::validation(vec![ValidationDetail::new(
+        "delegateUserId",
+        "exists",
+        "NOT_AVAILABLE",
+        "no active user with that id in this tenant; a task has to be handed to \
+         somebody who can sign in and act on it",
+    )])
 }
 
 /// Refuses an action on a task that is no longer open ([#177] AC2).

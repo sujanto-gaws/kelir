@@ -37,7 +37,7 @@ use uuid::Uuid;
 /// test. Reading it back from `permissions` would make the test agree with
 /// whatever the catalogue happens to hold, including a permission nothing
 /// enforces.
-const IDENTITY_PERMISSIONS: [&str; 8] = [
+const IDENTITY_PERMISSIONS: [&str; 11] = [
     "identity:user:create",
     "identity:user:read",
     "identity:user:update",
@@ -46,6 +46,13 @@ const IDENTITY_PERMISSIONS: [&str; 8] = [
     "identity:role:read",
     "identity:role:update",
     "identity:role:delete",
+    // The delegation slice (FR-IDM-006, #184). Its three permissions were
+    // seeded by `0005_delegation_tenant_permissions.sql` four sprints before
+    // anything checked them, which is exactly the shape this list exists to
+    // catch: a permission in the catalogue that nothing enforces.
+    "identity:delegation:create",
+    "identity:delegation:read",
+    "identity:delegation:delete",
 ];
 
 const PASSWORD: &str = "single-permission-user-password";
@@ -149,6 +156,38 @@ fn identity_routes(target_user: Uuid, target_role: Uuid, nonce: usize) -> Vec<Ro
             method: Method::DELETE,
             path: format!("/api/v1/identity/roles/{target_role}"),
             permission: "identity:role:delete",
+            body: None,
+        },
+        Route {
+            method: Method::GET,
+            path: "/api/v1/identity/delegations".into(),
+            permission: "identity:delegation:read",
+            body: None,
+        },
+        Route {
+            method: Method::POST,
+            path: "/api/v1/identity/delegations".into(),
+            permission: "identity:delegation:create",
+            // The window is opened in the *caller's* name — the request type has
+            // no delegator field — so `target_user` is the delegate, and the
+            // caller is whoever this row is being driven as. A far-future end
+            // keeps the body valid however long this suite lives: the service
+            // refuses a window that is already over.
+            body: Some(json!({
+                "delegateUserId": target_user,
+                "startsAt": "2099-01-01T00:00:00Z",
+                "endsAt": "2099-02-01T00:00:00Z",
+            })),
+        },
+        Route {
+            method: Method::DELETE,
+            // No delegation is created for this row to aim at, and none is
+            // needed: what is under test is whether authorization runs before
+            // the row is looked for. A caller holding the permission gets 404
+            // and everybody else gets 403, which is the distinction the assert
+            // below is written in terms of.
+            path: format!("/api/v1/identity/delegations/{}", Uuid::now_v7()),
+            permission: "identity:delegation:delete",
             body: None,
         },
         Route {
@@ -402,7 +441,7 @@ async fn every_protected_route_refuses_a_request_without_a_token() {
 
     assert_eq!(
         protected.len(),
-        14,
+        17,
         "every protected route belongs in this list; FR-API-008 claims all of them"
     );
 

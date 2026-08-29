@@ -128,14 +128,19 @@ pub const INSTANCE_READ: &str = "workflow:instance:read";
 /// of the schema refused to create for `rad:lookup:read`.
 pub const TASK_READ: &str = "workflow:task:read";
 
-/// Claiming a task, and recording a decision on it.
+/// Claiming a task, recording a decision on it, and handing it to somebody else.
 ///
-/// **One permission for both**, and a separate `workflow:task:claim` was the
-/// alternative. It is rejected: a permission that lets somebody take a task off
-/// the queue and then not act on it is a permission to stall an approval, which
-/// is a worse power than the one it was trying to split off. *Which* task a
-/// caller may act on is not a permission question at all — it is answered
-/// against the row, by [`domain::task::refuse_unless_theirs`].
+/// **One permission for all three**, and a separate `workflow:task:claim` was
+/// the alternative. It is rejected: a permission that lets somebody take a task
+/// off the queue and then not act on it is a permission to stall an approval,
+/// which is a worse power than the one it was trying to split off. The same
+/// argument refused a `workflow:task:delegate` when
+/// [#184](https://github.com/sujanto-gaws/kelir/issues/184) added the hand-off —
+/// splitting off the ability to stop working on something is the same shape of
+/// mistake. *Which* task a caller may act on is not a permission question at
+/// all — it is answered against the row, by
+/// [`domain::task::refuse_unless_theirs`] and, for a hand-off, by the stricter
+/// [`domain::task::refuse_unless_held_by`].
 pub const TASK_EXECUTE: &str = "workflow:task:execute";
 
 /// What the audit trail calls a workflow definition (naming convention §7).

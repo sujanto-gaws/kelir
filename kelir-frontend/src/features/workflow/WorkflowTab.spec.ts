@@ -87,6 +87,8 @@ function entry(overrides: Record<string, unknown> = {}): Record<string, unknown>
     comment: null,
     actorUserId: '0199a1a0-0000-7000-8000-0000000000f1',
     actorUsername: 'dina',
+    onBehalfOfUserId: null,
+    onBehalfOfUsername: null,
     occurredAt: '2026-08-28T01:00:00Z',
     ...overrides,
   }
@@ -209,5 +211,36 @@ describe('WorkflowTab', () => {
 
     expect(wrapper.get('[data-testid="workflow-none"]').text()).toContain('No approval')
     expect(backend.requests.some((call) => call.url.includes('/workflow/history'))).toBe(false)
+  })
+
+  it('names both parties on a decision somebody took for somebody else', async () => {
+    // #184 AC4. A delegated approval that showed only the delegate would answer
+    // *who decided* and lose *on whose authority* — which is the accountability
+    // delegation exists to preserve, and the reason the pair is on the row a
+    // person reads rather than only in the formal decision record.
+    onHistory = () => ({
+      status: 200,
+      body: historyBody([
+        entry({
+          actorUsername: 'budi',
+          onBehalfOfUserId: '0199a1a0-0000-7000-8000-0000000000f2',
+          onBehalfOfUsername: 'ani',
+        }),
+      ]),
+    })
+
+    const wrapper = await render()
+
+    expect(wrapper.get('[data-testid="history-on-behalf-of"]').text()).toContain('ani')
+    expect(wrapper.get('[data-testid="workflow-history"]').text()).toContain('budi')
+  })
+
+  it('says nothing about a second party where there was not one', async () => {
+    // The other half of the pair. Writing the actor into both would make
+    // *acting for myself* and *acting for somebody who happens to be me* read
+    // the same.
+    const wrapper = await render()
+
+    expect(wrapper.find('[data-testid="history-on-behalf-of"]').exists()).toBe(false)
   })
 })

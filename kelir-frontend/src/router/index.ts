@@ -147,6 +147,22 @@ export const routes: RouteRecordRaw[] = [
         meta: { requiresAuth: true, permission: 'identity:role:read', title: 'Roles' },
       },
       {
+        // Delegation windows (FR-IDM-006, #184). Under `admin/` beside users
+        // and roles, because the list is the tenant's — the row somebody has to
+        // be able to find is the one whose owner went on leave without ending
+        // it. **Opening one is still in your own name**: the read is
+        // administrative, the write is personal, and the API is what enforces
+        // the difference.
+        path: 'admin/delegations',
+        name: 'admin-delegations',
+        component: () => import('@/features/admin/DelegationListPage.vue'),
+        meta: {
+          requiresAuth: true,
+          permission: 'identity:delegation:read',
+          title: 'Delegations',
+        },
+      },
+      {
         path: 'admin/tenants',
         name: 'admin-tenants',
         component: () => import('@/features/admin/TenantListPage.vue'),

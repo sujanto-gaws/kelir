@@ -54,6 +54,20 @@ pub struct NewHistoryEntry<'a> {
     /// the start, and any edge the definition did not mark.
     pub comment: Option<&'a str>,
     pub actor_user_id: Option<Uuid>,
+    /// Whose authority the actor was exercising
+    /// ([#184](https://github.com/sujanto-gaws/kelir/issues/184) AC4).
+    ///
+    /// **Both parties or neither.** A delegated decision that recorded only the
+    /// delegate would lose the accountability delegation exists to preserve —
+    /// the approval was the delegator's to give — and one that recorded only the
+    /// delegator would name somebody who was not there. `None` on every row
+    /// nobody was standing in for, which is almost all of them; the actor is not
+    /// copied in to avoid the null, because that would make *acting for myself*
+    /// and *acting for somebody who happens to be me* the same row.
+    ///
+    /// It comes from `workflow_tasks.delegated_from_user_id`, which the server
+    /// wrote when the task was assigned or handed over — never from the request.
+    pub on_behalf_of_user_id: Option<Uuid>,
 }
 
 /// Appends a transition to the history.
@@ -71,9 +85,10 @@ pub async fn record<'e, E: PgExecutor<'e>>(
         r#"
         INSERT INTO workflow_history (
             id, tenant_id, workflow_instance_id, document_id,
-            from_state, to_state, action, task_id, comment, actor_user_id
+            from_state, to_state, action, task_id, comment,
+            actor_user_id, on_behalf_of_user_id
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         "#,
         Uuid::now_v7(),
         entry.tenant_id,
@@ -84,7 +99,8 @@ pub async fn record<'e, E: PgExecutor<'e>>(
         entry.action.map(TransitionAction::as_db),
         entry.task_id,
         entry.comment,
-        entry.actor_user_id
+        entry.actor_user_id,
+        entry.on_behalf_of_user_id
     )
     .execute(executor)
     .await
@@ -109,9 +125,12 @@ pub async fn list_for_document(
     let rows = sqlx::query!(
         r#"
         SELECT h.id, h.from_state, h.to_state, h.action, h.task_id, h.comment,
-               h.actor_user_id, u.username AS "actor_username?", h.created_at
+               h.actor_user_id, u.username AS "actor_username?",
+               h.on_behalf_of_user_id, b.username AS "on_behalf_of_username?",
+               h.created_at
         FROM workflow_history h
         LEFT JOIN users u ON u.id = h.actor_user_id AND u.tenant_id = h.tenant_id
+        LEFT JOIN users b ON b.id = h.on_behalf_of_user_id AND b.tenant_id = h.tenant_id
         WHERE h.tenant_id = $1 AND h.document_id = $2
         ORDER BY h.created_at, h.id
         LIMIT $3 OFFSET $4
@@ -135,6 +154,8 @@ pub async fn list_for_document(
             comment: row.comment,
             actor_user_id: row.actor_user_id,
             actor_username: row.actor_username,
+            on_behalf_of_user_id: row.on_behalf_of_user_id,
+            on_behalf_of_username: row.on_behalf_of_username,
             occurred_at: row.created_at,
         })
         .collect())

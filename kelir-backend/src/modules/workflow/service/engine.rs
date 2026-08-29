@@ -286,6 +286,10 @@ pub async fn start(
             task_id: None,
             comment: None,
             actor_user_id: request.actor,
+            // Nobody stands in for anybody at the submit: the document's own
+            // owner raised it, and a window redirects the approvals that follow
+            // rather than the act of asking for them.
+            on_behalf_of_user_id: None,
         },
     )
     .await?;
@@ -320,6 +324,18 @@ pub async fn start(
 pub struct DecisionProvenance<'a> {
     /// The task the decision was recorded against.
     pub task_id: Option<Uuid>,
+    /// Whose authority the actor was exercising, from that task's
+    /// `delegated_from_user_id` ([#184] AC4, AC5).
+    ///
+    /// **Read off the task, never off the request.** Acting on somebody's
+    /// behalf is something the server arranged — a window redirected the task,
+    /// or its holder handed it over — so it is a fact about the row rather than
+    /// a claim a caller can make. It reaches two places from here: the history
+    /// row, which records the pair, and the `allowedBy` check, which measures
+    /// this actor against the rule as the delegator as well as as themselves.
+    ///
+    /// [#184]: https://github.com/sujanto-gaws/kelir/issues/184
+    pub on_behalf_of: Option<Uuid>,
     /// The reason given with it (FR-TASK-006,
     /// [#182](https://github.com/sujanto-gaws/kelir/issues/182)), already
     /// trimmed and bounded by
@@ -384,6 +400,12 @@ pub async fn fire(
         })
         .ok_or_else(|| no_transition(graph, from_state, action))?;
 
+    // **A delegate is measured against the rule as the person they stand in
+    // for** (#184 AC5). `on_behalf_of` comes off the task, so an edge the
+    // delegator was allowed to take is one their delegate may take, and an edge
+    // neither of them satisfies is refused — delegation widens who may act and
+    // never widens what may be done.
+    //
     // **`allowedBy` authorizes; it does not select** (#226). The edge is chosen
     // by `condition` — S7, fallback last — and *then* the actor is checked
     // against it. Letting the check pick a different edge instead would mean an
@@ -398,7 +420,17 @@ pub async fn fire(
     if let Some(rule) = &chosen.allowed_by {
         let path = format!("transitions.{from_state}.{}.allowedBy", action.as_db());
 
-        if !assignment::permits(transaction, tenant_id, rule, context, actor, &path).await? {
+        if !assignment::permits(
+            transaction,
+            tenant_id,
+            rule,
+            context,
+            actor,
+            decision.on_behalf_of,
+            &path,
+        )
+        .await?
+        {
             return Err(AppError::Forbidden);
         }
     }
@@ -484,6 +516,7 @@ pub async fn fire(
             task_id: decision.task_id,
             comment: decision.comment,
             actor_user_id: actor,
+            on_behalf_of_user_id: decision.on_behalf_of,
         },
     )
     .await?;
@@ -557,6 +590,9 @@ async fn enter(
                 assignee_user_id: resolved.assignee_user_id,
                 candidate_role_id: resolved.candidate_role_id,
                 candidate_department_id: resolved.candidate_department_id,
+                // Set when a window redirected this task and null otherwise, in
+                // the statement that writes the assignee it explains (#184 AC2).
+                delegated_from_user_id: resolved.delegated_from_user_id,
                 created_by: actor,
             },
         )
@@ -577,6 +613,7 @@ async fn enter(
                     TaskStatus::Created
                 },
                 action: None,
+                comment: None,
                 actor,
             },
         )

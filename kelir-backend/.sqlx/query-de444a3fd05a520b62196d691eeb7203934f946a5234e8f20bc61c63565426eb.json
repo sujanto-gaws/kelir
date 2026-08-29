@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT t.id, t.task_ref, t.workflow_instance_id, t.document_id,\n               t.task_definition_key, t.task_name, t.task_type, t.status,\n               t.assignee_user_id, t.candidate_role_id, r.role_code AS \"candidate_role_code?\",\n               t.candidate_department_id, t.priority, t.due_at, t.action,\n               t.completed_by, t.completed_at, t.created_at\n        FROM workflow_tasks t\n        LEFT JOIN roles r ON r.id = t.candidate_role_id\n        WHERE t.tenant_id = $1 AND t.workflow_instance_id = $2 AND t.deleted_at IS NULL\n        ORDER BY t.created_at\n        ",
+  "query": "\n        SELECT t.id, t.task_ref, t.workflow_instance_id, t.document_id,\n               t.task_definition_key, t.task_name, t.task_type, t.status,\n               t.assignee_user_id, t.candidate_role_id, r.role_code AS \"candidate_role_code?\",\n               t.candidate_department_id, t.delegated_from_user_id,\n               t.priority, t.due_at, t.action,\n               t.completed_by, t.completed_at, t.created_at\n        FROM workflow_tasks t\n        LEFT JOIN roles r ON r.id = t.candidate_role_id\n        WHERE t.tenant_id = $1 AND t.workflow_instance_id = $2 AND t.deleted_at IS NULL\n        ORDER BY t.created_at\n        ",
   "describe": {
     "columns": [
       {
@@ -65,31 +65,36 @@
       },
       {
         "ordinal": 12,
+        "name": "delegated_from_user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 13,
         "name": "priority",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 13,
+        "ordinal": 14,
         "name": "due_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 14,
+        "ordinal": 15,
         "name": "action",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 15,
+        "ordinal": 16,
         "name": "completed_by",
         "type_info": "Uuid"
       },
       {
-        "ordinal": 16,
+        "ordinal": 17,
         "name": "completed_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 17,
+        "ordinal": 18,
         "name": "created_at",
         "type_info": "Timestamptz"
       }
@@ -113,6 +118,7 @@
       true,
       false,
       true,
+      true,
       false,
       true,
       true,
@@ -121,5 +127,5 @@
       false
     ]
   },
-  "hash": "53c3913d725b77db8ced3c408fbedcc4244d1b4b8c230e4991502872503b9273"
+  "hash": "de444a3fd05a520b62196d691eeb7203934f946a5234e8f20bc61c63565426eb"
 }

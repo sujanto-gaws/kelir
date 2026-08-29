@@ -89,6 +89,8 @@ pub struct InboxRow {
     pub assignee_user_id: Option<Uuid>,
     pub candidate_role_id: Option<Uuid>,
     pub candidate_role_code: Option<String>,
+    pub delegated_from_user_id: Option<Uuid>,
+    pub delegated_from_display_name: Option<String>,
     pub workflow_name: String,
     pub current_state: String,
     pub created_at: DateTime<Utc>,
@@ -121,12 +123,20 @@ pub async fn list_for_caller(
                t.task_name, t.task_type, t.status, t.priority, t.due_at,
                t.assignee_user_id, t.candidate_role_id,
                r.role_code AS "candidate_role_code?",
+               t.delegated_from_user_id,
+               f.display_name AS "delegated_from_display_name?",
                w.name AS workflow_name, i.current_state, t.created_at
         FROM workflow_tasks t
         JOIN documents d ON d.id = t.document_id AND d.deleted_at IS NULL
         JOIN workflow_instances i ON i.id = t.workflow_instance_id
         JOIN workflow_definitions w ON w.id = i.workflow_definition_id
         LEFT JOIN roles r ON r.id = t.candidate_role_id
+        -- Whose work this is, when it is not the holder's own (#184). Joined
+        -- rather than resolved per row for the reason the document join above
+        -- gives: an inbox of twenty tasks would otherwise be twenty-one round
+        -- trips, and "approve this on Ani's behalf" is the sentence the screen
+        -- has to be able to write.
+        LEFT JOIN users f ON f.id = t.delegated_from_user_id AND f.tenant_id = t.tenant_id
         WHERE t.tenant_id = $1 AND t.deleted_at IS NULL
           AND (
                 t.assignee_user_id = $2
@@ -176,6 +186,8 @@ pub async fn list_for_caller(
             assignee_user_id: row.assignee_user_id,
             candidate_role_id: row.candidate_role_id,
             candidate_role_code: row.candidate_role_code,
+            delegated_from_user_id: row.delegated_from_user_id,
+            delegated_from_display_name: row.delegated_from_display_name,
             workflow_name: row.workflow_name,
             current_state: row.current_state,
             created_at: row.created_at,
