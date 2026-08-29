@@ -36,6 +36,7 @@ function task(overrides: Record<string, unknown> = {}): unknown {
     status: 'CREATED',
     priority: 'NORMAL',
     dueAt: null,
+    isOverdue: false,
     assignment: 'ROLE',
     candidateRoleCode: 'FINANCE_APPROVER',
     workflowInstanceId: '0199a1a0-0000-7000-8000-0000000000b1',
@@ -160,5 +161,70 @@ describe('TaskInboxPage', () => {
     const wrapper = await render()
 
     expect(wrapper.get('[data-testid="tasks-empty"]').text()).toContain('Nothing is waiting')
+  })
+
+  // -------------------------------------------------------------------------
+  // Due dates and the overdue indicator (FR-TASK-007, #185)
+  // -------------------------------------------------------------------------
+
+  it('marks a late task from the server\u2019s answer, not from its own clock', async () => {
+    // #185 AC4. `dueAt` here is in the *future*, and `isOverdue` says true. A
+    // screen that compared the date to `Date.now()` would disagree with the
+    // server — which is exactly the second opinion the flag exists to prevent,
+    // and this fixture is built so only the flag can produce a pass.
+    rows = [task({ dueAt: '2099-01-01T00:00:00Z', isOverdue: true })]
+
+    const wrapper = await render()
+
+    expect(wrapper.find('[data-testid="task-overdue"]').exists()).toBe(true)
+  })
+
+  it('leaves a task that is merely due alone', async () => {
+    // And the mirror of it: a date in the *past* with `isOverdue` false, which
+    // is what a task decided after its deadline looks like. A screen deriving
+    // lateness would mark this one.
+    rows = [task({ dueAt: '2020-01-01T00:00:00Z', isOverdue: false })]
+
+    const wrapper = await render()
+
+    expect(wrapper.find('[data-testid="task-overdue"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="task-row-TASK-2026-000001"]').text()).toContain('2020')
+  })
+
+  it('shows a task with no deadline as having none, rather than as late', async () => {
+    rows = [task({ dueAt: null, isOverdue: false })]
+
+    const wrapper = await render()
+
+    expect(wrapper.find('[data-testid="task-overdue"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="task-row-TASK-2026-000001"]').text()).toContain('\u2014')
+  })
+
+  it('offers late as a third scope and sends it', async () => {
+    // One axis, three points: `all \u2283 open \u2283 overdue`. The control is the
+    // same Select, because the choice is one choice.
+    const wrapper = await render()
+
+    const values = wrapper
+      .get('[data-testid="tasks-scope"]')
+      .findAll('option')
+      .map((option) => (option.element as HTMLOptionElement).value)
+
+    expect(values).toEqual(['open', 'overdue', 'all'])
+
+    await wrapper.get('[data-testid="tasks-scope"]').setValue('overdue')
+    await flushPromises()
+
+    expect(lastRequest(backend).params.scope).toBe('overdue')
+  })
+
+  it('says what is empty, which is not always the queue', async () => {
+    // "Nothing is waiting for you" under `overdue` says the queue is empty when
+    // what is empty is the late part of it \u2014 the opposite of the news.
+    rows = []
+
+    const wrapper = await render({ scope: 'overdue' })
+
+    expect(wrapper.get('[data-testid="tasks-empty"]').text()).toContain('Nothing of yours is late')
   })
 })

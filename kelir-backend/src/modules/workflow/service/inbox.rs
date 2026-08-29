@@ -33,6 +33,19 @@ pub struct InboxTask {
     pub status: TaskStatus,
     pub priority: String,
     pub due_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Whether this task is late (FR-TASK-007, [#185] AC4).
+    ///
+    /// **The server's answer, not a date for the client to judge.** `dueAt` is
+    /// beside it so a screen can say *when*; this says *whether*, computed by
+    /// the database in the statement that read the row and against the clock
+    /// that stamped it. A browser comparing `dueAt` to its own clock would be a
+    /// second opinion, and a task late on one machine and not on another is the
+    /// bug report AC4 names as impossible to reproduce.
+    ///
+    /// `false` for a task with no due date, and for one already finished.
+    ///
+    /// [#185]: https://github.com/sujanto-gaws/kelir/issues/185
+    pub is_overdue: bool,
     /// **Mine, or going spare.** [#179] AC1, and it is a field rather than
     /// something a client derives from a null assignee: two clients deriving it
     /// would derive it differently, and the two situations need different words
@@ -174,6 +187,10 @@ pub async fn get_task(
         user_id,
         &InboxFilters {
             open_only: false,
+            // The detail view is reached for a task by id, and a decided one is
+            // still worth reading — narrowing to what is late here would answer
+            // 404 for every task somebody opened to see what happened to it.
+            overdue_only: false,
             document_id: None,
             task_id: Some(id),
         },
@@ -244,6 +261,7 @@ fn to_task(row: inbox::InboxRow, caller: Uuid) -> InboxTask {
         status: TaskStatus::from_db(&row.status),
         priority: row.priority,
         due_at: row.due_at,
+        is_overdue: row.is_overdue,
         candidate_role_code: row.candidate_role_code,
         delegated_from_user_id: row.delegated_from_user_id,
         delegated_from_display_name: row.delegated_from_display_name,

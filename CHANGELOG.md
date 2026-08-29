@@ -43,6 +43,48 @@ whose process has finished is transitionable again.
 
 ### Added
 
+- **Task due dates, and the indicator that makes them mean something**
+  (FR-WF-011, FR-TASK-007,
+  [#185](https://github.com/sujanto-gaws/kelir/issues/185)). **One item, because
+  a due date nobody is shown is a column.** A JWSS task declares `dueInHours`;
+  the engine stamps `workflow_tasks.due_at` when it generates the task; the
+  inbox marks what is late and can be narrowed to it.
+
+  **The window is relative and the stamp is absolute, and that is the point.** A
+  definition outlives every instance that runs it, so an absolute date in one
+  would be wrong for every instance after the first. The stamp is written once,
+  at generation — **a deadline does not move because somebody published a new
+  revision afterwards**, which would be a deadline nobody agreed to.
+
+  **One clock, named.** The stamp and every later *is this overdue* comparison
+  are both `now()` in PostgreSQL, and the answer reaches the client as
+  `isOverdue` rather than as a date to compare. A browser judging `dueAt`
+  against its own clock would be a second opinion, and a task that is late on
+  one screen and not on another is a bug report nobody can reproduce. An
+  application fleet with drifting clocks would produce the same failure at the
+  writing end.
+
+  **A task with no due date is not overdue**, written as an explicit null check
+  rather than left to three-valued logic — the usual shorthand, a null coalesced
+  to the epoch, reports every undated task as years late. **And a task finished
+  after its date passed is done, not late:** the indicator says what needs doing
+  now, and marking completed rows would bury the ones that do.
+
+  **`scope` gains `overdue` as a third point on one axis** — `all ⊃ open ⊃
+  overdue` — rather than a flag beside `open`. A late task is still an open one,
+  so combining them would let a caller ask for *completed and overdue*, which is
+  a question with no answer, and would need two controls on the screen to
+  express one choice.
+
+  **Nothing acts on lateness**, and the specification now says so where a reader
+  would otherwise assume otherwise. FR-WF-010 (escalation) is `Could` and
+  unscheduled, and the due-task reminders of FR-NTF-006/007 depend on it; a
+  JWSS task's `escalation` block is stored and executed by nothing, exactly as
+  `guards` and `actions` are.
+
+  **No migration.** `workflow_tasks.due_at` has existed since
+  `0025_workflow.sql`; what arrived is a writer.
+
 - **Delegation, end to end** (FR-IDM-006, FR-WF-009, FR-TASK-008,
   [#184](https://github.com/sujanto-gaws/kelir/issues/184)). Somebody goes on
   leave and their approvals keep moving. Three surfaces, one item by decision

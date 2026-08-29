@@ -23,6 +23,26 @@
 //! cost three sprints of coverage findings to learn: a test that asserts around
 //! a query proves something about the handler and nothing about the rows.
 //!
+//! # Overdue is the database's opinion, and that is the whole of the rule
+//!
+//! [#185](https://github.com/sujanto-gaws/kelir/issues/185) AC4 asks that
+//! *overdue* be computed against **a single clock**, and names the failure it is
+//! avoiding: a task that is late on one screen and not on another is a bug
+//! report nobody can reproduce. The clock is **`now()` in these statements** —
+//! the same one `insert_task` stamped `due_at` from — and the answer travels to
+//! the client as a boolean rather than a date to compare. A browser that
+//! subtracted `dueAt` from its own clock would be a second opinion, and the two
+//! would differ by whatever the viewer's machine is wrong by.
+//!
+//! **A task with no `due_at` is not overdue**, which the predicate says
+//! explicitly rather than relying on `NULL < now()` being unknown. AC5 names
+//! that trap because the other spelling of it — a null read as the epoch — is
+//! the one that reports every undated task as years late.
+//!
+//! **And overdue means still open.** A task somebody finished after its date
+//! passed is a fact about last week; the indicator exists to say what needs
+//! doing now, and colouring completed rows red would bury the ones that do.
+//!
 //! # The roles come from `user_roles`, not from the token
 //!
 //! A token's `roles` claim is a snapshot from sign-in. A role granted an hour
@@ -60,6 +80,14 @@ use uuid::Uuid;
 #[derive(Debug, Clone)]
 pub struct InboxFilters {
     pub open_only: bool,
+    /// Narrow to work that is late ([#185](https://github.com/sujanto-gaws/kelir/issues/185)
+    /// AC3).
+    ///
+    /// **Implies `open_only` rather than combining with it.** Overdue is a
+    /// narrowing of open — a completed task is not late, it is done — so the
+    /// two are one axis and `InboxQuery` offers them as one control. Setting
+    /// this without `open_only` is not a state the API can be asked for.
+    pub overdue_only: bool,
     pub document_id: Option<Uuid>,
     /// One task, by id.
     ///
@@ -86,6 +114,9 @@ pub struct InboxRow {
     pub status: String,
     pub priority: String,
     pub due_at: Option<DateTime<Utc>>,
+    /// Whether this task is past its date **and still open**, as the database
+    /// answered it in the same statement that read the row.
+    pub is_overdue: bool,
     pub assignee_user_id: Option<Uuid>,
     pub candidate_role_id: Option<Uuid>,
     pub candidate_role_code: Option<String>,
@@ -121,6 +152,9 @@ pub async fn list_for_caller(
         SELECT t.id, t.task_ref, t.workflow_instance_id, t.document_id,
                d.document_ref, d.document_number, d.title AS document_title,
                t.task_name, t.task_type, t.status, t.priority, t.due_at,
+               (t.due_at IS NOT NULL
+                AND t.due_at < now()
+                AND t.status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')) AS "is_overdue!",
                t.assignee_user_id, t.candidate_role_id,
                r.role_code AS "candidate_role_code?",
                t.delegated_from_user_id,
@@ -152,16 +186,23 @@ pub async fn list_for_caller(
                 ))
           )
           AND ($3 = false OR t.status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS'))
+          -- Late, and still open. Spelled out rather than left to `NULL < now()`
+          -- being unknown, because the other spelling of an undated task is one
+          -- read as the epoch and reported years late (#185 AC5).
+          AND ($6 = false OR (t.due_at IS NOT NULL
+                              AND t.due_at < now()
+                              AND t.status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')))
           AND ($4::uuid IS NULL OR t.document_id = $4)
           AND ($5::uuid IS NULL OR t.id = $5)
         ORDER BY t.created_at DESC
-        LIMIT $6 OFFSET $7
+        LIMIT $7 OFFSET $8
         "#,
         tenant_id,
         user_id,
         filters.open_only,
         filters.document_id,
         filters.task_id,
+        filters.overdue_only,
         limit,
         offset
     )
@@ -183,6 +224,7 @@ pub async fn list_for_caller(
             status: row.status,
             priority: row.priority,
             due_at: row.due_at,
+            is_overdue: row.is_overdue,
             assignee_user_id: row.assignee_user_id,
             candidate_role_id: row.candidate_role_id,
             candidate_role_code: row.candidate_role_code,
@@ -228,6 +270,12 @@ pub async fn count_for_caller(
                 ))
           )
           AND ($3 = false OR t.status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS'))
+          -- Late, and still open. Spelled out rather than left to `NULL < now()`
+          -- being unknown, because the other spelling of an undated task is one
+          -- read as the epoch and reported years late (#185 AC5).
+          AND ($6 = false OR (t.due_at IS NOT NULL
+                              AND t.due_at < now()
+                              AND t.status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')))
           AND ($4::uuid IS NULL OR t.document_id = $4)
           AND ($5::uuid IS NULL OR t.id = $5)
         "#,
@@ -236,6 +284,7 @@ pub async fn count_for_caller(
         filters.open_only,
         filters.document_id,
         filters.task_id,
+        filters.overdue_only,
     )
     .fetch_one(pool)
     .await

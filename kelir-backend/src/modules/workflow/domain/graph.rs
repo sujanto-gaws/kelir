@@ -176,13 +176,61 @@ pub struct TaskSpec {
     pub task_type: String,
     pub assignment: AssignmentRule,
     pub priority: String,
-    /// Read and **not written** in Sprint 10: FR-WF-011 is [#185] in Sprint 11,
-    /// and a due date nobody is shown is a column. Parsed because a definition
-    /// may declare one and dropping it here would mean Sprint 11 could not tell
-    /// a definition that omitted it from one this parser discarded.
+    /// How long the person generating this task has to do it (JWSS §3.1,
+    /// FR-WF-011; [#185]).
+    ///
+    /// **Relative, never absolute**, which is the specification's choice and
+    /// [#185] AC1's: a definition outlives every instance that runs it, so an
+    /// absolute date in one is wrong for every instance after the first.
+    ///
+    /// Read by [`Self::due_in_seconds`], which is the only thing that turns it
+    /// into a number the engine will use — see there for why the arithmetic
+    /// itself does not happen in this process.
     ///
     /// [#185]: https://github.com/sujanto-gaws/kelir/issues/185
     pub due_in_hours: Option<f64>,
+}
+
+impl TaskSpec {
+    /// The declared window in seconds, or `None` when there is no usable one.
+    ///
+    /// # Why this returns seconds rather than a due date
+    ///
+    /// **The stamp is computed by the database, not here** ([#185] AC4). The
+    /// due date and the *overdue* comparison have to come from one clock, and
+    /// the only clock both a write and every later read can share is the
+    /// database's — an application fleet whose members' clocks drift would
+    /// otherwise stamp two tasks generated a second apart as due hours apart,
+    /// and no screen could tell. So this hands `insert_task` a duration and the
+    /// statement adds it to `now()`.
+    ///
+    /// # And why an unusable value is dropped rather than refused
+    ///
+    /// A number that cannot be turned into an interval — not finite, not
+    /// positive, or too large for one — produces `None`, and the caller warns
+    /// and writes a task with no due date. **The alternative is failing the
+    /// transition**, which would land a definition author's mistake on whoever
+    /// happened to submit the next document; that is **D-24**'s direction,
+    /// applied to a field that decorates an approval rather than deciding it.
+    ///
+    /// The meta-schema already refuses a non-positive `dueInHours` at save
+    /// (`exclusiveMinimum: 0`), so this guard is about totality rather than
+    /// validation: `Value::as_f64` on a row somebody wrote by hand can produce
+    /// anything, and `parse` is documented as lenient.
+    ///
+    /// **The ceiling is a representability bound and not a product rule.**
+    /// Nothing in Kelir says how far ahead a due date may be; what this says is
+    /// that a hundred years of seconds is the most `make_interval` will be
+    /// handed, so the statement cannot fail on arithmetic.
+    pub fn due_in_seconds(&self) -> Option<f64> {
+        /// A hundred years, in seconds. Far outside any deadline and far inside
+        /// what an `interval` holds.
+        const CEILING: f64 = 100.0 * 365.25 * 24.0 * 3600.0;
+
+        let seconds = self.due_in_hours? * 3600.0;
+
+        (seconds.is_finite() && seconds > 0.0 && seconds <= CEILING).then_some(seconds)
+    }
 }
 
 /// A named step of the process.
@@ -475,5 +523,73 @@ mod tests {
         }
 
         assert!(TransitionAction::parse("APPROVE_ALL").is_none());
+    }
+
+    fn spec(due_in_hours: Option<f64>) -> TaskSpec {
+        TaskSpec {
+            task_definition_key: "manager_approval".to_owned(),
+            task_name: "Manager approval".to_owned(),
+            task_type: "APPROVAL_TASK".to_owned(),
+            assignment: AssignmentRule::parse(&json!("ROLE:APPROVER")).expect("a rule"),
+            priority: "NORMAL".to_owned(),
+            due_in_hours,
+        }
+    }
+
+    #[test]
+    fn a_declared_window_becomes_seconds_for_the_statement_to_add() {
+        // Hours are what a definition author writes and seconds are what
+        // `make_interval` takes; the conversion is here so the statement carries
+        // no arithmetic of its own beyond the addition.
+        assert_eq!(spec(Some(48.0)).due_in_seconds(), Some(172_800.0));
+        assert_eq!(spec(Some(0.5)).due_in_seconds(), Some(1800.0));
+    }
+
+    #[test]
+    fn a_task_that_declares_no_window_has_no_deadline() {
+        // Distinct from a window of zero, which is refused below: this is the
+        // ordinary case, and the task is created with `due_at` null.
+        assert_eq!(spec(None).due_in_seconds(), None);
+    }
+
+    #[test]
+    fn a_window_that_is_not_a_duration_is_dropped_rather_than_stamped() {
+        // The meta-schema refuses these at save (`exclusiveMinimum: 0`), so
+        // reaching them means a row somebody wrote by hand — and `parse` is
+        // documented as lenient, so this has to be total rather than trusting.
+        assert_eq!(spec(Some(0.0)).due_in_seconds(), None);
+        assert_eq!(spec(Some(-4.0)).due_in_seconds(), None);
+        assert_eq!(spec(Some(f64::NAN)).due_in_seconds(), None);
+        assert_eq!(spec(Some(f64::INFINITY)).due_in_seconds(), None);
+    }
+
+    #[test]
+    fn a_window_too_large_for_an_interval_is_dropped_rather_than_failing_a_submit() {
+        // A representability bound, not a product rule: nothing in Kelir says
+        // how far ahead a due date may be. What it guarantees is that the
+        // statement cannot fail on arithmetic, so a definition author's silly
+        // number never lands on whoever submits the next document.
+        assert_eq!(spec(Some(f64::MAX)).due_in_seconds(), None);
+        assert_eq!(spec(Some(1e30)).due_in_seconds(), None);
+
+        // A century is inside it, so the bound refuses nothing anybody means.
+        assert!(spec(Some(100.0 * 365.0 * 24.0)).due_in_seconds().is_some());
+    }
+
+    #[test]
+    fn a_definition_that_declares_a_window_carries_it_to_the_task_spec() {
+        let mut definition = definition();
+        definition["states"][0]["task"]["dueInHours"] = json!(48);
+
+        let graph = Graph::parse(&definition);
+        let task = graph
+            .state("SUBMITTED")
+            .expect("the state")
+            .task
+            .as_ref()
+            .expect("its task");
+
+        assert_eq!(task.due_in_hours, Some(48.0));
+        assert_eq!(task.due_in_seconds(), Some(172_800.0));
     }
 }

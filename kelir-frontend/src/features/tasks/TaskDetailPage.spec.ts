@@ -76,6 +76,7 @@ function detail(overrides: Record<string, unknown> = {}): Record<string, unknown
     status: 'CREATED',
     priority: 'NORMAL',
     dueAt: null,
+    isOverdue: false,
     assignment: 'ROLE',
     candidateRoleCode: 'FINANCE_APPROVER',
     delegatedFromUserId: null,
@@ -557,5 +558,37 @@ describe('TaskDetailPage', () => {
 
     expect(wrapper.get('[data-testid="task-on-behalf-of"]').text()).toContain('Ani Wijaya')
     expect(wrapper.get('[data-testid="task-assignment"]').text()).toBe('Mine')
+  })
+
+  // -------------------------------------------------------------------------
+  // Due dates (FR-WF-011, FR-TASK-007; #185)
+  // -------------------------------------------------------------------------
+
+  it('shows the deadline, and marks it late from the server\u2019s answer', async () => {
+    // The date is in the future and `isOverdue` says true, so only the flag can
+    // produce a pass — a screen comparing `dueAt` to its own clock would call
+    // this one fine (#185 AC4).
+    current = detail({ dueAt: '2099-01-01T00:00:00Z', isOverdue: true })
+
+    const wrapper = await render()
+
+    expect(wrapper.find('[data-testid="task-overdue"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="task-due"]').text()).toContain('past due')
+  })
+
+  it('shows a deadline that has not passed without calling it late', async () => {
+    current = detail({ dueAt: '2099-01-01T00:00:00Z', isOverdue: false })
+
+    const wrapper = await render()
+
+    expect(wrapper.find('[data-testid="task-overdue"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="task-due"]').text()).not.toContain('past due')
+  })
+
+  it('says nothing about a deadline a task does not have', async () => {
+    const wrapper = await render()
+
+    expect(wrapper.find('[data-testid="task-due"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="task-overdue"]').exists()).toBe(false)
   })
 })
