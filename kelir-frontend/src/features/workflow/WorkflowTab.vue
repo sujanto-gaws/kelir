@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 import { getDocumentWorkflow, listWorkflowHistory } from '@/api/tasks'
 import { ApiError } from '@/api/error'
 import { Alert } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { useAuthStore } from '@/stores/auth'
 import {
   INSTANCE_STATUS_LABELS,
   TASK_STATUS_LABELS,
@@ -14,6 +15,7 @@ import {
 } from '@/types/workflow'
 
 const props = defineProps<{ documentId: string }>()
+const auth = useAuthStore()
 
 /**
  * The Workflow tab of the document workspace (#178, and the tab #172 left
@@ -60,6 +62,34 @@ const history = ref<WorkflowHistoryEntry[]>([])
 const historyTotal = ref(0)
 const historyPage = ref(1)
 const historyProblem = ref('')
+
+/**
+ * Whether the steps can be read at all ([#263]).
+ *
+ * **The API answers 200 with an empty task list to a caller who holds
+ * `workflow:instance:read` and not `workflow:task:read`** — deliberately, in
+ * #101's shape: *a caller who may read parties and not roles has a working
+ * screen, not a forbidden one*. This panel used to render that as an empty list
+ * under the sentence *"These are the steps this approval has generated"*, which
+ * is a different claim from *you may not see them*, and false. The history
+ * below needs only `workflow:instance:read`, so the same screen said the
+ * approval had produced no steps and then listed the decisions people had taken
+ * on them.
+ *
+ * **The person who most often sees this is whoever raised the document.** They
+ * hold no tasks, so a deployment has no reason to grant them the task
+ * permission, and watching their own approval is exactly what the tab is for.
+ *
+ * **Read from the caller's own token rather than signalled by the response**,
+ * which is the trade [#263] AC4 and AC6 fix in place: the API is not changed,
+ * and `auth.can` is the mechanism this sprint already uses on the task screen
+ * for the hand-over picker. What it costs is that an empty list is attributed
+ * to a permission by inference rather than by the server saying so — sound
+ * while the token is the token the request went out with, which is the session.
+ *
+ * [#263]: https://github.com/sujanto-gaws/kelir/issues/263
+ */
+const canReadTasks = computed(() => auth.can('workflow:task:read'))
 
 /** One page at a time, because the endpoint pages and a long process fills it. */
 const HISTORY_PAGE_SIZE = 20
@@ -175,25 +205,44 @@ watch(() => props.documentId, load, { immediate: true })
       <div class="space-y-2" data-testid="workflow-tasks">
         <h3 class="font-medium">Steps</h3>
 
-        <ol class="space-y-2">
-          <li
-            v-for="task in workflow.tasks"
-            :key="task.id"
-            class="rounded-md border border-border p-3 text-sm"
-            :data-testid="`workflow-task-${task.taskRef}`"
-          >
-            <p class="font-medium">{{ task.taskName }}</p>
-            <p class="text-muted-foreground">
-              {{ TASK_STATUS_LABELS[task.status] }}
-              <template v-if="task.action"> · {{ task.action }}</template>
-              <template v-if="task.completedAt"> · {{ task.completedAt }}</template>
-            </p>
-          </li>
-        </ol>
+        <!-- Three outcomes, three sentences. An empty list is not one thing:
+             not allowed to look, and looked and there is nothing, are different
+             news, and the one this panel used to give was the wrong one for the
+             commoner case (#263). -->
+        <p
+          v-if="!canReadTasks"
+          class="text-sm text-muted-foreground"
+          data-testid="workflow-tasks-forbidden"
+        >
+          You cannot see the steps of this approval. Ask an administrator for permission to view
+          tasks. How the document moved between them is still below.
+        </p>
 
-        <p class="text-sm text-muted-foreground" data-testid="workflow-history-note">
-          These are the steps this approval has generated. How the document moved between them is
-          below.
+        <template v-else-if="workflow.tasks.length">
+          <ol class="space-y-2">
+            <li
+              v-for="task in workflow.tasks"
+              :key="task.id"
+              class="rounded-md border border-border p-3 text-sm"
+              :data-testid="`workflow-task-${task.taskRef}`"
+            >
+              <p class="font-medium">{{ task.taskName }}</p>
+              <p class="text-muted-foreground">
+                {{ TASK_STATUS_LABELS[task.status] }}
+                <template v-if="task.action"> · {{ task.action }}</template>
+                <template v-if="task.completedAt"> · {{ task.completedAt }}</template>
+              </p>
+            </li>
+          </ol>
+
+          <p class="text-sm text-muted-foreground" data-testid="workflow-history-note">
+            These are the steps this approval has generated. How the document moved between them is
+            below.
+          </p>
+        </template>
+
+        <p v-else class="text-sm text-muted-foreground" data-testid="workflow-tasks-empty">
+          This approval has generated no steps. How the document moved is below.
         </p>
       </div>
 
