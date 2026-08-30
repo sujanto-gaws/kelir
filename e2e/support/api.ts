@@ -30,8 +30,15 @@ export interface ApiSession {
  * danger of tripping it — but a suite that signs in wrongly is, which is worth
  * knowing when a 429 appears here.
  */
-export async function signInOverApi(): Promise<ApiSession> {
-  const { username, password } = credentials()
+export async function signInOverApi(as?: {
+  username: string
+  password: string
+}): Promise<ApiSession> {
+  // **The administrator unless somebody else is named.** #241's delegation flow
+  // needs a session as the delegator, because a window is opened in the
+  // caller's own name and carries no `delegatorUserId` — an administrator
+  // cannot open one on somebody's behalf, deliberately (#184).
+  const { username, password } = as ?? credentials()
   const anonymous = await request.newContext({ baseURL: baseUrl() })
 
   const response = await anonymous.post(`${API_PREFIX}/auth/login`, {
