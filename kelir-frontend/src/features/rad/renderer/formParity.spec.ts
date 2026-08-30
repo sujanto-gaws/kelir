@@ -3,9 +3,10 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import { flushPromises, mount } from '@vue/test-utils'
-import { describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it } from 'vitest'
 
 import JfssForm from '../JfssForm.vue'
+import { loadEvaluator } from '@/lib/jsonlogic'
 import type { JfssDefinition } from '@/types/jfss'
 
 /**
@@ -66,15 +67,64 @@ const cases: FormCase[] = JSON.parse(fs.readFileSync(corpusPath, 'utf8'))
  * case that cannot be submitted in a browser cannot claim parity with what the
  * server stores either.
  */
+/**
+ * The engine, before any case mounts ([#266]).
+ *
+ * **This is a wait on the condition rather than a longer wait**, which is the
+ * distinction [#266] AC2 draws: `loadEvaluator` resolves a module-level promise
+ * that every later `useFormEvaluation` shares, so once it has resolved here the
+ * composable's own `.then` lands on the first flush of every case below.
+ *
+ * # What it was, and how the cause was established
+ *
+ * `settle` counted six `flushPromises` and its comment listed *the engine's
+ * dynamic import* as one of the things they covered. They cannot cover it —
+ * `@goplasmatic/datalogic-wasm` instantiates WebAssembly, which no number of
+ * microtask flushes bounds. So the corpus passed when the engine happened to
+ * arrive in time and failed when it did not, in whole groups rather than singly.
+ *
+ * The cause was not guessed. Two experiments settled it:
+ *
+ * * **Starving the flushes refutes the obvious theory.** At one and two
+ *   flushes exactly one case fails; at three the corpus passes. Six was
+ *   double the margin the microtask work needs, so the flake was never a
+ *   flush-count problem.
+ * * **An engine that never arrives reproduces the flake exactly.** Mocking
+ *   `loadEvaluator` to a promise that never settles fails **seven** of ten —
+ *   the same count first observed, including the same three cases named in
+ *   [#266], with the same value-mismatch assertions.
+ *
+ * **A failed load is silent by design**, which is why it surfaced as seven
+ * wrong numbers instead of one error: `useFormEvaluation` fires the load
+ * unawaited and leaves computed fields as they are until it lands, so a form
+ * renders and accepts typing without the engine. That is right for a browser
+ * and is exactly what a parity corpus must not do.
+ *
+ * [#266]: https://github.com/sujanto-gaws/kelir/issues/266
+ */
+beforeAll(async () => {
+  const evaluator = await loadEvaluator()
+
+  // So a load that resolves to nothing fails here, once and legibly, rather
+  // than as a wall of value mismatches in the cases that needed it.
+  expect(evaluator, 'the JSON Logic engine loaded before the corpus ran').toBeTruthy()
+})
+
 async function settle(subject: FormCase): Promise<Record<string, unknown>> {
   const wrapper = mount(JfssForm, {
     props: { definition: subject.definition, initialValues: subject.payload },
   })
 
-  // More flushes than `useFormEvaluation.spec.ts` needs, and each one is a real
-  // step: the engine's dynamic import, the calculation pass its arrival wakes,
-  // a repeater's `onMounted` sequence write, and the passes a chain declared
-  // out of order takes to reach its fixed point.
+  // Microtask work, and only that: the calculation pass the engine's arrival
+  // wakes, a repeater's `onMounted` sequence write, and the passes a chain
+  // declared out of order takes to reach its fixed point.
+  //
+  // **The engine's own arrival is not among them, and used to be counted as if
+  // it were** ([#266]). `loadEvaluator` instantiates WebAssembly; that is not a
+  // microtask, so no number of flushes bounds it. Six usually covered it and
+  // sometimes did not — which is the whole of the intermittence, and why
+  // raising the number would have hidden it rather than fixed it. `beforeAll`
+  // now waits for the engine before any case mounts.
   for (let round = 0; round < 6; round += 1) {
     await flushPromises()
   }

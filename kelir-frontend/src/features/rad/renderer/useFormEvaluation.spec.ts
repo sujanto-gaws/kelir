@@ -1,8 +1,9 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import purchaseRequisition from '../__fixtures__/purchase-requisition.json'
 import JfssForm from '../JfssForm.vue'
+import { loadEvaluator } from '@/lib/jsonlogic'
 import type { JfssDefinition } from '@/types/jfss'
 
 /**
@@ -54,16 +55,42 @@ vi.mock('@/api/rad', () => ({
   }),
 }))
 
+/**
+ * The engine, before any test mounts ([#266]).
+ *
+ * **`render` below waits two `flushPromises` and its comment says it waits for
+ * the engine.** It cannot: `loadEvaluator` instantiates WebAssembly, and no
+ * number of microtask flushes bounds that. The mock above spies on the loader
+ * and delegates to the real one, so these tests run the real engine and raced
+ * it — usually winning, and on a loaded machine sometimes not, which surfaced
+ * as whole groups of calculation and conditional tests failing on values.
+ *
+ * `loadEvaluator` resolves a module-level promise the mock and the composable
+ * share, so awaiting it once here means every later mount finds the engine
+ * already there.
+ *
+ * **The spy is unaffected.** The one describe block that counts calls clears
+ * the spy in its own `beforeEach`, so this call is not in any count — including
+ * the test asserting a form with no expression never reaches for the engine.
+ *
+ * [#266]: https://github.com/sujanto-gaws/kelir/issues/266
+ */
+beforeAll(async () => {
+  await loadEvaluator()
+})
+
 const requisition = purchaseRequisition as unknown as JfssDefinition
 
-/** Mounts, and waits for the engine and the first calculation pass. */
+/** Mounts, and waits for the first calculation pass — the engine is already
+ * here, which `beforeAll` above is what makes true. */
 async function render(
   definition: JfssDefinition = requisition,
   initialValues?: Record<string, unknown>,
 ) {
   const wrapper = mount(JfssForm, { props: { definition, initialValues } })
 
-  // Twice: the first settles `loadEvaluator`, the second the calculation pass
+  // Twice: the first settles the composable's `.then` on the already-resolved
+  // engine promise, the second the calculation pass it wakes
   // that the engine's arrival wakes.
   await flushPromises()
   await flushPromises()
