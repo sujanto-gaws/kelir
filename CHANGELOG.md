@@ -7,7 +7,7 @@ All notable changes to Kelir are recorded here. The format follows
 
 While the major version is `0`, the public API may change in any release.
 
-## [Unreleased]
+## [0.5.0] — 2026-08-30
 
 Phase 5 opens: **a submitted document enters an approval it cannot leave by
 accident.** A workflow definition is authored and published; a document type
@@ -16,10 +16,16 @@ transaction that numbers it; the process generates a task; somebody else
 approves or rejects it from their inbox; and the document's status follows from
 that rather than beside it.
 
-**Upgrading:** six new migrations. `0025_workflow.sql` adds ten tables, three
+**This is not the MVP.** **D-1** puts that at `v0.6.0`, at the end of Phase 6 —
+attachments, comments, the activity timeline, notifications and audit search are
+not in this release. A reader meeting "approvals, end to end" is likely to
+assume otherwise, which is why it is said here rather than left to the roadmap.
+
+**Upgrading:** seven new migrations. `0025_workflow.sql` adds ten tables, three
 constraints and eight permission rows; `0027_workflow_history.sql` adds one
 table; `0028_delegation.sql` and `0029_workflow_routing.sql` add one nullable column
-to it each;
+to it each; `0030_workflow_self_transition.sql` **drops** a `CHECK` that `0027`
+had added, which widens what the table accepts and so cannot break a reader;
 `0024_one_live_role_per_party.sql` tightens one unique index on
 `mdm_party_roles` (see *Changed*); and `0026_form_section_not_its_own_parent.sql`
 adds a self-parent `CHECK` to a table nothing writes yet. Both are
@@ -368,11 +374,77 @@ whose process has finished is transitionable again.
   `.env` — demanding it would refuse a deployment for omitting the one value
   the caller had already supplied.
 
+### Fixed
+
+**Every one of these was found after the notes above were written, by the Phase 5
+exit steps rather than by the construction that produced them** — the
+[independent pass](projects/verifications/09.%20Sprint%2011%20Independent%20Pass.md)
+and the [exit demo](projects/verifications/10.%20Phase%205%20Exit%20Demo.md). They
+are listed together because that provenance is the useful thing about them.
+
+- **A workflow definition could publish and then fail at run time**
+  ([#259](https://github.com/sujanto-gaws/kelir/issues/259)). The meta-schema did
+  not bound what the columns bounded, so a definition whose `taskName` ran past
+  200 characters — or `taskDefinitionKey` past 64, or `states[].name` past 200,
+  or `variables[].key` past 64, or `version` past 40 — saved, published, and then
+  **500ed on the submit**, nowhere near the definition that caused it. Five
+  `maxLength` keywords now refuse it at save, where it can be acted on.
+
+  **A self-transition is legal and now runs.** `REVIEW --RETURN--> REVIEW` —
+  *send it round again* — satisfies S3, S4, S6 and S7, and JWSS forbids nothing
+  about it, but a `CHECK` on the history table refused the row it produces.
+  `0030` drops the constraint rather than the construct: what the table records
+  is a decision, and a reviewer who acted and left the document where it was is
+  the row a reader most needs. Recorded as **JWSS R-5**, the first narrowing on
+  the `1.x` line.
+
+- **The workflow tab said an approval had generated no steps when the reader
+  simply could not see them** ([#263](https://github.com/sujanto-gaws/kelir/issues/263)).
+  The API returns an empty task list to a caller holding `workflow:instance:read`
+  and not `workflow:task:read` — deliberately — and the tab rendered that under
+  *"These are the steps this approval has generated"*, with the history
+  immediately below listing the decisions people had taken on those steps. **The
+  permission combination is the requester's**: whoever raised a document holds no
+  tasks. Three outcomes now read differently: not allowed to look, looked and
+  found nothing, and the list itself.
+
+- **The task screen promised transitions that are not coming**
+  ([#264](https://github.com/sujanto-gaws/kelir/issues/264)). `AUTO` edges
+  reached the screen as things a person might one day do; they never can, because
+  JWSS gives an `AUTO` transition no caller. The API now filters them. And
+  `DELEGATE` was described as arriving in a later release when delegation had
+  already shipped as a route — the component's own header said so sixty lines
+  above the template that contradicted it.
+
+- **A button named a destination it could not know**
+  ([#271](https://github.com/sujanto-gaws/kelir/issues/271)), found by the exit
+  demo on its first run. Where a state declares two transitions for one action,
+  the engine picks between them when the decision arrives — and the button named
+  the first-written one, so a request below a routing threshold read *"Approve →
+  Director approval"* when it would complete. The verb alone where the engine
+  chooses; the destination where it cannot.
+
+- **A definition is now loaded only for the tenant that pointed at it**
+  ([#260](https://github.com/sujanto-gaws/kelir/issues/260)). The read had no
+  tenant predicate, deliberately, defended by a comment naming one caller where
+  there were five. No cross-tenant read was possible — every caller passed an id
+  from an already-scoped row — but that was a property of the callers rather than
+  of the read. It is checked now: with the check removed, an instance pointed at
+  another tenant's definition is decided successfully.
+
 ### Known limitations
 
-- **Delegate, conditional routing, due dates and escalation are not built.** A
-  definition may declare `DELEGATE`; the task detail shows the transition and
-  does not offer it. `RETURN` left this list when #183 built it.
+- **Escalation is not built.** FR-WF-010 is `Could` and unscheduled: a definition
+  may declare `escalation` and it is stored, validated and never acted on,
+  because there is no scheduler. Lateness is made *visible* — a due date and the
+  inbox's overdue indicator — and nothing acts on it automatically.
+- **A `DELEGATE` transition fires nothing, and that is not a gap this release
+  left.** Delegation is built, as a route of its own: handing a task over
+  answers nothing about the document and moves no process, so it is not a
+  transition. A definition declaring a `DELEGATE` edge is declaring one nothing
+  will ever fire.
+- **Delegation, conditional routing and due dates left this list in this
+  release**, built by #184, #186 and #185. `RETURN` left it when #183 built it.
 - **Guards and actions are stored and never executed**, because there is no
   lifecycle hook chain yet. A stored handler is not evidence that it runs.
 - **`AUTO` transitions do not fire.** Nothing drives one until system tasks land.
