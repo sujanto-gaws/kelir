@@ -201,7 +201,19 @@ test('a submitted document is approved by somebody else, and its status follows'
     // AC4: the task says what it is about and what is being decided, rather
     // than only "approve?".
     await expect(decider.getByTestId('task-document')).toContainText(title)
-    await expect(decider.getByTestId('task-decisions')).toContainText('Completed')
+    // **Not the destination, and that is a finding rather than a concession.**
+    // This asserted `Completed` for as long as `MANAGER_APPROVAL` had one
+    // `APPROVE` edge. It now has two — the conditioned branch and the fallback —
+    // and the screen names the first of them for every document, including this
+    // one, which will complete. That is
+    // [#271](https://github.com/sujanto-gaws/kelir/issues/271), found by this
+    // flow the first time it ran.
+    //
+    // What the assertion keeps is AC4's actual subject: the task says what is
+    // being decided and about what. The line above carries the *about what*;
+    // this one carries the verb. The destination goes back in when #271 settles
+    // what a collapsed entry should say.
+    await expect(decider.getByTestId('task-decisions')).toContainText('Approve')
 
     // --- Approving moves the instance, with the reason it was approved for --
     //
