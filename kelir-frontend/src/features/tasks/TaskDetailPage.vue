@@ -120,7 +120,32 @@ const offered = computed<AvailableDecision[]>(() => {
   return [...byAction.values()]
 })
 
-/** Declared by the definition and not performable yet — shown, not offered. */
+/**
+ * Declared by the definition and **not decided from this screen** — shown, not
+ * offered ([#264]).
+ *
+ * The list exists so a holder comparing the screen against the definition is not
+ * left thinking the product has lost a transition. What it used to say about
+ * them was *"Those arrive in a later release"*, and that was false in both
+ * directions:
+ *
+ * * **`AUTO` is never anybody's to make.** JWSS §4 forbids `allowedBy` on it
+ *   because there is no caller. It no longer reaches this list at all — the API
+ *   filters it, which is where [#264] AC1 records the decision belongs.
+ * * **`DELEGATE` shipped.** #184 built delegation and deliberately made it a
+ *   route rather than a transition, which the header above says in as many
+ *   words — so an edge declaring it fires nothing, now and later. *Hand it
+ *   over…* is on this screen already and is not that edge.
+ *
+ * **The remainder is not waiting on a release either**, which is why the
+ * sentence stops promising one rather than splitting into two. Of the actions
+ * that can land here — `SUBMIT`, `RESUBMIT`, `CANCEL`, `COMPLETE`, `ESCALATE` —
+ * none is a decision a task holder is ever given: FR-TASK-004, 005, 006 and 008
+ * are the ones that are, and all four are built. `ESCALATE` is FR-WF-010, a
+ * scheduler rather than a button. A two-way split would have an empty side.
+ *
+ * [#264]: https://github.com/sujanto-gaws/kelir/issues/264
+ */
 const deferred = computed(() =>
   (task.value?.decisions ?? []).filter((decision) => !decision.supported),
 )
@@ -568,20 +593,29 @@ function openDocument(): void {
           </div>
 
           <!-- Shown and not offered. A definition may declare a transition this
-               release cannot perform; drawing a button for it would produce a
-               refusal from a control the product itself put there. -->
+               screen does not decide; drawing a button for it would produce a
+               refusal from a control the product itself put there.
+
+               **The sentence ends after the list rather than before a full
+               stop**, which is what fixes the stray space #264 AC4 names: the
+               period used to follow the `v-for` on its own line, and the
+               template's newline came with it. -->
           <p
             v-if="deferred.length"
             class="mt-3 text-sm text-muted-foreground"
             data-testid="task-deferred"
           >
-            This workflow also allows
-            <template v-for="(decision, index) in deferred" :key="decision.action">
+            The definition also declares
+            <template
+              v-for="(decision, index) in deferred"
+              :key="`${decision.action}-${decision.toState}`"
+            >
               <span class="font-medium">{{ decision.action }}</span>
               <span> → {{ decision.toStateName }}</span>
               <span v-if="index < deferred.length - 1">, </span>
             </template>
-            . Those arrive in a later release.
+            from this state. Those are not decided here — a transition this screen does not offer is
+            moved by the engine, from the document, or by nothing at all.
           </p>
         </template>
       </div>

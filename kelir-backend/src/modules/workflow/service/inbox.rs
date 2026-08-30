@@ -13,7 +13,7 @@
 
 use uuid::Uuid;
 
-use super::super::domain::{Assignment, Graph, TaskStatus};
+use super::super::domain::{Assignment, Graph, TaskStatus, TransitionAction};
 use super::super::repository::inbox::{self, InboxFilters};
 use super::super::repository::{definition as definition_repo, instance as instance_repo};
 use super::super::TASK_READ;
@@ -220,6 +220,26 @@ pub async fn get_task(
             graph
                 .actions_from(&instance.current_state)
                 .into_iter()
+                // **`AUTO` is not a decision, so it is not in this list**
+                // ([#264]). `actions_from` answers *every transition out of
+                // this state*, which is the graph's question; this field
+                // answers *what may the person holding this task do*, which is
+                // a narrower one. JWSS §4 forbids `allowedBy` on an `AUTO`
+                // transition precisely because there is no caller, so an `AUTO`
+                // edge is the one case where the two questions have provably
+                // different answers.
+                //
+                // **Filtered here rather than on the client**, which [#264] AC1
+                // asked be decided and recorded. The alternative was every
+                // consumer of this list knowing that one member of the action
+                // vocabulary is never theirs — the designer, the task screen,
+                // and anything built on the API later — and the task inbox's
+                // own rule applies: two places deriving a thing derive it
+                // differently. `supported` marks what this release can fire;
+                // this filter marks what nobody can.
+                //
+                // [#264]: https://github.com/sujanto-gaws/kelir/issues/264
+                .filter(|transition| transition.action != TransitionAction::Auto)
                 .map(|transition| AvailableDecision {
                     action: transition.action.as_db().to_owned(),
                     to_state: transition.to.clone(),

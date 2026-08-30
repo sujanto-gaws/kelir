@@ -227,7 +227,7 @@ describe('TaskDetailPage', () => {
     expect(wrapper.get('[data-testid="decide-REJECT"]').text()).toContain('Rejected')
   })
 
-  it('shows a transition this release cannot perform without offering it', async () => {
+  it('shows a transition this screen does not decide without offering it', async () => {
     // A definition may declare `DELEGATE` — FR-WF-009 is #184 — and a button for
     // it would produce a 422 from a control the product itself drew. It was
     // `RETURN` until #183 built that one.
@@ -254,6 +254,83 @@ describe('TaskDetailPage', () => {
 
     expect(wrapper.find('[data-testid="decide-DELEGATE"]').exists()).toBe(false)
     expect(wrapper.get('[data-testid="task-deferred"]').text()).toContain('DELEGATE')
+  })
+
+  /**
+   * **The sentence stopped promising a release** ([#264]).
+   *
+   * `DELEGATE` was the instance that made the old wording plainly wrong rather
+   * than merely loose: #184 shipped delegation as a route rather than a
+   * transition — the component's own header says so — and *Hand it over…* is on
+   * this screen already. An edge declaring it fires nothing, now and later, so
+   * *"Those arrive in a later release"* promised something that is not coming.
+   *
+   * **Seen red**, and isolating, with only the wording reverted — *"Those
+   * arrive in a later release."* put back while the sentence still runs past
+   * the list. Reverting the whole paragraph reddens the punctuation test below
+   * as well, and so proves less about this one.
+   *
+   * [#264]: https://github.com/sujanto-gaws/kelir/issues/264
+   */
+  it('does not promise a release for a transition that is not coming', async () => {
+    current = detail({
+      decisions: [
+        {
+          action: 'APPROVE',
+          toState: 'COMPLETED',
+          toStateName: 'Completed',
+          supported: true,
+          requiresComment: false,
+        },
+        {
+          action: 'DELEGATE',
+          toState: 'MANAGER_APPROVAL',
+          toStateName: 'Manager approval',
+          supported: false,
+          requiresComment: false,
+        },
+      ],
+    })
+
+    const wrapper = await render()
+    const deferred = wrapper.get('[data-testid="task-deferred"]').text()
+
+    expect(deferred).not.toContain('later release')
+    expect(deferred).toContain('not decided here')
+  })
+
+  /**
+   * The stray space before the full stop ([#264] AC4).
+   *
+   * It came from the template: the period sat on its own line after the
+   * `v-for`, so the newline before it rendered as a space. The sentence now
+   * continues past the list instead of ending on it, which removes the
+   * position the space could occupy rather than trimming it afterwards.
+   *
+   * **Seen red**, and isolating, with only the punctuation reverted —
+   * `from this state.` replaced by a bare `.` behind the loop, the new wording
+   * kept.
+   */
+  it('punctuates the list without a space before the full stop', async () => {
+    current = detail({
+      decisions: [
+        {
+          action: 'CANCEL',
+          toState: 'CANCELLED',
+          toStateName: 'Cancelled',
+          supported: false,
+          requiresComment: false,
+        },
+      ],
+    })
+
+    const wrapper = await render()
+    // Collapse the template's own whitespace the way a browser does, then look
+    // for a space immediately before a full stop.
+    const rendered = wrapper.get('[data-testid="task-deferred"]').text().replace(/\s+/g, ' ')
+
+    expect(rendered).not.toMatch(/ \./)
+    expect(rendered).toContain('CANCEL → Cancelled from this state.')
   })
 
   it('offers a claim only for work that is going spare', async () => {
