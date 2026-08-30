@@ -227,6 +227,104 @@ describe('TaskDetailPage', () => {
     expect(wrapper.get('[data-testid="decide-REJECT"]').text()).toContain('Rejected')
   })
 
+  /**
+   * **The case [#271](https://github.com/sujanto-gaws/kelir/issues/271) was
+   * raised for.** A state may declare two transitions for one action with
+   * disjoint conditions (JWSS §4, S7), and the engine picks between them when
+   * the decision arrives — against a condition over the document, which this
+   * screen has not evaluated and cannot.
+   *
+   * The button used to keep the **first** edge's destination, so a workflow
+   * branching on an amount told every approver their decision went wherever
+   * that edge led. A request under the threshold, which would complete, read
+   * `Approve → Director approval`.
+   *
+   * **Seen red**, and isolating, with the `edges === 1` guard removed from the
+   * template: only this test fails, and the button names `Director approval`
+   * again.
+   */
+  it('does not name a destination for an action with two edges', async () => {
+    current = detail({
+      decisions: [
+        {
+          action: 'APPROVE',
+          toState: 'DIRECTOR_APPROVAL',
+          toStateName: 'Director approval',
+          supported: true,
+          requiresComment: false,
+        },
+        {
+          action: 'APPROVE',
+          toState: 'COMPLETED',
+          toStateName: 'Completed',
+          supported: true,
+          requiresComment: false,
+        },
+        {
+          action: 'REJECT',
+          toState: 'REJECTED',
+          toStateName: 'Rejected',
+          supported: true,
+          requiresComment: false,
+        },
+      ],
+    })
+
+    const wrapper = await render()
+    const approve = wrapper.get('[data-testid="decide-APPROVE"]')
+
+    // One button for the verb, as it always was — and no arrow, because there
+    // is no destination this screen can put after it.
+    expect(wrapper.findAll('[data-testid="decide-APPROVE"]')).toHaveLength(1)
+    expect(approve.text()).not.toContain('Director approval')
+    expect(approve.text()).not.toContain('Completed')
+    expect(approve.text()).not.toContain('→')
+
+    // **The single-edge action beside it is untouched**, which is what makes
+    // this a rule about ambiguity rather than a screen that stopped saying
+    // where anything goes (#271 AC2).
+    expect(wrapper.get('[data-testid="decide-REJECT"]').text()).toContain('Rejected')
+  })
+
+  /**
+   * The collapse combines what can be combined ([#271](https://github.com/sujanto-gaws/kelir/issues/271) AC3).
+   *
+   * `requiresComment` was already or-ed across a collapse and this pins it
+   * beside the destination rule, because the two are the same question answered
+   * oppositely: a comment requirement has a truthful combined value and a
+   * destination does not.
+   *
+   * **Seen red** with the `||` changed to take the first edge's value: the box
+   * is no longer marked required and the empty-reason refusal below stops
+   * firing.
+   */
+  it('requires a reason when any edge of a collapsed action does', async () => {
+    current = detail({
+      decisions: [
+        {
+          action: 'APPROVE',
+          toState: 'DIRECTOR_APPROVAL',
+          toStateName: 'Director approval',
+          supported: true,
+          requiresComment: false,
+        },
+        {
+          action: 'APPROVE',
+          toState: 'COMPLETED',
+          toStateName: 'Completed',
+          supported: true,
+          requiresComment: true,
+        },
+      ],
+    })
+
+    const wrapper = await render()
+
+    await wrapper.get('[data-testid="decide-APPROVE"]').trigger('click')
+
+    expect(wrapper.get('[data-testid="comment-required"]').text()).toContain('needs a reason')
+  })
+
   it('shows a transition this screen does not decide without offering it', async () => {
     // A definition may declare `DELEGATE` — FR-WF-009 is #184 — and a button for
     // it would produce a 422 from a control the product itself drew. It was

@@ -201,19 +201,21 @@ test('a submitted document is approved by somebody else, and its status follows'
     // AC4: the task says what it is about and what is being decided, rather
     // than only "approve?".
     await expect(decider.getByTestId('task-document')).toContainText(title)
-    // **Not the destination, and that is a finding rather than a concession.**
-    // This asserted `Completed` for as long as `MANAGER_APPROVAL` had one
-    // `APPROVE` edge. It now has two — the conditioned branch and the fallback —
-    // and the screen names the first of them for every document, including this
-    // one, which will complete. That is
-    // [#271](https://github.com/sujanto-gaws/kelir/issues/271), found by this
-    // flow the first time it ran.
+    // **Tightened by [#271](https://github.com/sujanto-gaws/kelir/issues/271),
+    // which this flow found on its first run.** It asserted `Completed` for as
+    // long as `MANAGER_APPROVAL` had one `APPROVE` edge; the branch gave it two,
+    // and the screen went on naming the first of them for every document —
+    // including this one, which completes.
     //
-    // What the assertion keeps is AC4's actual subject: the task says what is
-    // being decided and about what. The line above carries the *about what*;
-    // this one carries the verb. The destination goes back in when #271 settles
-    // what a collapsed entry should say.
-    await expect(decider.getByTestId('task-decisions')).toContainText('Approve')
+    // So the assertion is now the rule rather than a destination: **the verb
+    // alone where the engine chooses, the destination where it cannot.** Both
+    // halves are here, because a screen that had simply stopped naming
+    // destinations would satisfy the first and fail the person.
+    const approve = decider.getByTestId('decide-APPROVE')
+
+    await expect(approve).toContainText('Approve')
+    await expect(approve).not.toContainText('→')
+    await expect(decider.getByTestId('decide-REJECT')).toContainText('Rejected')
 
     // --- Approving moves the instance, with the reason it was approved for --
     //

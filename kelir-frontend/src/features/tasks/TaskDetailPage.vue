@@ -87,6 +87,18 @@ const handOverReason = ref('')
 const people = ref<User[]>([])
 
 /**
+ * One collapsed entry per action, carrying how many edges it came from.
+ *
+ * `edges` is what lets the button tell *this action goes there* from *this
+ * action goes to one of several places, and the engine picks* ([#271]).
+ *
+ * [#271]: https://github.com/sujanto-gaws/kelir/issues/271
+ */
+interface OfferedDecision extends AvailableDecision {
+  edges: number
+}
+
+/**
  * Only what this release can perform, one entry per action.
  *
  * **Collapsed by action**, because a state may declare two transitions for one
@@ -99,9 +111,41 @@ const people = ref<User[]>([])
  * cannot know which edge will fire, and of the two ways to be wrong, asking for
  * a reason that turns out to be optional costs a sentence — while not asking
  * produces a refusal from a button the product drew.
+ *
+ * # The destination is named only when there is one
+ *
+ * **A collapsed entry drops `toStateName` from its button** ([#271]). It used to
+ * keep the first edge's, which meant a workflow branching on an amount told
+ * every approver their decision went wherever the *first-written* edge led — a
+ * request under the threshold, which would complete, read `Approve → Director
+ * approval`. The engine chooses the edge when the decision arrives, against a
+ * condition over the document; this screen cannot know it in advance and no
+ * longer claims to.
+ *
+ * **What it says instead is the verb alone**, which [#271] AC1 asked be decided
+ * and written down rather than assumed. Two alternatives were rejected:
+ *
+ * * *Listing them* — `Approve → Completed or Director approval` — tells the
+ *   person something they cannot act on, and grows without bound with the
+ *   number of edges.
+ * * *Naming the uncertainty on the button* — `Approve → depends on the request`
+ *   — spends a control's label explaining an absence.
+ *
+ * Saying less is not the same as being unclear: the request carries the verb
+ * rather than the edge, which is what the collapse above already rests on.
+ *
+ * **A single-edge action still names where it goes** (AC2), because that is the
+ * informative case and most workflows are made entirely of it.
+ *
+ * # Every field of a collapse is combined, or cannot differ
+ *
+ * AC3. `requiresComment` is or-ed, above. `toState` and `toStateName` cannot be
+ * combined into one truthful value, so they are **withheld rather than picked**.
+ * `supported` cannot differ between edges sharing an action at all — the API
+ * derives it from the action — so there is nothing there to combine.
  */
-const offered = computed<AvailableDecision[]>(() => {
-  const byAction = new Map<string, AvailableDecision>()
+const offered = computed<OfferedDecision[]>(() => {
+  const byAction = new Map<string, OfferedDecision>()
 
   for (const decision of task.value?.decisions ?? []) {
     if (!decision.supported) {
@@ -112,8 +156,9 @@ const offered = computed<AvailableDecision[]>(() => {
 
     if (seen) {
       seen.requiresComment = seen.requiresComment || decision.requiresComment
+      seen.edges += 1
     } else {
-      byAction.set(decision.action, { ...decision })
+      byAction.set(decision.action, { ...decision, edges: 1 })
     }
   }
 
@@ -502,8 +547,12 @@ function openDocument(): void {
               :data-testid="`decide-${decision.action}`"
               @click="decide(decision)"
             >
-              {{ DECISION_LABELS[decision.action as DecisionAction] }} →
-              {{ decision.toStateName }}
+              {{ DECISION_LABELS[decision.action as DecisionAction] }}
+              <!-- Only where the action has one edge. Where it has several, the
+                   engine chooses when the decision arrives, and a button naming
+                   one of them names the wrong one for every document that goes
+                   the other way (#271). -->
+              <template v-if="decision.edges === 1"> → {{ decision.toStateName }}</template>
               <span v-if="decision.requiresComment" aria-hidden="true"> *</span>
             </Button>
           </div>
