@@ -5,9 +5,13 @@ import { createDocumentType, type SeededDocumentType } from '../support/document
 import { credentials } from '../support/env'
 import { publishForm, type SeededForm } from '../support/forms'
 import {
+  addApprover,
   bindWorkflow,
   createApprover,
+  createApproverRole,
+  openDelegationWindow,
   publishWorkflow,
+  BRANCH_THRESHOLD,
   type SeededApprover,
   type SeededWorkflow,
 } from '../support/workflow'
@@ -79,6 +83,10 @@ let form: SeededForm
 let documentType: SeededDocumentType
 let workflow: SeededWorkflow
 let approver: SeededApprover
+/** Holds the approver role, is named by the branch state, and delegates. */
+let director: SeededApprover
+/** Holds **no** approver role — see the delegation flow for why that matters. */
+let delegate: SeededApprover
 
 test.beforeAll(async () => {
   session = await signInOverApi()
@@ -91,9 +99,28 @@ test.beforeAll(async () => {
   // before the binding is used**, because an assignment that resolves to nobody
   // refuses the submit rather than leaving an approval that has silently
   // stopped.
-  workflow = await publishWorkflow(session, roleCode)
-  approver = await createApprover(session, roleCode)
+  // **The people come before the workflow now**, which is the ordering the
+  // branch state forces: it assigns to a *named user*, so the definition cannot
+  // be written until that user exists. Everything else is as it was.
+  const approverRoleId = await createApproverRole(session, roleCode, [
+    'identity:delegation:create',
+  ])
+
+  approver = await addApprover(session, approverRoleId, 'approver')
+  director = await addApprover(session, approverRoleId, 'director')
+
+  // **A role of its own, with the same permissions and not the approver's.**
+  // The `DIRECTOR_APPROVAL → COMPLETED` edge is `allowedBy: ROLE:<approver>`,
+  // which the delegate does not hold — so if they can decide it at all, it is
+  // on the director's authority and nothing else. A delegate who also held the
+  // role would prove the screens work and nothing about delegation.
+  const delegateRoleId = await createApproverRole(session, `${roleCode}-DELEGATE`)
+  delegate = await addApprover(session, delegateRoleId, 'delegate')
+
+  workflow = await publishWorkflow(session, roleCode, director.id)
   await bindWorkflow(session, documentType.id, workflow)
+
+  await openDelegationWindow(director, delegate.id, `On leave ${suffix}`)
 })
 
 test.afterAll(async () => {
@@ -415,4 +442,133 @@ test('a document under a workflow cannot have its status set by hand', async ({ 
   await expect(page.getByTestId('document-history')).toContainText('Submitted')
   await expect(page.getByTestId('transition-APPROVED')).toHaveCount(0)
   await expect(page.getByTestId('transition-IN_REVIEW')).toHaveCount(0)
+})
+
+test('a large request branches to the director, whose window sends it on, and the history says why', async ({
+  browser,
+}) => {
+  // The three items Sprint 11 added and never drove through a browser (#241
+  // AC2, AC3, AC4). They share one flow because they share one branch: the
+  // conditioned edge is what generates the task, the task is the one with a
+  // deadline, and it is assigned to a person, which is the only kind of
+  // assignment a delegation window can redirect.
+  //
+  // **Three people.** The requester raises it, the approver sends it up, and
+  // the *delegate* decides it — never the director, whose window is open the
+  // whole time.
+  const requester = await browser.newPage()
+  const decider = await browser.newPage()
+  const standIn = await browser.newPage()
+
+  try {
+    const { username, password } = credentials()
+    await signIn(requester, username, password)
+
+    await requester.goto('/documents/new')
+    await requester.getByTestId(`type-${documentType.typeCode}`).getByRole('radio').check()
+    await requester.getByTestId('new-document-title').fill(`Above the threshold ${suffix}`)
+    await requester.getByTestId('create-document').click()
+
+    await expect(requester).toHaveURL(/\/documents\/[0-9a-f-]{36}$/)
+    const documentUrl = requester.url()
+
+    // Over the threshold, so the conditioned edge is the one that applies.
+    await requester.locator('#jfss-amount-field').fill(String(BRANCH_THRESHOLD + 250_000))
+    await requester.getByRole('button', { name: 'Submit request' }).click()
+
+    await expect(requester.getByTestId('document-status')).toHaveText('Pending approval')
+    const number = (await requester.getByTestId('document-number').textContent())?.trim() ?? ''
+
+    // --- The approver sends it up, and the condition chooses the branch -----
+    await signIn(decider, approver.username, approver.password)
+    await decider.goto('/tasks')
+    await decider
+      .getByRole('row')
+      .filter({ hasText: number })
+      .getByRole('button', { name: 'Open' })
+      .click()
+
+    await decider.getByTestId('decide-APPROVE').click()
+    await expect(decider.getByTestId('task-decided')).toContainText('has been decided')
+
+    // The document did **not** complete, which is the branch being real: the
+    // unconditioned edge out of this state ends the approval, and the
+    // conditioned one does not.
+    await requester.goto(documentUrl)
+    await expect(requester.getByTestId('document-status')).toHaveText('Pending approval')
+
+    await requester.getByTestId('tab-workflow').click()
+    await expect(requester.getByTestId('workflow-state')).toHaveText('Director approval')
+
+    // --- AC4: the trail says which branches were considered ----------------
+    //
+    // The screen this sprint added that nothing had looked at. It answers *why
+    // this branch and not the other* with the edges the engine actually
+    // evaluated and what each one said — not with the expression, which belongs
+    // in the definition.
+    const routing = requester.getByTestId('workflow-history').getByTestId('history-routing')
+
+    await expect(routing.first()).toContainText('DIRECTOR_APPROVAL')
+    await expect(routing.first()).toContainText('condition met')
+
+    // --- AC2: the window redirected the task, and the director never held it -
+    //
+    // The task is assigned to the director by the definition. It is in the
+    // delegate's inbox because a window was open when it was generated, and the
+    // delegate holds no approver role at all.
+    await signIn(standIn, delegate.username, delegate.password)
+    await standIn.goto('/tasks')
+
+    const handed = standIn.getByRole('row').filter({ hasText: number })
+    await expect(handed).toHaveCount(1)
+    await expect(handed).toContainText('Mine')
+
+    await handed.getByRole('button', { name: 'Open' }).click()
+    await expect(standIn.getByTestId('task-name')).toHaveText('Approve the larger request')
+    // **The display name here and the username below**, because the two screens
+    // render different fields — the badge reads `delegatedFromDisplayName` and
+    // the history reads `onBehalfOfUsername`. Asserting the same string in both
+    // places would be asserting wrongly in one of them.
+    await expect(standIn.getByTestId('task-on-behalf-of')).toContainText(director.displayName)
+
+    // --- AC3: the deadline elapses, and the server's flag becomes a badge ---
+    //
+    // **A real wait, and the only place one is warranted.** `dueAt` was stamped
+    // when the task was generated and `isOverdue` is decided by the server
+    // against it, so nothing the browser does can bring the deadline forward —
+    // and the inbox reads the flag at load, so the page has to be fetched again
+    // after it passes. The deadline is seconds because the *indicator* is what
+    // is being demonstrated (`DIRECTOR_DUE_IN_HOURS` says so).
+    await standIn.waitForTimeout(2_000)
+    await standIn.goto('/tasks')
+
+    const late = standIn.getByRole('row').filter({ hasText: number })
+    await expect(late.getByTestId('task-overdue')).toHaveText('Late')
+
+    // And on the task itself, where the deadline is also spelled out.
+    await late.getByRole('button', { name: 'Open' }).click()
+    await expect(standIn.getByTestId('task-overdue')).toHaveText('Late')
+    await expect(standIn.getByTestId('task-due')).toContainText('past due')
+
+    // --- The delegate decides it, on the director's authority --------------
+    await standIn.getByTestId('decide-APPROVE').click()
+    await expect(standIn.getByTestId('task-notice')).toContainText('Completed')
+
+    // --- AC2, the half that matters: both names are on the record ----------
+    //
+    // A history showing only the delegate would lose exactly what delegation is
+    // supposed to preserve — the approval was the director's to give.
+    await requester.goto(documentUrl)
+    await expect(requester.getByTestId('document-status')).toHaveText('Completed')
+
+    await requester.getByTestId('tab-workflow').click()
+
+    const history = requester.getByTestId('workflow-history')
+    await expect(history).toContainText(delegate.username)
+    await expect(history.getByTestId('history-on-behalf-of')).toContainText(director.username)
+  } finally {
+    await requester.close()
+    await decider.close()
+    await standIn.close()
+  }
 })
