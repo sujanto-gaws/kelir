@@ -190,15 +190,18 @@ pub async fn start(
     transaction: &mut sqlx::PgTransaction<'_>,
     request: &StartRequest<'_>,
 ) -> Result<Started, AppError> {
-    let loaded =
-        definition_repo::definition_of_instance(&mut **transaction, request.workflow_definition_id)
-            .await?
-            .ok_or_else(|| AppError::Internal {
-                source: anyhow::anyhow!(
-                    "document type binds workflow definition {} which does not exist",
-                    request.workflow_definition_id
-                ),
-            })?;
+    let loaded = definition_repo::definition_of_instance(
+        &mut **transaction,
+        request.tenant_id,
+        request.workflow_definition_id,
+    )
+    .await?
+    .ok_or_else(|| AppError::Internal {
+        source: anyhow::anyhow!(
+            "document type binds workflow definition {} which does not exist",
+            request.workflow_definition_id
+        ),
+    })?;
 
     let (definition_json, workflow_key, _, _) = (
         loaded.definition_json,

@@ -334,29 +334,90 @@ pub async fn has_live_instances<'e, E: PgExecutor<'e>>(
     Ok(found.is_some())
 }
 
-/// Loads a definition for the engine, without the tenant scope a request has.
+/// Loads a definition to execute or to name, checked against the tenant that
+/// pointed at it ([#260]).
 ///
-/// **The scope is the instance's**, which was written under a tenant and carries
-/// a foreign key to this row; re-deriving it from the caller would let a
-/// mis-scoped instance silently execute nothing. Only
-/// [`super::super::service::engine`] calls this, and only with an id it read off
-/// a row it had already scoped.
+/// # The invariant, which is not a call-site count
+///
+/// **Every caller passes an id it read from a row already scoped to that
+/// tenant** — an instance row, or the document type's workflow binding. There
+/// are five, and there were five when the comment here said there was one:
+/// [`super::super::service::engine`], [`super::super::service::task`],
+/// [`super::super::service::inbox`], [`super::super::service::instance`], and
+/// `document::service::submit`. A count is the wrong thing to write down,
+/// because it goes stale the first time somebody adds a caller and reads no
+/// further than the signature — which is exactly what happened.
+///
+/// So the property is checked here instead of promised here.
+///
+/// # Why the row is still fetched unscoped, and then compared
+///
+/// **`WHERE id = $1 AND tenant_id = $2` would be worse**, and the original
+/// reasoning for the unscoped read is why: a definition linked from another
+/// tenant's row is a broken link, and a scoped `WHERE` turns it into *no row* —
+/// indistinguishable from a definition that was never there, which the engine
+/// reports as a binding to something that does not exist. The link is fetched,
+/// the mismatch is named in the log with both tenants, and only then does the
+/// answer become `None`. The outcome is the same and the diagnosis is not.
+///
+/// It cannot happen today: `workflow_definitions.id` is a foreign key from rows
+/// that were themselves written under a tenant. This is what makes that
+/// stay true rather than remain true by nobody having broken it.
+///
+/// # What was considered and not done
+///
+/// **A newtype only a tenant-scoped read can produce** — [#260] AC2 raises it.
+/// Its producers span two modules, `document_type::repository::workflow_binding`
+/// and this one's instance reads, so its constructor would have to be visible to
+/// both; what the compiler would then keep is *somebody wrote a conversion*,
+/// not *the id came from a scoped read*. The comparison below keeps the property
+/// itself, and fails loudly rather than only in the places a future author
+/// remembered to route through the type.
+///
+/// # A correction the finding did not catch
+///
+/// The comment this replaces opened with *"the scope is the instance's"*. On the
+/// submit path there **is** no instance yet — `engine::start` is what creates
+/// one, and the id comes from `document_type_workflows`, read under the
+/// tenant. The scope is the row that named the definition, whichever row that
+/// is.
+///
+/// [#260]: https://github.com/sujanto-gaws/kelir/issues/260
 pub async fn definition_of_instance<'e, E: PgExecutor<'e>>(
     executor: E,
+    tenant_id: Uuid,
     workflow_definition_id: Uuid,
 ) -> Result<Option<ExecutableDefinition>, sqlx::Error> {
     let row = sqlx::query!(
         r#"
-        SELECT definition_json, workflow_key, version, name, status
+        SELECT definition_json, workflow_key, version, name, status,
+               (tenant_id = $2) AS "in_tenant!"
         FROM workflow_definitions
         WHERE id = $1
         "#,
-        workflow_definition_id
+        workflow_definition_id,
+        tenant_id
     )
     .fetch_optional(executor)
     .await?;
 
-    Ok(row.map(|row| ExecutableDefinition {
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    if !row.in_tenant {
+        // Loud, and with both ends of the broken link, because the caller
+        // cannot tell this from a missing definition and will report it as one.
+        tracing::error!(
+            workflow_definition_id = %workflow_definition_id,
+            tenant_id = %tenant_id,
+            "a row in this tenant points at a workflow definition in another;              the definition was not loaded"
+        );
+
+        return Ok(None);
+    }
+
+    Ok(Some(ExecutableDefinition {
         definition_json: row.definition_json,
         workflow_key: row.workflow_key,
         version: row.version,

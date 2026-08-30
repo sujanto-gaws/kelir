@@ -530,6 +530,7 @@ async fn resubmit_workflow(
 
     let definition = definition_repo::definition_of_instance(
         &mut **transaction,
+        tenant_id,
         instance.workflow_definition_id,
     )
     .await?

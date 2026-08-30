@@ -96,7 +96,7 @@ async fn load_instance(
     // projection, for the reason `mod.rs` gives about the engine: the JSON is
     // the authority, and a screen reading a projection would be reading a copy.
     let state_name =
-        definition_repo::definition_of_instance(&state.pool, row.workflow_definition_id)
+        definition_repo::definition_of_instance(&state.pool, tenant_id, row.workflow_definition_id)
             .await?
             .map(|definition| Graph::parse(&definition.definition_json))
             .and_then(|graph| {

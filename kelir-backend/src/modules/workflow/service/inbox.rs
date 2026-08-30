@@ -206,10 +206,13 @@ pub async fn get_task(
         .await?
         .ok_or_else(|| AppError::not_found("Workflow instance"))?;
 
-    let graph =
-        definition_repo::definition_of_instance(&state.pool, instance.workflow_definition_id)
-            .await?
-            .map(|definition| Graph::parse(&definition.definition_json));
+    let graph = definition_repo::definition_of_instance(
+        &state.pool,
+        tenant_id,
+        instance.workflow_definition_id,
+    )
+    .await?
+    .map(|definition| Graph::parse(&definition.definition_json));
 
     let (current_state_name, decisions) = match &graph {
         Some(graph) => (
