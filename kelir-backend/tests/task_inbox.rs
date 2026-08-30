@@ -558,6 +558,115 @@ async fn a_transition_this_release_cannot_perform_is_reported_as_unsupported() {
     );
 }
 
+/// An `AUTO` edge is not a decision, so it is not in the list of them ([#264]).
+///
+/// **The list answers *what may the person holding this task do*.**
+/// `Graph::actions_from` answers a different question — *every transition out of
+/// this state* — and for `AUTO` the two provably differ: JWSS §4 forbids
+/// `allowedBy` on an `AUTO` transition because there is no caller. Nothing in
+/// the engine fires one either, so a state with an `AUTO` out-edge parks the
+/// process; the screen used to tell whoever was holding the task that it would
+/// arrive in a later release.
+///
+/// **Both halves, in one test.** A filter written as *drop everything
+/// unsupported* would pass the first assertion and fail the second — and
+/// `ESCALATE` is exactly the case that must survive, because it is a real
+/// transition that a person may one day be shown even though this release
+/// cannot fire it.
+///
+/// **Seen red** against the filter removed: `AUTO` reappears with
+/// `supported: false`.
+///
+/// [#264]: https://github.com/sujanto-gaws/kelir/issues/264
+#[tokio::test]
+async fn an_auto_transition_is_not_offered_as_a_decision_at_all() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let (_, approver) = holder(&app, "TI-AUTO", "ti.auto").await;
+
+    let definition = json!({
+        "workflowKey": "ti_auto",
+        "version": "1.0.0",
+        "name": "With an automatic edge",
+        "initialState": "MANAGER_APPROVAL",
+        "states": [
+            { "code": "MANAGER_APPROVAL", "name": "Manager approval",
+              "mapsToDocumentStatus": "PENDING_APPROVAL",
+              "task": { "taskDefinitionKey": "manager_approval", "taskName": "Decide",
+                        "assignment": { "assigneeType": "ROLE", "roleCode": "TI-AUTO" } } },
+            { "code": "ESCALATED", "name": "Escalated", "mapsToDocumentStatus": "PENDING_APPROVAL",
+              "task": { "taskDefinitionKey": "escalated_approval", "taskName": "Decide",
+                        "assignment": { "assigneeType": "ROLE", "roleCode": "TI-AUTO" } } },
+            { "code": "ARCHIVED", "name": "Archived", "mapsToDocumentStatus": "ARCHIVED",
+              "isFinal": true },
+            { "code": "COMPLETED", "name": "Completed", "mapsToDocumentStatus": "COMPLETED",
+              "isFinal": true }
+        ],
+        "transitions": [
+            { "from": "MANAGER_APPROVAL", "to": "COMPLETED", "action": "APPROVE",
+              "allowedBy": "ROLE:TI-AUTO" },
+            // No `allowedBy`, which S5 requires of an `AUTO` edge and which is
+            // the specification saying in its own grammar that nobody fires it.
+            { "from": "MANAGER_APPROVAL", "to": "ARCHIVED", "action": "AUTO" },
+            { "from": "MANAGER_APPROVAL", "to": "ESCALATED", "action": "ESCALATE",
+              "allowedBy": "ROLE:TI-AUTO" },
+            { "from": "ESCALATED", "to": "COMPLETED", "action": "APPROVE",
+              "allowedBy": "ROLE:TI-AUTO" }
+        ]
+    });
+
+    let created = app
+        .post(
+            "/api/v1/workflow/definitions",
+            Some(&token),
+            json!({
+                "workflowKey": "ti_auto",
+                "name": "With an automatic edge",
+                "definition": definition,
+            }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let workflow = id_of(&created.body["data"]);
+
+    let publication = app
+        .post(
+            &format!("/api/v1/workflow/definitions/{workflow}/publication"),
+            Some(&token),
+            json!({}),
+        )
+        .await;
+    assert_eq!(publication.status, StatusCode::OK, "{}", publication.body);
+
+    let type_id = document_type(&app, &token, "TI_AUTO", workflow).await;
+    let document = submitted_document(&app, &token, type_id, "Automatic").await;
+    let task = open_task_of(&app, document).await;
+
+    let read = app.get(&format!("{TASKS}/{task}"), Some(&approver)).await;
+    assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+
+    let decisions = read.body["data"]["decisions"]
+        .as_array()
+        .expect("the decisions");
+
+    assert!(
+        !decisions
+            .iter()
+            .any(|decision| decision["action"] == "AUTO"),
+        "an AUTO edge is nobody's decision and must not be listed as one: {}",
+        read.body
+    );
+
+    // The control. `ESCALATE` is unsupported and still listed, so the filter
+    // narrows on *who fires it* rather than on *whether this release can*.
+    let escalate = decisions
+        .iter()
+        .find(|decision| decision["action"] == "ESCALATE")
+        .expect("the escalate edge is still visible");
+    assert_eq!(escalate["supported"], false);
+}
+
 // ---------------------------------------------------------------------------
 // AC2, AC5 — paging, and a bad page inside the envelope
 // ---------------------------------------------------------------------------
