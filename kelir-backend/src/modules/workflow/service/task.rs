@@ -413,16 +413,19 @@ pub async fn decide(
     // again where a binding cannot be), and this path deliberately does not: an
     // instance pins its revision, and refusing here would strand every approval
     // in flight the moment an administrator retired the workflow.
-    let definition =
-        definition_repo::definition_of_instance(&state.pool, instance_row.workflow_definition_id)
-            .await?
-            .ok_or_else(|| AppError::Internal {
-                source: anyhow::anyhow!(
-                    "instance {} runs definition {} which does not exist",
-                    instance_row.id,
-                    instance_row.workflow_definition_id
-                ),
-            })?;
+    let definition = definition_repo::definition_of_instance(
+        &state.pool,
+        tenant_id,
+        instance_row.workflow_definition_id,
+    )
+    .await?
+    .ok_or_else(|| AppError::Internal {
+        source: anyhow::anyhow!(
+            "instance {} runs definition {} which does not exist",
+            instance_row.id,
+            instance_row.workflow_definition_id
+        ),
+    })?;
 
     let graph = Graph::parse(&definition.definition_json);
 
