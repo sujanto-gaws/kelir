@@ -6,7 +6,8 @@ use crate::error::ValidationDetail;
 use crate::health;
 use crate::middleware::cors::cors_layer;
 use crate::modules::{
-    auth, document, document_type, identity, master_data, organization, rad, task_inbox, workflow,
+    attachment, auth, document, document_type, identity, master_data, organization, rad,
+    task_inbox, workflow,
 };
 use crate::response::{ErrorBody, ErrorEnvelope, PageMeta};
 use crate::state::AppState;
@@ -96,6 +97,7 @@ use crate::state::AppState;
         document_type::handlers::get_numbering_rule,
         document_type::handlers::set_numbering_rule,
         document_type::handlers::clear_numbering_rule,
+        attachment::handlers::upload_attachment,
         document::handlers::list_documents,
         document::handlers::get_document,
         document::handlers::create_document,
@@ -132,6 +134,8 @@ use crate::state::AppState;
         organization::handlers::delete_tenant,
     ),
     components(schemas(
+        attachment::domain::Attachment,
+        attachment::domain::VirusScanStatus,
         health::HealthBody,
         health::ReadyBody,
         health::VersionBody,
@@ -367,7 +371,15 @@ fn api_v1_router(state: AppState) -> Router<AppState> {
         .nest("/master-data", master_data::handlers::routes())
         .nest("/rad", rad::handlers::routes())
         .nest("/document-types", document_type::handlers::routes())
-        .nest("/documents", document::handlers::routes())
+        // **Composed here rather than inside either module**, so the document
+        // module does not import the attachment module and the attachment
+        // module does not have to know its own prefix. The parameter is `{id}`
+        // and not `{document_id}` because the router it nests into already binds
+        // `{id}` at that position, and axum refuses two names for one segment.
+        .nest(
+            "/documents",
+            document::handlers::routes().nest("/{id}/attachments", attachment::handlers::routes()),
+        )
         .nest("/workflow", workflow::handlers::routes())
         .nest("/tasks", task_inbox::handlers::routes())
         .nest("/organization", organization::handlers::routes())

@@ -7,7 +7,7 @@ edition = "2021"
 anyhow = "1"
 # Argon2id password hashing (SRS NFR-SEC-001, coding standard 2.8).
 argon2 = "0.5"
-axum = { version = "0.8", features = ["macros"] }
+axum = { version = "0.8", features = ["macros", "multipart"] }
 chrono = { version = "0.4", features = ["serde"] }
 # The JSON Logic evaluator behind JFSS calculate and conditional rules
 # (FR-RAD-006, decision D-10). Pinned exactly, and to the same version as the
@@ -40,7 +40,23 @@ rand = "0.8"
 # argument is about. It costs nothing new to build — `jsonschema` already
 # depends on it.
 regex = "1"
-# Refresh tokens are stored as a SHA-256 digest, never in the clear.
+# Object storage for attachments (FR-ATT-001, FR-ATT-003; #244). MinIO has been
+# in the compose stack since Sprint 0 and speaks S3, so the client has to.
+#
+# **Chosen over `aws-sdk-s3`, against one criterion**: the limit in FR-ATT-004
+# has to be enforceable on a stream rather than on a buffer, because a size
+# limit applied to bytes you have already accepted is a limit on your disk. This
+# crate exposes `put_multipart`, which is a sink; the SDK does too, and costs
+# roughly five times the dependency tree to say so. The Sprint 12 construction
+# plan §5.2 left the choice to this item and named that criterion.
+#
+# **It cannot create a bucket, and that is not a gap.** The deployment
+# provisions the bucket; the application is given credentials that can put and
+# get objects in one, which is the privilege it should hold. `deploy/docker`
+# creates it, and CI creates it in the job that needs it.
+object_store = { version = "0.12", features = ["aws"] }
+# Refresh tokens are stored as a SHA-256 digest, never in the clear. Also the
+# `checksum` an attachment row carries (#244 AC1).
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -24,6 +24,19 @@ pub struct AppConfig {
     pub database_url: String,
     pub jwt_secret: String,
     pub storage_driver: String,
+    /// Where object storage is, and what it is called there (FR-ATT-001, #244).
+    ///
+    /// The defaults are the compose stack's MinIO, so a developer who has run
+    /// `deploy/docker` has working attachments without setting anything. **The
+    /// bucket is not created by this process**: the deployment provisions it and
+    /// the application holds credentials that can put and get objects in one,
+    /// which is the privilege it should have rather than the one that is
+    /// convenient.
+    pub storage_endpoint: String,
+    pub storage_bucket: String,
+    pub storage_access_key: String,
+    pub storage_secret_key: String,
+    pub storage_region: String,
     pub smtp_host: String,
     /// The port `smtp_host` listens on. 1025 is mailpit's, which the compose
     /// stack runs; a relay is usually 587.
@@ -317,6 +330,11 @@ impl AppConfig {
             ),
             jwt_secret,
             storage_driver: optional("KELIR_STORAGE_DRIVER", "local"),
+            storage_endpoint: optional("KELIR_STORAGE_ENDPOINT", "http://localhost:9000"),
+            storage_bucket: optional("KELIR_STORAGE_BUCKET", "kelir"),
+            storage_access_key: optional("KELIR_STORAGE_ACCESS_KEY", "minioadmin"),
+            storage_secret_key: optional("KELIR_STORAGE_SECRET_KEY", "minioadmin"),
+            storage_region: optional("KELIR_STORAGE_REGION", "us-east-1"),
             smtp_host: optional("KELIR_SMTP_HOST", "localhost"),
             smtp_port: {
                 let raw = optional("KELIR_SMTP_PORT", "1025");
@@ -352,6 +370,11 @@ impl AppConfig {
             database_url: "postgres://postgres:postgres@localhost:5432/kelir".to_owned(),
             jwt_secret: "test-secret".to_owned(),
             storage_driver: "local".to_owned(),
+            storage_endpoint: "http://localhost:9000".to_owned(),
+            storage_bucket: "kelir".to_owned(),
+            storage_access_key: "minioadmin".to_owned(),
+            storage_secret_key: "minioadmin".to_owned(),
+            storage_region: "us-east-1".to_owned(),
             smtp_host: "localhost".to_owned(),
             smtp_port: 1025,
             mail_from: "no-reply@kelir.test".to_owned(),

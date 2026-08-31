@@ -60,11 +60,43 @@ jobs:
           --health-timeout 3s
           --health-retries 10
 
+      # Attachments put bytes in object storage, and the integration tests read
+      # them back out of it (#244). The harness's rule is that nothing is
+      # mocked — it already requires this postgres for the same reason — so a
+      # real S3 endpoint is what the attachment tests run against. An in-memory
+      # double would verify the double.
+      minio:
+        image: minio/minio:latest
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd "mc ready local"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
     env:
       DATABASE_URL: postgres://kelir:kelir@localhost:5432/kelir
+      KELIR_STORAGE_ENDPOINT: http://localhost:9000
+      KELIR_STORAGE_BUCKET: kelir-test
+      KELIR_STORAGE_ACCESS_KEY: minioadmin
+      KELIR_STORAGE_SECRET_KEY: minioadmin
 
     steps:
       - uses: actions/checkout@v7
+
+      # **The bucket is created here and not by the application.** The
+      # credentials the backend holds can put and get objects in a bucket;
+      # a process that can create buckets can create the one an attacker names.
+      # `deploy/docker` does the same thing with a one-shot `mc` container.
+      - name: Create the attachment bucket
+        run: |
+          docker run --rm --network host --entrypoint sh minio/mc:latest -c \
+            "mc alias set ci http://localhost:9000 minioadmin minioadmin \
+             && mc mb --ignore-existing ci/kelir-test"
 
       - name: Install rustfmt and clippy
         run: rustup component add rustfmt clippy

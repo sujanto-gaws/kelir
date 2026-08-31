@@ -50,6 +50,7 @@
 
 pub mod fixtures;
 
+use std::env;
 use std::net::SocketAddr;
 
 use axum::body::{to_bytes, Body};
@@ -281,6 +282,123 @@ impl TestApp {
             status,
             // A 204 has no body, and an unparseable body is worth seeing rather
             // than panicking over: the status is usually the assertion.
+            body: serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        }
+    }
+
+    /// A `multipart/form-data` POST, with one file part and an optional
+    /// `description`.
+    ///
+    /// **Built by hand rather than with a crate.** The body is three lines of
+    /// formatting; a dependency that exists only to write them is a dependency
+    /// to keep in step, and the point of this helper is that the bytes on the
+    /// wire are the ones the test wrote. The boundary is fixed for the same
+    /// reason — nothing here is guessing what the parser will see.
+    pub async fn post_multipart(
+        &self,
+        uri: &str,
+        token: Option<&str>,
+        file_name: &str,
+        content_type: &str,
+        content: &[u8],
+        description: Option<&str>,
+    ) -> TestResponse {
+        const BOUNDARY: &str = "kelirtestboundary";
+
+        let mut body: Vec<u8> = Vec::new();
+
+        body.extend_from_slice(format!("--{BOUNDARY}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"file\"; filename=\"{file_name}\"\r\n")
+                .as_bytes(),
+        );
+        body.extend_from_slice(format!("Content-Type: {content_type}\r\n\r\n").as_bytes());
+        body.extend_from_slice(content);
+        body.extend_from_slice(b"\r\n");
+
+        if let Some(description) = description {
+            body.extend_from_slice(format!("--{BOUNDARY}\r\n").as_bytes());
+            body.extend_from_slice(b"Content-Disposition: form-data; name=\"description\"\r\n\r\n");
+            body.extend_from_slice(description.as_bytes());
+            body.extend_from_slice(b"\r\n");
+        }
+
+        body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
+
+        self.send_raw(
+            uri,
+            token,
+            &format!("multipart/form-data; boundary={BOUNDARY}"),
+            body,
+        )
+        .await
+    }
+
+    /// A `multipart/form-data` POST with **no** file part — the shape a form
+    /// takes when its file input was left empty.
+    pub async fn post_multipart_without_file(
+        &self,
+        uri: &str,
+        token: Option<&str>,
+        description: &str,
+    ) -> TestResponse {
+        const BOUNDARY: &str = "kelirtestboundary";
+
+        let mut body: Vec<u8> = Vec::new();
+
+        body.extend_from_slice(format!("--{BOUNDARY}\r\n").as_bytes());
+        body.extend_from_slice(b"Content-Disposition: form-data; name=\"description\"\r\n\r\n");
+        body.extend_from_slice(description.as_bytes());
+        body.extend_from_slice(b"\r\n");
+        body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
+
+        self.send_raw(
+            uri,
+            token,
+            &format!("multipart/form-data; boundary={BOUNDARY}"),
+            body,
+        )
+        .await
+    }
+
+    /// A POST of a body this harness does not build for you.
+    async fn send_raw(
+        &self,
+        uri: &str,
+        token: Option<&str>,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> TestResponse {
+        let mut builder = Request::builder().method(Method::POST).uri(uri);
+
+        if let Some(token) = token {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+
+        let mut request = builder
+            .header(header::CONTENT_TYPE, content_type)
+            .body(Body::from(body))
+            .unwrap_or_else(|error| {
+                harness_failure("build a test request", &error.to_string(), uri)
+            });
+
+        request.extensions_mut().insert(ConnectInfo(TEST_PEER));
+
+        let response = self
+            .router()
+            .oneshot(request)
+            .await
+            .unwrap_or_else(|error| harness_failure("drive the router", &error.to_string(), uri));
+
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap_or_else(|error| {
+                harness_failure("read a response body", &error.to_string(), uri)
+            });
+
+        TestResponse {
+            status,
             body: serde_json::from_slice(&bytes).unwrap_or(Value::Null),
         }
     }
@@ -526,6 +644,23 @@ fn test_config(database_url: &str) -> AppConfig {
         database_url: database_url.to_owned(),
         jwt_secret: JWT_SECRET.to_owned(),
         storage_driver: "local".to_owned(),
+        // **Real object storage, not a double.** This harness's own header says
+        // nothing is mocked, and it already requires a live PostgreSQL for the
+        // same reason: a repository verified against a stand-in is verified
+        // against the stand-in. `KELIR_STORAGE_ENDPOINT` points at the MinIO the
+        // compose stack runs and CI starts beside `postgres`; the bucket is
+        // provisioned by whoever started it, because this process holds
+        // credentials that can put and get objects and not credentials that can
+        // create buckets.
+        storage_endpoint: env::var("KELIR_STORAGE_ENDPOINT")
+            .unwrap_or_else(|_| "http://localhost:9000".to_owned()),
+        storage_bucket: env::var("KELIR_STORAGE_BUCKET")
+            .unwrap_or_else(|_| "kelir-test".to_owned()),
+        storage_access_key: env::var("KELIR_STORAGE_ACCESS_KEY")
+            .unwrap_or_else(|_| "minioadmin".to_owned()),
+        storage_secret_key: env::var("KELIR_STORAGE_SECRET_KEY")
+            .unwrap_or_else(|_| "minioadmin".to_owned()),
+        storage_region: env::var("KELIR_STORAGE_REGION").unwrap_or_else(|_| "us-east-1".to_owned()),
         // The harness uses a captured mailer, so this is never dialled — but a
         // host is left set deliberately: an empty one would exercise the
         // no-SMTP path rather than the one a deployment runs.

@@ -5,6 +5,7 @@ use sqlx::PgPool;
 use crate::config::AppConfig;
 use crate::mail::Mailer;
 use crate::middleware::rate_limit::RateLimiter;
+use crate::modules::attachment::storage::ObjectStorage;
 
 /// Shared application state handed to every handler.
 ///
@@ -17,6 +18,12 @@ pub struct AppState {
     /// Shared so every request sees the same counters; in-memory, so per
     /// instance (see `middleware::rate_limit`).
     pub rate_limiter: Arc<RateLimiter>,
+    /// Where an attachment's bytes go (FR-ATT-001, #244).
+    ///
+    /// On the state for the mailer's reason one field down: built once at
+    /// startup so a misconfiguration is loud immediately, and constructible
+    /// directly so a test can hand the router the store it will then read from.
+    pub storage: ObjectStorage,
     /// How the one transactional email leaves the process (FR-AUTH-006).
     ///
     /// On the state rather than built per request so a test can hold the same
@@ -45,11 +52,14 @@ impl AppState {
 
     /// The same, with the mailer supplied — how the test harness captures mail.
     pub fn with_mailer(pool: PgPool, config: AppConfig, mailer: Mailer) -> Self {
+        let storage = ObjectStorage::from_config(&config);
+
         Self {
             pool,
             config: Arc::new(config),
             rate_limiter: Arc::new(RateLimiter::new()),
             mailer,
+            storage,
         }
     }
 }
