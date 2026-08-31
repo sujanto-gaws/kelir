@@ -281,12 +281,14 @@ describe('DocumentWorkspace', () => {
     // Sprint 10 filled it (#178), so a tab still saying "Phase 5 fills this" at
     // the end of Phase 5's first sprint would be a true statement about a broken
     // promise. What is below is what genuinely has not arrived.
+    //
+    // **Attachments has now left it too** (#295), and left it for the same
+    // reason: a placeholder outliving the thing it promised is the defect this
+    // test exists to catch, so the list shrinks as the phase delivers. Comments
+    // is the last one, and #296 is what removes it.
     const wrapper = await render()
 
-    for (const [tab, phase] of [
-      ['attachments', 'Phase 6'],
-      ['comments', 'Phase 6'],
-    ]) {
+    for (const [tab, phase] of [['comments', 'Phase 6']]) {
       await wrapper.get(`[data-testid="tab-${tab}"]`).trigger('click')
 
       // Scoped to the panel rather than to the first `empty-tab` on the page:

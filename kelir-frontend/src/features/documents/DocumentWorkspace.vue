@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import DocumentHeader from './DocumentHeader.vue'
 import EmptyTab from './EmptyTab.vue'
+import AttachmentsTab from '@/features/attachments/AttachmentsTab.vue'
 import WorkflowTab from '@/features/workflow/WorkflowTab.vue'
 import {
   getDocument,
@@ -367,7 +368,10 @@ function onChange(values: Record<string, unknown>): void {
       </div>
 
       <div v-show="tab === 'attachments'" data-testid="panel-attachments">
-        <EmptyTab subject="Attachments" arrives="Phase 6" />
+        <!-- Mounted only once the tab is opened, for the Workflow tab's reason
+             one panel up: a workspace should not spend a request on every load
+             for a tab nobody looked at. -->
+        <AttachmentsTab v-if="tab === 'attachments'" :document-id="document.id" />
       </div>
 
       <div v-show="tab === 'comments'" data-testid="panel-comments">
