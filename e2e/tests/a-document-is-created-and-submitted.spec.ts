@@ -217,9 +217,17 @@ test('a tab a later phase fills says what will fill it', async ({ page }) => {
 
   await expect(page.getByTestId('document-title')).toHaveText(`Tabs ${suffix}`)
 
+  // **Attachments has left this list too** (#295), and its departure is the
+  // same assertion as Workflow's below: a placeholder outliving the thing it
+  // promised is what this test exists to catch, so the list shrinks as the
+  // phase delivers. What the panel says now is that this document has nothing
+  // attached — a state rather than a promise.
   await page.getByTestId('tab-attachments').click()
-  await expect(page.getByTestId('panel-attachments')).toContainText('Phase 6')
+  await expect(page.getByTestId('panel-attachments')).toContainText(
+    'Nothing is attached to this document yet',
+  )
 
+  // Comments is the last one, and #296 is what removes it.
   await page.getByTestId('tab-comments').click()
   await expect(page.getByTestId('panel-comments')).toContainText('Phase 6')
 
