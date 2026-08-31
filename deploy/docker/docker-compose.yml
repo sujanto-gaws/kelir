@@ -37,6 +37,14 @@ services:
       - KELIR_DATABASE_URL=postgres://postgres:postgres@postgres:5432/kelir
       - KELIR_JWT_SECRET=change-me
       - KELIR_STORAGE_DRIVER=local
+      # Attachments (FR-ATT-001, #244). The service name resolves inside the
+      # compose network; `minio-init` below creates the bucket, because the
+      # backend holds credentials that can put and get objects and deliberately
+      # not ones that can create a bucket.
+      - KELIR_STORAGE_ENDPOINT=http://minio:9000
+      - KELIR_STORAGE_BUCKET=kelir
+      - KELIR_STORAGE_ACCESS_KEY=minioadmin
+      - KELIR_STORAGE_SECRET_KEY=minioadmin
       - KELIR_SMTP_HOST=mailpit
       # The container port, which is fixed; KELIR_SMTP_PORT in the environment
       # moves the host mapping only, and must not follow it in here.
@@ -45,6 +53,7 @@ services:
       - KELIR_FRONTEND_URL=http://localhost:5173
     depends_on:
       - postgres
+      - minio-init
 
   postgres:
     image: postgres:16
@@ -66,6 +75,21 @@ services:
     ports:
       - "${KELIR_MINIO_PORT:-9000}:9000"
       - "${KELIR_MINIO_CONSOLE_PORT:-9001}:9001"
+
+  # One shot: creates the bucket and exits. **The application does not create
+  # it** — a process that can create buckets can create the one an attacker
+  # names, and the backend is given credentials for putting and getting objects
+  # in a bucket somebody else provisioned. MinIO has been in this stack since
+  # Sprint 0 with nothing using it; #244 is what puts the first byte in it.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    entrypoint: sh
+    command: >-
+      -c "until mc alias set kelir http://minio:9000 minioadmin minioadmin;
+          do sleep 1; done
+          && mc mb --ignore-existing kelir/kelir"
 
   mailpit:
     image: axllent/mailpit:latest

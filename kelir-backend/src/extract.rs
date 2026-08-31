@@ -16,8 +16,17 @@
 //! a request carries data. `?page=abc` used to be a bare 400 with an **empty
 //! body** on every list endpoint in the product (#122), which is the one shape a
 //! client written against the envelope cannot read: it finds `null` where it
-//! expects `error.code`. The three extractors together mean no refusal leaves
-//! this API outside the envelope.
+//! expects `error.code`.
+//!
+//! [`MultipartBody`] is the fourth, and it arrived the way the first three did —
+//! by the claim above being false. This module's header used to say *the three
+//! extractors together mean no refusal leaves this API outside the envelope*,
+//! and the first route to take a file
+//! ([#244](https://github.com/sujanto-gaws/kelir/issues/244)) answered **400
+//! with a null body** to a caller who posted JSON to it, because
+//! `axum::extract::Multipart` rejects before any handler code runs. A fourth
+//! place a request carries data needed a fourth extractor; the sentence is now
+//! true of four.
 //!
 //! **One gap, deliberately left.** The generated OpenAPI document does not say
 //! `additionalProperties: false`, because utoipa 5 accepts that attribute only
@@ -156,6 +165,40 @@ where
 /// The path `serde_path_to_error` reports is the key as it appeared on the wire,
 /// so a caller who sent `pageSize` is told `pageSize` even though the field is
 /// `page_size`.
+/// A `multipart/form-data` body that fails inside the envelope.
+///
+/// **The rejection happens before the handler**, which is what made this
+/// necessary: `Multipart` refuses a body whose content type is not
+/// `multipart/form-data` with a boundary, and refuses it with axum's own reply
+/// rather than with this API's. A client written against the envelope finds
+/// `null` where it expects `error.code`, which is exactly [#122]'s shape one
+/// content type over.
+///
+/// **415 and not 422**, for [`AppError::UnsupportedMediaType`]'s stated reason:
+/// the fix is a header rather than a payload. A caller who posted JSON here has
+/// not sent a bad file, they have sent the wrong kind of request.
+///
+/// [#122]: https://github.com/sujanto-gaws/kelir/issues/122
+pub struct MultipartBody(pub axum::extract::Multipart);
+
+impl<S> FromRequest<S> for MultipartBody
+where
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        axum::extract::Multipart::from_request(request, state)
+            .await
+            .map(Self)
+            .map_err(|rejection| {
+                tracing::debug!(%rejection, "a multipart body was refused before the handler");
+
+                AppError::UnsupportedMediaType
+            })
+    }
+}
+
 fn query_rejection(error: serde_path_to_error::Error<serde_urlencoded::de::Error>) -> AppError {
     let path = error.path().to_string();
     let parameter = if path.is_empty() || path == "." {

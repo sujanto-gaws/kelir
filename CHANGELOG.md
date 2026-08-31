@@ -7,6 +7,60 @@ All notable changes to Kelir are recorded here. The format follows
 
 While the major version is `0`, the public API may change in any release.
 
+## [Unreleased]
+
+Phase 6 opens: **a document starts carrying the things people put on it.**
+
+### Added
+
+- **A file can be attached to a document** (FR-ATT-001, FR-ATT-003,
+  [#244](https://github.com/sujanto-gaws/kelir/issues/244)). `POST
+  /api/v1/documents/{id}/attachments` takes a `multipart/form-data` body with a
+  `file` part and an optional `description`, stores the bytes in object storage
+  and records the metadata. **MinIO has been in the compose stack since Sprint 0
+  and used by nothing; this is the first byte in it.**
+- **`MultipartBody`**, a fourth request extractor, so a body that is not
+  `multipart/form-data` is refused **inside the error envelope** rather than with
+  axum's own 400 and a null body. `crate::extract`'s header had claimed three
+  extractors were enough for that property; the first route to take a file is
+  what made the claim false.
+
+### Security
+
+- **An uploaded file name never becomes an object key.** The stored name is the
+  basename, with everything outside `[A-Za-z0-9._-]` replaced and leading dots
+  dropped; the name as uploaded is kept beside it as data. `storage_reference` is
+  generated from the tenant, the document and the attachment's own id and is
+  **never taken from the request** (#244 AC6) — a caller-supplied path is a
+  caller-chosen destination — and it is not serialized back to any caller.
+- **An attachment is as private as the document it hangs on.** Upload requires
+  `attachment:create` *and* the document's own read, and a document the caller
+  cannot see answers 404 — the same answer reading it gives, so the refusal does
+  not confirm the document exists.
+- **Nothing is downloadable yet, deliberately.** `virus_scan_status` is `PENDING`
+  on every row and nothing sets it; the gate is
+  [#246](https://github.com/sujanto-gaws/kelir/issues/246). An attachment that
+  read `CLEAN` because nothing scanned it would be worse than one that reads
+  `PENDING` for ever.
+
+### Upgrading
+
+One new migration, `0031_attachment.sql`: three new tables and one foreign key
+added to `document_type_attachment_rules`, whose `category_id` has been `NOT
+NULL` with no referent since `0015`. **Nothing has ever written that table**, so
+the constraint validates against no rows and the previous release starts against
+this schema unchanged.
+
+**Object storage must be configured and its bucket must already exist.**
+`KELIR_STORAGE_ENDPOINT`, `KELIR_STORAGE_BUCKET`, `KELIR_STORAGE_ACCESS_KEY`,
+`KELIR_STORAGE_SECRET_KEY` and `KELIR_STORAGE_REGION` are new, and
+`deploy/env/.env.example` carries them with the compose stack's defaults. **The
+application does not create the bucket** — a process that can create buckets can
+create the one an attacker names — so the compose stack grows a one-shot
+`minio-init` service and CI's backend job creates it before the tests run. A
+deployment that leaves object storage unconfigured still boots and serves every
+other route; uploads are refused with a message naming the variables.
+
 ## [0.5.0] — 2026-08-30
 
 Phase 5 opens: **a submitted document enters an approval it cannot leave by
