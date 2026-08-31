@@ -19,6 +19,14 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
   `file` part and an optional `description`, stores the bytes in object storage
   and records the metadata. **MinIO has been in the compose stack since Sprint 0
   and used by nothing; this is the first byte in it.**
+- **A document carries a conversation** (FR-CMT-001,
+  [#249](https://github.com/sujanto-gaws/kelir/issues/249)). `POST` and `GET
+  /api/v1/documents/{id}/comments` add a comment and read a document's comments,
+  oldest first — a conversation is read in the order it was said, which is the
+  opposite of every other list in this product. **This is not the decision
+  comment**: FR-TASK-006 shipped in Sprint 11 as three columns written with the
+  decision and immutable because it is, and `modules::comment`'s documentation
+  states the difference before the first row is written.
 - **`MultipartBody`**, a fourth request extractor, so a body that is not
   `multipart/form-data` is refused **inside the error envelope** rather than with
   axum's own 400 and a null body. `crate::extract`'s header had claimed three
@@ -45,7 +53,12 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
 
 ### Upgrading
 
-One new migration, `0031_attachment.sql`: three new tables and one foreign key
+Two new migrations. `0032_comment.sql` adds three tables and nothing else, so
+the previous release starts against it unchanged; two of the three
+(`comment_mentions`, `comment_attachments`) are created and written by nothing,
+and their `COMMENT ON` says which sprint fills them.
+
+`0031_attachment.sql`: three new tables and one foreign key
 added to `document_type_attachment_rules`, whose `category_id` has been `NOT
 NULL` with no referent since `0015`. **Nothing has ever written that table**, so
 the constraint validates against no rows and the previous release starts against
