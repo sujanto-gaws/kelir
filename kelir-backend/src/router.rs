@@ -98,6 +98,8 @@ use crate::state::AppState;
         document_type::handlers::set_numbering_rule,
         document_type::handlers::clear_numbering_rule,
         attachment::handlers::upload_attachment,
+        attachment::handlers::list_attachments,
+        attachment::handlers::download_attachment,
         comment::handlers::add_comment,
         comment::handlers::list_comments,
         document::handlers::list_documents,
@@ -369,6 +371,9 @@ pub fn create_router(state: AppState) -> Router {
 /// The state is passed in as well as applied at the end, because the auth module
 /// puts a stateful layer over its metered routes.
 fn api_v1_router(state: AppState) -> Router<AppState> {
+    // Read before the state is handed to the auth routes, which consume it.
+    let max_upload_bytes = state.config.storage_max_upload_bytes;
+
     Router::new()
         .nest("/auth", auth::handlers::routes(state))
         .nest("/identity", identity::handlers::routes())
@@ -383,7 +388,10 @@ fn api_v1_router(state: AppState) -> Router<AppState> {
         .nest(
             "/documents",
             document::handlers::routes()
-                .nest("/{id}/attachments", attachment::handlers::routes())
+                .nest(
+                    "/{id}/attachments",
+                    attachment::handlers::routes(max_upload_bytes),
+                )
                 .nest("/{id}/comments", comment::handlers::routes()),
         )
         .nest("/workflow", workflow::handlers::routes())

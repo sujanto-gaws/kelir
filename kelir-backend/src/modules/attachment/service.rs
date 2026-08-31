@@ -7,13 +7,14 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use super::domain::{self, Attachment, MAX_FILE_NAME};
+use super::domain::{self, Attachment, VirusScanStatus, MAX_FILE_NAME};
 use super::repository as repo;
-use super::{ATTACHMENT_CREATE, ATTACHMENT_OBJECT_TYPE};
+use super::{ATTACHMENT_CREATE, ATTACHMENT_OBJECT_TYPE, ATTACHMENT_READ};
 use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
 use crate::modules::audit::{self, AuditEntry};
 use crate::modules::document::service::document as document_service;
+use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
 
 /// One file, as it arrived out of the multipart body.
@@ -80,6 +81,22 @@ pub async fn upload(
 
     if name_length > MAX_FILE_NAME {
         return Err(domain::file_name_too_long(name_length));
+    }
+
+    // **What the bytes are, not what the caller called them** (#245 AC4). The
+    // declared `Content-Type` is still recorded below, because what a client
+    // claimed is a fact about the request; it is simply not the fact this
+    // decision is made on.
+    //
+    // The size limit is not checked here and that is not an omission: it is
+    // enforced on the request body before any of it is read (#245 AC3), by the
+    // layer `handlers::routes` puts on this route. A check at this point would
+    // be a check on bytes already in hand.
+    let detected = domain::detect_mime_type(&file.bytes);
+    let allowed = &state.config.storage_allowed_mime_types;
+
+    if !domain::type_is_allowed(detected, allowed) {
+        return Err(domain::type_not_allowed(detected, allowed));
     }
 
     let tenant_id = caller.tenant_id();
@@ -154,4 +171,102 @@ pub async fn upload(
     .await;
 
     Ok(stored)
+}
+
+/// One attachment's bytes, and the three questions asked before they are served
+/// ([#245]).
+///
+/// # The document decides, not the attachment id
+///
+/// **[#245] AC1 and AC2 are one statement, not two checks.**
+/// `repository::find_stored_file` is scoped by tenant *and* by `document_id`, so
+/// an attachment hanging on a document this caller cannot read is not found —
+/// rather than found and then refused. The document itself is read first,
+/// through its own module's service, which answers 404 for a document that is
+/// not this tenant's, is deleted, or does not exist. **So the answer is the same
+/// whether or not the attachment exists**, which is AC2, and it is the same
+/// because there is nowhere for the two answers to differ.
+///
+/// # The scan gate is here, and it arrived one item early
+///
+/// [#246](https://github.com/sujanto-gaws/kelir/issues/246) AC2 and AC4 are the
+/// download-side gate: refused unless `CLEAN`, enforced where the bytes are
+/// served. The [construction plan](../../../../projects/planning/07.%20Sprint%2012%20Collaboration%20Construction%20Plan.md)
+/// sequences that item after this one, and **taking its gate here is deliberate
+/// rather than scope creep**: `modules::attachment`'s own documentation says an
+/// attachment cannot be retrieved until the gate lands, nothing sets `CLEAN`
+/// yet, and a download shipped without it would serve every unscanned byte in
+/// the product while making that sentence false. #246 keeps the scanner, the
+/// status transitions, the once-only move and the behaviour when the scanner is
+/// unreachable.
+///
+/// **`PENDING`, `INFECTED` and `FAILED` are all refusals and all distinguishable**
+/// (#246 AC2, AC3), because *not yet* and *never* need different things from the
+/// person holding the file.
+///
+/// [#245]: https://github.com/sujanto-gaws/kelir/issues/245
+pub async fn download(
+    state: &AppState,
+    caller: &Authenticated,
+    document_id: Uuid,
+    attachment_id: Uuid,
+) -> Result<StoredBytes, AppError> {
+    caller.require(ATTACHMENT_READ)?;
+
+    let document = document_service::get_document(state, caller, document_id).await?;
+
+    let stored =
+        repo::find_stored_file(&state.pool, caller.tenant_id(), document.id, attachment_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("Attachment"))?;
+
+    if stored.virus_scan_status != VirusScanStatus::Clean {
+        return Err(domain::not_yet_cleared(stored.virus_scan_status));
+    }
+
+    let bytes = state.storage.get(&stored.storage_reference).await?;
+
+    Ok(StoredBytes {
+        original_file_name: stored.original_file_name,
+        mime_type: stored.mime_type,
+        bytes,
+    })
+}
+
+/// What a download hands back to the handler.
+pub struct StoredBytes {
+    pub original_file_name: String,
+    pub mime_type: String,
+    pub bytes: axum::body::Bytes,
+}
+
+/// A document's attachments, newest first.
+///
+/// **Listed even while they are `PENDING`**, and the row says so. A file
+/// somebody uploaded that vanishes from the list until a scanner clears it looks
+/// like a lost upload; a file that is listed with its status is a file whose
+/// state a person can see. What `PENDING` refuses is the *bytes*, in
+/// [`download`].
+pub async fn list_attachments(
+    state: &AppState,
+    caller: &Authenticated,
+    document_id: Uuid,
+    pagination: &Pagination,
+) -> Result<(Vec<Attachment>, PageMeta), AppError> {
+    caller.require(ATTACHMENT_READ)?;
+
+    let document = document_service::get_document(state, caller, document_id).await?;
+    let tenant_id = caller.tenant_id();
+
+    let total = repo::count_for_document(&state.pool, tenant_id, document.id).await?;
+    let attachments = repo::list_for_document(
+        &state.pool,
+        tenant_id,
+        document.id,
+        pagination.limit(),
+        pagination.offset(),
+    )
+    .await?;
+
+    Ok((attachments, pagination.meta(total.max(0) as u64)))
 }

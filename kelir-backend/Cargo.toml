@@ -55,6 +55,18 @@ regex = "1"
 # get objects in one, which is the privilege it should hold. `deploy/docker`
 # creates it, and CI creates it in the job that needs it.
 object_store = { version = "0.12", features = ["aws"] }
+# What a file **is**, as opposed to what its name claims (FR-ATT-005, #245 AC4).
+# The two disagree exactly when it matters: an extension is caller-controlled
+# text, and `.pdf` on a payload is a rename away. This reads the leading bytes.
+#
+# Zero dependencies of its own, which is most of why it is here rather than a
+# larger detection crate: the whole of what this needs is a magic-number table,
+# and a table is a thing to audit rather than a service to trust.
+#
+# **It does not decide policy.** What it answers is *what is this*; which answers
+# are acceptable is `KELIR_STORAGE_ALLOWED_MIME_TYPES`, because #245 AC5 makes
+# the limits configuration rather than constants.
+infer = { version = "0.16", default-features = false }
 # Refresh tokens are stored as a SHA-256 digest, never in the clear. Also the
 # `checksum` an attachment row carries (#244 AC1).
 sha2 = "0.10"
