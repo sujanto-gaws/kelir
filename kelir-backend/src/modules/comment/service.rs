@@ -60,8 +60,13 @@ pub async fn add_comment(
     let actor = caller.user_id();
     let id = Uuid::now_v7();
 
+    // #249 AC6, discharged here rather than in that item: the comment and its
+    // activity event land in one transaction, so a timeline cannot disagree
+    // with the conversation it describes.
+    let mut transaction = state.pool.begin().await?;
+
     repo::insert_comment(
-        &state.pool,
+        &mut *transaction,
         &repo::NewComment {
             id,
             tenant_id,
@@ -71,6 +76,30 @@ pub async fn add_comment(
         },
     )
     .await?;
+
+    crate::modules::activity::service::record(
+        &mut transaction,
+        &crate::modules::activity::service::Happening {
+            tenant_id,
+            document_id: Some(document.id),
+            workflow_instance_id: None,
+            task_id: None,
+            attachment_id: None,
+            comment_id: Some(id),
+            event_type: "Comment.Added",
+            category: crate::modules::activity::domain::EventCategory::Comment,
+            actor_user_id: Some(actor),
+            actor_name: Some(caller.username()),
+            action_summary: "Commented on the document",
+            // **Not the body.** A timeline is read by everyone who may read the
+            // document; the comment itself is behind `comment:read`, and the
+            // line D-12 and D-32 drew for the decision comment holds here too.
+            details: json!({ "length": body.chars().count() }),
+        },
+    )
+    .await?;
+
+    transaction.commit().await?;
 
     let stored = repo::find_comment(&state.pool, tenant_id, id)
         .await?
@@ -87,7 +116,7 @@ pub async fn add_comment(
             object_type: COMMENT_OBJECT_TYPE,
             object_id: id,
             actor_user_id: Some(actor),
-            ip_address: None,
+            ip_address: caller.ip_address(),
             // **Not the body.** This trail is read through
             // `master-data:audit:read` by people who hold no permission over the
             // document, and a comment is prose about somebody else's work —

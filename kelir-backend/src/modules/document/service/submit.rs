@@ -398,7 +398,7 @@ pub async fn submit_document(
             object_type: OBJECT_TYPE,
             object_id: id,
             actor_user_id: actor,
-            ip_address: None,
+            ip_address: caller.ip_address(),
             reason: None,
             // Where the document actually came from, which is `RETURNED` on a
             // resubmission ([#183]). A trail claiming every submit began at a

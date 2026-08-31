@@ -128,7 +128,7 @@ pub async fn create_form(
             object_type: OBJECT_TYPE,
             object_id: id,
             actor_user_id: actor,
-            ip_address: None,
+            ip_address: caller.ip_address(),
             reason: None,
             old_value: None,
             // The definition is deliberately not in the record. It is up to a
@@ -220,7 +220,7 @@ pub async fn update_form(
             object_type: OBJECT_TYPE,
             object_id: id,
             actor_user_id: actor,
-            ip_address: None,
+            ip_address: caller.ip_address(),
             reason: None,
             old_value: Some(old_value),
             new_value: Some(new_value),
@@ -273,7 +273,7 @@ pub async fn publish_form(
             object_type: OBJECT_TYPE,
             object_id: id,
             actor_user_id: actor,
-            ip_address: None,
+            ip_address: caller.ip_address(),
             reason: None,
             old_value: Some(json!({ "status": before.status })),
             new_value: Some(json!({
@@ -357,7 +357,7 @@ pub async fn create_revision(
             object_type: OBJECT_TYPE,
             object_id: new_id,
             actor_user_id: actor,
-            ip_address: None,
+            ip_address: caller.ip_address(),
             reason: None,
             old_value: None,
             new_value: Some(json!({
@@ -400,7 +400,7 @@ pub async fn delete_form(
             object_type: OBJECT_TYPE,
             object_id: id,
             actor_user_id: actor,
-            ip_address: None,
+            ip_address: caller.ip_address(),
             reason: None,
             old_value: Some(json!({
                 "formKey": before.form_key,

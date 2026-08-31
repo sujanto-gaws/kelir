@@ -445,6 +445,60 @@ impl TestApp {
         }
     }
 
+    /// A request carrying headers this harness does not normally send.
+    ///
+    /// Exists for one class of test: proving that a header a **caller** wrote
+    /// does not reach somewhere it should not. `X-Forwarded-For` is the case —
+    /// `middleware::client_address` ignores it entirely unless the deployment
+    /// says how many proxies wrote it, and the only way to assert that is to
+    /// send one.
+    pub async fn send_with_headers(
+        &self,
+        method: Method,
+        uri: &str,
+        token: Option<&str>,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> TestResponse {
+        let mut builder = Request::builder().method(method).uri(uri);
+
+        if let Some(token) = token {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+
+        let mut request = match body {
+            Some(json) => builder
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json.to_string())),
+            None => builder.body(Body::empty()),
+        }
+        .unwrap_or_else(|error| harness_failure("build a test request", &error.to_string(), uri));
+
+        request.extensions_mut().insert(ConnectInfo(TEST_PEER));
+
+        let response = self
+            .router()
+            .oneshot(request)
+            .await
+            .unwrap_or_else(|error| harness_failure("drive the router", &error.to_string(), uri));
+
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap_or_else(|error| {
+                harness_failure("read a response body", &error.to_string(), uri)
+            });
+
+        TestResponse {
+            status,
+            body: serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        }
+    }
+
     pub async fn get(&self, uri: &str, token: Option<&str>) -> TestResponse {
         self.send(Method::GET, uri, token, None).await
     }

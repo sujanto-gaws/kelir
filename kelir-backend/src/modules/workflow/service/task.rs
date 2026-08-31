@@ -190,7 +190,7 @@ pub async fn claim_task(
             object_type: TASK_OBJECT_TYPE,
             object_id: id,
             actor_user_id: Some(user_id),
-            ip_address: None,
+            ip_address: caller.ip_address(),
             reason: None,
             old_value: Some(json!({ "status": TaskStatus::Created, "assigneeUserId": null })),
             new_value: Some(json!({
@@ -347,7 +347,7 @@ pub async fn delegate(
             object_type: TASK_OBJECT_TYPE,
             object_id: id,
             actor_user_id: Some(user_id),
-            ip_address: None,
+            ip_address: caller.ip_address(),
             // **Not the comment**, which is `decide`'s rule and its reason:
             // this trail is read through `master-data:audit:read` by people who
             // hold no permission over the document, and a note about why an
@@ -636,7 +636,7 @@ pub async fn decide(
             object_type: TASK_OBJECT_TYPE,
             object_id: id,
             actor_user_id: Some(user_id),
-            ip_address: None,
+            ip_address: caller.ip_address(),
             // **The comment is not copied here, and `commented` below says only
             // that there was one.** `audit_events.reason` is the field for it
             // and this is deliberately not written into it: the audit trail is

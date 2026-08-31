@@ -246,6 +246,11 @@ pub async fn ensure_administrator(
             object_type: "USER",
             object_id: id,
             actor_user_id: None,
+            // **No caller, so no address** (FR-AUD-005). The first-run
+            // administrator is created at startup by the process itself; an
+            // address here would have to be invented, and an invented address
+            // in an audit column is the thing `middleware::client_address`
+            // exists to prevent.
             ip_address: None,
             reason: Some("first-run administrator created from configuration"),
             old_value: None,

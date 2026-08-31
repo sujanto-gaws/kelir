@@ -118,8 +118,16 @@ pub async fn upload(
     // The object first. See this function's own documentation.
     state.storage.put(&reference, file.bytes).await?;
 
+    // **The row and its event are one transaction; the object is not in it.**
+    // #244 AC2 chose the object-first order and that is unchanged — what is new
+    // is that the row and the timeline entry now stand or fall together
+    // (#247 AC2, #248 AC3). The three states are: object only (recoverable, and
+    // the failure this order allows), object plus row plus event, and nothing.
+    // There is no state in which a file is recorded and its timeline is silent.
+    let mut transaction = state.pool.begin().await?;
+
     repo::insert_attachment(
-        &state.pool,
+        &mut *transaction,
         &repo::NewAttachment {
             id,
             tenant_id,
@@ -136,6 +144,32 @@ pub async fn upload(
     )
     .await?;
 
+    crate::modules::activity::service::record(
+        &mut transaction,
+        &crate::modules::activity::service::Happening {
+            tenant_id,
+            document_id: Some(document.id),
+            workflow_instance_id: None,
+            task_id: None,
+            // **The event links to what it describes** (#248 AC2), so a
+            // timeline can offer the file rather than only mention it.
+            attachment_id: Some(id),
+            comment_id: None,
+            event_type: "Attachment.Added",
+            category: crate::modules::activity::domain::EventCategory::Attachment,
+            actor_user_id: Some(actor),
+            actor_name: Some(caller.username()),
+            action_summary: "Attached a file",
+            details: json!({
+                "originalFileName": file.original_file_name,
+                "fileSize": file_size,
+            }),
+        },
+    )
+    .await?;
+
+    transaction.commit().await?;
+
     let stored = repo::find_attachment(&state.pool, tenant_id, id)
         .await?
         .ok_or_else(|| AppError::Internal {
@@ -151,7 +185,7 @@ pub async fn upload(
             object_type: ATTACHMENT_OBJECT_TYPE,
             object_id: id,
             actor_user_id: Some(actor),
-            ip_address: None,
+            ip_address: caller.ip_address(),
             // **Not the description**, which is prose somebody wrote about
             // somebody else's document — the line **D-12** and **D-32** drew for
             // the decision comment, applied to the one free-text field this
@@ -223,6 +257,40 @@ pub async fn download(
     if stored.virus_scan_status != VirusScanStatus::Clean {
         return Err(domain::not_yet_cleared(stored.virus_scan_status));
     }
+
+    // **The event is written before the bytes are handed over, and a failure to
+    // write it fails the download** (#248 AC1).
+    //
+    // A deliberate stance rather than an oversight of the *fail the action*
+    // rule: if this product cannot record that somebody took a copy of a file,
+    // it should not give them the copy. A download is the one read in the system
+    // that takes information out of it, and a timeline with a gap exactly where
+    // a copy was made is worse than a refused download.
+    //
+    // Its own transaction, because there is nothing else to join: the action
+    // *is* the event.
+    let mut transaction = state.pool.begin().await?;
+
+    crate::modules::activity::service::record(
+        &mut transaction,
+        &crate::modules::activity::service::Happening {
+            tenant_id: caller.tenant_id(),
+            document_id: Some(document.id),
+            workflow_instance_id: None,
+            task_id: None,
+            attachment_id: Some(attachment_id),
+            comment_id: None,
+            event_type: "Attachment.Downloaded",
+            category: crate::modules::activity::domain::EventCategory::Attachment,
+            actor_user_id: Some(caller.user_id()),
+            actor_name: Some(caller.username()),
+            action_summary: "Downloaded a file",
+            details: serde_json::json!({ "originalFileName": stored.original_file_name }),
+        },
+    )
+    .await?;
+
+    transaction.commit().await?;
 
     let bytes = state.storage.get(&stored.storage_reference).await?;
 

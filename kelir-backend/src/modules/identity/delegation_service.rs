@@ -143,7 +143,7 @@ pub async fn create_delegation(
             object_type: DELEGATION_OBJECT_TYPE,
             object_id: id,
             actor_user_id: Some(delegator),
-            ip_address: None,
+            ip_address: caller.ip_address(),
             // **The window's own `reason` is the audit reason**, and it is one of
             // the few places the two are the same field rather than a copy of
             // something private. A delegation's reason is "annual leave" — it is
@@ -200,7 +200,7 @@ pub async fn end_delegation(
             object_type: DELEGATION_OBJECT_TYPE,
             object_id: id,
             actor_user_id: Some(caller.user_id()),
-            ip_address: None,
+            ip_address: caller.ip_address(),
             reason: None,
             old_value: Some(serde_json::json!({
                 "isActive": before.is_active,

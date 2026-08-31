@@ -162,7 +162,7 @@ pub async fn transition(
             object_type: OBJECT_TYPE,
             object_id: id,
             actor_user_id: actor,
-            ip_address: None,
+            ip_address: caller.ip_address(),
             reason: request.reason.as_deref(),
             old_value: Some(json!({ "status": current })),
             new_value: Some(json!({ "status": request.status })),
