@@ -107,14 +107,22 @@ jobs:
       # measurement pinned.
       - name: Wait for the scanner
         run: |
-          for i in $(seq 1 60); do
-            if docker run --rm --network host --entrypoint clamdscan \
-                 clamav/clamav:latest --ping 1 >/dev/null 2>&1; then
-              echo "clamd answered after ${i}s"; exit 0
+          # **A socket check and not `clamdscan`.** The first version of this
+          # step ran `clamdscan --ping` out of the clamav image once per
+          # attempt, which pulls a gigabyte before it can answer and then does
+          # not know to use TCP without a config file. Bash speaks enough of the
+          # protocol: `zPING\0` and look for `PONG`.
+          for i in $(seq 1 120); do
+            if (exec 3<>/dev/tcp/127.0.0.1/3310 \
+                && printf 'zPING\0' >&3 \
+                && head -c 5 <&3 | grep -q PONG) 2>/dev/null; then
+              echo "clamd answered after ${i}s"
+              exit 0
             fi
             sleep 1
           done
-          echo "clamd never answered"; exit 1
+          echo "clamd never answered on 3310"
+          exit 1
 
       - name: Start object storage and create its bucket
         run: |
