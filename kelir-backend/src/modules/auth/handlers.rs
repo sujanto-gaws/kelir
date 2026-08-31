@@ -263,6 +263,7 @@ async fn change_password(
         caller.user_id(),
         &request.current_password,
         &request.new_password,
+        caller.ip_address(),
     )
     .await?;
 

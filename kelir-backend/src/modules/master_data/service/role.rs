@@ -215,7 +215,7 @@ pub async fn assign_role(
             object_type: OBJECT_TYPE,
             object_id: party_id,
             actor_user_id: actor,
-            ip_address: None,
+            ip_address: caller.ip_address(),
             reason: None,
             old_value: None,
             new_value: Some(json!({
@@ -300,7 +300,7 @@ pub async fn remove_role(
             object_type: OBJECT_TYPE,
             object_id: party_id,
             actor_user_id: actor,
-            ip_address: None,
+            ip_address: caller.ip_address(),
             reason: None,
             old_value: Some(json!({
                 "partyId": party.party_code,
