@@ -3,8 +3,8 @@ import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import DocumentHeader from './DocumentHeader.vue'
-import EmptyTab from './EmptyTab.vue'
 import AttachmentsTab from '@/features/attachments/AttachmentsTab.vue'
+import CommentsTab from '@/features/comments/CommentsTab.vue'
 import WorkflowTab from '@/features/workflow/WorkflowTab.vue'
 import {
   getDocument,
@@ -31,10 +31,11 @@ import type { Form } from '@/types/rad'
 /**
  * The document detail workspace (FR-DOC-014, #172).
  *
- * **A shell, and Sprint 10 filled the first of its empty tabs.** Workflow is
- * real now (#178); attachments and comments are still Phase 6. That the
- * addition was a component and a `v-show` rather than a rebuild is the shell
- * having worked — which is what #172 built it for.
+ * **A shell, and every one of its empty tabs has now been filled.** Workflow
+ * went first (#178), then attachments (#295) and comments (#296) — so nothing
+ * here promises a later phase any more. That each arrival was a component and a
+ * `v-show` rather than a rebuild is the shell having worked, which is what #172
+ * built it for.
  *
  * **The status shown here can be one a workflow wrote.** For a document with a
  * live process, `documents.status` is a *projection* of the instance's state and
@@ -375,7 +376,7 @@ function onChange(values: Record<string, unknown>): void {
       </div>
 
       <div v-show="tab === 'comments'" data-testid="panel-comments">
-        <EmptyTab subject="Comments" arrives="Phase 6" />
+        <CommentsTab v-if="tab === 'comments'" :document-id="document.id" />
       </div>
 
       <div>

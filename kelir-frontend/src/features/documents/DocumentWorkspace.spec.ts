@@ -274,29 +274,26 @@ describe('DocumentWorkspace', () => {
     expect(wrapper.get('[data-testid="document-problem"]').text()).toContain('numbering rule')
   })
 
-  it('names every tab a later phase will fill', async () => {
-    // AC4: neither an empty tab nor a silent one.
+  it('promises nothing a later phase will fill, because nothing is left to', async () => {
+    // AC4 was: neither an empty tab nor a silent one, and every unfilled tab
+    // names the phase that fills it. **Phase 6 emptied the list.** Workflow left
+    // it in Sprint 10 (#178), attachments in #295 and comments in #296, so the
+    // assertion inverts rather than disappears: what this now guards is a
+    // placeholder being *added* and left, which is the same defect from the
+    // other end.
     //
-    // **Workflow has left this list**, and its departure is the assertion:
-    // Sprint 10 filled it (#178), so a tab still saying "Phase 5 fills this" at
-    // the end of Phase 5's first sprint would be a true statement about a broken
-    // promise. What is below is what genuinely has not arrived.
-    //
-    // **Attachments has now left it too** (#295), and left it for the same
-    // reason: a placeholder outliving the thing it promised is the defect this
-    // test exists to catch, so the list shrinks as the phase delivers. Comments
-    // is the last one, and #296 is what removes it.
+    // A test whose subjects have all been delivered is a test to rewrite, not
+    // to delete — deleting it would retire the guard at the moment the promise
+    // it watched was finally kept.
     const wrapper = await render()
 
-    for (const [tab, phase] of [['comments', 'Phase 6']]) {
+    for (const tab of ['attachments', 'comments', 'workflow']) {
       await wrapper.get(`[data-testid="tab-${tab}"]`).trigger('click')
 
-      // Scoped to the panel rather than to the first `empty-tab` on the page:
-      // the tabs are `v-show`, so all three are in the DOM and an unscoped
-      // lookup would assert about whichever came first — green over the wrong
-      // panel, which is the shape a test is supposed to catch rather than have.
-      const empty = wrapper.get(`[data-testid="panel-${tab}"] [data-testid="empty-tab"]`)
-      expect(empty.text()).toContain(phase)
+      expect(
+        wrapper.find(`[data-testid="panel-${tab}"] [data-testid="empty-tab"]`).exists(),
+        `the ${tab} tab still promises a later phase`,
+      ).toBe(false)
     }
   })
 
