@@ -51,6 +51,25 @@ pub struct AppConfig {
     /// Empty means *refuse everything*, deliberately: the failure direction for
     /// a misconfigured allow-list is to store nothing, not to store anything.
     pub storage_allowed_mime_types: Vec<String>,
+    /// Where the virus scanner listens (FR-ATT-001, FR-ATT-002; #246).
+    ///
+    /// **There is no switch that turns scanning off**, and that is the design.
+    /// An unreachable scanner leaves every attachment `PENDING`, which leaves
+    /// every attachment undownloadable — the failure direction #246 AC7 asks
+    /// for. A flag saying *skip the scan* would be a flag saying *serve
+    /// unscanned bytes*, and no deployment should be one setting away from that.
+    ///
+    /// The default is the compose stack's service name, so a developer who has
+    /// run `deploy/docker` has working scanning without setting anything.
+    pub clamav_host: String,
+    pub clamav_port: u16,
+    /// How often the worker looks for attachments nobody has scanned.
+    ///
+    /// **A poll rather than a queue**, because the queue this would use is the
+    /// outbox and the outbox is Phase 8. The cost of the choice is latency
+    /// bounded by this number; the benefit is that a scan lost to a restart is
+    /// picked up again, which a spawned task would not be.
+    pub clamav_poll_seconds: u64,
     pub smtp_host: String,
     /// The port `smtp_host` listens on. 1025 is mailpit's, which the compose
     /// stack runs; a relay is usually 587.
@@ -380,6 +399,23 @@ impl AppConfig {
                 "KELIR_STORAGE_ALLOWED_MIME_TYPES",
                 DEFAULT_ALLOWED_MIME_TYPES,
             )),
+            clamav_host: optional("KELIR_CLAMAV_HOST", "clamav"),
+            clamav_port: {
+                let raw = optional("KELIR_CLAMAV_PORT", "3310");
+
+                raw.parse().map_err(|_| ConfigError::Invalid {
+                    key: "KELIR_CLAMAV_PORT",
+                    reason: format!("expected a port number; found '{raw}'"),
+                })?
+            },
+            clamav_poll_seconds: {
+                let raw = optional("KELIR_CLAMAV_POLL_SECONDS", "5");
+
+                raw.parse().map_err(|_| ConfigError::Invalid {
+                    key: "KELIR_CLAMAV_POLL_SECONDS",
+                    reason: format!("expected a number of seconds; found '{raw}'"),
+                })?
+            },
             smtp_host: optional("KELIR_SMTP_HOST", "localhost"),
             smtp_port: {
                 let raw = optional("KELIR_SMTP_PORT", "1025");
@@ -422,6 +458,9 @@ impl AppConfig {
             storage_region: "us-east-1".to_owned(),
             storage_max_upload_bytes: 26_214_400,
             storage_allowed_mime_types: mime_list(DEFAULT_ALLOWED_MIME_TYPES),
+            clamav_host: "localhost".to_owned(),
+            clamav_port: 3310,
+            clamav_poll_seconds: 5,
             smtp_host: "localhost".to_owned(),
             smtp_port: 1025,
             mail_from: "no-reply@kelir.test".to_owned(),

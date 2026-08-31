@@ -729,6 +729,17 @@ fn test_config(database_url: &str) -> AppConfig {
             .and_then(|raw| raw.parse().ok())
             .unwrap_or(4096),
         storage_allowed_mime_types: vec!["application/pdf".to_owned(), "image/png".to_owned()],
+        // **The harness does not run the scan worker**, so these address a
+        // scanner that is not there — which is the point for every test but the
+        // one that starts its own listener and passes the address in. An
+        // attachment stays `PENDING` unless a test says otherwise, which is
+        // exactly what a deployment with no scanner does.
+        clamav_host: env::var("KELIR_CLAMAV_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
+        clamav_port: env::var("KELIR_CLAMAV_PORT")
+            .ok()
+            .and_then(|raw| raw.parse().ok())
+            .unwrap_or(3310),
+        clamav_poll_seconds: 1,
         // The harness uses a captured mailer, so this is never dialled — but a
         // host is left set deliberately: an empty one would exercise the
         // no-SMTP path rather than the one a deployment runs.

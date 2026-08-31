@@ -47,6 +47,11 @@ services:
       - KELIR_STORAGE_SECRET_KEY=minioadmin
       # 25 MB, and the same number the scanner is sized against (#245, #246).
       - KELIR_STORAGE_MAX_UPLOAD_BYTES=26214400
+      # The scanner (FR-ATT-001, #246). There is no switch that turns scanning
+      # off: an unreachable scanner leaves every attachment PENDING and
+      # therefore undownloadable, which is the direction this has to fail in.
+      - KELIR_CLAMAV_HOST=clamav
+      - KELIR_CLAMAV_PORT=3310
       - KELIR_SMTP_HOST=mailpit
       # The container port, which is fixed; KELIR_SMTP_PORT in the environment
       # moves the host mapping only, and must not follow it in here.
@@ -56,6 +61,7 @@ services:
     depends_on:
       - postgres
       - minio-init
+      - clamav
 
   postgres:
     image: postgres:16
@@ -92,6 +98,22 @@ services:
       -c "until mc alias set kelir http://minio:9000 minioadmin minioadmin;
           do sleep 1; done
           && mc mb --ignore-existing kelir/kelir"
+
+  # Reserved by the system design since 2026-08-11 and filled by #246. **Sized
+  # 2026-08-31 rather than guessed**: ~1 GB resident, almost all of it the
+  # signature set, 25 MiB scanned in ~169 ms, and no gain from concurrency — so
+  # one instance is the whole answer. It ships its own database, so it is ready
+  # about 20 seconds after start rather than after a freshclam download.
+  #
+  # **`StreamMaxLength` must stay strictly above KELIR_STORAGE_MAX_UPLOAD_BYTES.**
+  # clamd's own sample config documents 25M, which is exactly the upload limit;
+  # at that value every maximum-size upload is refused by the scanner, recorded
+  # FAILED and permanently undownloadable. This image's effective default is
+  # 100 MiB, which is why nothing is set here.
+  clamav:
+    image: clamav/clamav:latest
+    ports:
+      - "${KELIR_CLAMAV_PORT:-3310}:3310"
 
   mailpit:
     image: axllent/mailpit:latest

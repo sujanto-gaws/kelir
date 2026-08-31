@@ -213,3 +213,80 @@ pub async fn count_for_document<'e, E: PgExecutor<'e>>(
     .await
     .map(|count| count.unwrap_or(0))
 }
+
+/// An attachment nobody has scanned yet.
+pub struct PendingScan {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub storage_reference: String,
+}
+
+/// The oldest attachments still waiting for a scanner.
+///
+/// **Oldest first, and no claim is taken.** Two workers reading the same batch
+/// scan the same file twice and reach the same answer, which costs a scan and
+/// changes nothing — where a claim would need either a fifth `virus_scan_status`
+/// the `CHECK` does not permit, or a database transaction held open across a
+/// network call to another service. [`record_scan_result`]'s predicate is what
+/// makes the duplicate harmless, and it is the same predicate that makes the
+/// transition happen exactly once.
+pub async fn pending_scans<'e, E: PgExecutor<'e>>(
+    executor: E,
+    limit: i64,
+) -> Result<Vec<PendingScan>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT id, tenant_id, storage_reference
+        FROM attachments
+        WHERE virus_scan_status = 'PENDING' AND deleted_at IS NULL
+        ORDER BY created_at
+        LIMIT $1
+        "#,
+        limit
+    )
+    .fetch_all(executor)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| PendingScan {
+            id: row.id,
+            tenant_id: row.tenant_id,
+            storage_reference: row.storage_reference,
+        })
+        .collect())
+}
+
+/// Writes a scan result, **and only over `PENDING`**.
+///
+/// The predicate is [#246](https://github.com/sujanto-gaws/kelir/issues/246)
+/// AC5, both halves of it, held in the statement rather than in the worker:
+///
+/// * *A scan result moves the row exactly once* — a second writer, whether a
+///   duplicate scan or a retry, matches no row and changes nothing.
+/// * *It cannot move back out of `INFECTED`* — nor out of `CLEAN` or `FAILED`,
+///   because `PENDING` is the only status this statement will write over. There
+///   is no route in this product from a decided scan to any other value.
+///
+/// Returns the number of rows moved, which the caller logs: zero is not an error
+/// and is worth seeing, because it means somebody else answered first.
+pub async fn record_scan_result<'e, E: PgExecutor<'e>>(
+    executor: E,
+    id: Uuid,
+    status: &str,
+) -> Result<u64, sqlx::Error> {
+    let affected = sqlx::query!(
+        r#"
+        UPDATE attachments
+        SET virus_scan_status = $2, updated_at = now()
+        WHERE id = $1 AND virus_scan_status = 'PENDING' AND deleted_at IS NULL
+        "#,
+        id,
+        status
+    )
+    .execute(executor)
+    .await?
+    .rows_affected();
+
+    Ok(affected)
+}

@@ -51,8 +51,10 @@
 pub mod domain;
 pub mod handlers;
 pub mod repository;
+pub mod scanner;
 pub mod service;
 pub mod storage;
+pub mod worker;
 
 /// What the audit trail calls an attachment (naming convention §7).
 pub const ATTACHMENT_OBJECT_TYPE: &str = "ATTACHMENT";

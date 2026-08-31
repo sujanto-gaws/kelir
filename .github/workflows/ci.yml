@@ -60,12 +60,19 @@ jobs:
           --health-timeout 3s
           --health-retries 10
 
+      clamav:
+        image: clamav/clamav:latest
+        ports:
+          - 3310:3310
+
     env:
       DATABASE_URL: postgres://kelir:kelir@localhost:5432/kelir
       KELIR_STORAGE_ENDPOINT: http://localhost:9000
       KELIR_STORAGE_BUCKET: kelir-test
       KELIR_STORAGE_ACCESS_KEY: minioadmin
       KELIR_STORAGE_SECRET_KEY: minioadmin
+      KELIR_CLAMAV_HOST: localhost
+      KELIR_CLAMAV_PORT: 3310
 
     steps:
       - uses: actions/checkout@v7
@@ -87,6 +94,36 @@ jobs:
       # can create buckets can create the one an attacker names.
       # `deploy/docker`'s `minio-init` service does the same thing for the
       # compose stack.
+      # The scanner the attachment tests need (#246). **A service container
+      # works here where MinIO's did not**: `clamav/clamav` starts clamd from
+      # its own entrypoint with no command, which is exactly the thing a service
+      # container cannot supply.
+      #
+      # It costs about a gigabyte of image and twenty seconds of start-up, and
+      # it buys the two answers only a real scanner gives: that a signature
+      # matches and that a clean file comes back clean. The replies clamd will
+      # not produce on demand — the ERROR, the silence — are driven by a
+      # scripted listener inside the test, which speaks the protocol the
+      # measurement pinned.
+      - name: Wait for the scanner
+        run: |
+          # **A socket check and not `clamdscan`.** The first version of this
+          # step ran `clamdscan --ping` out of the clamav image once per
+          # attempt, which pulls a gigabyte before it can answer and then does
+          # not know to use TCP without a config file. Bash speaks enough of the
+          # protocol: `zPING\0` and look for `PONG`.
+          for i in $(seq 1 120); do
+            if (exec 3<>/dev/tcp/127.0.0.1/3310 \
+                && printf 'zPING\0' >&3 \
+                && head -c 5 <&3 | grep -q PONG) 2>/dev/null; then
+              echo "clamd answered after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "clamd never answered on 3310"
+          exit 1
+
       - name: Start object storage and create its bucket
         run: |
           docker run -d --name minio --network host \
