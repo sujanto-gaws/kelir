@@ -53,10 +53,7 @@ export function uploadAttachment(
  * `attachment` — but parsing it here would be a second source for a name this
  * screen has in hand.
  */
-export async function downloadAttachment(
-  documentId: string,
-  attachmentId: string,
-): Promise<Blob> {
+export async function downloadAttachment(documentId: string, attachmentId: string): Promise<Blob> {
   try {
     const response = await apiClient.get<Blob>(
       `/documents/${documentId}/attachments/${attachmentId}`,

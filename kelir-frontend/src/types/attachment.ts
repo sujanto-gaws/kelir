@@ -59,8 +59,10 @@ export const SCAN_STATUS_LABELS: Record<VirusScanStatus, string> = {
 export const SCAN_STATUS_EXPLANATIONS: Record<VirusScanStatus, string> = {
   PENDING: 'Being checked for viruses. It will be available to download shortly.',
   CLEAN: 'Checked and available.',
-  INFECTED: 'A virus was found in this file, so it will not be served. Remove it and upload a clean copy.',
-  FAILED: 'This file could not be checked, so it will not be served — a check that did not run has cleared nothing. Upload it again.',
+  INFECTED:
+    'A virus was found in this file, so it will not be served. Remove it and upload a clean copy.',
+  FAILED:
+    'This file could not be checked, so it will not be served — a check that did not run has cleared nothing. Upload it again.',
 }
 
 /** Whether the bytes can be served (#246 AC2). */

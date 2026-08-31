@@ -139,8 +139,7 @@ async function save(attachment: Attachment): Promise<void> {
 
     URL.revokeObjectURL(url)
   } catch (error) {
-    failure.value =
-      error instanceof ApiError ? error.message : 'The file could not be downloaded.'
+    failure.value = error instanceof ApiError ? error.message : 'The file could not be downloaded.'
   }
 }
 
