@@ -359,6 +359,25 @@ pub async fn submit_document(
         .await?
     };
 
+    crate::modules::activity::service::record(
+        &mut transaction,
+        &crate::modules::activity::service::Happening {
+            tenant_id,
+            document_id: Some(id),
+            workflow_instance_id: None,
+            task_id: None,
+            attachment_id: None,
+            comment_id: None,
+            event_type: "Document.Submitted",
+            category: crate::modules::activity::domain::EventCategory::Document,
+            actor_user_id: actor,
+            actor_name: Some(caller.username()),
+            action_summary: "Submitted the document",
+            details: serde_json::json!({ "documentNumber": document_number }),
+        },
+    )
+    .await?;
+
     transaction.commit().await?;
 
     let submitted = repo::find_document(&state.pool, tenant_id, id)

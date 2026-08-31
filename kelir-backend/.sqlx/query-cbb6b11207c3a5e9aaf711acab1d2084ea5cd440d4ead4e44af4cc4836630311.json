@@ -1,0 +1,73 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, document_id, event_type, event_category, actor_user_id, actor_name,\n               action_summary, details_json, created_at\n        FROM activity_events\n        WHERE tenant_id = $1 AND document_id = $2\n        ORDER BY created_at DESC, id DESC\n        LIMIT $3 OFFSET $4\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "document_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "event_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "event_category",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "actor_user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "actor_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "action_summary",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "details_json",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 8,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "cbb6b11207c3a5e9aaf711acab1d2084ea5cd440d4ead4e44af4cc4836630311"
+}

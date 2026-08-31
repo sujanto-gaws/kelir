@@ -6,8 +6,8 @@ use crate::error::ValidationDetail;
 use crate::health;
 use crate::middleware::cors::cors_layer;
 use crate::modules::{
-    attachment, auth, comment, document, document_type, identity, master_data, organization, rad,
-    task_inbox, workflow,
+    activity, attachment, auth, comment, document, document_type, identity, master_data,
+    organization, rad, task_inbox, workflow,
 };
 use crate::response::{ErrorBody, ErrorEnvelope, PageMeta};
 use crate::state::AppState;
@@ -100,6 +100,7 @@ use crate::state::AppState;
         attachment::handlers::upload_attachment,
         attachment::handlers::list_attachments,
         attachment::handlers::download_attachment,
+        activity::handlers::list_activity,
         comment::handlers::add_comment,
         comment::handlers::list_comments,
         document::handlers::list_documents,
@@ -140,6 +141,8 @@ use crate::state::AppState;
     components(schemas(
         attachment::domain::Attachment,
         attachment::domain::VirusScanStatus,
+        activity::domain::ActivityEvent,
+        activity::domain::EventCategory,
         comment::domain::AddCommentRequest,
         comment::domain::Comment,
         health::HealthBody,
@@ -392,7 +395,8 @@ fn api_v1_router(state: AppState) -> Router<AppState> {
                     "/{id}/attachments",
                     attachment::handlers::routes(max_upload_bytes),
                 )
-                .nest("/{id}/comments", comment::handlers::routes()),
+                .nest("/{id}/comments", comment::handlers::routes())
+                .nest("/{id}/activity", activity::handlers::routes()),
         )
         .nest("/workflow", workflow::handlers::routes())
         .nest("/tasks", task_inbox::handlers::routes())

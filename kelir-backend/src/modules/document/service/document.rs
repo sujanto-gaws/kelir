@@ -188,6 +188,28 @@ pub async fn create_document(
     )
     .await?;
 
+    // **In the same transaction as the document** (#247 AC2). A document that
+    // rolled back did not happen, and a timeline saying it did would be worse
+    // than one that never mentioned it.
+    crate::modules::activity::service::record(
+        &mut transaction,
+        &crate::modules::activity::service::Happening {
+            tenant_id,
+            document_id: Some(id),
+            workflow_instance_id: None,
+            task_id: None,
+            attachment_id: None,
+            comment_id: None,
+            event_type: "Document.Created",
+            category: crate::modules::activity::domain::EventCategory::Document,
+            actor_user_id: actor,
+            actor_name: Some(caller.username()),
+            action_summary: "Created the document",
+            details: serde_json::json!({ "documentTypeId": request.document_type_id }),
+        },
+    )
+    .await?;
+
     transaction.commit().await?;
 
     // Read back before the record is written (#135).

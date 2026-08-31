@@ -34,6 +34,13 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
   `clamav` service the system design reserved on 2026-08-11 is now in the
   compose stack, **sized rather than guessed**: ~1 GB resident, 25 MiB in
   ~169 ms, and no gain from concurrency.
+- **A document has a timeline** (FR-ACT-001, FR-ACT-004,
+  [#247](https://github.com/sujanto-gaws/kelir/issues/247)). `GET
+  /api/v1/documents/{id}/activity` returns what happened to a document, newest
+  first, behind that document's own read permission. Creating, submitting and
+  transitioning a document write an event, and so do deciding and delegating a
+  task. **The actor's name is denormalized at event time**, so a rename does not
+  rewrite the past.
 - **A document carries a conversation** (FR-CMT-001,
   [#249](https://github.com/sujanto-gaws/kelir/issues/249)). `POST` and `GET
   /api/v1/documents/{id}/comments` add a comment and read a document's comments,
@@ -50,6 +57,10 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
 
 ### Security
 
+- **An activity event cannot outlive the action it describes.** It is written
+  in the action's own transaction, where an audit row is written on its own
+  connection and deliberately survives a failure — two function signatures hold
+  the difference rather than a convention.
 - **Nothing can produce a false `CLEAN`**, and three separate things hold it —
   in three different places on purpose. The scanner client returns
   `Result<ScanOutcome, ScanError>`, so *did not answer* is a different **type**
