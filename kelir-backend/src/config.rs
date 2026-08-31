@@ -37,6 +37,20 @@ pub struct AppConfig {
     pub storage_access_key: String,
     pub storage_secret_key: String,
     pub storage_region: String,
+    /// The largest file this deployment accepts, in bytes (FR-ATT-004, #245).
+    ///
+    /// **Enforced on the request body before it is read**, not on what has
+    /// already been accepted: a limit applied to bytes in hand is a limit on the
+    /// disk. 25 MB by default, which is the figure the Sprint 12 plan measures
+    /// the scanner against — the two want to agree, because a file this accepts
+    /// and the scanner cannot hold is a file stuck at `PENDING` for ever.
+    pub storage_max_upload_bytes: usize,
+    /// What may be stored, by **content** rather than by the name a caller typed
+    /// (FR-ATT-005, #245 AC4).
+    ///
+    /// Empty means *refuse everything*, deliberately: the failure direction for
+    /// a misconfigured allow-list is to store nothing, not to store anything.
+    pub storage_allowed_mime_types: Vec<String>,
     pub smtp_host: String,
     /// The port `smtp_host` listens on. 1025 is mailpit's, which the compose
     /// stack runs; a relay is usually 587.
@@ -63,6 +77,25 @@ pub struct AppConfig {
     /// How many reverse-proxy hops sit in front of this instance
     /// (`KELIR_TRUSTED_PROXY_HOPS`). See [`trusted_proxy_hops`].
     pub trusted_proxy_hops: usize,
+}
+
+/// What a deployment accepts when it says nothing.
+///
+/// Five types, and the list is short on purpose: an allow-list is a statement
+/// about what this product is for, and a long one is a statement that nobody
+/// decided. A deployment that needs more says so in
+/// `KELIR_STORAGE_ALLOWED_MIME_TYPES`.
+const DEFAULT_ALLOWED_MIME_TYPES: &str = "application/pdf,image/png,image/jpeg,\
+    application/vnd.openxmlformats-officedocument.wordprocessingml.document,\
+    application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+/// A comma-separated allow-list, normalized once here so the comparison later is
+/// a plain equality rather than a trim on every upload.
+fn mime_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|entry| entry.trim().to_ascii_lowercase())
+        .filter(|entry| !entry.is_empty())
+        .collect()
 }
 
 /// Reverse-proxy hops the deployment puts in front of the backend.
@@ -335,6 +368,18 @@ impl AppConfig {
             storage_access_key: optional("KELIR_STORAGE_ACCESS_KEY", "minioadmin"),
             storage_secret_key: optional("KELIR_STORAGE_SECRET_KEY", "minioadmin"),
             storage_region: optional("KELIR_STORAGE_REGION", "us-east-1"),
+            storage_max_upload_bytes: {
+                let raw = optional("KELIR_STORAGE_MAX_UPLOAD_BYTES", "26214400");
+
+                raw.parse().map_err(|_| ConfigError::Invalid {
+                    key: "KELIR_STORAGE_MAX_UPLOAD_BYTES",
+                    reason: format!("expected a size in bytes; found '{raw}'"),
+                })?
+            },
+            storage_allowed_mime_types: mime_list(&optional(
+                "KELIR_STORAGE_ALLOWED_MIME_TYPES",
+                DEFAULT_ALLOWED_MIME_TYPES,
+            )),
             smtp_host: optional("KELIR_SMTP_HOST", "localhost"),
             smtp_port: {
                 let raw = optional("KELIR_SMTP_PORT", "1025");
@@ -375,6 +420,8 @@ impl AppConfig {
             storage_access_key: "minioadmin".to_owned(),
             storage_secret_key: "minioadmin".to_owned(),
             storage_region: "us-east-1".to_owned(),
+            storage_max_upload_bytes: 26_214_400,
+            storage_allowed_mime_types: mime_list(DEFAULT_ALLOWED_MIME_TYPES),
             smtp_host: "localhost".to_owned(),
             smtp_port: 1025,
             mail_from: "no-reply@kelir.test".to_owned(),

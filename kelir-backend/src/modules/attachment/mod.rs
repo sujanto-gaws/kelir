@@ -6,12 +6,9 @@
 //!   `document:read`, never instead of it: an attachment is as private as the
 //!   document it hangs on, so attaching to a document you cannot see is refused
 //!   by the document's own answer rather than by a rule written here.
-//! * `attachment:read` — *may this account retrieve them*. Seeded by
-//!   `0031_attachment.sql` and **checked by nothing yet**: the download is
-//!   [#245](https://github.com/sujanto-gaws/kelir/issues/245), this sprint's
-//!   item 2. It is seeded now because both belong to one migration and a second
-//!   migration to add one permission row would be a migration for a `VALUES`
-//!   line.
+//! * `attachment:read` — *may this account retrieve them*. Checked by the list
+//!   and the download, both added by
+//!   [#245](https://github.com/sujanto-gaws/kelir/issues/245).
 //!
 //! There is no `attachment:delete`. Soft-delete is FR-ATT-006 and Sprint 13, and
 //! a permission row nothing checks is the `delegations` situation **D-13** spent
@@ -29,10 +26,20 @@
 //! # What this module does not do yet
 //!
 //! **Nothing scans**, and nothing sets `virus_scan_status` to anything but its
-//! `PENDING` default. The gate is [#246](https://github.com/sujanto-gaws/kelir/issues/246),
-//! and until it lands **an attachment is stored and cannot be retrieved** —
-//! which is the right order to build the two in, because the alternative is a
-//! download that works before anything checks the file.
+//! `PENDING` default. The scanner is
+//! [#246](https://github.com/sujanto-gaws/kelir/issues/246).
+//!
+//! **The download-side gate, however, is already here**, and that is a
+//! deliberate departure from the construction plan's item order. #246 AC2 and
+//! AC4 — refused unless `CLEAN`, enforced where the bytes are served — landed
+//! with [#245](https://github.com/sujanto-gaws/kelir/issues/245) rather than
+//! after it, because this paragraph used to say *an attachment is stored and
+//! cannot be retrieved* and a download shipped without the gate would have made
+//! that false while serving every unscanned byte in the product. Since nothing
+//! sets `CLEAN`, **every attachment is currently listed and none is
+//! downloadable**, which is the state this module intends until the scanner
+//! exists. #246 keeps the scanner, the status transitions, the once-only move
+//! out of `INFECTED`, and the behaviour when the scanner is unreachable.
 //!
 //! **Nothing writes an activity event.** That is
 //! [#248](https://github.com/sujanto-gaws/kelir/issues/248), this sprint's item

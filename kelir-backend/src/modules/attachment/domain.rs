@@ -73,6 +73,107 @@ pub struct Attachment {
     pub created_by: Option<Uuid>,
 }
 
+/// Refuses a file larger than the deployment accepts ([#245] AC3, AC6).
+///
+/// **Named limit, named unit.** *Upload failed* sends a person back to try the
+/// same file again, which is #245 AC6's own reasoning; a number they can compare
+/// against the file they are holding does not.
+///
+/// [#245]: https://github.com/sujanto-gaws/kelir/issues/245
+pub fn file_too_large(limit: usize) -> AppError {
+    AppError::validation(vec![ValidationDetail::new(
+        "file",
+        "maxSize",
+        "FILE_TOO_LARGE",
+        format!(
+            "this deployment accepts files up to {limit} bytes ({} MB)",
+            limit / (1024 * 1024)
+        ),
+    )])
+}
+
+/// Refuses a file whose **content** is not a type this deployment stores
+/// ([#245] AC4, AC6).
+///
+/// The message names what the bytes turned out to be rather than what the caller
+/// called the file, because those are the two different facts and the second one
+/// is the one they already believe.
+pub fn type_not_allowed(detected: Option<&str>, allowed: &[String]) -> AppError {
+    let what = detected.unwrap_or("not a type this server recognises");
+
+    AppError::validation(vec![ValidationDetail::new(
+        "file",
+        "mimeType",
+        "FILE_TYPE_NOT_ALLOWED",
+        format!(
+            "this file's content is {what}; this deployment stores {}",
+            allowed.join(", ")
+        ),
+    )])
+}
+
+/// What the bytes actually are, by their leading bytes.
+///
+/// **Never the extension, and never the caller's `Content-Type`** ([#245] AC4).
+/// Both are text the caller wrote. `mime_type` is still *recorded* from what
+/// they declared, because it is a fact about the request worth keeping; what it
+/// is not is evidence.
+///
+/// `None` means *nothing recognised it*, which is a refusal rather than a pass:
+/// an allow-list whose unknown case is "allow" is not an allow-list.
+pub fn detect_mime_type(bytes: &[u8]) -> Option<&'static str> {
+    infer::get(bytes).map(|kind| kind.mime_type())
+}
+
+/// Whether the detected type is one this deployment stores.
+///
+/// **An empty allow-list refuses everything.** A deployment that configures the
+/// list to nothing has said *store nothing*, and reading that as *store
+/// anything* would make the one obvious misconfiguration the dangerous one.
+pub fn type_is_allowed(detected: Option<&str>, allowed: &[String]) -> bool {
+    let Some(detected) = detected else {
+        return false;
+    };
+
+    allowed
+        .iter()
+        .any(|entry| entry.eq_ignore_ascii_case(detected))
+}
+
+/// Refuses the bytes of an attachment the scanner has not cleared
+/// ([#246](https://github.com/sujanto-gaws/kelir/issues/246) AC2, AC3).
+///
+/// **Three states, three messages.** *Not yet* and *never* need different things
+/// from the person holding the file: one is waiting, the other is a file they
+/// should replace. `FAILED` is a refusal and not a pass — a scan that could not
+/// run has cleared nothing — and it says so rather than reading as an error in
+/// the download.
+///
+/// A **409** rather than a 403 or a 404: the attachment is there and this caller
+/// may read it, but its state is not one the bytes can be served from. That is a
+/// conflict with the resource's condition, which is what a person retrying in a
+/// minute needs to be told.
+pub fn not_yet_cleared(status: VirusScanStatus) -> AppError {
+    AppError::conflict(match status {
+        VirusScanStatus::Pending => {
+            "this file has not been scanned yet, so it cannot be downloaded. Try again shortly"
+                .to_owned()
+        }
+        VirusScanStatus::Infected => {
+            "this file was found to be infected and will not be served. Remove it and upload a \
+             clean copy"
+                .to_owned()
+        }
+        VirusScanStatus::Failed => {
+            "this file could not be scanned, so it will not be served — a scan that did not run \
+             has cleared nothing. Upload it again"
+                .to_owned()
+        }
+        // Unreachable: the caller checks for `Clean` before calling this.
+        VirusScanStatus::Clean => "this file is available".to_owned(),
+    })
+}
+
 /// The longest `original_file_name` this API will record.
 ///
 /// The column is `TEXT` and takes anything; this is the bound that stops a
@@ -221,5 +322,38 @@ mod tests {
             VirusScanStatus::Failed
         );
         assert_eq!(VirusScanStatus::from_db("CLEAN"), VirusScanStatus::Clean);
+    }
+
+    #[test]
+    fn an_unrecognised_payload_is_refused_rather_than_allowed_through() {
+        // An allow-list whose unknown case is "allow" is not an allow-list.
+        assert!(!type_is_allowed(None, &["application/pdf".to_owned()]));
+        assert!(!type_is_allowed(
+            detect_mime_type(b"just some text, which no magic number claims"),
+            &["application/pdf".to_owned()]
+        ));
+    }
+
+    #[test]
+    fn an_empty_allow_list_stores_nothing() {
+        assert!(!type_is_allowed(Some("application/pdf"), &[]));
+    }
+
+    #[test]
+    fn content_decides_the_type_and_the_name_does_not() {
+        // A PDF header, whatever the file is called.
+        let pdf = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n";
+
+        assert_eq!(detect_mime_type(pdf), Some("application/pdf"));
+        assert!(type_is_allowed(
+            detect_mime_type(pdf),
+            &["application/pdf".to_owned()]
+        ));
+        // The same bytes are still refused where the deployment does not store
+        // that type — the allow-list is the policy, the sniffer is the fact.
+        assert!(!type_is_allowed(
+            detect_mime_type(pdf),
+            &["image/png".to_owned()]
+        ));
     }
 }

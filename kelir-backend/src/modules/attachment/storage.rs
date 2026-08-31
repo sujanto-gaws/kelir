@@ -66,6 +66,49 @@ impl std::fmt::Debug for ObjectStorage {
 }
 
 impl ObjectStorage {
+    /// Reads one object back.
+    ///
+    /// **A missing object is an internal error, not a 404.** The caller reached
+    /// here by naming a row that exists and that they may read; if the bytes it
+    /// points at are gone, the product is inconsistent and saying *not found*
+    /// would report that as the caller's mistake. [`super::service::upload`]
+    /// writes the object before the row precisely so this cannot happen, so
+    /// reaching it means something outside this service removed an object.
+    pub async fn get(&self, reference: &str) -> Result<axum::body::Bytes, AppError> {
+        match self {
+            Self::S3 { store, bucket } => {
+                let path = ObjectPath::from(reference);
+
+                let object = store.get(&path).await.map_err(|error| {
+                    tracing::error!(
+                        %error,
+                        %bucket,
+                        %reference,
+                        "an attachment's row exists and its object could not be read"
+                    );
+
+                    AppError::Internal {
+                        source: anyhow::anyhow!("object storage could not serve the file: {error}"),
+                    }
+                })?;
+
+                object.bytes().await.map_err(|error| {
+                    tracing::error!(%error, %bucket, %reference, "an attachment's bytes stopped mid-read");
+
+                    AppError::Internal {
+                        source: anyhow::anyhow!("object storage stopped mid-read: {error}"),
+                    }
+                })
+            }
+            Self::Unavailable { reason } => Err(AppError::Internal {
+                source: anyhow::anyhow!(
+                    "this deployment has no object storage configured, so a file cannot be \
+                     served: {reason}"
+                ),
+            }),
+        }
+    }
+
     /// Builds the store the configuration describes.
     ///
     /// **Builds rather than connects.** `AmazonS3Builder::build` validates the

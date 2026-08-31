@@ -97,3 +97,119 @@ pub async fn find_attachment<'e, E: PgExecutor<'e>>(
         created_by: row.created_by,
     }))
 }
+
+/// What the download path needs, which is not what a list shows.
+///
+/// **`storage_reference` lives here and reaches no caller.** It is on this
+/// struct because the handler has to fetch the object, and on no serialized type
+/// for the reason [`super::domain::Attachment`] gives.
+pub struct StoredFile {
+    pub original_file_name: String,
+    pub mime_type: String,
+    pub storage_reference: String,
+    pub virus_scan_status: VirusScanStatus,
+}
+
+/// Reads one attachment for serving, scoped by tenant **and by its document**.
+///
+/// **Both, and the document is the load-bearing half.** An attachment id alone
+/// would let a caller who may read document A fetch an attachment hanging on
+/// document B by guessing an id — [#245](https://github.com/sujanto-gaws/kelir/issues/245)
+/// AC1's *download resolves through the document's own read permission*, held
+/// in the statement rather than by the service remembering to compare.
+pub async fn find_stored_file<'e, E: PgExecutor<'e>>(
+    executor: E,
+    tenant_id: Uuid,
+    document_id: Uuid,
+    id: Uuid,
+) -> Result<Option<StoredFile>, sqlx::Error> {
+    let row = sqlx::query!(
+        r#"
+        SELECT original_file_name, mime_type, storage_reference, virus_scan_status
+        FROM attachments
+        WHERE tenant_id = $1 AND document_id = $2 AND id = $3 AND deleted_at IS NULL
+        "#,
+        tenant_id,
+        document_id,
+        id
+    )
+    .fetch_optional(executor)
+    .await?;
+
+    Ok(row.map(|row| StoredFile {
+        original_file_name: row.original_file_name,
+        mime_type: row.mime_type,
+        storage_reference: row.storage_reference,
+        virus_scan_status: VirusScanStatus::from_db(&row.virus_scan_status),
+    }))
+}
+
+/// A document's attachments, newest first.
+///
+/// Newest first, unlike `comments`: this is a list of records rather than a
+/// conversation, and the file somebody just added is the one they came for.
+pub async fn list_for_document<'e, E: PgExecutor<'e>>(
+    executor: E,
+    tenant_id: Uuid,
+    document_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<Attachment>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT id, document_id, original_file_name, mime_type, file_size, checksum,
+               description, virus_scan_status, created_at, created_by
+        FROM attachments
+        WHERE tenant_id = $1 AND document_id = $2 AND deleted_at IS NULL
+        ORDER BY created_at DESC, id DESC
+        LIMIT $3 OFFSET $4
+        "#,
+        tenant_id,
+        document_id,
+        limit,
+        offset
+    )
+    .fetch_all(executor)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| Attachment {
+            id: row.id,
+            document_id: row.document_id,
+            original_file_name: row.original_file_name,
+            mime_type: row.mime_type,
+            file_size: row.file_size,
+            checksum: row.checksum,
+            description: row.description,
+            virus_scan_status: VirusScanStatus::from_db(&row.virus_scan_status),
+            created_at: row.created_at,
+            created_by: row.created_by,
+        })
+        .collect())
+}
+
+/// How many the page is drawn from, **under the same predicate**.
+///
+/// The same three clauses the page filters on and no join — written out for the
+/// reason `workflow::repository::inbox` states and drifted from
+/// ([#279](https://github.com/sujanto-gaws/kelir/issues/279)): a count over a
+/// wider rule reports rows the page does not show.
+pub async fn count_for_document<'e, E: PgExecutor<'e>>(
+    executor: E,
+    tenant_id: Uuid,
+    document_id: Uuid,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar!(
+        r#"
+        SELECT count(*)
+        FROM attachments
+        WHERE tenant_id = $1 AND document_id = $2 AND deleted_at IS NULL
+        "#,
+        tenant_id,
+        document_id
+    )
+    .fetch_one(executor)
+    .await
+    .map(|count| count.unwrap_or(0))
+}

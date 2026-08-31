@@ -7,21 +7,42 @@
 //!
 //! [#244]: https://github.com/sujanto-gaws/kelir/issues/244
 
-use axum::extract::{Multipart, State};
-use axum::routing::post;
+use axum::extract::{DefaultBodyLimit, Multipart, State};
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use uuid::Uuid;
 
 use super::domain::{self, Attachment};
 use super::service::{self, UploadedFile};
 use crate::error::AppError;
-use crate::extract::{MultipartBody, PathParam};
+use crate::extract::{MultipartBody, PathParam, QueryParams};
 use crate::middleware::auth::Authenticated;
-use crate::response::ItemEnvelope;
+use crate::response::{ItemEnvelope, ListEnvelope, Pagination};
 use crate::state::AppState;
 
-pub fn routes() -> Router<AppState> {
-    Router::new().route("/", post(upload_attachment))
+/// The routes, and the one layer that is a security control rather than a
+/// convenience.
+///
+/// **`DefaultBodyLimit` is how [#245] AC3 is satisfied**, and it is why the
+/// limit is a router concern rather than a service one: the layer refuses a body
+/// larger than the deployment accepts **before any of it is read**, where a
+/// check inside the handler could only measure what had already arrived. A limit
+/// on bytes you are holding is a limit on your disk.
+///
+/// It is applied to the upload route alone. Axum's global default is 2 MB, which
+/// every JSON route in this product wants and this one does not.
+///
+/// [#245]: https://github.com/sujanto-gaws/kelir/issues/245
+pub fn routes(max_upload_bytes: usize) -> Router<AppState> {
+    Router::new()
+        .route(
+            "/",
+            post(upload_attachment).layer(DefaultBodyLimit::max(max_upload_bytes)),
+        )
+        .route("/", get(list_attachments))
+        .route("/{attachment_id}", get(download_attachment))
 }
 
 #[utoipa::path(
@@ -42,11 +63,36 @@ pub async fn upload_attachment(
     PathParam(document_id): PathParam<Uuid>,
     MultipartBody(multipart): MultipartBody,
 ) -> Result<Json<ItemEnvelope<Attachment>>, AppError> {
-    let file = read_file_part(multipart).await?;
+    let file = read_file_part(multipart, state.config.storage_max_upload_bytes).await?;
 
     Ok(Json(ItemEnvelope::new(
         service::upload(&state, &caller, document_id, file).await?,
     )))
+}
+
+/// Turns a multipart failure into the refusal it actually is.
+///
+/// **A body over the limit and a body that is malformed arrive the same way**,
+/// as a `MultipartError`, and only its status tells them apart.
+/// `DefaultBodyLimit` refuses while the body is being read, so the error can
+/// surface from **either** `next_field` or `bytes` depending on where the read
+/// stopped — which is why this is one function called from both places rather
+/// than a check at the point that seemed likely. It was written at the likely
+/// point first, and the test for it failed with `FILE_REQUIRED`: somebody who
+/// sent an oversized file was told they had forgotten to attach one, which is
+/// [#245] AC6 exactly backwards.
+///
+/// [#245]: https://github.com/sujanto-gaws/kelir/issues/245
+fn multipart_failure(error: axum::extract::multipart::MultipartError, limit: usize) -> AppError {
+    if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        tracing::debug!(%error, %limit, "an upload was over the limit");
+
+        return domain::file_too_large(limit);
+    }
+
+    tracing::debug!(%error, "a multipart body could not be read");
+
+    domain::no_file_part()
 }
 
 /// Pulls the one file part and the optional description out of the body.
@@ -62,15 +108,18 @@ pub async fn upload_attachment(
 /// page it does not control. The `deny_unknown_fields` instinct that governs
 /// this project's JSON bodies is right there and wrong here: a JSON body is a
 /// contract, and a form post is a browser's rendering of one.
-async fn read_file_part(mut multipart: Multipart) -> Result<UploadedFile, AppError> {
+async fn read_file_part(
+    mut multipart: Multipart,
+    max_upload_bytes: usize,
+) -> Result<UploadedFile, AppError> {
     let mut file: Option<UploadedFile> = None;
     let mut description: Option<String> = None;
 
-    while let Some(field) = multipart.next_field().await.map_err(|error| {
-        tracing::debug!(%error, "a multipart body could not be read");
-
-        domain::no_file_part()
-    })? {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| multipart_failure(error, max_upload_bytes))?
+    {
         match field.name() {
             Some("file") => {
                 let original_file_name = field.file_name().unwrap_or_default().to_owned();
@@ -79,11 +128,10 @@ async fn read_file_part(mut multipart: Multipart) -> Result<UploadedFile, AppErr
                     .unwrap_or("application/octet-stream")
                     .to_owned();
 
-                let bytes = field.bytes().await.map_err(|error| {
-                    tracing::debug!(%error, "a multipart file part could not be read");
-
-                    domain::no_file_part()
-                })?;
+                let bytes = field
+                    .bytes()
+                    .await
+                    .map_err(|error| multipart_failure(error, max_upload_bytes))?;
 
                 file = Some(UploadedFile {
                     original_file_name,
@@ -111,4 +159,75 @@ async fn read_file_part(mut multipart: Multipart) -> Result<UploadedFile, AppErr
     file.description = description;
 
     Ok(file)
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/documents/{id}/attachments", tag = "attachment",
+    params(Pagination),
+    responses(
+        (status = 200, description = "The document's attachments, newest first, each with its scan status", body = [Attachment]),
+        (status = 403, description = "Missing attachment:read or document:read"),
+        (status = 404, description = "No such document, or it is not one this caller may see")
+    ),
+    security(("bearer" = []))
+)]
+pub async fn list_attachments(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    PathParam(document_id): PathParam<Uuid>,
+    QueryParams(pagination): QueryParams<Pagination>,
+) -> Result<Json<ListEnvelope<Attachment>>, AppError> {
+    let (attachments, meta) =
+        service::list_attachments(&state, &caller, document_id, &pagination).await?;
+
+    Ok(Json(ListEnvelope::new(attachments, meta)))
+}
+
+/// The bytes.
+///
+/// **`Content-Disposition: attachment`, always.** Serving caller-supplied bytes
+/// inline lets an uploaded HTML or SVG file run as script on this origin, which
+/// is a stored cross-site scripting hole with the product's own session behind
+/// it. The allow-list makes that hard to reach and this makes it not worth
+/// reaching — two independent controls, because neither wants to be the only
+/// one.
+///
+/// The file name is the one that was uploaded, quoted, with quotes and control
+/// characters stripped: a header value is a place a caller-controlled string can
+/// inject a second header.
+#[utoipa::path(
+    get, path = "/api/v1/documents/{id}/attachments/{attachment_id}", tag = "attachment",
+    responses(
+        (status = 200, description = "The file", content_type = "application/octet-stream"),
+        (status = 403, description = "Missing attachment:read or document:read"),
+        (status = 404, description = "No such document or attachment, or not one this caller may see"),
+        (status = 409, description = "The scan has not cleared this file: PENDING, INFECTED or FAILED")
+    ),
+    security(("bearer" = []))
+)]
+pub async fn download_attachment(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    PathParam((document_id, attachment_id)): PathParam<(Uuid, Uuid)>,
+) -> Result<Response, AppError> {
+    let stored = service::download(&state, &caller, document_id, attachment_id).await?;
+
+    let disposition = format!(
+        "attachment; filename=\"{}\"",
+        stored
+            .original_file_name
+            .chars()
+            .filter(|character| !character.is_control() && *character != '"')
+            .collect::<String>()
+    );
+
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, stored.mime_type),
+            (header::CONTENT_DISPOSITION, disposition),
+        ],
+        stored.bytes,
+    )
+        .into_response())
 }

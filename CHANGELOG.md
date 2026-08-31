@@ -19,6 +19,14 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
   `file` part and an optional `description`, stores the bytes in object storage
   and records the metadata. **MinIO has been in the compose stack since Sprint 0
   and used by nothing; this is the first byte in it.**
+- **A document's attachments can be listed and downloaded** (FR-ATT-002,
+  [#245](https://github.com/sujanto-gaws/kelir/issues/245)). `GET
+  /api/v1/documents/{id}/attachments` lists them newest first with their scan
+  status, and `GET .../attachments/{attachment_id}` serves the bytes. **Both
+  resolve through the document's own read permission**, and the download's
+  statement is scoped by document as well as by id, so an attachment hanging on
+  a document the caller cannot read is *not found* rather than found and
+  refused — the answer is the same whether or not it exists.
 - **A document carries a conversation** (FR-CMT-001,
   [#249](https://github.com/sujanto-gaws/kelir/issues/249)). `POST` and `GET
   /api/v1/documents/{id}/comments` add a comment and read a document's comments,
@@ -34,6 +42,29 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
   what made the claim false.
 
 ### Security
+
+- **Nothing is served until a scan clears it.** Download refuses `PENDING`,
+  `INFECTED` and `FAILED` alike, with three distinguishable messages, and
+  `FAILED` is a refusal rather than a pass — a scan that could not run has
+  cleared nothing. The gate is enforced **where the bytes are served**. This is
+  [#246](https://github.com/sujanto-gaws/kelir/issues/246)'s download half,
+  landed one item early on purpose: nothing sets `CLEAN` yet, so a download
+  without it would have served every unscanned byte in the product. **Every
+  attachment is currently listed and none is downloadable**, which is the
+  intended state until the scanner exists.
+- **A file's type is decided by its content, never by its name**
+  (FR-ATT-005). The extension and the `Content-Type` are caller-written text;
+  the allow-list is matched against the leading bytes. A type nothing recognises
+  is refused, and an empty allow-list refuses everything — the failure direction
+  for a misconfiguration is to store nothing.
+- **Size is refused on the request body before any of it is read**
+  (FR-ATT-004). A limit applied to bytes already accepted is a limit on the
+  disk, not on the upload.
+- **Attachments are never served inline.** `Content-Disposition: attachment`,
+  always, with quotes and control characters stripped from the file name — an
+  uploaded HTML or SVG served inline is stored cross-site scripting with this
+  product's own session behind it, and the allow-list and this are two
+  independent controls because neither wants to be the only one.
 
 - **An uploaded file name never becomes an object key.** The stored name is the
   basename, with everything outside `[A-Za-z0-9._-]` replaced and leading dots
@@ -63,6 +94,12 @@ added to `document_type_attachment_rules`, whose `category_id` has been `NOT
 NULL` with no referent since `0015`. **Nothing has ever written that table**, so
 the constraint validates against no rows and the previous release starts against
 this schema unchanged.
+
+**Two new limits, both configuration** (#245 AC5).
+`KELIR_STORAGE_MAX_UPLOAD_BYTES` defaults to 25 MB — the figure the scanner will
+be sized against, so the two want to move together — and
+`KELIR_STORAGE_ALLOWED_MIME_TYPES` defaults to PDF, PNG, JPEG, DOCX and XLSX.
+`deploy/env/.env.example` carries both with their reasoning.
 
 **Object storage must be configured and its bucket must already exist.**
 `KELIR_STORAGE_ENDPOINT`, `KELIR_STORAGE_BUCKET`, `KELIR_STORAGE_ACCESS_KEY`,
