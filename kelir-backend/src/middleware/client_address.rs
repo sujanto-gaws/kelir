@@ -4,6 +4,20 @@
 //! `ip_address` column on every audit row. Both are worthless — worse than
 //! worthless, because they look like evidence — if the caller can choose it.
 //!
+//! **That sentence was half true for four sprints, and is true as of
+//! 2026-08-31.** The limiter has consumed this value since Phase 2; the audit
+//! column had not, because all 53 call sites passed `None` while this paragraph
+//! read as though they did not. **D-44** found it while Phase 6 was being
+//! planned and [#248](https://github.com/sujanto-gaws/kelir/issues/248) closed
+//! it, by putting the resolved address on
+//! [`Authenticated`](crate::middleware::auth::Authenticated) so that every
+//! service already holding a caller already holds the address.
+//!
+//! **One site still passes `None` and always will**: the first-run
+//! administrator is created at startup, by the process, with no request behind
+//! it. An address there would have to be invented, which is the thing this
+//! module exists to prevent.
+//!
 //! `X-Forwarded-For` is written by whoever is talking to us. A proxy *appends*
 //! to it, so a value the caller supplies survives as the leftmost element; the
 //! only entries that mean anything are the ones our own proxies wrote. This

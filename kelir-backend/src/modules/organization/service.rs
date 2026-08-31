@@ -368,7 +368,7 @@ pub async fn create_tenant(
             object_type: "TENANT",
             object_id: id,
             actor_user_id: Some(caller.user_id()),
-            ip_address: None,
+            ip_address: caller.ip_address(),
             reason: None,
             old_value: None,
             new_value: Some(serde_json::json!({
@@ -446,7 +446,7 @@ pub async fn update_tenant(
             object_type: "TENANT",
             object_id: id,
             actor_user_id: Some(caller.user_id()),
-            ip_address: None,
+            ip_address: caller.ip_address(),
             reason: None,
             old_value: Some(serde_json::json!({
                 "name": before.name,
@@ -503,7 +503,7 @@ pub async fn delete_tenant(
             object_type: "TENANT",
             object_id: id,
             actor_user_id: Some(caller.user_id()),
-            ip_address: None,
+            ip_address: caller.ip_address(),
             reason: None,
             old_value: None,
             new_value: None,

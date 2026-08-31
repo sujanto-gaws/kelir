@@ -423,6 +423,12 @@ pub async fn change_own_password(
     user_id: Uuid,
     current_password: &str,
     new_password: &str,
+    // **Threaded rather than dropped** (FR-AUD-005, #248). This function takes
+    // ids instead of an `Authenticated`, so it is one of three audit sites in
+    // the product that cannot reach the address through the caller — and it is
+    // the one where the address matters most, because a password change is the
+    // action an investigator asks *where from* about first.
+    ip_address: Option<&str>,
 ) -> Result<(), AppError> {
     crate::modules::identity::domain::validate_password_value(new_password)?;
 
@@ -454,7 +460,7 @@ pub async fn change_own_password(
                 object_type: "USER",
                 object_id: user_id,
                 actor_user_id: Some(user_id),
-                ip_address: None,
+                ip_address,
                 reason: Some("current password did not match"),
                 old_value: None,
                 new_value: None,
@@ -508,7 +514,7 @@ pub async fn change_own_password(
             object_type: "USER",
             object_id: user_id,
             actor_user_id: Some(user_id),
-            ip_address: None,
+            ip_address,
             reason: Some("changed by the account holder"),
             old_value: None,
             new_value: None,

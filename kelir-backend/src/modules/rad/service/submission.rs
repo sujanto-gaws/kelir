@@ -120,7 +120,7 @@ pub async fn submit_form(
             object_type: OBJECT_TYPE,
             object_id: id,
             actor_user_id: actor,
-            ip_address: None,
+            ip_address: caller.ip_address(),
             reason: None,
             old_value: None,
             // The payload is deliberately not in the record, for the reason a

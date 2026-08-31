@@ -136,7 +136,7 @@ pub async fn create_definition(
             object_type: DEFINITION_OBJECT_TYPE,
             object_id: id,
             actor_user_id: actor,
-            ip_address: None,
+            ip_address: caller.ip_address(),
             reason: None,
             old_value: None,
             // The definition itself is deliberately not in the record — the
@@ -231,7 +231,7 @@ pub async fn update_definition(
             object_type: DEFINITION_OBJECT_TYPE,
             object_id: id,
             actor_user_id: actor,
-            ip_address: None,
+            ip_address: caller.ip_address(),
             reason: None,
             old_value: Some(old_value),
             new_value: Some(new_value),
@@ -308,7 +308,7 @@ pub async fn publish_definition(
             object_type: DEFINITION_OBJECT_TYPE,
             object_id: id,
             actor_user_id: actor,
-            ip_address: None,
+            ip_address: caller.ip_address(),
             reason: None,
             old_value: Some(json!({ "status": before.status })),
             new_value: Some(json!({
@@ -396,7 +396,7 @@ pub async fn create_revision(
             object_type: DEFINITION_OBJECT_TYPE,
             object_id: new_id,
             actor_user_id: actor,
-            ip_address: None,
+            ip_address: caller.ip_address(),
             reason: None,
             old_value: None,
             new_value: Some(json!({
@@ -452,7 +452,7 @@ pub async fn delete_definition(
             object_type: DEFINITION_OBJECT_TYPE,
             object_id: id,
             actor_user_id: actor,
-            ip_address: None,
+            ip_address: caller.ip_address(),
             reason: None,
             old_value: Some(json!({
                 "workflowKey": before.workflow_key,

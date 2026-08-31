@@ -34,6 +34,13 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
   `clamav` service the system design reserved on 2026-08-11 is now in the
   compose stack, **sized rather than guessed**: ~1 GB resident, 25 MiB in
   ~169 ms, and no gain from concurrency.
+- **Attachments and comments reach the timeline** (FR-ACT-002, FR-ACT-003,
+  FR-ATT-008, FR-CMT-007, [#248](https://github.com/sujanto-gaws/kelir/issues/248)).
+  Attaching, downloading and commenting each write an event carrying the id of
+  what it describes, so a timeline can offer the file or the comment rather than
+  only mention that one exists. **A download that cannot be recorded is
+  refused**: if this product cannot note that somebody took a copy of a file, it
+  does not hand over the copy.
 - **A document has a timeline** (FR-ACT-001, FR-ACT-004,
   [#247](https://github.com/sujanto-gaws/kelir/issues/247)). `GET
   /api/v1/documents/{id}/activity` returns what happened to a document, newest
@@ -54,6 +61,19 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
   axum's own 400 and a null body. `crate::extract`'s header had claimed three
   extractors were enough for that property; the first route to take a file is
   what made the claim false.
+
+### Fixed
+
+- **`audit_events.ip_address` was always null** (FR-AUD-005,
+  [#248](https://github.com/sujanto-gaws/kelir/issues/248), decision **D-44**).
+  `middleware::client_address` resolved the caller's address and defended it
+  against a spoofed `X-Forwarded-For`, its own documentation said the audit row
+  keyed off it, and **all 53 audit call sites passed `None`** — so the column
+  read as evidence that the address had been unavailable. The resolved address
+  now travels on the authenticated caller, which made it one line at each site.
+  One site still passes `None` and always will: the first-run administrator is
+  created at startup with no request behind it, and an invented address is the
+  thing that module exists to prevent.
 
 ### Security
 

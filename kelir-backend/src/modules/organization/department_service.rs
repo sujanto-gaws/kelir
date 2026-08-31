@@ -129,7 +129,7 @@ pub async fn create_department(
             object_type: OBJECT_TYPE,
             object_id: id,
             actor_user_id: actor,
-            ip_address: None,
+            ip_address: caller.ip_address(),
             reason: None,
             old_value: None,
             new_value: Some(json!({
@@ -246,7 +246,7 @@ pub async fn update_department(
             object_type: OBJECT_TYPE,
             object_id: id,
             actor_user_id: actor,
-            ip_address: None,
+            ip_address: caller.ip_address(),
             reason: None,
             old_value: Some(old_value),
             new_value: Some(new_value),
@@ -302,7 +302,7 @@ pub async fn delete_department(
             object_type: OBJECT_TYPE,
             object_id: id,
             actor_user_id: actor,
-            ip_address: None,
+            ip_address: caller.ip_address(),
             reason: None,
             old_value: Some(json!({
                 "departmentId": before.department_code,

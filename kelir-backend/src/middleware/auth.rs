@@ -22,6 +22,21 @@ use crate::state::AppState;
 #[derive(Debug, Clone)]
 pub struct Authenticated {
     pub claims: AccessClaims,
+    /// Where the caller is talking from, as
+    /// [`ClientAddress`](crate::middleware::client_address::ClientAddress)
+    /// resolved it (FR-AUD-005, **D-44**).
+    ///
+    /// **`None` rather than a guess**, and the distinction is the whole point of
+    /// the module that produces it: an address a caller could choose is worse
+    /// than no address, because it looks like evidence. A request that arrives
+    /// without connection info — which no served request does — records nothing
+    /// rather than something forgeable.
+    ///
+    /// It lives here so that every audited action can reach it without a change
+    /// of signature: a service that already takes an `&Authenticated` already
+    /// has the address, which is what turned 53 audit call sites passing `None`
+    /// into a one-line change each.
+    address: Option<String>,
 }
 
 impl Authenticated {
@@ -31,6 +46,18 @@ impl Authenticated {
 
     pub fn tenant_id(&self) -> uuid::Uuid {
         self.claims.tenant_id
+    }
+
+    /// Where the caller is talking from, for the audit row (FR-AUD-005).
+    ///
+    /// **This is the value `middleware::client_address` promised and did not
+    /// deliver.** Its own documentation said *two things key off this value: the
+    /// authentication rate limiter and the `ip_address` column on every audit
+    /// row* — and all 53 audit call sites passed `None`, so the column was
+    /// always null while the sentence read as though it were not. **D-44** found
+    /// it; [#248](https://github.com/sujanto-gaws/kelir/issues/248) closes it.
+    pub fn ip_address(&self) -> Option<&str> {
+        self.address.as_deref()
     }
 
     /// The caller's name **as the token carries it**.
@@ -79,7 +106,16 @@ impl FromRequestParts<AppState> for Authenticated {
         let token = bearer_token(header).ok_or(AppError::Unauthorized)?;
         let claims = verify_access_token(&state.config.jwt_secret, token)?;
 
-        Ok(Self { claims })
+        // **Resolved here, not at the call site** (#248 AC4). An address taken
+        // from a header where it is used is an address the caller chose; this
+        // one has been through the hop-counting the deployment configured.
+        let address =
+            crate::middleware::client_address::ClientAddress::from_request_parts(parts, state)
+                .await
+                .ok()
+                .map(|address| address.to_string());
+
+        Ok(Self { claims, address })
     }
 }
 
@@ -124,6 +160,7 @@ mod tests {
     #[test]
     fn grants_a_held_permission() {
         let caller = Authenticated {
+            address: None,
             claims: claims_with(&["identity:user:read", "identity:user:update"]),
         };
 
@@ -133,6 +170,7 @@ mod tests {
     #[test]
     fn refuses_a_permission_that_is_not_held() {
         let caller = Authenticated {
+            address: None,
             claims: claims_with(&["identity:user:read"]),
         };
 
@@ -145,12 +183,14 @@ mod tests {
         // A prefix must not grant a longer permission, or holding
         // `identity:user:read` would imply `identity:user:read-secrets`.
         let caller = Authenticated {
+            address: None,
             claims: claims_with(&["identity:user"]),
         };
 
         assert!(caller.require("identity:user:read").is_err());
 
         let broader = Authenticated {
+            address: None,
             claims: claims_with(&["identity:user:read"]),
         };
         assert!(broader.require("identity:user").is_err());
@@ -185,7 +225,10 @@ mod tests {
         .expect("issues");
 
         let claims = verify_access_token(secret, &token).expect("verifies");
-        let caller = Authenticated { claims };
+        let caller = Authenticated {
+            claims,
+            address: None,
+        };
 
         assert_eq!(caller.user_id(), user_id);
         assert!(caller.require("identity:user:read").is_ok());
