@@ -60,12 +60,19 @@ jobs:
           --health-timeout 3s
           --health-retries 10
 
+      clamav:
+        image: clamav/clamav:latest
+        ports:
+          - 3310:3310
+
     env:
       DATABASE_URL: postgres://kelir:kelir@localhost:5432/kelir
       KELIR_STORAGE_ENDPOINT: http://localhost:9000
       KELIR_STORAGE_BUCKET: kelir-test
       KELIR_STORAGE_ACCESS_KEY: minioadmin
       KELIR_STORAGE_SECRET_KEY: minioadmin
+      KELIR_CLAMAV_HOST: localhost
+      KELIR_CLAMAV_PORT: 3310
 
     steps:
       - uses: actions/checkout@v7
@@ -87,6 +94,28 @@ jobs:
       # can create buckets can create the one an attacker names.
       # `deploy/docker`'s `minio-init` service does the same thing for the
       # compose stack.
+      # The scanner the attachment tests need (#246). **A service container
+      # works here where MinIO's did not**: `clamav/clamav` starts clamd from
+      # its own entrypoint with no command, which is exactly the thing a service
+      # container cannot supply.
+      #
+      # It costs about a gigabyte of image and twenty seconds of start-up, and
+      # it buys the two answers only a real scanner gives: that a signature
+      # matches and that a clean file comes back clean. The replies clamd will
+      # not produce on demand — the ERROR, the silence — are driven by a
+      # scripted listener inside the test, which speaks the protocol the
+      # measurement pinned.
+      - name: Wait for the scanner
+        run: |
+          for i in $(seq 1 60); do
+            if docker run --rm --network host --entrypoint clamdscan \
+                 clamav/clamav:latest --ping 1 >/dev/null 2>&1; then
+              echo "clamd answered after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "clamd never answered"; exit 1
+
       - name: Start object storage and create its bucket
         run: |
           docker run -d --name minio --network host \

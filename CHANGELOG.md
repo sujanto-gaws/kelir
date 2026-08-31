@@ -27,6 +27,13 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
   statement is scoped by document as well as by id, so an attachment hanging on
   a document the caller cannot read is *not found* rather than found and
   refused — the answer is the same whether or not it exists.
+- **Attachments are scanned, and only a cleared file is served** (FR-ATT-001,
+  FR-ATT-002, [#246](https://github.com/sujanto-gaws/kelir/issues/246)). An
+  upload returns immediately with `virus_scan_status = PENDING`; a background
+  worker streams the bytes to ClamAV over INSTREAM and records what it says. The
+  `clamav` service the system design reserved on 2026-08-11 is now in the
+  compose stack, **sized rather than guessed**: ~1 GB resident, 25 MiB in
+  ~169 ms, and no gain from concurrency.
 - **A document carries a conversation** (FR-CMT-001,
   [#249](https://github.com/sujanto-gaws/kelir/issues/249)). `POST` and `GET
   /api/v1/documents/{id}/comments` add a comment and read a document's comments,
@@ -43,6 +50,17 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
 
 ### Security
 
+- **Nothing can produce a false `CLEAN`**, and three separate things hold it —
+  in three different places on purpose. The scanner client returns
+  `Result<ScanOutcome, ScanError>`, so *did not answer* is a different **type**
+  from *answered*; the worker writes a status only on the answered arm, leaving
+  an unreachable scanner's files `PENDING` and therefore undownloadable; and the
+  `UPDATE` writes only over `PENDING`, so no result can overwrite a decided row
+  and nothing moves back out of `INFECTED`. A reply the client does not
+  recognise is a refusal, not a pass.
+- **There is no setting that turns scanning off.** A deployment that loses its
+  scanner stops serving files rather than starting to serve unscanned ones. A
+  flag saying *skip the scan* would be a flag saying *serve unscanned bytes*.
 - **Nothing is served until a scan clears it.** Download refuses `PENDING`,
   `INFECTED` and `FAILED` alike, with three distinguishable messages, and
   `FAILED` is a refusal rather than a pass — a scan that could not run has
@@ -94,6 +112,14 @@ added to `document_type_attachment_rules`, whose `category_id` has been `NOT
 NULL` with no referent since `0015`. **Nothing has ever written that table**, so
 the constraint validates against no rows and the previous release starts against
 this schema unchanged.
+
+**The scanner is new and required.** `KELIR_CLAMAV_HOST` and
+`KELIR_CLAMAV_PORT` default to the compose stack's service;
+`KELIR_CLAMAV_POLL_SECONDS` bounds how long a file waits before anything looks
+at it. **`StreamMaxLength` on the scanner must be strictly greater than
+`KELIR_STORAGE_MAX_UPLOAD_BYTES`** — clamd's own sample config documents 25M,
+which is exactly the upload default, and at that value every maximum-size upload
+is refused by the scanner, recorded `FAILED`, and permanently undownloadable.
 
 **Two new limits, both configuration** (#245 AC5).
 `KELIR_STORAGE_MAX_UPLOAD_BYTES` defaults to 25 MB — the figure the scanner will

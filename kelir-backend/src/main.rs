@@ -65,6 +65,17 @@ async fn run() -> anyhow::Result<()> {
 
     let bind_address = config.bind_address.clone();
     let state = AppState::new(pool, config);
+
+    // **The scanner runs beside the server, not inside a request** (FR-ATT-001,
+    // coding standard §2.4). An upload returns as soon as the bytes are stored,
+    // with `virus_scan_status = PENDING`; this loop answers afterwards and the
+    // download refuses until it has. It is spawned rather than awaited for the
+    // obvious reason and detached rather than tracked for a less obvious one:
+    // there is nothing to shut it down cleanly *for*. Its only durable state is
+    // a row it did not move, and a scan interrupted by a restart is picked up
+    // by the next process because the row is still `PENDING`.
+    tokio::spawn(modules::attachment::worker::run(state.clone()));
+
     let app = router::create_router(state);
 
     let listener = tokio::net::TcpListener::bind(&bind_address).await?;
