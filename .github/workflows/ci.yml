@@ -60,24 +60,6 @@ jobs:
           --health-timeout 3s
           --health-retries 10
 
-      # Attachments put bytes in object storage, and the integration tests read
-      # them back out of it (#244). The harness's rule is that nothing is
-      # mocked — it already requires this postgres for the same reason — so a
-      # real S3 endpoint is what the attachment tests run against. An in-memory
-      # double would verify the double.
-      minio:
-        image: minio/minio:latest
-        env:
-          MINIO_ROOT_USER: minioadmin
-          MINIO_ROOT_PASSWORD: minioadmin
-        ports:
-          - 9000:9000
-        options: >-
-          --health-cmd "mc ready local"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 20
-
     env:
       DATABASE_URL: postgres://kelir:kelir@localhost:5432/kelir
       KELIR_STORAGE_ENDPOINT: http://localhost:9000
@@ -88,14 +70,32 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # **The bucket is created here and not by the application.** The
-      # credentials the backend holds can put and get objects in a bucket;
-      # a process that can create buckets can create the one an attacker names.
-      # `deploy/docker` does the same thing with a one-shot `mc` container.
-      - name: Create the attachment bucket
+      # Attachments put bytes in object storage and the integration tests read
+      # them back out of it (#244). The harness's rule is that nothing is mocked
+      # — it already requires the postgres above for the same reason — so a real
+      # S3 endpoint is what the attachment tests run against. An in-memory double
+      # would verify the double.
+      #
+      # **A step and not a service container**, which is the one thing this
+      # cannot be: a service container takes an image and no command, and
+      # `minio/minio` needs `server /data`. Given none it prints its usage and
+      # exits, the health check never passes, and the job fails in
+      # *Initialize containers* before a line of Rust is compiled.
+      #
+      # **The bucket is created here and not by the application.** The backend
+      # holds credentials that put and get objects in a bucket; a process that
+      # can create buckets can create the one an attacker names.
+      # `deploy/docker`'s `minio-init` service does the same thing for the
+      # compose stack.
+      - name: Start object storage and create its bucket
         run: |
+          docker run -d --name minio --network host \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio:latest server /data
           docker run --rm --network host --entrypoint sh minio/mc:latest -c \
-            "mc alias set ci http://localhost:9000 minioadmin minioadmin \
+            "until mc alias set ci http://localhost:9000 minioadmin minioadmin; \
+             do sleep 1; done \
              && mc mb --ignore-existing ci/kelir-test"
 
       - name: Install rustfmt and clippy
