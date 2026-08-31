@@ -59,6 +59,20 @@ services:
       KELIR_DATABASE_URL: postgres://kelir:${KELIR_DB_PASSWORD:?set KELIR_DB_PASSWORD}@${KELIR_DB_HOST:-host.docker.internal}:${KELIR_DB_PORT:-5432}/kelir
       KELIR_JWT_SECRET: ${KELIR_JWT_SECRET:?set KELIR_JWT_SECRET to a generated value}
       KELIR_STORAGE_DRIVER: s3
+      # **Object storage, addressed inside the stack** (#244). Without these the
+      # defaults point at `localhost:9000` *inside the backend container*, where
+      # nothing listens — so every upload failed and the minio service beside it
+      # held nothing. Found by the Sprint 12 exit demo, which is what an exit
+      # demo is for: no unit or integration test can see a deployment's wiring.
+      KELIR_STORAGE_ENDPOINT: http://minio:9000
+      KELIR_STORAGE_BUCKET: kelir
+      KELIR_STORAGE_ACCESS_KEY: ${KELIR_MINIO_USER:?set KELIR_MINIO_USER}
+      KELIR_STORAGE_SECRET_KEY: ${KELIR_MINIO_PASSWORD:?set KELIR_MINIO_PASSWORD}
+      # **The scanner** (#246). Absent from this stack until 2026-08-31, which
+      # meant every attachment stayed PENDING and nothing was ever downloadable
+      # — the safe direction, and not a working product.
+      KELIR_CLAMAV_HOST: clamav
+      KELIR_CLAMAV_PORT: 3310
       KELIR_SMTP_HOST: mailpit
       KELIR_SMTP_PORT: 1025
       # Staging sends to mailpit, so the sender is never delivered anywhere real.
@@ -98,6 +112,37 @@ services:
       MINIO_ROOT_PASSWORD: ${KELIR_MINIO_PASSWORD:?set KELIR_MINIO_PASSWORD}
     volumes:
       - minio-data:/data
+
+  # One shot: creates the bucket the backend expects and exits. **The
+  # application does not create it** — a process that can create buckets can
+  # create the one an attacker names — so the deployment provisions it, exactly
+  # as `deploy/docker` and CI's backend job do.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    entrypoint: sh
+    # **One physical line, and that is not a style choice.** A folded scalar
+    # keeps more-indented lines literal rather than folding them, so a `command`
+    # split for readability arrives as several shell commands: the first ran
+    # `mc alias set` with no credentials and the next two tried to execute the
+    # username and the password. The bucket was never created and every upload
+    # answered `NoSuchBucket`, which the Sprint 12 exit demo found and nothing
+    # else could — no test reads this file.
+    command: -c "until mc alias set kelir http://minio:9000 ${KELIR_MINIO_USER:?set KELIR_MINIO_USER} ${KELIR_MINIO_PASSWORD:?set KELIR_MINIO_PASSWORD}; do sleep 1; done && mc mb --ignore-existing kelir/kelir"
+
+  # The virus scanner (#246, **D-4**). **Sized 2026-08-31 rather than guessed**:
+  # ~1 GB resident, almost all of it the signature set, 25 MiB scanned in
+  # ~169 ms, and no gain from concurrency — one instance is the whole answer.
+  #
+  # **`StreamMaxLength` must stay strictly above KELIR_STORAGE_MAX_UPLOAD_BYTES.**
+  # clamd's own sample config documents 25M, which is exactly the upload limit;
+  # at that value every maximum-size upload is refused by the scanner, recorded
+  # FAILED and permanently undownloadable. This image's effective default is
+  # 100 MiB, which is why nothing is set here.
+  clamav:
+    image: clamav/clamav:latest
+    restart: unless-stopped
 
   # Staging captures mail rather than sending it, so testing notifications in
   # Phase 6 cannot reach real recipients. Its UI is deliberately not published —
