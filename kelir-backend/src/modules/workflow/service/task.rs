@@ -315,6 +315,25 @@ pub async fn delegate(
     )
     .await?;
 
+    crate::modules::activity::service::record(
+        &mut transaction,
+        &crate::modules::activity::service::Happening {
+            tenant_id,
+            document_id: Some(task.document_id),
+            workflow_instance_id: Some(task.workflow_instance_id),
+            task_id: Some(id),
+            attachment_id: None,
+            comment_id: None,
+            event_type: "Workflow.TaskDelegated",
+            category: crate::modules::activity::domain::EventCategory::Workflow,
+            actor_user_id: Some(user_id),
+            actor_name: Some(caller.username()),
+            action_summary: "Handed a task to somebody else",
+            details: serde_json::json!({ "delegateUserId": request.delegate_user_id }),
+        },
+    )
+    .await?;
+
     transaction.commit().await?;
 
     let delegated = load(state, tenant_id, id).await?;
@@ -570,6 +589,37 @@ pub async fn decide(
             // the person whose work they are doing.
             on_behalf_of: task.delegated_from_user_id,
             comment: comment.as_deref(),
+        },
+    )
+    .await?;
+
+    // **The timeline, in the decision's own transaction** (#247 AC2). Recorded
+    // here rather than inside `engine::fire` on purpose: the engine is a state
+    // machine that takes an actor's id and no name, and threading one through
+    // would grow the signature its own documentation defends. The service is
+    // where the caller, the transaction and the outcome are all in hand.
+    crate::modules::activity::service::record(
+        &mut transaction,
+        &crate::modules::activity::service::Happening {
+            tenant_id,
+            document_id: Some(task.document_id),
+            workflow_instance_id: Some(task.workflow_instance_id),
+            task_id: Some(id),
+            attachment_id: None,
+            comment_id: None,
+            event_type: "Workflow.Decided",
+            category: crate::modules::activity::domain::EventCategory::Workflow,
+            actor_user_id: Some(user_id),
+            actor_name: Some(caller.username()),
+            action_summary: "Decided a task",
+            details: serde_json::json!({
+                "action": action.as_db(),
+                "from": fired.from_state,
+                "to": fired.to_state,
+                // Whose authority, when a delegation put the task in this
+                // person's hands (#184 AC4). Absent on an ordinary decision.
+                "onBehalfOfUserId": task.delegated_from_user_id,
+            }),
         },
     )
     .await?;

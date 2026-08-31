@@ -126,6 +126,28 @@ pub async fn transition(
     )
     .await?;
 
+    crate::modules::activity::service::record(
+        &mut transaction,
+        &crate::modules::activity::service::Happening {
+            tenant_id,
+            document_id: Some(id),
+            workflow_instance_id: None,
+            task_id: None,
+            attachment_id: None,
+            comment_id: None,
+            event_type: "Document.StatusChanged",
+            category: crate::modules::activity::domain::EventCategory::Document,
+            actor_user_id: actor,
+            actor_name: Some(caller.username()),
+            action_summary: "Moved the document to another status",
+            details: serde_json::json!({
+                "from": current.as_db(),
+                "to": request.status.as_db(),
+            }),
+        },
+    )
+    .await?;
+
     transaction.commit().await?;
 
     audit::record_or_warn(

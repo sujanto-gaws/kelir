@@ -33,6 +33,17 @@ impl Authenticated {
         self.claims.tenant_id
     }
 
+    /// The caller's name **as the token carries it**.
+    ///
+    /// Denormalized into `activity_events.actor_name` at the moment something
+    /// happens (#247 AC5), so a rename does not rewrite the past. It comes off
+    /// the token rather than a query because an activity event is written in
+    /// the action's own transaction and must not add a lookup that could fail
+    /// after the action is decided.
+    pub fn username(&self) -> &str {
+        &self.claims.username
+    }
+
     /// Requires a permission, or fails with `Forbidden`.
     ///
     /// `Forbidden`, not `NotFound`: the caller is authenticated, so hiding the
