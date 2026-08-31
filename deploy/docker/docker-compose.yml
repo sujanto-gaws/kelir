@@ -45,6 +45,8 @@ services:
       - KELIR_STORAGE_BUCKET=kelir
       - KELIR_STORAGE_ACCESS_KEY=minioadmin
       - KELIR_STORAGE_SECRET_KEY=minioadmin
+      # 25 MB, and the same number the scanner is sized against (#245, #246).
+      - KELIR_STORAGE_MAX_UPLOAD_BYTES=26214400
       - KELIR_SMTP_HOST=mailpit
       # The container port, which is fixed; KELIR_SMTP_PORT in the environment
       # moves the host mapping only, and must not follow it in here.

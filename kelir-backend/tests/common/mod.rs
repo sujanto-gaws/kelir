@@ -361,6 +361,48 @@ impl TestApp {
         .await
     }
 
+    /// A GET whose response is **not** JSON.
+    ///
+    /// Every other helper here parses the body into a `Value`, which is right
+    /// for an API that answers in one envelope — and wrong for the one route
+    /// that answers with a file. This returns the bytes and the headers, because
+    /// for a download those *are* the response: the content type and the
+    /// disposition are the security-relevant half.
+    pub async fn get_raw(&self, uri: &str, token: Option<&str>) -> RawResponse {
+        let mut builder = Request::builder().method(Method::GET).uri(uri);
+
+        if let Some(token) = token {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+
+        let mut request = builder.body(Body::empty()).unwrap_or_else(|error| {
+            harness_failure("build a test request", &error.to_string(), uri)
+        });
+
+        request.extensions_mut().insert(ConnectInfo(TEST_PEER));
+
+        let response = self
+            .router()
+            .oneshot(request)
+            .await
+            .unwrap_or_else(|error| harness_failure("drive the router", &error.to_string(), uri));
+
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap_or_else(|error| {
+                harness_failure("read a response body", &error.to_string(), uri)
+            })
+            .to_vec();
+
+        RawResponse {
+            status,
+            headers,
+            bytes,
+        }
+    }
+
     /// A POST of a body this harness does not build for you.
     async fn send_raw(
         &self,
@@ -628,6 +670,23 @@ impl TestResponse {
     }
 }
 
+/// A response this harness did not parse — the file routes answer with bytes.
+pub struct RawResponse {
+    pub status: StatusCode,
+    pub headers: axum::http::HeaderMap,
+    pub bytes: Vec<u8>,
+}
+
+impl RawResponse {
+    /// One header as a `String`, or `None` when it is absent or not text.
+    pub fn header(&self, name: header::HeaderName) -> Option<String> {
+        self.headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Provisioning
 // ---------------------------------------------------------------------------
@@ -661,6 +720,15 @@ fn test_config(database_url: &str) -> AppConfig {
         storage_secret_key: env::var("KELIR_STORAGE_SECRET_KEY")
             .unwrap_or_else(|_| "minioadmin".to_owned()),
         storage_region: env::var("KELIR_STORAGE_REGION").unwrap_or_else(|_| "us-east-1".to_owned()),
+        // **A limit the tests can exceed without sending 25 MB.** The production
+        // default is 25 MB; a test that had to reach it would spend a second of
+        // wall clock proving a number. The refusal is the same one either way —
+        // the layer, not the size.
+        storage_max_upload_bytes: env::var("KELIR_STORAGE_MAX_UPLOAD_BYTES")
+            .ok()
+            .and_then(|raw| raw.parse().ok())
+            .unwrap_or(4096),
+        storage_allowed_mime_types: vec!["application/pdf".to_owned(), "image/png".to_owned()],
         // The harness uses a captured mailer, so this is never dialled — but a
         // host is left set deliberately: an empty one would exercise the
         // no-SMTP path rather than the one a deployment runs.

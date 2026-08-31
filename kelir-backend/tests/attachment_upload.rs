@@ -27,7 +27,12 @@ use uuid::Uuid;
 use common::{fixtures, TestApp};
 use kelir_backend::config::AppConfig;
 
-const FILE: &[u8] = b"a quotation, as a sequence of bytes";
+/// **A real PDF header, because the type check reads the bytes** (#245 AC4).
+///
+/// Before that check existed this was a sentence of prose declared as
+/// `application/pdf`, which is precisely the mismatch the check refuses: what a
+/// caller says a file is, against what it is.
+const FILE: &[u8] = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<<>>\n%%EOF\n";
 
 // ---------------------------------------------------------------------------
 // Fixtures — a document to attach something to

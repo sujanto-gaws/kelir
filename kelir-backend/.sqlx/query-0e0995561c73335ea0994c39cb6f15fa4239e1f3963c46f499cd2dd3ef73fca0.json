@@ -1,0 +1,79 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, document_id, original_file_name, mime_type, file_size, checksum,\n               description, virus_scan_status, created_at, created_by\n        FROM attachments\n        WHERE tenant_id = $1 AND document_id = $2 AND deleted_at IS NULL\n        ORDER BY created_at DESC, id DESC\n        LIMIT $3 OFFSET $4\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "document_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "original_file_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "mime_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "file_size",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "checksum",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "description",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "virus_scan_status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "created_by",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "0e0995561c73335ea0994c39cb6f15fa4239e1f3963c46f499cd2dd3ef73fca0"
+}
