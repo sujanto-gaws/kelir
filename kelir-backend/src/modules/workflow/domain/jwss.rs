@@ -105,6 +105,18 @@ const META_SCHEMA: &str = include_str!("../jwss-meta-v1.0.0.json");
 /// Listed here as well as in the meta-schema because S9 needs to reason about
 /// the set — *at least one state maps to `COMPLETED` or `CANCELLED`* — and a
 /// rule that reads a vocabulary it cannot name is a rule written twice.
+///
+/// **`DRAFT` is in this list on purpose, and `RESOLVABLE_ASSIGNEE_TYPES` below
+/// is what narrowing looks like when narrowing is right** (**D-46**, from
+/// [#278](https://github.com/sujanto-gaws/kelir/issues/278)). A non-final state
+/// mapping to `DRAFT` leaves the document editable while its approval runs, and
+/// that is what let a discard strand a live process. The fix was the guard, not
+/// this set: `DRAFT` is [JWSS §10]'s own example, Kelir projects it correctly,
+/// and `document::service::delete_document` now asks `workflow_instances`
+/// rather than reading a status as a proxy for one. `super`'s header carries
+/// the reasoning.
+///
+/// [JWSS §10]: ../../../../../docs/schema/JSON%20Workflow%20Schema.md
 const DOCUMENT_STATUSES: &[&str] = &[
     "DRAFT",
     "SUBMITTED",

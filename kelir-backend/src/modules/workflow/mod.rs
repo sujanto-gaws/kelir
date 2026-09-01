@@ -70,6 +70,42 @@
 //! this module ever grows a `match` from state code to document status, that
 //! requirement has been broken.
 //!
+//! ### And the whole enum is available, `DRAFT` included (D-46)
+//!
+//! [#278](https://github.com/sujanto-gaws/kelir/issues/278) asked whether a
+//! non-final state mapping to `DRAFT` should be refused at save time, because
+//! that mapping is what let a document be discarded while its approval ran.
+//! **It is not refused, and the guard it broke was the thing that was wrong.**
+//!
+//! Three reasons, and the first is the shortest: [JWSS §10]'s own worked example
+//! maps its initial state to `DRAFT`, so refusing it would make this
+//! implementation refuse the specification's example — which is the argument
+//! [`domain::jwss`] already makes one file over about S8 and a stateless wait.
+//!
+//! The second is that the mapping is not wrong. `DRAFT` means *this document is
+//! editable*, and a process that wants its subject editable while it runs is a
+//! modelling choice with no rule against it. What was wrong was one guard
+//! reading `status = 'DRAFT'` as *has no live process*.
+//!
+//! The third is that narrowing the vocabulary would not have fixed the class.
+//! `RETURNED` also runs with a live process by design and was excluded from
+//! `is_discardable` by hand; the next status the proxy was wrong about would
+//! have been a different one. `document::service::delete_document` now asks
+//! `workflow_instances`, which is the only form of the question that stays true
+//! whichever mapping an author picks.
+//!
+//! **The save-time narrowing this module does do is a different kind.**
+//! [`domain::jwss::RESOLVABLE_ASSIGNEE_TYPES`] refuses `MANAGER_OF_OWNER` and
+//! `EXPRESSION` (**D-37**) because Kelir *cannot resolve* them — a definition
+//! using one could never run. Kelir projects `DRAFT` perfectly well.
+//!
+//! **What D-46 does not settle** is that such a definition publishes with
+//! nothing said about it. That is the missing publish-WARNING channel
+//! [`domain::jwss`]'s header already records for S8, and it stays one gap
+//! rather than becoming two.
+//!
+//! [JWSS §10]: ../../../../docs/schema/JSON%20Workflow%20Schema.md
+//!
 //! # Two records of one decision, and the third that is not this sprint's
 //!
 //! `approval_decisions` and `workflow_task_history` are both written when a

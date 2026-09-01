@@ -64,6 +64,51 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
 
 ### Fixed
 
+- **A document with a live approval could be discarded, and the approval
+  survived it** (FR-DOC-005, FR-WF-003,
+  [#278](https://github.com/sujanto-gaws/kelir/issues/278), decision **D-46**).
+  `DELETE /api/v1/documents/{id}` asked one question — *is this a draft* — and
+  that was a **proxy** for *has no live process*. The proxy is false: a
+  workflow state's `mapsToDocumentStatus` may be `DRAFT`, the projection writes
+  what the state says by design, and JWSS §10's own worked example maps its
+  initial state that way. So a document could be `DRAFT` while holding a
+  number, a running instance and an open task.
+
+  What was left behind was worse than a wrong refusal. The document was
+  soft-deleted; the instance stayed `RUNNING` and kept holding the
+  one-live-instance index; **the task stayed claimable**, so an approver could
+  take it and only then find the document gone; and every decision after that
+  answered `404 Document`, because the read filters `deleted_at IS NULL`. The
+  process could not be moved again by anybody, an administrator included.
+
+  The delete now asks `workflow_instances` — the fact, not the status — under
+  the row lock the submit also takes, so a process starting alongside a discard
+  loses the race rather than being stranded by it. The refusal names the
+  instance, as the status route's does. **Reproduced before it was fixed**: the
+  finding came from a pass with no toolchain and had been traced in source
+  rather than run.
+
+  **A state mapping to `DRAFT` stays permitted** (D-46). It is the
+  specification's own example, Kelir projects it correctly, and refusing it
+  would not have closed the class — `RETURNED` runs with a live process too.
+
+  **No migration, and nothing repairs a strand that already happened.** Every
+  definition in this repository maps its running states to `PENDING_APPROVAL`
+  or `IN_REVIEW`, so no deployment built from these fixtures can have reached
+  it; a tenant that authored its own definition can find out with
+
+  ```sql
+  SELECT i.id, i.document_id
+  FROM   workflow_instances i JOIN documents d ON d.id = i.document_id
+  WHERE  i.status IN ('STARTED', 'RUNNING', 'SUSPENDED')
+    AND  d.deleted_at IS NOT NULL;
+  ```
+
+  Rows that come back are instances with nothing to decide. Clearing
+  `documents.deleted_at` makes them decidable again, and that is a deliberate
+  act on a support engineer's part rather than something this release does on
+  its own — an undelete is not a thing this product otherwise has.
+
 - **`audit_events.ip_address` was always null** (FR-AUD-005,
   [#248](https://github.com/sujanto-gaws/kelir/issues/248), decision **D-44**).
   `middleware::client_address` resolved the caller's address and defended it

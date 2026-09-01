@@ -393,6 +393,33 @@ pub async fn update_document(
 /// deleted: the two answer different questions — "I opened this by mistake"
 /// against "this request is withdrawn" — and the second has to leave a row an
 /// auditor can find, which is [`super::status`]'s transition.
+///
+/// # Two rules, because one of them was a proxy for the other
+///
+/// *Only a draft* was doing two jobs until
+/// [#278](https://github.com/sujanto-gaws/kelir/issues/278): it said what a
+/// discard is *for*, and it stood in for **has no live process**. The second
+/// job was one it could not do. A state's `mapsToDocumentStatus` may be `DRAFT`
+/// — the platform enum carries it, S9 narrows only the final end of the set,
+/// and [JWSS §10]'s own worked example maps its initial state that way — and
+/// `engine::project_document_status` writes what the state says, by design
+/// (#178 AC4). So a document can be `DRAFT` while its approval is running,
+/// holding a number, a live instance and an open task, and the proxy is false.
+///
+/// What was left afterwards was worse than a wrong refusal: `deleted_at` set,
+/// the instance still `RUNNING` and still holding the one-live-instance index,
+/// the task still open — and every later decision answering **404 Document**,
+/// because `find_document` filters `deleted_at IS NULL`. The process could not
+/// be moved again by anybody, including an administrator.
+///
+/// So [`refuse_unless_discardable`] keeps the rule a status really does decide
+/// — *a document with a number is withdrawn, not discarded* — and
+/// [`refuse_while_a_workflow_is_deciding`] asks `workflow_instances` the
+/// question a status was never able to answer. In that order, for the reason
+/// given at the call site: both refuse, and only the first can say anything
+/// useful to somebody holding a document that is not a draft.
+///
+/// [JWSS §10]: ../../../../../docs/schema/JSON%20Workflow%20Schema.md
 pub async fn delete_document(
     state: &AppState,
     caller: &Authenticated,
@@ -413,7 +440,27 @@ pub async fn delete_document(
         .await?
         .ok_or_else(|| AppError::not_found("Document"))?;
 
+    // **The status first, then the fact, and the order is a message rather than
+    // a rule** (#278). Both refuse; only one of them can say something useful
+    // about a document that is not a draft. `RETURNED` is the case that proves
+    // it: it has no open task — the document is back with its author — so
+    // *act on the task instead* would be advice pointing at nothing, where
+    // `not_discardable` names where the document is and what to do with it.
+    //
+    // Nothing is lost by going second. `is_discardable` admits `DRAFT` alone,
+    // so `DRAFT` is the entire set this check has to cover — and `DRAFT` is
+    // exactly where the proxy was false. Should that set ever widen, this runs
+    // over the wider one without being told.
     refuse_unless_discardable(&locked)?;
+
+    // **Under the lock, and that is the whole of why this one is not the status
+    // route's read on the pool** (#278 AC1). `submit` takes `lock_document` on
+    // this same row before it starts an instance, so a process that begins
+    // between a check and this write is a process that has to wait for the
+    // lock — and then finds `deleted_at IS NULL` false and answers 404 rather
+    // than starting. The status route's equivalent may read on the pool because
+    // it asks whether its *surface* applies; this one guards a write.
+    refuse_while_a_workflow_is_deciding(&mut transaction, tenant_id, id).await?;
 
     if repo::soft_delete(&mut *transaction, tenant_id, id, actor).await? == 0 {
         return Err(not_discardable(&locked));
@@ -499,11 +546,19 @@ fn refuse_unless_editable(locked: &LockedDocument) -> Result<(), AppError> {
 ///
 /// **Separate from [`refuse_unless_editable`] since [#183]**, and the two now
 /// differ on exactly one status. A returned document may be *edited* and may
-/// not be *discarded*: it holds a number, a status history and a live process
-/// waiting for it to come back, so deleting it would strand the instance that
-/// returned it.
+/// not be *discarded*: it holds a number and a status history, so deleting it
+/// would retire a number an auditor can see was issued.
+///
+/// **The live process is no longer this function's argument** ([#278]). It was
+/// part of the reason `RETURNED` was excluded here, and it was the part a
+/// status cannot answer: `DRAFT` is a mapping a definition may choose, so a
+/// document in it may have a process too. [`refuse_while_a_workflow_is_deciding`]
+/// asks that question of the table it lives in, for every status at once, and
+/// what is left here is the rule a status really does decide — *a document with
+/// a number is withdrawn, not discarded*.
 ///
 /// [#183]: https://github.com/sujanto-gaws/kelir/issues/183
+/// [#278]: https://github.com/sujanto-gaws/kelir/issues/278
 fn refuse_unless_discardable(locked: &LockedDocument) -> Result<(), AppError> {
     if locked.status.is_discardable() {
         return Ok(());
@@ -518,6 +573,51 @@ fn not_editable(locked: &LockedDocument) -> AppError {
          edited; a submitted document is moved through PUT /documents/{{id}}/status",
         locked.status.as_db()
     ))
+}
+
+/// Refuses a discard of a document a workflow is deciding, **naming the
+/// instance** ([#278](https://github.com/sujanto-gaws/kelir/issues/278) AC1,
+/// AC2).
+///
+/// # Why this reads the table and `refuse_unless_discardable` reads a status
+///
+/// *Has a live process* is a fact about `workflow_instances`. The status was a
+/// proxy for it and the proxy is false, because `mapsToDocumentStatus` may say
+/// `DRAFT` and the projection writes what the state says (#178 AC4). Asking
+/// `workflow_instances` is the only form of the question that stays true when a
+/// definition author picks a mapping nobody anticipated — which is what #278
+/// is, and what makes this a class rather than one status.
+///
+/// **Run on the transaction, under `lock_document`'s `FOR UPDATE`.**
+/// [`super::status::transition`]'s equivalent reads on the pool and its own
+/// documentation explains why that is right *there*: it decides whether a
+/// surface applies, and a process starting a microsecond later is an ordering
+/// no lock improves. Here the check guards a write that would strand whatever
+/// it missed, and `submit` takes the same row lock before starting an instance
+/// — so under the lock the window closes rather than narrowing.
+async fn refuse_while_a_workflow_is_deciding(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<(), AppError> {
+    let Some(instance_id) =
+        crate::modules::workflow::repository::instance::live_instance_of_document(
+            &mut **transaction,
+            tenant_id,
+            id,
+        )
+        .await?
+    else {
+        return Ok(());
+    };
+
+    Err(AppError::conflict(format!(
+        "this document is being decided by workflow instance {instance_id}; \
+         discarding it would strand that process, and nothing could move it \
+         afterwards — not even an administrator, because every later decision \
+         would answer 404 for a document that is no longer there. Act on the \
+         task instead"
+    )))
 }
 
 fn not_discardable(locked: &LockedDocument) -> AppError {
