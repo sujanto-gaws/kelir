@@ -9,6 +9,17 @@
 
 set -euo pipefail
 
+# **Characters, not bytes.** `${#var}` counts bytes under a `C` locale, which is
+# what a CI runner often has, so a header carrying an em-dash — and this project
+# writes a lot of them — measures two longer there than on the author's machine.
+# The convention says 72 *characters*, and a rule whose answer depends on where
+# it is checked is not one.
+#
+# Forced rather than defaulted, because inheriting `LC_ALL=C` is the case this
+# exists for. Where `C.UTF-8` is unavailable libc falls back to `C` and the
+# count reverts to bytes, which is no worse than not setting it.
+export LC_ALL=C.UTF-8
+
 BASE_REF="${1:?usage: check-commit-messages.sh <base-ref> [head-ref]}"
 HEAD_REF="${2:-HEAD}"
 

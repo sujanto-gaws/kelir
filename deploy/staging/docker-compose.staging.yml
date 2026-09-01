@@ -129,7 +129,14 @@ services:
     # username and the password. The bucket was never created and every upload
     # answered `NoSuchBucket`, which the Sprint 12 exit demo found and nothing
     # else could — no test reads this file.
-    command: -c "until mc alias set kelir http://minio:9000 ${KELIR_MINIO_USER:?set KELIR_MINIO_USER} ${KELIR_MINIO_PASSWORD:?set KELIR_MINIO_PASSWORD}; do sleep 1; done && mc mb --ignore-existing kelir/kelir"
+    #
+    # **And it ends by checking what it was for**, which is the half that would
+    # have caught the above without a demo. `mc mb` succeeding proves nothing:
+    # a shell that cannot find a command still exits 0 if the last one
+    # succeeded, so this container reported success while creating nothing. The
+    # trailing `mc ls kelir/kelir` fails when the bucket is not there, and a
+    # one-shot container that fails is one somebody sees.
+    command: -c "until mc alias set kelir http://minio:9000 ${KELIR_MINIO_USER:?set KELIR_MINIO_USER} ${KELIR_MINIO_PASSWORD:?set KELIR_MINIO_PASSWORD}; do sleep 1; done && mc mb --ignore-existing kelir/kelir && mc ls kelir/kelir"
 
   # The virus scanner (#246, **D-4**). **Sized 2026-08-31 rather than guessed**:
   # ~1 GB resident, almost all of it the signature set, 25 MiB scanned in
