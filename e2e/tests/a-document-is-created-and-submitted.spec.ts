@@ -199,6 +199,29 @@ test('a document is created from a type, filled in, submitted, found and moved',
   // value that is simply true now.
   await expect(page.getByTestId('document-history')).toContainText('Draft')
   await expect(page.getByTestId('document-history')).toContainText('Submitted')
+
+  // --- And the activity says what happened, which History does not ---------
+  //
+  // **MVP criterion 12** (FR-ACT-005, #250). The events have existed since
+  // Sprint 12 and nothing read them; this is the first assertion in a browser
+  // that a person can see them.
+  //
+  // **Two tabs, two questions, and this is where they are told apart.**
+  // History above is this document's *status changes*. Activity is everything
+  // that happened to it, from four sources — which is why the assertions below
+  // are on entries History cannot contain.
+  await page.getByTestId('tab-activity').click()
+
+  await expect(page.getByTestId('activity-list')).toContainText('Created the document')
+  await expect(page.getByTestId('activity-list')).toContainText('Submitted the document')
+
+  // **The actor as recorded** (#250 AC4), and the source label (#250 AC3) —
+  // the label is what lets a reader tell an empty category from a missing one.
+  await expect(page.getByTestId('activity-list')).toContainText(credentials().username)
+  await expect(page.getByTestId('activity-category').first()).toHaveText('Document')
+
+  // **#250 AC5**, in the place somebody would otherwise merge the two records.
+  await expect(page.getByTestId('activity-not-audit')).toContainText('not the audit trail')
 })
 
 test('a tab a later phase fills says what will fill it', async ({ page }) => {

@@ -283,11 +283,38 @@ async fn an_event_from_another_tenant_is_refused_by_the_query() {
     );
 }
 
-/// **`activity:read` is not `document:read`** (coding standard §2.9).
+/// **Reading a document is permission to read its timeline, and nothing else
+/// is asked for** ([#250] AC2, **D-47**).
 ///
-/// **Seen red, 2026-08-31**, with `caller.require(ACTIVITY_READ)?` deleted.
+/// # This test asserted the opposite until 2026-09-01, and the inversion is the
+/// decision
+///
+/// It was `reading_a_document_is_not_permission_to_read_its_timeline`, and it
+/// was right about the code and wrong about the product. `activity:read` was
+/// the only thing between a document's reader and the attachment names an entry
+/// used to carry — a job nothing had given it, done badly, since one grant
+/// opened all three surfaces at once. **D-45** took that detail out; what an
+/// entry says now is the document's own history, which `document:read` covers
+/// by definition.
+///
+/// The four-record table in `modules::activity`, `0033_activity.sql`'s
+/// `COMMENT ON TABLE` and [Database Schema] §10 all said *behind that
+/// document's own read permission* from the start. This is the code agreeing
+/// with them.
+///
+/// **The mutation for this is not a deleted guard**, because the guard is the
+/// absence of one. It is `caller.require(ACTIVITY_READ)?` **restored** to
+/// `service::list_activity` — the line D-47 removed — which turns this 200 into
+/// a 403. Seen red that way, 2026-09-01.
+///
+/// **`document:read` is still load-bearing**, and the second half asserts it:
+/// a caller holding neither reads no timeline, so this is one permission moving
+/// rather than a gate disappearing.
+///
+/// [#250]: https://github.com/sujanto-gaws/kelir/issues/250
+/// [Database Schema]: ../../docs/design/02.%20Database%20Schema.md
 #[tokio::test]
-async fn reading_a_document_is_not_permission_to_read_its_timeline() {
+async fn reading_a_document_is_permission_to_read_its_timeline() {
     let app = TestApp::spawn().await;
     let token = app.administrator_token().await;
     let type_id = document_type(&app, &token, "PR_ACT_ISOLATE").await;
@@ -318,14 +345,60 @@ async fn reading_a_document_is_not_permission_to_read_its_timeline() {
         .await;
     assert_eq!(readable.status, StatusCode::OK, "{}", readable.body);
 
-    let refused = app
+    // This account holds no permission whose name contains `activity`, which is
+    // the state a deployment leaves whoever raises documents in.
+    let listed = app
         .get(
             &format!("/api/v1/documents/{document}/activity"),
             Some(&reader),
         )
         .await;
 
-    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+    assert_eq!(
+        listed.status,
+        StatusCode::OK,
+        "a person who may read this document may not see what happened to it: {}",
+        listed.body
+    );
+    assert_eq!(listed.body["data"][0]["eventType"], "Document.Created");
+
+    // **And the gate that is left still holds.** A caller with neither
+    // permission reads nothing — the document's own read is refusing this, one
+    // service call down, which is what makes D-47 a permission moving rather
+    // than a permission going away.
+    let stranger_role = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "ROLE-ACT-STRANGER",
+        &["activity:read"],
+    )
+    .await;
+
+    fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "act-stranger",
+        "act-stranger@example.test",
+        common::ADMIN_PASSWORD,
+        &[stranger_role],
+    )
+    .await;
+
+    let stranger = app.sign_in("act-stranger", common::ADMIN_PASSWORD).await;
+
+    let refused = app
+        .get(
+            &format!("/api/v1/documents/{document}/activity"),
+            Some(&stranger),
+        )
+        .await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::FORBIDDEN,
+        "a caller who may not read the document read its timeline: {}",
+        refused.body
+    );
 }
 
 /// **The timeline is not the audit trail**, asserted over the rows.
