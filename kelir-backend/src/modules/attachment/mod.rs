@@ -10,6 +10,16 @@
 //!   and the download, both added by
 //!   [#245](https://github.com/sujanto-gaws/kelir/issues/245).
 //!
+//! **The rule covers the name, and it took [#292] to make that true.** An
+//! attachment being as private as its document was enforced here and nowhere
+//! else, so the activity timeline — which asks for `activity:read` and the
+//! document's read and no more — served every file's original name and size to
+//! callers holding no `attachment:read` at all. A file name is routinely the
+//! sensitive part. **D-45** took the detail out of the event and left the
+//! `attachment_id` in its place, so the name comes from here or from nowhere.
+//!
+//! [#292]: https://github.com/sujanto-gaws/kelir/issues/292
+//!
 //! There is no `attachment:delete`. Soft-delete is FR-ATT-006 and Sprint 13, and
 //! a permission row nothing checks is the `delegations` situation **D-13** spent
 //! two decisions undoing.

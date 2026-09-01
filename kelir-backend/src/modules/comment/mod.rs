@@ -40,6 +40,15 @@
 //! and the same reasoning: a thing that hangs on a document cannot be more
 //! visible than the document.
 //!
+//! **And the timeline is inside that rule rather than beside it**
+//! ([#292](https://github.com/sujanto-gaws/kelir/issues/292), **D-45**). The
+//! `Comment.Added` event never carried the body — `service::add_comment` drew
+//! that line in the commit that wrote it — but it carried the body's
+//! **length**, which is a
+//! measurement of a thing the reader may not read. It now carries the
+//! `comment_id` and nothing else, so what a comment says and how much of it
+//! there is are both answers this module gives.
+//!
 //! There is no `comment:update` and no `comment:delete`. Editing and deleting
 //! are FR-CMT-003 and Sprint 13, and a permission row nothing checks is the
 //! `delegations` situation **D-13** spent two decisions undoing.

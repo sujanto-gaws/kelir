@@ -850,6 +850,27 @@ async fn a_delegated_decision_records_both_parties_in_the_history() {
 
     assert_eq!(approval["actorUsername"], "dlg-ac4-budi");
     assert_eq!(approval["onBehalfOfUsername"], "dlg-ac4-ani");
+
+    // **And the timeline does not say it** ([#292](https://github.com/sujanto-gaws/kelir/issues/292),
+    // **D-45**). The pair belongs to *how did this document get here*, which is
+    // the history's question and is behind the workflow's own read; the
+    // timeline answers *what happened to this document*, and what happened is
+    // that it was approved. The two records are one row apart here on purpose.
+    let timeline: Value = sqlx::query_scalar(
+        "SELECT details_json FROM activity_events \
+         WHERE document_id = $1 AND event_type = 'Workflow.Decided'",
+    )
+    .bind(document)
+    .fetch_one(&app.pool)
+    .await
+    .expect("the decision's timeline entry");
+
+    assert_eq!(timeline["action"], "APPROVE");
+    assert!(
+        timeline.get("onBehalfOfUserId").is_none(),
+        "the delegation's second party is written into the timeline, where the \
+         reader needs no workflow permission to see it: {timeline}"
+    );
 }
 
 /// A decision nobody was standing in for records no second party.

@@ -329,7 +329,11 @@ pub async fn delegate(
             actor_user_id: Some(user_id),
             actor_name: Some(caller.username()),
             action_summary: "Handed a task to somebody else",
-            details: serde_json::json!({ "delegateUserId": request.delegate_user_id }),
+            // **Not who it went to** (#292 AC2, **D-45**). The second party to a
+            // delegation is the workflow's fact, kept in `workflow_history` and
+            // on the task itself, both behind the workflow's own read. The
+            // `task_id` above is how a reader who holds it gets there.
+            details: serde_json::json!({}),
         },
     )
     .await?;
@@ -612,13 +616,17 @@ pub async fn decide(
             actor_user_id: Some(user_id),
             actor_name: Some(caller.username()),
             action_summary: "Decided a task",
+            // **What was decided stays; on whose behalf does not**
+            // (#292 AC2, **D-45**). The action and the two states are what
+            // moved *this document*, which is the question the timeline exists
+            // to answer and which the document's own read already covers.
+            // `onBehalfOfUserId` answers a different one — that a delegation
+            // happened and who was behind it (#184 AC4) — and `workflow_history`
+            // keeps it, behind the workflow's read.
             details: serde_json::json!({
                 "action": action.as_db(),
                 "from": fired.from_state,
                 "to": fired.to_state,
-                // Whose authority, when a delegation put the task in this
-                // person's hands (#184 AC4). Absent on an ordinary decision.
-                "onBehalfOfUserId": task.delegated_from_user_id,
             }),
         },
     )

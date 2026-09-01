@@ -5,7 +5,7 @@
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::domain::{ActivityEvent, EventCategory};
+use super::domain::{self, ActivityEvent, EventCategory};
 use super::repository as repo;
 use super::ACTIVITY_READ;
 use crate::error::AppError;
@@ -90,6 +90,22 @@ pub async fn record(
 /// the rule `modules::attachment` and `modules::comment` both state, for the
 /// same reason: a thing that hangs on a document cannot be more visible than the
 /// document.
+///
+/// # And a third rule, one line below the other two
+///
+/// **Two permissions are all this asks for, and that is why the entries carry
+/// nothing a third would have guarded** ([#292], **D-45**). An attachment's
+/// name, a comment's length and the second party to a delegation are behind
+/// `attachment:read`, `comment:read` and the workflow's own read; a timeline
+/// repeating them would be a fourth surface answering three other modules'
+/// questions without asking their permissions.
+///
+/// The write paths no longer produce those keys. [`domain::disclosable`] is
+/// what makes that true of the **rows already in the table**, which no fix to a
+/// writer can reach — `activity_events` is append-only, so the boundary is the
+/// only place left that can hold them.
+///
+/// [#292]: https://github.com/sujanto-gaws/kelir/issues/292
 pub async fn list_activity(
     state: &AppState,
     caller: &Authenticated,
@@ -101,6 +117,12 @@ pub async fn list_activity(
     let document = document_service::get_document(state, caller, document_id).await?;
     let tenant_id = caller.tenant_id();
 
+    // **The count and the page are drawn under the same predicate** (#247 AC6),
+    // and D-45 is what keeps that true: redacting a field changes what an entry
+    // says and never whether it is there, so no entry is dropped and the total
+    // still counts what the page is a page of. Filtering entries by the reader —
+    // the other shape #292 offered — is what would have put these two statements
+    // into disagreement.
     let total = repo::count_for_document(&state.pool, tenant_id, document.id).await?;
     let events = repo::list_for_document(
         &state.pool,
@@ -110,6 +132,14 @@ pub async fn list_activity(
         pagination.offset(),
     )
     .await?;
+
+    let events = events
+        .into_iter()
+        .map(|event| ActivityEvent {
+            details: domain::disclosable(&event.event_type, event.details),
+            ..event
+        })
+        .collect();
 
     Ok((events, pagination.meta(total.max(0) as u64)))
 }

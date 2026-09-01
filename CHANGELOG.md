@@ -77,6 +77,33 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
 
 ### Security
 
+- **A document's timeline no longer names the files on it**
+  (FR-ACT-001, FR-ATT-002, [#292](https://github.com/sujanto-gaws/kelir/issues/292),
+  decision **D-45**). Reading a timeline takes `activity:read` and the
+  document's own read — and the entries carried an attachment's **original file
+  name** and size, a comment's length, and the second party to a delegated
+  decision. So a caller holding neither `attachment:read` nor `comment:read`
+  learned the name of every file on the document, and a file name is routinely
+  the sensitive part: *2026-redundancy-list.pdf* needs no contents to do damage.
+  Not a leak across tenants or documents — both are in the statement — but a
+  **missing second permission**.
+
+  **The entry now carries the link and not the subject.** Nothing is lost, only
+  put back where it was already guarded: the name is in `attachments` behind
+  `attachment:read`, the comment and its length in `comments` behind
+  `comment:read`, the delegation's second party in `workflow_history` behind the
+  workflow's read — and `attachmentId`, `commentId`, `taskId` and
+  `workflowInstanceId` are now served, so a reader who holds those permissions
+  has somewhere to go and ask. `Workflow.Decided` keeps `action`, `from` and
+  `to`, which are what moved *this document*. **The alternative — filtering
+  entries a caller may not read — was rejected** because it has to be
+  remembered by every module that adds an event type, and forgetting silently is
+  precisely the defect being fixed.
+
+  **Rows written by `0.5.x` are covered too.** `activity_events` is append-only,
+  so the read serves each entry through an allow-list by event type — `{}` for
+  one it does not know — rather than trusting what is in the column.
+
 - **An activity event cannot outlive the action it describes.** It is written
   in the action's own transaction, where an audit row is written on its own
   connection and deliberately survives a failure — two function signatures hold
@@ -167,6 +194,16 @@ create the one an attacker names — so the compose stack grows a one-shot
 `minio-init` service and CI's backend job creates it before the tests run. A
 deployment that leaves object storage unconfigured still boots and serves every
 other route; uploads are refused with a message naming the variables.
+
+**The activity timeline's payload changed shape, and no migration goes with it**
+(#292, **D-45**). `GET /api/v1/documents/{id}/activity` gains
+`workflowInstanceId`, `taskId`, `attachmentId` and `commentId` — the columns
+`0033_activity.sql` has always written and nothing served — and its `details`
+object loses every key that described the entry's subject rather than the
+document. **Rows already in `activity_events` keep what they were written with**:
+the redaction happens at the read, because the table is append-only and there is
+no honest migration that edits history. Nothing in this repository consumed
+`details`; FR-ACT-005's screen is Sprint 13 and is written against the links.
 
 ## [0.5.0] — 2026-08-30
 
