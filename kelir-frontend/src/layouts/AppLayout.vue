@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import {
+  Bell,
   Building2,
   FileText,
   Inbox,
@@ -20,8 +21,10 @@ import { Button } from '@/components/ui/button'
 import { LOGIN_ROUTE_NAME } from '@/router/guards'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
+import { useNotificationStore } from '@/stores/notifications'
 
 const appStore = useAppStore()
+const notifications = useNotificationStore()
 const auth = useAuthStore()
 const route = useRoute()
 const router = useRouter()
@@ -52,6 +55,16 @@ const navigation = [
     icon: FileText,
     enabled: true,
     permission: 'document:read',
+  },
+  {
+    // #251. Below the two work queues and above the reference data, which is
+    // where it sits in a day: you look at what came to you, then at what is
+    // waiting, then at the things you need to fill a form in.
+    name: 'notifications',
+    label: 'Notifications',
+    icon: Bell,
+    enabled: true,
+    permission: 'notification:read',
   },
   {
     name: 'master-data',
@@ -96,6 +109,21 @@ const visibleNavigation = computed(() =>
 
 const currentTitle = computed(() =>
   typeof route.meta.title === 'string' ? route.meta.title : 'Kelir',
+)
+
+/**
+ * The badge, re-read whenever the person moves.
+ *
+ * **Not a timer.** Every navigation is a moment they are already looking at the
+ * shell, and it costs one small request at a point where one was being made
+ * anyway. A notification that arrives while a screen sits open is seen on the
+ * next move — a stated limit, and the thing that closes it is a delivery
+ * channel (#257) rather than a shorter interval.
+ */
+watch(
+  () => route.fullPath,
+  () => void notifications.refresh(),
+  { immediate: true },
 )
 
 const isSigningOut = ref(false)
@@ -164,11 +192,43 @@ async function signOut(): Promise<void> {
         <span v-if="auth.displayName" class="ml-auto text-sm text-muted-foreground">
           {{ auth.displayName }}
         </span>
+        <span v-else class="ml-auto" />
+
+        <!-- **The badge, and the only place a person learns something arrived
+             without having gone looking.** The count refreshes on navigation
+             rather than on a timer: a poll is a request per user per interval
+             for a number that is usually unchanged, and real-time delivery is a
+             channel (#257) rather than a shorter interval. -->
+        <RouterLink
+          v-if="auth.can('notification:read')"
+          :to="{ name: 'notifications' }"
+          class="relative"
+          data-testid="notifications-bell"
+        >
+          <Button
+            variant="ghost"
+            size="icon"
+            :aria-label="
+              notifications.unread > 0
+                ? `Notifications, ${notifications.unread} unread`
+                : 'Notifications'
+            "
+          >
+            <Bell class="size-4" aria-hidden="true" />
+          </Button>
+          <span
+            v-if="notifications.unread > 0"
+            class="absolute -right-1 -top-1 min-w-4 rounded-full bg-primary px-1 text-center text-[10px] leading-4 text-primary-foreground"
+            aria-hidden="true"
+            data-testid="notifications-badge"
+          >
+            {{ notifications.unread > 99 ? '99+' : notifications.unread }}
+          </span>
+        </RouterLink>
 
         <Button
           variant="ghost"
           size="icon"
-          :class="auth.displayName ? '' : 'ml-auto'"
           :aria-label="appStore.isDark ? 'Switch to light theme' : 'Switch to dark theme'"
           @click="appStore.toggleTheme()"
         >

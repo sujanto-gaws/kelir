@@ -7,7 +7,7 @@ use crate::health;
 use crate::middleware::cors::cors_layer;
 use crate::modules::{
     activity, attachment, auth, comment, document, document_type, identity, master_data,
-    organization, rad, task_inbox, workflow,
+    notification, organization, rad, task_inbox, workflow,
 };
 use crate::response::{ErrorBody, ErrorEnvelope, PageMeta};
 use crate::state::AppState;
@@ -101,6 +101,10 @@ use crate::state::AppState;
         attachment::handlers::list_attachments,
         attachment::handlers::download_attachment,
         activity::handlers::list_activity,
+        notification::handlers::list_notifications,
+        notification::handlers::unread_count,
+        notification::handlers::mark_read,
+        notification::handlers::mark_all_read,
         comment::handlers::add_comment,
         comment::handlers::list_comments,
         document::handlers::list_documents,
@@ -143,6 +147,9 @@ use crate::state::AppState;
         attachment::domain::VirusScanStatus,
         activity::domain::ActivityEvent,
         activity::domain::EventCategory,
+        notification::domain::Notification,
+        notification::domain::NotificationType,
+        notification::domain::UnreadCount,
         comment::domain::AddCommentRequest,
         comment::domain::Comment,
         health::HealthBody,
@@ -400,6 +407,9 @@ fn api_v1_router(state: AppState) -> Router<AppState> {
         )
         .nest("/workflow", workflow::handlers::routes())
         .nest("/tasks", task_inbox::handlers::routes())
+        // Top level and subject-less, beside the inbox rather than under a
+        // document: the caller's token is what says whose these are (#251).
+        .nest("/notifications", notification::handlers::routes())
         .nest("/organization", organization::handlers::routes())
 }
 

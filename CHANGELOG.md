@@ -13,6 +13,39 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
 
 ### Added
 
+- **The product tells people things** (FR-NTF-001, FR-NTF-002, FR-NTF-003,
+  [#251](https://github.com/sujanto-gaws/kelir/issues/251), decision **D-48**).
+  `0034_notification.sql`, an in-app notification centre at
+  `/notifications` with an unread badge in the shell, and two triggers: **a
+  task reaching somebody tells them**, and **a decision on somebody's document
+  tells whoever raised it**.
+
+  **Written in the transaction of the thing it announces.** A notification that
+  outlives a rolled-back approval is a lie somebody acts on; one lost when the
+  approval commits is a person who never heard, and nothing anywhere records
+  that they did not. `notify` takes the caller's transaction and returns its
+  error — `activity::record`'s shape, and deliberately not `audit`'s tolerated
+  failure.
+
+  **Delegation is honoured because the notification follows the task**, not the
+  definition: a window that redirected the task redirects the notification with
+  it, and the trigger is handed the task's own holder so re-resolving is not
+  something a future author can do by accident.
+
+  **A role task tells every current holder** (D-48). The inbox offers it to all
+  of them, so notifying one would be a lottery and notifying none would leave
+  this product's commonest approval shape silent. Those rows go stale when
+  somebody claims — they are a record of what reached you, and My Tasks is the
+  live view, which the centre says on the screen.
+
+  **Marking read is idempotent**, and a second call does not move the
+  timestamp. **Nothing notifies about lateness** (FR-NTF-006/007 are `Could`
+  and unscheduled, and depend on FR-WF-010, which is too), **nothing sends
+  email** (FR-NTF-004 is [#257](https://github.com/sujanto-gaws/kelir/issues/257),
+  and this migration creates its three tables unwritten), and there are **no
+  preferences** (FR-NTF-005, unscheduled) — every account with the permission
+  gets everything addressed to it.
+
 - **A document has an activity timeline, on a screen** (FR-ACT-005,
   [#250](https://github.com/sujanto-gaws/kelir/issues/250), decision **D-47**).
   **SRS §9 criterion 12.** Sprint 12 wrote the events and nothing read them —
@@ -285,6 +318,18 @@ create the one an attacker names — so the compose stack grows a one-shot
 `minio-init` service and CI's backend job creates it before the tests run. A
 deployment that leaves object storage unconfigured still boots and serves every
 other route; uploads are refused with a message naming the variables.
+
+**One new migration, `0034_notification.sql`.** Four tables and one permission
+row (`notification:read`, granted to `ROLE-ADMIN`); nothing is altered and
+nothing dropped, so the previous release names none of it and starts against
+this schema unchanged. **Grant `notification:read` to the roles that should have
+a notification centre** — an account without it has no centre and is told
+nothing, which is the only control this release offers (FR-NTF-005's preferences
+are unscheduled).
+
+Three of the four tables — `notification_templates`, `notification_channels`,
+`notification_logs` — are created and written by nothing. They belong to the
+email channel (#257) and their `COMMENT ON` says so.
 
 **The activity timeline's payload changed shape, and no migration goes with it**
 (#292, **D-45**). `GET /api/v1/documents/{id}/activity` gains

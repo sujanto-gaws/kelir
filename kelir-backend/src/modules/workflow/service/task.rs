@@ -86,6 +86,7 @@ use crate::middleware::auth::Authenticated;
 use crate::modules::audit::{self, AuditEntry};
 use crate::modules::document::repository as document_repo;
 use crate::modules::identity::delegation_repository as delegation_repo;
+use crate::modules::notification;
 use crate::state::AppState;
 
 /// What a decision answers with.
@@ -631,6 +632,45 @@ pub async fn decide(
         },
     )
     .await?;
+
+    // **The owner is told their document moved** (#251 AC2), in the decision's
+    // own transaction like the timeline entry above it and for the same reason:
+    // a rejection somebody was told about and which then rolled back is worse
+    // than one they hear about a moment later.
+    //
+    // **Not the actor, when the actor is the owner.** An approver deciding
+    // their own document — an `OWNER` task, or an owner who also holds the
+    // approving role — already knows: they are the one who pressed it. The task
+    // path takes the opposite view and says why there; the difference is that
+    // this notification announces *somebody else acted on your document*, and
+    // when nobody else did there is nothing to announce.
+    if let Some(owner) = document.created_by.filter(|owner| *owner != user_id) {
+        let body = format!(
+            "{} was {} by {}.",
+            document
+                .document_number
+                .as_deref()
+                .unwrap_or("Your document"),
+            action.as_db().to_lowercase(),
+            caller.username(),
+        );
+
+        notification::service::notify(
+            &mut transaction,
+            &notification::service::Telling {
+                tenant_id,
+                recipient_user_id: owner,
+                document_id: Some(task.document_id),
+                workflow_instance_id: Some(task.workflow_instance_id),
+                task_id: Some(id),
+                notification_type: notification::domain::NotificationType::DocumentDecided,
+                title: &format!("Your document was {}", action.as_db().to_lowercase()),
+                body: &body,
+                actor: Some(user_id),
+            },
+        )
+        .await?;
+    }
 
     transaction.commit().await?;
 
