@@ -3,8 +3,50 @@
 //! Modules never insert audit rows directly (coding standard §2.8) — they call
 //! [`record`], which owns the hash chain.
 //!
-//! Phase 2 writes the chain; verifying it and exposing audit search land with
-//! the rest of §10 in Phase 6.
+//! # The search arrived in Sprint 13, and the chain's verification did not
+//!
+//! Phase 2 wrote the chain. [#252](https://github.com/sujanto-gaws/kelir/issues/252)
+//! adds FR-AUD-004's read — `GET /api/v1/audit`, filtered by actor, object,
+//! event type and date. **Verifying the chain is still not a surface**
+//! (#252 AC5): reading the trail and proving it unbroken are different
+//! questions, and a search that implied the second would be claiming something
+//! it does not check. `tests/audit_hash_chain.rs` is what checks it.
+//!
+//! # `audit:read` opens the surface; the object opens the values (D-49)
+//!
+//! **D-12** found `master-data:audit:read` handing back a party's own field
+//! values through its change history to a caller who was refused
+//! `GET /parties/{id}`, and settled it by requiring the record's read
+//! *alongside* the audit permission. #252 AC2 asks for that rule across every
+//! object type, and a search cannot take D-12's shape: requiring read on all
+//! nineteen would mean a compliance reviewer needs the whole product to search
+//! anything, and requiring none would be D-12's defect nineteen times over.
+//!
+//! So the split is by **what a row is made of**. *Somebody updated party X at
+//! 09:05* is the trail; `{"statusId": "SUSPENDED"}` is the party. The first is
+//! served to anyone with `audit:read`; the second only to a caller holding the
+//! object's own read, and withheld — never hidden — otherwise.
+//!
+//! ## Why a new permission, and why `master-data:audit:read` survives it
+//!
+//! **A new code** (#252 AC3). `master_data::service::audit_record` predicted
+//! this in as many words — *when FR-AUD-004 lands, `audit:read` is its to
+//! define, and whether this one folds into it is a decision that surface can
+//! make with its own requirements in front of it* — and generalizing a
+//! permission named `master-data:*` to govern documents, users and workflow
+//! definitions is the kind of thing AC3 exists to prevent: a tenant granting it
+//! would have no way to know what they had granted.
+//!
+//! **`master-data:audit:read` is not folded in and is not now unchecked.** It
+//! opens `GET /parties/{id}/audit`, a different surface answering a different
+//! question, and it still does. That is the distinction **D-47** found
+//! `activity:read` lacking: two permissions are one too many only when they
+//! answer the same question about the same rows.
+//!
+//! **A tenant wanting one reviewer for everything grants `audit:read`** and
+//! gets the trail with no contents, which is a coherent and useful thing to be:
+//! *who did what, when* without the payloads. Granting the object reads
+//! alongside it is how they see more.
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
@@ -14,6 +56,25 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::error::AppError;
+
+pub mod domain;
+pub mod handlers;
+pub mod repository;
+pub mod service;
+
+/// Searching the whole trail (#252 AC3, **D-49**).
+///
+/// **Not `master-data:audit:read` widened.** That code opens one module's
+/// per-record history and keeps doing so; a permission named for one module and
+/// governing all of them reads as a mistake to whoever grants it, which is what
+/// AC3 asks to be avoided. The two are separate because they answer different
+/// questions about different rows — the test **D-47** applies, and this pair
+/// passes it.
+///
+/// **What it grants is the question, not the contents.** A row's `oldValue` and
+/// `newValue` need the read permission of the object they describe; see
+/// [`service::search_audit`].
+pub const AUDIT_READ: &str = "audit:read";
 
 /// What happened, in the event vocabulary of naming convention §7.
 pub struct AuditEntry<'a> {

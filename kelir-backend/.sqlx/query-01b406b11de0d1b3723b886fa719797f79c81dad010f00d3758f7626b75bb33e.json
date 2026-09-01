@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT count(*)\n        FROM audit_events\n        WHERE tenant_id = $1\n          AND ($2::uuid        IS NULL OR actor_user_id = $2)\n          AND ($3::text        IS NULL OR object_type   = $3)\n          AND ($4::uuid        IS NULL OR object_id     = $4)\n          AND ($5::text        IS NULL OR event_type    = $5)\n          AND ($6::timestamptz IS NULL OR created_at   >= $6)\n          AND ($7::timestamptz IS NULL OR created_at   <= $7)\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Uuid",
+        "Text",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "01b406b11de0d1b3723b886fa719797f79c81dad010f00d3758f7626b75bb33e"
+}

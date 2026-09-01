@@ -13,6 +13,31 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
 
 ### Added
 
+- **The audit trail is searchable** (FR-AUD-004,
+  [#252](https://github.com/sujanto-gaws/kelir/issues/252), decision **D-49**).
+  `GET /api/v1/audit`, behind a new `audit:read`, filtered by actor, object
+  type, object id, event type and date range, paginated and totally ordered.
+  The trail itself is old — it has been written since Sprint 3, which is what
+  **D-44** found; what was missing was the ability to ask.
+
+  **A row's recorded values need the object's own read permission**, which is
+  **D-12** generalized from one module to nineteen. That decision found a
+  party's field values reachable through its change history by a caller refused
+  `GET /parties/{id}`; a search crosses every module at once, so the split is by
+  what a row is made of: *somebody updated party X at 09:05* is the trail, and
+  `{"statusId": "SUSPENDED"}` is the party. **The row is withheld, never
+  hidden** — a search that dropped rows would teach an auditor the trail is
+  shorter than it is — and `valuesWithheld` says which happened, so an empty
+  payload is never ambiguous. An object type the build cannot place withholds.
+
+  **`master-data:audit:read` is unchanged and still opens
+  `GET /parties/{id}/audit`.** Two surfaces, two questions, two permissions —
+  which is the test D-47 applied to `activity:read` and found it failing.
+
+  **The search does not verify the hash chain**, and says so. Reading the trail
+  and proving it unbroken are different questions, and a search implying the
+  second would claim something it has not checked.
+
 - **The product tells people things** (FR-NTF-001, FR-NTF-002, FR-NTF-003,
   [#251](https://github.com/sujanto-gaws/kelir/issues/251), decision **D-48**).
   `0034_notification.sql`, an in-app notification centre at
@@ -318,6 +343,14 @@ create the one an attacker names — so the compose stack grows a one-shot
 `minio-init` service and CI's backend job creates it before the tests run. A
 deployment that leaves object storage unconfigured still boots and serves every
 other route; uploads are refused with a message naming the variables.
+
+**`0035_audit_search.sql` adds one permission row** (`audit:read`, granted to
+`ROLE-ADMIN`) and nothing else — no table, no column, no index: `audit_events`
+and the three indexes the search uses have been in place since `0003_audit.sql`.
+**Grant `audit:read` to whoever should be able to search the trail**, and grant
+the object read permissions alongside it to whoever should see the recorded
+values; `audit:read` on its own is a coherent grant — *who did what, when*,
+without the payloads.
 
 **One new migration, `0034_notification.sql`.** Four tables and one permission
 row (`notification:read`, granted to `ROLE-ADMIN`); nothing is altered and

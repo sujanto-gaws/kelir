@@ -71,6 +71,25 @@ impl Authenticated {
         &self.claims.username
     }
 
+    /// Whether the caller holds a permission, **without refusing when they do
+    /// not**.
+    ///
+    /// [`Self::require`] is for a gate: the caller may not be here, so say so.
+    /// This is for a surface that answers either way and shows less — the
+    /// audit search, which returns the row to everybody who may search and the
+    /// row's *values* only to whoever may read the object they describe
+    /// ([#252](https://github.com/sujanto-gaws/kelir/issues/252) AC2). A `?` on
+    /// `require` there would refuse a whole page because one row named an
+    /// object the caller cannot read.
+    ///
+    /// **Not a way around `require`.** Every use of this is a place where
+    /// *less* is served rather than a place where a check is skipped, and a
+    /// surface that used it to decide whether to serve at all would be a
+    /// surface with no gate.
+    pub fn holds(&self, permission: &str) -> bool {
+        self.claims.has_permission(permission)
+    }
+
     /// Requires a permission, or fails with `Forbidden`.
     ///
     /// `Forbidden`, not `NotFound`: the caller is authenticated, so hiding the
