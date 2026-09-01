@@ -91,10 +91,14 @@ pub async fn add_comment(
             actor_user_id: Some(actor),
             actor_name: Some(caller.username()),
             action_summary: "Commented on the document",
-            // **Not the body.** A timeline is read by everyone who may read the
-            // document; the comment itself is behind `comment:read`, and the
-            // line D-12 and D-32 drew for the decision comment holds here too.
-            details: json!({ "length": body.chars().count() }),
+            // **Not the body, and since #292 not its length either.** The
+            // first half was already right — a timeline is read by everyone who
+            // may read the document, and the comment is behind `comment:read`,
+            // which is the line D-12 and D-32 drew for the decision comment.
+            // The length was the same disclosure in a smaller quantity: it is a
+            // measurement of a thing this caller may not read, and **D-45**
+            // says the timeline reports that a comment happened and links to it.
+            details: json!({}),
         },
     )
     .await?;

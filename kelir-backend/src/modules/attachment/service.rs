@@ -160,10 +160,14 @@ pub async fn upload(
             actor_user_id: Some(actor),
             actor_name: Some(caller.username()),
             action_summary: "Attached a file",
-            details: json!({
-                "originalFileName": file.original_file_name,
-                "fileSize": file_size,
-            }),
+            // **Empty, and the `attachment_id` above is why** (#292, **D-45**).
+            // This carried the original file name and the size until a caller
+            // holding `activity:read` and no `attachment:read` was found
+            // reading both off the timeline. A file name is routinely the
+            // sensitive part — *2026-redundancy-list.pdf* needs no contents to
+            // do damage — and this module's own header says an attachment is as
+            // private as the document it hangs on. Its name has to be too.
+            details: json!({}),
         },
     )
     .await?;
@@ -285,7 +289,11 @@ pub async fn download(
             actor_user_id: Some(caller.user_id()),
             actor_name: Some(caller.username()),
             action_summary: "Downloaded a file",
-            details: serde_json::json!({ "originalFileName": stored.original_file_name }),
+            // The name goes for the reason it goes above, and **the event is
+            // not weaker for it**: that somebody took a copy is the whole point
+            // of this row, and the actor, the time and the link all survive
+            // (#292, **D-45**).
+            details: serde_json::json!({}),
         },
     )
     .await?;
