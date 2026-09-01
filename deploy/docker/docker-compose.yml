@@ -97,7 +97,14 @@ services:
     # One physical line: a folded scalar keeps more-indented lines literal, so a
     # split `command` arrives as several shell commands. See the staging stack,
     # where that shipped and the exit demo found it.
-    command: -c "until mc alias set kelir http://minio:9000 minioadmin minioadmin; do sleep 1; done && mc mb --ignore-existing kelir/kelir"
+    #
+    # **It ends by checking what it was for** — the Sprint 12 retrospective's
+    # second action. `mc mb` is not evidence that a bucket exists: a shell that
+    # cannot find a command still exits 0 if the last one succeeded, which is
+    # exactly how this container reported success while creating nothing. The
+    # trailing `mc ls kelir/kelir` fails loudly when the bucket is absent, so
+    # `depends_on` and a person reading `docker compose ps` both learn it.
+    command: -c "until mc alias set kelir http://minio:9000 minioadmin minioadmin; do sleep 1; done && mc mb --ignore-existing kelir/kelir && mc ls kelir/kelir"
 
   # Reserved by the system design since 2026-08-11 and filled by #246. **Sized
   # 2026-08-31 rather than guessed**: ~1 GB resident, almost all of it the
