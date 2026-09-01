@@ -1,6 +1,6 @@
 # Kelir Documentation
 
-**Status:** Living · **Last updated:** 2026-08-30
+**Status:** Living · **Last updated:** 2026-09-01
 
 Kelir is a metadata-driven, document-centric, workflow-enabled full-stack framework for building enterprise business applications rapidly — Rust (Axum + SQLx + PostgreSQL) on the backend, Vue 3 (Vite + Pinia + shadcn-vue + Tailwind CSS v4) on the frontend. This folder is the complete documentation set; this file is its map.
 
@@ -51,6 +51,44 @@ Early exploratory documents. Still valid for intent and examples, but **supersed
 | [04. Kelir Plugin and Extension Management Concept.md](architectures/04.%20Kelir%20Plugin%20and%20Extension%20Management%20Concept.md) | Plugin platform: registry, lifecycle, permissions, hooks, settings, sandboxing |
 | [05. Core - Master Data - Party.md](architectures/05.%20Core%20-%20Master%20Data%20-%20Party.md) | Party master-data model as a JSON Schema aggregate (OFBiz-style) |
 
+### architectures/adr/
+
+Architecture decision records — one file per architecturally significant choice, recording the alternatives that lost and what would reopen the question. They record *why*; the design documents remain the statement of *what* and *how* (authority rule 8). Rules in [standards/06. Architecture Decision Records.md](standards/06.%20Architecture%20Decision%20Records.md); this table is the only index, and a new ADR adds its row here in the same change.
+
+| ADR | Decision | Status |
+|---|---|---|
+| [0000. ADR Template.md](architectures/adr/0000.%20ADR%20Template.md) | The form every record is copied from | Template |
+| [0001](architectures/adr/0001.%20Rust%20and%20Axum%20for%20the%20Backend.md) | Rust and Axum for the backend — one backend language, and it is Rust | Adopted |
+| [0002](architectures/adr/0002.%20SQLx%20with%20Compile-Time%20Verified%20Queries.md) | SQLx with compile-time verified queries; no run-time query assembly | Adopted |
+| [0003](architectures/adr/0003.%20PostgreSQL%20as%20the%20Only%20Database.md) | PostgreSQL as the only database | Adopted |
+| [0004](architectures/adr/0004.%20A%20Modular%20Monolith%20with%20a%20Flat%20Module%20Layout.md) | A modular monolith with a flat `modules/` layout | Adopted |
+| [0005](architectures/adr/0005.%20An%20Internal%20Workflow%20Engine%20Instead%20of%20BPMN.md) | An internal workflow engine instead of BPMN | Adopted |
+| [0006](architectures/adr/0006.%20Metadata-Driven%20Forms%20and%20Lists.md) | Metadata-driven forms and lists rendered from JFSS | Adopted |
+| [0007](architectures/adr/0007.%20Explicit%20Endpoints%20for%20Core%20Master%20Data.md) | Explicit typed endpoints for the six core master-data entities | Adopted |
+| [0008](architectures/adr/0008.%20One%20JSON%20Logic%20Engine%20on%20Both%20Sides.md) | One JSON Logic engine on both sides — `datalogic-rs` and its WASM build | Adopted |
+| [0009](architectures/adr/0009.%20Per-Request%20Tenancy%20Deferred%20Past%201.0.md) | Per-request tenancy deferred past 1.0 | **Superseded** by 0010 |
+| [0010](architectures/adr/0010.%20Multi-Tenant%20Mode%20Runs%20and%20Roles%20Are%20Tenant-Scoped.md) | Multi-tenant mode runs, and roles are tenant-scoped | Adopted |
+| [0011](architectures/adr/0011.%20A%20Derived%20Surface%20Requires%20the%20Permission%20of%20What%20It%20Derives%20From.md) | A derived surface discloses only what its subject's permission allows | Adopted |
+| [0012](architectures/adr/0012.%20The%20Audit%20Hash%20Chain%20Covers%20the%20Payload.md) | The audit hash chain covers the payload, length-prefixed | Adopted |
+| [0013](architectures/adr/0013.%20A%20Business%20Code%20Is%20Never%20Released.md) | A business code is never released, even by a deleted party | Adopted |
+| [0014](architectures/adr/0014.%20Kelir%20Extends%20JFSS%20Through%20Settings.md) | Kelir extends JFSS through `settings`, never by editing the standard | Adopted |
+| [0015](architectures/adr/0015.%20Calculations%20Run%20Before%20Conditional%20Stripping.md) | Calculations run before conditional stripping — a security property | Adopted |
+| [0016](architectures/adr/0016.%20An%20Unenforceable%20Rule%20Refuses%20Rather%20Than%20Passes.md) | A rule this build cannot enforce refuses rather than passes | Adopted |
+| [0017](architectures/adr/0017.%20Field%20Refusals%20Answer%20422%20with%20the%20S10.3%20Envelope.md) | Field-level refusals answer 422 with the S10.3 envelope | Adopted |
+| [0018](architectures/adr/0018.%20Division%20by%20Zero%20Is%20an%20Evaluation%20Error.md) | Division by zero is an evaluation error on both sides | Adopted |
+| [0019](architectures/adr/0019.%20A%20Workflow%20Definition%20Is%20Narrowed%20at%20Save%20Time.md) | A workflow definition the engine could never run is refused at save | Adopted |
+| [0020](architectures/adr/0020.%20The%20Workflow%20Owns%20the%20Document%20Status.md) | The workflow owns the document's status while a process is live | Adopted |
+| [0021](architectures/adr/0021.%20AllowedBy%20Authorizes%20and%20Does%20Not%20Select.md) | `allowedBy` authorizes the chosen edge; it does not select one | Adopted |
+| [0022](architectures/adr/0022.%20Numbering%20Counters%20Live%20in%20Per-Scope%20Buckets.md) | Numbering counters live in per-scope buckets, allocated off the transaction | Adopted |
+| [0023](architectures/adr/0023.%20Resubmission%20Enters%20Through%20the%20Document%20Submit.md) | Resubmission enters through the document's own submit endpoint | Adopted |
+| [0024](architectures/adr/0024.%20A%20Role%20Task%20Notifies%20Every%20Holder.md) | A role task notifies every current holder, unbounded | Adopted |
+| [0025](architectures/adr/0025.%20A%20Detached%20Send%20and%20a%20Residual%20Timing%20Oracle.md) | A detached mail send, and a 16 ms enumeration oracle accepted and stated | Adopted |
+| [0026](architectures/adr/0026.%20ClamAV%20in%20the%20Stack,%20Scanning%20Asynchronously.md) | ClamAV in the compose stack, scanning asynchronously | Adopted |
+| [0027](architectures/adr/0027.%20A%20Document%20Pins%20the%20Form%20Revision%20It%20Was%20Filled%20Against.md) | A document pins its form revision; re-pointing is refused only for unpinned documents | Adopted |
+| [0028](architectures/adr/0028.%20A%20Definition%20Is%20Refused%20at%20Save%20Rather%20Than%20at%20Render.md) | A malformed definition is refused at save rather than at render | Adopted |
+
+**0001–0028 were written retrospectively on 2026-09-01** from the documents that already held these decisions — a one-time pass directed by the product owner, not a standing practice (standard §9). Each says so in its §1 and names its source; the source keeps authority. Scope and planning decisions stayed `D-n` in [Product Backlog](../projects/planning/02.%20Product%20Backlog.md) §6, which carries the full `D-n` → ADR map.
+
 ### design/
 
 | Document | Content |
@@ -90,6 +128,7 @@ The JSON standards family. Each specification carries its own version, RFC 2119 
 | [03. Commit Message Convention.md](standards/03.%20Commit%20Message%20Convention.md) | Conventional-commit format, types, scopes, breaking changes |
 | [04. Release Process.md](standards/04.%20Release%20Process.md) | Versioning, release checklist, tagging, hotfixes, migration compatibility |
 | [05. Git Workflow.md](standards/05.%20Git%20Workflow.md) | Branching model (always-releasable `main`), PRs, review |
+| [06. Architecture Decision Records.md](standards/06.%20Architecture%20Decision%20Records.md) | What earns an ADR, its required structure, status lifecycle, supersession, and the impacted-documents rule |
 
 ### ../projects/planning/
 
@@ -113,12 +152,13 @@ When documents disagree, precedence is explicit:
 5. **Tables and columns** — the [Database Schema](design/02.%20Database%20Schema.md) wins over the table lists in SDD §6 and over column sketches in older documents; its §14 records every deliberate deviation.
 6. **JSON shapes** — within each schema/ specification, the embedded **meta-schema is normative** over its own prose. Illustrative JSON examples in architecture/concept documents predate the specifications and are superseded by them (marked in place).
 7. **Concepts folder** — background and intent only; any detail that conflicts with newer documents is superseded.
+8. **Decision records** — an [ADR](architectures/adr/) records *why* a choice was made and never states *what* or *how*. Where an ADR conflicts with the SDD, the Database Schema, or a schema specification, **the operative document wins** and the ADR is stale — repaired by a superseding ADR, never by editing the record ([standards/06](standards/06.%20Architecture%20Decision%20Records.md) §7).
 
 ---
 
 ## Document Conventions
 
-- Documentation files are numbered per folder: `NN. Title Case.md`; new documents continue their folder's numbering (naming convention §10).
+- Documentation files are numbered per folder: `NN. Title Case.md`; new documents continue their folder's numbering (naming convention §10). `architectures/adr/` runs its own four-digit series, `NNNN. Title Case.md`, where the number is the record's permanent `ADR-NNNN` identity.
 - Every document carries `**Status:** … · **Last updated:** YYYY-MM-DD` under its H1. Schema specifications use the JFSS house style (`**Version:** … / **Status:** … / **Target Stack:** …`) instead, with the spec version doubling as the change marker.
 - `Status` takes one of the values defined in [naming convention §10.1](standards/02.%20Naming%20Convention.md) — `Draft`, `Adopted`, `Living`, `Superseded`, `Retired`, `Template`, `Final`, plus the `… Standard` variants for `schema/`. It answers one question: how much can a reader rely on this? A value needing a qualifier to be understood is the wrong value.
 - Cross-references cite the target as `document NN §X` (within a folder) or a relative markdown link with URL-encoded spaces (`[SDD](design/01.%20System%20Design%20Document.md)`).
@@ -135,7 +175,8 @@ When documents disagree, precedence is explicit:
 | System Design Document v0.1 | **Draft** — approval open, as above |
 | Database Schema | **Draft** — adopted with the SDD. Counts live in the document itself (§4 and its closing total), not here |
 | Schema standards | JFSS **Final Standard**; rule registries **Active Standard**; JWSS / LHCS / PMS / EES / DTDS **Draft Standard** |
-| Standards 01–05 | **Adopted** — CI enforces the coding standard, branch protection implements the git workflow |
+| Standards 01–06 | **Adopted** — CI enforces the coding standard, branch protection implements the git workflow. Standard 06 (ADRs) was adopted 2026-09-01 |
+| Decision records | **28 adopted, one superseded** (0009 by 0010) — all written in the 2026-09-01 retrofit pass from the architecture documents and the `D-n` table. The next decision taken is the first written as one |
 | Concepts 01–04 | **Superseded** — background and intent only (authority rule 7) |
 | Planning | Complete — sprint plan and product backlog cover all 164 FRs. Scope decisions **D-1…D-44** are recorded in [Product Backlog](../projects/planning/02.%20Product%20Backlog.md) §6; all are resolved except **D-15**, and **D-7** is superseded by **D-18**. Sprints 0–13 are detailed in [Sprint Plan](../projects/planning/01.%20Sprint%20Plan.md) §5; 14–21 remain an outline in §6, detailed at each phase boundary |
 | Implementation | **Phases 1–4 released** — `v0.1.0` through `v0.4.0`; staging retired by **D-9**. **Phase 5's scope is complete and the phase is not closed**: all six of Sprint 11's construction items are merged, so a submitted document runs an approval end to end — definitions, instances, tasks, an inbox, approve/reject/return, delegation, due dates, conditional routing and a history that says how the document got here. What remains before `v0.5.0` is the exit rather than the work: the demo, an independent verification pass, and the release rehearsal. **The pass has started and is partial** — three of the six items were read by somebody who did not write them and three were not ([record 09](../projects/verifications/09.%20Sprint%2011%20Independent%20Pass.md) §1) — and it has already produced one blocking defect, [#259](https://github.com/sujanto-gaws/kelir/issues/259): a definition could publish and then fail at run time. That is fixed, and it moved the JWSS to **R-5**. **`v0.5.0` is not the MVP** (**D-1**) — that is `v0.6.0` at the end of Phase 6. See [Sprint 11 Status](../projects/status/12.%20Sprint%2011%20Status.md) |
