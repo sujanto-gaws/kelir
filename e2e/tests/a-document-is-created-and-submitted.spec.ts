@@ -227,9 +227,15 @@ test('a tab a later phase fills says what will fill it', async ({ page }) => {
     'Nothing is attached to this document yet',
   )
 
-  // Comments is the last one, and #296 is what removes it.
+  // **Comments was the last one, and #296 removed it.** With it the workspace
+  // stops promising anything a later phase will fill, which is what this run of
+  // assertions has been counting down to since #187 wrote the first of them.
+  // What the panel says now is that nobody has commented — a state, and one a
+  // person can change from this screen.
   await page.getByTestId('tab-comments').click()
-  await expect(page.getByTestId('panel-comments')).toContainText('Phase 6')
+  await expect(page.getByTestId('panel-comments')).toContainText(
+    'Nobody has commented on this document yet',
+  )
 
   // **Workflow has left this list**, and its departure is the assertion. It
   // said "Phase 5 fills this" until Sprint 10 filled it (#178); a tab still
