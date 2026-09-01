@@ -13,6 +13,26 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
 
 ### Added
 
+- **A document has an activity timeline, on a screen** (FR-ACT-005,
+  [#250](https://github.com/sujanto-gaws/kelir/issues/250), decision **D-47**).
+  **SRS §9 criterion 12.** Sprint 12 wrote the events and nothing read them —
+  the right order, because a timeline with four sources and no screen is still
+  worth having and a screen over one source is not. The workspace gains an
+  **Activity** tab: one list, newest first, paged, showing the document
+  lifecycle, the workflow, attachments and comments together.
+
+  **All four sources or none.** A timeline showing three of four is worse than
+  one showing none, because a reader cannot tell an empty category from a
+  missing one — so every entry carries the source it came from, and the panel is
+  the place that difference is visible.
+
+  **The actor is rendered as recorded**, never joined to a current name, so the
+  timeline still reads correctly after somebody is renamed or removed. And the
+  panel says plainly that it is **not the audit trail**, and that the History
+  tab beside it is a third thing again — this document's status changes. Those
+  three records have been distinguished in prose since #247; this is the first
+  screen where a person could otherwise merge them.
+
 - **A file can be attached to a document** (FR-ATT-001, FR-ATT-003,
   [#244](https://github.com/sujanto-gaws/kelir/issues/244)). `POST
   /api/v1/documents/{id}/attachments` takes a `multipart/form-data` body with a
@@ -61,6 +81,32 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
   axum's own 400 and a null body. `crate::extract`'s header had claimed three
   extractors were enough for that property; the first route to take a file is
   what made the claim false.
+
+### Changed
+
+- **The activity timeline no longer asks for `activity:read`** (#250 AC2,
+  decision **D-47**). It reads through the document's own read permission and
+  nothing else, which is what `modules::activity`'s four-record table,
+  `0033_activity.sql`'s own `COMMENT ON TABLE` and the [Database
+  Schema](docs/design/02.%20Database%20Schema.md) §10 had all said from the
+  start.
+
+  **D-45 is what made that safe rather than merely consistent.** While an entry
+  carried an attachment's file name, `activity:read` was the only thing between
+  a document's reader and another module's data — accidentally, and badly, since
+  one grant opened all three. Once `details` says only what happened to the
+  document, the second permission guarded nothing the first does not, and all it
+  could still do was refuse the person who raised the document a view of their
+  own document's history.
+
+  **The permission row is still seeded and is now checked by nothing.** It
+  cannot be dropped in the release that stops using it — [release
+  process](docs/standards/04.%20Release%20Process.md) §7's N−1 rule is
+  *deprecate in release N, remove in N+1*, and the previous release still calls
+  `require("activity:read")`. [#301](https://github.com/sujanto-gaws/kelir/issues/301)
+  removes it after `v0.6.0`. **No grant needs changing**: an account that holds
+  the permission is unaffected, and one that does not can now read timelines it
+  could already read the documents of.
 
 ### Fixed
 

@@ -24,7 +24,7 @@ pub fn routes() -> Router<AppState> {
     params(Pagination),
     responses(
         (status = 200, description = "The document's timeline, newest first", body = [ActivityEvent]),
-        (status = 403, description = "Missing activity:read or document:read"),
+        (status = 403, description = "Missing document:read — the timeline asks for nothing else (D-47)"),
         (status = 404, description = "No such document, or it is not one this caller may see")
     ),
     security(("bearer" = []))

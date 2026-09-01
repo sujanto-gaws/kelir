@@ -87,11 +87,38 @@
 //! against FR-ACT-005's screen rather than a gap in this fix — the screen has
 //! the link and can go and ask.
 //!
+//! # And a fourth time, which is D-45 being taken to its conclusion (D-47)
+//!
+//! [#250](https://github.com/sujanto-gaws/kelir/issues/250) AC2 asked for the
+//! timeline to read through **the document's own permission and no other**, and
+//! that is now what it does: [`service::list_activity`] requires nothing but
+//! `document_service::get_document`.
+//!
+//! **The four-record table above always said so.** So does
+//! `0033_activity.sql`'s own `COMMENT ON TABLE` — *behind that document's own
+//! read permission* — and so does [Database Schema] §10. Three statements of
+//! the rule and one implementation that asked for a second permission anyway.
+//!
+//! **D-45 is what made the documents right rather than optimistic.** While an
+//! entry carried an attachment's file name, `activity:read` was the only thing
+//! between a document's reader and another surface's data — accidentally, and
+//! badly, since it was one grant for all three. Once `details` says only what
+//! happened to the document, the second permission guards nothing the first
+//! does not, and all it can still do is refuse the person who raised the
+//! document a view of their own document's history.
+//!
+//! [`ACTIVITY_READ`] survives it, checking nothing, and says there why.
+//!
+//! [Database Schema]: ../../../../docs/design/02.%20Database%20Schema.md
+//!
 //! # What is not here
 //!
-//! **No timeline screen.** FR-ACT-005 is Sprint 13. This release writes the
-//! events and serves them; a screen over one source would have been worth less
-//! than the events themselves, which is why the sprint plan separated them.
+//! **The timeline screen arrived in Sprint 13**
+//! ([#250](https://github.com/sujanto-gaws/kelir/issues/250), FR-ACT-005, MVP
+//! criterion 12), one sprint after the events. The order was the point: a
+//! timeline with four sources and no screen is still worth having, and a screen
+//! over one source is not — so the sprint plan separated them and the screen
+//! waited until attachments and comments were writing too.
 //!
 //! **No event this module writes on its own.** Every `record` call site is in
 //! another module, because an event is part of what an action produced and the
@@ -111,4 +138,32 @@ pub mod handlers;
 pub mod repository;
 pub mod service;
 
+/// `activity:read`, **which nothing checks any more** (**D-47**, from
+/// [#250](https://github.com/sujanto-gaws/kelir/issues/250) AC2).
+///
+/// # A permission row nothing checks is a thing this project has undone twice
+///
+/// **D-13** spent two decisions on the `delegations` rows, and both
+/// `modules::attachment` and `modules::comment` cite it as the reason they
+/// declare no `delete` permission. So this constant is a known bad shape, kept
+/// deliberately and briefly, and the alternative was worse in a way that is
+/// worth writing down.
+///
+/// **The migration cannot drop the row in the release that stops checking it.**
+/// [Release process](../../../../docs/standards/04.%20Release%20Process.md)'s
+/// N−1 rule says a migration must leave the previous release running, and the
+/// previous release calls `caller.require("activity:read")` — deleting the
+/// permission would make every timeline read 403 for the whole of a rolling
+/// deploy, on the release that is still serving traffic. A permission removed
+/// one release after the check that used it is the only ordering that is safe
+/// in both directions.
+///
+/// **It is also what a downgrade needs.** Rolling back to `v0.6.0`'s
+/// predecessor with the row already gone gives a build whose check can never
+/// pass.
+///
+/// So: the constant stays, the seed stays, and
+/// [#301](https://github.com/sujanto-gaws/kelir/issues/301) drops both once
+/// this release is the N−1. Until then the honest statement is the one above —
+/// nothing reads it, and that is a decision rather than an oversight.
 pub const ACTIVITY_READ: &str = "activity:read";

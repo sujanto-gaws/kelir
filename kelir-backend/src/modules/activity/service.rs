@@ -7,7 +7,6 @@ use uuid::Uuid;
 
 use super::domain::{self, ActivityEvent, EventCategory};
 use super::repository as repo;
-use super::ACTIVITY_READ;
 use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
 use crate::modules::document::service::document as document_service;
@@ -84,27 +83,40 @@ pub async fn record(
 
 /// A document's timeline.
 ///
-/// **Two permissions, and the document's own read is what scopes it.**
-/// `activity:read` says whether this account reads timelines at all; which
-/// document's is the document's question, asked through its module's service —
-/// the rule `modules::attachment` and `modules::comment` both state, for the
-/// same reason: a thing that hangs on a document cannot be more visible than the
-/// document.
+/// **One permission, and it is the document's own** ([#250] AC2, **D-47**).
+/// Whether this caller may see what happened to a document is the same question
+/// as whether they may see the document, asked once, through its module's
+/// service — which is also what scopes the read to a tenant and to a row, so
+/// there is nothing a second check could add.
 ///
-/// # And a third rule, one line below the other two
+/// # It asked for `activity:read` as well, and D-45 is why it no longer does
 ///
-/// **Two permissions are all this asks for, and that is why the entries carry
-/// nothing a third would have guarded** ([#292], **D-45**). An attachment's
-/// name, a comment's length and the second party to a delegation are behind
-/// `attachment:read`, `comment:read` and the workflow's own read; a timeline
-/// repeating them would be a fourth surface answering three other modules'
-/// questions without asking their permissions.
+/// [#292] found the entries carrying an attachment's original file name, a
+/// comment's length and the second party to a delegation — detail belonging to
+/// three other surfaces, each with its own permission. `activity:read` was the
+/// only thing standing between a document's reader and those, and it stood
+/// there by accident: nothing said it was for that, and it guarded them all
+/// equally badly, since anybody who held it saw everything.
 ///
-/// The write paths no longer produce those keys. [`domain::disclosable`] is
-/// what makes that true of the **rows already in the table**, which no fix to a
-/// writer can reach — `activity_events` is append-only, so the boundary is the
-/// only place left that can hold them.
+/// **D-45 took the detail out.** What an entry says now is what happened *to
+/// the document* — created, submitted, moved, a file was attached, somebody
+/// commented, a decision was taken — and every one of those is the document's
+/// own history, which `document:read` covers by definition. So the second
+/// permission was left guarding nothing the first does not, and a reader who
+/// may open a document had to be granted a separate permission to be told what
+/// had happened to it.
 ///
+/// **Whoever raised the document is the commonest reader of its timeline**, and
+/// a deployment has no reason to have granted them anything named `activity`.
+/// That is [#263]'s shape, which this project has now met three times:
+/// #263 a screen showing too little, #292 a surface showing too much, and this.
+///
+/// [`domain::disclosable`] is what keeps the premise true, including for the
+/// rows written before D-45 — `activity_events` is append-only, so the boundary
+/// is the only place that can hold them.
+///
+/// [#250]: https://github.com/sujanto-gaws/kelir/issues/250
+/// [#263]: https://github.com/sujanto-gaws/kelir/issues/263
 /// [#292]: https://github.com/sujanto-gaws/kelir/issues/292
 pub async fn list_activity(
     state: &AppState,
@@ -112,8 +124,11 @@ pub async fn list_activity(
     document_id: Uuid,
     pagination: &Pagination,
 ) -> Result<(Vec<ActivityEvent>, PageMeta), AppError> {
-    caller.require(ACTIVITY_READ)?;
-
+    // **The document's read is the whole gate**, and it is not a missing check
+    // (D-47). `get_document` requires `document:read`, scopes to the caller's
+    // tenant and answers 404 for a row they may not see — so a caller who
+    // reaches the line below has already been told they may read this document,
+    // and what follows is that document's own history.
     let document = document_service::get_document(state, caller, document_id).await?;
     let tenant_id = caller.tenant_id();
 

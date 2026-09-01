@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import DocumentHeader from './DocumentHeader.vue'
+import ActivityTab from '@/features/activity/ActivityTab.vue'
 import AttachmentsTab from '@/features/attachments/AttachmentsTab.vue'
 import CommentsTab from '@/features/comments/CommentsTab.vue'
 import WorkflowTab from '@/features/workflow/WorkflowTab.vue'
@@ -36,6 +37,10 @@ import type { Form } from '@/types/rad'
  * here promises a later phase any more. That each arrival was a component and a
  * `v-show` rather than a rebuild is the shell having worked, which is what #172
  * built it for.
+ *
+ * **Activity (#250) is the first tab this shell gained rather than filled**,
+ * and it cost the same: an import, a row in `TABS`, a `v-show`. It is the
+ * record of what the other four did, which is why it reads last.
  *
  * **The status shown here can be one a workflow wrote.** For a document with a
  * live process, `documents.status` is a *projection* of the instance's state and
@@ -77,12 +82,29 @@ const problem = ref('')
 /** Something that worked, said plainly. */
 const notice = ref('')
 
+/**
+ * **`Activity` is last, and `History` keeps its name** ([#250]).
+ *
+ * The two are one word apart and answer different questions, which is the
+ * confusion this tab strip could most easily create. `History` is this
+ * document's **status changes** — `document_status_history`, one row per
+ * transition. `Activity` is everything that happened *to* the document from all
+ * four sources, and it is the record of what the tabs before it did — so it
+ * reads after them rather than between them.
+ *
+ * The Activity panel says so itself, in its closing note, because a tab label
+ * cannot carry a distinction and the person who needs it is looking at the
+ * panel rather than at this array.
+ *
+ * [#250]: https://github.com/sujanto-gaws/kelir/issues/250
+ */
 const TABS = [
   { key: 'form', label: 'Form' },
   { key: 'history', label: 'History' },
   { key: 'workflow', label: 'Workflow' },
   { key: 'attachments', label: 'Attachments' },
   { key: 'comments', label: 'Comments' },
+  { key: 'activity', label: 'Activity' },
 ] as const
 
 type TabKey = (typeof TABS)[number]['key']
@@ -377,6 +399,13 @@ function onChange(values: Record<string, unknown>): void {
 
       <div v-show="tab === 'comments'" data-testid="panel-comments">
         <CommentsTab v-if="tab === 'comments'" :document-id="document.id" />
+      </div>
+
+      <div v-show="tab === 'activity'" data-testid="panel-activity">
+        <!-- Mounted only once the tab is opened, for the reason the Workflow
+             and Attachments panels give: a workspace opened to read a form
+             makes one request, not five. -->
+        <ActivityTab v-if="tab === 'activity'" :document-id="document.id" />
       </div>
 
       <div>
