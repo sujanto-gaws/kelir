@@ -49,25 +49,70 @@
 //! `comment_id` and nothing else, so what a comment says and how much of it
 //! there is are both answers this module gives.
 //!
-//! There is no `comment:update` and no `comment:delete`. Editing and deleting
-//! are FR-CMT-003 and Sprint 13, and a permission row nothing checks is the
-//! `delegations` situation **D-13** spent two decisions undoing.
+//! **`comment:update` and `comment:delete` arrived with the tail**
+//! ([#253](https://github.com/sujanto-gaws/kelir/issues/253),
+//! `0036_comment_thread.sql`), and each is checked **with authorship**: the
+//! permission says whether an account edits or deletes comments at all, and
+//! `comments.created_by` says whose. There is deliberately **no moderator
+//! code** — nothing in this release lets one account edit or delete another's
+//! comment — because a permission row nothing checks is the `delegations`
+//! situation **D-13** spent two decisions undoing. When a deployment needs one,
+//! it arrives with the surface that uses it.
+//!
+//! # The conversation is one level deep, and a deleted comment can leave a mark
+//!
+//! **D-50 / [ADR-0029]: a reply is to a comment, never to a reply.** #253 AC1
+//! asks that the depth be decided rather than fall out of a nullable column,
+//! and one level is the decision: a conversation about a document is read top
+//! to bottom, and arbitrary depth buys a recursive read, a collapsing screen
+//! and threads that drift off the point the document is about.
+//! `service::add_comment` refuses the second hop, because *my parent has no
+//! parent* is a fact about another row and no `CHECK` can read one.
+//!
+//! **D-51 / [ADR-0030]: deleting is soft, and it does not take the replies.**
+//! They are other people's words. A deleted comment that still has undeleted
+//! replies is served as a **tombstone** — author, time, no body — so the
+//! answers under it still
+//! have something to be answers to; one that nobody replied to is not served at
+//! all. Both halves are decided in `repository::list_for_document`, the single
+//! place every reader comes through, and `service::delete_comment` states the
+//! argument.
+//!
+//! **An edit is visible as an edit** (#253 AC3). `comments.edited_at` is null
+//! until the body changes and is not `updated_at`, which moves for any write to
+//! the row — the delete included. The previous text is **not kept**: this module
+//! stores no revisions, so what survives an edit is that it happened, when and
+//! by whom.
+//!
+//! Both decisions carry their rejected alternatives in the records rather than
+//! here — cascade, re-parent and hide for the delete; unbounded and bounded
+//! depth for the thread — and both are the first taken *after*
+//! `docs/architectures/adr/` existed rather than filed into it retrospectively.
+//!
+//! [ADR-0029]: ../../../../docs/architectures/adr/0029.%20A%20Comment%20Thread%20Is%20One%20Level%20Deep.md
+//! [ADR-0030]: ../../../../docs/architectures/adr/0030.%20A%20Deleted%20Comment%20Leaves%20a%20Tombstone.md
 //!
 //! # What this module does not do yet
 //!
-//! **No threading** (FR-CMT-002), **no editing or deleting** (FR-CMT-003), **no
-//! resolving** (FR-CMT-004), **no mentions** (FR-CMT-005/006) — all Sprint 13.
-//! `comments.parent_comment_id`, `comments.status` and both side tables exist
-//! and are written by nothing; `0032_comment.sql` says which sprint fills each,
-//! because a column that exists is not a feature that exists.
+//! **No resolving** (FR-CMT-005) and **no mentions** (FR-CMT-006), both `Could`.
+//! `comments.status`, `resolved_by`, `resolved_at` and the two side tables
+//! `comment_mentions` and `comment_attachments` exist and are written by
+//! nothing; `0032_comment.sql` says so table by table, because a column that
+//! exists is not a feature that exists.
 //!
-//! **No activity event.** [#249](https://github.com/sujanto-gaws/kelir/issues/249)
-//! AC6 asks for one in the same transaction as the comment, and
-//! `activity_events` does not exist in this release — it is item 4, and the
-//! events for comments and attachments are
-//! [#248](https://github.com/sujanto-gaws/kelir/issues/248), item 5. AC6 is
-//! **discharged by #248**, which the construction plan §6 sequences last so that
-//! an event writer lands after its subjects rather than before them.
+//! # Every write here lands on the timeline, in its own transaction
+//!
+//! `Comment.Added`, `Comment.Replied`, `Comment.Edited` and `Comment.Deleted`
+//! ([#248](https://github.com/sujanto-gaws/kelir/issues/248)'s rule, #253 AC5).
+//! Each is written by `activity::service::record` inside the transaction that
+//! writes the row, so a timeline cannot claim something the conversation never
+//! agreed to — that is what `record`'s signature is for, and it is the opposite
+//! of the audit path's deliberate tolerance one call below it.
+//!
+//! **None of the four carries anything about the comment** — not the body, not
+//! its length, not the old text on an edit. The entry says what happened to the
+//! *document* and links to the comment, which is **D-45** and the only reason
+//! the timeline needs no second permission.
 
 pub mod domain;
 pub mod handlers;
@@ -79,3 +124,8 @@ pub const COMMENT_OBJECT_TYPE: &str = "COMMENT";
 
 pub const COMMENT_CREATE: &str = "comment:create";
 pub const COMMENT_READ: &str = "comment:read";
+/// Editing one's **own** comment (FR-CMT-003). Never enough on its own —
+/// `service::refuse_unless_author` is the other half.
+pub const COMMENT_UPDATE: &str = "comment:update";
+/// Deleting one's **own** comment (FR-CMT-004), softly. Same pairing.
+pub const COMMENT_DELETE: &str = "comment:delete";
