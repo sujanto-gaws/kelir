@@ -96,8 +96,7 @@ async function load(id: string, next: number): Promise<void> {
     total.value = result.meta.total
     page.value = next
   } catch (error) {
-    failure.value =
-      error instanceof ApiError ? error.message : 'The activity could not be loaded.'
+    failure.value = error instanceof ApiError ? error.message : 'The activity could not be loaded.'
   } finally {
     loading.value = false
   }
@@ -174,19 +173,14 @@ watch(
           <span class="font-medium" data-testid="activity-summary">
             {{ event.actionSummary }}
           </span>
-          <span class="text-muted-foreground">
-            · {{ actor(event) }} · {{ when(event) }}
-          </span>
+          <span class="text-muted-foreground"> · {{ actor(event) }} · {{ when(event) }} </span>
         </p>
 
         <p class="mt-1 text-xs text-muted-foreground">
           <!-- AC3 made visible. The label is what lets a reader see that all
                four sources are here — without it, a timeline of only document
                events and a timeline missing three sources look identical. -->
-          <span
-            class="rounded bg-muted px-1.5 py-0.5 font-medium"
-            data-testid="activity-category"
-          >
+          <span class="rounded bg-muted px-1.5 py-0.5 font-medium" data-testid="activity-category">
             {{ category(event) }}
           </span>
           <span class="ml-2" data-testid="activity-event-type">{{ event.eventType }}</span>
@@ -213,9 +207,9 @@ watch(
          assumption in a conversation with an auditor. -->
     <p class="border-t pt-3 text-xs text-muted-foreground" data-testid="activity-not-audit">
       This is the document's activity, not the audit trail. It shows what happened here, for the
-      people working on this document. The audit trail is a separate, hash-chained record of
-      whether data was tampered with, behind its own permission — and neither is derived from the
-      other. The History tab is different again: it shows only this document's status changes.
+      people working on this document. The audit trail is a separate, hash-chained record of whether
+      data was tampered with, behind its own permission — and neither is derived from the other. The
+      History tab is different again: it shows only this document's status changes.
     </p>
   </div>
 </template>

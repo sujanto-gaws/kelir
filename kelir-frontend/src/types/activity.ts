@@ -32,13 +32,7 @@
 
 /** Which part of the product an event came from. */
 export type EventCategory =
-  | 'DOCUMENT'
-  | 'ATTACHMENT'
-  | 'COMMENT'
-  | 'WORKFLOW'
-  | 'SECURITY'
-  | 'MASTER_DATA'
-  | 'NOTIFICATION'
+  'DOCUMENT' | 'ATTACHMENT' | 'COMMENT' | 'WORKFLOW' | 'SECURITY' | 'MASTER_DATA' | 'NOTIFICATION'
 
 export interface ActivityEvent {
   id: string

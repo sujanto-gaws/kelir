@@ -158,9 +158,7 @@ describe('ActivityTab', () => {
     })
 
     const wrapper = await render()
-    const labels = wrapper
-      .findAll('[data-testid="activity-category"]')
-      .map((chip) => chip.text())
+    const labels = wrapper.findAll('[data-testid="activity-category"]').map((chip) => chip.text())
 
     expect(labels).toEqual(['Attachment', 'Comment', 'Workflow', 'Document'])
   })
@@ -183,9 +181,7 @@ describe('ActivityTab', () => {
 
     const wrapper = await render()
 
-    expect(wrapper.find('[data-testid="activity-row"]').text()).toContain(
-      'ani.wijaya-as-she-was',
-    )
+    expect(wrapper.find('[data-testid="activity-row"]').text()).toContain('ani.wijaya-as-she-was')
   })
 
   /** An event the system wrote has no actor, and the row still reads. */
