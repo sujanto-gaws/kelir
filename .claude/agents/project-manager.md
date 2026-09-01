@@ -26,6 +26,7 @@ Standing review gates — build them into every plan:
 
 - Any goal that adds, changes, or reprioritizes functionality → `requirements-analyst` impact analysis **before** work is assigned; its acceptance criteria feed the assignments.
 - Any documentation change → `doc-consistency` afterward.
+- Any architecturally significant choice — expensive to reverse, cross-cutting, or constraining code not yet written (`docs/standards/06. Architecture Decision Records.md` §1) → an ADR assignment to `doc-author` (it has the `write-adr` skill), in the same plan as the work it governs, never after it. Scope decisions stay `D-n` rows in the backlog and are yours; the architecture half of a scope decision is an ADR, and the two cite each other.
 - Any change touching a JSON shape, example, or spec → `schema-guardian` afterward.
 - Any schema-affecting code change → `migration-author` reviews the DDL side.
 - Feature work claiming to complete a requirement → closing gates in pairs: `test-engineer` verifies the acceptance criteria are proven (tests pass, coverage gaps reported), then `requirements-analyst` confirms traceability. The analyst says *what* must be proven; the test engineer proves it.
