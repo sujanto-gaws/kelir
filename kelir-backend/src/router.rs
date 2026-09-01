@@ -6,7 +6,7 @@ use crate::error::ValidationDetail;
 use crate::health;
 use crate::middleware::cors::cors_layer;
 use crate::modules::{
-    activity, attachment, auth, comment, document, document_type, identity, master_data,
+    activity, attachment, audit, auth, comment, document, document_type, identity, master_data,
     notification, organization, rad, task_inbox, workflow,
 };
 use crate::response::{ErrorBody, ErrorEnvelope, PageMeta};
@@ -101,6 +101,8 @@ use crate::state::AppState;
         attachment::handlers::list_attachments,
         attachment::handlers::download_attachment,
         activity::handlers::list_activity,
+        audit::handlers::search_audit,
+        audit::handlers::object_types,
         notification::handlers::list_notifications,
         notification::handlers::unread_count,
         notification::handlers::mark_read,
@@ -147,6 +149,7 @@ use crate::state::AppState;
         attachment::domain::VirusScanStatus,
         activity::domain::ActivityEvent,
         activity::domain::EventCategory,
+        audit::domain::AuditEvent,
         notification::domain::Notification,
         notification::domain::NotificationType,
         notification::domain::UnreadCount,
@@ -410,6 +413,9 @@ fn api_v1_router(state: AppState) -> Router<AppState> {
         // Top level and subject-less, beside the inbox rather than under a
         // document: the caller's token is what says whose these are (#251).
         .nest("/notifications", notification::handlers::routes())
+        // Module-wide and filtered, which is the question the per-record
+        // history under a party deliberately does not answer (#252).
+        .nest("/audit", audit::handlers::routes())
         .nest("/organization", organization::handlers::routes())
 }
 

@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT DISTINCT object_type AS \"object_type!\"\n        FROM audit_events\n        WHERE tenant_id = $1\n        ORDER BY object_type\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "object_type!",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "72feba1794940cbdd3dce7f767b1afeadfd3b6bb833e065c692419daa60dfbbe"
+}
