@@ -3037,3 +3037,210 @@ async fn a_resubmission_does_not_consume_a_number_from_the_sequence() {
         next_of(&second_number) - next_of(&first_number) - 1
     );
 }
+
+// ---------------------------------------------------------------------------
+// #278 — a discard cannot strand a live approval
+// ---------------------------------------------------------------------------
+
+/// A workflow whose **non-final initial state maps to `DRAFT`**.
+///
+/// This is [#278]'s precondition, and it is one word in a definition rather
+/// than a contrivance: `DRAFT` is in the platform enum, in the meta-schema and
+/// in `jwss::DOCUMENT_STATUSES`; S9 constrains only that *some final* state
+/// maps to `COMPLETED` or `CANCELLED`; and [JWSS §10]'s own worked example maps
+/// its initial state to `DRAFT`. **D-46** decided that stays permitted, so this
+/// definition publishes — the assertion is inside [`publish_workflow`] — and
+/// what changed is the guard downstream of it.
+///
+/// No other definition in this repository maps a state to `DRAFT`. That is why
+/// the defect survived to Sprint 12: it was a trap laid for the first author
+/// reaching for the status that means *editable again* without knowing
+/// `RETURNED` is the one this product was built around.
+///
+/// [#278]: https://github.com/sujanto-gaws/kelir/issues/278
+/// [JWSS §10]: ../../docs/schema/JSON%20Workflow%20Schema.md
+fn draft_mapping_workflow(key: &str) -> Value {
+    json!({
+        "workflowKey": key,
+        "version": "1.0.0",
+        "name": "An approval that leaves the document editable",
+        "initialState": "MANAGER_APPROVAL",
+        "states": [
+            { "code": "MANAGER_APPROVAL", "name": "Manager approval",
+              "mapsToDocumentStatus": "DRAFT",
+              "task": { "taskDefinitionKey": "manager_approval", "taskName": "Approve the request",
+                        "assignment": { "assigneeType": "ROLE", "roleCode": APPROVER_ROLE } } },
+            { "code": "COMPLETED", "name": "Completed", "mapsToDocumentStatus": "COMPLETED",
+              "isFinal": true },
+            { "code": "REJECTED", "name": "Rejected", "mapsToDocumentStatus": "REJECTED",
+              "isFinal": true }
+        ],
+        "transitions": [
+            { "from": "MANAGER_APPROVAL", "to": "COMPLETED", "action": "APPROVE",
+              "allowedBy": format!("ROLE:{APPROVER_ROLE}") },
+            { "from": "MANAGER_APPROVAL", "to": "REJECTED", "action": "REJECT",
+              "allowedBy": format!("ROLE:{APPROVER_ROLE}") }
+        ]
+    })
+}
+
+/// **A document a workflow is deciding cannot be discarded, whatever its
+/// status** ([#278] AC1, AC2, AC3).
+///
+/// The guard `delete_document` had was `status = 'DRAFT'`, a **proxy** for *has
+/// no live process*, and the projection is what makes the proxy false: this
+/// document is `DRAFT` with a number, a `RUNNING` instance and an open task.
+///
+/// **Reproduced before it was fixed** (AC5), on 2026-09-01, because the finding
+/// was traced in source rather than executed — [record 09] §7 says so in its
+/// own header. What the run showed, against `main` at `3767a44`:
+///
+/// ```text
+/// delete answered 204 No Content
+/// document deleted_at = Some(…), instance status = RUNNING
+/// claim answered 200 OK          <- the task is still claimable
+/// decision answered 404 Not Found: "Document not found"
+/// ```
+///
+/// The claim succeeding is the part the issue did not predict and the part that
+/// makes it worst: an approver is handed the task, takes it, and only then
+/// finds the document gone. Nothing could move that instance again — not the
+/// approver, not an administrator — because `find_document` filters
+/// `deleted_at IS NULL` and every later decision reads through it.
+///
+/// **Seen red, 2026-09-01**, with the `refuse_while_a_workflow_is_deciding`
+/// call deleted from `service::document::delete_document`: the delete answers
+/// 204 and the assertions below fail on the first one.
+///
+/// [#278]: https://github.com/sujanto-gaws/kelir/issues/278
+/// [record 09]: ../../projects/verifications/09.%20Sprint%2011%20Independent%20Pass.md
+#[tokio::test]
+async fn a_document_a_workflow_is_deciding_cannot_be_discarded() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let _ = approver_role(&app).await;
+
+    let workflow = publish_workflow(&app, &token, draft_mapping_workflow("wf_278_guard")).await;
+    let type_id = document_type(&app, &token, "PR_278_GUARD", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    // The precondition, asserted rather than assumed: the projection put this
+    // document back in `DRAFT` while its approval runs.
+    assert_eq!(
+        stored_status(&app, id).await,
+        "DRAFT",
+        "the precondition is gone: this test is no longer about #278"
+    );
+    let (instance, _, instance_status) = instance_of(&app, id).await.expect("a live instance");
+    assert_eq!(instance_status, "RUNNING");
+    let task = open_task_of(&app, id).await;
+
+    let number: Option<String> =
+        sqlx::query_scalar("SELECT document_number FROM documents WHERE id = $1")
+            .bind(id)
+            .fetch_one(&app.pool)
+            .await
+            .expect("the document row");
+    assert!(
+        number.is_some(),
+        "a submitted document holds a number, which is half of what a discard would retire"
+    );
+
+    let refused = app
+        .send(
+            Method::DELETE,
+            &format!("/api/v1/documents/{id}"),
+            Some(&token),
+            None,
+        )
+        .await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::CONFLICT,
+        "a document with a live approval was discarded: {}",
+        refused.body
+    );
+
+    // AC2 — the refusal names the instance, which is the status route's shape.
+    // A caller told only "no" cannot find the process they have to act on.
+    let message = refused.body["error"]["message"]
+        .as_str()
+        .expect("a message");
+    assert!(
+        message.contains(&instance.to_string()),
+        "the refusal does not name the instance a caller has to act on: {message}"
+    );
+
+    let deleted: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT deleted_at FROM documents WHERE id = $1")
+            .bind(id)
+            .fetch_one(&app.pool)
+            .await
+            .expect("the document row");
+    assert!(deleted.is_none(), "the refusal wrote `deleted_at` anyway");
+
+    // **And the process is unharmed**, which is the other half of the claim: a
+    // refusal that left the approval undecidable would be this defect reached
+    // by a different route.
+    let approver_token = approver(&app, "wf-278-approver").await;
+    assert_eq!(
+        app.post(
+            &format!("/api/v1/workflow/tasks/{task}/claim"),
+            Some(&approver_token),
+            json!({}),
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+
+    let decided = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&approver_token),
+            json!({ "action": "APPROVE", "comment": "Approved" }),
+        )
+        .await;
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+    assert_eq!(stored_status(&app, id).await, "COMPLETED");
+}
+
+/// The other half: **the guard is about the process, not about the delete**.
+///
+/// A draft under a type that binds no workflow is still discarded, so the
+/// refusal above is a live instance being found rather than
+/// `delete_document` having stopped working — the shape
+/// `a_document_under_a_workflow_cannot_have_its_status_set_by_hand` uses for
+/// the same reason one rule over.
+#[tokio::test]
+async fn a_draft_with_no_process_behind_it_is_still_discarded() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let type_id = document_type(&app, &token, "PR_278_FREE", None).await;
+    let id = draft(&app, &token, type_id).await;
+
+    assert!(
+        instance_of(&app, id).await.is_none(),
+        "this document was supposed to have no process"
+    );
+
+    let discarded = app
+        .send(
+            Method::DELETE,
+            &format!("/api/v1/documents/{id}"),
+            Some(&token),
+            None,
+        )
+        .await;
+
+    assert_eq!(
+        discarded.status,
+        StatusCode::NO_CONTENT,
+        "the live-instance guard refused a document with no instance: {}",
+        discarded.body
+    );
+}

@@ -309,6 +309,25 @@ pub async fn update_document<'e, E: PgExecutor<'e>>(
 /// status history and a live process waiting for it to come back. Deleting it
 /// would strand the instance that returned it and retire a number an auditor
 /// can see was issued.
+///
+/// # The second harm named above is not guarded here, and this is why
+///
+/// *Stranding the instance* was correctly identified in the paragraph above and
+/// then guarded by `status = 'DRAFT'`, which is a **proxy** for *has no live
+/// process* — and [#278](https://github.com/sujanto-gaws/kelir/issues/278)
+/// found the proxy false: `mapsToDocumentStatus` may say `DRAFT`, so a document
+/// under a running approval can be in it.
+///
+/// The fact now lives in [`super::super::service::document::delete_document`],
+/// under this row's `FOR UPDATE`, and **deliberately not in this `WHERE`**. The
+/// predicate would be a `NOT EXISTS` over `workflow_instances` naming the three
+/// live statuses — a copy of `modules::workflow`'s vocabulary inside
+/// `modules::document`'s SQL, which the day that module adds a fourth becomes a
+/// delete that silently reopens. `instance::live_instance_of_document` is the
+/// one place that says what live means, and one place is what makes it true.
+///
+/// So what this statement still carries is the rule a status really does
+/// decide: **a document with a number is withdrawn, not discarded.**
 pub async fn soft_delete<'e, E: PgExecutor<'e>>(
     executor: E,
     tenant_id: Uuid,
