@@ -97,6 +97,7 @@ use super::assignment::{self, AssignmentContext};
 use crate::error::{AppError, ValidationDetail};
 use crate::modules::document::domain::DocumentStatus;
 use crate::modules::document::repository as document_repo;
+use crate::modules::notification;
 use crate::modules::rad::evaluator::RuleEvaluator;
 
 /// What a caller supplies to start a process.
@@ -698,6 +699,35 @@ async fn enter(
             },
         )
         .await?;
+
+        // **Told in this transaction, so nobody hears about a task that did not
+        // survive** (#251 AC3). `notify` returns its error and this `?` carries
+        // it, which is `activity::record`'s rule one module over — and it is
+        // load-bearing in both directions here: a rolled-back submit that had
+        // already told an approver would send them to a task that is not there.
+        //
+        // **From `resolved`, which is where #251 AC4 is discharged.** That
+        // struct is what `insert_task` wrote as the task's own holder, so a
+        // delegation window that redirected the task redirects the notification
+        // with it, without this call knowing that windows exist. Re-resolving
+        // the definition's named assignee here is the defect AC4 names, and the
+        // only way to write it is to go and ask for something this scope
+        // already has.
+        notify_the_task_reached(
+            transaction,
+            tenant_id,
+            &TaskArrival {
+                task_id,
+                instance_id,
+                document_id,
+                task_name: &spec.task_name,
+                assignee_user_id: resolved.assignee_user_id,
+                candidate_role_id: resolved.candidate_role_id,
+                candidate_department_id: resolved.candidate_department_id,
+                actor,
+            },
+        )
+        .await?;
     }
 
     project_document_status(
@@ -708,6 +738,88 @@ async fn enter(
         graph,
     )
     .await
+}
+
+/// One task's arrival, as [`notify_the_task_reached`] needs it.
+///
+/// Every field comes from the row just written rather than from the definition,
+/// which is [#251] AC4 in the type: there is no `assignment` here to re-resolve,
+/// so a delegation cannot be lost by resolving it twice.
+///
+/// [#251]: https://github.com/sujanto-gaws/kelir/issues/251
+struct TaskArrival<'a> {
+    task_id: Uuid,
+    instance_id: Uuid,
+    document_id: Uuid,
+    task_name: &'a str,
+    assignee_user_id: Option<Uuid>,
+    candidate_role_id: Option<Uuid>,
+    candidate_department_id: Option<Uuid>,
+    actor: Option<Uuid>,
+}
+
+/// Tells whoever a new task has reached ([#251] AC2, AC4).
+///
+/// # Three shapes, and the middle one is the decision
+///
+/// * **Assigned to a person** — one notification, to them. That person is the
+///   task's holder, so a delegation window has already been applied.
+/// * **Offered to a role** — one notification per current holder (**D-48**).
+///   `service::role_recipients` carries the argument; the short version is that
+///   a role task reaches everybody the inbox offers it to, and notifying nobody
+///   until somebody claims it would leave the commonest approval shape in this
+///   product silent.
+/// * **Neither** — nothing. A task with no assignee and no candidate role
+///   reached nobody, and a notification would have no recipient to name.
+///
+/// **The actor is not excluded.** A person who submits a document whose first
+/// task resolves to `OWNER` is told about their own task, and that is right:
+/// they did not create the task, the engine did, and *what is waiting for me*
+/// is the question the centre answers. The decision path takes the opposite
+/// view and says why there.
+async fn notify_the_task_reached(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    arrival: &TaskArrival<'_>,
+) -> Result<(), AppError> {
+    let recipients = match (arrival.assignee_user_id, arrival.candidate_role_id) {
+        (Some(assignee), _) => vec![assignee],
+        (None, Some(role_id)) => {
+            notification::service::role_recipients(
+                transaction,
+                tenant_id,
+                role_id,
+                arrival.candidate_department_id,
+            )
+            .await?
+        }
+        (None, None) => Vec::new(),
+    };
+
+    let body = format!(
+        "{} is waiting for you. Open your inbox to act on it.",
+        arrival.task_name
+    );
+
+    for recipient in recipients {
+        notification::service::notify(
+            transaction,
+            &notification::service::Telling {
+                tenant_id,
+                recipient_user_id: recipient,
+                document_id: Some(arrival.document_id),
+                workflow_instance_id: Some(arrival.instance_id),
+                task_id: Some(arrival.task_id),
+                notification_type: notification::domain::NotificationType::TaskAssigned,
+                title: arrival.task_name,
+                body: &body,
+                actor: arrival.actor,
+            },
+        )
+        .await?;
+    }
+
+    Ok(())
 }
 
 /// Writes the document's status from the state the process is in ([#178]).

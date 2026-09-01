@@ -112,6 +112,20 @@ export const routes: RouteRecordRaw[] = [
         meta: { requiresAuth: true, permission: 'document:read', title: 'Document' },
       },
       {
+        // What has been sent to the person signed in (FR-NTF-003, #251).
+        //
+        // **`notification:read` rather than nothing.** The rows are already
+        // scoped to the caller in the statement, so this permission is not
+        // what keeps them apart — it is what says whether this account has a
+        // notification centre at all, which nothing else in the product
+        // answers. That is the distinction **D-47** found `activity:read`
+        // lacking.
+        path: 'notifications',
+        name: 'notifications',
+        component: () => import('@/features/notifications/NotificationCentrePage.vue'),
+        meta: { requiresAuth: true, permission: 'notification:read', title: 'Notifications' },
+      },
+      {
         // What is waiting for the person signed in — theirs, and their roles'
         // (FR-TASK-001, 002). The scope and the page live in the query string
         // beside it, so a view can be linked to (#179).

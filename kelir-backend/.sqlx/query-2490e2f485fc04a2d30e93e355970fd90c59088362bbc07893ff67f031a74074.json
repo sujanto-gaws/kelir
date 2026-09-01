@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE notifications\n        SET read_at = now(), updated_by = $2, updated_at = now()\n        WHERE tenant_id = $1 AND recipient_user_id = $2\n          AND deleted_at IS NULL AND read_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2490e2f485fc04a2d30e93e355970fd90c59088362bbc07893ff67f031a74074"
+}
