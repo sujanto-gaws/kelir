@@ -70,6 +70,16 @@ pub struct AppConfig {
     /// bounded by this number; the benefit is that a scan lost to a restart is
     /// picked up again, which a spawned task would not be.
     pub clamav_poll_seconds: u64,
+    /// How often the sender looks for notifications nobody has delivered yet
+    /// (FR-NTF-004, [#257](https://github.com/sujanto-gaws/kelir/issues/257)).
+    ///
+    /// **A poll for `clamav_poll_seconds`' reason**, and one more: the queue is
+    /// the notification row itself, written in the transaction of the thing it
+    /// announces (#251 AC3), so a delivery lost to a restart is picked up by the
+    /// next pass where a spawned task would be gone. The cost is latency bounded
+    /// by this number — an email arrives within a few seconds of the approval
+    /// that caused it, not within a few milliseconds.
+    pub notification_poll_seconds: u64,
     pub smtp_host: String,
     /// The port `smtp_host` listens on. 1025 is mailpit's, which the compose
     /// stack runs; a relay is usually 587.
@@ -416,6 +426,14 @@ impl AppConfig {
                     reason: format!("expected a number of seconds; found '{raw}'"),
                 })?
             },
+            notification_poll_seconds: {
+                let raw = optional("KELIR_NOTIFICATION_POLL_SECONDS", "5");
+
+                raw.parse().map_err(|_| ConfigError::Invalid {
+                    key: "KELIR_NOTIFICATION_POLL_SECONDS",
+                    reason: format!("expected a number of seconds; found '{raw}'"),
+                })?
+            },
             smtp_host: optional("KELIR_SMTP_HOST", "localhost"),
             smtp_port: {
                 let raw = optional("KELIR_SMTP_PORT", "1025");
@@ -461,6 +479,7 @@ impl AppConfig {
             clamav_host: "localhost".to_owned(),
             clamav_port: 3310,
             clamav_poll_seconds: 5,
+            notification_poll_seconds: 5,
             smtp_host: "localhost".to_owned(),
             smtp_port: 1025,
             mail_from: "no-reply@kelir.test".to_owned(),

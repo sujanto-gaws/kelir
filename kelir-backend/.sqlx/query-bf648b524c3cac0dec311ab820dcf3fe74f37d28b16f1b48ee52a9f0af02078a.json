@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT n.id, n.tenant_id, n.notification_type, n.title, n.body,\n               u.email AS \"recipient_email?\"\n        FROM notifications n\n        -- **A deactivated recipient has no address for this purpose.**\n        -- `users.email` is `NOT NULL`, so the only way this join misses is a\n        -- person removed between the notification being written and this pass —\n        -- and mailing somebody the product has deactivated is the one delivery\n        -- worth not attempting. The notification itself stays where it is.\n        LEFT JOIN users u\n               ON u.id = n.recipient_user_id AND u.tenant_id = n.tenant_id\n              AND u.deleted_at IS NULL\n        WHERE n.status = 'PENDING' AND n.deleted_at IS NULL\n        ORDER BY n.created_at\n        LIMIT $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "tenant_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "notification_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "body",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "recipient_email?",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "bf648b524c3cac0dec311ab820dcf3fe74f37d28b16f1b48ee52a9f0af02078a"
+}
