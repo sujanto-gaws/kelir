@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT 1 AS \"found!\"\n        FROM workflow_tasks t\n        -- The third statement #279 found disagreeing, joined for the reason the\n        -- count is: this gate answered *visible* for a task the read behind it\n        -- then answered 404 for.\n        JOIN documents d ON d.id = t.document_id AND d.deleted_at IS NULL\n        WHERE t.tenant_id = $1 AND t.id = $3 AND t.deleted_at IS NULL\n          AND (\n                t.assignee_user_id = $2\n             OR (t.assignee_user_id IS NULL AND EXISTS (\n                    SELECT 1 FROM user_roles ur\n                    WHERE ur.tenant_id = $1 AND ur.user_id = $2 AND ur.deleted_at IS NULL\n                      AND ur.role_id = t.candidate_role_id\n                      AND (ur.valid_from IS NULL OR ur.valid_from <= current_date)\n                      AND (ur.valid_to   IS NULL OR ur.valid_to   >= current_date)\n                      AND (t.candidate_department_id IS NULL\n                           OR ur.department_id IS NULL\n                           OR ur.department_id = t.candidate_department_id)\n                ))\n          )\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "found!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "4b698154bccb417c13963fe7303037566cc779ef937ffb9970b2342673ad25c3"
+}

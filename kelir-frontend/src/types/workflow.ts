@@ -53,7 +53,14 @@ export type DecisionAction = 'APPROVE' | 'REJECT' | 'RETURN'
  * flag would let a screen ask for *completed and overdue*, which is a question
  * with no answer, and would need two controls to express one choice.
  */
-export type InboxScope = 'open' | 'overdue' | 'all'
+/**
+ * One axis with four points, which is what the API offers (#185 AC3, #256 AC2).
+ *
+ * `overdue ⊂ open ⊂ all` and `completed ⊂ all`, and the two subsets are
+ * disjoint: a task that is late is still open, because a finished one is not
+ * late, it is done. One control on the screen, because there is one question.
+ */
+export type InboxScope = 'open' | 'overdue' | 'completed' | 'all'
 
 export interface WorkflowVariable {
   key: string
@@ -160,6 +167,24 @@ export interface InboxTask {
   documentNumber: string | null
   documentTitle: string
   createdAt: string
+  /**
+   * What was decided, on a task that has been (#256 AC5).
+   *
+   * `null` while it is still waiting, which is what lets one list render both
+   * questions: the row that says *finished* is the row that says what was
+   * decided.
+   */
+  action: string | null
+  /**
+   * The reason given with the decision — FR-TASK-006's record, taken with the
+   * approval and immutable because the decision is.
+   *
+   * **Not a comment from the Comments tab.** That is a conversation its author
+   * can edit; this is evidence, and the two are one table apart for exactly
+   * that reason.
+   */
+  decisionComment: string | null
+  completedAt: string | null
 }
 
 /** One thing the holder of a task may do, and where it leads. */
