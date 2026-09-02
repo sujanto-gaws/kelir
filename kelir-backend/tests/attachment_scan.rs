@@ -368,14 +368,19 @@ async fn the_write_itself_refuses_to_move_a_decided_row() {
     let attachment = attach(&app, &token, document, "q.pdf", PDF).await;
 
     // Decided, by whatever route.
-    let moved = repository::record_scan_result(&app.pool, attachment, "INFECTED")
+    // **The tenant travels with the id** (#294 AC1). It is the same tenant the
+    // worker reads off the row, so this call proves the predicate does not
+    // refuse a legitimate write rather than proving it fires.
+    let tenant = common::fixtures::SYSTEM_TENANT_ID;
+
+    let moved = repository::record_scan_result(&app.pool, tenant, attachment, "INFECTED")
         .await
         .expect("the first result");
     assert_eq!(moved, 1, "the first result moves the row");
 
     // Everything a later writer might try, including the same value again.
     for later in ["CLEAN", "PENDING", "FAILED", "INFECTED"] {
-        let moved = repository::record_scan_result(&app.pool, attachment, later)
+        let moved = repository::record_scan_result(&app.pool, tenant, attachment, later)
             .await
             .expect("a later result");
 

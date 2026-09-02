@@ -13,6 +13,46 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
 
 ### Added
 
+- **A file can be filed, removed, or replaced by a link to where it really
+  lives** (FR-ATT-006, FR-ATT-009, FR-ATT-010,
+  [#254](https://github.com/sujanto-gaws/kelir/issues/254), decisions **D-52**
+  and **D-53**, recorded as
+  [ADR-0031](docs/architectures/adr/0031.%20An%20External%20Reference%20Is%20Not%20an%20Attachment%20Row.md)
+  and [ADR-0032](docs/architectures/adr/0032.%20A%20Soft-Deleted%20Attachment%20Keeps%20Its%20Object.md)).
+  `0037_attachment_tail.sql` seeds four categories, adds
+  `document_external_references`, and adds `attachment:delete` and
+  `attachment:reference`.
+
+  **Categories have rows in them for the first time.** `QUOTATION`,
+  `CONTRACT`, `APPROVAL` and `EVIDENCE`, seeded for the system tenant, and an
+  attachment or a link can carry one. Filing is optional: a file nobody has
+  categorized is a normal state, not a refused upload.
+
+  **Deleting is soft and keeps the stored object** (D-52). The row leaves every
+  list and the download refuses it — through the predicate in the statement that
+  serves the bytes, not a check beside it — and `storage_reference`, the file
+  name and the checksum stay, so the delete is recoverable and the audit trail's
+  hash still describes something that exists. **When bytes actually leave a
+  deployment is a retention question**, `attachments.retention_policy_id` is
+  where it will be answered, and nothing writes it yet: storage grows and
+  nothing shrinks it. The screen says *the stored copy is kept* before somebody
+  confirms, because *delete* means something narrower here than it sounds.
+
+  **An external reference is its own table, never an attachment row with a URL
+  in it** (D-53). It has no size, no checksum, no MIME type and **no scan
+  status**, so a link is visibly not a file and can never read `CLEAN` — held by
+  the shape rather than by a convention. The alternative would have had to store
+  sentinel values that say something false, or make the file columns nullable,
+  which breaks the previous release's list at run time. **`url` is `http` or
+  `https` and nothing else**: the string is rendered as a link, and
+  `javascript:` in an `href` is somebody else's script in this product's page.
+
+  **`attachment:reference` is a new permission**, separate from
+  `attachment:create`, because recording a link grants something different: no
+  bytes enter the product, nothing is scanned, and the risk is what somebody
+  else clicks. Deleting is `attachment:delete`, and both writes ask authorship
+  as well: no code in this release lets one account remove another's upload.
+
 - **A conversation can be answered, corrected and taken back** (FR-CMT-002,
   FR-CMT-003, FR-CMT-004, [#253](https://github.com/sujanto-gaws/kelir/issues/253),
   decisions **D-50** and **D-51**, recorded as
@@ -214,6 +254,28 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
   could already read the documents of.
 
 ### Fixed
+
+- **A download that failed is no longer recorded as one that happened**
+  (FR-ACT-002, [#293](https://github.com/sujanto-gaws/kelir/issues/293)). The
+  `Attachment.Downloaded` event was committed and the object read afterwards, so
+  a storage failure gave the caller a 500 and the timeline an entry saying they
+  had taken a copy. **The object is now read first and the event still written
+  before the bytes are served**, so the ordering that matters is unchanged — if
+  this product cannot record that somebody took a copy, it does not hand over
+  the copy — and the false record is gone. Both consequences are named in the
+  code, because over-recording remains the safe direction and reversing the
+  order entirely would trade this defect for a worse one.
+
+- **The scan write carries a tenant in its predicate**
+  ([#294](https://github.com/sujanto-gaws/kelir/issues/294)). It was the one
+  write in the Sprint 12 surface scoped by id alone. Nothing was wrong — every
+  id came from `pending_scans`, which is right to read across tenants — but a
+  statement whose scope depends on its caller having chosen correctly is the
+  shape [#106](https://github.com/sujanto-gaws/kelir/issues/106) and
+  [#121](https://github.com/sujanto-gaws/kelir/issues/121) cost this project
+  three sprints of findings over. The tenant now comes from the row the worker
+  read, and `pending_scans` says in its own documentation why reading across
+  tenants is deliberate: it is a worker, and there is no caller to scope to.
 
 - **A document with a live approval could be discarded, and the approval
   survived it** (FR-DOC-005, FR-WF-003,

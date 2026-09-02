@@ -69,6 +69,14 @@ pub mod worker;
 /// What the audit trail calls an attachment (naming convention §7).
 pub const ATTACHMENT_OBJECT_TYPE: &str = "ATTACHMENT";
 
+/// What the audit trail calls an external reference (naming convention §7).
+///
+/// **Its own object type, not `ATTACHMENT`.** A trail that filed both under one
+/// name would make *which of these was a file* a question nobody can answer from
+/// the row, and `audit::domain::readable_by` maps a type to the permission that
+/// governs it — two things governed alike still have to be told apart.
+pub const REFERENCE_OBJECT_TYPE: &str = "EXTERNAL_REFERENCE";
+
 pub const ATTACHMENT_CREATE: &str = "attachment:create";
 /// Seeded by `0031_attachment.sql`, checked by #245. See the module note.
 #[allow(
@@ -76,3 +84,11 @@ pub const ATTACHMENT_CREATE: &str = "attachment:create";
     reason = "the download that checks it is #245, this sprint's item 2"
 )]
 pub const ATTACHMENT_READ: &str = "attachment:read";
+/// Deleting one's **own** attachment (FR-ATT-009), softly, keeping the object.
+/// Never enough on its own — `service::refuse_unless_uploader` is the other
+/// half, which is `modules::comment`'s pairing one module over.
+pub const ATTACHMENT_DELETE: &str = "attachment:delete";
+/// Recording a link to something this product does not hold (FR-ATT-010).
+/// **Separate from `attachment:create`** because it grants something different:
+/// no bytes, no scan, and a risk that lives in what somebody else clicks.
+pub const ATTACHMENT_REFERENCE: &str = "attachment:reference";

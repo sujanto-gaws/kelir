@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE attachments\n        SET deleted_at = now(), updated_at = now(), updated_by = $4\n        WHERE tenant_id = $1 AND document_id = $2 AND id = $3 AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8c6d2f80672b7711fa05b50e8a0f9601925cf510c8e34d6f5ce25a155a1d99a0"
+}

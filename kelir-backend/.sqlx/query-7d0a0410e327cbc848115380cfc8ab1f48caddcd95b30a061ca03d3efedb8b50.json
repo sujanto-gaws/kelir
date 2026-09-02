@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE attachments\n        SET virus_scan_status = $3, updated_at = now()\n        WHERE tenant_id = $1 AND id = $2\n          AND virus_scan_status = 'PENDING' AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7d0a0410e327cbc848115380cfc8ab1f48caddcd95b30a061ca03d3efedb8b50"
+}

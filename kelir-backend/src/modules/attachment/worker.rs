@@ -115,7 +115,12 @@ async fn scan_one(state: &AppState, host: &str, port: u16, attachment: &repo::Pe
                 ScanOutcome::Failed(_) => "FAILED",
             };
 
-            match repo::record_scan_result(&state.pool, attachment.id, status).await {
+            // The tenant comes from the row `pending_scans` returned rather than
+            // from anything this loop decides (#294 AC1): the read is
+            // deliberately cross-tenant, and the write is not.
+            match repo::record_scan_result(&state.pool, attachment.tenant_id, attachment.id, status)
+                .await
+            {
                 Ok(0) => tracing::debug!(
                     attachment = %attachment.id,
                     %status,

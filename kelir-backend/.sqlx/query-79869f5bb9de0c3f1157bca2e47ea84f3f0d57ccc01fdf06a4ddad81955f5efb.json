@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE document_external_references\n        SET deleted_at = now(), updated_at = now(), updated_by = $4\n        WHERE tenant_id = $1 AND document_id = $2 AND id = $3 AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "79869f5bb9de0c3f1157bca2e47ea84f3f0d57ccc01fdf06a4ddad81955f5efb"
+}

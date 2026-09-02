@@ -334,6 +334,52 @@ impl TestApp {
         .await
     }
 
+    /// A `multipart/form-data` POST carrying a `categoryId` part beside the
+    /// file — the shape the upload form takes once a person has filed what
+    /// they are attaching ([#254](https://github.com/sujanto-gaws/kelir/issues/254)
+    /// AC1).
+    ///
+    /// A separate method rather than a seventh parameter on
+    /// [`Self::post_multipart`]: three test files call that one and none of
+    /// them is about categories.
+    pub async fn post_multipart_with_category(
+        &self,
+        uri: &str,
+        token: Option<&str>,
+        file_name: &str,
+        content_type: &str,
+        content: &[u8],
+        category_id: &str,
+    ) -> TestResponse {
+        const BOUNDARY: &str = "kelirtestboundary";
+
+        let mut body: Vec<u8> = Vec::new();
+
+        body.extend_from_slice(format!("--{BOUNDARY}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"file\"; filename=\"{file_name}\"\r\n")
+                .as_bytes(),
+        );
+        body.extend_from_slice(format!("Content-Type: {content_type}\r\n\r\n").as_bytes());
+        body.extend_from_slice(content);
+        body.extend_from_slice(b"\r\n");
+
+        body.extend_from_slice(format!("--{BOUNDARY}\r\n").as_bytes());
+        body.extend_from_slice(b"Content-Disposition: form-data; name=\"categoryId\"\r\n\r\n");
+        body.extend_from_slice(category_id.as_bytes());
+        body.extend_from_slice(b"\r\n");
+
+        body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
+
+        self.send_raw(
+            uri,
+            token,
+            &format!("multipart/form-data; boundary={BOUNDARY}"),
+            body,
+        )
+        .await
+    }
+
     /// A `multipart/form-data` POST with **no** file part — the shape a form
     /// takes when its file input was left empty.
     pub async fn post_multipart_without_file(

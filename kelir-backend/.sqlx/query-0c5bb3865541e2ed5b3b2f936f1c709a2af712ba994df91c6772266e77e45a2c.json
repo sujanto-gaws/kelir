@@ -1,0 +1,83 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT r.id, r.document_id, r.label, r.url, r.description, r.created_at, r.created_by,\n               c.id AS \"category_id?\", c.category_code AS \"category_code?\",\n               c.name AS \"category_name?\", c.is_system AS \"category_is_system?\"\n        FROM document_external_references r\n        LEFT JOIN attachment_categories c\n               ON c.id = r.category_id AND c.tenant_id = r.tenant_id\n        WHERE r.tenant_id = $1 AND r.id = $2 AND r.deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "document_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "label",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "description",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "created_by",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 7,
+        "name": "category_id?",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 8,
+        "name": "category_code?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 9,
+        "name": "category_name?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 10,
+        "name": "category_is_system?",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "0c5bb3865541e2ed5b3b2f936f1c709a2af712ba994df91c6772266e77e45a2c"
+}

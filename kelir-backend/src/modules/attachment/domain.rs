@@ -1,10 +1,12 @@
-//! What an attachment is, and the refusals that need no database (FR-ATT-001,
-//! FR-ATT-003; [#244]).
+//! What an attachment is, what a reference to one somewhere else is, and the
+//! refusals that need no database (FR-ATT-001, FR-ATT-003, FR-ATT-006,
+//! FR-ATT-010; [#244], [#254]).
 //!
 //! [#244]: https://github.com/sujanto-gaws/kelir/issues/244
+//! [#254]: https://github.com/sujanto-gaws/kelir/issues/254
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -69,8 +71,73 @@ pub struct Attachment {
     pub checksum: String,
     pub description: Option<String>,
     pub virus_scan_status: VirusScanStatus,
+    /// What kind of thing this file is (FR-ATT-006), or null on one nobody has
+    /// filed. **Absent is a normal state**: a category is how a person finds a
+    /// quotation among eleven files, not a property the upload cannot proceed
+    /// without.
+    pub category: Option<AttachmentCategory>,
     pub created_at: DateTime<Utc>,
     pub created_by: Option<Uuid>,
+}
+
+/// One category, as the API reports it (FR-ATT-006; [#254] AC1).
+///
+/// **The code and the name are both served.** The code is what a rule will be
+/// written against — `document_type_attachment_rules.category_id` has been
+/// waiting for this table since `0015` — and the name is what a person reads.
+/// Serving only the id would make every screen fetch the list to render a word.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentCategory {
+    pub id: Uuid,
+    pub code: String,
+    pub name: String,
+    /// A category this product seeded, which a tenant may use and may not
+    /// delete. `0031_attachment.sql` created the flag; `0037` writes the four.
+    pub is_system: bool,
+}
+
+/// A link to something that lives somewhere else (FR-ATT-010; [#254] AC4).
+///
+/// # It is deliberately not an [`Attachment`], and the type is the argument
+///
+/// **There is no `fileSize`, no `checksum`, no `mimeType` and no
+/// `virusScanStatus` on this struct**, because there is none on the row and
+/// there is nothing true to put in them. #254 AC4 asks that a reference be
+/// visibly not a file everywhere attachments are listed, and AC5 that it never
+/// read `CLEAN` — both of which a shared type would have to enforce by
+/// convention, and this one enforces by having no field to get wrong.
+///
+/// **D-53** carries the full argument, including the half that settles it: the
+/// previous release reads `attachments.file_size` into a non-null `i64`, so a
+/// nullable-column version of this would break `v0.5.0`'s list at run time
+/// rather than at deploy time.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalReference {
+    pub id: Uuid,
+    pub document_id: Uuid,
+    /// What to call the link on a screen — never the URL itself, which is where
+    /// a lookalike host hides in plain sight.
+    pub label: String,
+    /// `http` or `https`, refused at the surface if it is anything else.
+    pub url: String,
+    pub description: Option<String>,
+    pub category: Option<AttachmentCategory>,
+    pub created_at: DateTime<Utc>,
+    pub created_by: Option<Uuid>,
+}
+
+/// The body of a request to record an external reference.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AddReferenceRequest {
+    pub label: String,
+    pub url: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub category_id: Option<Uuid>,
 }
 
 /// Refuses a file larger than the deployment accepts ([#245] AC3, AC6).
@@ -274,9 +341,160 @@ pub fn storage_reference(
     format!("tenants/{tenant_id}/documents/{document_id}/attachments/{attachment_id}/{file_name}")
 }
 
+/// The longest label and URL this API will record.
+///
+/// **2048 for the URL** because that is the bound every browser and proxy in
+/// practice agrees on, and a link nothing can follow is not a reference. The
+/// label is bounded by its column.
+pub const MAX_REFERENCE_LABEL: usize = 200;
+pub const MAX_URL: usize = 2048;
+
+/// The label as the row should hold it, or a refusal.
+///
+/// Whitespace is a refusal rather than an absence, for `comment::domain`'s
+/// stated reason: the label **is** what the link is called, and there is nothing
+/// else in the request for it to be missing from.
+pub fn normalize_label(label: String) -> Result<String, AppError> {
+    let trimmed = label.trim();
+
+    if trimmed.is_empty() {
+        return Err(AppError::validation(vec![ValidationDetail::new(
+            "label",
+            "required",
+            "LABEL_REQUIRED",
+            "a reference needs something to call it; a link with no label is a URL somebody has \
+             to read to know what it is",
+        )]));
+    }
+
+    if trimmed.chars().count() > MAX_REFERENCE_LABEL {
+        return Err(AppError::validation(vec![ValidationDetail::new(
+            "label",
+            "maxLength",
+            "LABEL_TOO_LONG",
+            format!("a label is at most {MAX_REFERENCE_LABEL} characters"),
+        )]));
+    }
+
+    Ok(trimmed.to_owned())
+}
+
+/// The URL as the row should hold it, or a refusal — **and this one is a
+/// security control** ([#254] AC4).
+///
+/// # Why a scheme allow-list, in a product that only stores the string
+///
+/// The string is stored, and then it is **rendered as a link**. `javascript:`
+/// in an `href` is somebody else's script running in this product's page with
+/// this product's session; `data:` is a page of the author's choosing wearing
+/// this product's origin in the address bar; `file:` points at the reader's own
+/// disk. None of those is a *document that lives elsewhere*, which is what
+/// FR-ATT-010 asks for.
+///
+/// **An allow-list, not a deny-list**, for `type_is_allowed`'s reason one
+/// screen up: a deny-list has to be extended for every scheme somebody invents,
+/// and forgetting is silent. `http` and `https` are what a reference is.
+///
+/// The frontend adds `rel="noopener noreferrer"` and the scheme check does not
+/// depend on it: a second client rendering the same row gets the same guarantee
+/// from the same place, which is the rule this project applies to every gate it
+/// puts on a screen.
+pub fn normalize_url(url: String) -> Result<String, AppError> {
+    let trimmed = url.trim();
+
+    if trimmed.is_empty() {
+        return Err(url_refusal("URL_REQUIRED", "a reference needs a URL"));
+    }
+
+    if trimmed.chars().count() > MAX_URL {
+        return Err(url_refusal(
+            "URL_TOO_LONG",
+            format!("a URL is at most {MAX_URL} characters"),
+        ));
+    }
+
+    // Case-insensitively, and on the scheme alone: `HTTPS://` is https, and
+    // ` javascript:` with a leading space is javascript once trimmed — which is
+    // why the trim happens first and the check runs on what will be stored.
+    let lowered = trimmed.to_ascii_lowercase();
+
+    if !(lowered.starts_with("http://") || lowered.starts_with("https://")) {
+        return Err(url_refusal(
+            "URL_SCHEME_NOT_ALLOWED",
+            "a reference is an http or https link; this product will not store any other scheme, \
+             because the link is rendered for somebody else to follow",
+        ));
+    }
+
+    Ok(trimmed.to_owned())
+}
+
+fn url_refusal(code: &str, message: impl Into<String>) -> AppError {
+    AppError::validation(vec![ValidationDetail::new("url", "format", code, message)])
+}
+
+/// The refusal for a `categoryId` this tenant does not have.
+///
+/// A 422 naming the field rather than a 404, because the request is what is
+/// wrong: the document exists, the file is fine, and the fix is in the body the
+/// caller sent.
+pub fn category_not_found() -> AppError {
+    AppError::validation(vec![ValidationDetail::new(
+        "categoryId",
+        "reference",
+        "CATEGORY_NOT_FOUND",
+        "this tenant has no attachment category with that id",
+    )])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_link_that_is_not_http_is_refused_whatever_case_it_arrives_in() {
+        for hostile in [
+            "javascript:alert(1)",
+            "JavaScript:alert(1)",
+            "  javascript:alert(1)  ",
+            "data:text/html;base64,PHNjcmlwdD4=",
+            "file:///etc/passwd",
+            "ftp://example.test/quotation.pdf",
+        ] {
+            assert!(
+                normalize_url(hostile.to_owned()).is_err(),
+                "{hostile} was accepted as a reference"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ordinary_link_survives_with_its_case_and_query_intact() {
+        assert_eq!(
+            normalize_url("  https://Example.test/a?b=c#d  ".to_owned()).expect("a url"),
+            "https://Example.test/a?b=c#d",
+            "only the surrounding whitespace is this function's business"
+        );
+        assert!(normalize_url("HTTPS://example.test/x".to_owned()).is_ok());
+        assert!(normalize_url("http://example.test/x".to_owned()).is_ok());
+    }
+
+    #[test]
+    fn a_label_of_whitespace_is_refused_rather_than_stored_empty() {
+        assert!(normalize_label("   \n ".to_owned()).is_err());
+        assert_eq!(
+            normalize_label("  Vendor portal  ".to_owned()).expect("a label"),
+            "Vendor portal"
+        );
+    }
+
+    #[test]
+    fn the_label_bound_is_in_characters_rather_than_bytes() {
+        let long = "é".repeat(MAX_REFERENCE_LABEL);
+
+        assert!(normalize_label(long.clone()).is_ok());
+        assert!(normalize_label(format!("{long}é")).is_err());
+    }
 
     #[test]
     fn a_traversal_in_an_uploaded_name_does_not_survive_into_the_stored_one() {
