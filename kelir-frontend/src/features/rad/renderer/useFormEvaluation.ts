@@ -67,12 +67,37 @@ import {
  * accepts typing and checks its §5 keywords before it lands. What waits is
  * `calculate` and `conditional`, and both have a defined answer for "not yet":
  * a computed field is left as it is, and every component is visible.
+ *
+ * **And a defined answer for "not ever"** ([#273](https://github.com/sujanto-gaws/kelir/issues/273),
+ * **D-54**). Those two used to be the same state: a rejected load left `engine`
+ * undefined exactly as a pending one does, so a form whose engine had failed
+ * looked like a form whose engine was slow, for ever. The behaviour is
+ * unchanged — the unawaited load stays, nothing blocks, nothing is refused —
+ * and what is added is that the failure is **caught**, and that the form says
+ * so. Waiting still says nothing, which is D-10's condition and the half a fix
+ * here could easily have broken.
  */
 
 /** What a form's rules decide, for the components rendering inside it. */
 export interface FormEvaluation {
   /** True once the engine has arrived, or when the definition needs none. */
   ready: ComputedRef<boolean>
+  /**
+   * True when the engine **will not** arrive — the load was attempted and
+   * rejected ([#273](https://github.com/sujanto-gaws/kelir/issues/273)).
+   *
+   * **`ready === false` says two different things and this is the second one.**
+   * Before this flag existed, *the engine is still coming* and *the engine is
+   * never coming* were the same state on the screen: totals blank or stale,
+   * conditional sections all visible, nothing said. The first resolves itself
+   * on a slow connection; the second never does, and the person filling the
+   * form in had no way to tell which they were in.
+   *
+   * **It stays true for the life of the page**, because `loadEvaluator`
+   * memoizes its promise — a rejected load is a rejected load until a reload.
+   * That is what makes *not ever* an honest thing to say rather than a guess.
+   */
+  engineUnavailable: ComputedRef<boolean>
   /**
    * A defect in the **definition**, which stops nothing else from rendering.
    *
@@ -331,6 +356,7 @@ export function createFormEvaluation(
   values: Record<string, unknown>,
 ): FormEvaluation {
   const engine = shallowRef<RuleEvaluator | undefined>()
+  const unavailable = ref(false)
   const revealed = ref(false)
   const reported = ref<ReportedViolation[]>([])
 
@@ -342,14 +368,33 @@ export function createFormEvaluation(
     () => {
       revealed.value = false
 
-      if (engine.value === undefined && expected.value) {
+      if (engine.value === undefined && expected.value && !unavailable.value) {
         // Not awaited: a form renders, accepts typing and checks its §5
         // keywords without the engine. The alternative — a spinner over the
         // whole form until 588 KB arrives — would make D-10's bundle cost
         // visible on exactly the page that was supposed to absorb it.
-        void loadEvaluator().then((loaded) => {
-          engine.value = loaded
-        })
+        //
+        // **Handled, though** (#273 AC1). The rejection used to go nowhere: an
+        // unhandled promise rejection, `engine` left undefined, and a form that
+        // computed nothing and said nothing. What it now sets is a flag the
+        // form reads, and *nothing else changes* — the same fields render, the
+        // same typing is accepted, the same submission is allowed, because the
+        // server recomputes every calculated value at submit (#163) and this
+        // side has never been what decides them.
+        loadEvaluator()
+          .then((loaded) => {
+            engine.value = loaded
+          })
+          .catch((error: unknown) => {
+            unavailable.value = true
+
+            // Logged as well as shown: the banner tells the person what they
+            // can do about it, and this tells whoever is looking at the console
+            // what actually failed — a chunk that 404s and a WebAssembly
+            // instantiation the browser refused are the same sentence on screen
+            // and different problems underneath.
+            console.error('the JSON Logic engine did not load', error)
+          })
       }
     },
     { immediate: true },
@@ -702,6 +747,7 @@ export function createFormEvaluation(
 
   return {
     ready,
+    engineUnavailable: computed(() => unavailable.value && expected.value),
     defect,
     undecided: computed(() => outcomes.value.undecided),
     isVisible,

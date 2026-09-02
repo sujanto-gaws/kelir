@@ -255,6 +255,23 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
 
 ### Fixed
 
+- **A form whose calculation engine fails to load now says so**
+  (FR-RAD-008, [#273](https://github.com/sujanto-gaws/kelir/issues/273),
+  decision **D-54**). The load was fired and its rejection went nowhere — an
+  unhandled promise rejection, no engine, and a form that computed nothing and
+  said nothing. *Still coming* and *never coming* were the same screen: totals
+  blank or stale, conditional sections all showing, in silence.
+
+  The rejection is caught, and a form whose engine failed carries **one
+  form-level banner** naming what the person can see — totals not updating,
+  sections not hiding — and what to do: **the submission is still correct**,
+  because the server recomputes every calculated field, and a reload usually
+  fixes it. **A form whose engine is merely slow still says nothing**, which is
+  **D-10**'s bundle condition and the half a fix here could most easily have
+  broken; the submit path is untouched, because a browser that cannot compute
+  has no business refusing a submission over values it was never the authority
+  on.
+
 - **A download that failed is no longer recorded as one that happened**
   (FR-ACT-002, [#293](https://github.com/sujanto-gaws/kelir/issues/293)). The
   `Attachment.Downloaded` event was committed and the object read afterwards, so
