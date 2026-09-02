@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE notifications\n        -- The column is `VARCHAR(40)` and the comparison below wants `text`,\n        -- so the parameter is cast once and used as one type in both clauses —\n        -- without it Postgres deduces two types for `$3` and refuses to prepare.\n        SET status = $3::text,\n            sent_at = CASE WHEN $3::text = 'SENT' THEN now() ELSE sent_at END,\n            updated_at = now()\n        WHERE tenant_id = $1 AND id = $2 AND status = 'PENDING' AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "fcbb566de7ce32e3bfe801e9402cc6168da9124155ecf351aeed4e3a0f13a742"
+}

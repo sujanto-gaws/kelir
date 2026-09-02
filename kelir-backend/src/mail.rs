@@ -1,17 +1,30 @@
 //! Outbound mail.
 //!
-//! **This is not the notification module.** Phase 6 owns notification
-//! templates, channels, retries and the outbox (SDD §6.11); this sends one
-//! message directly over SMTP, because the password-reset flow (FR-AUTH-006,
-//! #17) needs a link to reach a person and everything else about notifications
-//! is a later phase's problem. When that module lands it should absorb this —
-//! the seam is [`Mailer::send`], and there is exactly one caller.
+//! **This is not the notification module**, and since [#257] it has a second
+//! caller that is. Phase 6 owns notification templates, channels and the
+//! delivery loop (SDD §6.9); this file is the transport underneath both —
+//! the password-reset flow (FR-AUTH-006, #17), which needed a link to reach a
+//! person before any of that existed, and `notification::worker`, which owns
+//! everything about *what* is sent and *when*. **The absorption the comment
+//! above once predicted did not happen and should not**: a mailer that knows
+//! about templates is a mailer the reset flow cannot use.
 //!
-//! **A failure to send is not a failure of the request that caused it.** The
-//! reset flow answers the same way whether the address existed or not, so a
-//! send that fails cannot be reported to the caller without disclosing that it
-//! was attempted. It is logged at `error` and swallowed, and
-//! [`Mailer::send`]'s signature says so by returning `()`.
+//! **The two callers want opposite answers, so there are two entry points.**
+//!
+//! * [`Mailer::send`] returns `()`. A failure to send is not a failure of the
+//!   request that caused it: the reset flow answers the same way whether the
+//!   address existed or not, so a send that fails cannot be reported to the
+//!   caller without disclosing that it was attempted. Logged at `error` and
+//!   swallowed, and the signature says so.
+//! * [`Mailer::deliver`] returns the outcome. The notification worker writes a
+//!   `notification_logs` row per attempt and has somewhere to put the error;
+//!   a delivery whose result nobody can see is the silence [#257] exists to
+//!   end.
+//!
+//! Same work, same match, two signatures — `send` is `deliver` with the answer
+//! dropped, rather than a second copy of the sending.
+//!
+//! [#257]: https://github.com/sujanto-gaws/kelir/issues/257
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -182,9 +195,11 @@ impl Mailer {
     /// transactions; what bounds that today is
     /// [`crate::modules::auth::reset::RESEND_COOLDOWN_SECONDS`], one message
     /// per account per minute, which is a bound on the flood and not on the
-    /// number of accounts in it. Both belong to the notification module that
-    /// absorbs this one in Phase 6 (SDD §6.11), where the queue this should
-    /// hand to actually exists.
+    /// number of accounts in it. **The queue this should hand to now exists**
+    /// — a `notifications` row delivered by `notification::worker` ([#257]) —
+    /// and moving the reset onto it is a decision rather than a refactor: a
+    /// reset that becomes a row would be a row whose absence says no account
+    /// matched, which is the disclosure this whole flow is shaped to avoid.
     pub fn send_detached(&self, mail: Mail) {
         let mailer = self.clone();
 
@@ -193,15 +208,38 @@ impl Mailer {
 
     /// Sends, and never reports a failure to the caller.
     ///
-    /// See the module comment: the one flow that sends mail must answer
-    /// identically whether an address existed, so it cannot surface a delivery
-    /// error either.
+    /// See the module comment: the reset flow must answer identically whether
+    /// an address existed, so it cannot surface a delivery error either. **The
+    /// password-reset path wants exactly this** and has since Sprint 4.
     ///
     /// **Called on the request's own path by nobody** — see
     /// [`Mailer::send_detached`], which is what the reset flow uses. It stays
     /// `pub` because the detached path calls it and its unit tests drive it
     /// directly.
+    ///
+    /// [`Self::deliver`] is the same work with the answer kept, for the caller
+    /// that has somewhere to record it.
     pub async fn send(&self, mail: Mail) {
+        if let Err(error) = self.deliver(mail).await {
+            tracing::error!(%error, "sending mail failed");
+        }
+    }
+
+    /// Sends, and reports what happened ([#257] AC2).
+    ///
+    /// The notification worker writes one `notification_logs` row per attempt —
+    /// `SENT` or `FAILED` with the error — and cannot do that against a function
+    /// that returns nothing. Everything else about the send is unchanged; this
+    /// is the same match with its arms answering.
+    ///
+    /// **A `Logged` mailer reports success**, and that is deliberate rather than
+    /// a convenience: a deployment with no SMTP host has said it does not send
+    /// mail, and a log row saying every notification failed would turn a stated
+    /// configuration into an alert somebody has to triage. The warning line is
+    /// where that deployment's evidence lives.
+    ///
+    /// [#257]: https://github.com/sujanto-gaws/kelir/issues/257
+    pub async fn deliver(&self, mail: Mail) -> Result<(), String> {
         match self {
             Self::Logged { from } => {
                 tracing::warn!(
@@ -210,6 +248,8 @@ impl Mailer {
                     subject = %mail.subject,
                     "no SMTP host is configured, so this message was not sent"
                 );
+
+                Ok(())
             }
             Self::Captured { sent, delay, .. } => {
                 if !delay.is_zero() {
@@ -219,6 +259,8 @@ impl Mailer {
                 if let Ok(mut sent) = sent.lock() {
                     sent.push(mail);
                 }
+
+                Ok(())
             }
             Self::Smtp { transport, from } => {
                 let built = Message::builder()
@@ -226,16 +268,19 @@ impl Mailer {
                         Ok(address) => address,
                         Err(error) => {
                             tracing::error!(%error, from = %from, "the configured mail sender address is not valid");
-                            return;
+                            return Err(format!("the sender address is not valid: {error}"));
                         }
                     })
                     .to(match mail.to.parse() {
                         Ok(address) => address,
                         Err(error) => {
                             // Not logged with the address: it is a user's email,
-                            // and an invalid one is still personal data.
+                            // and an invalid one is still personal data. The
+                            // returned message says the same thing, and the row
+                            // it lands in names the notification rather than the
+                            // person.
                             tracing::error!(%error, "a recipient address was not valid");
-                            return;
+                            return Err("the recipient address is not valid".to_owned());
                         }
                     })
                     .subject(mail.subject)
@@ -243,12 +288,12 @@ impl Mailer {
                     .body(mail.body);
 
                 match built {
-                    Ok(message) => {
-                        if let Err(error) = transport.send(message).await {
-                            tracing::error!(%error, "sending mail failed");
-                        }
-                    }
-                    Err(error) => tracing::error!(%error, "building the message failed"),
+                    Ok(message) => transport
+                        .send(message)
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| error.to_string()),
+                    Err(error) => Err(format!("building the message failed: {error}")),
                 }
             }
         }

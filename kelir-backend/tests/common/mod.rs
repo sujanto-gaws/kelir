@@ -606,6 +606,28 @@ impl TestApp {
         self.state.mailer.captured_messages()
     }
 
+    /// Runs one delivery pass of the notification sender
+    /// ([#257](https://github.com/sujanto-gaws/kelir/issues/257)).
+    ///
+    /// **The worker's work with the waiting taken out.** `worker::run` is a loop
+    /// with a sleep in it, which a test can only wait on; `pass` is the same
+    /// work, and driving it here means a test asserts what a delivery did rather
+    /// than how long it took to happen — the seam
+    /// `attachment::worker::pass` exists for, used the same way.
+    pub async fn deliver_notifications(&self) {
+        kelir_backend::modules::notification::worker::pass(&self.state)
+            .await
+            .expect("the delivery pass");
+    }
+
+    /// What the captured mailer holds right now.
+    ///
+    /// No waiting: [`Self::deliver_notifications`] has already returned, so a
+    /// message that was going to be sent has been.
+    pub fn sent_mail(&self) -> Vec<Mail> {
+        self.state.mailer.captured_messages()
+    }
+
     /// Signs in naming a tenant, as a multi-tenant deployment's client does.
     ///
     /// Separate from [`TestApp::sign_in`] rather than an `Option` parameter on
@@ -840,6 +862,7 @@ fn test_config(database_url: &str) -> AppConfig {
             .and_then(|raw| raw.parse().ok())
             .unwrap_or(3310),
         clamav_poll_seconds: 1,
+        notification_poll_seconds: 1,
         // The harness uses a captured mailer, so this is never dialled — but a
         // host is left set deliberately: an empty one would exercise the
         // no-SMTP path rather than the one a deployment runs.

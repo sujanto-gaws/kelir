@@ -91,6 +91,7 @@ Architecture decision records — one file per architecturally significant choic
 | [0031](architectures/adr/0031.%20An%20External%20Reference%20Is%20Not%20an%20Attachment%20Row.md) | An external reference is its own table — never an attachment row with a URL in it | **Draft** |
 | [0032](architectures/adr/0032.%20A%20Soft-Deleted%20Attachment%20Keeps%20Its%20Object.md) | A soft-deleted attachment keeps its stored object; removing bytes is retention's | **Draft** |
 | [0033](architectures/adr/0033.%20A%20Governed%20Record%20Parks%20at%20Pending%20Approval.md) | A governed master-data record parks at `PENDING_APPROVAL` while its change is approved | **Draft** |
+| [0034](architectures/adr/0034.%20One%20Delivery%20Attempt,%20Recorded%20Rather%20Than%20Retried.md) | A notification is delivered once per enabled channel, and a failure is logged rather than retried | **Draft** |
 
 **0001–0028 were written retrospectively on 2026-09-01** from the documents that already held these decisions — a one-time pass directed by the product owner, not a standing practice (standard §9). Each says so in its §1 and names its source; the source keeps authority. Scope and planning decisions stayed `D-n` in [Product Backlog](../projects/planning/02.%20Product%20Backlog.md) §6, which carries the full `D-n` → ADR map.
 

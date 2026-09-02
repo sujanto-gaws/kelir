@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT channel_type\n        FROM notification_channels\n        WHERE tenant_id = $1 AND deleted_at IS NULL AND is_enabled = true\n          AND channel_type <> 'IN_APP'\n        ORDER BY channel_type\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "channel_type",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9921539cde0fd91ae8fa4437145cef76f1d161fa6a757485b31f44311c29567a"
+}

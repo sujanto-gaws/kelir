@@ -75,6 +75,10 @@ async fn run() -> anyhow::Result<()> {
     // a row it did not move, and a scan interrupted by a restart is picked up
     // by the next process because the row is still `PENDING`.
     tokio::spawn(modules::attachment::worker::run(state.clone()));
+    // The second worker, and the reason there are two rather than one loop with
+    // a match in it: they poll different tables at different rates and one is
+    // bound by a virus scanner while the other is bound by a mail relay.
+    tokio::spawn(modules::notification::worker::run(state.clone()));
 
     let app = router::create_router(state);
 

@@ -13,6 +13,49 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
 
 ### Added
 
+- **A notification can leave the building** (FR-NTF-004, FR-NTF-005,
+  [#257](https://github.com/sujanto-gaws/kelir/issues/257)). A notification written
+  by an approval, an assignment or a decision is now delivered by email as
+  well as to the notification centre, on whichever channels its tenant has
+  turned on.
+
+  **The channel is data, not a branch.** There is no `match notification_type`
+  in the sender: it reads `notification_channels`, and a tenant with an enabled
+  row and a template gets an email while one without either does not. A channel
+  this build has no sender for — `SMS`, a plugin's — is recorded as a failed
+  attempt rather than skipped, so an unbuilt channel is distinguishable from a
+  working one. `0039_notification_email.sql` seeds the `EMAIL` channel and two
+  templates for the system tenant and **adds no DDL**: all four tables have
+  been in `0034_notification.sql` since item 2, which said this issue would
+  write three of them.
+
+  **The row is the queue.** `notify` still writes the notification inside the
+  transaction of the thing it announces; a worker delivers it after that
+  transaction commits. An SMTP call inside that transaction would hold a
+  database lock open across somebody else's network, which is **D-35**'s shape,
+  and would let a mail-server timeout roll back the approval that triggered it.
+
+  **A delivery is attempted once**, and its outcome — either way, with the
+  error text — is written to `notification_logs`, a table nothing had ever
+  written a row into. Nothing retries: a poll loop that retried every `FAILED`
+  row would send a relay refusing one message a copy of it every few seconds,
+  and a correct retry needs a backoff, a cap and a terminal state. **What that
+  costs is stated rather than discovered** — a relay down for five minutes
+  loses those five minutes of email permanently — in **D-56** and
+  [ADR-0034](docs/architectures/adr/0034.%20One%20Delivery%20Attempt,%20Recorded%20Rather%20Than%20Retried.md).
+
+  **A failure never costs the notification.** `notifications.status` is the
+  state of the delivery, not of the notification: a failed send leaves the
+  title, the body and `read_at` exactly as they were, and the centre still
+  shows it unread. A template that names a placeholder the sender cannot
+  resolve sends the notification's own title and body — silence is the failure
+  this epic exists to end, and an email nobody receives because somebody
+  mistyped `{{dueDate}}` in a configuration table is that failure wearing a
+  different hat.
+
+  `KELIR_NOTIFICATION_POLL_SECONDS` (default `5`) is how often the sender
+  looks.
+
 - **The inbox answers a fourth question: what you have decided** (FR-TASK-009,
   FR-SRH-003, [#256](https://github.com/sujanto-gaws/kelir/issues/256)).
   `GET /tasks?scope=completed` lists the tasks that have been through your

@@ -9,7 +9,7 @@
 //!
 //! [#251]: https://github.com/sujanto-gaws/kelir/issues/251
 
-use sqlx::PgExecutor;
+use sqlx::{PgExecutor, PgPool};
 use uuid::Uuid;
 
 use super::domain::{Notification, NotificationType};
@@ -252,6 +252,215 @@ pub async fn mark_all_read<'e, E: PgExecutor<'e>>(
         recipient_user_id
     )
     .execute(executor)
+    .await?
+    .rows_affected();
+
+    Ok(affected)
+}
+
+// ---------------------------------------------------------------------------
+// The email channel (FR-NTF-004; #257)
+// ---------------------------------------------------------------------------
+
+/// One notification waiting to be delivered somewhere other than the centre.
+pub struct PendingDelivery {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub notification_type: String,
+    pub title: String,
+    pub body: String,
+    /// Where an email would go, and `None` when there is nowhere.
+    ///
+    /// **Only reachable for a deactivated recipient.** `users.email` is
+    /// `NOT NULL`, so a person who exists has an address; what this absence
+    /// means is that the account was removed between the notification being
+    /// written and this pass. The worker records that as a failed attempt
+    /// rather than retrying it for ever.
+    pub recipient_email: Option<String>,
+}
+
+/// The notifications nobody has tried to deliver yet.
+///
+/// # It reads across every tenant, deliberately
+///
+/// The same shape and the same reason as `attachment::repository::pending_scans`
+/// ([#294](https://github.com/sujanto-gaws/kelir/issues/294) AC2): this is a
+/// **worker**. It holds no session, acts for nobody, and delivers what a
+/// deployment has queued. A tenant filter would mean a worker per tenant or a
+/// list somebody maintains, and whichever tenant was left off would have its
+/// notifications sit `PENDING` for ever — which reads to a person as email that
+/// silently does not arrive.
+///
+/// Every row carries its own `tenant_id`, and the writes below take it back as a
+/// predicate, so the write is scoped even though the read is not.
+///
+/// **`PENDING` is the whole claim.** Two workers reading one batch send one
+/// notification twice, which costs an email and changes no row twice —
+/// `mark_delivered` writes only over `PENDING`, exactly as `record_scan_result`
+/// writes only over its own.
+pub async fn pending_deliveries(
+    pool: &PgPool,
+    limit: i64,
+) -> Result<Vec<PendingDelivery>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT n.id, n.tenant_id, n.notification_type, n.title, n.body,
+               u.email AS "recipient_email?"
+        FROM notifications n
+        -- **A deactivated recipient has no address for this purpose.**
+        -- `users.email` is `NOT NULL`, so the only way this join misses is a
+        -- person removed between the notification being written and this pass —
+        -- and mailing somebody the product has deactivated is the one delivery
+        -- worth not attempting. The notification itself stays where it is.
+        LEFT JOIN users u
+               ON u.id = n.recipient_user_id AND u.tenant_id = n.tenant_id
+              AND u.deleted_at IS NULL
+        WHERE n.status = 'PENDING' AND n.deleted_at IS NULL
+        ORDER BY n.created_at
+        LIMIT $1
+        "#,
+        limit
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| PendingDelivery {
+            id: row.id,
+            tenant_id: row.tenant_id,
+            notification_type: row.notification_type,
+            title: row.title,
+            body: row.body,
+            recipient_email: row.recipient_email,
+        })
+        .collect())
+}
+
+/// The outbound channel types this tenant has turned on (#257 AC1).
+///
+/// **`IN_APP` is not among them and cannot be.** The centre reads
+/// `notifications` directly, so an in-app notification is not *delivered*
+/// anywhere and has no attempt to log — `0034`'s own comment on
+/// `notification_logs` says so. A row configuring it would be a row nothing
+/// reads.
+pub async fn enabled_channels(pool: &PgPool, tenant_id: Uuid) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar!(
+        r#"
+        SELECT channel_type
+        FROM notification_channels
+        WHERE tenant_id = $1 AND deleted_at IS NULL AND is_enabled = true
+          AND channel_type <> 'IN_APP'
+        ORDER BY channel_type
+        "#,
+        tenant_id
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// What this tenant says a notification of this type looks like on this channel.
+pub struct Template {
+    pub subject_template: Option<String>,
+    pub body_template: String,
+}
+
+/// The enabled template for a type and channel, or nothing.
+///
+/// **`en` only, and the locale column is why that is a gap rather than a
+/// simplification.** `0034` gave templates a locale because a notification is
+/// read by a person; nothing in this release knows what language that person
+/// reads, so this asks for `en` and a deployment that seeds another locale finds
+/// it unused. Whoever adds a user locale reads it here.
+pub async fn template_for(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    notification_type: &str,
+    channel: &str,
+) -> Result<Option<Template>, sqlx::Error> {
+    let row = sqlx::query!(
+        r#"
+        SELECT subject_template, body_template
+        FROM notification_templates
+        WHERE tenant_id = $1 AND notification_type = $2 AND channel = $3
+          AND locale = 'en' AND is_enabled = true AND deleted_at IS NULL
+        "#,
+        tenant_id,
+        notification_type,
+        channel
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|row| Template {
+        subject_template: row.subject_template,
+        body_template: row.body_template,
+    }))
+}
+
+/// Records one delivery attempt, whichever way it went (#257 AC2).
+///
+/// **Append-only, and written whether the send worked or not.** A trail with
+/// only the successes in it answers *did this arrive* with silence for the case
+/// somebody is asking about.
+pub async fn record_attempt(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    notification_id: Uuid,
+    channel: &str,
+    status: &str,
+    error_message: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        r#"
+        INSERT INTO notification_logs
+            (id, tenant_id, notification_id, channel, attempt, status, error_message)
+        VALUES ($1, $2, $3, $4, 1, $5, $6)
+        "#,
+        Uuid::now_v7(),
+        tenant_id,
+        notification_id,
+        channel,
+        status,
+        error_message
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Moves a notification out of `PENDING`, **and only out of `PENDING`**.
+///
+/// The predicate is what makes a duplicated pass harmless: a second worker that
+/// sent the same email finds no row to move and writes nothing twice. It is
+/// `record_scan_result`'s guarantee, one module over, for the same reason.
+///
+/// **`read_at` is untouched.** Delivery is not reading, and a notification the
+/// recipient has already opened in the centre must not become unread because an
+/// email went out afterwards.
+pub async fn mark_delivered(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    id: Uuid,
+    status: &str,
+) -> Result<u64, sqlx::Error> {
+    let affected = sqlx::query!(
+        r#"
+        UPDATE notifications
+        -- The column is `VARCHAR(40)` and the comparison below wants `text`,
+        -- so the parameter is cast once and used as one type in both clauses —
+        -- without it Postgres deduces two types for `$3` and refuses to prepare.
+        SET status = $3::text,
+            sent_at = CASE WHEN $3::text = 'SENT' THEN now() ELSE sent_at END,
+            updated_at = now()
+        WHERE tenant_id = $1 AND id = $2 AND status = 'PENDING' AND deleted_at IS NULL
+        "#,
+        tenant_id,
+        id,
+        status
+    )
+    .execute(pool)
     .await?
     .rows_affected();
 

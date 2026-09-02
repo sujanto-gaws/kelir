@@ -58,6 +58,8 @@ pub mod domain;
 pub mod handlers;
 pub mod repository;
 pub mod service;
+pub mod template;
+pub mod worker;
 
 /// Reading and dismissing **your own** notifications.
 ///

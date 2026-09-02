@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO notification_logs\n            (id, tenant_id, notification_id, channel, attempt, status, error_message)\n        VALUES ($1, $2, $3, $4, 1, $5, $6)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Varchar",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2ba270576d33652d1ab44148cf5c648201a957ab9c1d8f8b2dd3479119e9d58a"
+}
