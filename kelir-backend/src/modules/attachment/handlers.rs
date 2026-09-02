@@ -14,10 +14,10 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use uuid::Uuid;
 
-use super::domain::{self, Attachment};
+use super::domain::{self, AddReferenceRequest, Attachment, AttachmentCategory, ExternalReference};
 use super::service::{self, UploadedFile};
 use crate::error::AppError;
-use crate::extract::{MultipartBody, PathParam, QueryParams};
+use crate::extract::{JsonBody, MultipartBody, PathParam, QueryParams};
 use crate::middleware::auth::Authenticated;
 use crate::response::{ItemEnvelope, ListEnvelope, Pagination};
 use crate::state::AppState;
@@ -42,7 +42,31 @@ pub fn routes(max_upload_bytes: usize) -> Router<AppState> {
             post(upload_attachment).layer(DefaultBodyLimit::max(max_upload_bytes)),
         )
         .route("/", get(list_attachments))
-        .route("/{attachment_id}", get(download_attachment))
+        .route(
+            "/{attachment_id}",
+            get(download_attachment).delete(delete_attachment),
+        )
+}
+
+/// The external-reference routes, mounted at
+/// `/api/v1/documents/{id}/references` (FR-ATT-010; [#254]).
+///
+/// **A sibling of `/attachments` rather than a shape inside it.** A reference is
+/// not a file — no bytes, no scan, no download — and a surface that served both
+/// through one collection would have to answer *which of these can I download*
+/// with a field rather than with a route. **D-53** carries the argument; this
+/// mount is what it looks like from outside.
+///
+/// [#254]: https://github.com/sujanto-gaws/kelir/issues/254
+pub fn reference_routes() -> Router<AppState> {
+    Router::new()
+        .route("/", get(list_references).post(add_reference))
+        .route("/{reference_id}", axum::routing::delete(delete_reference))
+}
+
+/// The category list, mounted at `/api/v1/attachment-categories` (FR-ATT-006).
+pub fn category_routes() -> Router<AppState> {
+    Router::new().route("/", get(list_categories))
 }
 
 #[utoipa::path(
@@ -114,6 +138,7 @@ async fn read_file_part(
 ) -> Result<UploadedFile, AppError> {
     let mut file: Option<UploadedFile> = None;
     let mut description: Option<String> = None;
+    let mut category_id: Option<Uuid> = None;
 
     while let Some(field) = multipart
         .next_field()
@@ -138,6 +163,7 @@ async fn read_file_part(
                     declared_mime_type,
                     bytes,
                     description: None,
+                    category_id: None,
                 });
             }
             Some("description") => {
@@ -151,12 +177,30 @@ async fn read_file_part(
                     description = Some(trimmed.to_owned());
                 }
             }
+            // **A categoryId that is not a uuid is refused rather than
+            // dropped** ([#254] AC1). Every other unrecognised part is ignored
+            // — a browser form gains fields for its own reasons — but this one
+            // was *sent*, and a file filed under nothing because the id was
+            // malformed is the silent drop `extract`'s own header exists to
+            // stop.
+            Some("categoryId") => {
+                let text = field.text().await.unwrap_or_default();
+                let trimmed = text.trim();
+
+                if !trimmed.is_empty() {
+                    category_id =
+                        Some(trimmed.parse::<Uuid>().map_err(|_| {
+                            AppError::bad_request("`categoryId` is not a valid uuid")
+                        })?);
+                }
+            }
             _ => {}
         }
     }
 
     let mut file = file.ok_or_else(domain::no_file_part)?;
     file.description = description;
+    file.category_id = category_id;
 
     Ok(file)
 }
@@ -230,4 +274,113 @@ pub async fn download_attachment(
         stored.bytes,
     )
         .into_response())
+}
+
+/// **204 and no body**, which is `delete_document`'s answer to the same
+/// question. A deleted attachment leaves the list and the download refuses it;
+/// there is nothing left to return.
+#[utoipa::path(
+    delete, path = "/api/v1/documents/{id}/attachments/{attachment_id}", tag = "attachment",
+    responses(
+        (status = 204, description = "Deleted. The stored object is kept — the delete is soft (D-52)"),
+        (status = 403, description = "Missing attachment:delete or document:read, or the file is somebody else's upload"),
+        (status = 404, description = "No such document or attachment, or one this caller may not see")
+    ),
+    security(("bearer" = []))
+)]
+pub async fn delete_attachment(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    PathParam((document_id, attachment_id)): PathParam<(Uuid, Uuid)>,
+) -> Result<StatusCode, AppError> {
+    service::delete_attachment(&state, &caller, document_id, attachment_id).await?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(
+    post, path = "/api/v1/documents/{id}/references", tag = "attachment",
+    request_body = AddReferenceRequest,
+    responses(
+        (status = 200, description = "The stored reference. It has no size, no scan status and no download", body = ExternalReference),
+        (status = 403, description = "Missing attachment:reference or document:read"),
+        (status = 404, description = "No such document, or it is not one this caller may see"),
+        (status = 422, description = "An empty label, a URL that is neither http nor https, or a categoryId this tenant does not have")
+    ),
+    security(("bearer" = []))
+)]
+pub async fn add_reference(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    PathParam(document_id): PathParam<Uuid>,
+    JsonBody(request): JsonBody<AddReferenceRequest>,
+) -> Result<Json<ItemEnvelope<ExternalReference>>, AppError> {
+    Ok(Json(ItemEnvelope::new(
+        service::add_reference(&state, &caller, document_id, request).await?,
+    )))
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/documents/{id}/references", tag = "attachment",
+    params(Pagination),
+    responses(
+        (status = 200, description = "The document's external references, newest first", body = [ExternalReference]),
+        (status = 403, description = "Missing attachment:read or document:read"),
+        (status = 404, description = "No such document, or it is not one this caller may see")
+    ),
+    security(("bearer" = []))
+)]
+pub async fn list_references(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    PathParam(document_id): PathParam<Uuid>,
+    QueryParams(pagination): QueryParams<Pagination>,
+) -> Result<Json<ListEnvelope<ExternalReference>>, AppError> {
+    let (references, meta) =
+        service::list_references(&state, &caller, document_id, &pagination).await?;
+
+    Ok(Json(ListEnvelope::new(references, meta)))
+}
+
+#[utoipa::path(
+    delete, path = "/api/v1/documents/{id}/references/{reference_id}", tag = "attachment",
+    responses(
+        (status = 204, description = "Removed"),
+        (status = 403, description = "Missing attachment:delete or document:read, or the reference is somebody else's"),
+        (status = 404, description = "No such document or reference, or one this caller may not see")
+    ),
+    security(("bearer" = []))
+)]
+pub async fn delete_reference(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    PathParam((document_id, reference_id)): PathParam<(Uuid, Uuid)>,
+) -> Result<StatusCode, AppError> {
+    service::delete_reference(&state, &caller, document_id, reference_id).await?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// **Not paginated**, deliberately: this is a tenant's own vocabulary, it is
+/// four rows in a fresh deployment, and a picker that arrives one page at a time
+/// is a picker missing options.
+#[utoipa::path(
+    get, path = "/api/v1/attachment-categories", tag = "attachment",
+    responses(
+        (status = 200, description = "Every category this tenant can file something under, system rows first", body = [AttachmentCategory]),
+        (status = 403, description = "Missing attachment:read")
+    ),
+    security(("bearer" = []))
+)]
+pub async fn list_categories(
+    State(state): State<AppState>,
+    caller: Authenticated,
+) -> Result<Json<ListEnvelope<AttachmentCategory>>, AppError> {
+    let categories = service::list_categories(&state, &caller).await?;
+    let total = categories.len() as u64;
+
+    Ok(Json(ListEnvelope::new(
+        categories,
+        Pagination::default().meta(total),
+    )))
 }

@@ -15,6 +15,15 @@
  */
 export type VirusScanStatus = 'PENDING' | 'CLEAN' | 'INFECTED' | 'FAILED'
 
+/** One category a file or a link can be filed under (FR-ATT-006). */
+export interface AttachmentCategory {
+  id: string
+  code: string
+  name: string
+  /** Seeded by this product. A tenant may use it and may not delete it. */
+  isSystem: boolean
+}
+
 export interface Attachment {
   id: string
   documentId: string
@@ -25,8 +34,48 @@ export interface Attachment {
   checksum: string
   description: string | null
   virusScanStatus: VirusScanStatus
+  /** What kind of thing it is, or null on a file nobody has filed. */
+  category: AttachmentCategory | null
   createdAt: string
   createdBy: string | null
+}
+
+/**
+ * A link to something this product does not hold (FR-ATT-010).
+ *
+ * **It is deliberately not an `Attachment`, and the type is the argument.**
+ * There is no `fileSize`, no `mimeType` and no `virusScanStatus` here because
+ * there is none on the row: a reference is not a file, is never scanned, and can
+ * never read `CLEAN` (#254 AC4, AC5). A screen holding one of these cannot
+ * render a size or a scan badge for it by accident, which is the half of *visibly
+ * not a file* that a shared type would have left to a convention.
+ */
+export interface ExternalReference {
+  id: string
+  documentId: string
+  /** What to call the link — never the URL, which is where a lookalike hides. */
+  label: string
+  url: string
+  description: string | null
+  category: AttachmentCategory | null
+  createdAt: string
+  createdBy: string | null
+}
+
+/**
+ * An `href` this screen is willing to put in the page.
+ *
+ * **The server already refuses anything but http and https**
+ * (`attachment::domain::normalize_url`), so this is defence in depth rather than
+ * the gate — and it is worth having anyway: a row that predates the check, or
+ * one written by a surface somebody adds later, would otherwise reach an
+ * `href` where `javascript:` is script execution in this product's page with
+ * this product's session. A refused link renders as text and goes nowhere.
+ */
+export function safeHref(url: string): string | undefined {
+  const trimmed = url.trim().toLowerCase()
+
+  return trimmed.startsWith('http://') || trimmed.startsWith('https://') ? url : undefined
 }
 
 /**

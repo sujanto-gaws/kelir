@@ -137,7 +137,12 @@ pub fn disclosable(event_type: &str, details: Value) -> Value {
         // Everything an attachment, a comment or a hand-off could say about
         // itself is behind `attachment:read`, `comment:read` or the workflow's
         // read. The timeline says that it happened, and links.
-        "Attachment.Added" | "Attachment.Downloaded" => &[],
+        "Attachment.Added" | "Attachment.Downloaded" | "Attachment.Deleted" => &[],
+        // A reference's label and URL are the two most quotable things this
+        // module stores — a URL names a host, a path and often a customer — and
+        // both are behind `attachment:read`
+        // ([#254](https://github.com/sujanto-gaws/kelir/issues/254)).
+        "Reference.Added" | "Reference.Deleted" => &[],
         // The comment epic's four, and the tail's three say no more than the
         // first did ([#253](https://github.com/sujanto-gaws/kelir/issues/253)).
         // *Somebody replied*, *somebody edited*, *somebody deleted* — the words

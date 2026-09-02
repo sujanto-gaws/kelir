@@ -8,6 +8,7 @@ import type { CurrentUser } from '@/types/auth'
 import {
   errorBody,
   installFakeBackend,
+  itemBody,
   type FakeBackendHandle,
   type FakeReply,
 } from '@/lib/testing/fake-backend'
@@ -24,6 +25,14 @@ import {
  * security control turned into a bug report, which is this item's second
  * acceptance criterion and #246 AC3's reason for distinguishing them at all.
  *
+ * The tail ([#254]) added two more, run 2026-09-02:
+ *
+ * - **M3** — `safeHref` forced to return whatever it is given. Red: *refuses to
+ *   put a javascript link in an href*.
+ * - **M4** — `mine()` forced to `true`, the authorship gate removed. Red:
+ *   *offers no delete on somebody elses file*.
+ *
+ * [#254]: https://github.com/sujanto-gaws/kelir/issues/254
  * [#295]: https://github.com/sujanto-gaws/kelir/issues/295
  */
 
@@ -43,7 +52,30 @@ function attachment(overrides: Record<string, unknown> = {}): Record<string, unk
     checksum: 'sha256:abc',
     description: null,
     virusScanStatus: 'CLEAN',
+    category: null,
     createdAt: '2026-08-31T10:00:00Z',
+    createdBy: '0199a1a0-0000-7000-8000-0000000000f9',
+    ...overrides,
+  }
+}
+
+const QUOTATION = {
+  id: '00000000-0000-0000-0003-000000000001',
+  code: 'QUOTATION',
+  name: 'Quotation',
+  isSystem: true,
+}
+
+/** A link, as the API reports one — with none of a file's fields (#254 AC4). */
+function reference(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: '0199a1a0-0000-7000-8000-0000000000b1',
+    documentId: DOCUMENT_ID,
+    label: 'Vendor portal',
+    url: 'https://vendor.example.test/quotes/2026-11',
+    description: null,
+    category: null,
+    createdAt: '2026-08-31T11:00:00Z',
     createdBy: '0199a1a0-0000-7000-8000-0000000000f9',
     ...overrides,
   }
@@ -52,16 +84,30 @@ function attachment(overrides: Record<string, unknown> = {}): Record<string, unk
 describe('AttachmentsTab', () => {
   let backend: FakeBackendHandle
   let onList: () => FakeReply
+  let onReferences: () => FakeReply
+  let onCategories: () => FakeReply
+  let onWrite: () => FakeReply
 
   beforeEach(() => {
     setActivePinia(createPinia())
     signIn(['attachment:read', 'attachment:create'])
 
     onList = () => ({ status: 200, body: pageBody([attachment()]) })
+    onReferences = () => ({ status: 200, body: pageBody([]) })
+    onCategories = () => ({ status: 200, body: pageBody([QUOTATION]) })
+    onWrite = () => ({ status: 204, body: undefined })
 
     backend = installFakeBackend((request) => {
+      if (request.url.includes('/attachment-categories')) {
+        return onCategories()
+      }
+
+      if (request.url.includes('/references')) {
+        return request.method === 'get' ? onReferences() : onWrite()
+      }
+
       if (request.url.includes('/attachments')) {
-        return onList()
+        return request.method === 'get' ? onList() : onWrite()
       }
 
       return { status: 404, body: errorBody('NOT_FOUND', 'no') }
@@ -226,5 +272,165 @@ describe('AttachmentsTab', () => {
 
     expect(wrapper.find('[data-testid="attachment-input"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="attachment-row"]').exists()).toBe(true)
+  })
+  // -------------------------------------------------------------------------
+  // #254 — categories, the delete, and a link that is visibly not a file
+  // -------------------------------------------------------------------------
+
+  it('shows what a file is filed under, and nothing when it is filed under nothing', async () => {
+    onList = () => ({
+      status: 200,
+      body: pageBody([attachment(), attachment({ id: 'x', category: QUOTATION })]),
+    })
+
+    const wrapper = await render()
+    const badges = wrapper.findAll('[data-testid="attachment-category"]')
+
+    expect(badges).toHaveLength(1)
+    expect(badges[0].text()).toBe('Quotation')
+  })
+
+  it('sends the chosen category with the upload', async () => {
+    const wrapper = await render()
+
+    await wrapper.find('[data-testid="attachment-category-picker"]').setValue(QUOTATION.id)
+
+    const input = wrapper.find('[data-testid="attachment-input"]')
+    const file = new File(['%PDF-1.7'], 'quotation.pdf', { type: 'application/pdf' })
+
+    Object.defineProperty(input.element, 'files', { value: [file] })
+    await input.trigger('change')
+    await flushPromises()
+
+    const posted = backend.requests.find(
+      (request) => request.method === 'post' && request.url.includes('/attachments'),
+    )
+
+    expect(posted).toBeDefined()
+    // The body is the `FormData` the client built, recorded as it was sent —
+    // so the assertion reads the part rather than a rendering of the whole.
+    expect((posted?.body as FormData).get('categoryId')).toBe(QUOTATION.id)
+    expect((posted?.body as FormData).get('file')).toBeInstanceOf(File)
+  })
+
+  /**
+   * **A link carries no size, no scan badge and no download** (#254 AC4), and
+   * the screen cannot render one by accident because the type it renders from
+   * has no such field.
+   */
+  it('shows a link as a link rather than as a file', async () => {
+    onList = () => ({ status: 200, body: pageBody([]) })
+    onReferences = () => ({ status: 200, body: pageBody([reference()]) })
+
+    const wrapper = await render()
+    const row = wrapper.find('[data-testid="reference-row"]')
+
+    expect(row.exists()).toBe(true)
+    expect(row.text()).toContain('Vendor portal')
+    expect(wrapper.find('[data-testid="reference-badge"]').text()).toBe('Link')
+    expect(row.find('[data-testid="attachment-status"]').exists()).toBe(false)
+    expect(row.find('[data-testid="attachment-download"]').exists()).toBe(false)
+
+    const open = wrapper.find('[data-testid="reference-open-link"]')
+    expect(open.attributes('href')).toBe('https://vendor.example.test/quotes/2026-11')
+    expect(open.attributes('rel')).toBe('noopener noreferrer')
+    expect(open.attributes('target')).toBe('_blank')
+  })
+
+  /**
+   * **Defence in depth, and it is the `href` that matters.** The server refuses
+   * these; a row that predates the check must still not become script in this
+   * page.
+   */
+  it('refuses to put a javascript link in an href', async () => {
+    onList = () => ({ status: 200, body: pageBody([]) })
+    onReferences = () => ({
+      status: 200,
+      body: pageBody([reference({ url: 'javascript:alert(1)' })]),
+    })
+
+    const wrapper = await render()
+
+    expect(wrapper.find('[data-testid="reference-open-link"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="reference-unopenable"]').exists()).toBe(true)
+  })
+
+  it('records a link and says what a link is not', async () => {
+    onWrite = () => ({ status: 200, body: itemBody(reference()) })
+    signIn(['attachment:read', 'attachment:create', 'attachment:reference'])
+
+    const wrapper = await render()
+
+    await wrapper.find('[data-testid="reference-open"]').trigger('click')
+    expect(wrapper.find('[data-testid="reference-note"]').text()).toContain('nothing is checked')
+
+    await wrapper.find('[data-testid="reference-label"]').setValue('Vendor portal')
+    await wrapper.find('[data-testid="reference-url"]').setValue('https://vendor.example.test/q')
+    await wrapper.find('[data-testid="reference-submit"]').trigger('click')
+    await flushPromises()
+
+    const posted = backend.requests.find(
+      (request) => request.method === 'post' && request.url.includes('/references'),
+    )
+
+    expect(posted?.body).toMatchObject({
+      label: 'Vendor portal',
+      url: 'https://vendor.example.test/q',
+    })
+  })
+
+  it('offers no link form to a caller who may not record one', async () => {
+    const wrapper = await render()
+
+    expect(wrapper.find('[data-testid="reference-open"]').exists()).toBe(false)
+  })
+
+  /**
+   * **The ask says what *deleted* means here** (D-52): the row goes and the
+   * stored copy is kept, which is not what the word implies on its own.
+   */
+  it('asks before deleting, and says the stored copy is kept', async () => {
+    signIn(['attachment:read', 'attachment:create', 'attachment:delete'])
+
+    const wrapper = await render()
+
+    await wrapper.find('[data-testid="attachment-delete"]').trigger('click')
+    await flushPromises()
+
+    expect(backend.requests.some((request) => request.method === 'delete')).toBe(false)
+    expect(wrapper.find('[data-testid="delete-ask"]').text()).toContain('stored copy is kept')
+
+    await wrapper.find('[data-testid="attachment-delete-confirm"]').trigger('click')
+    await flushPromises()
+
+    expect(
+      backend.requests.some(
+        (request) => request.method === 'delete' && request.url.includes('/attachments/'),
+      ),
+    ).toBe(true)
+  })
+
+  it('offers no delete on somebody elses file', async () => {
+    signIn(['attachment:read', 'attachment:create', 'attachment:delete'])
+    onList = () => ({ status: 200, body: pageBody([attachment({ createdBy: 'somebody-else' })]) })
+
+    const wrapper = await render()
+
+    expect(wrapper.find('[data-testid="attachment-delete"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="attachment-download"]').exists()).toBe(true)
+  })
+
+  /**
+   * **A links call that fails must not blank the files.** Two collections, two
+   * results — including the case where an older backend has no `/references` at
+   * all during a rolling deploy.
+   */
+  it('still lists the files when the links cannot be loaded', async () => {
+    onReferences = () => ({ status: 404, body: errorBody('NOT_FOUND', 'no such route') })
+
+    const wrapper = await render()
+
+    expect(wrapper.find('[data-testid="attachment-row"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="attachments-error"]').exists()).toBe(true)
   })
 })

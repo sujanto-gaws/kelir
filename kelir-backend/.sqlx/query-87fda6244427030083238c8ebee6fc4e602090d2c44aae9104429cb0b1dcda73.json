@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, document_id, original_file_name, mime_type, file_size, checksum,\n               description, virus_scan_status, created_at, created_by\n        FROM attachments\n        WHERE tenant_id = $1 AND document_id = $2 AND deleted_at IS NULL\n        ORDER BY created_at DESC, id DESC\n        LIMIT $3 OFFSET $4\n        ",
+  "query": "\n        SELECT a.id, a.document_id, a.original_file_name, a.mime_type, a.file_size, a.checksum,\n               a.description, a.virus_scan_status, a.created_at, a.created_by,\n               c.id AS \"category_id?\", c.category_code AS \"category_code?\",\n               c.name AS \"category_name?\", c.is_system AS \"category_is_system?\"\n        FROM attachments a\n        LEFT JOIN attachment_categories c\n               ON c.id = a.category_id AND c.tenant_id = a.tenant_id\n        WHERE a.tenant_id = $1 AND a.document_id = $2 AND a.deleted_at IS NULL\n        ORDER BY a.created_at DESC, a.id DESC\n        LIMIT $3 OFFSET $4\n        ",
   "describe": {
     "columns": [
       {
@@ -52,6 +52,26 @@
         "ordinal": 9,
         "name": "created_by",
         "type_info": "Uuid"
+      },
+      {
+        "ordinal": 10,
+        "name": "category_id?",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 11,
+        "name": "category_code?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 12,
+        "name": "category_name?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 13,
+        "name": "category_is_system?",
+        "type_info": "Bool"
       }
     ],
     "parameters": {
@@ -72,8 +92,12 @@
       true,
       false,
       false,
-      true
+      true,
+      false,
+      false,
+      false,
+      false
     ]
   },
-  "hash": "0e0995561c73335ea0994c39cb6f15fa4239e1f3963c46f499cd2dd3ef73fca0"
+  "hash": "87fda6244427030083238c8ebee6fc4e602090d2c44aae9104429cb0b1dcda73"
 }

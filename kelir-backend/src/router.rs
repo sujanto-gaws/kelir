@@ -107,6 +107,11 @@ use crate::state::AppState;
         notification::handlers::unread_count,
         notification::handlers::mark_read,
         notification::handlers::mark_all_read,
+        attachment::handlers::delete_attachment,
+        attachment::handlers::add_reference,
+        attachment::handlers::list_references,
+        attachment::handlers::delete_reference,
+        attachment::handlers::list_categories,
         comment::handlers::add_comment,
         comment::handlers::list_comments,
         comment::handlers::edit_comment,
@@ -155,6 +160,9 @@ use crate::state::AppState;
         notification::domain::Notification,
         notification::domain::NotificationType,
         notification::domain::UnreadCount,
+        attachment::domain::AddReferenceRequest,
+        attachment::domain::AttachmentCategory,
+        attachment::domain::ExternalReference,
         comment::domain::AddCommentRequest,
         comment::domain::EditCommentRequest,
         comment::domain::Comment,
@@ -408,8 +416,16 @@ fn api_v1_router(state: AppState) -> Router<AppState> {
                     "/{id}/attachments",
                     attachment::handlers::routes(max_upload_bytes),
                 )
+                .nest("/{id}/references", attachment::handlers::reference_routes())
                 .nest("/{id}/comments", comment::handlers::routes())
                 .nest("/{id}/activity", activity::handlers::routes()),
+        )
+        // **Beside the documents rather than under one**, because a category is
+        // the tenant's vocabulary and not one document's: the picker beside an
+        // upload asks the same question on every document there is (#254).
+        .nest(
+            "/attachment-categories",
+            attachment::handlers::category_routes(),
         )
         .nest("/workflow", workflow::handlers::routes())
         .nest("/tasks", task_inbox::handlers::routes())

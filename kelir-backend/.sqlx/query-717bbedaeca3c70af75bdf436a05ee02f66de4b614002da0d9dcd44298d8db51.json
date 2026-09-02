@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, document_id, original_file_name, mime_type, file_size, checksum,\n               description, virus_scan_status, created_at, created_by\n        FROM attachments\n        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL\n        ",
+  "query": "\n        SELECT a.id, a.document_id, a.original_file_name, a.mime_type, a.file_size, a.checksum,\n               a.description, a.virus_scan_status, a.created_at, a.created_by,\n               c.id AS \"category_id?\", c.category_code AS \"category_code?\",\n               c.name AS \"category_name?\", c.is_system AS \"category_is_system?\"\n        FROM attachments a\n        LEFT JOIN attachment_categories c\n               ON c.id = a.category_id AND c.tenant_id = a.tenant_id\n        WHERE a.tenant_id = $1 AND a.id = $2 AND a.deleted_at IS NULL\n        ",
   "describe": {
     "columns": [
       {
@@ -52,6 +52,26 @@
         "ordinal": 9,
         "name": "created_by",
         "type_info": "Uuid"
+      },
+      {
+        "ordinal": 10,
+        "name": "category_id?",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 11,
+        "name": "category_code?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 12,
+        "name": "category_name?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 13,
+        "name": "category_is_system?",
+        "type_info": "Bool"
       }
     ],
     "parameters": {
@@ -70,8 +90,12 @@
       true,
       false,
       false,
-      true
+      true,
+      false,
+      false,
+      false,
+      false
     ]
   },
-  "hash": "34303da4219fddd06412502d685055050dccf8892e76a3788aec7e15997146c9"
+  "hash": "717bbedaeca3c70af75bdf436a05ee02f66de4b614002da0d9dcd44298d8db51"
 }
