@@ -82,6 +82,39 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
 
 ### Fixed
 
+- **Eleven environment variables the configuration reference did not list**
+  ([#316](https://github.com/sujanto-gaws/kelir/issues/316)). `KELIR_CLAMAV_*` and
+  `KELIR_STORAGE_*` had been missing since Sprint 12 and
+  `KELIR_TRUSTED_PROXY_HOPS` since Sprint 2, and **every one of those defaults
+  is the development compose stack's** — so a deployment that followed
+  [Installation and Deployment](docs/operations/01.%20Installation%20and%20Deployment.md)
+  §7 to the letter pointed object storage at `localhost:9000` and the virus
+  scanner at a host named `clamav`, started, reported healthy, and failed at
+  the first upload. Each row now says what the default is *for*, and names the
+  compose stack where that is what the default is.
+
+  `KELIR_STORAGE_DRIVER`'s row no longer says "Used from Phase 6"; Phase 6 is
+  now. `KELIR_BUILD_SHA`, which `build.rs` reads at compile time, has a row of
+  its own in a new §7.3.
+
+  **A test holds it, which is the part worth more than the rows.**
+  `configuration_reference.rs` fails when a `KELIR_*` name appears in the
+  crate's source with no row in §7.1 or §7.3, and again when §7.1 keeps a row
+  for something the binary stopped reading. The gap was found by diffing the
+  two sides by hand while adding a twelfth variable — a finding that arrived
+  by luck, and this is that diff run on every build.
+
+  The SDD's §13.3 copy of the same list — nine of twenty-nine variables, last
+  touched in Phase 2 — is gone, and points at §7 instead. Two lists of one
+  thing is how the first one drifted.
+
+  **One thing this did not fix**, named in the row that documents it:
+  `KELIR_STORAGE_SECRET_KEY` defaults to `minioadmin` and the
+  placeholder-secret guard covers `KELIR_JWT_SECRET` and
+  `KELIR_BOOTSTRAP_ADMIN_PASSWORD` and nothing else, so the binary does not
+  refuse it in staging or production. The staging compose file does.
+  [#317](https://github.com/sujanto-gaws/kelir/issues/317).
+
 - **The inbox's count, its page and its detail gate agree about which rows
   exist** ([#279](https://github.com/sujanto-gaws/kelir/issues/279)). The page
   joined `documents` and the count did not, so a task whose document had been
