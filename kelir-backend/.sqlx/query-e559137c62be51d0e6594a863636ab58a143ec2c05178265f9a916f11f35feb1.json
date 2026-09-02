@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE comments\n        SET body = $4, edited_at = now(), updated_at = now(), updated_by = $5\n        WHERE tenant_id = $1 AND document_id = $2 AND id = $3 AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e559137c62be51d0e6594a863636ab58a143ec2c05178265f9a916f11f35feb1"
+}

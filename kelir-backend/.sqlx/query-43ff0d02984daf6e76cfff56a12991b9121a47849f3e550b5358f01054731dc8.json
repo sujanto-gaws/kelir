@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT parent_comment_id\n        FROM comments\n        WHERE tenant_id = $1 AND document_id = $2 AND id = $3 AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "parent_comment_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "43ff0d02984daf6e76cfff56a12991b9121a47849f3e550b5358f01054731dc8"
+}

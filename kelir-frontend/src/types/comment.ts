@@ -11,7 +11,17 @@
 export interface Comment {
   id: string
   documentId: string
-  body: string
+  /**
+   * What the comment says, or **null on a tombstone** — a deleted comment the
+   * list still carries because replies hang from it. The body is withheld by the
+   * server, not blank: a comment of nothing is a thing the API refuses to store.
+   */
+  body: string | null
+  /**
+   * The comment this one replies to, null on a root. Threading is **one level**,
+   * so a comment with this set has no replies of its own.
+   */
+  parentCommentId: string | null
   authorUserId: string | null
   /**
    * The author's name **now**, joined rather than denormalized — a conversation
@@ -21,6 +31,17 @@ export interface Comment {
    */
   authorUsername: string | null
   createdAt: string
+  /**
+   * When the body last changed, null on a comment nobody has edited.
+   *
+   * **Not `updatedAt`**, which the server moves for any write to the row, the
+   * delete included. An edit has to be visible *as* an edit — a comment whose
+   * text changed with nothing saying so is a conversation somebody can rewrite
+   * after the fact — and this is the field that says so.
+   */
+  editedAt: string | null
+  /** When it was deleted. Non-null only on a tombstone, whose `body` is null. */
+  deletedAt: string | null
 }
 
 /**
