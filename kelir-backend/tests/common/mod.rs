@@ -60,6 +60,7 @@ use axum::Router;
 use serde_json::Value;
 use sqlx::{Connection, PgConnection, PgPool};
 use tower::ServiceExt;
+use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 use kelir_backend::config::{AppConfig, AppEnv, BootstrapAdmin};
@@ -155,6 +156,8 @@ impl TestApp {
     /// is the slow transport #202 needed and could not inject. Everything else
     /// wants the default captured one.
     pub async fn spawn_with_mailer(adjust: impl FnOnce(&mut AppConfig), mailer: Mailer) -> Self {
+        capture_backend_logs();
+
         let maintenance_url = server_url();
         let database_name = format!("kelir_test_{}", Uuid::now_v7().simple());
 
@@ -812,6 +815,52 @@ impl RawResponse {
 // ---------------------------------------------------------------------------
 // Provisioning
 // ---------------------------------------------------------------------------
+
+/// Sends the backend's own `tracing` output to the test harness, once per test
+/// binary ([#274]).
+///
+/// # The log that was not there
+///
+/// [#274] is an unexplained 500 seen once in a full suite run and never since.
+/// Its first acceptance criterion is *a failing run is captured with the
+/// backend's log*, and that could not be satisfied by trying harder: **no test
+/// binary installed a subscriber**, so `error.rs`'s
+/// `tracing::error!(error = ?source, "request failed with an internal error")`
+/// — which carries the `sqlx` error behind every `INTERNAL_ERROR` — was written
+/// to nothing at all. A rerun would have produced the same generic envelope and
+/// the same absence.
+///
+/// # Why it is on by default, and quiet anyway
+///
+/// The failure this exists for happens **once in some number of runs**, so a
+/// flag somebody remembers to set for the run that fails is a flag for the run
+/// that already failed. The filter is `error` and above, and `with_test_writer`
+/// routes it through libtest's per-test capture — so a passing run prints
+/// nothing, and a run where the server failed prints why, under the test that
+/// failed.
+///
+/// `KELIR_TEST_LOG` overrides the filter for somebody chasing something
+/// specific: `KELIR_TEST_LOG=kelir_backend=debug,sqlx=warn`, with
+/// `--nocapture` to see it from a passing test too.
+///
+/// [#274]: https://github.com/sujanto-gaws/kelir/issues/274
+fn capture_backend_logs() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+
+    ONCE.call_once(|| {
+        let filter = EnvFilter::try_from_env("KELIR_TEST_LOG")
+            .unwrap_or_else(|_| EnvFilter::new("kelir_backend=error"));
+
+        // `try_init` rather than `init`: a test binary that has already set a
+        // subscriber some other way keeps it, and the harness does not panic
+        // over logging.
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_test_writer()
+            .with_target(true)
+            .try_init();
+    });
+}
 
 /// Configuration for a test instance.
 ///
