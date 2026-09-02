@@ -167,6 +167,7 @@ function onAction(action: string): void {
 
 /** Surfaced as top-level refs so the template reads them without `.value`. */
 const defect = evaluation.defect
+const engineUnavailable = evaluation.engineUnavailable
 
 /** Registry rules the definition asks for that this side does not decide. */
 const undecided = computed(() =>
@@ -185,6 +186,28 @@ const undecided = computed(() =>
     <Alert v-if="defect" variant="destructive" data-testid="form-defect">
       <p class="font-medium">This form carries a rule Kelir cannot apply.</p>
       <p class="mt-1">{{ defect }}</p>
+    </Alert>
+
+    <!-- **The engine failed to load, and that is not the same as not yet**
+         (#273, **D-54**). A form whose engine is still coming says nothing —
+         D-10's condition, and the state most people are in for a moment. This
+         one is permanent: `loadEvaluator` memoizes its promise, so a rejected
+         load stays rejected until the page is reloaded.
+
+         It is a form-level notice rather than a per-field marker because the
+         failure is form-level: nothing computes and no `conditional` decides,
+         and the half that shows sections which should be hidden has no field to
+         hang a marker on. And it is not `destructive`: nothing is broken for
+         the person, nothing they typed is at risk, and the submission still
+         produces correct totals — the server recomputes every calculated field
+         (#163), which is why this says what to do rather than what went wrong. -->
+    <Alert v-if="engineUnavailable" data-testid="form-engine-unavailable">
+      <p class="font-medium">Calculations are not running in your browser.</p>
+      <p class="mt-1">
+        Totals and rules that depend on them will not update as you type, and sections that would
+        normally be hidden may all be showing. You can still fill this form in and submit it — every
+        calculated value is worked out again when you do. Reloading the page usually fixes it.
+      </p>
     </Alert>
 
     <!-- A rule the registry defines and this side does not decide. Named, for

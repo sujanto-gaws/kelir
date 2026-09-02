@@ -34,6 +34,18 @@ import type { JfssDefinition } from '@/types/jfss'
  */
 const evaluatorLoads = vi.hoisted(() => vi.fn())
 
+/**
+ * What the next `loadEvaluator` does — the real thing unless a test says
+ * otherwise ([#273](https://github.com/sujanto-gaws/kelir/issues/273)).
+ *
+ * **`rejects` and `never` are the two states the composable could not tell
+ * apart** before this item, and no test could reach either: the real loader
+ * resolves, and a rejection had nowhere to come from. They are set per test and
+ * reset in `beforeEach`, so every other test in this file still runs the real
+ * engine.
+ */
+const evaluator = vi.hoisted(() => ({ mode: 'real' as 'real' | 'rejects' | 'never' }))
+
 vi.mock('@/lib/jsonlogic', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/jsonlogic')>()
 
@@ -41,6 +53,14 @@ vi.mock('@/lib/jsonlogic', async (importOriginal) => {
     ...actual,
     loadEvaluator: () => {
       evaluatorLoads()
+
+      if (evaluator.mode === 'rejects') {
+        return Promise.reject(new Error('the engine chunk could not be fetched'))
+      }
+
+      if (evaluator.mode === 'never') {
+        return new Promise(() => {})
+      }
 
       return actual.loadEvaluator()
     },
@@ -77,6 +97,10 @@ vi.mock('@/api/rad', () => ({
  */
 beforeAll(async () => {
   await loadEvaluator()
+})
+
+beforeEach(() => {
+  evaluator.mode = 'real'
 })
 
 const requisition = purchaseRequisition as unknown as JfssDefinition
@@ -662,5 +686,136 @@ describe("D-10's bundle condition, from the side a unit test can see", () => {
     })
 
     expect(evaluatorLoads).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * The two states `ready === false` used to collapse into one ([#273], **D-54**).
+ *
+ * # Seen to fail (coding standard §2.9, and #273 AC5 by name)
+ *
+ * Both mutations were run on 2026-09-02 and each reddened its own test:
+ *
+ * | Mutation | Reddened |
+ * |---|---|
+ * | The `.catch` neutered, so a rejected load sets nothing — #273 as it was found | *says the calculations are not running when the engine load is rejected* |
+ * | The banner keyed to `!ready` instead of `engineUnavailable` — the fix that regresses D-10's condition | *says nothing at all while the engine is still coming* |
+ *
+ * The second is the one worth having: a banner that appears while the engine is
+ * merely in flight is the spinner D-10 refused, wearing different words, and
+ * nothing else in this file would have caught it.
+ *
+ * [#273]: https://github.com/sujanto-gaws/kelir/issues/273
+ */
+describe('an engine that does not arrive (#273)', () => {
+  /**
+   * Mounts **without** waiting for an engine that is not coming.
+   *
+   * `render` above flushes twice on the assumption that the engine is already
+   * resolved; here the point is what the form does while it is not.
+   */
+  async function mountForm(definition: JfssDefinition = requisition) {
+    const wrapper = mount(JfssForm, { props: { definition } })
+
+    await flushPromises()
+    await flushPromises()
+
+    return wrapper
+  }
+
+  /**
+   * **AC2 — a form whose engine failed says so.**
+   *
+   * And says what to do about it. The message names the consequence the person
+   * can see (totals not updating, sections not hiding) rather than the cause
+   * they cannot (a chunk that would not fetch).
+   */
+  it('says the calculations are not running when the engine load is rejected', async () => {
+    evaluator.mode = 'rejects'
+
+    const wrapper = await mountForm()
+    const banner = wrapper.find('[data-testid="form-engine-unavailable"]')
+
+    expect(banner.exists()).toBe(true)
+    expect(banner.text()).toContain('not running in your browser')
+    // The half that keeps somebody working: their submission is still right.
+    expect(banner.text()).toContain('worked out again')
+  })
+
+  /**
+   * **AC3 — a form whose engine has not arrived keeps saying nothing.**
+   *
+   * This is D-10's condition, and the half a fix for #273 could most easily
+   * have broken: a banner while the engine is in flight is the spinner D-10
+   * refused, wearing different words.
+   */
+  it('says nothing at all while the engine is still coming', async () => {
+    evaluator.mode = 'never'
+
+    const wrapper = await mountForm()
+
+    expect(wrapper.find('[data-testid="form-engine-unavailable"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="form-defect"]').exists()).toBe(false)
+    // And the form is there to be filled in, which is the point of not waiting.
+    expect(wrapper.find('#jfss-title-field').exists()).toBe(true)
+  })
+
+  /**
+   * **AC4 — the submit path is unchanged.**
+   *
+   * The server recomputes every calculated field (#163), so a browser that
+   * cannot compute has no business refusing a submission. A form that went
+   * invalid on a failed engine would turn a display failure into a data-entry
+   * outage.
+   */
+  it('still accepts a submission when the engine never loaded', async () => {
+    evaluator.mode = 'rejects'
+
+    const wrapper = await mountForm()
+
+    for (const [selector, value] of [
+      ['#jfss-title-field', 'Two standing desks'],
+      ['#jfss-supplier-field', 'supplier-1'],
+      ['#jfss-priority-field', '1'],
+      ['#jfss-row-0-line-description', 'A desk'],
+      ['#jfss-row-0-line-quantity', '2'],
+    ]) {
+      await wrapper.find(selector).setValue(value)
+      await flushPromises()
+    }
+
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === 'Submit request')!
+      .trigger('click')
+    await flushPromises()
+
+    expect(wrapper.emitted('action')).toBeTruthy()
+    expect(wrapper.emitted('action')![0][0]).toBe('submit')
+  })
+
+  /**
+   * **A form with nothing to evaluate never reaches for the engine**, so it
+   * cannot be told the engine failed — there was no load to fail.
+   */
+  it('says nothing on a form that needs no engine', async () => {
+    evaluator.mode = 'rejects'
+
+    const wrapper = await mountForm({
+      formId: 'plain',
+      version: '2.0.1',
+      components: [
+        {
+          id: 'a',
+          role: 'data',
+          type: 'textfield',
+          key: 'a',
+          label: 'A',
+          validation: { type: 'string', required: true },
+        },
+      ],
+    })
+
+    expect(wrapper.find('[data-testid="form-engine-unavailable"]').exists()).toBe(false)
   })
 })
