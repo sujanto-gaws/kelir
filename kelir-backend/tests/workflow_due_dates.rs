@@ -549,8 +549,15 @@ async fn the_task_detail_answers_whether_as_well_as_when() {
 
 /// A scope the inbox does not serve is refused by name, and the message lists
 /// the ones that exist.
+///
+/// **The third copy of this assertion**, and the third to catch the list
+/// growing: `task_inbox.rs` and `TaskInboxPage.spec.ts` hold the other two, and
+/// all three failed when [#256](https://github.com/sujanto-gaws/kelir/issues/256)
+/// added `completed`. Three tests asserting one message reads like duplication
+/// until the message changes and each of them names a different place that
+/// would otherwise have kept describing a list the API no longer serves.
 #[tokio::test]
-async fn an_unknown_scope_names_the_three_that_exist() {
+async fn an_unknown_scope_names_all_four_that_exist() {
     let app = TestApp::spawn().await;
     let holder = approver(&app, "due-scope-holder").await;
 
@@ -566,7 +573,7 @@ async fn an_unknown_scope_names_the_three_that_exist() {
         refused.body["error"]["details"][0]["message"]
             .as_str()
             .expect("a message")
-            .contains("open, overdue, all"),
+            .contains("open, overdue, completed, all"),
         "{}",
         refused.body
     );

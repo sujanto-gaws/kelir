@@ -14,7 +14,7 @@
 use uuid::Uuid;
 
 use super::super::domain::{Assignment, Graph, TaskStatus, TransitionAction};
-use super::super::repository::inbox::{self, InboxFilters};
+use super::super::repository::inbox::{self, InboxFilters, InboxScope};
 use super::super::repository::{definition as definition_repo, instance as instance_repo};
 use super::super::TASK_READ;
 use crate::error::AppError;
@@ -75,6 +75,26 @@ pub struct InboxTask {
     pub document_number: Option<String>,
     pub document_title: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// What was decided, on a task that has been ([#256] AC5).
+    ///
+    /// `null` while it is still waiting, which is what makes the completed view
+    /// readable without a second call: the row that says *finished* is the row
+    /// that says what was decided and why.
+    ///
+    /// [#256]: https://github.com/sujanto-gaws/kelir/issues/256
+    pub action: Option<String>,
+    /// **The reason FR-TASK-006 recorded in Sprint 11**, visible until now only
+    /// on the document's own history.
+    ///
+    /// This is the decision comment — the immutable record, not the
+    /// conversation `modules::comment` holds — and it is served here because the
+    /// person reading it is the task's own holder or a role holder the
+    /// visibility rule already admits. It is the same rule the document's
+    /// history applies, asked from the other end; what it is **not** is the
+    /// audit trail, which is read by people holding no permission over the
+    /// document and where **D-12** and **D-32** keep this text out.
+    pub decision_comment: Option<String>,
+    pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// What a task detail says for itself ([#179] AC4).
@@ -186,13 +206,14 @@ pub async fn get_task(
         tenant_id,
         user_id,
         &InboxFilters {
-            open_only: false,
-            // The detail view is reached for a task by id, and a decided one is
-            // still worth reading — narrowing to what is late here would answer
-            // 404 for every task somebody opened to see what happened to it.
-            overdue_only: false,
+            // `All`, and the detail view is why the axis has that point at all:
+            // it is reached for a task by id, and a decided one is still worth
+            // reading — narrowing to what is open, late or finished here would
+            // answer 404 for a task somebody opened to see what happened to it.
+            scope: InboxScope::All,
             document_id: None,
             task_id: Some(id),
+            search: None,
         },
         1,
         0,
@@ -296,5 +317,8 @@ fn to_task(row: inbox::InboxRow, caller: Uuid) -> InboxTask {
         document_number: row.document_number,
         document_title: row.document_title,
         created_at: row.created_at,
+        action: row.action,
+        decision_comment: row.decision_comment,
+        completed_at: row.completed_at,
     }
 }

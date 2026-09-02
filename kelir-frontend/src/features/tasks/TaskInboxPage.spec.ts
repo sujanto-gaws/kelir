@@ -47,6 +47,9 @@ function task(overrides: Record<string, unknown> = {}): unknown {
     documentNumber: 'PR-2026-000001',
     documentTitle: 'Two standing desks',
     createdAt: '2026-08-28T00:00:00Z',
+    action: null,
+    decisionComment: null,
+    completedAt: null,
     ...overrides,
   }
 }
@@ -62,6 +65,18 @@ function lastRequest(backend: FakeBackendHandle): RecordedRequest {
   return backend.requests[backend.requests.length - 1]
 }
 
+/**
+ * # Seen to fail (coding standard §2.9), for #256's additions
+ *
+ * Two mutations, run 2026-09-02:
+ *
+ * - **`completed` dropped from `scopeOptions`.** Red: *offers the whole axis on
+ *   one control…*, *searches within the scope being shown…* — a point the API
+ *   serves and the screen does not offer is exactly what the first of those
+ *   exists to catch, and it caught it twice.
+ * - **The decision hidden, so a finished row renders its status instead.** Red:
+ *   *shows the decision and its reason on a task that has been decided*.
+ */
 describe('TaskInboxPage', () => {
   let backend: FakeBackendHandle
   let router: Router
@@ -200,9 +215,11 @@ describe('TaskInboxPage', () => {
     expect(wrapper.get('[data-testid="task-row-TASK-2026-000001"]').text()).toContain('\u2014')
   })
 
-  it('offers late as a third scope and sends it', async () => {
-    // One axis, three points: `all \u2283 open \u2283 overdue`. The control is the
-    // same Select, because the choice is one choice.
+  it('offers the whole axis on one control and sends the point chosen', async () => {
+    // One axis, four points: `overdue \u2283 open`, `completed`, both inside `all`.
+    // The control is one Select, because the choice is one choice \u2014 the list
+    // grew with #185 and again with #256, and this assertion is what makes a
+    // point added to the API and forgotten on the screen visible.
     const wrapper = await render()
 
     const values = wrapper
@@ -210,12 +227,76 @@ describe('TaskInboxPage', () => {
       .findAll('option')
       .map((option) => (option.element as HTMLOptionElement).value)
 
-    expect(values).toEqual(['open', 'overdue', 'all'])
+    expect(values).toEqual(['open', 'overdue', 'completed', 'all'])
 
     await wrapper.get('[data-testid="tasks-scope"]').setValue('overdue')
     await flushPromises()
 
     expect(lastRequest(backend).params.scope).toBe('overdue')
+
+    await wrapper.get('[data-testid="tasks-scope"]').setValue('completed')
+    await flushPromises()
+
+    expect(lastRequest(backend).params.scope).toBe('completed')
+  })
+
+  /**
+   * **A decided task says what was decided and why** (#256 AC5).
+   *
+   * The reason is FR-TASK-006's record \u2014 the immutable one taken with the
+   * approval \u2014 and until now it was readable only on the document's history.
+   */
+  it('shows the decision and its reason on a task that has been decided', async () => {
+    rows = [
+      task({
+        status: 'COMPLETED',
+        action: 'APPROVE',
+        decisionComment: 'budget is available',
+        completedAt: '2026-09-02T10:00:00Z',
+      }),
+    ]
+
+    const wrapper = await render()
+
+    expect(wrapper.get('[data-testid="task-decision"]').text()).toBe('APPROVE')
+    expect(wrapper.get('[data-testid="task-decision-comment"]').text()).toBe('budget is available')
+  })
+
+  it('shows the status rather than a blank decision on a task still waiting', async () => {
+    const wrapper = await render()
+
+    expect(wrapper.find('[data-testid="task-decision"]').exists()).toBe(false)
+  })
+
+  /**
+   * **The search is a second control on the same query, not a second view**
+   * (#256 AC3): searching inside "Decided by me" stays inside it.
+   *
+   * It sends on submit rather than on every keystroke \u2014 a list that refetched
+   * per character would race its own answers.
+   */
+  it('searches within the scope being shown, on submit', async () => {
+    const wrapper = await render()
+
+    await wrapper.get('[data-testid="tasks-scope"]').setValue('completed')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="tasks-search"]').setValue('desks')
+    expect(lastRequest(backend).params.q).toBeUndefined()
+
+    await wrapper.get('[data-testid="tasks-search-submit"]').trigger('submit')
+    await flushPromises()
+
+    expect(lastRequest(backend).params.q).toBe('desks')
+    expect(lastRequest(backend).params.scope).toBe('completed')
+  })
+
+  it('says the search found nothing rather than that the queue is empty', async () => {
+    rows = []
+
+    const wrapper = await render({ q: 'nothing here' })
+
+    expect(wrapper.get('[data-testid="tasks-empty"]').text()).toContain('matches that search')
   })
 
   it('says what is empty, which is not always the queue', async () => {

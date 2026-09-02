@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { listTasks } from '@/api/tasks'
@@ -63,8 +63,19 @@ const list = useQueryBackedList<InboxTask>(listTasks)
 const scopeOptions: { value: InboxScope; label: string }[] = [
   { value: 'open', label: 'Waiting for me' },
   { value: 'overdue', label: 'Late' },
+  { value: 'completed', label: 'Decided by me' },
   { value: 'all', label: 'Everything I have held' },
 ]
+
+/**
+ * The search box's text, held here and pushed to the URL on submit.
+ *
+ * **Not on every keystroke.** A list that re-fetched as somebody typed would
+ * send a request per character and race its own answers; the URL is the state,
+ * and it changes when the person says so. `q` is seeded from the URL so a
+ * deep link arrives with its own term in the box.
+ */
+const searchTerm = ref('')
 
 /**
  * What an empty list means, which depends on what was asked for.
@@ -74,15 +85,27 @@ const scopeOptions: { value: InboxScope; label: string }[] = [
  * news. Three questions, three answers.
  */
 const emptyMessage = computed(() => {
+  // A search that found nothing is a different answer from an empty queue, and
+  // saying "nothing is waiting for you" to somebody who has just searched hides
+  // the fact that the term is what emptied the list.
+  if (list.filters.value.q) {
+    return 'Nothing here matches that search.'
+  }
+
   switch (list.filters.value.scope) {
     case 'overdue':
       return 'Nothing of yours is late.'
+    case 'completed':
+      return 'You have not decided anything yet.'
     case 'all':
       return 'Nothing has been through your hands yet.'
     default:
       return 'Nothing is waiting for you.'
   }
 })
+
+/** Whether the list being shown is one of finished work. */
+const showingCompleted = computed(() => list.filters.value.scope === 'completed')
 
 const currentQuery = computed<ListQuery>(() => {
   const query: ListQuery = {}
@@ -133,11 +156,16 @@ function openTask(id: string): void {
   void router.push({ name: 'task', params: { id } })
 }
 
+function search(): void {
+  navigate({ q: searchTerm.value.trim() })
+}
+
 // One load path: the URL changed, so re-apply it. `immediate` is what makes a
 // deep-linked view load its own scope rather than the default one.
 watch(
   () => route.query,
   () => {
+    searchTerm.value = (list.filters.value.q as string | undefined) ?? currentQuery.value.q ?? ''
     void list.apply(currentQuery.value)
   },
   { immediate: true, deep: true },
@@ -153,7 +181,7 @@ watch(
       </p>
     </div>
 
-    <div class="grid gap-3 sm:max-w-xs">
+    <div class="grid gap-3 sm:max-w-xl sm:grid-cols-2">
       <div class="space-y-2">
         <Label for="tasks-scope">Show</Label>
         <Select
@@ -163,6 +191,26 @@ watch(
           :options="scopeOptions"
           @update:model-value="navigate({ scope: $event })"
         />
+      </div>
+
+      <!-- **The search narrows whichever list is showing** (#256 AC3): it is a
+           second control on the same query rather than a second view, so
+           searching inside "Decided by me" stays inside it. -->
+      <div class="space-y-2">
+        <Label for="tasks-search">Search</Label>
+        <form class="flex gap-2" @submit.prevent="search">
+          <input
+            id="tasks-search"
+            v-model="searchTerm"
+            type="search"
+            placeholder="Task or document"
+            class="w-full rounded-md border p-2 text-sm"
+            data-testid="tasks-search"
+          />
+          <Button type="submit" size="sm" variant="outline" data-testid="tasks-search-submit">
+            Search
+          </Button>
+        </form>
       </div>
     </div>
 
@@ -188,7 +236,7 @@ watch(
             <TableHead>Workflow</TableHead>
             <TableHead>Whose</TableHead>
             <TableHead>Due</TableHead>
-            <TableHead>Status</TableHead>
+            <TableHead>{{ showingCompleted ? 'Decision' : 'Status' }}</TableHead>
             <TableHead class="sr-only">Open</TableHead>
           </TableRow>
         </TableHeader>
@@ -230,7 +278,24 @@ watch(
                 {{ dueLabel(task.dueAt) }}
               </span>
             </TableCell>
-            <TableCell>{{ TASK_STATUS_LABELS[task.status] }}</TableCell>
+            <TableCell>
+              <!-- **A decided task says what was decided and why** (#256 AC5).
+                   The reason is FR-TASK-006's record — the immutable one taken
+                   with the approval, not the conversation on the Comments tab —
+                   and until now it was readable only on the document's own
+                   history. -->
+              <template v-if="task.action">
+                <span class="font-medium" data-testid="task-decision">{{ task.action }}</span>
+                <span
+                  v-if="task.decisionComment"
+                  class="block text-sm text-muted-foreground"
+                  data-testid="task-decision-comment"
+                >
+                  {{ task.decisionComment }}
+                </span>
+              </template>
+              <span v-else>{{ TASK_STATUS_LABELS[task.status] }}</span>
+            </TableCell>
             <TableCell class="text-right">
               <Button
                 variant="outline"

@@ -13,6 +13,45 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
 
 ### Added
 
+- **The inbox answers a fourth question: what you have decided** (FR-TASK-009,
+  FR-SRH-003, [#256](https://github.com/sujanto-gaws/kelir/issues/256)).
+  `GET /tasks?scope=completed` lists the tasks that have been through your
+  hands, and each row carries **what was decided and the reason given with
+  it** — FR-TASK-006's record, taken with the approval in Sprint 11 and
+  readable until now only on the document's own history.
+
+  **A fourth point on one axis, not a second endpoint.** `overdue ⊂ open ⊂ all`
+  and `completed ⊂ all`, with the two subsets disjoint: a task that is late is
+  still open, because a finished one is not late, it is done. A second
+  collection over `workflow_tasks` would have been a second implementation of
+  the visibility rule, and the two would drift — which is the failure the file
+  those statements live in was already carrying (see *Fixed*).
+
+  **Search narrows whichever list is showing** — the task's own name, the
+  document's title and its number — through the same statement, so the search
+  runs inside the visibility rule rather than over the rows it returned. A `%`
+  or `_` typed by a person is a character: `50%` searches for a percent sign,
+  not for everything.
+
+  The screen gains one option on the control it already had and a search box
+  beside it; a decided row shows the decision where a waiting row shows its
+  status.
+
+### Fixed
+
+- **The inbox's count, its page and its detail gate agree about which rows
+  exist** ([#279](https://github.com/sujanto-gaws/kelir/issues/279)). The page
+  joined `documents` and the count did not, so a task whose document had been
+  soft-deleted was **counted and not listed** — an inbox that said 23 and ended
+  at 19, which the comment above the count forbids in as many words. The detail
+  gate had the same gap in the other direction: it answered *visible* for a task
+  the read behind it then answered 404 for.
+
+  All three carry the join now. And the drift is harder to reintroduce than it
+  was: #256's search reads the document's own columns in the count as well as in
+  the page, so removing that join stops the crate compiling rather than
+  quietly changing a number.
+
 - **A master-data change can be routed through an approval** (FR-MDM-010,
   [#255](https://github.com/sujanto-gaws/kelir/issues/255), decision **D-55**,
   recorded as

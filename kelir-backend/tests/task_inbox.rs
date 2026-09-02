@@ -743,11 +743,15 @@ async fn an_unknown_scope_is_refused_with_the_values_that_work() {
 
     assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(refused.body["error"]["details"][0]["path"], "scope");
-    // The list grew when #185 added `overdue`, and this assertion is what made
-    // that visible rather than leaving a refusal message describing two of the
-    // three values it accepts.
+    // The list grew when #185 added `overdue`, and again when #256 added
+    // `completed`. This assertion is what made both visible rather than leaving
+    // a refusal message describing some of the values it accepts — which is the
+    // failure it was written for, twice now.
     assert!(
-        refused.body.to_string().contains("open, overdue, all"),
+        refused
+            .body
+            .to_string()
+            .contains("open, overdue, completed, all"),
         "{}",
         refused.body
     );
@@ -878,4 +882,214 @@ async fn the_new_routes_are_in_the_published_contract() {
             "{path} is served and is not in the OpenAPI document"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// #256 — the completed view, the search, and #279's count that has to agree
+// ---------------------------------------------------------------------------
+
+// # Seen to fail (coding standard §2.9)
+//
+// Four mutations, run 2026-09-02:
+//
+// | Mutation | Reddened |
+// |---|---|
+// | `count_for_caller`'s join widened to `ON d.id = t.document_id`, dropping `deleted_at IS NULL` — #279's shape | *the count, the page and the gate agree…* — total 1 against an empty page |
+// | `completed` parsed as `InboxScope::All` | *a completed task leaves the queue…* |
+// | The search predicate neutered with `OR true` | *the search narrows…*, *a percent in a search…* |
+// | The `%` escaping dropped from `normalize_search` | *a percent in a search is a percent…* |
+//
+// **And one thing a mutation could not do.** Removing the `documents` join from
+// the count outright no longer compiles: the search reads `d.title` and
+// `d.document_number` in that statement as well as in the page, so #279's exact
+// defect — the join present in one and absent in the other — is now a build
+// failure rather than a wrong number. The test guards the semantics; the
+// compiler guards the join.
+
+/// One page of the inbox, asked for with a query string.
+async fn inbox_of(app: &TestApp, token: &str, query: &str) -> common::TestResponse {
+    app.get(&format!("{TASKS}?{query}"), Some(token)).await
+}
+
+/// **What has been through my hands, distinct from what is waiting** ([#256]
+/// AC1, AC5).
+///
+/// The completed row carries what was decided **and the reason given with it** —
+/// FR-TASK-006's record, written in Sprint 11 and readable until now only on the
+/// document's own history.
+///
+/// **Seen red** with `completed` mapped to `InboxScope::All`: the finished task
+/// appears under both scopes, and *waiting for me* stops meaning anything.
+///
+/// [#256]: https://github.com/sujanto-gaws/kelir/issues/256
+#[tokio::test]
+async fn a_completed_task_leaves_the_queue_and_says_what_was_decided() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let (_, approver) = holder(&app, "TI-DONE", "ti.done").await;
+
+    let workflow = publish_workflow(&app, &token, "ti_done", "TI-DONE").await;
+    let type_id = document_type(&app, &token, "TI_DONE", workflow).await;
+    let document = submitted_document(&app, &token, type_id, "Two standing desks").await;
+    let task = open_task_of(&app, document).await;
+
+    let waiting = inbox_of(&app, &approver, "scope=open").await;
+    assert_eq!(waiting.body["data"].as_array().expect("a page").len(), 1);
+    assert_eq!(waiting.body["meta"]["total"], 1);
+
+    let before = inbox_of(&app, &approver, "scope=completed").await;
+    assert_eq!(before.body["data"].as_array().expect("a page").len(), 0);
+    assert_eq!(before.body["meta"]["total"], 0);
+
+    let claimed = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/claim"),
+            Some(&approver),
+            json!({}),
+        )
+        .await;
+    assert_eq!(claimed.status, StatusCode::OK, "{}", claimed.body);
+
+    let decided = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&approver),
+            json!({ "action": "APPROVE", "comment": "budget is available" }),
+        )
+        .await;
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+
+    let waiting_after = inbox_of(&app, &approver, "scope=open").await;
+    assert_eq!(
+        waiting_after.body["data"].as_array().expect("a page").len(),
+        0,
+        "a decided task is not waiting for anybody"
+    );
+    assert_eq!(waiting_after.body["meta"]["total"], 0);
+
+    let done = inbox_of(&app, &approver, "scope=completed").await;
+    let row = &done.body["data"][0];
+
+    assert_eq!(done.body["data"].as_array().expect("a page").len(), 1);
+    assert_eq!(done.body["meta"]["total"], 1);
+    assert_eq!(row["id"], task.to_string());
+    assert_eq!(row["action"], "APPROVE");
+    assert_eq!(row["decisionComment"], "budget is available");
+    assert!(!row["completedAt"].is_null());
+    assert_eq!(
+        row["isOverdue"], false,
+        "a finished task is not late, it is done"
+    );
+}
+
+/// **The search narrows the same list** ([#256] AC3) — through the statement the
+/// visibility rule lives in, rather than by filtering a page afterwards.
+#[tokio::test]
+async fn the_search_narrows_the_inbox_by_document_and_by_task_name() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let (_, approver) = holder(&app, "TI-SEARCH", "ti.search").await;
+
+    let workflow = publish_workflow(&app, &token, "ti_search", "TI-SEARCH").await;
+    let type_id = document_type(&app, &token, "TI_SEARCH", workflow).await;
+
+    submitted_document(&app, &token, type_id, "Two standing desks").await;
+    submitted_document(&app, &token, type_id, "A replacement laptop").await;
+
+    let everything = inbox_of(&app, &approver, "scope=open").await;
+    assert_eq!(everything.body["data"].as_array().expect("a page").len(), 2);
+
+    let desks = inbox_of(&app, &approver, "scope=open&q=desks").await;
+
+    assert_eq!(
+        desks.body["data"].as_array().expect("a page").len(),
+        1,
+        "the search narrows the list: {}",
+        desks.body
+    );
+    assert_eq!(
+        desks.body["meta"]["total"], 1,
+        "and the count narrows with it — a total the page cannot account for is unreadable"
+    );
+    assert_eq!(desks.body["data"][0]["documentTitle"], "Two standing desks");
+
+    // The other half of AC3: the task's own name.
+    let by_task = inbox_of(&app, &approver, "scope=open&q=Approve%20the").await;
+    assert_eq!(by_task.body["data"].as_array().expect("a page").len(), 2);
+    assert_eq!(by_task.body["meta"]["total"], 2);
+}
+
+/// **A wildcard typed by a person is a character.** `%` searching for everything
+/// is the version of this somebody notices; `a_b` matching `axb` is the version
+/// nobody does.
+#[tokio::test]
+async fn a_percent_in_a_search_is_a_percent_rather_than_everything() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let (_, approver) = holder(&app, "TI-WILD", "ti.wild").await;
+
+    let workflow = publish_workflow(&app, &token, "ti_wild", "TI-WILD").await;
+    let type_id = document_type(&app, &token, "TI_WILD", workflow).await;
+    submitted_document(&app, &token, type_id, "Two standing desks").await;
+
+    let everything = inbox_of(&app, &approver, "scope=open&q=%25").await;
+
+    assert_eq!(
+        everything.body["data"].as_array().expect("a page").len(),
+        0,
+        "a search for a percent sign found a task that has none: {}",
+        everything.body
+    );
+    assert_eq!(everything.body["meta"]["total"], 0);
+}
+
+/// **The count, the page and the visibility gate agree about which rows exist**
+/// ([#279](https://github.com/sujanto-gaws/kelir/issues/279) AC1, AC2).
+///
+/// A task whose document has been soft-deleted was **counted and not listed**:
+/// the page joined `documents`, the count did not, and the detail gate did not
+/// either — three statements written to agree, disagreeing in two directions.
+///
+/// **Seen red** against the count as it stood: `meta.total` said 1 and the page
+/// was empty, which is the inbox saying 23 and ending at 19 that
+/// `count_for_caller`'s own comment forbids.
+#[tokio::test]
+async fn the_count_the_page_and_the_gate_agree_when_a_document_is_gone() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let (_, approver) = holder(&app, "TI-GONE", "ti.gone").await;
+
+    let workflow = publish_workflow(&app, &token, "ti_gone", "TI-GONE").await;
+    let type_id = document_type(&app, &token, "TI_GONE", workflow).await;
+    let document = submitted_document(&app, &token, type_id, "A vanished request").await;
+    let task = open_task_of(&app, document).await;
+
+    // Soft-deleted directly: the discard path refuses a submitted document
+    // (#278), so this is the state #279 says is reachable only through it.
+    sqlx::query("UPDATE documents SET deleted_at = now() WHERE id = $1")
+        .bind(document)
+        .execute(&app.pool)
+        .await
+        .expect("the document");
+
+    let after = inbox_of(&app, &approver, "scope=open").await;
+
+    assert_eq!(
+        after.body["data"].as_array().expect("a page").len(),
+        0,
+        "the page does not list a task whose document is gone"
+    );
+    assert_eq!(
+        after.body["meta"]["total"], 0,
+        "#279: and the count no longer says it is there"
+    );
+
+    let detail = app.get(&format!("{TASKS}/{task}"), Some(&approver)).await;
+
+    assert_eq!(
+        detail.status,
+        StatusCode::NOT_FOUND,
+        "the gate and the read agree: {}",
+        detail.body
+    );
 }
