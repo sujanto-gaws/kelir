@@ -873,6 +873,139 @@ async fn a_delegated_decision_records_both_parties_in_the_history() {
     );
 }
 
+/// **A task handed back to its delegator is decided by nobody but them**
+/// ([#280](https://github.com/sujanto-gaws/kelir/issues/280) AC1).
+///
+/// Ani hands her task to Budi, and Budi hands it back. `refuse_self_delegation`
+/// compares Budi with Ani and passes, and the `COALESCE` alone would keep Ani in
+/// `delegated_from_user_id` — so the task would say Ani holds it **on Ani's
+/// behalf**, and her approval's history row would carry her in both columns.
+///
+/// That is precisely the row `0028_delegation.sql` made the column nullable to
+/// prevent: *acting for themselves* and *acting for somebody who happens to be
+/// them* have to stay different rows, and the second is what
+/// `WorkflowTab.vue` renders as "ani … on ani's behalf".
+///
+/// **The fix is at the hand-off** (AC2), so this asserts the task's own row as
+/// well as the history: the row is what the `allowedBy` check reads and what the
+/// inbox renders, and a correction applied only at the decision would leave it
+/// saying something untrue.
+///
+/// **Seen red** against `repository::task::delegate` with the `NULLIF` removed:
+/// the task comes back naming Ani as its delegator and the approval's history
+/// row carries `on_behalf_of_user_id = ani`.
+#[tokio::test]
+async fn a_task_handed_back_is_no_longer_held_on_anybodys_behalf() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let ani = party(&app, "dlg-back-ani").await;
+    let budi = party(&app, "dlg-back-budi").await;
+
+    let workflow = publish_workflow(&app, &token, user_workflow("wf_dlg_back", ani.id)).await;
+    let type_id = document_type(&app, &token, "PR_DLG_BACK", Some(workflow)).await;
+    let document = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, document).await.status, StatusCode::OK);
+
+    let (task_id, _, _, _) = open_task_of(&app, document).await;
+
+    for (from, to) in [(&ani, &budi), (&budi, &ani)] {
+        let handed = app
+            .post(
+                &format!("/api/v1/workflow/tasks/{task_id}/delegation"),
+                Some(&from.token),
+                json!({ "delegateUserId": to.id }),
+            )
+            .await;
+        assert_eq!(handed.status, StatusCode::OK, "{}", handed.body);
+    }
+
+    let (_, assignee, delegated_from, _) = open_task_of(&app, document).await;
+
+    assert_eq!(assignee, Some(ani.id), "the task is Ani's again");
+    assert_eq!(
+        delegated_from, None,
+        "and it is hers, not held on her own behalf — the row 0028's header \
+         says the column was made nullable to prevent"
+    );
+
+    // The chain of who passed it on is still in the task's own history, which
+    // is where the hand-back is recorded rather than lost.
+    let hand_offs: Vec<Option<Uuid>> = sqlx::query_scalar(
+        "SELECT actor_user_id FROM workflow_task_history \
+         WHERE task_id = $1 AND action = 'DELEGATE' ORDER BY created_at, id",
+    )
+    .bind(task_id)
+    .fetch_all(&app.pool)
+    .await
+    .expect("the hand-offs");
+
+    assert_eq!(hand_offs, vec![Some(ani.id), Some(budi.id)]);
+
+    let decided = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task_id}/decision"),
+            Some(&ani.token),
+            json!({ "action": "APPROVE" }),
+        )
+        .await;
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+
+    let on_behalf_of: Option<Uuid> = sqlx::query_scalar(
+        "SELECT on_behalf_of_user_id FROM workflow_history \
+         WHERE document_id = $1 AND action = 'APPROVE'",
+    )
+    .bind(document)
+    .fetch_one(&app.pool)
+    .await
+    .expect("the approval's history row");
+
+    assert_eq!(
+        on_behalf_of, None,
+        "a decision by the person the task came back to is theirs alone"
+    );
+}
+
+/// **And a third hand-off after a hand-back names the delegator again.**
+///
+/// A → B → A → B. By the time Ani hands it on a second time it is her authority
+/// once more, so the column is Ani — which is the half a `NULLIF` could have
+/// broken by clearing more than the one row it is for.
+#[tokio::test]
+async fn handing_on_again_after_a_hand_back_names_the_delegator_again() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let ani = party(&app, "dlg-again-ani").await;
+    let budi = party(&app, "dlg-again-budi").await;
+
+    let workflow = publish_workflow(&app, &token, user_workflow("wf_dlg_again", ani.id)).await;
+    let type_id = document_type(&app, &token, "PR_DLG_AGAIN", Some(workflow)).await;
+    let document = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, document).await.status, StatusCode::OK);
+
+    let (task_id, _, _, _) = open_task_of(&app, document).await;
+
+    for (from, to) in [(&ani, &budi), (&budi, &ani), (&ani, &budi)] {
+        let handed = app
+            .post(
+                &format!("/api/v1/workflow/tasks/{task_id}/delegation"),
+                Some(&from.token),
+                json!({ "delegateUserId": to.id }),
+            )
+            .await;
+        assert_eq!(handed.status, StatusCode::OK, "{}", handed.body);
+    }
+
+    let (_, assignee, delegated_from, _) = open_task_of(&app, document).await;
+
+    assert_eq!(assignee, Some(budi.id));
+    assert_eq!(
+        delegated_from,
+        Some(ani.id),
+        "Budi holds it on Ani's behalf again, which is what a hand-back leaves \
+         the next hand-off free to say"
+    );
+}
+
 /// A decision nobody was standing in for records no second party.
 ///
 /// The other half of the pair: writing the actor into both columns to avoid a

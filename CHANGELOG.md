@@ -255,6 +255,27 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
 
 ### Fixed
 
+- **A task handed back to the person who delegated it is no longer decided
+  "on their own behalf"** (FR-WF-009, FR-TASK-008,
+  [#280](https://github.com/sujanto-gaws/kelir/issues/280)). Ani hands her task
+  to Budi and Budi hands it back: the self-delegation check compares Budi with
+  Ani and passes, and `COALESCE` kept Ani in `delegated_from_user_id` — so the
+  task said Ani held it on **Ani's** behalf, and her approval's history row
+  carried her in both columns. The Workflow tab rendered it as *"ani … on ani's
+  behalf"*.
+
+  It is the row `0028_delegation.sql` made the column nullable to prevent:
+  *acting for themselves* and *acting for somebody who happens to be them* have
+  to stay different rows. **The hand-off now clears the column when it would
+  name the incoming assignee**, rather than the decision suppressing a second
+  party it was handed — because the task's own row is what the `allowedBy`
+  check reads and what the inbox renders, and correcting only the history would
+  leave the row untrue. Handing on again after a hand-back names the delegator
+  again.
+
+  **No authorization changed.** `assignment::permits` checked the duplicated
+  candidate twice and widened nothing; what was wrong was the record.
+
 - **A form whose calculation engine fails to load now says so**
   (FR-RAD-008, [#273](https://github.com/sujanto-gaws/kelir/issues/273),
   decision **D-54**). The load was fired and its rejection went nowhere — an

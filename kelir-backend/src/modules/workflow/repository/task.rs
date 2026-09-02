@@ -312,6 +312,32 @@ pub async fn complete(
 /// The *chain* is not lost by this: each hand-off writes its own
 /// `workflow_task_history` row, with the person who made it as the actor.
 ///
+/// # `NULLIF` is the hand-back, and it is why the `COALESCE` is not enough
+///
+/// **A → B → A** ([#280](https://github.com/sujanto-gaws/kelir/issues/280)).
+/// Ani's task goes to Budi, so the column becomes Ani; Budi hands it back, and
+/// the `COALESCE` keeps Ani while the assignee becomes Ani too. The row then
+/// says Ani holds this task **on Ani's behalf** — and when she decides,
+/// `on_behalf_of` comes off that row, so the approval's history says
+/// *ani, on ani's behalf* on the one screen [#184] AC4 exists to serve.
+///
+/// `0028_delegation.sql`'s header is explicit that this is the row the column
+/// was made nullable to prevent: *writing the actor into both columns to avoid a
+/// null would make "acting for themselves" indistinguishable from "acting for
+/// somebody who happens to be them"*. A hand-back produced it anyway.
+///
+/// **So the fix is here rather than at the decision** (#280 AC2). The task's own
+/// row is what `assignment::permits` reads for the `allowedBy` check and what
+/// the inbox renders; correcting only the history would leave the row itself
+/// saying something untrue, for every reader to re-derive the correction from.
+/// One statement, no extra query: keep the delegator **unless it is the person
+/// now holding the task**, in which case there is nobody to name.
+///
+/// A → B → C → A nulls it for the same reason, and A → B → A → B names Ani
+/// again on the second hand-off, because by then it is her authority once more.
+/// `refuse_self_delegation` means `$3` and `$4` are never the same person, so
+/// this can only fire on a genuine hand-back.
+///
 /// # The status does not move
 ///
 /// See [`insert_task`]: `DELEGATED` would take the row out of the open set the
@@ -330,7 +356,7 @@ pub async fn delegate(
         r#"
         UPDATE workflow_tasks SET
             assignee_user_id       = $3,
-            delegated_from_user_id = COALESCE(delegated_from_user_id, $4),
+            delegated_from_user_id = NULLIF(COALESCE(delegated_from_user_id, $4), $3),
             updated_by             = $4,
             updated_at             = now()
         WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL

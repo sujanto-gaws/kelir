@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE workflow_tasks SET\n            assignee_user_id       = $3,\n            delegated_from_user_id = NULLIF(COALESCE(delegated_from_user_id, $4), $3),\n            updated_by             = $4,\n            updated_at             = now()\n        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL\n          AND assignee_user_id = $4\n          AND status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "76b01ee719844fcd4cb7d357ea88c0d4f6b433848c5a6b597b026ec79a8ceb3e"
+}
