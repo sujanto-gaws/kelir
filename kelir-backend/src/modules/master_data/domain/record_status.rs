@@ -284,16 +284,49 @@ mod tests {
         }
     }
 
+    /// **A change parks a record from the two states it can be raised from, and
+    /// from nowhere else** (FR-MDM-010, [#255], **D-55**).
+    ///
+    /// This test used to assert that *nothing* reached `PENDING_APPROVAL`,
+    /// because nothing could approve anything. Something can now: a governed
+    /// change document parks the record it is about. What has not changed is
+    /// that a **person** cannot ask for it — that rule lives one layer up, in
+    /// `service::record_status::transition`, and is held by
+    /// `a_person_cannot_park_a_record_by_hand` in
+    /// `tests/master_data_record_status.rs`.
+    ///
+    /// The split is deliberate: `may_move_to` is the state machine and says
+    /// which moves exist; the surface says who may ask for one. Keeping the
+    /// person-rule out of here is what stops there being two copies of the
+    /// table.
+    ///
+    /// [#255]: https://github.com/sujanto-gaws/kelir/issues/255
     #[test]
-    fn a_direct_edit_cannot_put_a_record_into_pending_approval() {
-        // Nothing can approve anything until FR-MDM-010, so a record put here
-        // would await an approver that does not exist.
+    fn only_a_change_can_park_a_record_and_only_from_draft_or_active() {
         for status in ALL {
-            assert!(
-                status.check_move_to(RecordStatus::PendingApproval).is_err(),
-                "{} reached PENDING_APPROVAL",
-                status.as_db()
+            let parked = status.check_move_to(RecordStatus::PendingApproval).is_ok();
+            let raisable = matches!(status, RecordStatus::Draft | RecordStatus::Active);
+
+            assert_eq!(
+                parked,
+                raisable,
+                "{} {} park",
+                status.as_db(),
+                if raisable { "could not" } else { "could" }
             );
+        }
+    }
+
+    /// And the parked state is identified in one place, because two modules now
+    /// ask about it and one of them refuses it.
+    #[test]
+    fn the_parked_state_is_named_rather_than_compared() {
+        assert!(RecordStatus::PendingApproval.is_parked());
+
+        for status in ALL {
+            if status != RecordStatus::PendingApproval {
+                assert!(!status.is_parked(), "{} read as parked", status.as_db());
+            }
         }
     }
 
