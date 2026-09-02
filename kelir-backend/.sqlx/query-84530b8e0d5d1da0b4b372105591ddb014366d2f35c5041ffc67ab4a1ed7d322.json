@@ -1,0 +1,47 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, document_id, entity_type, entity_id, previous_record_status\n        FROM mdm_change_requests\n        WHERE tenant_id = $1 AND document_id = $2 AND resolved_at IS NULL\n        FOR UPDATE\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "document_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "entity_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "entity_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "previous_record_status",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "84530b8e0d5d1da0b4b372105591ddb014366d2f35c5041ffc67ab4a1ed7d322"
+}

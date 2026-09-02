@@ -29,6 +29,7 @@
 
 pub mod audit_record;
 pub mod facility;
+pub mod governance;
 pub mod party;
 pub mod party_validation;
 pub mod record_status;
@@ -40,6 +41,7 @@ pub mod role_view;
 // file's size, not about the module's interface.
 pub use audit_record::*;
 pub use facility::*;
+pub use governance::*;
 pub use party::*;
 pub use party_validation::*;
 pub use record_status::*;

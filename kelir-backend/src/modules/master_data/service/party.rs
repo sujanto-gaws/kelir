@@ -14,6 +14,7 @@ use super::domain::{
     PartyRelationshipInput, PartyStatusCode, PartySummary, PartyType, UpdatePartyRequest,
     PROFILED_ROLE_TYPES,
 };
+use super::governance;
 use super::repository::{
     self as repo, ClassificationFields, ContactMechFields, IdentificationFields, NewParty,
     PartyGroupFields, PartyRow, PersonFields, RelationshipFields,
@@ -263,6 +264,16 @@ pub async fn update_party(
         .ok_or_else(|| AppError::not_found("Party"))?;
 
     validate_update_party(&request, &before.party_code, before.party_type)?;
+
+    // **A record with a change awaiting approval is not edited directly**
+    // (FR-MDM-010, [#255](https://github.com/sujanto-gaws/kelir/issues/255) AC1,
+    // **D-55**). The record's own status is what refuses it, under the
+    // permission that already governs this write — not a new permission, and
+    // not a query into the document module on every update.
+    //
+    // A governed change that could be overtaken by a direct edit would be a
+    // governance nobody has to use.
+    governance::refuse_if_awaiting_approval(before.record_status)?;
 
     let relationships_from = match &request.relationships_from {
         Some(inputs) => Some(

@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE mdm_change_requests\n        SET outcome = $3, resolved_at = now(), updated_at = now(), updated_by = $4\n        WHERE tenant_id = $1 AND id = $2 AND resolved_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f43d501faf5e3df4111d1620ff4ec6969670592c59ec18cac63b170fcd5fdc3e"
+}

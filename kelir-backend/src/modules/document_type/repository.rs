@@ -501,6 +501,36 @@ pub async fn has_documents<'e, E: PgExecutor<'e>>(
 /// standard §2.5's "resolve what the request points at first": nothing about
 /// this answer needs to be held, because a binding changed a microsecond later
 /// is a binding that applies to the *next* document.
+/// What entity a type governs, if any (FR-MDM-010, [#255] AC3).
+///
+/// **The configuration, read as one column.** `target_entity_type` has been on
+/// `document_types` since `0015_document.sql` — *set for master-data change
+/// document types*, in its own comment — and was read by nothing until #255.
+/// Whether the value means anything is
+/// `master_data::service::governance::governed_entity`'s question, not this
+/// one's: a repository returns what is stored.
+///
+/// [#255]: https://github.com/sujanto-gaws/kelir/issues/255
+pub async fn target_entity_type<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
+    tenant_id: Uuid,
+    document_type_id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    let row = sqlx::query_scalar!(
+        r#"
+        SELECT target_entity_type
+        FROM document_types
+        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+        "#,
+        tenant_id,
+        document_type_id
+    )
+    .fetch_optional(executor)
+    .await?;
+
+    Ok(row.flatten())
+}
+
 pub async fn workflow_binding<'e, E: sqlx::PgExecutor<'e>>(
     executor: E,
     tenant_id: Uuid,

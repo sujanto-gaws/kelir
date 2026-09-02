@@ -215,11 +215,24 @@ async fn an_illegal_transition_is_refused_and_changes_nothing() {
     );
 }
 
+/// **A person still cannot park a record**, and since FR-MDM-010 landed the
+/// reason has changed ([#255](https://github.com/sujanto-gaws/kelir/issues/255),
+/// **D-55**).
+///
+/// It used to be that nothing could approve anything, so `PENDING_APPROVAL` was
+/// unreachable in the state machine and a request for it was an **illegal
+/// transition** — a 422 about the payload. Something can approve things now: a
+/// governed change document parks the record it is about, and `may_move_to`
+/// permits the move because the process makes it.
+///
+/// What refuses this request is therefore no longer the state machine but the
+/// **surface**: parking is a process's move, and a record parked by hand would
+/// be waiting for an approval nobody can give — the state this file's original
+/// comment was protecting against, protected by a different sentence. A **409**,
+/// because what refuses it is the record's condition and who is asking rather
+/// than the shape of the request.
 #[tokio::test]
-async fn a_direct_edit_cannot_put_a_record_into_pending_approval() {
-    // Nothing can approve anything until FR-MDM-010, so a record put here would
-    // await an approver that does not exist — the overstatement this issue set
-    // out to remove, one value over.
+async fn a_person_cannot_park_a_record_by_hand() {
     let app = TestApp::spawn().await;
     let token = app.administrator_token().await;
     let party = given_party(&app, &token, "PARTY-ACME").await;
@@ -233,8 +246,48 @@ async fn a_direct_edit_cannot_put_a_record_into_pending_approval() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .expect("a message")
+            .contains("raising a change document"),
+        "the refusal names the door to use: {body}"
+    );
     assert_eq!(stored_status(&app, "mdm_parties", party).await, "DRAFT");
+}
+
+/// And the other end of the same rule: a parked record is not un-parked by
+/// hand either, because the change document that parked it is still pointing at
+/// it.
+#[tokio::test]
+async fn a_parked_record_is_not_transitioned_out_by_hand() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let party = given_party(&app, &token, "PARTY-PARKED").await;
+
+    // Parked the way a governed change parks it — the surface cannot, which is
+    // the rule above.
+    sqlx::query("UPDATE mdm_parties SET record_status = 'PENDING_APPROVAL' WHERE id = $1")
+        .bind(party)
+        .execute(&app.pool)
+        .await
+        .expect("the record");
+
+    let (status, body) = transition(
+        &app,
+        &token,
+        &format!("{PARTIES}/{party}/transition"),
+        json!({ "recordStatusId": "ACTIVE" }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        stored_status(&app, "mdm_parties", party).await,
+        "PENDING_APPROVAL",
+        "and the change document still has a record to apply to"
+    );
 }
 
 // ---------------------------------------------------------------------------

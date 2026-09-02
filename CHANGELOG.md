@@ -13,6 +13,54 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
 
 ### Added
 
+- **A master-data change can be routed through an approval** (FR-MDM-010,
+  [#255](https://github.com/sujanto-gaws/kelir/issues/255), decision **D-55**,
+  recorded as
+  [ADR-0033](docs/architectures/adr/0033.%20A%20Governed%20Record%20Parks%20at%20Pending%20Approval.md)).
+  A document type that sets `targetEntityType` and binds a workflow makes
+  changes to that entity go through approval; `0038_master_data_governance.sql`
+  adds `mdm_change_requests`, and **no `ALTER` to anything** — the
+  configuration column has been on `document_types` since Sprint 4, waiting.
+
+  **The record parks at `PENDING_APPROVAL` while the change is decided.** That
+  value has been in the schema since `0008` and reachable by nothing;
+  `record_status`'s own documentation reserved it for this item and named the
+  line that would change when the workflow landed. Submitting the change parks
+  the record in the submit's transaction, and **a direct edit is refused while
+  it is parked** — under the permission that already governs that write, with
+  no new permission and no cross-module query.
+
+  **Approving applies the change in the transaction that closes the process**,
+  and moves the record to `ACTIVE`. **Refusing writes nothing and puts the
+  record back where it was** — not to `DRAFT`: an active supplier whose change
+  is rejected is still an active supplier, which is what the change request row
+  remembers. Every attempt, refused ones included, is on the record's own
+  history at `GET /master-data/parties/{id}/change-requests`.
+
+  **Nothing in the workflow engine learns about master data.** The chain is
+  engine → document → master data: the engine projects a status onto a document
+  as it does for every document, and the document module asks master data to
+  settle whatever change it carried. `grep -rn "modules::master_data"
+  kelir-backend/src/modules/workflow/` returns nothing.
+
+  **A governed change carries the record's own scalar fields.** The
+  sub-aggregates — contacts, identifications, relationships, a facility's
+  address — are written by multi-statement service logic this process does not
+  reproduce inside a workflow's closing transaction, and a change naming one is
+  **refused when it is raised**, with the field named, rather than approved and
+  half-applied.
+
+### Changed
+
+- **`POST /master-data/{entity}/{id}/transition` answers 409 for
+  `PENDING_APPROVAL`**, where it answered 422
+  ([#255](https://github.com/sujanto-gaws/kelir/issues/255)). It used to be an
+  illegal transition because nothing could approve anything; it is now a legal
+  move that the **surface** refuses, because parking is a process's move and a
+  record parked by hand would await an approval nobody can give. The same 409
+  refuses transitioning a record *out* of `PENDING_APPROVAL`, which would
+  strand the change document pointing at it.
+
 - **A file can be filed, removed, or replaced by a link to where it really
   lives** (FR-ATT-006, FR-ATT-009, FR-ATT-010,
   [#254](https://github.com/sujanto-gaws/kelir/issues/254), decisions **D-52**

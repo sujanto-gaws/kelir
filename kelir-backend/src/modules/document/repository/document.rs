@@ -65,6 +65,11 @@ pub struct LockedDocument {
     pub form_id: Option<Uuid>,
     pub form_data: Value,
     pub requested_for_department_id: Option<Uuid>,
+    /// What this document is about, when it is about a master-data record
+    /// (FR-DOC-011). Read here because the submit needs it to raise a governed
+    /// change (FR-MDM-010, #255) in the transaction it already holds.
+    pub entity_type: Option<String>,
+    pub entity_id: Option<Uuid>,
 }
 
 /// What the submit has to know **before** it opens its transaction.
@@ -146,7 +151,7 @@ pub async fn lock_document(
     let row = sqlx::query!(
         r#"
         SELECT status, document_type_id, form_id, form_data_json,
-               requested_for_department_id
+               requested_for_department_id, entity_type, entity_id
         FROM documents
         WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
         FOR UPDATE
@@ -163,7 +168,35 @@ pub async fn lock_document(
         form_id: row.form_id,
         form_data: row.form_data_json,
         requested_for_department_id: row.requested_for_department_id,
+        entity_type: row.entity_type,
+        entity_id: row.entity_id,
     }))
+}
+
+/// The payload a document is carrying, read inside a transaction.
+///
+/// **For the settlement of a governed change** (FR-MDM-010, [#255]): the
+/// approval applies what the approver saw, and the approver saw the document's
+/// own form data. Read rather than carried from the submit, because *what was
+/// approved* is a question about the row at the moment the process closed.
+///
+/// [#255]: https://github.com/sujanto-gaws/kelir/issues/255
+pub async fn form_data_of<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<Option<Value>, sqlx::Error> {
+    sqlx::query_scalar!(
+        r#"
+        SELECT form_data_json
+        FROM documents
+        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+        "#,
+        tenant_id,
+        id
+    )
+    .fetch_optional(executor)
+    .await
 }
 
 /// Where a document is, read **without a lock**.

@@ -96,7 +96,7 @@ use super::super::repository::{
 use super::assignment::{self, AssignmentContext};
 use crate::error::{AppError, ValidationDetail};
 use crate::modules::document::domain::DocumentStatus;
-use crate::modules::document::repository as document_repo;
+use crate::modules::document::service::status as document_status_service;
 use crate::modules::notification;
 use crate::modules::rad::evaluator::RuleEvaluator;
 
@@ -736,6 +736,7 @@ async fn enter(
         document_id,
         &state.maps_to_document_status,
         graph,
+        actor,
     )
     .await
 }
@@ -841,6 +842,7 @@ async fn project_document_status(
     document_id: Uuid,
     maps_to: &str,
     graph: &Graph,
+    actor: Option<Uuid>,
 ) -> Result<DocumentStatus, AppError> {
     let status = parse_document_status(maps_to).ok_or_else(|| AppError::Internal {
         source: anyhow::anyhow!(
@@ -849,7 +851,20 @@ async fn project_document_status(
         ),
     })?;
 
-    document_repo::set_status_from_workflow(transaction, tenant_id, document_id, status).await?;
+    // **Through the document module's service, not its repository** — which is
+    // what keeps this engine ignorant of what a document may be *about*
+    // ([#255](https://github.com/sujanto-gaws/kelir/issues/255) AC6). A document
+    // that carries a master-data change settles it there, in this transaction;
+    // nothing here knows that master data exists, and no `match` on entity type
+    // is reachable from this module.
+    document_status_service::project_from_workflow(
+        transaction,
+        tenant_id,
+        document_id,
+        status,
+        actor,
+    )
+    .await?;
 
     Ok(status)
 }

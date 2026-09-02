@@ -9,7 +9,9 @@ use super::domain::{
     RoleViewRow, TransitionRequest, TransitionResult, TransitionTarget, UpdateFacilityRequest,
     UpdatePartyRequest,
 };
+use super::domain::{ChangeAttempt, GovernedEntity};
 use super::service;
+use super::service::governance;
 use crate::error::AppError;
 use crate::extract::{JsonBody, PathParam, QueryParams};
 use crate::middleware::auth::Authenticated;
@@ -24,6 +26,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/parties/{id}",
             get(get_party).put(update_party).delete(delete_party),
+        )
+        .route(
+            "/parties/{id}/change-requests",
+            get(list_party_change_requests),
         )
         .route("/parties/{id}/roles", get(get_party_roles))
         // A lifecycle transition is not a field edit, so it is a verb
@@ -57,6 +63,10 @@ pub fn routes() -> Router<AppState> {
             get(get_facility)
                 .put(update_facility)
                 .delete(delete_facility),
+        )
+        .route(
+            "/facilities/{id}/change-requests",
+            get(list_facility_change_requests),
         )
         .route(
             "/facilities/{id}/transition",
@@ -558,4 +568,55 @@ async fn facility_audit(
             .await?;
 
     Ok(Json(ListEnvelope::new(records, meta)))
+}
+
+/// What has been proposed for this party, newest first (FR-MDM-010; [#255] AC4).
+///
+/// **The record's own history of change attempts**, refused ones included: what
+/// was asked of a record is part of what happened to it. Each row names the
+/// document that carried the change and how it ended; reading the change itself
+/// is `document:read`, on that document.
+#[utoipa::path(
+    get, path = "/api/v1/master-data/parties/{id}/change-requests", tag = "master-data",
+    responses(
+        (status = 200, description = "Every change proposed for this party, newest first", body = [ChangeAttempt]),
+        (status = 403, description = "Missing master-data:party:read")
+    ),
+    security(("bearer" = []))
+)]
+pub async fn list_party_change_requests(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    PathParam(id): PathParam<Uuid>,
+) -> Result<Json<ListEnvelope<ChangeAttempt>>, AppError> {
+    let attempts = governance::list_changes(&state, &caller, GovernedEntity::Party, id).await?;
+    let total = attempts.len() as u64;
+
+    Ok(Json(ListEnvelope::new(
+        attempts,
+        Pagination::default().meta(total),
+    )))
+}
+
+/// The same list for a facility.
+#[utoipa::path(
+    get, path = "/api/v1/master-data/facilities/{id}/change-requests", tag = "master-data",
+    responses(
+        (status = 200, description = "Every change proposed for this facility, newest first", body = [ChangeAttempt]),
+        (status = 403, description = "Missing master-data:facility:read")
+    ),
+    security(("bearer" = []))
+)]
+pub async fn list_facility_change_requests(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    PathParam(id): PathParam<Uuid>,
+) -> Result<Json<ListEnvelope<ChangeAttempt>>, AppError> {
+    let attempts = governance::list_changes(&state, &caller, GovernedEntity::Facility, id).await?;
+    let total = attempts.len() as u64;
+
+    Ok(Json(ListEnvelope::new(
+        attempts,
+        Pagination::default().meta(total),
+    )))
 }

@@ -50,6 +50,7 @@
 
 pub mod audit_record;
 pub mod facility;
+pub mod governance;
 pub mod party;
 pub mod party_children;
 pub mod record_status;
@@ -61,6 +62,7 @@ pub mod role_view;
 // about its interface.
 pub use audit_record::*;
 pub use facility::*;
+pub use governance::*;
 pub use party::*;
 pub use party_children::*;
 pub use record_status::*;

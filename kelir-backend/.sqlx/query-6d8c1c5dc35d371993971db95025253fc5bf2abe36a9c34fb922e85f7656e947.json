@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO mdm_change_requests\n            (id, tenant_id, document_id, entity_type, entity_id,\n             previous_record_status, created_by, updated_by)\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $7)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Uuid",
+        "Varchar",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6d8c1c5dc35d371993971db95025253fc5bf2abe36a9c34fb922e85f7656e947"
+}

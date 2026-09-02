@@ -12,6 +12,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::error::{AppError, ValidationDetail};
+use crate::modules::master_data::domain::GovernedEntity;
 use crate::utils::serde::present_or_absent;
 
 /// Longest `typeCode` §6.2 holds — `type_code VARCHAR(64)`.
@@ -286,11 +287,39 @@ pub fn validate_create(request: &CreateDocumentTypeRequest) -> Result<(), AppErr
             false,
             &mut details,
         );
+        governable(entity, &mut details);
     }
 
     check_workflows(&request.workflows, &mut details);
 
     finish(details)
+}
+
+/// Refuses a `targetEntityType` this build cannot route a change to
+/// (FR-MDM-010, [#255] AC3).
+///
+/// **Refused at save rather than discovered at submit**, which is
+/// [ADR-0028](../../../../docs/architectures/adr/0028.%20A%20Definition%20Is%20Refused%20at%20Save%20Rather%20Than%20at%20Render.md)'s
+/// rule about definitions applied to configuration: a type is written once and
+/// used many times, and a value that governs nothing would make every document
+/// of that type an ordinary document while its administrator believed otherwise.
+///
+/// The column has no `CHECK` and has held free text since `0015`, so the read
+/// side stays lenient — `GovernedEntity::from_db` treats a value it cannot place
+/// as *governs nothing*. This stops new ones arriving; it does not rewrite what
+/// is already there.
+fn governable(entity: &str, details: &mut Vec<ValidationDetail>) {
+    if GovernedEntity::from_db(entity).is_none() {
+        details.push(ValidationDetail::new(
+            "targetEntityType",
+            "enum",
+            "ENTITY_NOT_GOVERNABLE",
+            format!(
+                "`{entity}` is not a record type changes can be routed through approval for; \
+                 this build governs PARTY and FACILITY"
+            ),
+        ));
+    }
 }
 
 pub fn validate_update(request: &UpdateDocumentTypeRequest) -> Result<(), AppError> {
@@ -312,6 +341,7 @@ pub fn validate_update(request: &UpdateDocumentTypeRequest) -> Result<(), AppErr
             false,
             &mut details,
         );
+        governable(entity, &mut details);
     }
 
     if let Some(workflows) = &request.workflows {
