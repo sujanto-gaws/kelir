@@ -15,12 +15,26 @@
 //!
 //! # Three decisions this file records
 //!
-//! **`PENDING_APPROVAL` cannot be entered by a direct edit.** It is the
-//! workflow's state (FR-MDM-010, Phase 5+) and nothing today can approve
-//! anything, so a record put there would sit awaiting an approver that does not
-//! exist — the same overstatement this issue exists to remove, reintroduced one
-//! value over. `DRAFT -> ACTIVE` is the path until the workflow lands, and
-//! [`RecordStatus::may_move_to`] is where that changes when it does.
+//! **`PENDING_APPROVAL` cannot be entered by a direct edit**, and since
+//! [#255](https://github.com/sujanto-gaws/kelir/issues/255) it can be entered.
+//! Both halves are still true, and the difference between them is the whole of
+//! FR-MDM-010.
+//!
+//! This paragraph used to say the value was unreachable because *nothing today
+//! can approve anything*, and named [`RecordStatus::may_move_to`] as where that
+//! would change when the workflow landed. It has. A record parks here when a
+//! **governed change document** is submitted against it, and leaves when that
+//! document is approved or refused — both writes made by
+//! `master_data::service::governance`, inside the transaction that moved the
+//! document.
+//!
+//! **The transition surface still refuses it, by name.** `POST /transition` is a
+//! person saying where a record should be; parking is a **process** saying that
+//! a record is not theirs to move. A caller who could park a record by hand
+//! would create exactly what this file warned about — a record awaiting an
+//! approver that does not exist — and a caller who could unpark one would strand
+//! the change document still pointing at it. `service::record_status::transition`
+//! refuses `PENDING_APPROVAL` at either end and says which door to use.
 //!
 //! **`ARCHIVED` is terminal.** `ARCHIVED -> DRAFT` is the case worth naming:
 //! archiving is what a tenant does to a record it has finished with, and a
@@ -89,15 +103,26 @@ impl RecordStatus {
     /// answering 200 would confirm the belief.
     pub fn may_move_to(self) -> &'static [Self] {
         match self {
-            // No PENDING_APPROVAL: nothing can approve it yet.
-            Self::Draft => &[Self::Active, Self::Inactive],
-            // Only reachable once a workflow puts a record here (FR-MDM-010).
+            // `PENDING_APPROVAL` is here since #255: a governed change parks a
+            // record from either of the two states it can be raised from. It is
+            // the *state machine* that permits the move; the transition surface
+            // refuses it, because parking is a process's move rather than a
+            // person's — see this module's header.
+            Self::Draft => &[Self::PendingApproval, Self::Active, Self::Inactive],
             Self::PendingApproval => &[Self::Active, Self::Draft],
-            Self::Active => &[Self::Suspended, Self::Inactive],
+            Self::Active => &[Self::PendingApproval, Self::Suspended, Self::Inactive],
             Self::Suspended => &[Self::Active, Self::Inactive],
             Self::Inactive => &[Self::Active, Self::Archived],
             Self::Archived => &[],
         }
+    }
+
+    /// Whether this is the state a governed change parks a record in.
+    ///
+    /// One predicate rather than a `==` in three places, because *the parked
+    /// state* is a concept two modules now share and one of them refuses it.
+    pub fn is_parked(self) -> bool {
+        matches!(self, Self::PendingApproval)
     }
 
     /// Refuses a move this record cannot make, naming both ends of it.

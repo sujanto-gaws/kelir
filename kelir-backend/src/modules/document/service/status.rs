@@ -271,3 +271,71 @@ pub struct StatusHistoryEntry {
     pub reason: Option<String>,
     pub changed_at: chrono::DateTime<chrono::Utc>,
 }
+
+/// Writes the status a workflow state maps to, and settles whatever governed
+/// change the document was carrying (FR-MDM-010; [#255] AC5, AC6).
+///
+/// # This function is what keeps the engine ignorant
+///
+/// The workflow engine projects `mapsToDocumentStatus` onto a document and
+/// knows nothing else about it. It calls **this**, in its own transaction, and
+/// this asks `master_data` to settle a change — so the chain is
+/// *engine → document → master data*, and the `match` on entity type lives at
+/// the far end of it where the tables are.
+///
+/// A `match` on entity type inside the engine is the failure
+/// [#178](https://github.com/sujanto-gaws/kelir/issues/178) AC4 named, and it is
+/// avoided here by direction rather than by anybody remembering.
+///
+/// # Only a terminal status settles anything
+///
+/// `APPROVED` and `COMPLETED` apply the change; `REJECTED` and `CANCELLED` put
+/// the record back and write nothing to it. Everything else is a change still
+/// being decided — a document moving to `PENDING` has not been approved, and a
+/// record parked at `PENDING_APPROVAL` is exactly where it should be while it
+/// waits.
+///
+/// **Most documents carry no change**, and for them this is one status write and
+/// one indexed read that finds nothing.
+pub async fn project_from_workflow(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    document_id: Uuid,
+    status: DocumentStatus,
+    actor: Option<Uuid>,
+) -> Result<u64, AppError> {
+    let affected = super::super::repository::set_status_from_workflow(
+        transaction,
+        tenant_id,
+        document_id,
+        status,
+    )
+    .await?;
+
+    let settlement = match status {
+        DocumentStatus::Approved | DocumentStatus::Completed => Some(true),
+        DocumentStatus::Rejected | DocumentStatus::Cancelled => Some(false),
+        _ => None,
+    };
+
+    if let Some(approved) = settlement {
+        // The payload the approver saw, read here rather than carried: it is
+        // what was approved, and `mark_submitted` is the last write to it.
+        let form_data =
+            super::super::repository::form_data_of(&mut **transaction, tenant_id, document_id)
+                .await?
+                .unwrap_or_else(|| serde_json::json!({}));
+
+        crate::modules::master_data::service::governance::settle(
+            transaction,
+            tenant_id,
+            document_id,
+            approved,
+            &form_data,
+            actor,
+        )
+        .await?;
+    }
+
+    Ok(affected)
+}

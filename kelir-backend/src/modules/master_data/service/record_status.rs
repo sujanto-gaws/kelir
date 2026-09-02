@@ -55,6 +55,23 @@ pub async fn transition(
         .await?
         .ok_or_else(|| AppError::not_found(target.missing()))?;
 
+    // **The parked state belongs to the process, not to a caller** (FR-MDM-010,
+    // [#255](https://github.com/sujanto-gaws/kelir/issues/255), **D-55**).
+    //
+    // `may_move_to` permits `DRAFT -> PENDING_APPROVAL` because a governed
+    // change makes that move; this surface refuses it because a person asking
+    // for it would park a record with no document behind it — the record
+    // awaiting an approver that does not exist, which is what this module's
+    // documentation warned about before the workflow existed. And a person
+    // asking to move a record *out* of it would strand the change document that
+    // put it there.
+    //
+    // The state machine stays in one place and this is a rule about a surface,
+    // which is the split that keeps `may_move_to` the only copy of the table.
+    if current.is_parked() || request.record_status_id.is_parked() {
+        return Err(parked_belongs_to_the_process(current));
+    }
+
     current.check_move_to(request.record_status_id)?;
 
     let moved = repo::move_record_status(
@@ -114,4 +131,23 @@ pub async fn record_status_of(
     id: Uuid,
 ) -> Result<Option<RecordStatus>, AppError> {
     Ok(repo::find_record_status(&state.pool, tenant_id, target, id).await?)
+}
+
+/// The refusal for a transition into or out of the parked state.
+///
+/// A **409** rather than a 422: the transition asked for is legal in the state
+/// machine, and what refuses it is where the record is and who is asking — a
+/// property of the resource's condition rather than of the request.
+fn parked_belongs_to_the_process(current: RecordStatus) -> AppError {
+    if current.is_parked() {
+        return AppError::conflict(
+            "this record has a change awaiting approval; it leaves PENDING_APPROVAL when that \
+             change is approved or refused, not by a transition",
+        );
+    }
+
+    AppError::conflict(
+        "PENDING_APPROVAL is entered by raising a change document against this record, not by a \
+         transition: a record parked by hand would be waiting for an approval nobody can give",
+    )
 }

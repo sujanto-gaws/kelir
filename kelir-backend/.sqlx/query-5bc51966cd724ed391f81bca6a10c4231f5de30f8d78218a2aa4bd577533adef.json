@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                UPDATE mdm_facilities\n                SET record_status = $4, updated_at = now(), updated_by = $5\n                WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL AND record_status = $3\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Varchar",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5bc51966cd724ed391f81bca6a10c4231f5de30f8d78218a2aa4bd577533adef"
+}

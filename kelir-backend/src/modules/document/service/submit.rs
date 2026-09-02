@@ -97,7 +97,7 @@
 //! [start]: crate::modules::workflow::service::engine::start
 
 use chrono::Utc;
-use serde_json::json;
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use super::super::domain::{Document, DocumentStatus};
@@ -111,6 +111,7 @@ use crate::modules::document_type::numbering::{AllocationContext, GapPolicy};
 use crate::modules::document_type::{
     numbering_repository, numbering_service, repository as document_type_repository,
 };
+use crate::modules::master_data::service::governance;
 use crate::modules::rad::service::evaluation::Strictness;
 use crate::modules::workflow::domain::{Graph, TransitionAction};
 use crate::modules::workflow::repository::{
@@ -286,6 +287,19 @@ pub async fn submit_document(
             "this document was submitted while this submission was being applied",
         ));
     }
+
+    // **A governed master-data change parks its record here** (FR-MDM-010,
+    // [#255](https://github.com/sujanto-gaws/kelir/issues/255), **D-55**), in
+    // this transaction: the document becomes `PENDING` and the record becomes
+    // `PENDING_APPROVAL` together, or neither does.
+    //
+    // **Whether this document is one is configuration** — the type's
+    // `target_entity_type`, which `0015_document.sql` created for this and
+    // nothing read until now — and the answer is `None` for every ordinary
+    // document, which is all of them today. `master_data` is where the entity
+    // is placed and where the record's table is known; nothing here learns
+    // either, and the workflow engine below learns neither (#255 AC6).
+    raise_governed_change(&mut transaction, tenant_id, id, &locked, &form_data, actor).await?;
 
     // Step 6, in the same transaction. A document cannot end in a state its own
     // history does not explain.
@@ -664,4 +678,61 @@ async fn start_workflow(
     repo::link_process_instance(transaction, tenant_id, document_id, started.instance_id).await?;
 
     Ok(Some(started))
+}
+
+/// Parks the master-data record a governed change is about, if this document is
+/// one ([#255](https://github.com/sujanto-gaws/kelir/issues/255) AC1).
+///
+/// **Three things have to be true**, and a document that fails any of them is an
+/// ordinary document: its type names an entity this build governs, the document
+/// links a record, and the two agree about which kind of record it is.
+///
+/// **A type that governs and a document that links nothing is a refusal**, not a
+/// silent pass. A change document with no record to change would be approved by
+/// somebody and apply to nothing — which is the shape of the failure this whole
+/// item exists to prevent, arriving through the configuration instead of through
+/// the code.
+async fn raise_governed_change(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    document_id: Uuid,
+    locked: &repo::LockedDocument,
+    form_data: &Value,
+    actor: Option<Uuid>,
+) -> Result<(), AppError> {
+    let configured = document_type_repository::target_entity_type(
+        &mut **transaction,
+        tenant_id,
+        locked.document_type_id,
+    )
+    .await?;
+
+    let Some(entity) = governance::governed_entity(configured.as_deref()) else {
+        return Ok(());
+    };
+
+    let (Some(linked_type), Some(entity_id)) = (locked.entity_type.as_deref(), locked.entity_id)
+    else {
+        return Err(AppError::conflict(
+            "this document type routes master-data changes through approval, so a document of \
+             it has to name the record it changes",
+        ));
+    };
+
+    if governance::governed_entity(Some(linked_type)) != Some(entity) {
+        return Err(AppError::conflict(
+            "this document names a different kind of record from the one its type governs",
+        ));
+    }
+
+    governance::raise(
+        transaction,
+        tenant_id,
+        entity,
+        entity_id,
+        document_id,
+        form_data,
+        actor,
+    )
+    .await
 }

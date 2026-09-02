@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT document_id\n        FROM mdm_change_requests\n        WHERE tenant_id = $1 AND entity_type = $2 AND entity_id = $3 AND resolved_at IS NULL\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "document_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4b73c463b2df2d11aecac23be501b5b9b60105de78f059164a16766d7ac843f5"
+}

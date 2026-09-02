@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                SELECT record_status\n                FROM mdm_parties\n                WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL\n                FOR UPDATE\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "record_status",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "edd0f89b69387ca7511c1e7103f7e993c1f55cc864b1b75f6d59e8fe9e498c1a"
+}

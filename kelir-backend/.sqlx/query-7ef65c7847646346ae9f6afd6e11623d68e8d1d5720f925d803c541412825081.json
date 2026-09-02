@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT status, document_type_id, form_id, form_data_json,\n               requested_for_department_id\n        FROM documents\n        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL\n        FOR UPDATE\n        ",
+  "query": "\n        SELECT status, document_type_id, form_id, form_data_json,\n               requested_for_department_id, entity_type, entity_id\n        FROM documents\n        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL\n        FOR UPDATE\n        ",
   "describe": {
     "columns": [
       {
@@ -27,6 +27,16 @@
         "ordinal": 4,
         "name": "requested_for_department_id",
         "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "entity_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "entity_id",
+        "type_info": "Uuid"
       }
     ],
     "parameters": {
@@ -40,8 +50,10 @@
       false,
       true,
       false,
+      true,
+      true,
       true
     ]
   },
-  "hash": "48af716965761e3b2d2c1453dc1137241f6adcf40c00f3183a5bd3da75e9b97e"
+  "hash": "7ef65c7847646346ae9f6afd6e11623d68e8d1d5720f925d803c541412825081"
 }

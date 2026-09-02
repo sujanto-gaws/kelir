@@ -14,6 +14,7 @@ use super::domain::{
     FacilitySummary, FacilityType, MasterDataOption, PostalAddress, UpdateFacilityRequest,
     MAX_FACILITY_DEPTH,
 };
+use super::governance;
 use super::repository::{self as repo, FacilityFields, NewFacility};
 use super::FACILITY_READ;
 use crate::error::{AppError, ValidationDetail};
@@ -204,6 +205,9 @@ pub async fn update_facility(
         .ok_or_else(|| AppError::not_found("Facility"))?;
 
     validate_update_facility(&request, &before.facility_id)?;
+
+    // The same refusal `update_party` makes, for the same reason (#255 AC1).
+    governance::refuse_if_awaiting_approval(before.record_status_id)?;
 
     // Both references resolve on the pool, before the transaction opens, so
     // this call holds one connection at a time (coding standard §2.5, #118).

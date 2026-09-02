@@ -14,6 +14,7 @@ pub(super) use super::{domain, repository};
 
 pub mod audit_record;
 pub mod facility;
+pub mod governance;
 pub mod party;
 pub mod record_status;
 pub mod role;
@@ -21,6 +22,7 @@ pub mod role_view;
 
 pub use audit_record::*;
 pub use facility::*;
+pub use governance::*;
 pub use party::*;
 pub use record_status::*;
 pub use role::*;
