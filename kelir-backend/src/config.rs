@@ -13,9 +13,12 @@ use std::fmt;
     reason = "fields are consumed by the modules that own them, from Phase 2 onward"
 )]
 ///
-/// Secrets never carry a default (coding standard §2.8): a missing
-/// `KELIR_JWT_SECRET` fails startup rather than silently running on a
-/// placeholder. Everything else falls back to a development-friendly value.
+/// Secrets never carry a default that works where it matters (coding standard
+/// §2.8): a missing `KELIR_JWT_SECRET` fails startup rather than silently
+/// running on a placeholder, and the object-store credentials fall back only in
+/// `development` and `test` — staging and production refuse to start on them
+/// ([#317](https://github.com/sujanto-gaws/kelir/issues/317)). Everything else
+/// falls back to a development-friendly value everywhere.
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub app_name: String,
@@ -32,6 +35,15 @@ pub struct AppConfig {
     /// the application holds credentials that can put and get objects in one,
     /// which is the privilege it should have rather than the one that is
     /// convenient.
+    ///
+    /// **The two credentials have defaults on a developer's machine and none
+    /// anywhere else** ([#317]). Staging and production refuse to start with
+    /// them unset, because MinIO's own well-known credentials reaching a
+    /// deployment nobody typed them into is the failure this pair had until
+    /// Sprint 13: the guard existed, in a compose file, and a deployment that
+    /// did not use that file got no guard at all.
+    ///
+    /// [#317]: https://github.com/sujanto-gaws/kelir/issues/317
     pub storage_endpoint: String,
     pub storage_bucket: String,
     pub storage_access_key: String,
@@ -328,8 +340,26 @@ impl fmt::Display for AppEnv {
 
 #[derive(Debug)]
 pub enum ConfigError {
-    Missing { key: &'static str },
-    Invalid { key: &'static str, reason: String },
+    Missing {
+        key: &'static str,
+    },
+    Invalid {
+        key: &'static str,
+        reason: String,
+    },
+    /// A credential with a development default was left at it, somewhere that
+    /// default is not a choice anybody made ([#317]).
+    ///
+    /// Distinct from [`Self::Missing`] because the variable is not required —
+    /// it has a default, and that default is correct on a developer's machine.
+    /// What is wrong is *where* it was used, so the message says the
+    /// environment as well as the key.
+    ///
+    /// [#317]: https://github.com/sujanto-gaws/kelir/issues/317
+    Defaulted {
+        key: &'static str,
+        app_env: AppEnv,
+    },
 }
 
 impl fmt::Display for ConfigError {
@@ -337,6 +367,11 @@ impl fmt::Display for ConfigError {
         match self {
             Self::Missing { key } => write!(f, "{key} is required but was not set"),
             Self::Invalid { key, reason } => write!(f, "{key} is invalid: {reason}"),
+            Self::Defaulted { key, app_env } => write!(
+                f,
+                "{key} was left at its development default, which {app_env} does not accept — \
+                 set it to the credential this deployment actually uses"
+            ),
         }
     }
 }
@@ -370,6 +405,32 @@ impl AppConfig {
         };
 
         let app_env = AppEnv::parse(&optional("KELIR_APP_ENV", "development"))?;
+
+        // **A default is a convenience, not a decision** ([#317]).
+        //
+        // `optional` cannot tell a value somebody set from a value nobody set:
+        // by the time it returns, `minioadmin` from the environment and
+        // `minioadmin` from the fallback are the same string. That is fine for
+        // a bind address and wrong for a credential, because the whole question
+        // about a credential is whether anybody chose it.
+        //
+        // So this is `optional` where the default is harmless and `required`
+        // where it is not. **Not a list of known-bad strings**: a deployment
+        // that sets `minioadmin` deliberately has made a choice this has no
+        // business overruling, and a list would have to grow a row for every
+        // credential's placeholder and would still miss the next one.
+        //
+        // [#317]: https://github.com/sujanto-gaws/kelir/issues/317
+        let credential = |key: &'static str, fallback: &str| -> Result<String, ConfigError> {
+            match get(key).ok().filter(|value| !value.trim().is_empty()) {
+                Some(value) => Ok(value),
+                None if app_env.requires_real_secrets() => {
+                    Err(ConfigError::Defaulted { key, app_env })
+                }
+                None => Ok(fallback.to_owned()),
+            }
+        };
+
         let jwt_secret = required("KELIR_JWT_SECRET")?;
 
         // `.env.example` and the compose stack ship a placeholder secret so
@@ -394,8 +455,8 @@ impl AppConfig {
             storage_driver: optional("KELIR_STORAGE_DRIVER", "local"),
             storage_endpoint: optional("KELIR_STORAGE_ENDPOINT", "http://localhost:9000"),
             storage_bucket: optional("KELIR_STORAGE_BUCKET", "kelir"),
-            storage_access_key: optional("KELIR_STORAGE_ACCESS_KEY", "minioadmin"),
-            storage_secret_key: optional("KELIR_STORAGE_SECRET_KEY", "minioadmin"),
+            storage_access_key: credential("KELIR_STORAGE_ACCESS_KEY", "minioadmin")?,
+            storage_secret_key: credential("KELIR_STORAGE_SECRET_KEY", "minioadmin")?,
             storage_region: optional("KELIR_STORAGE_REGION", "us-east-1"),
             storage_max_upload_bytes: {
                 let raw = optional("KELIR_STORAGE_MAX_UPLOAD_BYTES", "26214400");
@@ -626,6 +687,8 @@ mod tests {
             ("KELIR_APP_ENV", "staging"),
             ("KELIR_BOOTSTRAP_ADMIN_USERNAME", "admin"),
             ("KELIR_BOOTSTRAP_ADMIN_PASSWORD", "change-me"),
+            ("KELIR_STORAGE_ACCESS_KEY", "a-deployment-key"),
+            ("KELIR_STORAGE_SECRET_KEY", "a-deployment-secret"),
         ]))
         .expect_err("placeholder refused");
 
@@ -653,6 +716,109 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // The object-store credentials (#317)
+    //
+    // Seen to fail (coding standard §2.9), three mutations run 2026-09-03:
+    //
+    // | Mutation | Reddened |
+    // |---|---|
+    // | The guard never fires — every environment falls back | *refuses a storage access key nobody set in staging*; *refuses a storage secret key nobody set in production* |
+    // | The guard fires everywhere, a developer's machine included | sixteen, *the storage defaults still apply where they are meant to* among them — a guard that refuses too much is the failure that gets it reverted |
+    // | Only the secret key guarded, the access key left as it was | *refuses a storage access key nobody set in staging* |
+    // -----------------------------------------------------------------------
+
+    /// **An object-store credential nobody set is not a credential** (#317
+    /// AC1). Staging and production refuse to start, naming the variable, the
+    /// way a missing `KELIR_JWT_SECRET` already did.
+    ///
+    /// The access key is checked first because it is read first; the test after
+    /// this one supplies it so the secret key is what is left defaulted.
+    #[test]
+    fn refuses_a_storage_access_key_nobody_set_in_staging() {
+        let error = AppConfig::from_source(source(&[
+            ("KELIR_JWT_SECRET", "a-real-secret-value"),
+            ("KELIR_APP_ENV", "staging"),
+        ]))
+        .expect_err("staging must not run on MinIO's own credentials");
+
+        assert!(
+            matches!(
+                error,
+                ConfigError::Defaulted {
+                    key: "KELIR_STORAGE_ACCESS_KEY",
+                    app_env: AppEnv::Staging,
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    /// The other half, in production, with the access key supplied (#317 AC2).
+    ///
+    /// **An access key somebody set beside a secret key nobody set is the same
+    /// misconfiguration half-done**, and is the shape a deployment reaches by
+    /// copying one line out of an example file.
+    #[test]
+    fn refuses_a_storage_secret_key_nobody_set_in_production() {
+        let error = AppConfig::from_source(source(&[
+            ("KELIR_JWT_SECRET", "a-real-secret-value"),
+            ("KELIR_APP_ENV", "production"),
+            ("KELIR_STORAGE_ACCESS_KEY", "kelir-production"),
+        ]))
+        .expect_err("production must not run on a defaulted secret key");
+
+        assert!(
+            matches!(
+                error,
+                ConfigError::Defaulted {
+                    key: "KELIR_STORAGE_SECRET_KEY",
+                    app_env: AppEnv::Production,
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    /// **A deployment that sets `minioadmin` has made a choice** (#317 AC4).
+    ///
+    /// The condition is *nobody set this*, not *this value is on a list of bad
+    /// ones*. A list would have to grow a row for every credential's
+    /// placeholder, would still miss the next one, and would overrule an
+    /// operator who really is running MinIO with its defaults on a closed
+    /// network — which is their call, not this loader's.
+    #[test]
+    fn a_credential_somebody_set_is_accepted_however_ordinary_it_looks() {
+        let config = AppConfig::from_source(source(&[
+            ("KELIR_JWT_SECRET", "a-real-secret-value"),
+            ("KELIR_APP_ENV", "production"),
+            ("KELIR_STORAGE_ACCESS_KEY", "minioadmin"),
+            ("KELIR_STORAGE_SECRET_KEY", "minioadmin"),
+        ]))
+        .expect("a value somebody set is a value somebody chose");
+
+        assert_eq!(config.storage_secret_key, "minioadmin");
+    }
+
+    /// **Nothing changes on a developer's machine** (#317 AC3).
+    ///
+    /// Local development, the `deploy/docker` stack and CI all rely on the
+    /// defaults working. A guard that made `cargo test` need credentials would
+    /// have broken more than it fixed.
+    #[test]
+    fn the_storage_defaults_still_apply_where_they_are_meant_to() {
+        for env in ["development", "test"] {
+            let config = AppConfig::from_source(source(&[
+                ("KELIR_JWT_SECRET", "change-me"),
+                ("KELIR_APP_ENV", env),
+            ]))
+            .unwrap_or_else(|error| panic!("{env} still loads without credentials: {error}"));
+
+            assert_eq!(config.storage_access_key, "minioadmin");
+            assert_eq!(config.storage_secret_key, "minioadmin");
+        }
     }
 
     #[test]
@@ -690,6 +856,8 @@ mod tests {
         let config = AppConfig::from_source(source(&[
             ("KELIR_JWT_SECRET", "a-real-deployment-secret"),
             ("KELIR_APP_ENV", "production"),
+            ("KELIR_STORAGE_ACCESS_KEY", "a-deployment-key"),
+            ("KELIR_STORAGE_SECRET_KEY", "a-deployment-secret"),
         ]))
         .expect("a non-placeholder secret is accepted");
 
@@ -845,9 +1013,14 @@ mod tests {
             ("staging", AppEnv::Staging),
             ("production", AppEnv::Production),
         ] {
+            // **Staging and production need credentials to load at all**
+            // (#317), so this loop supplies them rather than testing four
+            // environments and asserting about two.
             let config = AppConfig::from_source(source(&[
                 ("KELIR_JWT_SECRET", "s3cret"),
                 ("KELIR_APP_ENV", raw),
+                ("KELIR_STORAGE_ACCESS_KEY", "a-deployment-key"),
+                ("KELIR_STORAGE_SECRET_KEY", "a-deployment-secret"),
             ]))
             .expect("documented environment parses");
 

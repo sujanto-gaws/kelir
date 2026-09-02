@@ -536,6 +536,41 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
 
 ### Security
 
+- **The object-store credentials are held to the rule the other two secrets
+  were** (`KELIR_STORAGE_ACCESS_KEY`, `KELIR_STORAGE_SECRET_KEY`;
+  [#317](https://github.com/sujanto-gaws/kelir/issues/317)). Both defaulted to
+  `minioadmin` — MinIO's own — and the placeholder guard covered
+  `KELIR_JWT_SECRET` and `KELIR_BOOTSTRAP_ADMIN_PASSWORD` and nothing else, so
+  a binary started with `KELIR_APP_ENV=production` and neither key set ran on
+  well-known development credentials. **Staging and production now refuse to
+  start**, naming the variable and the environment; `development` and `test`
+  fall back as they did, because local development, `deploy/docker` and CI all
+  rely on that.
+
+  **The guard existed — in a compose file.** `docker-compose.staging.yml` will
+  not start without `KELIR_MINIO_PASSWORD`, so the shipped staging path was
+  safe and a bare binary, another orchestrator, or the development compose
+  adapted for a real host was not. That is
+  [#294](https://github.com/sujanto-gaws/kelir/issues/294)'s lesson one sprint on:
+  a thing's safety should not depend on its caller having chosen correctly.
+
+  **The condition is that nobody set the value, not that the value looks
+  bad.** Adding `minioadmin` to the list of known placeholders was the obvious
+  fix and is the rejected one: it needs a row per credential, still misses the
+  next one, and overrules an operator running MinIO with its own defaults on a
+  closed network. A deployment that sets `minioadmin` deliberately has made a
+  choice; one that never set it has not. Coding standard §2.8 now states that
+  rule so the next credential inherits it — **D-58**.
+
+  `deploy/env/.env.example` no longer hands the two values over, because a
+  file that is copied and edited would otherwise turn *nobody set this* into
+  *somebody set this* with nobody deciding.
+
+  Also corrected: `KELIR_STORAGE_DRIVER` is read by nothing at all. #244 built
+  one backend and never branched on it, and the row
+  [#316](https://github.com/sujanto-gaws/kelir/issues/316) wrote for it a day earlier
+  said it was read.
+
 - **A document's timeline no longer names the files on it**
   (FR-ACT-001, FR-ATT-002, [#292](https://github.com/sujanto-gaws/kelir/issues/292),
   decision **D-45**). Reading a timeline takes `activity:read` and the
@@ -683,7 +718,6 @@ document. **Rows already in `activity_events` keep what they were written with**
 the redaction happens at the read, because the table is append-only and there is
 no honest migration that edits history. Nothing in this repository consumed
 `details`; FR-ACT-005's screen is Sprint 13 and is written against the links.
-
 ## [0.5.0] — 2026-08-30
 
 Phase 5 opens: **a submitted document enters an approval it cannot leave by
