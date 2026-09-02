@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT count(*)\n        FROM comments c\n        WHERE c.tenant_id = $1 AND c.document_id = $2\n          AND (\n            c.deleted_at IS NULL\n            OR EXISTS (\n              SELECT 1 FROM comments r\n              WHERE r.parent_comment_id = c.id AND r.deleted_at IS NULL\n            )\n          )\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "2bad1ae82dcf66a981938e60e2e5b0093e00b2dd78dbfc6a5d3535e5e8001b2d"
+}

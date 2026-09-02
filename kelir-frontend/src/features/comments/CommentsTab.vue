@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 
-import { addComment, listComments } from '@/api/comments'
+import { addComment, deleteComment, editComment, listComments } from '@/api/comments'
 import { ApiError } from '@/api/error'
 import { Alert } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
@@ -12,7 +12,8 @@ const props = defineProps<{ documentId: string }>()
 const auth = useAuthStore()
 
 /**
- * The Comments tab of the document workspace (FR-CMT-001; [#296]).
+ * The Comments tab of the document workspace (FR-CMT-001 to FR-CMT-004; [#296],
+ * [#253]).
  *
  * **This is the screen SRS §9 criterion 11 has been claiming since
  * 2026-08-11.** The API shipped in Sprint 12; *comments can be added* was true
@@ -35,13 +36,37 @@ const auth = useAuthStore()
  * this project has drawn that line four times in prose and this is the first
  * time somebody can see it.
  *
- * # What is not here yet
+ * **The tail made that line visible rather than blurring it** (#253): a comment
+ * here can now be replied to, edited and deleted, and every one of those is
+ * something a decision's reason may never be. The distinction note stays under
+ * the composer for exactly that reason.
  *
- * **No threading, editing, deleting or resolving** — FR-CMT-002/003/004 are
- * [#253](https://github.com/sujanto-gaws/kelir/issues/253), and `parent_comment_id`
- * and `status` exist unwritten for them. A reply control that posted a
- * top-level comment would be worse than no reply control.
+ * # Three shapes this screen renders that the first one did not
  *
+ * **A reply reads under what it answers** (**D-50**, one level). The server
+ * returns the conversation thread-major — a root, then its replies, then the
+ * next root — so this groups rather than sorts, and a reply whose root is on
+ * another page is drawn at the top level rather than dropped.
+ *
+ * **A tombstone.** A deleted comment that still has replies comes back with
+ * `body: null` (**D-51**), and is drawn as *this comment was deleted* with its
+ * author and time and no actions. Rendering it as an empty bubble would be a
+ * comment of nothing, which the API refuses to store; dropping it would orphan
+ * the answers under it.
+ *
+ * **An edit says it is one.** `editedAt` is stamped by the server when the body
+ * changes and by nothing else, and it is shown next to the time. A comment whose
+ * text changed with nothing saying so is a conversation somebody can rewrite
+ * after the fact.
+ *
+ * # Deleting asks first, and asks in the page
+ *
+ * The confirmation is a second button in the row, not `window.confirm`: a
+ * blocking browser dialog is untestable here, unstyled, and cannot say what is
+ * about to happen — *the replies stay* is the part somebody deleting a root
+ * needs to know, and a modal that only says "OK?" cannot tell them.
+ *
+ * [#253]: https://github.com/sujanto-gaws/kelir/issues/253
  * [#296]: https://github.com/sujanto-gaws/kelir/issues/296
  */
 
@@ -52,10 +77,79 @@ const posting = ref(false)
 const failure = ref<string | null>(null)
 const postFailure = ref<string | null>(null)
 
+/** The root being replied to, and the reply being written for it. */
+const replyingTo = ref<string | null>(null)
+const replyDraft = ref('')
+const replyFailure = ref<string | null>(null)
+
+/** The comment being edited, and the text it will become. */
+const editing = ref<string | null>(null)
+const editDraft = ref('')
+const editFailure = ref<string | null>(null)
+
+/** The comment whose delete has been asked for and not yet confirmed. */
+const confirming = ref<string | null>(null)
+const deleteFailure = ref<string | null>(null)
+
+/** True while any of the three writes is in flight, so nothing double-fires. */
+const working = ref(false)
+
 const canRead = computed(() => auth.can('comment:read'))
 const canWrite = computed(() => auth.can('comment:create'))
+const canEdit = computed(() => auth.can('comment:update'))
+const canDelete = computed(() => auth.can('comment:delete'))
 const tooLong = computed(() => draft.value.trim().length > MAX_COMMENT_BODY)
 const empty = computed(() => draft.value.trim().length === 0)
+const replyTooLong = computed(() => replyDraft.value.trim().length > MAX_COMMENT_BODY)
+const replyEmpty = computed(() => replyDraft.value.trim().length === 0)
+const editTooLong = computed(() => editDraft.value.trim().length > MAX_COMMENT_BODY)
+const editEmpty = computed(() => editDraft.value.trim().length === 0)
+
+/**
+ * The conversation as a list of threads.
+ *
+ * **Grouped, not sorted.** The order is the server's — a root, then what answers
+ * it — and re-sorting here would be a second opinion about a thing the API has
+ * already decided. A reply whose root is not on this page has nowhere to nest,
+ * so it stands as its own row: an answer shown out of place is still an answer,
+ * and dropping it would hide somebody's words behind a page boundary.
+ */
+const threads = computed(() => {
+  const roots: { comment: Comment; replies: Comment[] }[] = []
+  const byId = new Map<string, { comment: Comment; replies: Comment[] }>()
+
+  for (const comment of comments.value) {
+    const parent = comment.parentCommentId ? byId.get(comment.parentCommentId) : undefined
+
+    if (parent) {
+      parent.replies.push(comment)
+      continue
+    }
+
+    const thread = { comment, replies: [] as Comment[] }
+    roots.push(thread)
+    byId.set(comment.id, thread)
+  }
+
+  return roots
+})
+
+/** Whether this comment is one the signed-in person wrote. */
+function mine(comment: Comment): boolean {
+  return comment.authorUserId !== null && comment.authorUserId === auth.user?.id
+}
+
+/**
+ * A tombstone: deleted, kept because replies hang from it, and body withheld.
+ *
+ * **Truthiness rather than `!== null`**, which is not laziness: an older client
+ * bundle reading a payload without the field would otherwise read every comment
+ * as deleted, and a screen that hides the whole conversation on a missing key is
+ * a worse failure than one that shows it.
+ */
+function deleted(comment: Comment): boolean {
+  return Boolean(comment.deletedAt)
+}
 
 async function load(): Promise<void> {
   if (!canRead.value) {
@@ -103,6 +197,98 @@ async function post(): Promise<void> {
   }
 }
 
+function startReply(comment: Comment): void {
+  replyingTo.value = comment.id
+  replyDraft.value = ''
+  replyFailure.value = null
+  editing.value = null
+  confirming.value = null
+}
+
+function cancelReply(): void {
+  replyingTo.value = null
+  replyDraft.value = ''
+  replyFailure.value = null
+}
+
+/** Sends the reply, and keeps the draft if the server refuses it. */
+async function sendReply(parentId: string): Promise<void> {
+  if (replyEmpty.value || replyTooLong.value) {
+    return
+  }
+
+  working.value = true
+  replyFailure.value = null
+
+  try {
+    await addComment(props.documentId, replyDraft.value, parentId)
+    cancelReply()
+    await load()
+  } catch (error) {
+    replyFailure.value = error instanceof ApiError ? error.message : 'The reply could not be added.'
+  } finally {
+    working.value = false
+  }
+}
+
+function startEdit(comment: Comment): void {
+  editing.value = comment.id
+  editDraft.value = comment.body ?? ''
+  editFailure.value = null
+  replyingTo.value = null
+  confirming.value = null
+}
+
+function cancelEdit(): void {
+  editing.value = null
+  editDraft.value = ''
+  editFailure.value = null
+}
+
+async function saveEdit(commentId: string): Promise<void> {
+  if (editEmpty.value || editTooLong.value) {
+    return
+  }
+
+  working.value = true
+  editFailure.value = null
+
+  try {
+    await editComment(props.documentId, commentId, editDraft.value)
+    cancelEdit()
+    await load()
+  } catch (error) {
+    editFailure.value =
+      error instanceof ApiError ? error.message : 'The comment could not be edited.'
+  } finally {
+    working.value = false
+  }
+}
+
+/**
+ * Deletes, after the second click.
+ *
+ * **The list is reloaded rather than spliced**, because what a delete leaves
+ * behind is the server's answer: a comment with replies stays as a tombstone and
+ * one without disappears, and a screen guessing between those two would show the
+ * wrong conversation until the next load.
+ */
+async function confirmDelete(commentId: string): Promise<void> {
+  working.value = true
+  deleteFailure.value = null
+
+  try {
+    await deleteComment(props.documentId, commentId)
+    confirming.value = null
+    await load()
+  } catch (error) {
+    deleteFailure.value =
+      error instanceof ApiError ? error.message : 'The comment could not be deleted.'
+  } finally {
+    working.value = false
+  }
+}
+
 function said(comment: Comment): string {
   return new Date(comment.createdAt).toLocaleString()
 }
@@ -133,24 +319,272 @@ watch(() => props.documentId, load, { immediate: true })
 
       <!-- **Oldest first**, which is the order the API returns and the order a
            conversation is read in. Every other list in this product is newest
-           first, and that difference is deliberate. -->
+           first, and that difference is deliberate. Replies are nested under
+           what they answer, one level and no deeper. -->
       <ol v-else class="space-y-3" data-testid="comment-list">
-        <li
-          v-for="comment in comments"
-          :key="comment.id"
-          class="rounded-md border p-3"
-          data-testid="comment-row"
-        >
-          <p class="text-sm font-medium">
-            {{ comment.authorUsername ?? 'Somebody who has since been removed' }}
-            <span class="font-normal text-muted-foreground"> · {{ said(comment) }}</span>
-          </p>
-          <!-- Interpolated, never rendered as markup: a comment is text one
-               person wrote for others to read, and the server escaping it is
-               not a licence to interpolate it into anything. -->
-          <p class="mt-1 whitespace-pre-wrap text-sm" data-testid="comment-body">
-            {{ comment.body }}
-          </p>
+        <li v-for="thread in threads" :key="thread.comment.id">
+          <div class="rounded-md border p-3" data-testid="comment-row">
+            <p class="text-sm font-medium">
+              {{ thread.comment.authorUsername ?? 'Somebody who has since been removed' }}
+              <span class="font-normal text-muted-foreground">
+                · {{ said(thread.comment) }}
+                <!-- An edit is visible as an edit: a comment whose text changed
+                     with nothing saying so is a conversation somebody can
+                     rewrite after the fact. -->
+                <span v-if="thread.comment.editedAt" data-testid="comment-edited"> · edited</span>
+              </span>
+            </p>
+
+            <!-- A deleted comment with replies keeps its place so the answers
+                 under it still have something to answer. -->
+            <p
+              v-if="deleted(thread.comment)"
+              class="mt-1 text-sm italic text-muted-foreground"
+              data-testid="comment-deleted"
+            >
+              This comment was deleted. The replies to it are still here.
+            </p>
+
+            <template v-else-if="editing === thread.comment.id">
+              <textarea
+                v-model="editDraft"
+                rows="3"
+                class="mt-1 w-full rounded-md border p-2 text-sm"
+                data-testid="edit-input"
+                :disabled="working"
+              />
+              <p v-if="editTooLong" class="text-xs text-destructive" data-testid="edit-too-long">
+                A comment is at most {{ MAX_COMMENT_BODY }} characters.
+              </p>
+              <Alert v-if="editFailure" variant="destructive" data-testid="edit-error">
+                {{ editFailure }}
+              </Alert>
+              <div class="mt-2 flex gap-2">
+                <Button
+                  size="sm"
+                  :disabled="working || editEmpty || editTooLong"
+                  data-testid="edit-submit"
+                  @click="saveEdit(thread.comment.id)"
+                >
+                  Save
+                </Button>
+                <Button size="sm" variant="ghost" data-testid="edit-cancel" @click="cancelEdit">
+                  Cancel
+                </Button>
+              </div>
+            </template>
+
+            <!-- Interpolated, never rendered as markup: a comment is text one
+                 person wrote for others to read, and the server escaping it is
+                 not a licence to interpolate it into anything. -->
+            <p v-else class="mt-1 whitespace-pre-wrap text-sm" data-testid="comment-body">
+              {{ thread.comment.body }}
+            </p>
+
+            <div
+              v-if="!deleted(thread.comment) && editing !== thread.comment.id"
+              class="mt-2 flex gap-2"
+            >
+              <Button
+                v-if="canWrite"
+                size="sm"
+                variant="ghost"
+                data-testid="comment-reply"
+                @click="startReply(thread.comment)"
+              >
+                Reply
+              </Button>
+              <Button
+                v-if="mine(thread.comment) && canEdit"
+                size="sm"
+                variant="ghost"
+                data-testid="comment-edit"
+                @click="startEdit(thread.comment)"
+              >
+                Edit
+              </Button>
+              <template v-if="mine(thread.comment) && canDelete">
+                <Button
+                  v-if="confirming !== thread.comment.id"
+                  size="sm"
+                  variant="ghost"
+                  data-testid="comment-delete"
+                  @click="confirming = thread.comment.id"
+                >
+                  Delete
+                </Button>
+                <template v-else>
+                  <!-- The replies survive, and somebody deleting a comment that
+                       has them is told so before they do it. -->
+                  <span class="self-center text-xs text-muted-foreground" data-testid="delete-ask">
+                    Delete this comment? Any replies to it stay.
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    :disabled="working"
+                    data-testid="comment-delete-confirm"
+                    @click="confirmDelete(thread.comment.id)"
+                  >
+                    Delete
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    data-testid="comment-delete-cancel"
+                    @click="confirming = null"
+                  >
+                    Keep
+                  </Button>
+                </template>
+              </template>
+            </div>
+
+            <Alert
+              v-if="deleteFailure && confirming === thread.comment.id"
+              variant="destructive"
+              data-testid="delete-error"
+            >
+              {{ deleteFailure }}
+            </Alert>
+
+            <div v-if="replyingTo === thread.comment.id" class="mt-2 space-y-2">
+              <label class="text-sm font-medium" :for="`reply-${thread.comment.id}`">
+                Reply to {{ thread.comment.authorUsername ?? 'this comment' }}
+              </label>
+              <textarea
+                :id="`reply-${thread.comment.id}`"
+                v-model="replyDraft"
+                rows="2"
+                class="w-full rounded-md border p-2 text-sm"
+                data-testid="reply-input"
+                :disabled="working"
+              />
+              <p v-if="replyTooLong" class="text-xs text-destructive" data-testid="reply-too-long">
+                A comment is at most {{ MAX_COMMENT_BODY }} characters.
+              </p>
+              <Alert v-if="replyFailure" variant="destructive" data-testid="reply-error">
+                {{ replyFailure }}
+              </Alert>
+              <div class="flex gap-2">
+                <Button
+                  size="sm"
+                  :disabled="working || replyEmpty || replyTooLong"
+                  data-testid="reply-submit"
+                  @click="sendReply(thread.comment.id)"
+                >
+                  Reply
+                </Button>
+                <Button size="sm" variant="ghost" data-testid="reply-cancel" @click="cancelReply">
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          <!-- One level, and the indent is the whole of the nesting: a reply to
+               a reply is refused by the server, so there is no third depth for
+               this template to have to draw. -->
+          <ol v-if="thread.replies.length > 0" class="mt-2 space-y-2 pl-6" data-testid="reply-list">
+            <li
+              v-for="answer in thread.replies"
+              :key="answer.id"
+              class="rounded-md border p-3"
+              data-testid="comment-reply-row"
+            >
+              <p class="text-sm font-medium">
+                {{ answer.authorUsername ?? 'Somebody who has since been removed' }}
+                <span class="font-normal text-muted-foreground">
+                  · {{ said(answer) }}
+                  <span v-if="answer.editedAt" data-testid="comment-edited"> · edited</span>
+                </span>
+              </p>
+
+              <template v-if="editing === answer.id">
+                <textarea
+                  v-model="editDraft"
+                  rows="3"
+                  class="mt-1 w-full rounded-md border p-2 text-sm"
+                  data-testid="edit-input"
+                  :disabled="working"
+                />
+                <p v-if="editTooLong" class="text-xs text-destructive">
+                  A comment is at most {{ MAX_COMMENT_BODY }} characters.
+                </p>
+                <Alert v-if="editFailure" variant="destructive" data-testid="edit-error">
+                  {{ editFailure }}
+                </Alert>
+                <div class="mt-2 flex gap-2">
+                  <Button
+                    size="sm"
+                    :disabled="working || editEmpty || editTooLong"
+                    data-testid="edit-submit"
+                    @click="saveEdit(answer.id)"
+                  >
+                    Save
+                  </Button>
+                  <Button size="sm" variant="ghost" data-testid="edit-cancel" @click="cancelEdit">
+                    Cancel
+                  </Button>
+                </div>
+              </template>
+
+              <p v-else class="mt-1 whitespace-pre-wrap text-sm" data-testid="comment-body">
+                {{ answer.body }}
+              </p>
+
+              <!-- No Reply control here. The server refuses a reply to a reply
+                   (D-50) and a button that posted one would be a control whose
+                   only outcome is a 422. -->
+              <div v-if="mine(answer) && editing !== answer.id" class="mt-2 flex gap-2">
+                <Button
+                  v-if="canEdit"
+                  size="sm"
+                  variant="ghost"
+                  data-testid="comment-edit"
+                  @click="startEdit(answer)"
+                >
+                  Edit
+                </Button>
+                <template v-if="canDelete">
+                  <Button
+                    v-if="confirming !== answer.id"
+                    size="sm"
+                    variant="ghost"
+                    data-testid="comment-delete"
+                    @click="confirming = answer.id"
+                  >
+                    Delete
+                  </Button>
+                  <template v-else>
+                    <span
+                      class="self-center text-xs text-muted-foreground"
+                      data-testid="delete-ask"
+                    >
+                      Delete this reply?
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      :disabled="working"
+                      data-testid="comment-delete-confirm"
+                      @click="confirmDelete(answer.id)"
+                    >
+                      Delete
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      data-testid="comment-delete-cancel"
+                      @click="confirming = null"
+                    >
+                      Keep
+                    </Button>
+                  </template>
+                </template>
+              </div>
+            </li>
+          </ol>
         </li>
       </ol>
 
@@ -168,10 +602,12 @@ watch(() => props.documentId, load, { immediate: true })
         <!-- **The line this screen exists to keep visible.** The Workflow tab
              one panel over shows decisions with their reasons, which look like
              comments with authors and are not: a reason is part of a decision
-             and cannot be edited, where this is a conversation. -->
+             and cannot be edited, where this is a conversation — which, since
+             #253, is something anyone here can edit and delete. -->
         <p class="text-xs text-muted-foreground" data-testid="comment-distinction">
-          A comment is part of the conversation about this document. The reason an approver gives
-          with a decision is recorded with that decision, on the Workflow tab.
+          A comment is part of the conversation about this document, and its author can edit or
+          delete it. The reason an approver gives with a decision is recorded with that decision, on
+          the Workflow tab, and cannot be changed afterwards.
         </p>
 
         <Alert v-if="postFailure" variant="destructive" data-testid="comment-error">

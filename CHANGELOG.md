@@ -13,6 +13,53 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
 
 ### Added
 
+- **A conversation can be answered, corrected and taken back** (FR-CMT-002,
+  FR-CMT-003, FR-CMT-004, [#253](https://github.com/sujanto-gaws/kelir/issues/253),
+  decisions **D-50** and **D-51**, recorded as
+  [ADR-0029](docs/architectures/adr/0029.%20A%20Comment%20Thread%20Is%20One%20Level%20Deep.md)
+  and [ADR-0030](docs/architectures/adr/0030.%20A%20Deleted%20Comment%20Leaves%20a%20Tombstone.md)).
+  Replies, editing and deleting on a
+  document's comments, on the API and on the screen that renders them.
+  `0036_comment_thread.sql` adds `comments.edited_at`, the self-parent
+  constraint, and two permissions: `comment:update` and `comment:delete`.
+
+  **Threading is one level** (D-50). A reply is a `POST` to the same collection
+  carrying `parentCommentId`; a reply to a reply is refused with a 422 naming
+  the field. `comments.parent_comment_id` would have carried any depth, which is
+  exactly why the depth is now decided rather than left to fall out of a
+  nullable column — and one level is what a conversation people read while
+  deciding whether to approve something can afford.
+
+  **Editing and deleting are the author's, and a permission is not enough.**
+  `comment:update` and `comment:delete` say whether an account edits or deletes
+  comments at all; `comments.created_by` says whose. There is deliberately no
+  moderator permission — a code nothing checks is the `delegations` situation
+  **D-13** spent two decisions undoing.
+
+  **An edit is visible as an edit.** `editedAt` is stamped when the body
+  changes and by nothing else — not `updatedAt`, which moves for any write to
+  the row, the delete included — because a comment whose text changed with
+  nothing saying so is a conversation somebody can rewrite after the fact. The
+  previous text is **not kept**: what survives an edit is that it happened,
+  when, and who did it.
+
+  **Deleting is soft, and it does not take the replies** (D-51). A deleted
+  comment that has been answered stays in the conversation as a tombstone —
+  author, time, no body — so the answers under it still have something to
+  answer; one nobody replied to leaves the list entirely. The row keeps its
+  text, withheld at the read boundary, which is **D-45**'s shape applied to a
+  second table.
+
+  **All three land on the document's timeline in their own transaction** —
+  `Comment.Replied`, `Comment.Edited`, `Comment.Deleted` — and none of them
+  carries the body, its length, or the words an edit replaced. The timeline says
+  what happened to the document and links to the comment; what it says is behind
+  `comment:read`.
+
+  **Still not the decision comment**, and the screen now says so to the person:
+  a comment is a conversation its author can edit, and the reason an approver
+  gives with a decision is recorded with that decision and cannot be changed.
+
 - **The audit trail is searchable** (FR-AUD-004,
   [#252](https://github.com/sujanto-gaws/kelir/issues/252), decision **D-49**).
   `GET /api/v1/audit`, behind a new `audit:read`, filtered by actor, object

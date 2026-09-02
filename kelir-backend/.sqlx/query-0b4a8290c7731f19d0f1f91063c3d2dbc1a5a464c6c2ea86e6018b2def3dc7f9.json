@@ -1,0 +1,73 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT c.id, c.document_id, c.body, c.parent_comment_id, c.created_by, c.created_at,\n               c.edited_at, c.deleted_at,\n               u.username AS \"author_username?\"\n        FROM comments c\n        LEFT JOIN users u ON u.id = c.created_by AND u.tenant_id = c.tenant_id\n        LEFT JOIN comments p ON p.id = c.parent_comment_id AND p.tenant_id = c.tenant_id\n        WHERE c.tenant_id = $1 AND c.document_id = $2\n          AND (\n            c.deleted_at IS NULL\n            OR EXISTS (\n              SELECT 1 FROM comments r\n              WHERE r.parent_comment_id = c.id AND r.deleted_at IS NULL\n            )\n          )\n        ORDER BY coalesce(p.created_at, c.created_at), coalesce(p.id, c.id), c.created_at, c.id\n        LIMIT $3 OFFSET $4\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "document_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "body",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "parent_comment_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "created_by",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "edited_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "deleted_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "author_username?",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "0b4a8290c7731f19d0f1f91063c3d2dbc1a5a464c6c2ea86e6018b2def3dc7f9"
+}

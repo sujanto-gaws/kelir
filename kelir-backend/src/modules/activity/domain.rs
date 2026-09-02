@@ -138,7 +138,14 @@ pub fn disclosable(event_type: &str, details: Value) -> Value {
         // itself is behind `attachment:read`, `comment:read` or the workflow's
         // read. The timeline says that it happened, and links.
         "Attachment.Added" | "Attachment.Downloaded" => &[],
-        "Comment.Added" => &[],
+        // The comment epic's four, and the tail's three say no more than the
+        // first did ([#253](https://github.com/sujanto-gaws/kelir/issues/253)).
+        // *Somebody replied*, *somebody edited*, *somebody deleted* — the words
+        // before and after an edit are the comment's, behind `comment:read`,
+        // and an edit is the one event where carrying them would be most
+        // tempting and most wrong: it would put a copy of the old text where
+        // deleting the comment cannot reach it.
+        "Comment.Added" | "Comment.Replied" | "Comment.Edited" | "Comment.Deleted" => &[],
         "Workflow.TaskDelegated" => &[],
         _ => &[],
     };

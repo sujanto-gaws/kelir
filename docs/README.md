@@ -1,6 +1,6 @@
 # Kelir Documentation
 
-**Status:** Living · **Last updated:** 2026-09-01
+**Status:** Living · **Last updated:** 2026-09-02
 
 Kelir is a metadata-driven, document-centric, workflow-enabled full-stack framework for building enterprise business applications rapidly — Rust (Axum + SQLx + PostgreSQL) on the backend, Vue 3 (Vite + Pinia + shadcn-vue + Tailwind CSS v4) on the frontend. This folder is the complete documentation set; this file is its map.
 
@@ -86,6 +86,8 @@ Architecture decision records — one file per architecturally significant choic
 | [0026](architectures/adr/0026.%20ClamAV%20in%20the%20Stack,%20Scanning%20Asynchronously.md) | ClamAV in the compose stack, scanning asynchronously | Adopted |
 | [0027](architectures/adr/0027.%20A%20Document%20Pins%20the%20Form%20Revision%20It%20Was%20Filled%20Against.md) | A document pins its form revision; re-pointing is refused only for unpinned documents | Adopted |
 | [0028](architectures/adr/0028.%20A%20Definition%20Is%20Refused%20at%20Save%20Rather%20Than%20at%20Render.md) | A malformed definition is refused at save rather than at render | Adopted |
+| [0029](architectures/adr/0029.%20A%20Comment%20Thread%20Is%20One%20Level%20Deep.md) | A comment thread is one level deep — a reply answers a root, never another reply | **Draft** |
+| [0030](architectures/adr/0030.%20A%20Deleted%20Comment%20Leaves%20a%20Tombstone.md) | A deleted comment leaves a tombstone while replies hang from it, and never takes them | **Draft** |
 
 **0001–0028 were written retrospectively on 2026-09-01** from the documents that already held these decisions — a one-time pass directed by the product owner, not a standing practice (standard §9). Each says so in its §1 and names its source; the source keeps authority. Scope and planning decisions stayed `D-n` in [Product Backlog](../projects/planning/02.%20Product%20Backlog.md) §6, which carries the full `D-n` → ADR map.
 
