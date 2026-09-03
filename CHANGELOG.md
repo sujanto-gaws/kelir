@@ -9,7 +9,28 @@ While the major version is `0`, the public API may change in any release.
 
 ## [Unreleased]
 
-Phase 6 opens: **a document starts carrying the things people put on it.**
+Nothing yet.
+
+## [0.6.0] — 2026-09-03
+
+Phase 6 closes: **a document carries the things people put on it.** A file is
+attached to a document, scanned before anyone can open it, and downloaded once
+it clears; a conversation is held on the record, answered and corrected; an
+activity timeline shows both; notifications leave the building; and the audit
+trail is searchable.
+
+**This is the MVP.** **D-1** has placed it at `v0.6.0` since 2026-08-11, and
+`v0.5.0`'s notes said as plainly that it was not. SRS §9 is met in full —
+fifteen criteria verified one at a time against a running deployment built from
+release images, rather than against this project's own coverage table, and
+recorded in [MVP Verification](projects/verifications/14.%20MVP%20Verification.md).
+
+**Fourteen of the fifteen rest on evidence produced by executing them. The
+fifteenth is accepted on a stated basis rather than ticked:** criterion 4,
+*administrators can configure document types*, is served by the API and by no
+screen. Document types are configured through `/api/v1/document-types`; the
+document type and menu builders are scheduled for Phase 7 (FR-RAD-004,
+FR-RAD-008). **D-64** records the decision and what it obliges.
 
 ### Added
 
@@ -79,213 +100,6 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
   The screen gains one option on the control it already had and a search box
   beside it; a decided row shows the decision where a waiting row shows its
   status.
-
-### Fixed
-
-- **A file stops saying `Checking` after it has been cleared** (FR-ATT-002,
-  **D-63**, [#326](https://github.com/sujanto-gaws/kelir/issues/326)). The
-  attachments tab read its list once and never again, so a file uploaded
-  through the screen showed `Checking` until the person reloaded the page —
-  while the worker had already cleared it and both the row and the API read
-  `CLEAN`.
-
-  **It was worse than a stale badge.** The explanation beside it promises the
-  file *will be available to download shortly*, and the whole reason this screen
-  renders three refusals rather than one spinner is that `PENDING` resolves and
-  the other two do not. One that never visibly resolves is indistinguishable
-  from a permanent refusal.
-
-  The screen now re-asks every three seconds while a scan is outstanding and
-  stops when none is — under the worker's own five-second sweep, so it is never
-  a whole cycle behind. It stops after forty polls, because a scanner that
-  cannot be reached leaves a row `PENDING` for ever; the badge then still reads
-  `Checking`, which is still true.
-
-  **Found by the browser flow on its first run**, which is what that flow is
-  for.
-
-- **The release stack pins its infrastructure, not only its language runtimes**
-  (**D-62**). `minio/minio`, `minio/mc`, `clamav/clamav` and `axllent/mailpit`
-  were `:latest` in the development compose, in **the staging compose a release
-  is deployed from**, and in two places in `ci.yml`, while PostgreSQL, Rust and
-  Node had carried versions since Sprint 0. Two deployments of one Kelir tag
-  could run different object storage and a different scanner.
-
-  Each is now pinned to **what `latest` resolved to on 2026-09-03**, checked by
-  digest first, so this froze the stack rather than moving it:
-  `minio/minio:RELEASE.2025-09-07T16-13-09Z`,
-  `minio/mc:RELEASE.2025-08-13T08-35-41Z`, `clamav/clamav:1.5`,
-  `axllent/mailpit:v1.31`. MinIO and `mc` publish no version line, so they take
-  a dated release; ClamAV and Mailpit take a patch line, the granularity
-  `postgres:16` already uses.
-
-  **A test holds it, which is the part worth more than the tags.**
-  `deployment_images_are_pinned.rs` fails the build when a floating tag or an
-  untagged `image:` appears anywhere in `deploy/` or `.github/workflows/`.
-
-  **And ClamAV's `StreamMaxLength` reasoning now rests on something that does
-  not move.** The compose files deliberately configure it nowhere, because the
-  image's effective default is 100 MiB against a 25 MiB upload limit — while
-  clamd's own sample config documents 25M, at which every maximum-size upload
-  is refused, recorded `FAILED` and permanently undownloadable. That was a
-  decision resting on somebody else's default in an image fetched fresh on
-  every deployment. A version bump now re-checks it.
-
-  Found by the [Sprint 13 independent pass](projects/verifications/13.%20Sprint%2013%20Independent%20Pass.md),
-  finding 3.
-
-- **The audit search no longer withholds every external reference's values from
-  everybody** (FR-AUD-004, **D-61**). `audit::domain::readable_by` maps an
-  object type to the permission its recorded values need; item 3 wrote its
-  nineteen arms on 2026-09-01, item 5 added the `EXTERNAL_REFERENCE` object
-  type on 2026-09-02, and the map did not grow — so a caller holding
-  `audit:read`, `attachment:read` and `attachment:reference` saw
-  `valuesWithheld` on every one of those rows, with **no permission that would
-  have opened them**. It failed closed, which is why nothing broke and nothing
-  said so.
-
-  `EXTERNAL_REFERENCE` now maps to `attachment:read`, which is what
-  `list_references` requires.
-
-  **The guard is the part worth more than the arm.** The test that should have
-  caught this **listed** its nineteen subjects, and its own doc comment said the
-  list came from a `grep` — run once, on the day before the type was added. It
-  is replaced by `tests/audit_object_types.rs`, which runs the grep: it walks
-  the crate's source for the three shapes an object type takes, asserts every
-  written type can be placed **and** that every arm answers for a type something
-  writes, and carries a count guard so a walk that stops looking fails rather
-  than passes. That is [sprint plan](projects/planning/01.%20Sprint%20Plan.md)
-  verification rule 6, and the shape `router.rs` already used one module over.
-
-  **`PARTY_ROLE`'s arm is retired.** Nothing writes it — a party gaining a role
-  is audited as `PARTY`, because `object_id` is the party — and an arm nothing
-  can reach is the same ageing list. Its reasoning stays as a comment where the
-  arm was.
-
-  Found by the [Sprint 13 independent pass](projects/verifications/13.%20Sprint%2013%20Independent%20Pass.md),
-  finding 2.
-
-- **A master-data record awaiting approval can no longer be deleted, and its
-  approval can no longer be stranded** (FR-MDM-010, **D-60**). `update_party`
-  and `update_facility` have refused a record parked at `PENDING_APPROVAL`
-  since [#255](https://github.com/sujanto-gaws/kelir/issues/255); the two
-  **delete** paths did not, and the cost was not a lost edit.
-
-  **The delete answered 204 and the approval then failed for ever.** `settle`'s
-  `move_record_status_in` carries `deleted_at IS NULL` and runs on the reject
-  branch as well as the approve one, so once the record was gone **both
-  `APPROVE` and `REJECT` answered 500**, the instance stayed `RUNNING` and the
-  task `ASSIGNED` — a process nobody, including an administrator, could move.
-  That is [#278](https://github.com/sujanto-gaws/kelir/issues/278) one module
-  over: *a discard cannot strand a live approval*, restated about a record
-  rather than a document.
-
-  **Under the lock rather than beside it.** The guard reads the record's status
-  through `lock_record_status`, the same `FOR UPDATE` read `governance::raise`
-  takes before it parks a record, so a delete and a submit arriving together
-  serialise instead of racing. An unlocked read would have closed the case and
-  kept the race, which is the distinction #278's own fix drew.
-
-  The refusal's wording moves from *cannot be edited* to *cannot be changed*,
-  because it now answers a delete as well as an update.
-
-  Found by the [Sprint 13 independent pass](projects/verifications/13.%20Sprint%2013%20Independent%20Pass.md),
-  finding 1 — the first independent pass this project has run over a whole
-  sprint, and it found in item 6's code the class of defect the same sprint had
-  paid to fix in item 0.
-
-- **A test that gets an unexplained 500 now prints why**
-  ([#274](https://github.com/sujanto-gaws/kelir/issues/274)). The integration harness
-  installs a `tracing` subscriber at `error` and above, routed through
-  libtest's per-test capture, so `error.rs`'s existing
-  `request failed with an internal error` line — which carries the `sqlx`
-  error behind every `INTERNAL_ERROR` — lands under the test that failed. **No
-  test binary had ever installed one**, so that line was written to nothing,
-  and #274's first acceptance criterion could not be satisfied by rerunning.
-  A passing run prints nothing; `KELIR_TEST_LOG` widens the filter. **D-59.**
-
-- **Eleven environment variables the configuration reference did not list**
-  ([#316](https://github.com/sujanto-gaws/kelir/issues/316)). `KELIR_CLAMAV_*` and
-  `KELIR_STORAGE_*` had been missing since Sprint 12 and
-  `KELIR_TRUSTED_PROXY_HOPS` since Sprint 2, and **every one of those defaults
-  is the development compose stack's** — so a deployment that followed
-  [Installation and Deployment](docs/operations/01.%20Installation%20and%20Deployment.md)
-  §7 to the letter pointed object storage at `localhost:9000` and the virus
-  scanner at a host named `clamav`, started, reported healthy, and failed at
-  the first upload. Each row now says what the default is *for*, and names the
-  compose stack where that is what the default is.
-
-  `KELIR_STORAGE_DRIVER`'s row no longer says "Used from Phase 6"; Phase 6 is
-  now. `KELIR_BUILD_SHA`, which `build.rs` reads at compile time, has a row of
-  its own in a new §7.3.
-
-  **A test holds it, which is the part worth more than the rows.**
-  `configuration_reference.rs` fails when a `KELIR_*` name appears in the
-  crate's source with no row in §7.1 or §7.3, and again when §7.1 keeps a row
-  for something the binary stopped reading. The gap was found by diffing the
-  two sides by hand while adding a twelfth variable — a finding that arrived
-  by luck, and this is that diff run on every build.
-
-  The SDD's §13.3 copy of the same list — nine of twenty-nine variables, last
-  touched in Phase 2 — is gone, and points at §7 instead. Two lists of one
-  thing is how the first one drifted.
-
-  **One thing this did not fix**, named in the row that documents it:
-  `KELIR_STORAGE_SECRET_KEY` defaults to `minioadmin` and the
-  placeholder-secret guard covers `KELIR_JWT_SECRET` and
-  `KELIR_BOOTSTRAP_ADMIN_PASSWORD` and nothing else, so the binary does not
-  refuse it in staging or production. The staging compose file does.
-  [#317](https://github.com/sujanto-gaws/kelir/issues/317).
-
-- **The inbox's count, its page and its detail gate agree about which rows
-  exist** ([#279](https://github.com/sujanto-gaws/kelir/issues/279)). The page
-  joined `documents` and the count did not, so a task whose document had been
-  soft-deleted was **counted and not listed** — an inbox that said 23 and ended
-  at 19, which the comment above the count forbids in as many words. The detail
-  gate had the same gap in the other direction: it answered *visible* for a task
-  the read behind it then answered 404 for.
-
-  All three carry the join now. And the drift is harder to reintroduce than it
-  was: #256's search reads the document's own columns in the count as well as in
-  the page, so removing that join stops the crate compiling rather than
-  quietly changing a number.
-
-- **A master-data change can be routed through an approval** (FR-MDM-010,
-  [#255](https://github.com/sujanto-gaws/kelir/issues/255), decision **D-55**,
-  recorded as
-  [ADR-0033](docs/architectures/adr/0033.%20A%20Governed%20Record%20Parks%20at%20Pending%20Approval.md)).
-  A document type that sets `targetEntityType` and binds a workflow makes
-  changes to that entity go through approval; `0038_master_data_governance.sql`
-  adds `mdm_change_requests`, and **no `ALTER` to anything** — the
-  configuration column has been on `document_types` since Sprint 4, waiting.
-
-  **The record parks at `PENDING_APPROVAL` while the change is decided.** That
-  value has been in the schema since `0008` and reachable by nothing;
-  `record_status`'s own documentation reserved it for this item and named the
-  line that would change when the workflow landed. Submitting the change parks
-  the record in the submit's transaction, and **a direct edit is refused while
-  it is parked** — under the permission that already governs that write, with
-  no new permission and no cross-module query.
-
-  **Approving applies the change in the transaction that closes the process**,
-  and moves the record to `ACTIVE`. **Refusing writes nothing and puts the
-  record back where it was** — not to `DRAFT`: an active supplier whose change
-  is rejected is still an active supplier, which is what the change request row
-  remembers. Every attempt, refused ones included, is on the record's own
-  history at `GET /master-data/parties/{id}/change-requests`.
-
-  **Nothing in the workflow engine learns about master data.** The chain is
-  engine → document → master data: the engine projects a status onto a document
-  as it does for every document, and the document module asks master data to
-  settle whatever change it carried. `grep -rn "modules::master_data"
-  kelir-backend/src/modules/workflow/` returns nothing.
-
-  **A governed change carries the record's own scalar fields.** The
-  sub-aggregates — contacts, identifications, relationships, a facility's
-  address — are written by multi-statement service logic this process does not
-  reproduce inside a workflow's closing transaction, and a change naming one is
-  **refused when it is raised**, with the field named, rather than approved and
-  half-applied.
 
 ### Changed
 
@@ -512,7 +326,6 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
   extractors were enough for that property; the first route to take a file is
   what made the claim false.
 
-### Changed
 
 - **The activity timeline no longer asks for `activity:read`** (#250 AC2,
   decision **D-47**). It reads through the document's own read permission and
@@ -539,6 +352,212 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
   could already read the documents of.
 
 ### Fixed
+
+- **A file stops saying `Checking` after it has been cleared** (FR-ATT-002,
+  **D-63**, [#326](https://github.com/sujanto-gaws/kelir/issues/326)). The
+  attachments tab read its list once and never again, so a file uploaded
+  through the screen showed `Checking` until the person reloaded the page —
+  while the worker had already cleared it and both the row and the API read
+  `CLEAN`.
+
+  **It was worse than a stale badge.** The explanation beside it promises the
+  file *will be available to download shortly*, and the whole reason this screen
+  renders three refusals rather than one spinner is that `PENDING` resolves and
+  the other two do not. One that never visibly resolves is indistinguishable
+  from a permanent refusal.
+
+  The screen now re-asks every three seconds while a scan is outstanding and
+  stops when none is — under the worker's own five-second sweep, so it is never
+  a whole cycle behind. It stops after forty polls, because a scanner that
+  cannot be reached leaves a row `PENDING` for ever; the badge then still reads
+  `Checking`, which is still true.
+
+  **Found by the browser flow on its first run**, which is what that flow is
+  for.
+
+- **The release stack pins its infrastructure, not only its language runtimes**
+  (**D-62**). `minio/minio`, `minio/mc`, `clamav/clamav` and `axllent/mailpit`
+  were `:latest` in the development compose, in **the staging compose a release
+  is deployed from**, and in two places in `ci.yml`, while PostgreSQL, Rust and
+  Node had carried versions since Sprint 0. Two deployments of one Kelir tag
+  could run different object storage and a different scanner.
+
+  Each is now pinned to **what `latest` resolved to on 2026-09-03**, checked by
+  digest first, so this froze the stack rather than moving it:
+  `minio/minio:RELEASE.2025-09-07T16-13-09Z`,
+  `minio/mc:RELEASE.2025-08-13T08-35-41Z`, `clamav/clamav:1.5`,
+  `axllent/mailpit:v1.31`. MinIO and `mc` publish no version line, so they take
+  a dated release; ClamAV and Mailpit take a patch line, the granularity
+  `postgres:16` already uses.
+
+  **A test holds it, which is the part worth more than the tags.**
+  `deployment_images_are_pinned.rs` fails the build when a floating tag or an
+  untagged `image:` appears anywhere in `deploy/` or `.github/workflows/`.
+
+  **And ClamAV's `StreamMaxLength` reasoning now rests on something that does
+  not move.** The compose files deliberately configure it nowhere, because the
+  image's effective default is 100 MiB against a 25 MiB upload limit — while
+  clamd's own sample config documents 25M, at which every maximum-size upload
+  is refused, recorded `FAILED` and permanently undownloadable. That was a
+  decision resting on somebody else's default in an image fetched fresh on
+  every deployment. A version bump now re-checks it.
+
+  Found by the [Sprint 13 independent pass](projects/verifications/13.%20Sprint%2013%20Independent%20Pass.md),
+  finding 3.
+
+- **The audit search no longer withholds every external reference's values from
+  everybody** (FR-AUD-004, **D-61**). `audit::domain::readable_by` maps an
+  object type to the permission its recorded values need; item 3 wrote its
+  nineteen arms on 2026-09-01, item 5 added the `EXTERNAL_REFERENCE` object
+  type on 2026-09-02, and the map did not grow — so a caller holding
+  `audit:read`, `attachment:read` and `attachment:reference` saw
+  `valuesWithheld` on every one of those rows, with **no permission that would
+  have opened them**. It failed closed, which is why nothing broke and nothing
+  said so.
+
+  `EXTERNAL_REFERENCE` now maps to `attachment:read`, which is what
+  `list_references` requires.
+
+  **The guard is the part worth more than the arm.** The test that should have
+  caught this **listed** its nineteen subjects, and its own doc comment said the
+  list came from a `grep` — run once, on the day before the type was added. It
+  is replaced by `tests/audit_object_types.rs`, which runs the grep: it walks
+  the crate's source for the three shapes an object type takes, asserts every
+  written type can be placed **and** that every arm answers for a type something
+  writes, and carries a count guard so a walk that stops looking fails rather
+  than passes. That is [sprint plan](projects/planning/01.%20Sprint%20Plan.md)
+  verification rule 6, and the shape `router.rs` already used one module over.
+
+  **`PARTY_ROLE`'s arm is retired.** Nothing writes it — a party gaining a role
+  is audited as `PARTY`, because `object_id` is the party — and an arm nothing
+  can reach is the same ageing list. Its reasoning stays as a comment where the
+  arm was.
+
+  Found by the [Sprint 13 independent pass](projects/verifications/13.%20Sprint%2013%20Independent%20Pass.md),
+  finding 2.
+
+- **A master-data record awaiting approval can no longer be deleted, and its
+  approval can no longer be stranded** (FR-MDM-010, **D-60**). `update_party`
+  and `update_facility` have refused a record parked at `PENDING_APPROVAL`
+  since [#255](https://github.com/sujanto-gaws/kelir/issues/255); the two
+  **delete** paths did not, and the cost was not a lost edit.
+
+  **The delete answered 204 and the approval then failed for ever.** `settle`'s
+  `move_record_status_in` carries `deleted_at IS NULL` and runs on the reject
+  branch as well as the approve one, so once the record was gone **both
+  `APPROVE` and `REJECT` answered 500**, the instance stayed `RUNNING` and the
+  task `ASSIGNED` — a process nobody, including an administrator, could move.
+  That is [#278](https://github.com/sujanto-gaws/kelir/issues/278) one module
+  over: *a discard cannot strand a live approval*, restated about a record
+  rather than a document.
+
+  **Under the lock rather than beside it.** The guard reads the record's status
+  through `lock_record_status`, the same `FOR UPDATE` read `governance::raise`
+  takes before it parks a record, so a delete and a submit arriving together
+  serialise instead of racing. An unlocked read would have closed the case and
+  kept the race, which is the distinction #278's own fix drew.
+
+  The refusal's wording moves from *cannot be edited* to *cannot be changed*,
+  because it now answers a delete as well as an update.
+
+  Found by the [Sprint 13 independent pass](projects/verifications/13.%20Sprint%2013%20Independent%20Pass.md),
+  finding 1 — the first independent pass this project has run over a whole
+  sprint, and it found in item 6's code the class of defect the same sprint had
+  paid to fix in item 0.
+
+- **A test that gets an unexplained 500 now prints why**
+  ([#274](https://github.com/sujanto-gaws/kelir/issues/274)). The integration harness
+  installs a `tracing` subscriber at `error` and above, routed through
+  libtest's per-test capture, so `error.rs`'s existing
+  `request failed with an internal error` line — which carries the `sqlx`
+  error behind every `INTERNAL_ERROR` — lands under the test that failed. **No
+  test binary had ever installed one**, so that line was written to nothing,
+  and #274's first acceptance criterion could not be satisfied by rerunning.
+  A passing run prints nothing; `KELIR_TEST_LOG` widens the filter. **D-59.**
+
+- **Eleven environment variables the configuration reference did not list**
+  ([#316](https://github.com/sujanto-gaws/kelir/issues/316)). `KELIR_CLAMAV_*` and
+  `KELIR_STORAGE_*` had been missing since Sprint 12 and
+  `KELIR_TRUSTED_PROXY_HOPS` since Sprint 2, and **every one of those defaults
+  is the development compose stack's** — so a deployment that followed
+  [Installation and Deployment](docs/operations/01.%20Installation%20and%20Deployment.md)
+  §7 to the letter pointed object storage at `localhost:9000` and the virus
+  scanner at a host named `clamav`, started, reported healthy, and failed at
+  the first upload. Each row now says what the default is *for*, and names the
+  compose stack where that is what the default is.
+
+  `KELIR_STORAGE_DRIVER`'s row no longer says "Used from Phase 6"; Phase 6 is
+  now. `KELIR_BUILD_SHA`, which `build.rs` reads at compile time, has a row of
+  its own in a new §7.3.
+
+  **A test holds it, which is the part worth more than the rows.**
+  `configuration_reference.rs` fails when a `KELIR_*` name appears in the
+  crate's source with no row in §7.1 or §7.3, and again when §7.1 keeps a row
+  for something the binary stopped reading. The gap was found by diffing the
+  two sides by hand while adding a twelfth variable — a finding that arrived
+  by luck, and this is that diff run on every build.
+
+  The SDD's §13.3 copy of the same list — nine of twenty-nine variables, last
+  touched in Phase 2 — is gone, and points at §7 instead. Two lists of one
+  thing is how the first one drifted.
+
+  **One thing this did not fix**, named in the row that documents it:
+  `KELIR_STORAGE_SECRET_KEY` defaults to `minioadmin` and the
+  placeholder-secret guard covers `KELIR_JWT_SECRET` and
+  `KELIR_BOOTSTRAP_ADMIN_PASSWORD` and nothing else, so the binary does not
+  refuse it in staging or production. The staging compose file does.
+  [#317](https://github.com/sujanto-gaws/kelir/issues/317).
+
+- **The inbox's count, its page and its detail gate agree about which rows
+  exist** ([#279](https://github.com/sujanto-gaws/kelir/issues/279)). The page
+  joined `documents` and the count did not, so a task whose document had been
+  soft-deleted was **counted and not listed** — an inbox that said 23 and ended
+  at 19, which the comment above the count forbids in as many words. The detail
+  gate had the same gap in the other direction: it answered *visible* for a task
+  the read behind it then answered 404 for.
+
+  All three carry the join now. And the drift is harder to reintroduce than it
+  was: #256's search reads the document's own columns in the count as well as in
+  the page, so removing that join stops the crate compiling rather than
+  quietly changing a number.
+
+- **A master-data change can be routed through an approval** (FR-MDM-010,
+  [#255](https://github.com/sujanto-gaws/kelir/issues/255), decision **D-55**,
+  recorded as
+  [ADR-0033](docs/architectures/adr/0033.%20A%20Governed%20Record%20Parks%20at%20Pending%20Approval.md)).
+  A document type that sets `targetEntityType` and binds a workflow makes
+  changes to that entity go through approval; `0038_master_data_governance.sql`
+  adds `mdm_change_requests`, and **no `ALTER` to anything** — the
+  configuration column has been on `document_types` since Sprint 4, waiting.
+
+  **The record parks at `PENDING_APPROVAL` while the change is decided.** That
+  value has been in the schema since `0008` and reachable by nothing;
+  `record_status`'s own documentation reserved it for this item and named the
+  line that would change when the workflow landed. Submitting the change parks
+  the record in the submit's transaction, and **a direct edit is refused while
+  it is parked** — under the permission that already governs that write, with
+  no new permission and no cross-module query.
+
+  **Approving applies the change in the transaction that closes the process**,
+  and moves the record to `ACTIVE`. **Refusing writes nothing and puts the
+  record back where it was** — not to `DRAFT`: an active supplier whose change
+  is rejected is still an active supplier, which is what the change request row
+  remembers. Every attempt, refused ones included, is on the record's own
+  history at `GET /master-data/parties/{id}/change-requests`.
+
+  **Nothing in the workflow engine learns about master data.** The chain is
+  engine → document → master data: the engine projects a status onto a document
+  as it does for every document, and the document module asks master data to
+  settle whatever change it carried. `grep -rn "modules::master_data"
+  kelir-backend/src/modules/workflow/` returns nothing.
+
+  **A governed change carries the record's own scalar fields.** The
+  sub-aggregates — contacts, identifications, relationships, a facility's
+  address — are written by multi-statement service logic this process does not
+  reproduce inside a workflow's closing transaction, and a change naming one is
+  **refused when it is raised**, with the field named, rather than approved and
+  half-applied.
+
 
 - **A task handed back to the person who delegated it is no longer decided
   "on their own behalf"** (FR-WF-009, FR-TASK-008,
@@ -840,6 +859,7 @@ document. **Rows already in `activity_events` keep what they were written with**
 the redaction happens at the read, because the table is append-only and there is
 no honest migration that edits history. Nothing in this repository consumed
 `details`; FR-ACT-005's screen is Sprint 13 and is written against the links.
+
 ## [0.5.0] — 2026-08-30
 
 Phase 5 opens: **a submitted document enters an approval it cannot leave by
@@ -2520,7 +2540,9 @@ outstanding. Treat `0.1.0` as cut, not proven.
 - No business endpoints. `/api/v1` is mounted and empty.
 - No production environment, image registry, or rehearsed database restore.
 
-[Unreleased]: https://github.com/sujanto-gaws/kelir/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/sujanto-gaws/kelir/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/sujanto-gaws/kelir/releases/tag/v0.6.0
+[0.5.0]: https://github.com/sujanto-gaws/kelir/releases/tag/v0.5.0
 [0.4.0]: https://github.com/sujanto-gaws/kelir/releases/tag/v0.4.0
 [0.3.0]: https://github.com/sujanto-gaws/kelir/releases/tag/v0.3.0
 [0.2.0]: https://github.com/sujanto-gaws/kelir/releases/tag/v0.2.0
