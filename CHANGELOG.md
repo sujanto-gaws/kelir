@@ -82,6 +82,16 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
 
 ### Fixed
 
+- **A test that gets an unexplained 500 now prints why**
+  ([#274](https://github.com/sujanto-gaws/kelir/issues/274)). The integration harness
+  installs a `tracing` subscriber at `error` and above, routed through
+  libtest's per-test capture, so `error.rs`'s existing
+  `request failed with an internal error` line — which carries the `sqlx`
+  error behind every `INTERNAL_ERROR` — lands under the test that failed. **No
+  test binary had ever installed one**, so that line was written to nothing,
+  and #274's first acceptance criterion could not be satisfied by rerunning.
+  A passing run prints nothing; `KELIR_TEST_LOG` widens the filter. **D-59.**
+
 - **Eleven environment variables the configuration reference did not list**
   ([#316](https://github.com/sujanto-gaws/kelir/issues/316)). `KELIR_CLAMAV_*` and
   `KELIR_STORAGE_*` had been missing since Sprint 12 and
