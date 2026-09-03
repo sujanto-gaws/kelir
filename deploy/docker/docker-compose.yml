@@ -140,6 +140,8 @@ services:
   # made every maximum-size upload permanently undownloadable, in a stack whose
   # compose file explains exactly why. **A version bump here re-checks the
   # default**; that is the one thing this pin buys that a pin usually does not.
+  #
+  # Setting the value outright, rather than inheriting it, is issue #324.
   clamav:
     image: clamav/clamav:1.5
     ports:

@@ -50,7 +50,7 @@
 //! project did to `activity::record`'s executor and to `scanner::scan`'s
 //! outcome. It is 69 construction sites across eleven modules and belongs to a
 //! sprint rather than to a finding's fix. Recorded in **D-61** as the option
-//! not taken.
+//! not taken, and filed as [#323].
 //!
 //! Until then the count guard below is the honest half: a walk that stops
 //! finding things fails, so the scan cannot quietly cover less than it did.
@@ -66,6 +66,7 @@
 //! | The source walk narrowed to `modules/audit` alone | both, on the count guard — a scan that stops looking is the failure a green check would hide |
 //!
 //! [#252]: https://github.com/sujanto-gaws/kelir/issues/252
+//! [#323]: https://github.com/sujanto-gaws/kelir/issues/323
 
 use std::collections::BTreeSet;
 use std::fs;
