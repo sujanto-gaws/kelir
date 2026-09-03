@@ -11,8 +11,8 @@ use uuid::Uuid;
 
 use super::domain::{
     validate_create_facility, validate_update_facility, CreateFacilityRequest, Facility,
-    FacilitySummary, FacilityType, MasterDataOption, PostalAddress, UpdateFacilityRequest,
-    MAX_FACILITY_DEPTH,
+    FacilitySummary, FacilityType, GovernedEntity, MasterDataOption, PostalAddress,
+    UpdateFacilityRequest, MAX_FACILITY_DEPTH,
 };
 use super::governance;
 use super::repository::{self as repo, FacilityFields, NewFacility};
@@ -369,6 +369,28 @@ pub async fn delete_facility(
     let mut transaction = state.pool.begin().await?;
 
     repo::lock_facility_hierarchy(&mut transaction, tenant_id).await?;
+
+    // **A record with a change awaiting approval is not deleted** (FR-MDM-010,
+    // **D-60**) — the party path's sibling, and the same defect: deleting a
+    // parked record left its approval undecidable for ever, 500 on both
+    // APPROVE and REJECT. See `party::delete_party` for the reasoning and for
+    // why the read is the locking one.
+    //
+    // **Before the children check**, because the two refusals are not
+    // equivalent. "Remove the facilities under this one" is work the caller can
+    // go and do; "a change is awaiting approval" is a process in another module
+    // that has to be decided first, and a caller who cleared the children and
+    // came back would meet it anyway. The more specific state answers first.
+    //
+    // The hierarchy lock is taken above and this row lock below it, in that
+    // order, on every facility path that takes both. `governance::raise` takes
+    // only the row lock and never the advisory one, so the two cannot cycle.
+    let parked =
+        repo::lock_record_status(&mut transaction, tenant_id, GovernedEntity::Facility, id)
+            .await?
+            .ok_or_else(|| AppError::not_found("Facility"))?;
+
+    governance::refuse_if_awaiting_approval(parked)?;
 
     let children = repo::children_of(&mut *transaction, tenant_id, id).await?;
 

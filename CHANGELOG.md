@@ -82,6 +82,35 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
 
 ### Fixed
 
+- **A master-data record awaiting approval can no longer be deleted, and its
+  approval can no longer be stranded** (FR-MDM-010, **D-60**). `update_party`
+  and `update_facility` have refused a record parked at `PENDING_APPROVAL`
+  since [#255](https://github.com/sujanto-gaws/kelir/issues/255); the two
+  **delete** paths did not, and the cost was not a lost edit.
+
+  **The delete answered 204 and the approval then failed for ever.** `settle`'s
+  `move_record_status_in` carries `deleted_at IS NULL` and runs on the reject
+  branch as well as the approve one, so once the record was gone **both
+  `APPROVE` and `REJECT` answered 500**, the instance stayed `RUNNING` and the
+  task `ASSIGNED` — a process nobody, including an administrator, could move.
+  That is [#278](https://github.com/sujanto-gaws/kelir/issues/278) one module
+  over: *a discard cannot strand a live approval*, restated about a record
+  rather than a document.
+
+  **Under the lock rather than beside it.** The guard reads the record's status
+  through `lock_record_status`, the same `FOR UPDATE` read `governance::raise`
+  takes before it parks a record, so a delete and a submit arriving together
+  serialise instead of racing. An unlocked read would have closed the case and
+  kept the race, which is the distinction #278's own fix drew.
+
+  The refusal's wording moves from *cannot be edited* to *cannot be changed*,
+  because it now answers a delete as well as an update.
+
+  Found by the [Sprint 13 independent pass](projects/verifications/13.%20Sprint%2013%20Independent%20Pass.md),
+  finding 1 — the first independent pass this project has run over a whole
+  sprint, and it found in item 6's code the class of defect the same sprint had
+  paid to fix in item 0.
+
 - **A test that gets an unexplained 500 now prints why**
   ([#274](https://github.com/sujanto-gaws/kelir/issues/274)). The integration harness
   installs a `tracing` subscriber at `error` and above, routed through
