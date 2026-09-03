@@ -168,9 +168,7 @@ describe('AttachmentsTab', () => {
 
         return {
           status: 200,
-          body: pageBody([
-            attachment({ virusScanStatus: reads === 1 ? 'PENDING' : 'CLEAN' }),
-          ]),
+          body: pageBody([attachment({ virusScanStatus: reads === 1 ? 'PENDING' : 'CLEAN' })]),
         }
       }
 
@@ -238,9 +236,7 @@ describe('AttachmentsTab', () => {
 
         return {
           status: 200,
-          body: pageBody([
-            attachment({ virusScanStatus: reads === 1 ? 'PENDING' : 'CLEAN' }),
-          ]),
+          body: pageBody([attachment({ virusScanStatus: reads === 1 ? 'PENDING' : 'CLEAN' })]),
         }
       }
 
