@@ -48,7 +48,7 @@
 //! is `&'a str`; an enum with an exhaustive `match` in `readable_by` and no
 //! wildcard would make an unplaceable type *not compile*, which is what this
 //! project did to `activity::record`'s executor and to `scanner::scan`'s
-//! outcome. It is 92 construction sites across nine modules and belongs to a
+//! outcome. It is 69 construction sites across eleven modules and belongs to a
 //! sprint rather than to a finding's fix. Recorded in **D-61** as the option
 //! not taken.
 //!
