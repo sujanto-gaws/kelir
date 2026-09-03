@@ -82,6 +82,28 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
 
 ### Fixed
 
+- **A file stops saying `Checking` after it has been cleared** (FR-ATT-002,
+  **D-63**, [#326](https://github.com/sujanto-gaws/kelir/issues/326)). The
+  attachments tab read its list once and never again, so a file uploaded
+  through the screen showed `Checking` until the person reloaded the page —
+  while the worker had already cleared it and both the row and the API read
+  `CLEAN`.
+
+  **It was worse than a stale badge.** The explanation beside it promises the
+  file *will be available to download shortly*, and the whole reason this screen
+  renders three refusals rather than one spinner is that `PENDING` resolves and
+  the other two do not. One that never visibly resolves is indistinguishable
+  from a permanent refusal.
+
+  The screen now re-asks every three seconds while a scan is outstanding and
+  stops when none is — under the worker's own five-second sweep, so it is never
+  a whole cycle behind. It stops after forty polls, because a scanner that
+  cannot be reached leaves a row `PENDING` for ever; the badge then still reads
+  `Checking`, which is still true.
+
+  **Found by the browser flow on its first run**, which is what that flow is
+  for.
+
 - **The release stack pins its infrastructure, not only its language runtimes**
   (**D-62**). `minio/minio`, `minio/mc`, `clamav/clamav` and `axllent/mailpit`
   were `:latest` in the development compose, in **the staging compose a release

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 
 import {
   addReference,
@@ -307,9 +307,99 @@ function badgeVariant(attachment: Attachment): 'default' | 'secondary' | 'destru
   return attachment.virusScanStatus === 'PENDING' ? 'secondary' : 'destructive'
 }
 
+/**
+ * How often the screen re-asks while a scan is outstanding, and how long it
+ * keeps asking (**D-63**, [#326](https://github.com/sujanto-gaws/kelir/issues/326)).
+ *
+ * **Three seconds, under the worker's own five.** `attachment::worker` sweeps
+ * for `PENDING` rows every `KELIR_ATTACHMENT_SCAN_INTERVAL` seconds — five by
+ * default — so the answer appears at an arbitrary offset inside a five-second
+ * window. Polling under that cadence means the screen is never a whole worker
+ * cycle behind what the database already knows, and the request is the same
+ * single list read the tab makes when it opens.
+ *
+ * **The ceiling is because a `PENDING` row is not always on its way to an
+ * answer.** A scanner that cannot be reached leaves the file `PENDING`
+ * indefinitely — `attachment_scan.rs` has a test named for exactly that — and a
+ * screen with no cap would ask about it for as long as the tab stayed open. Two
+ * minutes is far past the ~169 ms **D-4** measured for 25 MiB and short enough
+ * that a broken scanner does not become a background request loop.
+ *
+ * **What happens after the ceiling is nothing, deliberately.** The badge still
+ * reads `Checking`, which is still true — the row *is* pending. Turning it into
+ * an error would be this screen inventing a verdict the server has not reached,
+ * which is the mistake `readable_by` and `disclosable` both refuse one layer
+ * down.
+ */
+const SCAN_POLL_MS = 3_000
+const SCAN_POLL_LIMIT = 40
+
+let scanPoll: ReturnType<typeof setInterval> | undefined
+let scanPolls = 0
+
+function scanOutstanding(): boolean {
+  return attachments.value.some((attachment) => attachment.virusScanStatus === 'PENDING')
+}
+
+function stopWatchingScans(): void {
+  if (scanPoll !== undefined) {
+    clearInterval(scanPoll)
+    scanPoll = undefined
+  }
+}
+
+/**
+ * Re-reads the list while something is being scanned.
+ *
+ * **The tab pays nothing when nothing is pending**, which is the ordinary case:
+ * this starts only when a `PENDING` row exists and stops the moment none does.
+ * Switching to another tab costs nothing either — the workspace mounts this
+ * component under `v-if`, so leaving unmounts it and `onUnmounted` clears the
+ * timer.
+ *
+ * **A hidden browser tab is skipped rather than counted.** Coming back to a
+ * window left in the background should find the list fresh, not find the
+ * ceiling already spent on requests nobody could see.
+ */
+function watchScans(): void {
+  if (scanPoll !== undefined || !scanOutstanding()) {
+    return
+  }
+
+  scanPolls = 0
+
+  scanPoll = setInterval(() => {
+    if (typeof document !== 'undefined' && document.hidden) {
+      return
+    }
+
+    if (scanPolls >= SCAN_POLL_LIMIT) {
+      stopWatchingScans()
+      return
+    }
+
+    scanPolls += 1
+    void load()
+  }, SCAN_POLL_MS)
+}
+
+// The list is re-read whenever it changes, and the poll starts or stops on what
+// it now holds. Both directions matter: an upload adds a `PENDING` row and
+// starts it, and the scan clearing is what stops it.
+watch(attachments, () => {
+  if (scanOutstanding()) {
+    watchScans()
+  } else {
+    stopWatchingScans()
+  }
+})
+
+onUnmounted(stopWatchingScans)
+
 watch(
   () => props.documentId,
   async () => {
+    stopWatchingScans()
     await Promise.all([load(), loadCategories()])
   },
   { immediate: true },
