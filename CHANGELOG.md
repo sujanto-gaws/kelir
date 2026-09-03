@@ -82,6 +82,37 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
 
 ### Fixed
 
+- **The audit search no longer withholds every external reference's values from
+  everybody** (FR-AUD-004, **D-61**). `audit::domain::readable_by` maps an
+  object type to the permission its recorded values need; item 3 wrote its
+  nineteen arms on 2026-09-01, item 5 added the `EXTERNAL_REFERENCE` object
+  type on 2026-09-02, and the map did not grow — so a caller holding
+  `audit:read`, `attachment:read` and `attachment:reference` saw
+  `valuesWithheld` on every one of those rows, with **no permission that would
+  have opened them**. It failed closed, which is why nothing broke and nothing
+  said so.
+
+  `EXTERNAL_REFERENCE` now maps to `attachment:read`, which is what
+  `list_references` requires.
+
+  **The guard is the part worth more than the arm.** The test that should have
+  caught this **listed** its nineteen subjects, and its own doc comment said the
+  list came from a `grep` — run once, on the day before the type was added. It
+  is replaced by `tests/audit_object_types.rs`, which runs the grep: it walks
+  the crate's source for the three shapes an object type takes, asserts every
+  written type can be placed **and** that every arm answers for a type something
+  writes, and carries a count guard so a walk that stops looking fails rather
+  than passes. That is [sprint plan](projects/planning/01.%20Sprint%20Plan.md)
+  verification rule 6, and the shape `router.rs` already used one module over.
+
+  **`PARTY_ROLE`'s arm is retired.** Nothing writes it — a party gaining a role
+  is audited as `PARTY`, because `object_id` is the party — and an arm nothing
+  can reach is the same ageing list. Its reasoning stays as a comment where the
+  arm was.
+
+  Found by the [Sprint 13 independent pass](projects/verifications/13.%20Sprint%2013%20Independent%20Pass.md),
+  finding 2.
+
 - **A master-data record awaiting approval can no longer be deleted, and its
   approval can no longer be stranded** (FR-MDM-010, **D-60**). `update_party`
   and `update_facility` have refused a record parked at `PENDING_APPROVAL`
