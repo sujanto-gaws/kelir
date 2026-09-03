@@ -61,7 +61,11 @@ jobs:
           --health-retries 10
 
       clamav:
-        image: clamav/clamav:latest
+        # Pinned like the compose stacks are (**D-62**) — `1.5` is what
+        # `latest` resolved to on 2026-09-03, so this froze CI rather than
+        # moving it. A scanner that changes under a green pipeline is a
+        # product change nobody made.
+        image: clamav/clamav:1.5
         ports:
           - 3310:3310
 
@@ -125,12 +129,16 @@ jobs:
           exit 1
 
       - name: Start object storage and create its bucket
+        # **The same pins the compose files carry** (**D-62**). This step is the
+        # third place an infrastructure image is named, and the easiest to miss:
+        # the compose files are read when somebody deploys, this runs on every
+        # push, and both were `:latest`.
         run: |
           docker run -d --name minio --network host \
             -e MINIO_ROOT_USER=minioadmin \
             -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio:latest server /data
-          docker run --rm --network host --entrypoint sh minio/mc:latest -c \
+            minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
+          docker run --rm --network host --entrypoint sh minio/mc:RELEASE.2025-08-13T08-35-41Z -c \
             "until mc alias set ci http://localhost:9000 minioadmin minioadmin; \
              do sleep 1; done \
              && mc mb --ignore-existing ci/kelir-test"

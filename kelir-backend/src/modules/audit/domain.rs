@@ -38,17 +38,30 @@ use uuid::Uuid;
 /// [#252]: https://github.com/sujanto-gaws/kelir/issues/252
 pub fn readable_by(object_type: &str) -> Option<&'static str> {
     Some(match object_type {
-        // Master data. `PARTY_ROLE` is `master-data:party-role:read` rather
-        // than the party's own, which is #81's rule and the one D-12 was
-        // arguing about: *this party is a supplier* is what that permission
-        // exists to refuse.
+        // Master data.
+        //
+        // **There is deliberately no `PARTY_ROLE` arm**, and the reasoning is
+        // kept here for whoever needs it. Nothing writes that type: a party
+        // gaining the SUPPLIER role is audited as `PARTY`, because `object_id`
+        // is the party and that is the object an auditor asks about
+        // (`master_data::service::role`, naming convention §7). The arm existed
+        // and mapped it to `master-data:party-role:read` — #81's rule, and the
+        // one **D-12** was arguing about, that *this party is a supplier* is
+        // what that permission exists to refuse. It was unreachable, and an arm
+        // nothing can reach is the same ageing checklist as a list nothing
+        // regenerates (**D-61**). If a release ever writes `PARTY_ROLE`, the
+        // source scan in `tests/audit_object_types.rs` fails until somebody
+        // decides this again — with the previous decision in front of them.
         "PARTY" => "master-data:party:read",
-        "PARTY_ROLE" => "master-data:party-role:read",
         "FACILITY" => "master-data:facility:read",
 
-        // Documents and what hangs on them.
+        // Documents and what hangs on them. An external reference is a link
+        // rather than a file, and it is read through the same permission its
+        // neighbours are: `list_references` requires `attachment:read`, so that
+        // is the permission its recorded values need (**D-49**).
         "DOCUMENT" => "document:read",
         "ATTACHMENT" => "attachment:read",
+        "EXTERNAL_REFERENCE" => "attachment:read",
         "COMMENT" => "comment:read",
 
         // Configuration. A numbering rule's values are a document type's
@@ -166,45 +179,27 @@ impl AuditSearch {
 mod tests {
     use super::*;
 
-    /// **Every object type this codebase writes has an answer**, and the test
-    /// names them rather than counting them — a count passes when a type is
-    /// renamed and this does not.
-    ///
-    /// The list is `grep -rn 'object_type:' src/` reduced to its constants and
-    /// literals. A type added later without a row here withholds its values,
-    /// which is the safe direction and is what the `_ => None` arm is for; this
-    /// test is what stops that from happening silently to a type we already
-    /// have.
-    #[test]
-    fn every_object_type_this_release_writes_can_be_placed() {
-        for object_type in [
-            "PARTY",
-            "PARTY_ROLE",
-            "FACILITY",
-            "DOCUMENT",
-            "ATTACHMENT",
-            "COMMENT",
-            "DOCUMENT_TYPE",
-            "DOCUMENT_TYPE_NUMBERING_RULE",
-            "RAD_FORM",
-            "RAD_FORM_SUBMISSION",
-            "RAD_LIST",
-            "WORKFLOW_DEFINITION",
-            "WORKFLOW_INSTANCE",
-            "WORKFLOW_TASK",
-            "USER",
-            "ROLE",
-            "DELEGATION",
-            "DEPARTMENT",
-            "TENANT",
-        ] {
-            assert!(
-                readable_by(object_type).is_some(),
-                "`{object_type}` is written by this codebase and cannot be placed, \
-                 so its values are withheld from everybody"
-            );
-        }
-    }
+    // **The list this test used to hold is gone, and that is the fix.**
+    //
+    // It named nineteen object types and asserted each could be placed, with a
+    // doc comment saying the list was `grep -rn 'object_type:' src/` reduced
+    // to its constants and literals. That grep was run on 2026-09-01. On
+    // 2026-09-02 the attachment tail added `EXTERNAL_REFERENCE`, the list did
+    // not grow, and **the test still passed** while every external-reference
+    // row withheld its values from everybody — found by the [Sprint 13
+    // independent pass][pass], finding 2.
+    //
+    // That is [sprint plan][plan] verification rule 6 exactly: *a test
+    // asserting a project-wide property discovers its subjects rather than
+    // listing them; an enumerating test fails the way the list it checks
+    // fails.* The replacement runs the grep instead of quoting it, and lives
+    // in `tests/audit_object_types.rs` because it walks the crate's source —
+    // the shape `tests/configuration_reference.rs` already uses, and the shape
+    // `router.rs`'s `every_annotated_route_reaches_the_document` used to catch
+    // this class one module over.
+    //
+    // [pass]: ../../../../projects/verifications/13.%20Sprint%2013%20Independent%20Pass.md
+    // [plan]: ../../../../projects/planning/01.%20Sprint%20Plan.md
 
     /// And a type nobody has heard of withholds rather than opens.
     #[test]

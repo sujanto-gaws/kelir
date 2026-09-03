@@ -288,15 +288,19 @@ pub fn not_changeable(status: RecordStatus) -> AppError {
     ))
 }
 
-/// The refusal for a direct edit of a record with a change in flight
-/// ([#255] AC1).
+/// The refusal for a direct write to a record with a change in flight
+/// ([#255] AC1, and the delete paths from **D-60**).
 ///
 /// **The record's own status is what refuses it**, under the permission that
 /// already governs the write — rather than a new permission, or a query into
 /// the document module on every master-data update.
+///
+/// **"changed" rather than "edited"**, because this refuses a delete as well as
+/// an update since D-60, and a delete refused with *cannot be edited* is a
+/// message that reads as the wrong answer to the question that was asked.
 pub fn awaiting_approval() -> AppError {
     AppError::conflict(
-        "this record has a change awaiting approval and cannot be edited directly until that \
+        "this record has a change awaiting approval and cannot be changed directly until that \
          change is decided",
     )
 }

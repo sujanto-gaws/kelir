@@ -82,6 +82,96 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
 
 ### Fixed
 
+- **The release stack pins its infrastructure, not only its language runtimes**
+  (**D-62**). `minio/minio`, `minio/mc`, `clamav/clamav` and `axllent/mailpit`
+  were `:latest` in the development compose, in **the staging compose a release
+  is deployed from**, and in two places in `ci.yml`, while PostgreSQL, Rust and
+  Node had carried versions since Sprint 0. Two deployments of one Kelir tag
+  could run different object storage and a different scanner.
+
+  Each is now pinned to **what `latest` resolved to on 2026-09-03**, checked by
+  digest first, so this froze the stack rather than moving it:
+  `minio/minio:RELEASE.2025-09-07T16-13-09Z`,
+  `minio/mc:RELEASE.2025-08-13T08-35-41Z`, `clamav/clamav:1.5`,
+  `axllent/mailpit:v1.31`. MinIO and `mc` publish no version line, so they take
+  a dated release; ClamAV and Mailpit take a patch line, the granularity
+  `postgres:16` already uses.
+
+  **A test holds it, which is the part worth more than the tags.**
+  `deployment_images_are_pinned.rs` fails the build when a floating tag or an
+  untagged `image:` appears anywhere in `deploy/` or `.github/workflows/`.
+
+  **And ClamAV's `StreamMaxLength` reasoning now rests on something that does
+  not move.** The compose files deliberately configure it nowhere, because the
+  image's effective default is 100 MiB against a 25 MiB upload limit — while
+  clamd's own sample config documents 25M, at which every maximum-size upload
+  is refused, recorded `FAILED` and permanently undownloadable. That was a
+  decision resting on somebody else's default in an image fetched fresh on
+  every deployment. A version bump now re-checks it.
+
+  Found by the [Sprint 13 independent pass](projects/verifications/13.%20Sprint%2013%20Independent%20Pass.md),
+  finding 3.
+
+- **The audit search no longer withholds every external reference's values from
+  everybody** (FR-AUD-004, **D-61**). `audit::domain::readable_by` maps an
+  object type to the permission its recorded values need; item 3 wrote its
+  nineteen arms on 2026-09-01, item 5 added the `EXTERNAL_REFERENCE` object
+  type on 2026-09-02, and the map did not grow — so a caller holding
+  `audit:read`, `attachment:read` and `attachment:reference` saw
+  `valuesWithheld` on every one of those rows, with **no permission that would
+  have opened them**. It failed closed, which is why nothing broke and nothing
+  said so.
+
+  `EXTERNAL_REFERENCE` now maps to `attachment:read`, which is what
+  `list_references` requires.
+
+  **The guard is the part worth more than the arm.** The test that should have
+  caught this **listed** its nineteen subjects, and its own doc comment said the
+  list came from a `grep` — run once, on the day before the type was added. It
+  is replaced by `tests/audit_object_types.rs`, which runs the grep: it walks
+  the crate's source for the three shapes an object type takes, asserts every
+  written type can be placed **and** that every arm answers for a type something
+  writes, and carries a count guard so a walk that stops looking fails rather
+  than passes. That is [sprint plan](projects/planning/01.%20Sprint%20Plan.md)
+  verification rule 6, and the shape `router.rs` already used one module over.
+
+  **`PARTY_ROLE`'s arm is retired.** Nothing writes it — a party gaining a role
+  is audited as `PARTY`, because `object_id` is the party — and an arm nothing
+  can reach is the same ageing list. Its reasoning stays as a comment where the
+  arm was.
+
+  Found by the [Sprint 13 independent pass](projects/verifications/13.%20Sprint%2013%20Independent%20Pass.md),
+  finding 2.
+
+- **A master-data record awaiting approval can no longer be deleted, and its
+  approval can no longer be stranded** (FR-MDM-010, **D-60**). `update_party`
+  and `update_facility` have refused a record parked at `PENDING_APPROVAL`
+  since [#255](https://github.com/sujanto-gaws/kelir/issues/255); the two
+  **delete** paths did not, and the cost was not a lost edit.
+
+  **The delete answered 204 and the approval then failed for ever.** `settle`'s
+  `move_record_status_in` carries `deleted_at IS NULL` and runs on the reject
+  branch as well as the approve one, so once the record was gone **both
+  `APPROVE` and `REJECT` answered 500**, the instance stayed `RUNNING` and the
+  task `ASSIGNED` — a process nobody, including an administrator, could move.
+  That is [#278](https://github.com/sujanto-gaws/kelir/issues/278) one module
+  over: *a discard cannot strand a live approval*, restated about a record
+  rather than a document.
+
+  **Under the lock rather than beside it.** The guard reads the record's status
+  through `lock_record_status`, the same `FOR UPDATE` read `governance::raise`
+  takes before it parks a record, so a delete and a submit arriving together
+  serialise instead of racing. An unlocked read would have closed the case and
+  kept the race, which is the distinction #278's own fix drew.
+
+  The refusal's wording moves from *cannot be edited* to *cannot be changed*,
+  because it now answers a delete as well as an update.
+
+  Found by the [Sprint 13 independent pass](projects/verifications/13.%20Sprint%2013%20Independent%20Pass.md),
+  finding 1 — the first independent pass this project has run over a whole
+  sprint, and it found in item 6's code the class of defect the same sprint had
+  paid to fix in item 0.
+
 - **A test that gets an unexplained 500 now prints why**
   ([#274](https://github.com/sujanto-gaws/kelir/issues/274)). The integration harness
   installs a `tracing` subscriber at `error` and above, routed through

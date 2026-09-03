@@ -10,9 +10,9 @@ use uuid::Uuid;
 
 use super::domain::{
     validate_create_party, validate_update_party, ContactMechType, CreatePartyRequest,
-    PartyAggregate, PartyClassificationInput, PartyContactMechInput, PartyIdentificationInput,
-    PartyRelationshipInput, PartyStatusCode, PartySummary, PartyType, UpdatePartyRequest,
-    PROFILED_ROLE_TYPES,
+    GovernedEntity, PartyAggregate, PartyClassificationInput, PartyContactMechInput,
+    PartyIdentificationInput, PartyRelationshipInput, PartyStatusCode, PartySummary, PartyType,
+    UpdatePartyRequest, PROFILED_ROLE_TYPES,
 };
 use super::governance;
 use super::repository::{
@@ -517,6 +517,34 @@ pub async fn delete_party(
     // on `supplier_number` is partial on `deleted_at IS NULL`, so the orphan
     // kept the number while `remove_role` had stopped being able to find it.
     let mut transaction = state.pool.begin().await?;
+
+    // **A record with a change awaiting approval is not deleted either**
+    // (FR-MDM-010, **D-60**). `update_party` has refused this since [#255];
+    // this path did not, and the consequence was not a lost edit but a stranded
+    // process: the delete answered 204, and the approver's decision then failed
+    // with a 500 on both APPROVE and REJECT for ever, because `settle`'s
+    // `move_record_status_in` carries `deleted_at IS NULL` and finds nothing.
+    // The instance stayed RUNNING and the task ASSIGNED, which nobody —
+    // including an administrator — could move.
+    //
+    // That is [#278](https://github.com/sujanto-gaws/kelir/issues/278) one
+    // module over, and it was found by the Sprint 13 independent pass
+    // ([record 13](../../../../projects/verifications/13.%20Sprint%2013%20Independent%20Pass.md)
+    // finding 1) rather than by the item that wrote it.
+    //
+    // **Under the lock, not beside it.** `lock_record_status` is the same
+    // `FOR UPDATE` read `governance::raise` takes before it parks a record, so
+    // the two serialise: a change raised while this delete is in flight waits
+    // for this transaction and then finds the row gone, and a delete raced
+    // against a submit blocks until the park commits and then refuses. An
+    // unlocked read on the pool would refuse the case and keep the race, which
+    // is the distinction #278's own fix drew — a check that decides whether a
+    // surface applies may read the pool; one that guards a write may not.
+    let parked = repo::lock_record_status(&mut transaction, tenant_id, GovernedEntity::Party, id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Party"))?;
+
+    governance::refuse_if_awaiting_approval(parked)?;
 
     let removed = repo::soft_delete_party(&mut *transaction, tenant_id, id, actor).await?;
 

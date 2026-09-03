@@ -20,6 +20,24 @@
 //! | `settle` returning before it applies | *an approval applies the change…* |
 //! | The rejection branch putting the record at `DRAFT` rather than back | *a rejected change leaves an active record active* |
 //!
+//! **Two more, run 2026-09-03 with the delete guard (**D-60**, record 13
+//! finding 1):**
+//!
+//! | Mutation | Reddened |
+//! |---|---|
+//! | `refuse_if_awaiting_approval` removed from `delete_party` | *a parked record is not deleted while its change awaits approval*, *an approval still settles after a delete was refused* |
+//! | `refuse_if_awaiting_approval` removed from `delete_facility` | *a parked facility is not deleted either* |
+//!
+//! **And one thing a mutation could not reach.** Swapping
+//! `repo::lock_record_status` for an unlocked read on the pool leaves all three
+//! green: the guard still refuses the case, and what the lock buys is the
+//! *race* — a delete and a submit arriving together. No test here drives two
+//! transactions at once, so the placement rests on the argument rather than on
+//! a red run: `governance::raise` takes the same `FOR UPDATE` read before it
+//! parks a record, so the two serialise on that row. Stated because a green
+//! mutation is a finding rather than a nuisance, and this one names an
+//! uncovered guarantee rather than an untested statement.
+//!
 //! [#255]: https://github.com/sujanto-gaws/kelir/issues/255
 
 mod common;
@@ -133,7 +151,31 @@ async fn publish_workflow(app: &TestApp, token: &str, definition: Value) -> Uuid
 /// A form whose fields **are** the record's fields, which is what makes a
 /// change document a change: the payload the person fills in is deserialized
 /// into the record's own update shape.
-async fn change_form(app: &TestApp, token: &str, key: &str) -> Uuid {
+/// The change form, shaped by the entity it proposes changes to.
+///
+/// **A facility change form does not carry `externalId`.** The submit reads the
+/// document's form data as a change to the *record*, so a form declaring a
+/// field the target entity has no column for is refused at submit with
+/// `CHANGE_NOT_READABLE` — which is the governance layer working, and is why
+/// this fixture cannot be one shape for both entities.
+async fn change_form(app: &TestApp, token: &str, key: &str, entity: Option<&str>) -> Uuid {
+    let components = if entity == Some("FACILITY") {
+        json!([
+            { "id": "name", "role": "data", "type": "textfield",
+              "key": "name", "label": "Name",
+              "validation": { "type": "string" } }
+        ])
+    } else {
+        json!([
+            { "id": "external-id", "role": "data", "type": "textfield",
+              "key": "externalId", "label": "External id",
+              "validation": { "type": "string" } },
+            { "id": "description", "role": "data", "type": "textfield",
+              "key": "description", "label": "Description",
+              "validation": { "type": "string" } }
+        ])
+    };
+
     let created = app
         .post(
             "/api/v1/rad/forms",
@@ -145,14 +187,7 @@ async fn change_form(app: &TestApp, token: &str, key: &str) -> Uuid {
                     "formId": key,
                     "version": "2.0.1",
                     "title": "Supplier change",
-                    "components": [
-                        { "id": "external-id", "role": "data", "type": "textfield",
-                          "key": "externalId", "label": "External id",
-                          "validation": { "type": "string" } },
-                        { "id": "description", "role": "data", "type": "textfield",
-                          "key": "description", "label": "Description",
-                          "validation": { "type": "string" } }
-                    ]
+                    "components": components
                 },
             }),
         )
@@ -182,7 +217,7 @@ async fn governed_type(
     workflow: Uuid,
     entity: Option<&str>,
 ) -> Uuid {
-    let form = change_form(app, token, &code.to_lowercase().replace('_', "-")).await;
+    let form = change_form(app, token, &code.to_lowercase().replace('_', "-"), entity).await;
     let mut body = json!({
         "typeCode": code,
         "name": code,
@@ -240,6 +275,20 @@ async fn change_document(
     supplier: Uuid,
     form_data: Value,
 ) -> Uuid {
+    change_document_for(app, token, type_id, "PARTY", supplier, form_data).await
+}
+
+/// The same, for a governed entity that is not a party. Parameterised rather
+/// than copied, because a second fixture that differs in one string is how the
+/// first one stops being the one anybody edits.
+async fn change_document_for(
+    app: &TestApp,
+    token: &str,
+    type_id: Uuid,
+    entity_type: &str,
+    entity_id: Uuid,
+    form_data: Value,
+) -> Uuid {
     let created = app
         .post(
             "/api/v1/documents",
@@ -247,8 +296,8 @@ async fn change_document(
             json!({
                 "documentTypeId": type_id,
                 "title": "Change of supplier details",
-                "entityType": "PARTY",
-                "entityId": supplier,
+                "entityType": entity_type,
+                "entityId": entity_id,
                 "formData": form_data,
             }),
         )
@@ -745,4 +794,206 @@ async fn a_governed_document_that_names_no_record_is_refused() {
     let refused = submit(&app, &token, id_of(&created.body["data"])).await;
 
     assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.body);
+}
+
+// ---------------------------------------------------------------------------
+// AC7 — a parked record is not deleted, and its approval is not stranded
+// ---------------------------------------------------------------------------
+
+/// A facility, for the delete guard's second half.
+async fn facility(app: &TestApp, token: &str, code: &str) -> Uuid {
+    let created = app
+        .post(
+            "/api/v1/master-data/facilities",
+            Some(token),
+            json!({
+                "facilityId": code,
+                "name": format!("{code} Works"),
+                "facilityTypeId": "BUILDING",
+            }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+    id_of(&created.body["data"])
+}
+
+/// **The delete is refused for the same reason the edit is** (**D-60**).
+///
+/// `update_party` has refused a parked record since [#255]; `delete_party` did
+/// not, and the cost was not a lost edit. The record went, the change document
+/// stayed, and `settle`'s `move_record_status_in` — which carries
+/// `deleted_at IS NULL` and runs on the reject branch as well as the approve
+/// one — then found nothing, so **both decisions answered 500 for ever** and
+/// the instance stayed `RUNNING` with its task `ASSIGNED`.
+///
+/// That is [#278](https://github.com/sujanto-gaws/kelir/issues/278) one module
+/// over: *a discard cannot strand a live approval*, restated about a record
+/// rather than a document. Found by the Sprint 13 independent pass, finding 1.
+#[tokio::test]
+async fn a_parked_record_is_not_deleted_while_its_change_awaits_approval() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let reviewer = approver(&app, "mdm-delete-reviewer").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &token,
+        approval_workflow("wf_mdm_delete", reviewer.id),
+    )
+    .await;
+    let type_id = governed_type(&app, &token, "MDM_DELETE", workflow, Some("PARTY")).await;
+    let supplier = party(&app, &token, "MDM-DELETE-1").await;
+    activate(&app, &token, supplier).await;
+
+    let document = change_document(
+        &app,
+        &token,
+        type_id,
+        supplier,
+        json!({ "externalId": "SUP-9100", "description": "raised, then deleted" }),
+    )
+    .await;
+    let submitted = submit(&app, &token, document).await;
+    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+    assert_eq!(record_status(&app, supplier).await, "PENDING_APPROVAL");
+
+    let deleted = app
+        .delete(
+            &format!("/api/v1/master-data/parties/{supplier}"),
+            Some(&token),
+        )
+        .await;
+
+    assert_eq!(
+        deleted.status,
+        StatusCode::CONFLICT,
+        "a record awaiting approval is not deleted: {}",
+        deleted.body
+    );
+
+    // The record is still there and still parked — the refusal changed nothing.
+    let alive: bool =
+        sqlx::query_scalar("SELECT deleted_at IS NULL FROM mdm_parties WHERE id = $1")
+            .bind(supplier)
+            .fetch_one(&app.pool)
+            .await
+            .expect("the record");
+    assert!(alive, "a refused delete leaves the record alone");
+    assert_eq!(record_status(&app, supplier).await, "PENDING_APPROVAL");
+}
+
+/// **And the approval still completes**, which is the half that says the defect
+/// is gone rather than merely refused: the point of the guard is that nobody is
+/// left holding a task no decision can close.
+#[tokio::test]
+async fn an_approval_still_settles_after_a_delete_was_refused() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let reviewer = approver(&app, "mdm-strand-reviewer").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &token,
+        approval_workflow("wf_mdm_strand", reviewer.id),
+    )
+    .await;
+    let type_id = governed_type(&app, &token, "MDM_STRAND", workflow, Some("PARTY")).await;
+    let supplier = party(&app, &token, "MDM-STRAND-1").await;
+    activate(&app, &token, supplier).await;
+
+    let document = change_document(
+        &app,
+        &token,
+        type_id,
+        supplier,
+        json!({ "externalId": "SUP-9101", "description": "survives a delete attempt" }),
+    )
+    .await;
+    let submitted = submit(&app, &token, document).await;
+    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+
+    let deleted = app
+        .delete(
+            &format!("/api/v1/master-data/parties/{supplier}"),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(deleted.status, StatusCode::CONFLICT, "{}", deleted.body);
+
+    // `decide` asserts a 200, which is the assertion: before the guard this was
+    // a 500, and so was the REJECT that a caller would have tried next.
+    decide(&app, &reviewer, document, "APPROVE").await;
+
+    let (external, status): (Option<String>, String) =
+        sqlx::query_as("SELECT external_id, record_status FROM mdm_parties WHERE id = $1")
+            .bind(supplier)
+            .fetch_one(&app.pool)
+            .await
+            .expect("the record");
+
+    assert_eq!(external.as_deref(), Some("SUP-9101"));
+    assert_eq!(status, "ACTIVE");
+
+    // And the record is deletable once nothing is waiting on it.
+    let now = app
+        .delete(
+            &format!("/api/v1/master-data/parties/{supplier}"),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(
+        now.status,
+        StatusCode::NO_CONTENT,
+        "the guard refuses a parked record, not every record: {}",
+        now.body
+    );
+}
+
+/// The same rule on the other governed entity, which has its own delete path
+/// and its own lock order.
+#[tokio::test]
+async fn a_parked_facility_is_not_deleted_either() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let reviewer = approver(&app, "mdm-facility-reviewer").await;
+
+    let workflow =
+        publish_workflow(&app, &token, approval_workflow("wf_mdm_fac", reviewer.id)).await;
+    let type_id = governed_type(&app, &token, "MDM_FAC", workflow, Some("FACILITY")).await;
+    let site = facility(&app, &token, "MDM-FAC-1").await;
+
+    let document = change_document_for(
+        &app,
+        &token,
+        type_id,
+        "FACILITY",
+        site,
+        json!({ "name": "MDM-FAC-1 Works, renamed" }),
+    )
+    .await;
+    let submitted = submit(&app, &token, document).await;
+    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+
+    let deleted = app
+        .delete(
+            &format!("/api/v1/master-data/facilities/{site}"),
+            Some(&token),
+        )
+        .await;
+
+    assert_eq!(
+        deleted.status,
+        StatusCode::CONFLICT,
+        "a facility awaiting approval is not deleted: {}",
+        deleted.body
+    );
+
+    let alive: bool =
+        sqlx::query_scalar("SELECT deleted_at IS NULL FROM mdm_facilities WHERE id = $1")
+            .bind(site)
+            .fetch_one(&app.pool)
+            .await
+            .expect("the facility");
+    assert!(alive);
 }
