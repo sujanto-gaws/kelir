@@ -1,0 +1,55 @@
+name: Pull-request title
+
+# **The header that actually lands on `main`** (**D-38**), checked in a workflow
+# of its own so that fixing it works (**D-65**, [#329]).
+#
+# This repository squash-merges, so the header a reader of `git log main` sees
+# is the pull-request *title* with ` (#NNN)` appended — not any commit on the
+# branch. `ci.yml` checked it from the start, inside the `Commit messages` job,
+# and that had one defect: `ci.yml` triggers on the default `pull_request`
+# types, which are `opened`, `synchronize` and `reopened`. **`edited` is not
+# among them.** So the script's own closing line — *edit the title and this job
+# will re-run* — was false, and a title fixed after a failure left a red check
+# with no way to clear it but an unrelated push. Found on [#328].
+#
+# **Adding `edited` to `ci.yml` was the obvious fix and the wrong one.** That
+# event fires on body edits as well as titles, so a typo corrected in a
+# description would have cost a full backend suite — twenty-five minutes to
+# re-check a line of bash. Splitting is what makes the remedy cheap enough to be
+# the remedy.
+#
+# [#328]: https://github.com/sujanto-gaws/kelir/pull/328
+# [#329]: https://github.com/sujanto-gaws/kelir/issues/329
+
+on:
+  pull_request:
+    # `edited` is the one this workflow exists for; the other three keep the
+    # check present from the moment a pull request opens, so a title is never
+    # unexamined between events.
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+# A title edited twice in quick succession only needs its last state checked.
+concurrency:
+  group: pr-title-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  title:
+    name: Pull-request title
+    runs-on: ubuntu-latest
+    steps:
+      # Only the script is needed, so the checkout is shallow — this job exists
+      # to be seconds rather than minutes, which is the whole argument for it
+      # being a job at all.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Validate the pull-request title as the squashed header
+        run: |
+          ./scripts/check-pull-request-title.sh \
+            "${{ github.event.pull_request.title }}" \
+            "${{ github.event.pull_request.number }}"

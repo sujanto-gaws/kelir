@@ -372,18 +372,10 @@ jobs:
             "origin/${{ github.base_ref }}" \
             "${{ github.event.pull_request.head.sha }}"
 
-      # **The header that actually lands on main** (D-38). This repository
-      # squash-merges, so the branch commits checked above are not what a
-      # reader of `git log main` sees — the pull-request title is, with
-      # ` (#NNN)` appended by GitHub. Git Workflow §4 has always said the
-      # title governs; nothing checked it, and four of the eight headers on
-      # main at the time this was added were over the maximum.
-      #
-      # `always()` so an author fixing one problem is told about both rather
-      # than discovering the second on the next push.
-      - name: Validate the pull-request title as the squashed header
-        if: always()
-        run: |
-          ./scripts/check-pull-request-title.sh \
-            "${{ github.event.pull_request.title }}" \
-            "${{ github.event.pull_request.number }}"
+      # **The pull-request title is checked in `pull-request-title.yml`**, not
+      # here (**D-65**). It lived in this job from D-38 until 2026-09-03, and
+      # the move is not tidying: this workflow triggers on the default
+      # `pull_request` types, which do not include `edited`, so a title fixed
+      # after a failure could not clear its own check. The title check now runs
+      # in a workflow that does listen for `edited` — and, being seconds of
+      # bash, can afford to.
