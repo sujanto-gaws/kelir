@@ -1,6 +1,6 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import AttachmentsTab from './AttachmentsTab.vue'
 import { useAuthStore } from '@/stores/auth'
@@ -137,6 +137,162 @@ describe('AttachmentsTab', () => {
 
     return wrapper
   }
+
+  /**
+   * **The gate opening is a thing the screen has to notice** ([#326],
+   * **D-63**).
+   *
+   * `AttachmentsTab` used to read the list once, in a `watch` on
+   * `documentId`, and never again. So a file uploaded through this screen read
+   * `Checking` until the person reloaded the page — while the worker had
+   * cleared it, the row said `CLEAN` and the API said `CLEAN`. Found by
+   * `a-file-and-a-conversation-on-a-document.spec.ts` on its first run.
+   *
+   * **It is worse than a stale badge**, which is why this test is here rather
+   * than in the e2e suite alone: `SCAN_STATUS_EXPLANATIONS.PENDING` promises
+   * the file *will be available to download shortly*, and the whole basis for
+   * rendering three refusals rather than one spinner (#246 AC3) is that
+   * `PENDING` resolves and the other two do not. A `PENDING` that never visibly
+   * resolves is indistinguishable from a permanent refusal.
+   *
+   * [#326]: https://github.com/sujanto-gaws/kelir/issues/326
+   */
+  it('shows a scan that cleared without anybody reloading', async () => {
+    vi.useFakeTimers()
+
+    try {
+      let reads = 0
+
+      onList = () => {
+        reads += 1
+
+        return {
+          status: 200,
+          body: pageBody([attachment({ virusScanStatus: reads === 1 ? 'PENDING' : 'CLEAN' })]),
+        }
+      }
+
+      const wrapper = mount(AttachmentsTab, { props: { documentId: DOCUMENT_ID } })
+      await flushPromises()
+
+      expect(wrapper.find('[data-testid="attachment-status"]').text()).toBe('Checking')
+      expect(wrapper.find('[data-testid="attachment-download"]').exists()).toBe(false)
+
+      await vi.advanceTimersByTimeAsync(3_000)
+      await flushPromises()
+
+      expect(wrapper.find('[data-testid="attachment-status"]').text()).toBe('Ready')
+      expect(wrapper.find('[data-testid="attachment-download"]').exists()).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  /** The ordinary case pays nothing: nothing is pending, so nothing is asked. */
+  it('asks again only while a scan is outstanding', async () => {
+    vi.useFakeTimers()
+
+    try {
+      let reads = 0
+
+      onList = () => {
+        reads += 1
+
+        return { status: 200, body: pageBody([attachment({ virusScanStatus: 'CLEAN' })]) }
+      }
+
+      mount(AttachmentsTab, { props: { documentId: DOCUMENT_ID } })
+      await flushPromises()
+
+      expect(reads).toBe(1)
+
+      await vi.advanceTimersByTimeAsync(30_000)
+      await flushPromises()
+
+      expect(reads).toBe(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  /**
+   * **And it stops once the answer arrives**, which is the half the ceiling
+   * does not cover: a cleared scan should end the asking immediately, not leave
+   * a timer running until the cap retires it.
+   *
+   * This test exists because the mutation that removed the stop came back
+   * **green** — the three tests written before it covered the poll starting and
+   * the ceiling, and nothing covered the ordinary end. A green mutation is a
+   * finding (coding standard §2.9), and this is the finding.
+   */
+  it('stops asking as soon as the scan has cleared', async () => {
+    vi.useFakeTimers()
+
+    try {
+      let reads = 0
+
+      onList = () => {
+        reads += 1
+
+        return {
+          status: 200,
+          body: pageBody([attachment({ virusScanStatus: reads === 1 ? 'PENDING' : 'CLEAN' })]),
+        }
+      }
+
+      mount(AttachmentsTab, { props: { documentId: DOCUMENT_ID } })
+      await flushPromises()
+
+      await vi.advanceTimersByTimeAsync(3_000)
+      await flushPromises()
+
+      // The clearing read, and no more.
+      expect(reads).toBe(2)
+
+      await vi.advanceTimersByTimeAsync(3_000 * 10)
+      await flushPromises()
+
+      expect(reads).toBe(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  /**
+   * **A row can be `PENDING` and not on its way anywhere.** A scanner that
+   * cannot be reached leaves it there — `attachment_scan.rs` has a test named
+   * for exactly that — so the asking has a ceiling rather than running for as
+   * long as the tab is open.
+   */
+  it('stops asking rather than polling for ever', async () => {
+    vi.useFakeTimers()
+
+    try {
+      let reads = 0
+
+      onList = () => {
+        reads += 1
+
+        return { status: 200, body: pageBody([attachment({ virusScanStatus: 'PENDING' })]) }
+      }
+
+      mount(AttachmentsTab, { props: { documentId: DOCUMENT_ID } })
+      await flushPromises()
+
+      await vi.advanceTimersByTimeAsync(3_000 * 45)
+      await flushPromises()
+
+      const atTheCeiling = reads
+
+      await vi.advanceTimersByTimeAsync(3_000 * 20)
+      await flushPromises()
+
+      expect(reads).toBe(atTheCeiling)
+      expect(reads).toBeLessThanOrEqual(41)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 
   it('lists what is attached, with its name and size', async () => {
     const wrapper = await render()
