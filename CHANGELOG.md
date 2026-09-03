@@ -82,6 +82,36 @@ Phase 6 opens: **a document starts carrying the things people put on it.**
 
 ### Fixed
 
+- **The release stack pins its infrastructure, not only its language runtimes**
+  (**D-62**). `minio/minio`, `minio/mc`, `clamav/clamav` and `axllent/mailpit`
+  were `:latest` in the development compose, in **the staging compose a release
+  is deployed from**, and in two places in `ci.yml`, while PostgreSQL, Rust and
+  Node had carried versions since Sprint 0. Two deployments of one Kelir tag
+  could run different object storage and a different scanner.
+
+  Each is now pinned to **what `latest` resolved to on 2026-09-03**, checked by
+  digest first, so this froze the stack rather than moving it:
+  `minio/minio:RELEASE.2025-09-07T16-13-09Z`,
+  `minio/mc:RELEASE.2025-08-13T08-35-41Z`, `clamav/clamav:1.5`,
+  `axllent/mailpit:v1.31`. MinIO and `mc` publish no version line, so they take
+  a dated release; ClamAV and Mailpit take a patch line, the granularity
+  `postgres:16` already uses.
+
+  **A test holds it, which is the part worth more than the tags.**
+  `deployment_images_are_pinned.rs` fails the build when a floating tag or an
+  untagged `image:` appears anywhere in `deploy/` or `.github/workflows/`.
+
+  **And ClamAV's `StreamMaxLength` reasoning now rests on something that does
+  not move.** The compose files deliberately configure it nowhere, because the
+  image's effective default is 100 MiB against a 25 MiB upload limit — while
+  clamd's own sample config documents 25M, at which every maximum-size upload
+  is refused, recorded `FAILED` and permanently undownloadable. That was a
+  decision resting on somebody else's default in an image fetched fresh on
+  every deployment. A version bump now re-checks it.
+
+  Found by the [Sprint 13 independent pass](projects/verifications/13.%20Sprint%2013%20Independent%20Pass.md),
+  finding 3.
+
 - **The audit search no longer withholds every external reference's values from
   everybody** (FR-AUD-004, **D-61**). `audit::domain::readable_by` maps an
   object type to the permission its recorded values need; item 3 wrote its

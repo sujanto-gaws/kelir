@@ -74,8 +74,23 @@ services:
     volumes:
       - kelir-postgres-data:/var/lib/postgresql/data
 
+  # **Pinned, like the language runtimes are** (**D-62**). PostgreSQL, Rust and
+  # Node have been pinned since Sprint 0; the four infrastructure images this
+  # phase added were `:latest`, in this file and in the one CI deploys — so two
+  # deployments of one Kelir tag could run different object storage and a
+  # different scanner, and a `docker compose pull` could change the product
+  # without changing the repository. Raised by the Sprint 13 independent pass,
+  # finding 3.
+  #
+  # **Every pin below is the image `latest` resolved to on 2026-09-03**, by
+  # digest, so this change froze the stack rather than moving it.
+  #
+  # **Two of the four have no version line.** MinIO and `mc` publish only
+  # `RELEASE.<timestamp>` and `latest`, so they take a dated release and a bump
+  # is a deliberate edit. ClamAV and Mailpit have patch lines — `1.5`, `v1.31` —
+  # which is the granularity `postgres:16` already uses.
   minio:
-    image: minio/minio:latest
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     command: server /data --console-address ":9001"
     environment:
       - MINIO_ROOT_USER=minioadmin
@@ -90,7 +105,7 @@ services:
   # in a bucket somebody else provisioned. MinIO has been in this stack since
   # Sprint 0 with nothing using it; #244 is what puts the first byte in it.
   minio-init:
-    image: minio/mc:latest
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
     depends_on:
       - minio
     entrypoint: sh
@@ -117,13 +132,21 @@ services:
   # at that value every maximum-size upload is refused by the scanner, recorded
   # FAILED and permanently undownloadable. This image's effective default is
   # 100 MiB, which is why nothing is set here.
+  #
+  # **That reasoning rests on a pinned image now, and it did not before**
+  # (**D-62**). It is a decision to configure nothing, resting on somebody
+  # else's default, in an image that was fetched fresh on every deployment — so
+  # a ClamAV release shipping the 25M its own sample config documents would have
+  # made every maximum-size upload permanently undownloadable, in a stack whose
+  # compose file explains exactly why. **A version bump here re-checks the
+  # default**; that is the one thing this pin buys that a pin usually does not.
   clamav:
-    image: clamav/clamav:latest
+    image: clamav/clamav:1.5
     ports:
       - "${KELIR_CLAMAV_PORT:-3310}:3310"
 
   mailpit:
-    image: axllent/mailpit:latest
+    image: axllent/mailpit:v1.31
     ports:
       - "${KELIR_SMTP_PORT:-1025}:1025"
       - "${KELIR_MAILPIT_UI_PORT:-8025}:8025"
