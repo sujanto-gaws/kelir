@@ -314,6 +314,172 @@ async fn the_registry_invoice_calculation_is_accepted() {
     assert_eq!(created["status"], "DRAFT");
 }
 
+/// **AC1, at the endpoint.** A rule name no registry declares is refused where
+/// the definition is *written*, and the refusal names the rule ([#338]).
+///
+/// It was already refused — S8.1.1 has never let an unknown rule pass — but at
+/// submit, against the person filling the form in, who cannot fix a definition.
+/// By then the form had been published and used.
+///
+/// [#338]: https://github.com/sujanto-gaws/kelir/issues/338
+#[tokio::test]
+async fn a_rule_name_no_registry_declares_is_refused_at_save() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let mut document = definition("unregistered-rule");
+    document["components"][0]["rules"] = json!([{
+        "rule": "looksNice", "scope": "both", "message": "This does not look nice."
+    }]);
+
+    let response = app
+        .send(
+            Method::POST,
+            "/api/v1/rad/forms",
+            Some(&token),
+            Some(json!({
+                "formKey": "unregistered-rule",
+                "title": "Unregistered rule",
+                "definition": document,
+            })),
+        )
+        .await;
+
+    assert_eq!(response.status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let detail = response.body["error"]["details"]
+        .as_array()
+        .expect("details")
+        .iter()
+        .find(|detail| detail["code"] == "RULE_NOT_REGISTERED")
+        .cloned()
+        .unwrap_or_else(|| panic!("body {}", response.body));
+
+    assert!(
+        detail["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("looksNice")),
+        "the refusal must name the rule; got {detail}"
+    );
+}
+
+/// **AC3, at the endpoint.** Two fields that calculate from each other are a
+/// definition JFSS S12.2 calls invalid, and it is refused where it is written.
+#[tokio::test]
+async fn a_cyclic_definition_is_refused_at_save_and_names_both_fields() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let mut document = definition("cyclic");
+    document["components"] = json!([
+        {"id": "a", "role": "data", "type": "number", "key": "a", "label": "A",
+         "validation": {"type": "number"}, "calculate": {"+": [{"var": "b"}, 1]}},
+        {"id": "b", "role": "data", "type": "number", "key": "b", "label": "B",
+         "validation": {"type": "number"}, "calculate": {"+": [{"var": "a"}, 1]}}
+    ]);
+
+    let response = app
+        .send(
+            Method::POST,
+            "/api/v1/rad/forms",
+            Some(&token),
+            Some(json!({
+                "formKey": "cyclic",
+                "title": "Cyclic",
+                "definition": document,
+            })),
+        )
+        .await;
+
+    assert_eq!(response.status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let detail = response.body["error"]["details"]
+        .as_array()
+        .expect("details")
+        .iter()
+        .find(|detail| detail["code"] == "CALCULATION_CYCLE")
+        .cloned()
+        .unwrap_or_else(|| panic!("body {}", response.body));
+    let message = detail["message"].as_str().unwrap_or_default();
+
+    assert!(message.contains("`a`"), "{message}");
+    assert!(message.contains("`b`"), "{message}");
+}
+
+/// **AC3's other half: the publish itself refuses**, not only the write that
+/// preceded it.
+///
+/// The draft is written through the repository rather than the API, because the
+/// API now refuses it — which is exactly the state this guards. A definition
+/// stored before a check existed keeps what it was stored with, and publishing
+/// is the one-way door: after it, documents pin the revision and the definition
+/// can never be corrected in place. So the **stored** definition is what is
+/// checked, at the moment it goes live.
+#[tokio::test]
+async fn publishing_a_definition_the_engine_refuses_is_refused() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let created = create_form(&app, &token, "cyclic-draft", definition("cyclic-draft")).await;
+    let id = id_of(&created);
+
+    let mut cyclic = definition("cyclic-draft");
+    cyclic["components"] = json!([
+        {"id": "a", "role": "data", "type": "number", "key": "a", "label": "A",
+         "validation": {"type": "number"}, "calculate": {"+": [{"var": "b"}, 1]}},
+        {"id": "b", "role": "data", "type": "number", "key": "b", "label": "B",
+         "validation": {"type": "number"}, "calculate": {"+": [{"var": "a"}, 1]}}
+    ]);
+
+    assert_eq!(
+        form_repo::update_draft(
+            &app.pool,
+            fixtures::SYSTEM_TENANT_ID,
+            id,
+            &form_repo::FormFields {
+                title: None,
+                definition_json: Some(&cyclic),
+                entity_id: None,
+            },
+            None,
+        )
+        .await
+        .expect("the draft is rewritten behind the API"),
+        1
+    );
+
+    let response = app
+        .send(
+            Method::POST,
+            &format!("/api/v1/rad/forms/{id}/publish"),
+            Some(&token),
+            None,
+        )
+        .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a cyclic definition must not go live; body {}",
+        response.body
+    );
+
+    let read = app
+        .send(
+            Method::GET,
+            &format!("/api/v1/rad/forms/{id}"),
+            Some(&token),
+            None,
+        )
+        .await;
+
+    assert_eq!(
+        read.body["data"]["status"], "DRAFT",
+        "the refused publish must leave the revision a draft; body {}",
+        read.body
+    );
+}
+
 /// A published revision is immutable, and **two layers hold that**.
 ///
 /// The service reads the row and refuses a published one; the `UPDATE`

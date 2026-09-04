@@ -1,5 +1,6 @@
 //! RAD metadata domain types (FR-RAD-002, FR-RAD-003).
 
+pub mod engine;
 pub mod form;
 pub mod jfss;
 pub mod list;

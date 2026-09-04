@@ -541,6 +541,15 @@ export function createFormEvaluation(
   // calculations themselves make. It terminates because `write` assigns only a
   // changed value: a second pass over a settled payload assigns nothing and
   // wakes nothing. This is §5.2's "all derived fields, in definition order".
+  //
+  // **The server orders by the dependency graph since Sprint 14** (#338,
+  // `rad::domain::engine`) and this still does not, which is a difference in
+  // *how many passes* rather than in the answer: both sides converge on the
+  // same payload for any acyclic definition, and a cyclic one can no longer be
+  // published. What the graph would buy here is recomputing only the fields
+  // downstream of a change instead of all of them — JFSS §9.1's advice, and a
+  // cost that shows on a form containing a datagrid rather than a correctness
+  // problem.
   watch(
     [definition, () => values, engine],
     () => applyCalculations(definition.value.components, values),
@@ -554,10 +563,12 @@ export function createFormEvaluation(
    * JFSS §7: what a `conditional` decides about one component.
    *
    * **A conditional that cannot be evaluated leaves the component alone** —
-   * rendered and editable — for §5.6's reason applied to visibility. Before the
-   * engine arrives, and on a payload whose arithmetic has not settled, the
-   * alternatives are a form that hides fields it will show a moment later and
-   * one that disables an input because a division has not been filled in yet.
+   * rendered and editable — for §5.6's reason applied to visibility. On a
+   * payload whose arithmetic has not settled the alternatives are a form that
+   * hides fields it will show a moment later and one that disables an input
+   * because a division has not been filled in yet. The server has no next
+   * moment and refuses instead, which is the stated divergence in
+   * `rad::service::evaluation`.
    */
   function conditionalHolds(component: JfssComponent, scope: Record<string, unknown>): boolean {
     return evaluate(component.conditional?.logic, scope) === true

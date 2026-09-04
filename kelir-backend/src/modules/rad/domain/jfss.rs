@@ -8,21 +8,24 @@
 //! — so a definition that does not validate is not a JFSS document and is
 //! refused rather than stored.
 //!
-//! **Operators**, against the [Calculation Rule
-//! Registry](../../../../../docs/schema/JFSS%20Calculation%20Rule%20Registry.md).
-//! The meta-schema deliberately does not do this: its `jsonLogic` definition
-//! says "deep operator/arity validation is deferred to the runtime libraries
-//! and the Calculation Rule Registry" and accepts any single-key object. So a
-//! definition that passes the meta-schema can still carry an operator no
-//! registry approves, and **that is the hole this check closes.**
+//! **The rules**, against both companion registries and against each other —
+//! [`super::engine`], which owns the walk this file used to carry. The
+//! meta-schema deliberately checks neither: its `jsonLogic` definition says
+//! "deep operator/arity validation is deferred to the runtime libraries and the
+//! Calculation Rule Registry" and accepts any single-key object, and it has
+//! nothing at all to say about a `rules[].rule` name or a pair of fields that
+//! compute from each other. So a definition that passes the meta-schema can
+//! still carry an operator no registry approves, a rule nobody defines, or a
+//! cycle JFSS S12.2 makes invalid, and **that is the hole the engine closes.**
 //!
-//! It matters more since decision **D-10** than it did before. The adopted
-//! engine ships a far wider operator surface than the registry approves —
-//! `datetime`, `ext-string`, `ext-array`, `ext-math`, `flagd` — and every one
-//! of them would evaluate happily on both sides. Parity is not the same as
-//! governance: two runtimes agreeing on an operator nobody approved is two
-//! runtimes agreeing on something the registry says is FORBIDDEN. The registry
-//! is the allow-list; this is where it is enforced.
+//! The operator half matters more since decision **D-10** than it did before.
+//! The adopted engine ships a far wider operator surface than the registry
+//! approves — `datetime`, `ext-string`, `ext-array`, `ext-math`, `flagd` — and
+//! every one of them would evaluate happily on both sides. Parity is not the
+//! same as governance: two runtimes agreeing on an operator nobody approved is
+//! two runtimes agreeing on something the registry says is FORBIDDEN. The
+//! registry is the allow-list; [`super::engine`] is where it is enforced, and
+//! [`check_operators`] below is the expression walker it enforces it with.
 //!
 //! **Lookup bindings**, against the source allow-list of
 //! [`super::lookup::LookupSource`] (FR-RAD-007, [#161]). A lookup field is the
@@ -63,7 +66,7 @@ const META_SCHEMA: &str = include_str!("../jfss-meta-v2.0.1.json");
 ///
 /// §2.2's `sum` is here because Kelir registers it as a custom operator in both
 /// environments, which is what the registry requires of it.
-const CALCULATE_OPERATORS: &[&str] = &[
+pub(crate) const CALCULATE_OPERATORS: &[&str] = &[
     "var", "+", "-", "*", "/", "%", "min", "max", "map", "filter", "reduce", "all", "some", "none",
     "sum",
 ];
@@ -139,10 +142,10 @@ fn validator() -> &'static jsonschema::Validator {
 pub fn validate_definition(definition: &Value) -> Vec<ValidationDetail> {
     let mut details = shape_errors(definition);
 
-    // Operators and lookups are checked even when the shape is wrong. The three
-    // checks read different parts of the document, and a caller who has more
-    // than one problem should be told about all of them.
-    details.extend(operator_errors(definition));
+    // The engine and the lookups are checked even when the shape is wrong. The
+    // three checks read different parts of the document, and a caller who has
+    // more than one problem should be told about all of them.
+    details.extend(super::engine::definition_errors(definition));
     details.extend(lookup_errors(definition));
     details
 }
@@ -169,53 +172,6 @@ fn shape_errors(definition: &Value) -> Vec<ValidationDetail> {
         .collect()
 }
 
-/// Operators used outside the approved sets.
-fn operator_errors(definition: &Value) -> Vec<ValidationDetail> {
-    let mut details = Vec::new();
-
-    walk_components(definition, "definition.components", &mut details);
-    details
-}
-
-/// Walks the component tree, checking every `calculate` and `conditional`.
-///
-/// Written as a walk of the *document* rather than a search for the two keys,
-/// because a search would also find a `calculate` inside `settings` or inside
-/// some future property that is not a rule at all, and refuse a document for
-/// carrying a word.
-fn walk_components(node: &Value, path: &str, details: &mut Vec<ValidationDetail>) {
-    let Some(components) = node.get("components").and_then(Value::as_array) else {
-        return;
-    };
-
-    for (index, component) in components.iter().enumerate() {
-        let here = format!("{path}.{index}");
-
-        if let Some(calculate) = component.get("calculate") {
-            check_operators(
-                calculate,
-                CALCULATE_OPERATORS,
-                &format!("{here}.calculate"),
-                details,
-            );
-        }
-
-        if let Some(logic) = component.get("conditional").and_then(|c| c.get("logic")) {
-            check_operators(
-                logic,
-                CONDITIONAL_OPERATORS,
-                &format!("{here}.conditional.logic"),
-                details,
-            );
-        }
-
-        // A nested calculate is as much a stored operator as a top-level one.
-        for (child, child_path) in child_containers(component, &here) {
-            walk_components(child, &child_path, details);
-        }
-    }
-}
-
 /// Every node under `component` whose `components` array holds children, with
 /// the path each of them is at.
 ///
@@ -223,10 +179,12 @@ fn walk_components(node: &Value, path: &str, details: &mut Vec<ValidationDetail>
 /// under `components` on a single-slot container, and under `columns` / `tabs`
 /// as slot objects that each carry their own `components`. §4.3.1 requires a
 /// conformant implementation to traverse all three *wherever* it walks the tree,
-/// and this file now walks it twice — once for operators and once for lookups.
-/// Two traversals that have to agree about the shapes are two places to forget
-/// one, which is the failure §4.3.1 describes: traversing only `components`
-/// silently ignores every child nested inside a `columns` or `tabs` container.
+/// and the tree is walked in three places — the lookup check below, the rule
+/// engine's catalogue, and the re-evaluation on every write. Traversals that
+/// have to agree about the shapes are places to forget one, which is the
+/// failure §4.3.1 describes: traversing only `components` silently ignores
+/// every child nested inside a `columns` or `tabs` container. So the shapes are
+/// named here, in [`container_children_at`], and nowhere else.
 ///
 /// A `data` component's `components` is a row template rather than a set of
 /// siblings, and it is descended into all the same: a lookup declared inside a
@@ -271,21 +229,51 @@ pub(crate) fn role_of(component: &Value) -> Option<&str> {
 /// `childComponents` in `types/jfss.ts` draws the same line for the same
 /// reason, and the two walks have to agree or a rule means one thing per side.
 pub(crate) fn container_children(component: &Value) -> Vec<&Value> {
+    container_children_at(component, "")
+        .into_iter()
+        .map(|(child, _)| child)
+        .collect()
+}
+
+/// The same, with the definition path each child sits at.
+///
+/// **The path-carrying half, and the only one that knows the shapes.**
+/// [`container_children`] is written in terms of it rather than beside it,
+/// because a definition of *child* that exists twice is the §4.3.1 failure
+/// stated one file down: a walk that knows only `components` silently ignores
+/// everything nested in a `columns` or `tabs` container, and a walk that
+/// learned the shapes separately is a walk that can forget one of them on its
+/// own schedule. The rule engine needs the paths — a refusal at publish names
+/// where in the document the problem is — and the re-evaluation on every write
+/// does not.
+pub(crate) fn container_children_at<'a>(
+    component: &'a Value,
+    here: &str,
+) -> Vec<(&'a Value, String)> {
     if role_of(component) != Some("layout") {
         return Vec::new();
     }
 
     if let Some(children) = component.get("components").and_then(Value::as_array) {
-        return children.iter().collect();
+        return children
+            .iter()
+            .enumerate()
+            .map(|(index, child)| (child, format!("{here}.components.{index}")))
+            .collect();
     }
 
     let mut children = Vec::new();
 
     for slot_key in SLOT_KEYS {
         if let Some(slots) = component.get(slot_key).and_then(Value::as_array) {
-            for slot in slots {
+            for (slot_index, slot) in slots.iter().enumerate() {
                 if let Some(inner) = slot.get("components").and_then(Value::as_array) {
-                    children.extend(inner.iter());
+                    for (index, child) in inner.iter().enumerate() {
+                        children.push((
+                            child,
+                            format!("{here}.{slot_key}.{slot_index}.components.{index}"),
+                        ));
+                    }
                 }
             }
         }

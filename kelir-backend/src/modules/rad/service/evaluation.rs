@@ -32,7 +32,9 @@
 //!    line-item table that reads 1, 3, 4 after a deletion is what the property
 //!    exists to prevent, and a client is not the thing that gets to decide it.
 //! 3. **Re-evaluate every `calculate`** by *declared* mode (S4.2.3, S8.1.1),
-//!    to a fixed point.
+//!    in the order [`super::super::domain::engine`]'s dependency graph gives
+//!    (§9.2). One pass, because the order is the data's rather than the
+//!    author's.
 //! 4. **Re-evaluate every `conditional`** against the payload and discard the
 //!    values of the components that resolve to hidden (S10.2).
 //! 5. **Run `validation` and the `rules`** scoped `server` or `both`
@@ -55,6 +57,7 @@
 
 use serde_json::{Map, Value};
 
+use super::super::domain::engine;
 use super::super::domain::jfss::{container_children, data_key, role_of, row_template};
 use super::super::domain::validation::validate_field;
 use super::super::evaluator::{normalize_numeric, RuleEvaluator};
@@ -131,9 +134,13 @@ impl Strictness {
             // nothing the user typed is thrown away by a rule that could not be
             // decided.
             EVALUATION_FAILED => true,
-            // `RULE_NOT_REGISTERED` is deliberately absent. A rule name nobody
-            // defines is a defect in the *definition*, and no amount of
-            // finishing the document makes it go away (JFSS S8.1.1).
+            // `RULE_NOT_REGISTERED` and `CALCULATION_CYCLE` are deliberately
+            // absent. A rule name nobody defines and a pair of fields that
+            // compute from each other are defects in the *definition*, and no
+            // amount of finishing the document makes either go away (JFSS
+            // S8.1.1, S12.2). Both are refused at publish since [#338], so a
+            // draft that meets one is being written against a form that should
+            // never have gone live.
             _ => false,
         }
     }
@@ -212,7 +219,7 @@ fn secure(
     pass.apply_sequence(&components, &mut payload);
 
     // 3.
-    let calculation_failures = pass.calculate_to_fixed_point(&components, &mut payload);
+    let calculation_failures = pass.calculate(&components, &mut payload);
     pass.failures.extend(calculation_failures);
 
     // 4. Visibility is decided once, against the payload as it stands after the
@@ -417,188 +424,199 @@ impl Evaluation<'_> {
 
     // -- 3. Calculation ---------------------------------------------------
 
-    /// Every `calculate` the definition carries, run until the payload settles.
+    /// Every `calculate` the definition carries, in dependency order.
     ///
-    /// **A fixed point rather than a topological order, and the difference is
-    /// the graph decision D-2 reserves.** §9.2 asks for topological order so
-    /// that a chain (`c` depends on `b` depends on `a`) converges in one pass;
-    /// building the graph is the rule engine's, in Sprints 14–16, and half a
-    /// graph here would be exactly the erosion the construction plan §1 names.
-    /// Repeating a definition-order pass until nothing moves reaches the same
-    /// answer for any acyclic definition, and it is what the browser does — its
-    /// calculation watcher re-runs on every value change, including the changes
-    /// the calculations themselves make.
+    /// **The dependency graph JFSS §9.2 asks for, arrived at in Sprint 14**
+    /// ([#338], FR-RAD-006). Until this issue the order was the *definition's*
+    /// — the author's typing order, not the data's — repeated until the payload
+    /// stopped moving, which reached the same answer for any acyclic definition
+    /// by evaluating the whole scope up to `n + 1` times. Two things are better
+    /// now, and one of them is not an optimisation:
     ///
-    /// **The bound is what makes a cyclic definition a refusal rather than a
-    /// hang.** A chain of `n` calculated fields declared in the worst possible
-    /// order settles after `n` passes and the `n + 1`-th confirms it, so a
-    /// definition that has still not settled by then has a cycle — which S12.2
-    /// makes invalid and which nothing rejects at save yet, because the
-    /// detector is the same graph D-2 reserved. Refusing beats persisting a
-    /// half-converged payload.
-    fn calculate_to_fixed_point(
+    /// - **One pass.** A chain of `n` calculated fields declared backwards cost
+    ///   `n + 1` passes over every expression in the scope; it now costs one.
+    /// - **A cycle is a property of the definition rather than a loop that
+    ///   failed to settle.** The old bound could only report *these did not
+    ///   converge*, against the definition as a whole and without naming a
+    ///   field. [`engine`] names every field on the loop — and, the part that
+    ///   matters, the same graph refuses the definition at publish, so this arm
+    ///   is reached only by a form published before that gate existed.
+    ///
+    /// [#338]: https://github.com/sujanto-gaws/kelir/issues/338
+    fn calculate(
         &mut self,
         components: &[&Value],
         payload: &mut Map<String, Value>,
     ) -> Vec<ValidationDetail> {
-        let bound = count_calculated(components) + 1;
+        let mut failures = Vec::new();
 
-        for _ in 0..bound {
-            let mut failures = Vec::new();
-            let mut changed = false;
-
-            self.calculate_pass(components, payload, "", &mut failures, &mut changed);
-
-            if !changed {
-                return failures;
-            }
-        }
-
-        vec![ValidationDetail::new(
-            "definition",
-            "cycle",
-            "CALCULATION_DID_NOT_SETTLE",
-            format!(
-                "the `calculate` expressions did not reach a stable answer in {bound} passes, \
-                 which means they depend on one another in a cycle — JFSS S12.2 makes such a \
-                 definition invalid"
-            ),
-        )]
+        self.calculate_scope(components, payload, "", &mut failures);
+        failures
     }
 
-    /// One definition-order pass over a scope, and the rows beneath it.
+    /// One scope, evaluated in the order its own graph gives.
     ///
-    /// The scope is cloned before each evaluation rather than once per pass, so
-    /// a field written earlier in the pass is visible to the next expression —
-    /// which is what lets a chain declared in order settle in a single pass, and
-    /// is exactly what the browser's in-place mutation gives it for free. The
-    /// cost is one clone of the scope per calculated field; a definition is
-    /// capped at a megabyte and the largest example in the JFSS documents is
-    /// under 8 KB.
-    fn calculate_pass(
+    /// The scope is cloned before each evaluation rather than once for the
+    /// scope, so a field computed earlier is visible to the expressions that
+    /// depend on it — which is the whole point of having ordered them. The cost
+    /// is one clone of the scope per calculated field; a definition is capped
+    /// at a megabyte and the largest example in the JFSS documents is under
+    /// 8 KB.
+    fn calculate_scope(
         &mut self,
         components: &[&Value],
         scope: &mut Map<String, Value>,
         scope_path: &str,
         failures: &mut Vec<ValidationDetail>,
-        changed: &mut bool,
     ) {
-        for component in components {
-            if role_of(component) == Some("layout") {
-                self.calculate_pass(
-                    &container_children(component),
-                    scope,
-                    scope_path,
-                    failures,
-                    changed,
-                );
-                continue;
-            }
+        let order = match engine::evaluation_order(components) {
+            Ok(order) => order,
+            Err(cycle) => {
+                // **Refused rather than half-evaluated.** There is no order in
+                // which these expressions can run, so every answer this scope
+                // could produce is one of several — and persisting whichever
+                // one an arbitrary order happened to give is what S12.2 calls
+                // invalid. The definition gate is where this is meant to be
+                // caught; reaching it here means the form was published before
+                // that gate existed, and the submission is refused with the
+                // fields named rather than with a 500.
+                failures.push(ValidationDetail::new(
+                    if scope_path.is_empty() {
+                        "definition".to_owned()
+                    } else {
+                        scope_path.to_owned()
+                    },
+                    "cycle",
+                    engine::CALCULATION_CYCLE,
+                    format!(
+                        "these fields compute from one another in a loop — {} — so there is \
+                         no order in which they can be evaluated; JFSS S12.2 makes such a \
+                         definition invalid, and it is the form that has to be corrected \
+                         rather than this document",
+                        cycle.describe()
+                    ),
+                ));
 
+                return;
+            }
+        };
+
+        for component in order {
             let Some(key) = data_key(component) else {
+                // The catalogue yields keyed `data` components and nothing
+                // else, so this is unreachable; skipping beats an `expect` on a
+                // path that runs on every write.
                 continue;
             };
 
             if let Some(expression) = component.get("calculate") {
-                // S4.2.3, branched on the **declared** mode and never on
-                // whether the operators look deterministic — S8.1.1 forbids
-                // inferring it, because that would require every language to
-                // maintain an identical operator classification and the
-                // Calculation Rule Registry does not carry one. A missing mode
-                // is `derived`, which the specification states rather than
-                // leaves to an implementation's default.
-                let derived =
-                    component.get("calculateMode").and_then(Value::as_str) != Some("generated");
-                let unresolved = scope.get(key).is_none_or(Value::is_null);
-
-                // Case C's guard comes before the evaluation rather than after
-                // it: a resolved generated value is never recomputed, and
-                // evaluating one only to throw the answer away would make
-                // "exactly once" a statement about the write rather than about
-                // the evaluation.
-                if derived || unresolved {
-                    let path = join_path(scope_path, key);
-                    let data = Value::Object(scope.clone());
-
-                    let computed = match self.evaluator.evaluate(expression, &data) {
-                        Ok(value) => Some(value),
-                        Err(error) => {
-                            // **This is where a division by zero lands**
-                            // (decision **D-24**). The browser renders the
-                            // field blank and does not block typing, because on
-                            // a zero-filled payload an average fails before the
-                            // first keystroke; the submission is where the same
-                            // failure is refused, with the field named.
-                            //
-                            // The engine's own words are logged and not
-                            // returned: they name operators and argument
-                            // shapes, which is a description of the definition
-                            // rather than of what anybody typed.
-                            tracing::info!(
-                                field = %path,
-                                error = %error.message(),
-                                "a calculate expression produced no value",
-                            );
-
-                            failures.push(ValidationDetail::new(
-                                path,
-                                "calculate",
-                                EVALUATION_FAILED,
-                                "this field is computed from the others and its expression \
-                                 produced no value — a division by zero does not produce one \
-                                 (Calculation Rule Registry §3.1)",
-                            ));
-
-                            None
-                        }
-                    };
-
-                    let next = if derived {
-                        computed
-                            .map(|value| coerce(component, value))
-                            .unwrap_or(Value::Null)
-                    } else {
-                        // Case C's priority 2 then 3. `null` is "the operator
-                        // yielded null", which the table answers with
-                        // `defaultValue` — so the check is before the numeric
-                        // wrapper rather than after it, where §7.3 would
-                        // already have turned the null into a 0 nobody asked
-                        // for.
-                        match computed {
-                            Some(Value::Null) | None => component
-                                .get("defaultValue")
-                                .cloned()
-                                .unwrap_or(Value::Null),
-                            Some(value) => coerce(component, value),
-                        }
-                    };
-
-                    if scope.get(key) != Some(&next) {
-                        scope.insert(key.to_owned(), next);
-                        *changed = true;
-                    }
-                }
+                self.calculate_field(component, key, expression, scope, scope_path, failures);
             }
 
             // A repeater: the same walk over the template, once per row,
             // against that row — because a template's `key`s address properties
-            // of the row (§4.3.1) and an expression written in one means its own
-            // row's siblings.
+            // of the row (§4.3.1) and an expression written in one means its
+            // own row's siblings. It runs at the repeater's own position in the
+            // order, which is what puts a grand total after the rows it sums.
             let Some(template) = row_template(component) else {
                 continue;
             };
             let Some(Value::Array(rows)) = scope.get_mut(key) else {
                 continue;
             };
+            let rows: Vec<&mut Value> = rows.iter_mut().collect();
 
-            for (index, row) in rows.iter_mut().enumerate() {
+            for (index, row) in rows.into_iter().enumerate() {
                 let row_path = join_path(scope_path, &format!("{key}.{index}"));
 
                 if let Some(row) = row.as_object_mut() {
-                    self.calculate_pass(&refs(template), row, &row_path, failures, changed);
+                    self.calculate_scope(&refs(template), row, &row_path, failures);
                 }
             }
         }
+    }
+
+    /// One `calculate` expression, evaluated and written over whatever the
+    /// client sent (S8.1).
+    fn calculate_field(
+        &mut self,
+        component: &Value,
+        key: &str,
+        expression: &Value,
+        scope: &mut Map<String, Value>,
+        scope_path: &str,
+        failures: &mut Vec<ValidationDetail>,
+    ) {
+        // S4.2.3, branched on the **declared** mode and never on whether the
+        // operators look deterministic — S8.1.1 forbids inferring it, because
+        // that would require every language to maintain an identical operator
+        // classification and the Calculation Rule Registry does not carry one.
+        // A missing mode is `derived`, which the specification states rather
+        // than leaves to an implementation's default.
+        let derived = component.get("calculateMode").and_then(Value::as_str) != Some("generated");
+        let unresolved = scope.get(key).is_none_or(Value::is_null);
+
+        // Case C's guard comes before the evaluation rather than after it: a
+        // resolved generated value is never recomputed, and evaluating one only
+        // to throw the answer away would make "exactly once" a statement about
+        // the write rather than about the evaluation.
+        if !derived && !unresolved {
+            return;
+        }
+
+        let path = join_path(scope_path, key);
+        let data = Value::Object(scope.clone());
+
+        let computed = match self.evaluator.evaluate(expression, &data) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                // **This is where a division by zero lands** (decision
+                // **D-24**). The browser renders the field blank and does not
+                // block typing, because on a zero-filled payload an average
+                // fails before the first keystroke; the submission is where the
+                // same failure is refused, with the field named.
+                //
+                // The engine's own words are logged and not returned: they name
+                // operators and argument shapes, which is a description of the
+                // definition rather than of what anybody typed.
+                tracing::info!(
+                    field = %path,
+                    error = %error.message(),
+                    "a calculate expression produced no value",
+                );
+
+                failures.push(ValidationDetail::new(
+                    path,
+                    "calculate",
+                    EVALUATION_FAILED,
+                    "this field is computed from the others and its expression produced no \
+                     value — a division by zero does not produce one (Calculation Rule \
+                     Registry §3.1)",
+                ));
+
+                None
+            }
+        };
+
+        let next = if derived {
+            computed
+                .map(|value| coerce(component, value))
+                .unwrap_or(Value::Null)
+        } else {
+            // Case C's priority 2 then 3. `null` is "the operator yielded
+            // null", which the table answers with `defaultValue` — so the check
+            // is before the numeric wrapper rather than after it, where §7.3
+            // would already have turned the null into a 0 nobody asked for.
+            match computed {
+                Some(Value::Null) | None => component
+                    .get("defaultValue")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                Some(value) => coerce(component, value),
+            }
+        };
+
+        scope.insert(key.to_owned(), next);
     }
 
     // -- 4. Conditionals --------------------------------------------------
@@ -808,28 +826,6 @@ fn coerce(component: &Value, result: Value) -> Value {
     } else {
         result
     }
-}
-
-/// How many `calculate` expressions the definition carries, rows aside.
-///
-/// The bound on the fixed-point loop. A repeater's template is counted once
-/// rather than once per row, which is correct for the loop's purpose: rows do
-/// not depend on one another, so adding rows adds width and not depth.
-fn count_calculated(components: &[&Value]) -> usize {
-    components
-        .iter()
-        .map(|component| {
-            let here = usize::from(
-                role_of(component) == Some("data") && component.get("calculate").is_some(),
-            );
-            let children = count_calculated(&container_children(component));
-            let rows = row_template(component)
-                .map(|template| count_calculated(&refs(template)))
-                .unwrap_or(0);
-
-            here + children + rows
-        })
-        .sum()
 }
 
 /// An owned component array as a slice of references.
@@ -1212,9 +1208,17 @@ mod tests {
         assert_eq!(payload["c"], json!(3.0));
     }
 
-    /// S12.2 makes a cyclic definition invalid and nothing rejects one at save
-    /// yet — the detector is the same graph **D-2** reserved. Refusing beats
-    /// persisting a half-converged payload, and beats not terminating.
+    /// S12.2 makes a cyclic definition invalid, and since [#338] one is refused
+    /// at publish — so this is the *second* line: a form published before that
+    /// gate existed, refused here with both fields named rather than answered
+    /// with a half-converged payload or a 500.
+    ///
+    /// **It used to be the only line, and it named no field.**
+    /// `CALCULATION_DID_NOT_SETTLE` reported that `n + 1` passes had not
+    /// converged, against `definition` as a whole, which told the reader that
+    /// something somewhere was circular.
+    ///
+    /// [#338]: https://github.com/sujanto-gaws/kelir/issues/338
     #[test]
     fn a_cyclic_definition_is_refused_rather_than_looping() {
         let definition = json!({
@@ -1228,13 +1232,94 @@ mod tests {
         });
 
         let details = refusal(&definition, &json!({}));
+        let cycle = details
+            .iter()
+            .find(|detail| detail.code == "CALCULATION_CYCLE")
+            .unwrap_or_else(|| panic!("got {details:?}"));
 
-        assert!(
-            details
-                .iter()
-                .any(|detail| detail.code == "CALCULATION_DID_NOT_SETTLE"),
-            "got {details:?}"
-        );
+        assert!(cycle.message.contains("`a`"), "{}", cycle.message);
+        assert!(cycle.message.contains("`b`"), "{}", cycle.message);
+    }
+
+    /// **AC2 at the submission**, and the property the fixed-point loop could
+    /// only reach by running the scope four times.
+    ///
+    /// The definition declares `grand_total`, then the rows it sums, and the
+    /// per-row `line_total` after the columns it multiplies — the reverse of
+    /// the dependency order in both scopes at once. The totals are the ones the
+    /// registry §6.1 invoice is worth.
+    ///
+    /// The mutation that must make it red is replacing
+    /// `engine::evaluation_order`'s body with `Ok(components.to_vec())`.
+    #[test]
+    fn a_definition_declared_in_reverse_dependency_order_still_totals() {
+        let definition = json!({
+            "formId": "backwards", "version": "2.0.1",
+            "components": [
+                {"id": "total", "role": "data", "type": "number", "key": "grand_total",
+                 "label": "Grand total", "validation": {"type": "number"},
+                 "calculate": {"sum": [{"map": [
+                     {"var": "line_items"}, {"var": "line_total"}
+                 ]}]}},
+                {"id": "lines", "role": "data", "type": "datagrid", "key": "line_items",
+                 "label": "Lines", "validation": {"type": "array"},
+                 "components": [
+                     {"id": "lt", "role": "data", "type": "number", "key": "line_total",
+                      "label": "Line total", "validation": {"type": "number"},
+                      "calculate": {"*": [{"var": "unit_price"}, {"var": "quantity"}]}},
+                     {"id": "q", "role": "data", "type": "number", "key": "quantity",
+                      "label": "Quantity", "validation": {"type": "integer"}},
+                     {"id": "p", "role": "data", "type": "number", "key": "unit_price",
+                      "label": "Unit price", "validation": {"type": "number"}}
+                 ]}
+            ]
+        });
+
+        let payload = secure(&definition, &two_lines_worth_42());
+
+        assert_eq!(payload["line_items"][0]["line_total"], json!(20.0));
+        assert_eq!(payload["line_items"][1]["line_total"], json!(22.0));
+        assert_eq!(payload["grand_total"], json!(42.0));
+    }
+
+    /// **AC5 through the engine rather than around it.** The same tamper as
+    /// [`a_tampered_total_is_replaced_by_the_one_the_rules_produce`], on a
+    /// definition whose order only the graph can resolve: the grand total is
+    /// declared before the rows, and it sums the rows' own computed
+    /// `line_total` rather than recomputing the product. Definition order gives
+    /// the client's zeros; dependency order gives 42.
+    #[test]
+    fn a_tampered_total_is_the_engines_even_when_the_order_is_the_graphs() {
+        let definition = json!({
+            "formId": "backwards", "version": "2.0.1",
+            "components": [
+                {"id": "total", "role": "data", "type": "number", "key": "grand_total",
+                 "label": "Grand total", "validation": {"type": "number"},
+                 "calculate": {"sum": [{"map": [
+                     {"var": "line_items"}, {"var": "line_total"}
+                 ]}]}},
+                {"id": "lines", "role": "data", "type": "datagrid", "key": "line_items",
+                 "label": "Lines", "validation": {"type": "array"},
+                 "components": [
+                     {"id": "lt", "role": "data", "type": "number", "key": "line_total",
+                      "label": "Line total", "validation": {"type": "number"},
+                      "calculate": {"*": [{"var": "unit_price"}, {"var": "quantity"}]}},
+                     {"id": "q", "role": "data", "type": "number", "key": "quantity",
+                      "label": "Quantity", "validation": {"type": "integer"}},
+                     {"id": "p", "role": "data", "type": "number", "key": "unit_price",
+                      "label": "Unit price", "validation": {"type": "number"}}
+                 ]}
+            ]
+        });
+        let mut submitted = two_lines_worth_42();
+
+        submitted["grand_total"] = json!(0);
+        submitted["line_items"][0]["line_total"] = json!(0);
+        submitted["line_items"][1]["line_total"] = json!(0);
+
+        let payload = secure(&definition, &submitted);
+
+        assert_eq!(payload["grand_total"], json!(42.0));
     }
 
     /// **Decision D-24 at the submission** (#164 AC6, construction plan §6.3

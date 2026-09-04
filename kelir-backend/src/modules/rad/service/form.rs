@@ -11,8 +11,8 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use super::super::domain::{
-    validate_create_form, validate_update_form, CreateFormRequest, Form, FormStatus, FormSummary,
-    UpdateFormRequest,
+    jfss, validate_create_form, validate_update_form, CreateFormRequest, Form, FormStatus,
+    FormSummary, UpdateFormRequest,
 };
 use super::super::repository::form::{self as repo, FormFields, NewForm};
 use super::super::{FORM_CREATE, FORM_DELETE, FORM_PUBLISH, FORM_READ, FORM_UPDATE};
@@ -251,6 +251,21 @@ pub async fn publish_form(
             "revision {} of `{}` is {:?} and only a draft can be published",
             before.revision, before.form_key, before.status
         )));
+    }
+
+    // **The definition is re-validated here, against what is stored** ([#338]).
+    // Every write validates too, so on a draft authored by this build this is a
+    // second green light — and the reason it is not redundant is that publishing
+    // is a one-way door. A draft stored before a check existed keeps whatever it
+    // was stored with; the checks the rule engine added in Sprint 14 are exactly
+    // that case, and without this a cyclic definition written last month goes
+    // live and is discovered by the first person to fill it in. **The stored
+    // definition is what goes live, so the stored definition is what is
+    // checked.**
+    let details = jfss::validate_definition(&before.definition);
+
+    if !details.is_empty() {
+        return Err(AppError::validation(details));
     }
 
     if repo::publish(&state.pool, tenant_id, id, actor).await? == 0 {
