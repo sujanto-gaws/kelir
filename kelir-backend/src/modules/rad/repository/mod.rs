@@ -9,6 +9,7 @@
 //!   an update. A read that forgets it puts a retired definition in front of a
 //!   renderer.
 
+pub mod action;
 pub mod form;
 pub mod list;
 pub mod submission;

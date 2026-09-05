@@ -1,6 +1,14 @@
 import { getItem, getPage, postItem } from './client'
 import type { Page } from '@/types/api'
-import type { Form, FormSubmission, LookupOption, LookupQuery } from '@/types/rad'
+import type {
+  Form,
+  FormSubmission,
+  ListRow,
+  LookupOption,
+  LookupQuery,
+  RadAction,
+  RenderableList,
+} from '@/types/rad'
 
 /**
  * The RAD endpoints (`/api/v1/rad/*`).
@@ -68,4 +76,65 @@ export function submitForm(
   payload: Record<string, unknown>,
 ): Promise<FormSubmission> {
   return postItem<FormSubmission>(`/rad/forms/${formId}/submissions`, { payload })
+}
+
+/**
+ * One list, resolved for drawing (FR-RAD-003, FR-RAD-010, #340).
+ *
+ * **By key, not by id**, because a rendered list is reached from a URL somebody
+ * bookmarks and `listKey` is the tenant-unique name a menu and a document type
+ * already use.
+ *
+ * The definition arrives already checked against what can be drawn: a column
+ * naming nothing, a filter the documents query has no parameter for, or a
+ * default sort on an unsortable column is a 422 naming the key rather than a
+ * table that renders blank. This side reads the answer; it does not re-check.
+ */
+export function getRenderableList(listKey: string): Promise<RenderableList> {
+  return getItem<RenderableList>(`/rad/lists/by-key/${encodeURIComponent(listKey)}`)
+}
+
+/**
+ * One page of the rows a list arranges.
+ *
+ * **Filters go by the definition's own `key`.** The server maps each to the
+ * query parameter it sets, so this side never learns that `stage` means
+ * `status` — and a filter the definition does not declare is refused rather
+ * than ignored, which is why nothing here invents one.
+ *
+ * **`pageSize` is dropped rather than forwarded**, and it is dropped here
+ * because `useQueryBackedList` adds one of its own: the definition decides the
+ * page size, the endpoint refuses the parameter by name, and a composable that
+ * paginates every other list in the product should not have to know that. The
+ * server's `meta.pageSize` is what the pager then reads back.
+ */
+export function listRenderedRows(
+  listId: string,
+  query: Record<string, string | number | undefined> = {},
+): Promise<Page<ListRow>> {
+  const params: Record<string, string | number> = {}
+
+  for (const [key, value] of Object.entries(query)) {
+    if (key === 'pageSize') {
+      continue
+    }
+
+    if (value !== undefined && value !== null && value !== '') {
+      params[key] = value as string | number
+    }
+  }
+
+  return getPage<ListRow>(`/rad/lists/${listId}/rows`, params)
+}
+
+/**
+ * The configured actions this caller may invoke in one context (§5.10).
+ *
+ * **Everything returned is already permitted.** The server drops any action
+ * whose `required_permission` the caller does not hold, so there is nothing to
+ * filter and nothing to disable — a disabled button would publish the existence
+ * of an action the permission was set to hide.
+ */
+export function listActions(context: RadAction['context']): Promise<Page<RadAction>> {
+  return getPage<RadAction>('/rad/actions', { context } as Record<string, string>)
 }

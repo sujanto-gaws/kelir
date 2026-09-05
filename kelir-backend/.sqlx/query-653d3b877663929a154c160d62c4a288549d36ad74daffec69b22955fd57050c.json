@@ -1,0 +1,59 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, action_key, label, context, action_type, config_json,\n               required_permission\n        FROM rad_actions\n        WHERE tenant_id = $1\n          AND deleted_at IS NULL\n          AND is_enabled\n          AND context = $2\n        ORDER BY sort_order, action_key\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "action_key",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "label",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "context",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "action_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "config_json",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 6,
+        "name": "required_permission",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "653d3b877663929a154c160d62c4a288549d36ad74daffec69b22955fd57050c"
+}

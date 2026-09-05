@@ -1,0 +1,112 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT d.id, d.document_ref, d.document_number, d.document_type_id,\n               t.type_code AS document_type_code, d.title, d.status, d.priority,\n               d.entity_type, d.entity_id, d.submitted_at, d.created_at, d.updated_at,\n               CASE WHEN $10 THEN d.form_data_json END AS form_data_json\n        FROM documents d\n        JOIN document_types t\n          ON t.id = d.document_type_id AND t.tenant_id = d.tenant_id\n        WHERE d.tenant_id = $1\n          AND d.deleted_at IS NULL\n          AND ($2::uuid IS NULL OR d.document_type_id = $2)\n          AND ($3::text IS NULL OR d.status = $3)\n          AND ($4::text IS NULL OR d.priority = $4)\n          AND ($5::text IS NULL OR d.entity_type = $5)\n          AND ($6::uuid IS NULL OR d.entity_id = $6)\n          AND ($7::text IS NULL\n               OR d.title ILIKE '%' || $7 || '%'\n               OR d.document_ref ILIKE '%' || $7 || '%'\n               OR d.document_number ILIKE '%' || $7 || '%')\n          AND ($13::uuid IS NULL OR t.list_id = $13)\n        ORDER BY\n          CASE WHEN $11 = 'document_ref'       AND NOT $12 THEN d.document_ref END ASC,\n          CASE WHEN $11 = 'document_ref'       AND     $12 THEN d.document_ref END DESC,\n          CASE WHEN $11 = 'document_number'    AND NOT $12 THEN d.document_number END ASC,\n          CASE WHEN $11 = 'document_number'    AND     $12 THEN d.document_number END DESC,\n          CASE WHEN $11 = 'document_type_code' AND NOT $12 THEN t.type_code END ASC,\n          CASE WHEN $11 = 'document_type_code' AND     $12 THEN t.type_code END DESC,\n          CASE WHEN $11 = 'title'              AND NOT $12 THEN d.title END ASC,\n          CASE WHEN $11 = 'title'              AND     $12 THEN d.title END DESC,\n          CASE WHEN $11 = 'status'             AND NOT $12 THEN d.status END ASC,\n          CASE WHEN $11 = 'status'             AND     $12 THEN d.status END DESC,\n          CASE WHEN $11 = 'priority'           AND NOT $12 THEN d.priority END ASC,\n          CASE WHEN $11 = 'priority'           AND     $12 THEN d.priority END DESC,\n          CASE WHEN $11 = 'submitted_at'       AND NOT $12 THEN d.submitted_at END ASC,\n          CASE WHEN $11 = 'submitted_at'       AND     $12 THEN d.submitted_at END DESC,\n          CASE WHEN $11 = 'created_at'         AND NOT $12 THEN d.created_at END ASC,\n          CASE WHEN $11 = 'created_at'         AND     $12 THEN d.created_at END DESC,\n          CASE WHEN $11 = 'updated_at'         AND NOT $12 THEN d.updated_at END ASC,\n          CASE WHEN $11 = 'updated_at'         AND     $12 THEN d.updated_at END DESC,\n          d.id DESC\n        LIMIT $8 OFFSET $9\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "document_ref",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "document_number",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "document_type_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "document_type_code",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "title",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "priority",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "entity_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 9,
+        "name": "entity_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 10,
+        "name": "submitted_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 11,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 12,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 13,
+        "name": "form_data_json",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Uuid",
+        "Text",
+        "Int8",
+        "Int8",
+        "Bool",
+        "Text",
+        "Bool",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "63585708b815123e7f47d316fcdf929675e63d7802e61baef90d9c916ef02321"
+}

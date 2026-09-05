@@ -112,6 +112,27 @@ export const routes: RouteRecordRaw[] = [
         meta: { requiresAuth: true, permission: 'document:read', title: 'Document' },
       },
       {
+        // **A configured list, rendered** (FR-RAD-003, FR-RAD-010; #340). The
+        // definition storage API has existed since Sprint 7 and this is the
+        // first route that reads it: every column, filter and sort on the
+        // screen comes from `rad_lists`, so a new list needs a row and not a
+        // route.
+        //
+        // By `listKey` rather than by id, because §5.6's unique index makes the
+        // key the tenant's own name for a list — the one a menu row and a
+        // document type already use — and a bookmarked URL should survive a
+        // definition being replaced.
+        path: 'lists/:listKey',
+        name: 'rendered-list',
+        component: () => import('@/features/rad/list-renderer/ListRendererPage.vue'),
+        // The permission of the rows behind it, which is what the endpoint
+        // requires (Database Schema §5.13's lookup precedent). Not
+        // `rad:list:read`: that is the *builder's* permission, and gating this
+        // on it would mean only a configuration administrator could open a
+        // screen built for everybody.
+        meta: { requiresAuth: true, permission: 'document:read', title: 'List' },
+      },
+      {
         // What has been sent to the person signed in (FR-NTF-003, #251).
         //
         // **`notification:read` rather than nothing.** The rows are already
