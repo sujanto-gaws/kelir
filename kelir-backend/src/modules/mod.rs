@@ -5,6 +5,7 @@ pub mod auth;
 pub mod comment;
 pub mod document;
 pub mod document_type;
+pub mod hook;
 pub mod identity;
 pub mod integration;
 pub mod master_data;
