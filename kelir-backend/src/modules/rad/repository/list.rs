@@ -117,6 +117,57 @@ pub async fn find_list<'e, E: PgExecutor<'e> + Copy>(
     }))
 }
 
+/// The same, by the key a menu route and a document type name a list by.
+///
+/// **A second read rather than a parameter on the first**, because the two are
+/// addressed differently and mean different things: `id` is a row and
+/// `list_key` is the tenant-unique name §5.6's index enforces. A renderer opens
+/// a list by the name in its URL — `/lists/purchase_requisition_list` — and an
+/// id in a route would make every bookmark a reference to a row somebody could
+/// replace.
+///
+/// # The `tenant_id` here is defence in depth, and a mutation says so
+///
+/// **Removing it from this statement comes back green** (#340's campaign, M14),
+/// and the cause is a gate rather than a missing test — coding standard §2.9's
+/// stated shape. [`find_list`] below re-scopes by tenant, so a key resolved to
+/// another tenant's id yields `None` there and the caller gets a 404 either
+/// way. What the predicate changes is only the case where **two tenants hold
+/// the same key**: without it, the `SELECT` picks one of the two rows in no
+/// defined order, and the answer becomes 200-or-404 by luck.
+///
+/// It stays, and the reason it cannot be held by a test is written down rather
+/// than papered over: an `ORDER BY` added here so a test could predict which
+/// row wins would be production code shaped by a test. **The load-bearing scope
+/// is [`find_list`]'s**, and that one is covered — `rad_list_render.rs` asks
+/// this tenant for another tenant's list id and asserts a 404, and
+/// `rad_permissions.rs` asserts the same for the storage read.
+pub async fn find_list_by_key<'e, E: PgExecutor<'e> + Copy>(
+    executor: E,
+    tenant_id: Uuid,
+    list_key: &str,
+) -> Result<Option<ListDefinition>, sqlx::Error> {
+    let Some(id) = sqlx::query_scalar!(
+        r#"
+        SELECT id
+        FROM rad_lists
+        WHERE tenant_id = $1 AND list_key = $2 AND deleted_at IS NULL
+        "#,
+        tenant_id,
+        list_key,
+    )
+    .fetch_optional(executor)
+    .await?
+    else {
+        return Ok(None);
+    };
+
+    // Resolved to an id and then read through `find_list`, so the children come
+    // back through exactly one statement each. Two full readers would be two
+    // places to forget a column when §5.7 grows one.
+    find_list(executor, tenant_id, id).await
+}
+
 async fn columns_of<'e, E: PgExecutor<'e>>(
     executor: E,
     tenant_id: Uuid,

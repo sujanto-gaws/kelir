@@ -21,9 +21,35 @@ While the major version is `0`, the public API may change in any release.
   on one walk of the component tree, and a dependency graph built from every
   `{"var": ...}` reference in **both** `calculate` and `conditional`, as
   JFSS S12.2 requires.
+- **The dynamic list renderer** (FR-RAD-003, FR-RAD-010,
+  [#340](https://github.com/sujanto-gaws/kelir/issues/340), **D-68**). The list
+  definition storage API has existed since `v0.4.0` and nothing read it. A
+  configured list now renders at `/lists/{listKey}`: its columns, their labels
+  and order, its sort, its page size and its filters all come from the stored
+  definition, and a definition declaring different columns produces a different
+  table with no code change. Rows are the documents of every type that names the
+  list.
+- **`GET /api/v1/rad/lists/by-key/{listKey}`** — the renderer's read of a list
+  definition, resolved against what can be drawn. `ACTIVE` lists only, and it
+  requires `document:read` — the permission of the rows behind it — rather than
+  the builder's `rad:list:read`.
+- **`GET /api/v1/rad/lists/{id}/rows`** — one page of the rows a list arranges,
+  applying only the filters the definition declares and reading `form_data.*`
+  columns out of the stored payload server-side, so the wire carries the
+  declared cells rather than whole form payloads.
+- **`GET /api/v1/rad/actions?context=…`** — the configured action catalogue
+  (`rad_actions`, in the schema since `v0.4.0` with no reader). An action whose
+  `required_permission` the caller does not hold is not returned, rather than
+  returned and disabled.
 
 ### Changed
 
+- **The document list can be ordered.** `list_documents` ordered
+  `created_at DESC` with no way to ask for anything else. It now takes a sort
+  from an allow-list of nine columns, bound as a parameter into a static
+  `ORDER BY` so no identifier from a request reaches the SQL. The default is
+  unchanged — newest first — and `GET /documents` still has no sort parameter,
+  because that screen offers no such control.
 - **Calculated fields evaluate in dependency order rather than in the order
   they are declared** (JFSS §9.2). A chain declared backwards used to settle by
   repeating a definition-order pass until the payload stopped moving; it now

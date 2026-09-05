@@ -172,6 +172,10 @@ impl DocumentQuery {
                 priority,
                 entity_type,
                 entity_id: self.entity_id,
+                // Never from the request. `DocumentQuery` has no `listId`, and
+                // the rendered-list path sets this itself from the list the
+                // caller opened.
+                list_id: None,
             })
         } else {
             Err(AppError::validation(details))
@@ -193,6 +197,16 @@ fn pair_detail(path: &str, message: &str) -> ValidationDetail {
 pub struct DocumentFilters {
     pub search: Option<String>,
     pub document_type_id: Option<Uuid>,
+    /// Narrows to the documents of every type that names this list
+    /// (`document_types.list_id`), which is what a *rendered* list is over
+    /// ([#340](https://github.com/sujanto-gaws/kelir/issues/340)).
+    ///
+    /// **Not a query parameter, and that is the point.** Nothing parses it out
+    /// of a request: `GET /documents` cannot set it, and the rendered-list path
+    /// sets it from the list the caller opened. A client-settable `listId`
+    /// would be a second way to select rows that the list definition was
+    /// supposed to decide.
+    pub list_id: Option<Uuid>,
     pub status: Option<DocumentStatus>,
     pub priority: Option<DocumentPriority>,
     pub entity_type: Option<EntityType>,

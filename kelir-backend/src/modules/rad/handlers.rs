@@ -14,12 +14,15 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use uuid::Uuid;
 
+use super::domain::action::{Action, ActionContext};
+use super::domain::render::RenderableList;
 use super::domain::submission::{Submission, SubmitFormRequest};
 use super::domain::{
     CreateFormRequest, CreateListRequest, Form, FormSummary, ListDefinition, ListSummary,
     LookupOption, LookupQuery, LookupSource, UpdateFormRequest, UpdateListRequest,
 };
 use super::service;
+use super::service::render::{ListRow, RowQuery};
 use crate::error::AppError;
 use crate::extract::{JsonBody, PathParam, QueryParams};
 use crate::middleware::auth::Authenticated;
@@ -60,7 +63,28 @@ pub fn routes() -> Router<AppState> {
         // bad binding earns, which names every one of them. An endpoint whose
         // whole answer is four constants would be a surface to keep in step
         // with them for no reader that needs it.
+        // **The render read, and it is deliberately not `/lists/{id}`.** That
+        // route serves the builder: any status, `rad:list:read`, the definition
+        // as stored. This one serves a renderer: `ACTIVE` only, `document:read`
+        // — the permission of the rows behind it — and the definition resolved
+        // against what can actually be drawn. A `?for=render` on the first
+        // would be one endpoint answering two questions with two permissions,
+        // which is the shape a reader cannot tell apart from a bug.
+        //
+        // By key rather than by id because a rendered list is reached from a
+        // URL somebody bookmarks, and §5.6's unique index makes the key the
+        // name a menu and a document type already use.
+        .route("/lists/by-key/{list_key}", get(get_renderable_list))
+        // The rows, as a sub-collection of the list that arranges them (naming
+        // convention §5). By id: the caller has just been handed one by the
+        // read above, and paging through a key would resolve it again per page.
+        .route("/lists/{id}/rows", get(list_rows))
         .route("/lookups/{source}/options", get(list_lookup_options))
+        // The configured actions of one context (§5.10). A query parameter
+        // rather than `/actions/list`, because `context` selects a subset of
+        // one collection rather than naming a different resource — naming
+        // convention §5, and the same reading `GET /documents?status=` takes.
+        .route("/actions", get(list_actions))
 }
 
 #[utoipa::path(
@@ -349,4 +373,86 @@ async fn list_lookup_options(
     let (options, meta) = service::lookup::list_options(&state, &caller, source, &query).await?;
 
     Ok(Json(ListEnvelope::new(options, meta)))
+}
+
+/// What a `context` query names, and the refusal a wrong one earns.
+///
+/// A typed `context` rather than a free string, so an unknown value is a 422
+/// naming the four rather than an empty list — which would read as *this
+/// deployment has configured no actions* and is the failure
+/// [#326](https://github.com/sujanto-gaws/kelir/issues/326) took in a different
+/// panel: nothing distinguishes "none" from "you asked the wrong question".
+#[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
+#[serde(rename_all = "camelCase")]
+struct ActionQuery {
+    context: ActionContext,
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/rad/actions", tag = "rad",
+    params(ActionQuery),
+    responses(
+        (status = 200, description = "The actions this caller may invoke in that context", body = [Action]),
+        (status = 422, description = "`context` is not one of LIST, DETAIL, DOCUMENT or TASK")
+    ),
+    security(("bearer" = []))
+)]
+async fn list_actions(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    QueryParams(query): QueryParams<ActionQuery>,
+) -> Result<Json<ListEnvelope<Action>>, AppError> {
+    let actions = service::action::list_actions(&state, &caller, query.context).await?;
+    // Every row the caller may invoke, so the count is the length rather than a
+    // second query: the filter is applied in the service and a `total` from the
+    // database would be the *unfiltered* count, which would tell the caller how
+    // many actions they were not shown.
+    let total = actions.len() as u64;
+    let meta = crate::response::PageMeta::new(1, total.max(1) as u32, total);
+
+    Ok(Json(ListEnvelope::new(actions, meta)))
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/rad/lists/by-key/{list_key}", tag = "rad",
+    params(("list_key" = String, Path, description = "The list's tenant-unique key")),
+    responses(
+        (status = 200, description = "The list as a renderer needs it", body = RenderableList),
+        (status = 403, description = "Missing document:read"),
+        (status = 404, description = "No such list"),
+        (status = 409, description = "The list is a draft or is deprecated"),
+        (status = 422, description = "The definition declares something this renderer cannot serve")
+    ),
+    security(("bearer" = []))
+)]
+async fn get_renderable_list(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    PathParam(list_key): PathParam<String>,
+) -> Result<Json<ItemEnvelope<RenderableList>>, AppError> {
+    let list = service::render::renderable_list(&state, &caller, &list_key).await?;
+
+    Ok(Json(ItemEnvelope::new(list)))
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/rad/lists/{id}/rows", tag = "rad",
+    params(RowQuery),
+    responses(
+        (status = 200, description = "One page of the rows the list arranges", body = [ListRow]),
+        (status = 403, description = "Missing document:read"),
+        (status = 404, description = "No such list, or it is not ACTIVE"),
+        (status = 422, description = "A filter or sort the definition does not declare")
+    ),
+    security(("bearer" = []))
+)]
+async fn list_rows(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    PathParam(id): PathParam<Uuid>,
+    QueryParams(query): QueryParams<RowQuery>,
+) -> Result<Json<ListEnvelope<ListRow>>, AppError> {
+    let (rows, meta) = service::render::list_rows(&state, &caller, id, &query).await?;
+
+    Ok(Json(ListEnvelope::new(rows, meta)))
 }

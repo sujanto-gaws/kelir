@@ -31,9 +31,28 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use serde_json::Value;
+
 use super::super::domain::{
-    DocumentFilters, DocumentPriority, DocumentStatus, DocumentSummary, EntityType,
+    DocumentFilters, DocumentPriority, DocumentSort, DocumentStatus, DocumentSummary, EntityType,
 };
+
+/// A document as the list serves it, with the form payload beside it when
+/// something asked for it.
+///
+/// **`form_data` is `None` unless the caller said it needed it**, and that is a
+/// query-level decision rather than a projection afterwards: a page of twenty
+/// documents carries twenty form payloads, which is the reason
+/// [`DocumentSummary`] exists at all (NFR-PERF-002). The rendered-list path
+/// ([#340]) asks for it only when the list definition declares a `form_data.*`
+/// column, and it never puts the payload on the wire — it reads the declared
+/// paths out of it and sends the cells.
+///
+/// [#340]: https://github.com/sujanto-gaws/kelir/issues/340
+pub struct DocumentRow {
+    pub summary: DocumentSummary,
+    pub form_data: Option<Value>,
+}
 
 /// How many documents match, for the `meta.total` the envelope carries.
 ///
@@ -52,6 +71,8 @@ pub async fn count_documents(
         r#"
         SELECT count(*)
         FROM documents d
+        JOIN document_types t
+          ON t.id = d.document_type_id AND t.tenant_id = d.tenant_id
         WHERE d.tenant_id = $1
           AND d.deleted_at IS NULL
           AND ($2::uuid IS NULL OR d.document_type_id = $2)
@@ -63,6 +84,7 @@ pub async fn count_documents(
                OR d.title ILIKE '%' || $7 || '%'
                OR d.document_ref ILIKE '%' || $7 || '%'
                OR d.document_number ILIKE '%' || $7 || '%')
+          AND ($8::uuid IS NULL OR t.list_id = $8)
         "#,
         tenant_id,
         filters.document_type_id,
@@ -71,6 +93,7 @@ pub async fn count_documents(
         filters.entity_type.map(EntityType::as_db),
         filters.entity_id,
         escaped(filters.search.as_deref()),
+        filters.list_id,
     )
     .fetch_one(pool)
     .await
@@ -79,22 +102,68 @@ pub async fn count_documents(
 
 /// One page of documents.
 ///
-/// **Ordered newest first**, which is what a list of documents is for: the thing
-/// somebody is looking for is almost always the one they made most recently, and
-/// a stable secondary key on `id` keeps two documents created in the same
-/// millisecond from swapping places between pages.
+/// **Ordered by `sort`, and a stable secondary key on `id` keeps two documents
+/// created in the same millisecond from swapping places between pages.** The
+/// default is newest first, which is what a list of documents is for: the thing
+/// somebody is looking for is almost always the one they made most recently.
+///
+/// Delegates to [`list_document_rows`] rather than carrying a second statement,
+/// which is the one place this file departs from the duplication
+/// [`count_documents`] argues for — and for the reason that argument gives.
+/// Those two statements duplicate a `WHERE`, where drift is a wrong *number*
+/// beside a right page; these would duplicate a `WHERE`, an `ORDER BY` and a
+/// `LIMIT`, where drift is two pages of the same query in different orders.
 pub async fn list_documents(
     pool: &PgPool,
     tenant_id: Uuid,
     filters: &DocumentFilters,
+    sort: DocumentSort,
     limit: i64,
     offset: i64,
 ) -> Result<Vec<DocumentSummary>, sqlx::Error> {
+    let rows = list_document_rows(pool, tenant_id, filters, sort, false, limit, offset).await?;
+
+    Ok(rows.into_iter().map(|row| row.summary).collect())
+}
+
+/// The same page, with the form payload where one was asked for.
+///
+/// # The `ORDER BY` is static, and that is the whole of why it looks like this
+///
+/// Coding standard §2.5 keeps a statement static so `sqlx::query!` can check
+/// it, and §6.4 requires a dynamic identifier to be allow-listed. Both hold
+/// here without an assembled string: [`DocumentSort`] is a closed enum, its
+/// `as_db` token arrives as a **bound parameter**, and every column this query
+/// could order by is written out in the statement's own text. Nothing from a
+/// request reaches the SQL as an identifier.
+///
+/// The cost is nine pairs of `CASE` arms. It is worth paying: the alternative
+/// that reads better is `format!` around a validated identifier, and that
+/// trades a checked statement for an unchecked one plus a promise that the
+/// validation is never bypassed — which is a promise about every future edit
+/// rather than about this one.
+///
+/// **`form_data_json` is read only when `with_form_data` holds**, through the
+/// `CASE` on `$10`, so a caller that does not need the payload does not pay to
+/// fetch it.
+pub async fn list_document_rows(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    filters: &DocumentFilters,
+    sort: DocumentSort,
+    with_form_data: bool,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<DocumentRow>, sqlx::Error> {
+    let sort_key = sort.key.as_db();
+    let descending = sort.descending;
+
     let rows = sqlx::query!(
         r#"
         SELECT d.id, d.document_ref, d.document_number, d.document_type_id,
                t.type_code AS document_type_code, d.title, d.status, d.priority,
-               d.entity_type, d.entity_id, d.submitted_at, d.created_at, d.updated_at
+               d.entity_type, d.entity_id, d.submitted_at, d.created_at, d.updated_at,
+               CASE WHEN $10 THEN d.form_data_json END AS form_data_json
         FROM documents d
         JOIN document_types t
           ON t.id = d.document_type_id AND t.tenant_id = d.tenant_id
@@ -109,7 +178,27 @@ pub async fn list_documents(
                OR d.title ILIKE '%' || $7 || '%'
                OR d.document_ref ILIKE '%' || $7 || '%'
                OR d.document_number ILIKE '%' || $7 || '%')
-        ORDER BY d.created_at DESC, d.id DESC
+          AND ($13::uuid IS NULL OR t.list_id = $13)
+        ORDER BY
+          CASE WHEN $11 = 'document_ref'       AND NOT $12 THEN d.document_ref END ASC,
+          CASE WHEN $11 = 'document_ref'       AND     $12 THEN d.document_ref END DESC,
+          CASE WHEN $11 = 'document_number'    AND NOT $12 THEN d.document_number END ASC,
+          CASE WHEN $11 = 'document_number'    AND     $12 THEN d.document_number END DESC,
+          CASE WHEN $11 = 'document_type_code' AND NOT $12 THEN t.type_code END ASC,
+          CASE WHEN $11 = 'document_type_code' AND     $12 THEN t.type_code END DESC,
+          CASE WHEN $11 = 'title'              AND NOT $12 THEN d.title END ASC,
+          CASE WHEN $11 = 'title'              AND     $12 THEN d.title END DESC,
+          CASE WHEN $11 = 'status'             AND NOT $12 THEN d.status END ASC,
+          CASE WHEN $11 = 'status'             AND     $12 THEN d.status END DESC,
+          CASE WHEN $11 = 'priority'           AND NOT $12 THEN d.priority END ASC,
+          CASE WHEN $11 = 'priority'           AND     $12 THEN d.priority END DESC,
+          CASE WHEN $11 = 'submitted_at'       AND NOT $12 THEN d.submitted_at END ASC,
+          CASE WHEN $11 = 'submitted_at'       AND     $12 THEN d.submitted_at END DESC,
+          CASE WHEN $11 = 'created_at'         AND NOT $12 THEN d.created_at END ASC,
+          CASE WHEN $11 = 'created_at'         AND     $12 THEN d.created_at END DESC,
+          CASE WHEN $11 = 'updated_at'         AND NOT $12 THEN d.updated_at END ASC,
+          CASE WHEN $11 = 'updated_at'         AND     $12 THEN d.updated_at END DESC,
+          d.id DESC
         LIMIT $8 OFFSET $9
         "#,
         tenant_id,
@@ -121,39 +210,61 @@ pub async fn list_documents(
         escaped(filters.search.as_deref()),
         limit,
         offset,
+        with_form_data,
+        sort_key,
+        descending,
+        filters.list_id,
     )
     .fetch_all(pool)
     .await?;
 
     Ok(rows
         .into_iter()
-        .map(|row| DocumentSummary {
-            id: row.id,
-            document_ref: row.document_ref,
-            document_number: row.document_number,
-            document_type_id: row.document_type_id,
-            document_type_code: row.document_type_code,
-            title: row.title,
-            status: DocumentStatus::from_db(&row.status),
-            priority: DocumentPriority::from_db(&row.priority),
-            entity_type: row.entity_type.as_deref().and_then(EntityType::from_db),
-            entity_id: row.entity_id,
-            submitted_at: row.submitted_at,
-            created_at: row.created_at,
-            updated_at: row.updated_at,
+        .map(|row| DocumentRow {
+            summary: DocumentSummary {
+                id: row.id,
+                document_ref: row.document_ref,
+                document_number: row.document_number,
+                document_type_id: row.document_type_id,
+                document_type_code: row.document_type_code,
+                title: row.title,
+                status: DocumentStatus::from_db(&row.status),
+                priority: DocumentPriority::from_db(&row.priority),
+                entity_type: row.entity_type.as_deref().and_then(EntityType::from_db),
+                entity_id: row.entity_id,
+                submitted_at: row.submitted_at,
+                created_at: row.created_at,
+                updated_at: row.updated_at,
+            },
+            form_data: row.form_data_json,
         })
         .collect())
 }
 
-/// Makes `%` and `_` in a search term match themselves.
+/// Whether any document type in this tenant names `list_id`.
 ///
-/// Without it, a search for `PR_2026` matches `PR-2026` and `PRX2026`, and a
-/// search for `%` returns the whole population — which reads as a working search
-/// that found everything. The escape character is the backslash `ILIKE` uses by
-/// default, and it is escaped first so that escaping does not double itself.
-///
-/// The same treatment `role_view`'s search gets, and the query parameter's doc
-/// comment says so on the wire: *`%` and `_` in it match themselves*.
+/// `EXISTS` rather than a count: the question is *is there one*, and a count
+/// over a table with a hundred types would read every row to answer a yes.
+pub async fn list_is_bound(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    list_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar!(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM document_types
+            WHERE tenant_id = $1 AND list_id = $2 AND deleted_at IS NULL
+        ) AS "bound!"
+        "#,
+        tenant_id,
+        list_id,
+    )
+    .fetch_one(pool)
+    .await
+}
+
 fn escaped(search: Option<&str>) -> Option<String> {
     search.map(|term| {
         term.replace('\\', "\\\\")

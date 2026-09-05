@@ -81,3 +81,88 @@ export interface FormSubmission {
   createdAt: string
   updatedAt: string
 }
+
+/**
+ * A configured action (`domain/action.rs`, §5.10).
+ *
+ * **Every action here is one the caller may invoke.** The server filters by
+ * `required_permission` and does not send that column back, so nothing on this
+ * side re-decides it — a client that filtered again would be a second copy of a
+ * rule that already has one answer.
+ */
+export interface RadAction {
+  id: string
+  actionKey: string
+  label: string
+  context: 'LIST' | 'DETAIL' | 'DOCUMENT' | 'TASK'
+  actionType: 'NAVIGATE' | 'API_CALL' | 'WORKFLOW_ACTION' | 'PLUGIN'
+  config: Record<string, unknown>
+}
+
+/** What a filter control is (`domain/list.rs`, §5.8's `CHECK`). */
+export type ListFilterType = 'TEXT' | 'ENUM' | 'LOOKUP' | 'DATE_RANGE' | 'NUMBER_RANGE' | 'BOOLEAN'
+
+/**
+ * A column of a rendered list (`domain/render.rs`).
+ *
+ * `sortable` is not the definition's `isSortable`. It is that intent resolved
+ * against what the query can order by, which is the server's answer and not a
+ * question this side re-asks: a `form_data.*` column arrives `sortable: false`
+ * however the definition marked it.
+ */
+export interface RenderableColumn {
+  key: string
+  label: string
+  dataType: string | null
+  format: string | null
+  width: string | null
+  sortable: boolean
+}
+
+/**
+ * A filter control of a rendered list.
+ *
+ * `parameter` is what the rows request calls this filter; `key` is what the
+ * definition calls it. They are usually the same and are not required to be,
+ * which is why both are on the wire — the renderer sends `key` and the server
+ * maps it.
+ */
+export interface RenderableFilter {
+  key: string
+  label: string
+  filterType: ListFilterType
+  options: unknown
+  isDefault: boolean
+  parameter: string
+}
+
+/**
+ * Everything needed to draw one list, and nothing that needs a second request
+ * to interpret.
+ *
+ * `defaultSortKey` and `defaultSortDescending` arrive resolved: the stored
+ * `default_sort_json` is parsed on the server, so this side never reads that
+ * shape and cannot disagree with the query about what the list opens on.
+ */
+export interface RenderableList {
+  id: string
+  listKey: string
+  title: string
+  pageSize: number
+  columns: RenderableColumn[]
+  filters: RenderableFilter[]
+  defaultSortKey: string
+  defaultSortDescending: boolean
+}
+
+/**
+ * One row: the document's identity, and a cell per declared column.
+ *
+ * Keyed by the definition's own `columnKey`, so a renderer walks
+ * `list.columns` and reads `row.cells[column.key]` — there is no second
+ * mapping, and a column the definition drops cannot leave an orphan cell.
+ */
+export interface ListRow {
+  id: string
+  cells: Record<string, unknown>
+}

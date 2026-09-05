@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT EXISTS (\n            SELECT 1\n            FROM document_types\n            WHERE tenant_id = $1 AND list_id = $2 AND deleted_at IS NULL\n        ) AS \"bound!\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "bound!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "274a6a6fc97174f120f1c2c8a4f03cee5d1816152fd1a5b4771aed3effb9a26c"
+}
