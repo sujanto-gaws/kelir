@@ -87,7 +87,11 @@ describe('ListRendererPage', () => {
       if (request.url.includes('/rad/actions')) {
         return {
           status: 200,
-          body: { success: true, data: actions, meta: { page: 1, pageSize: 20, total: actions.length } },
+          body: {
+            success: true,
+            data: actions,
+            meta: { page: 1, pageSize: 20, total: actions.length },
+          },
         }
       }
 
@@ -328,7 +332,11 @@ describe('ListRendererPage', () => {
   it('renders the refusal when the list is a draft rather than an empty table', async () => {
     listReply = {
       status: 409,
-      body: errorBody('CONFLICT', 'list `requisitions` is Draft and only an Active list is rendered', []),
+      body: errorBody(
+        'CONFLICT',
+        'list `requisitions` is Draft and only an Active list is rendered',
+        [],
+      ),
     }
 
     const wrapper = await render()

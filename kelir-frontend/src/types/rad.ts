@@ -100,13 +100,7 @@ export interface RadAction {
 }
 
 /** What a filter control is (`domain/list.rs`, §5.8's `CHECK`). */
-export type ListFilterType =
-  | 'TEXT'
-  | 'ENUM'
-  | 'LOOKUP'
-  | 'DATE_RANGE'
-  | 'NUMBER_RANGE'
-  | 'BOOLEAN'
+export type ListFilterType = 'TEXT' | 'ENUM' | 'LOOKUP' | 'DATE_RANGE' | 'NUMBER_RANGE' | 'BOOLEAN'
 
 /**
  * A column of a rendered list (`domain/render.rs`).
