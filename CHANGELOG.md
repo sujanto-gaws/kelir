@@ -42,8 +42,30 @@ While the major version is `0`, the public API may change in any release.
   `required_permission` the caller does not hold is not returned, rather than
   returned and disabled.
 
+- **System tasks, and the lifecycle hook chain that gives them something to do**
+  (FR-WF-005, [#339](https://github.com/sujanto-gaws/kelir/issues/339),
+  **D-69**, [ADR-0036](docs/architectures/adr/0036.%20The%20Hook%20Chain%20Ships%20Its%20Before%20Half%20First.md)).
+  A `SERVICE_TASK` state now writes no task row and takes its `AUTO` transition
+  in the same transaction, running that transition's `guards`. Before this it
+  generated a human task that waited for a person who was not coming.
+- **`modules::hook`** — the before half of the Lifecycle Hook Contract: the
+  handler grammar, the registration entry and its priority bands, the full
+  invocation payload, `CONTINUE` / `MODIFY` / `REJECT`, the `HOOK_REJECTED`
+  envelope, and an execution log in `document_hook_executions`. Three core
+  handlers ship: `core:continue_always`, `core:set_form_field` and
+  `core:reject_when`. A handler reference is resolved **at publish**, so an
+  unknown handler is refused to the author.
+- **`AUTO` transitions fire**, from a service task and from nothing else. A
+  chain of automatic steps is bounded, so two service states routing into each
+  other are refused rather than looping.
+
 ### Changed
 
+- **Four of the six JWSS task types are refused at publish**, naming
+  themselves. `USER_TASK`, `REVIEW_TASK` and `DATA_ENTRY_TASK` would create the
+  same row `APPROVAL_TASK` does; `SIGNATURE_TASK` would record an approval as a
+  signature that never happened. `taskType` was an unconstrained string on the
+  graph and the task row, defaulted to `APPROVAL_TASK` and read by nothing.
 - **The document list can be ordered.** `list_documents` ordered
   `created_at DESC` with no way to ask for anything else. It now takes a sort
   from an allow-list of nine columns, bound as a parameter into a static

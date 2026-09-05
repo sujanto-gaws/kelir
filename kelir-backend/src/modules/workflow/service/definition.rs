@@ -276,7 +276,7 @@ pub async fn publish_definition(
         return Err(AppError::validation(problems));
     }
 
-    let graph = Graph::parse(&before.definition);
+    let graph = Graph::parse(&before.definition, before.version);
 
     let mut transaction = state.pool.begin().await?;
 
@@ -475,7 +475,7 @@ pub async fn delete_definition(
 /// It is not a hash, because a hash tells a reader nothing they can act on when
 /// two differ.
 fn definition_marker(definition: &Value) -> Value {
-    let graph = Graph::parse(definition);
+    let graph = Graph::parse(definition, 0);
 
     json!({
         "bytes": definition.to_string().len(),

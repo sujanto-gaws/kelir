@@ -22,6 +22,9 @@
 
 use serde_json::Value;
 
+use super::task_type::{self, TaskType};
+use crate::modules::hook::domain::Registration;
+
 /// The action that fires a transition (JWSS §4).
 ///
 /// Sprint 10 issues `SUBMIT`, `APPROVE` and `REJECT`. The rest are in the
@@ -173,7 +176,12 @@ impl AssignmentRule {
 pub struct TaskSpec {
     pub task_definition_key: String,
     pub task_name: String,
-    pub task_type: String,
+    /// **Parsed, not stored raw** ([#339](https://github.com/sujanto-gaws/kelir/issues/339)).
+    /// A `String` here is what let a `SERVICE_TASK` reach the task writer and
+    /// become a human task under another name; the value is now resolved at
+    /// publish, where the author is, and this type is what the engine branches
+    /// on.
+    pub task_type: TaskType,
     pub assignment: AssignmentRule,
     pub priority: String,
     /// How long the person generating this task has to do it (JWSS §3.1,
@@ -267,6 +275,14 @@ pub struct Transition {
     /// definition published before the property existed — and is the same answer
     /// the meta-schema's `default` gives.
     pub requires_comment: bool,
+    /// The `before_workflow_transition` chain this edge declares (JWSS §7,
+    /// LHCS §3).
+    ///
+    /// **Parsed here rather than at the call site**, so the engine asks the
+    /// graph for a chain instead of re-reading the definition JSON it was built
+    /// from — and so a registration that does not parse is absent once rather
+    /// than differently absent per caller.
+    pub guards: Vec<Registration>,
 }
 
 /// A workflow variable's declaration (JWSS §6.3).
@@ -281,6 +297,14 @@ pub struct VariableDeclaration {
 #[derive(Debug, Clone)]
 pub struct Graph {
     pub workflow_key: String,
+    /// Which stored revision this graph was parsed from.
+    ///
+    /// **Not from the document** — JWSS's `version` is the specification's, and
+    /// a definition's own editions are `workflow_definitions.revision`. It
+    /// travels with the graph because the execution log records a transition as
+    /// `<workflowKey>@<revision>:<from>-><to>` (§6.12), and a graph that could
+    /// not say which revision it was would make that string a guess.
+    pub revision: i32,
     pub initial_state: String,
     pub states: Vec<State>,
     pub transitions: Vec<Transition>,
@@ -288,9 +312,10 @@ pub struct Graph {
 }
 
 impl Graph {
-    pub fn parse(definition: &Value) -> Self {
+    pub fn parse(definition: &Value, revision: i32) -> Self {
         Self {
             workflow_key: string(definition, "workflowKey").unwrap_or_default(),
+            revision,
             initial_state: string(definition, "initialState").unwrap_or_default(),
             states: array(definition, "states")
                 .iter()
@@ -361,7 +386,11 @@ fn parse_task(value: &Value) -> Option<TaskSpec> {
     Some(TaskSpec {
         task_definition_key: string(value, "taskDefinitionKey")?,
         task_name: string(value, "taskName").unwrap_or_default(),
-        task_type: string(value, "taskType").unwrap_or_else(|| "APPROVAL_TASK".to_owned()),
+        // A type this engine does not perform makes the whole spec unparseable,
+        // which is how it reaches the publish refusal: `jwss::validate_definition`
+        // names it, and a definition that got past that check another way ends
+        // up with no task rather than a mislabelled one.
+        task_type: task_type::parse(string_ref(value, "taskType")).ok()?,
         assignment: AssignmentRule::parse(value.get("assignment")?)?,
         priority: string(value, "priority").unwrap_or_else(|| "NORMAL".to_owned()),
         due_in_hours: value.get("dueInHours").and_then(Value::as_f64),
@@ -375,6 +404,7 @@ fn parse_transition(value: &Value) -> Option<Transition> {
         action: TransitionAction::parse(value.get("action")?.as_str()?)?,
         allowed_by: value.get("allowedBy").and_then(AssignmentRule::parse),
         condition: value.get("condition").cloned(),
+        guards: crate::modules::hook::service::guards_of(value),
         requires_comment: value
             .get("requiresComment")
             .and_then(Value::as_bool)
@@ -388,6 +418,12 @@ fn parse_variable(value: &Value) -> Option<VariableDeclaration> {
         data_type: string(value, "dataType").unwrap_or_else(|| "STRING".to_owned()),
         source: value.get("source").cloned(),
     })
+}
+
+/// The same, borrowed — for a parser that resolves the string rather than
+/// keeping it.
+fn string_ref<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value.get(key).and_then(Value::as_str)
 }
 
 fn string(value: &Value, key: &str) -> Option<String> {
@@ -433,7 +469,7 @@ mod tests {
 
     #[test]
     fn reads_the_states_and_their_task_specifications() {
-        let graph = Graph::parse(&definition());
+        let graph = Graph::parse(&definition(), 1);
 
         assert_eq!(graph.states.len(), 3);
         assert_eq!(graph.initial_state, "SUBMITTED");
@@ -486,7 +522,7 @@ mod tests {
             ]
         });
 
-        let graph = Graph::parse(&definition);
+        let graph = Graph::parse(&definition, 1);
         let candidates = graph.candidates("A", TransitionAction::Approve);
 
         assert_eq!(candidates.len(), 2);
@@ -499,7 +535,7 @@ mod tests {
 
     #[test]
     fn an_action_that_leaves_nowhere_has_no_candidates() {
-        let graph = Graph::parse(&definition());
+        let graph = Graph::parse(&definition(), 1);
 
         assert!(graph
             .candidates("COMPLETED", TransitionAction::Approve)
@@ -529,7 +565,7 @@ mod tests {
         TaskSpec {
             task_definition_key: "manager_approval".to_owned(),
             task_name: "Manager approval".to_owned(),
-            task_type: "APPROVAL_TASK".to_owned(),
+            task_type: TaskType::Approval,
             assignment: AssignmentRule::parse(&json!("ROLE:APPROVER")).expect("a rule"),
             priority: "NORMAL".to_owned(),
             due_in_hours,
@@ -581,7 +617,7 @@ mod tests {
         let mut definition = definition();
         definition["states"][0]["task"]["dueInHours"] = json!(48);
 
-        let graph = Graph::parse(&definition);
+        let graph = Graph::parse(&definition, 1);
         let task = graph
             .state("SUBMITTED")
             .expect("the state")
