@@ -1,6 +1,6 @@
 # Kelir Documentation
 
-**Status:** Living · **Last updated:** 2026-09-04
+**Status:** Living · **Last updated:** 2026-09-05
 
 Kelir is a metadata-driven, document-centric, workflow-enabled full-stack framework for building enterprise business applications rapidly — Rust (Axum + SQLx + PostgreSQL) on the backend, Vue 3 (Vite + Pinia + shadcn-vue + Tailwind CSS v4) on the frontend. This folder is the complete documentation set; this file is its map.
 
@@ -92,7 +92,7 @@ Architecture decision records — one file per architecturally significant choic
 | [0032](architectures/adr/0032.%20A%20Soft-Deleted%20Attachment%20Keeps%20Its%20Object.md) | A soft-deleted attachment keeps its stored object; removing bytes is retention's | **Draft** |
 | [0033](architectures/adr/0033.%20A%20Governed%20Record%20Parks%20at%20Pending%20Approval.md) | A governed master-data record parks at `PENDING_APPROVAL` while its change is approved | **Draft** |
 | [0034](architectures/adr/0034.%20One%20Delivery%20Attempt,%20Recorded%20Rather%20Than%20Retried.md) | A notification is delivered once per enabled channel, and a failure is logged rather than retried | **Draft** |
-| [0035](architectures/adr/0035.%20Rules%20Are%20Resolved%20Before%20a%20Form%20Is%20Published.md) | A form definition's rules are resolved at the write and again at the publish, over one graph spanning `calculate` and `conditional` | **Draft** |
+| [0035](architectures/adr/0035.%20Rules%20Are%20Resolved%20Before%20a%20Form%20Is%20Published.md) | A form definition's rules are resolved at the write and again at the publish, over one graph spanning `calculate` and `conditional` | Adopted |
 
 **0001–0028 were written retrospectively on 2026-09-01** from the documents that already held these decisions — a one-time pass directed by the product owner, not a standing practice (standard §9). Each says so in its §1 and names its source; the source keeps authority. Scope and planning decisions stayed `D-n` in [Product Backlog](../projects/planning/02.%20Product%20Backlog.md) §6, which carries the full `D-n` → ADR map.
 
