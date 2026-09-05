@@ -245,6 +245,19 @@ fn registry_rule(name: &str) -> Option<RegistryRule> {
     Some(entry)
 }
 
+/// Whether the Validation Rule Registry defines `name`.
+///
+/// **The catalogue's membership question, asked without a value in hand.**
+/// [`validate_field`] answers it as a side effect of deciding one submitted
+/// value, which is too late for the only person who can act on the answer: a
+/// rule name nobody defines is a defect in the *definition*, and the author is
+/// gone by the time somebody is filling the form in. [`super::engine`] asks it
+/// at publish over the same `match`, so the two moments cannot disagree about
+/// what the registry contains.
+pub(crate) fn is_registered(name: &str) -> bool {
+    registry_rule(name).is_some()
+}
+
 /// `params.target`'s value in the scope the rule was raised in.
 ///
 /// **Structural equality where the browser has reference equality.** `===` in

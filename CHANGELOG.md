@@ -9,7 +9,41 @@ While the major version is `0`, the public API may change in any release.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **The validation and calculation rule engines around the evaluator**
+  (FR-RAD-006, [#338](https://github.com/sujanto-gaws/kelir/issues/338),
+  **D-67**, [ADR-0035](docs/architectures/adr/0035.%20Rules%20Are%20Resolved%20Before%20a%20Form%20Is%20Published.md)).
+  Kelir has evaluated JFSS rules since `v0.4.0` and has never had an engine
+  around the evaluator. `rad::domain::engine` is that layer: a rule catalogue
+  resolving a definition's `rules[].rule` names against the Validation Rule
+  Registry and its expression operators against the Calculation Rule Registry
+  on one walk of the component tree, and a dependency graph built from every
+  `{"var": ...}` reference in **both** `calculate` and `conditional`, as
+  JFSS S12.2 requires.
+
+### Changed
+
+- **Calculated fields evaluate in dependency order rather than in the order
+  they are declared** (JFSS §9.2). A chain declared backwards used to settle by
+  repeating a definition-order pass until the payload stopped moving; it now
+  settles in one pass. A repeater's rows are their own scope, and a grand total
+  that reads the repeater runs after them.
+- **A form definition's rules are resolved when it is written *and* when it is
+  published.** `publish_form` re-runs `validate_definition` against the stored
+  definition before flipping the status, because publishing is a one-way door —
+  documents pin the revision — and a draft written by an earlier build keeps
+  whatever it was stored with. Workflow definitions have been checked at both
+  moments since `v0.5.0`; forms now match.
+- **A rule name outside the Validation Rule Registry is refused at the
+  definition, not only at the submission.** It was already a refusal
+  (`RULE_NOT_REGISTERED`, **D-28**), but against the person filling in the form,
+  who cannot edit a definition. The same code now refuses the author.
+- **A cyclic definition is refused with every field on the loop named.**
+  `CALCULATION_CYCLE` replaces `CALCULATION_DID_NOT_SETTLE`, which described a
+  bound on a loop that no longer exists and named no field. The submission path
+  keeps the refusal as its second line — a form published before this gate
+  existed answers 422 naming the fields, never a 500.
 
 ## [0.6.0] — 2026-09-03
 
