@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE rad_menus\n        SET parent_menu_id = (\n                SELECT parent_menu_id FROM rad_menus\n                WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL\n            ),\n            updated_by = $3,\n            updated_at = now()\n        WHERE tenant_id = $1 AND parent_menu_id = $2 AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d20e7f706c6dd611f7130bc465a2a0f8d14f852ae667d473f9ca2b0c406acabe"
+}

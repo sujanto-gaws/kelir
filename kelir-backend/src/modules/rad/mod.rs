@@ -32,6 +32,17 @@ pub const FORM_DELETE: &str = "rad:form:delete";
 ///
 /// [#164]: https://github.com/sujanto-gaws/kelir/issues/164
 pub const FORM_SUBMIT: &str = "rad:form:submit";
+/// Configuring the navigation (FR-RAD-004, [#341]).
+///
+/// Four rather than one, matching forms and lists: reading the navigation a
+/// deployment has configured and rewriting it are different questions. There is
+/// no `publish` counterpart, because a menu has no revision anything pins.
+///
+/// [#341]: https://github.com/sujanto-gaws/kelir/issues/341
+pub const MENU_CREATE: &str = "rad:menu:create";
+pub const MENU_READ: &str = "rad:menu:read";
+pub const MENU_UPDATE: &str = "rad:menu:update";
+pub const MENU_DELETE: &str = "rad:menu:delete";
 pub const LIST_CREATE: &str = "rad:list:create";
 pub const LIST_READ: &str = "rad:list:read";
 pub const LIST_UPDATE: &str = "rad:list:update";

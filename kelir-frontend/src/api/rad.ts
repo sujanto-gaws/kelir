@@ -1,13 +1,18 @@
-import { getItem, getPage, postItem } from './client'
-import type { Page } from '@/types/api'
+import { deleteItem, getItem, getPage, postItem, putItem } from './client'
+import type { Page, PageQuery } from '@/types/api'
 import type {
+  CreateMenuRequest,
   Form,
+  FormSummary,
+  MenuEntry,
   FormSubmission,
   ListRow,
+  ListSummary,
   LookupOption,
   LookupQuery,
   RadAction,
   RenderableList,
+  UpdateMenuRequest,
 } from '@/types/rad'
 
 /**
@@ -137,4 +142,55 @@ export function listRenderedRows(
  */
 export function listActions(context: RadAction['context']): Promise<Page<RadAction>> {
   return getPage<RadAction>('/rad/actions', { context } as Record<string, string>)
+}
+
+/**
+ * Form definitions, for a chooser.
+ *
+ * The summary shape, which is what the endpoint returns: a page of twenty forms
+ * with their JFSS documents inlined is twenty definition trees on the wire to
+ * render a list of titles, and `FormSummary` exists for exactly that reason.
+ */
+export function listForms(query: PageQuery = {}): Promise<Page<FormSummary>> {
+  return getPage<FormSummary>('/rad/forms', query)
+}
+
+/**
+ * The whole configured navigation (FR-RAD-004, #341).
+ *
+ * **Not paged**, which the endpoint says too: a navigation is read whole on
+ * every page load, and a second page of it would be navigation nobody found.
+ *
+ * **Every entry, enabled or not.** This is the *builder's* read — an
+ * administrator editing the navigation has to see the entry they switched off.
+ * The sidebar does its own filtering, which is where hiding belongs and where
+ * it is cosmetic by design.
+ */
+export function listMenus(): Promise<Page<MenuEntry>> {
+  return getPage<MenuEntry>('/rad/menus', {})
+}
+
+export function createMenu(request: CreateMenuRequest): Promise<MenuEntry> {
+  return postItem<MenuEntry>('/rad/menus', request)
+}
+
+export function updateMenu(id: string, request: UpdateMenuRequest): Promise<MenuEntry> {
+  return putItem<MenuEntry>(`/rad/menus/${id}`, request)
+}
+
+/** Removes an entry; its children move up to its own parent. */
+export function deleteMenu(id: string): Promise<void> {
+  return deleteItem(`/rad/menus/${id}`)
+}
+
+/**
+ * The list definitions this tenant has (#341).
+ *
+ * **Requires `rad:list:read`, which the document type builder's caller may not
+ * hold.** The chooser that reads this treats a refusal as *no lists to offer*
+ * rather than as a page failure: binding a list is optional, and a person who
+ * may configure a type but not read list definitions can still configure one.
+ */
+export function listLists(query: PageQuery = {}): Promise<Page<ListSummary>> {
+  return getPage<ListSummary>('/rad/lists', query)
 }

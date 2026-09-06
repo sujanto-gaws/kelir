@@ -15,6 +15,7 @@ use axum::{Json, Router};
 use uuid::Uuid;
 
 use super::domain::action::{Action, ActionContext};
+use super::domain::menu::{CreateMenuRequest, MenuEntry, UpdateMenuRequest};
 use super::domain::render::RenderableList;
 use super::domain::submission::{Submission, SubmitFormRequest};
 use super::domain::{
@@ -85,6 +86,13 @@ pub fn routes() -> Router<AppState> {
         // one collection rather than naming a different resource — naming
         // convention §5, and the same reading `GET /documents?status=` takes.
         .route("/actions", get(list_actions))
+        // The configured navigation (§5.9, FR-RAD-004). Not paged, and the
+        // handler says why.
+        .route("/menus", get(list_menus).post(create_menu))
+        .route(
+            "/menus/{id}",
+            get(get_menu).put(update_menu).delete(delete_menu),
+        )
 }
 
 #[utoipa::path(
@@ -455,4 +463,106 @@ async fn list_rows(
     let (rows, meta) = service::render::list_rows(&state, &caller, id, &query).await?;
 
     Ok(Json(ListEnvelope::new(rows, meta)))
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/rad/menus", tag = "rad",
+    responses(
+        (status = 200, description = "Every configured navigation entry, in render order", body = [MenuEntry]),
+        (status = 403, description = "Missing rad:menu:read")
+    ),
+    security(("bearer" = []))
+)]
+async fn list_menus(
+    State(state): State<AppState>,
+    caller: Authenticated,
+) -> Result<Json<ListEnvelope<MenuEntry>>, AppError> {
+    let menus = service::menu::list_menus(&state, &caller).await?;
+    // **Not paged**, which is why the meta is built here rather than by a
+    // `Pagination`: a navigation is read whole on every page load, and a second
+    // page of it would be navigation nobody found. The envelope keeps the shape
+    // every other list has so one client can read them all.
+    let total = menus.len() as u64;
+    let meta = crate::response::PageMeta::new(1, total.max(1) as u32, total);
+
+    Ok(Json(ListEnvelope::new(menus, meta)))
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/rad/menus/{id}", tag = "rad",
+    responses(
+        (status = 200, description = "One navigation entry", body = MenuEntry),
+        (status = 404, description = "No such entry")
+    ),
+    security(("bearer" = []))
+)]
+async fn get_menu(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    PathParam(id): PathParam<Uuid>,
+) -> Result<Json<ItemEnvelope<MenuEntry>>, AppError> {
+    let menu = service::menu::get_menu(&state, &caller, id).await?;
+
+    Ok(Json(ItemEnvelope::new(menu)))
+}
+
+#[utoipa::path(
+    post, path = "/api/v1/rad/menus", tag = "rad",
+    request_body = CreateMenuRequest,
+    responses(
+        (status = 201, description = "Created, as a CONFIG entry", body = MenuEntry),
+        (status = 403, description = "Missing rad:menu:create"),
+        (status = 422, description = "The key is taken, the route is not relative, or the parent is not this tenant's")
+    ),
+    security(("bearer" = []))
+)]
+async fn create_menu(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    JsonBody(request): JsonBody<CreateMenuRequest>,
+) -> Result<(StatusCode, Json<ItemEnvelope<MenuEntry>>), AppError> {
+    let menu = service::menu::create_menu(&state, &caller, &request).await?;
+
+    Ok((StatusCode::CREATED, Json(ItemEnvelope::new(menu))))
+}
+
+#[utoipa::path(
+    put, path = "/api/v1/rad/menus/{id}", tag = "rad",
+    request_body = UpdateMenuRequest,
+    responses(
+        (status = 200, description = "The entry as it now stands", body = MenuEntry),
+        (status = 403, description = "Missing rad:menu:update"),
+        (status = 404, description = "No such entry"),
+        (status = 422, description = "The move would make a loop, or the parent is not this tenant's")
+    ),
+    security(("bearer" = []))
+)]
+async fn update_menu(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    PathParam(id): PathParam<Uuid>,
+    JsonBody(request): JsonBody<UpdateMenuRequest>,
+) -> Result<Json<ItemEnvelope<MenuEntry>>, AppError> {
+    let menu = service::menu::update_menu(&state, &caller, id, &request).await?;
+
+    Ok(Json(ItemEnvelope::new(menu)))
+}
+
+#[utoipa::path(
+    delete, path = "/api/v1/rad/menus/{id}", tag = "rad",
+    responses(
+        (status = 204, description = "Removed; its children move up to its own parent"),
+        (status = 403, description = "Missing rad:menu:delete"),
+        (status = 404, description = "No such entry")
+    ),
+    security(("bearer" = []))
+)]
+async fn delete_menu(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    PathParam(id): PathParam<Uuid>,
+) -> Result<StatusCode, AppError> {
+    service::menu::delete_menu(&state, &caller, id).await?;
+
+    Ok(StatusCode::NO_CONTENT)
 }

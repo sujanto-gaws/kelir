@@ -351,3 +351,24 @@ export const INSTANCE_STATUS_LABELS: Record<InstanceStatus, string> = {
   CANCELLED: 'Cancelled',
   FAILED: 'Failed',
 }
+
+/**
+ * A workflow definition on a chooser (`domain::WorkflowDefinitionSummary`).
+ *
+ * `version` is the definition's own revision — **not** the JWSS specification
+ * version, which is `jwssVersion`. The two were conflated once already, on
+ * forms.
+ */
+export type WorkflowDefinitionStatus = 'DRAFT' | 'ACTIVE' | 'DEPRECATED'
+
+export interface WorkflowDefinitionSummary {
+  id: string
+  workflowKey: string
+  name: string
+  version: number
+  jwssVersion: string
+  status: WorkflowDefinitionStatus
+  initialState: string
+  createdAt: string
+  updatedAt: string
+}

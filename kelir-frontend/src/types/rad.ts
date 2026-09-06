@@ -166,3 +166,87 @@ export interface ListRow {
   id: string
   cells: Record<string, unknown>
 }
+
+/**
+ * A form on a list screen: everything but the definition
+ * (`domain::FormSummary`).
+ *
+ * The definition is the reason this type exists beside [`Form`] — a page of
+ * twenty forms with their JFSS trees inlined is twenty documents on the wire to
+ * render a table of titles.
+ */
+export interface FormSummary {
+  id: string
+  formKey: string
+  title: string
+  revision: number
+  jfssVersion: string
+  status: FormStatus
+  entityId: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+/** Where a menu entry came from (`domain::menu::MenuSource`, §5.9's `CHECK`). */
+export type MenuSource = 'CORE' | 'CONFIG' | 'PLUGIN'
+
+/**
+ * One entry of the configured navigation.
+ *
+ * **`requiredPermission` hides; it does not guard.** §5.9's column comment is
+ * *hide when the user lacks it*, and that is all it does — the screen the entry
+ * points at enforces its own permission, through the router's `meta.permission`
+ * and the endpoint behind it. An entry naming a permission nobody holds removes
+ * a link and opens nothing.
+ */
+export interface MenuEntry {
+  id: string
+  menuKey: string
+  label: string
+  /** A Lucide icon name. An unknown one renders without an icon. */
+  icon: string | null
+  parentMenuId: string | null
+  /** Relative to the application; the API refuses anything else. */
+  routePath: string | null
+  requiredPermission: string | null
+  source: MenuSource
+  sortOrder: number
+  isEnabled: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+export interface CreateMenuRequest {
+  menuKey: string
+  label: string
+  icon?: string | null
+  parentMenuId?: string | null
+  routePath?: string | null
+  requiredPermission?: string | null
+  sortOrder?: number
+  isEnabled?: boolean
+}
+
+/** Editing an entry. Absent means *leave alone*; `null` clears. */
+export type UpdateMenuRequest = Partial<Omit<CreateMenuRequest, 'menuKey'>>
+
+/** A list definition's status (`domain::list::ListStatus`). */
+export type ListStatus = 'ACTIVE' | 'DEPRECATED'
+
+/**
+ * A list definition on a list-of-lists screen: without its columns and filters
+ * (`domain::list::ListSummary`).
+ *
+ * Read by the document type builder to fill its list chooser — the same reason
+ * [`FormSummary`] exists, and the endpoint returns the summary for it.
+ */
+export interface ListSummary {
+  id: string
+  listKey: string
+  title: string
+  entityId: string | null
+  pageSize: number
+  status: ListStatus
+  createdAt: string
+  updatedAt: string
+}

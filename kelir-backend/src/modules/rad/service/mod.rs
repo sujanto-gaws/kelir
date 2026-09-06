@@ -16,5 +16,6 @@ pub mod evaluation;
 pub mod form;
 pub mod list;
 pub mod lookup;
+pub mod menu;
 pub mod render;
 pub mod submission;
