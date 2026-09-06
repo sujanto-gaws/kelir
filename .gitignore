@@ -48,6 +48,17 @@ desktop.ini
 .vscode/
 .idea/
 .claude/settings.local.json
+# Per-machine agent settings: experimental env flags, terminal preferences and
+# plugin toggles, which belong to whoever is sitting at the machine rather than
+# to the project. `settings.local.json` above was already ignored; this file
+# holds the same kind of value and was not, so it showed as untracked noise in
+# every `git status`.
+.claude/settings.json
+# A GitHub credential, kept beside the agent configuration so the tooling can
+# find it. It is ignored here because the cost of the alternative is not a
+# messy `git status` but a live token on a public remote, and `git add -A` from
+# any session in this checkout is all it would take.
+.claude/.github-token
 # Scratch git worktrees the agent tooling creates. `.claude/agents/` and the
 # skills beside it are shared project configuration and stay tracked.
 .claude/worktrees/
