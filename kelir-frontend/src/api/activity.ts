@@ -15,7 +15,11 @@ import type { Page } from '@/types/api'
  * [#250](https://github.com/sujanto-gaws/kelir/issues/250) AC2). There is no
  * `activity:read` check to mirror here: whether this caller may see what
  * happened to a document is the same question as whether they may see the
- * document, and the server asks it once.
+ * document, and the server asks it once. **Since
+ * [#301](https://github.com/sujanto-gaws/kelir/issues/301) there is no such
+ * permission at all** — the row left the catalogue one release after the check
+ * left the code — so a `can('activity:read')` here would be a guard on a string
+ * no deployment can grant.
  *
  * That is why this file has no `can(…)` guard and `comments.ts`'s caller does.
  */

@@ -129,7 +129,10 @@ describe('ActivityTab', () => {
    * on a permission they do not hold, showing a refusal on their own document.
    *
    * **Seen red (M5)** with a `can('activity:read')` gate added around the
-   * fetch: no request is made and no row renders.
+   * fetch: no request is made and no row renders. **#301 removed the
+   * permission itself**, which makes the `can` below true by construction
+   * rather than by this account's roles — the assertion that carries the
+   * property is the request, and M5 is what holds it.
    */
   it('reads with the document permission and no other', async () => {
     const wrapper = await render()
