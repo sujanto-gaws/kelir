@@ -256,7 +256,9 @@ async fn claim_task(
         (status = 200, description = "Decided; the process moved and the document's status followed", body = DecisionResult),
         (status = 403, description = "Missing workflow:task:execute, or this task is not the caller's"),
         (status = 404, description = "No such task"),
-        (status = 409, description = "The task was already decided, or the process moved underneath the decision"),
+        (status = 409, description = "The task was already decided, or the process moved underneath \
+                                      the decision, or this document carries a master-data change \
+                                      whose record is no longer at PENDING_APPROVAL (#322)"),
         (status = 422, description = "The definition has no such transition from where the process is, \
                                       or the transition requires a comment and none was given, \
                                       or the comment is too long")
