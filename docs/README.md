@@ -93,6 +93,7 @@ Architecture decision records — one file per architecturally significant choic
 | [0033](architectures/adr/0033.%20A%20Governed%20Record%20Parks%20at%20Pending%20Approval.md) | A governed master-data record parks at `PENDING_APPROVAL` while its change is approved | **Draft** |
 | [0034](architectures/adr/0034.%20One%20Delivery%20Attempt,%20Recorded%20Rather%20Than%20Retried.md) | A notification is delivered once per enabled channel, and a failure is logged rather than retried | **Draft** |
 | [0035](architectures/adr/0035.%20Rules%20Are%20Resolved%20Before%20a%20Form%20Is%20Published.md) | A form definition's rules are resolved at the write and again at the publish, over one graph spanning `calculate` and `conditional` | Adopted |
+| [0036](architectures/adr/0036.%20The%20Hook%20Chain%20Ships%20Its%20Before%20Half%20First.md) | The lifecycle hook chain ships its before half, driven by a service task; after-hooks wait for the outbox | **Draft** |
 
 **0001–0028 were written retrospectively on 2026-09-01** from the documents that already held these decisions — a one-time pass directed by the product owner, not a standing practice (standard §9). Each says so in its §1 and names its source; the source keeps authority. Scope and planning decisions stayed `D-n` in [Product Backlog](../projects/planning/02.%20Product%20Backlog.md) §6, which carries the full `D-n` → ADR map.
 

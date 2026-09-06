@@ -574,7 +574,7 @@ async fn resubmit_workflow(
         ),
     })?;
 
-    let graph = Graph::parse(&definition.definition_json);
+    let graph = Graph::parse(&definition.definition_json, definition.version);
 
     engine::fire(
         transaction,

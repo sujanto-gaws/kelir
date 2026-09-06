@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO document_hook_executions\n            (id, tenant_id, source, hook_id, workflow_transition_ref, document_id,\n             hook_name, handler_reference, result, duration_ms, error_message)\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Uuid",
+        "Varchar",
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Int4",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2dba70ef5d69265d2be6315a44e2ca47e6186e47e7c06d2e1a202a4e120b5cc3"
+}

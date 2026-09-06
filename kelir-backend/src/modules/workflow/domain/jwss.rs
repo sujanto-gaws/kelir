@@ -86,6 +86,7 @@ use std::sync::OnceLock;
 
 use serde_json::Value;
 
+use super::task_type;
 use crate::error::ValidationDetail;
 use crate::modules::rad::domain::jfss::{check_operators, CONDITIONAL_OPERATORS};
 
@@ -169,7 +170,51 @@ pub fn validate_definition(definition: &Value) -> Vec<ValidationDetail> {
     // stopping.
     details.extend(operator_errors(definition));
     details.extend(assignment_errors(definition));
+    details.extend(task_type_errors(definition));
+    // LHCS §2: *a reference MUST resolve at registration time.* Publishing is
+    // that moment for a workflow definition, and `hook::service` owns the
+    // question so that a document type's registrations and a workflow's are
+    // resolved by one piece of code (#339).
+    details.extend(crate::modules::hook::service::registration_errors(
+        definition,
+    ));
     details.extend(structural_errors(definition));
+    details
+}
+
+/// Every state's `taskType`, resolved against what this engine performs
+/// ([#339](https://github.com/sujanto-gaws/kelir/issues/339) AC4, AC5).
+///
+/// **The meta-schema checks the vocabulary and this checks the engine**, and
+/// the two are different questions. `taskType` has an `enum` in §3.1, so a
+/// value outside it was already refused by [`shape_errors`] — what was *not*
+/// refused is a value inside it that nothing performs, and there were four of
+/// those. A `SERVICE_TASK` published happily and then generated a human task
+/// waiting for a person who was not coming.
+///
+/// Refused **at publish**, which is where the author is. The alternative is the
+/// state this replaces: a definition accepted, an instance started, and a
+/// stalled approval discovered by whoever was waiting for it.
+fn task_type_errors(definition: &Value) -> Vec<ValidationDetail> {
+    let mut details = Vec::new();
+
+    for (index, state) in states(definition).iter().enumerate() {
+        let Some(task) = state.get("task") else {
+            continue;
+        };
+
+        let declared = task.get("taskType").and_then(Value::as_str);
+
+        if let Err(refusal) = task_type::parse(declared) {
+            details.push(detail(
+                format!("definition.states.{index}.task.taskType"),
+                "S3",
+                "TASK_TYPE_NOT_PERFORMED",
+                refusal.to_string(),
+            ));
+        }
+    }
+
     details
 }
 

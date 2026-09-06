@@ -1,0 +1,36 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT handler_reference, priority, config_json\n        FROM document_lifecycle_hooks\n        WHERE tenant_id = $1\n          AND deleted_at IS NULL\n          AND is_enabled\n          AND hook_name = $2\n          AND (document_type_id IS NULL OR document_type_id = $3)\n        ORDER BY priority, created_at, id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "handler_reference",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "priority",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "config_json",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "dbe06d0965d2c92e00394e2c1211e0765e3cb849b7ed36dc000a4721ecf01844"
+}

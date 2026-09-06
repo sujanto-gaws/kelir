@@ -5,6 +5,7 @@ pub mod graph;
 pub mod instance;
 pub mod jwss;
 pub mod task;
+pub mod task_type;
 
 pub use definition::{
     validate_create, validate_update, CreateWorkflowRequest, UpdateWorkflowRequest,
@@ -19,3 +20,4 @@ pub use instance::{
 pub use task::{
     Assignment, DecisionAction, DecisionRequest, DelegateRequest, TaskStatus, WorkflowTask,
 };
+pub use task_type::{TaskType, TaskTypeRefusal};

@@ -451,7 +451,7 @@ pub async fn decide(
         ),
     })?;
 
-    let graph = Graph::parse(&definition.definition_json);
+    let graph = Graph::parse(&definition.definition_json, definition.version);
 
     let document = document_repo::find_document(&state.pool, tenant_id, subject.document_id)
         .await?

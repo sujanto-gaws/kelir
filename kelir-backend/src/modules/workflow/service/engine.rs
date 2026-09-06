@@ -58,25 +58,44 @@
 //! through a decision the task's own assignment had already gated. The return
 //! action is what would have made it live, and this landed first.
 //!
-//! # `guards` and `actions` are stored and not executed
+//! # `guards` run on an automatic transition; `actions` are still stored only
 //!
 //! JWSS §7 declares them as hook registration entries merged into the
-//! `before_workflow_transition` / `after_workflow_transition` chains. **There is
-//! no chain.** `document_lifecycle_hooks` has no reader and architectures/01
-//! §12.4.2 is unbuilt, so a definition's handlers are validated for shape,
-//! stored, and never invoked. It is said here, once, because a stored handler
-//! must not read as evidence that it runs — and when the chain lands, this
-//! paragraph is the place the invocation goes.
+//! `before_workflow_transition` / `after_workflow_transition` chains. **The
+//! before-chain now exists** — [`crate::modules::hook`], built with [#339] —
+//! and [`advance_automatically`] runs a transition's `guards` through it.
 //!
-//! # `AUTO` transitions do not fire
+//! Two narrowings, stated here because a stored handler must not read as
+//! evidence that it runs:
 //!
-//! For the same reason and with the same honesty: an `AUTO` transition is one
-//! the engine fires without a caller, and nothing in Sprint 10 drives one. A
-//! definition may declare one — the validator accepts it — and an instance that
-//! reaches a state whose only exit is `AUTO` will sit there. S6 catches the
-//! version of that which is a dead end; it does not catch a live state waiting
-//! for a driver that does not exist, and FR-WF-005 (system tasks) is the `Should`
-//! that supplies one.
+//! - **`guards` run on an `AUTO` transition and on no other.** A decision-driven
+//!   transition does not yet invoke them. The chain is the same one; what is
+//!   missing is the call, and it goes beside `fire`'s own authorization check.
+//! - **`actions` never run.** They are `after_workflow_transition`, and
+//!   architectures/01 §12.5 delivers an after-hook through the outbox — which
+//!   this product does not have until Phase 8. [`crate::modules::hook`]'s
+//!   module doc is where that is argued.
+//!
+//! # `AUTO` transitions fire from a service task, and from nothing else
+//!
+//! **This paragraph used to say they never fire.** An `AUTO` transition is one
+//! the engine takes without a caller, and until [#339] nothing drove one: a
+//! definition could declare it, the validator accepted it, and an instance that
+//! reached a state whose only exit was `AUTO` sat there. FR-WF-005 was named as
+//! the `Should` that would supply the driver, and this is it.
+//!
+//! **The driver is a `SERVICE_TASK`, not the transition.** A state whose task
+//! is a service task writes no task row — nobody is coming to decide it — and
+//! [`advance_automatically`] takes its `AUTO` edge in the same transaction.
+//! A state with an `AUTO` exit and *no* service task still sits there, which is
+//! deliberate: `AUTO` says how an edge is taken and the task type says whether
+//! anything takes it, and making every `AUTO` self-firing would turn a
+//! definition's parked state into a state it runs through.
+//!
+//! **The chain of them is bounded** ([`MAX_AUTOMATIC_STEPS`]). Two service
+//! states pointing at each other is a definition S6 does not catch — it is not
+//! a dead end, it is a live loop — and a bound is what turns it into a refusal
+//! rather than a transaction that never returns.
 //!
 //! [#175]: https://github.com/sujanto-gaws/kelir/issues/175
 //! [#178]: https://github.com/sujanto-gaws/kelir/issues/178
@@ -97,6 +116,7 @@ use super::assignment::{self, AssignmentContext};
 use crate::error::{AppError, ValidationDetail};
 use crate::modules::document::domain::DocumentStatus;
 use crate::modules::document::service::status as document_status_service;
+use crate::modules::hook;
 use crate::modules::notification;
 use crate::modules::rad::evaluator::RuleEvaluator;
 
@@ -234,7 +254,7 @@ pub async fn start(
         )]));
     }
 
-    let graph = Graph::parse(&definition_json);
+    let graph = Graph::parse(&definition_json, loaded.version);
 
     let initial = graph.state(&graph.initial_state).ok_or_else(|| {
         // Unreachable through the API: S1 refuses a definition whose initial
@@ -311,6 +331,7 @@ pub async fn start(
         initial,
         request.actor,
         request.context,
+        request.evaluation,
     )
     .await?;
 
@@ -585,6 +606,7 @@ pub async fn fire(
         target,
         actor,
         context,
+        evaluation,
     )
     .await?;
 
@@ -617,8 +639,385 @@ async fn enter(
     state: &State,
     actor: Option<Uuid>,
     context: AssignmentContext,
+    evaluation: &EvaluationContext,
 ) -> Result<DocumentStatus, AppError> {
-    if let Some(spec) = &state.task {
+    let mut current = state;
+    let mut status = enter_once(
+        transaction,
+        tenant_id,
+        instance_id,
+        document_id,
+        graph,
+        current,
+        actor,
+        context,
+    )
+    .await?;
+
+    // **The service-task loop** ([#339] AC1). A state whose task is a service
+    // task has nobody coming to decide it, so the engine takes its `AUTO` edge
+    // here — in this transaction, which is what makes the whole advance one
+    // atomic thing with the decision that reached it.
+    for step in 0..MAX_AUTOMATIC_STEPS {
+        let is_service = current
+            .task
+            .as_ref()
+            .is_some_and(|spec| !spec.task_type.is_human());
+
+        if !is_service {
+            break;
+        }
+
+        let Some(next) = advance_automatically(
+            transaction,
+            tenant_id,
+            instance_id,
+            document_id,
+            graph,
+            current,
+            actor,
+            evaluation,
+        )
+        .await?
+        else {
+            break;
+        };
+
+        current = next;
+        status = enter_once(
+            transaction,
+            tenant_id,
+            instance_id,
+            document_id,
+            graph,
+            current,
+            actor,
+            context,
+        )
+        .await?;
+
+        if step + 1 == MAX_AUTOMATIC_STEPS {
+            // **A loop of service states is refused, not run forever.** S6
+            // catches a dead end and does not catch this: two service states
+            // pointing at each other are both live and both exited. Refusing
+            // rolls the whole advance back, which leaves the document where it
+            // was — somewhere a person can act — rather than parked in the
+            // middle of a definition's cycle.
+            return Err(AppError::conflict(format!(
+                "this workflow's automatic steps did not settle in {MAX_AUTOMATIC_STEPS} \
+                 transitions, which means its service tasks route into one another in a \
+                 loop; the document has not moved"
+            )));
+        }
+    }
+
+    Ok(status)
+}
+
+/// How many `AUTO` transitions one entry may take before the definition is
+/// treated as looping.
+///
+/// **A bound rather than a cycle detector**, and the difference is what it
+/// costs to be wrong. A detector over the `AUTO` subgraph would refuse a
+/// definition at publish and would have to be right about every path; a bound
+/// refuses one *instance* at run time and is right about all of them. Sixteen
+/// is far past any real chain of automatic steps and far short of a request
+/// that appears to hang.
+///
+/// It is also architectures/01 §12.5's *recursion: hook-initiated actions carry
+/// a depth counter; exceeding the limit aborts the chain*, applied to the one
+/// recursion this engine has.
+const MAX_AUTOMATIC_STEPS: usize = 16;
+
+/// Takes a service state's `AUTO` edge, or `None` where it has none.
+///
+/// **`None` is not a failure** ([#339] AC3). A service state with no `AUTO` exit
+/// is a definition that asked the product to do something and did not say what
+/// comes next; the instance stays where it is, with its status projected, which
+/// is a state a person can still act on through the document's own surfaces.
+/// The alternative — refusing the transition that reached it — would roll back
+/// somebody's approval because a *later* state was misconfigured.
+///
+/// **A guard that refuses is a refusal of the whole advance**, which is LHCS
+/// §5.1's *chain stops, the transaction rolls back*. That is the opposite
+/// direction from the paragraph above and deliberately so: a guard said no, and
+/// a guard saying no is the definition working.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the same parts `enter` carries, for the same reason"
+)]
+async fn advance_automatically<'g>(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    instance_id: Uuid,
+    document_id: Uuid,
+    graph: &'g Graph,
+    state: &State,
+    actor: Option<Uuid>,
+    evaluation: &EvaluationContext,
+) -> Result<Option<&'g State>, AppError> {
+    let mut routing: Vec<Value> = Vec::new();
+    let mut selected = None;
+
+    // The same S7 order `fire` uses — conditioned edges in document order, the
+    // fallback last — through the same `candidates`, so an automatic edge is
+    // chosen by the rule a decided one is.
+    for transition in graph.candidates(&state.code, TransitionAction::Auto) {
+        let Some(condition) = &transition.condition else {
+            selected = Some(transition);
+            break;
+        };
+
+        let outcome = evaluate_condition(condition, evaluation, actor).map_err(|error| {
+            tracing::error!(
+                workflow = %graph.workflow_key,
+                from = %state.code,
+                to = %transition.to,
+                error = %error,
+                "an automatic transition's condition could not be evaluated"
+            );
+
+            unevaluable_condition(&state.code, TransitionAction::Auto, &transition.to)
+        })?;
+
+        routing.push(json!({
+            "to": transition.to,
+            "condition": condition,
+            "outcome": outcome,
+        }));
+
+        if outcome {
+            selected = Some(transition);
+            break;
+        }
+    }
+
+    let Some(chosen) = selected else {
+        // Every conditioned edge was false, or there were none at all. Recorded
+        // rather than silent: a service task that did nothing because its
+        // routing did not hold is exactly the thing somebody will have to
+        // explain later.
+        tracing::info!(
+            workflow = %graph.workflow_key,
+            state = %state.code,
+            evaluated = routing.len(),
+            "a service task has no automatic transition to take; the instance stays here"
+        );
+
+        return Ok(None);
+    };
+
+    let target = graph.state(&chosen.to).ok_or_else(|| AppError::Internal {
+        source: anyhow::anyhow!(
+            "automatic transition to `{}` names a state the definition does not declare",
+            chosen.to
+        ),
+    })?;
+
+    // **The guards, before the move** (LHCS §5.1, JWSS §7). A `REJECT` returns
+    // an error and this transaction rolls back, so a refused guard leaves the
+    // document exactly where the decision that reached this state put it.
+    run_transition_guards(
+        transaction,
+        tenant_id,
+        document_id,
+        graph,
+        instance_id,
+        state,
+        chosen,
+        actor,
+        evaluation,
+    )
+    .await?;
+
+    let outcome = if target.is_final {
+        InstanceOutcome::from_document_status(&target.maps_to_document_status)
+    } else {
+        None
+    };
+
+    let moved = repo::move_state(
+        transaction,
+        tenant_id,
+        &repo::StateMove {
+            id: instance_id,
+            from: &state.code,
+            to: &chosen.to,
+            final_state: target.is_final,
+            outcome,
+        },
+        actor,
+    )
+    .await?;
+
+    if moved == 0 {
+        return Err(AppError::conflict(
+            "this process moved while an automatic step was being applied",
+        ));
+    }
+
+    history::record(
+        &mut **transaction,
+        &history::NewHistoryEntry {
+            tenant_id,
+            workflow_instance_id: instance_id,
+            document_id,
+            from_state: Some(&state.code),
+            to_state: &chosen.to,
+            action: Some(TransitionAction::Auto),
+            // No task and no comment: nobody decided this, which is the whole
+            // of what a service task is.
+            task_id: None,
+            comment: None,
+            // The actor is whoever's action reached the service state, carried
+            // so the trail attributes the automatic step to the decision that
+            // caused it rather than to nobody.
+            actor_user_id: actor,
+            on_behalf_of_user_id: None,
+            routing: (!routing.is_empty()).then_some(Value::Array(routing)),
+        },
+    )
+    .await?;
+
+    Ok(Some(target))
+}
+
+/// One transition's `guards`, run as `before_workflow_transition`.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the payload's own fields, assembled where they are known"
+)]
+async fn run_transition_guards(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    document_id: Uuid,
+    graph: &Graph,
+    instance_id: Uuid,
+    from: &State,
+    chosen: &super::super::domain::Transition,
+    actor: Option<Uuid>,
+    evaluation: &EvaluationContext,
+) -> Result<(), AppError> {
+    // **Four sources merged into one chain** is §12.4's whole shape, and this
+    // is where two of them meet: the registry's entries for this document type
+    // (and the tenant-wide ones, which is what a null `document_type_id`
+    // means), and the definition's own `guards`. Reading the registry even when
+    // the definition declares nothing is deliberate — a tenant-wide policy that
+    // only applied to transitions that already had a guard would be a policy
+    // for the definitions that needed it least.
+    let document_type_id = evaluation
+        .document
+        .get("documentTypeId")
+        .and_then(Value::as_str)
+        .and_then(|id| id.parse().ok())
+        .unwrap_or_else(Uuid::nil);
+
+    let registry = hook::repository::registry_chain(
+        transaction,
+        tenant_id,
+        document_type_id,
+        hook::BEFORE_WORKFLOW_TRANSITION,
+    )
+    .await?;
+
+    let chain = hook::service::merge(registry, chosen.guards.clone());
+
+    if chain.is_empty() {
+        return Ok(());
+    }
+
+    let metadata = hook::repository::metadata_of(transaction, tenant_id, document_id).await?;
+    let transition_ref =
+        hook::service::transition_ref(&graph.workflow_key, graph.revision, &from.code, &chosen.to);
+    let context = hook::service::workflow_context(
+        &graph.workflow_key,
+        graph.revision,
+        instance_id,
+        &from.code,
+        &from.code,
+        &chosen.to,
+        TransitionAction::Auto.as_db(),
+    );
+
+    let mut invocation = hook::Invocation {
+        hook_name: hook::BEFORE_WORKFLOW_TRANSITION,
+        stage: hook::Stage::Transition,
+        // Overwritten per entry by the runner; the chain here is one source.
+        source: hook::Source::Workflow,
+        tenant_id,
+        document_id,
+        document_type_key: evaluation
+            .document
+            .get("typeCode")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        current_status: evaluation.document.get("status").and_then(Value::as_str),
+        target_status: Some(&chosen.to),
+        actor_user_id: actor,
+        form_data: evaluation.form_data.clone(),
+        metadata,
+        workflow_context: context,
+        subject: Value::Null,
+        config: json!({}),
+        correlation_id: instance_id,
+    };
+
+    let outcome = hook::service::run_before_chain(
+        transaction,
+        &RuleEvaluator::new(),
+        &chain,
+        &mut invocation,
+        Some(&transition_ref),
+    )
+    .await?;
+
+    if outcome.modified {
+        // **Not yet applied, and refused rather than dropped.** LHCS §5.1 makes
+        // the engine replace the payload *and re-validate it against the form's
+        // own schema*; writing `documents.form_data_json` from here without
+        // that re-validation would store data the document's definition has not
+        // seen — which is the Tamper-Proof Pattern's failure with the hook in
+        // place of the browser. The write goes in beside the submit path's
+        // `secure_payload`, and until it does a `MODIFY` is a refusal that says
+        // so.
+        return Err(AppError::conflict(
+            "a guard on this transition returned MODIFY, and applying a modified payload \
+             needs the re-validation JFSS S8.1 requires; this build refuses it rather than \
+             storing data the form has not checked",
+        ));
+    }
+
+    Ok(())
+}
+
+/// Enters a state: its task, if it declares one that a person performs, and the
+/// document's status.
+///
+/// **Both in the caller's transaction** ([#176] AC1, [#178] AC3). A state that
+/// says it needs approval and a process with no task to approve it is a stalled
+/// instance nobody is told about, and two transactions is how it happens.
+///
+/// [#176]: https://github.com/sujanto-gaws/kelir/issues/176
+#[allow(
+    clippy::too_many_arguments,
+    reason = "same as `fire`: these are the \
+    parts of a transition, and a struct would only rename them"
+)]
+async fn enter_once(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    instance_id: Uuid,
+    document_id: Uuid,
+    graph: &Graph,
+    state: &State,
+    actor: Option<Uuid>,
+    context: AssignmentContext,
+) -> Result<DocumentStatus, AppError> {
+    // **A service task writes no task row** ([#339] AC2), which is the defect
+    // this issue is really about: before it, a `SERVICE_TASK` generated a human
+    // task that sat in somebody's inbox waiting for a person who was not
+    // coming. `enter`'s loop is what moves the instance past this state.
+    if let Some(spec) = state.task.as_ref().filter(|spec| spec.task_type.is_human()) {
         let path = format!("states.{}.task.assignment", state.code);
 
         // **A `dueInHours` no interval can hold leaves the task without a
@@ -661,7 +1060,7 @@ async fn enter(
                 document_id,
                 task_definition_key: &spec.task_definition_key,
                 task_name: &spec.task_name,
-                task_type: &spec.task_type,
+                task_type: spec.task_type.as_db(),
                 priority: &spec.priority,
                 assignee_user_id: resolved.assignee_user_id,
                 candidate_role_id: resolved.candidate_role_id,
