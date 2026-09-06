@@ -213,6 +213,32 @@ export const routes: RouteRecordRaw[] = [
         },
       },
       {
+        // **The screen D-64 was accepted against the absence of** (FR-RAD-008,
+        // #341). SRS §9 criterion 4 — *administrators can configure document
+        // types* — was recorded as met over the API on the stated basis that
+        // this was scheduled, and `v0.6.0`'s notes say so in shipped text.
+        path: 'admin/document-types',
+        name: 'admin-document-types',
+        component: () => import('@/features/admin/DocumentTypeListPage.vue'),
+        // The read permission opens the screen; create, update and delete are
+        // checked per button, the way every other admin screen does it — a
+        // button that always answers 403 says the product is broken rather than
+        // that this person may not do it.
+        meta: {
+          requiresAuth: true,
+          permission: 'document-type:read',
+          title: 'Document types',
+        },
+      },
+      {
+        // The configured navigation (FR-RAD-004, #341). `rad_menus` has been in
+        // the schema since Sprint 7 with no surface whatever.
+        path: 'admin/menus',
+        name: 'admin-menus',
+        component: () => import('@/features/admin/MenuListPage.vue'),
+        meta: { requiresAuth: true, permission: 'rad:menu:read', title: 'Navigation' },
+      },
+      {
         path: 'forbidden',
         name: 'forbidden',
         component: () => import('@/pages/ForbiddenPage.vue'),

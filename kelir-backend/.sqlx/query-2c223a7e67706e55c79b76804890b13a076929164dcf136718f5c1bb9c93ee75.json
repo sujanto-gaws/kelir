@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT EXISTS (\n            SELECT 1 FROM rad_menus\n            WHERE tenant_id = $1 AND menu_key = $2 AND deleted_at IS NULL\n        ) AS \"taken!\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "taken!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "2c223a7e67706e55c79b76804890b13a076929164dcf136718f5c1bb9c93ee75"
+}

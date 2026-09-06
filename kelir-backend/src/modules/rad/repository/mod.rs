@@ -12,4 +12,5 @@
 pub mod action;
 pub mod form;
 pub mod list;
+pub mod menu;
 pub mod submission;

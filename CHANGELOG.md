@@ -59,6 +59,42 @@ While the major version is `0`, the public API may change in any release.
   chain of automatic steps is bounded, so two service states routing into each
   other are refused rather than looping.
 
+- **The document type builder and the menu builder** (FR-RAD-004, FR-RAD-008,
+  FR-DTYPE-001..004, [#341](https://github.com/sujanto-gaws/kelir/issues/341),
+  **D-70**). `/admin/document-types` creates and edits a document type, binds a
+  published form revision and an active workflow to it, and sets its numbering
+  rule; `/admin/menus` authors the navigation. **This is what discharges
+  D-64**: `v0.6.0` was tagged with SRS §9's *administrators can configure
+  document types* met by an API and by no screen, accepted on the stated basis
+  that this builder was scheduled. The assertion that closes it is not that the
+  screen renders — it is that a document is raised from a type configured
+  through the browser in the same flow. The form, list and workflow bindings are
+  chosen from what may actually be bound, and the governed master-data record is
+  offered as the two values the backend implements — a third would make the type
+  govern nothing, silently.
+- **`RAD_MENU` audit records are readable by `rad:menu:read`.** An object type
+  this crate writes and `audit::domain::readable_by` does not place withholds
+  its values from everybody (**D-49**), which `audit_object_types` is there to
+  catch and did.
+- **`GET|POST /api/v1/rad/menus` and `GET|PUT|DELETE /api/v1/rad/menus/{id}`**
+  — the navigation surface over `rad_menus`, in the schema since `v0.4.0`
+  with no reader and no writer. `source` is written by the server as `CONFIG`
+  and never taken from the request. Deleting an entry re-parents its children to
+  their grandparent rather than cascading.
+- **The sidebar renders configured entries beside the built-in ones**,
+  interleaved by `sort_order` rather than appended. The built-in destinations
+  stay in code, so a tenant whose menu table is empty or mis-edited still has an
+  application they can navigate — including back to the screen that fixes it.
+  A configured entry's `required_permission` hides the link; the screen behind
+  it enforces its own.
+- **A menu re-parent that would close a loop is refused**
+  (`MENU_WOULD_CYCLE`), by the bounded ancestor walk
+  [#191](https://github.com/sujanto-gaws/kelir/issues/191) asked for. A walk
+  that reaches the depth bound refuses as `MENU_TREE_TOO_DEEP` rather than
+  assuming there was no cycle above it — a ring of three is invisible to the
+  `CHECK` constraint that catches a self-reference. #191's `rad_form_sections`
+  half remains open.
+
 ### Changed
 
 - **Four of the six JWSS task types are refused at publish**, naming

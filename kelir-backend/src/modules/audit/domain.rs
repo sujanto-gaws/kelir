@@ -69,6 +69,7 @@ pub fn readable_by(object_type: &str) -> Option<&'static str> {
         "DOCUMENT_TYPE" | "DOCUMENT_TYPE_NUMBERING_RULE" => "document-type:read",
         "RAD_FORM" | "RAD_FORM_SUBMISSION" => "rad:form:read",
         "RAD_LIST" => "rad:list:read",
+        "RAD_MENU" => "rad:menu:read",
 
         // Workflow.
         "WORKFLOW_DEFINITION" => "workflow:definition:read",

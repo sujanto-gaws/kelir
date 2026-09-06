@@ -1,0 +1,27 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE rad_menus\n        SET label = COALESCE($3, label),\n            icon = CASE WHEN $4 THEN $5 ELSE icon END,\n            parent_menu_id = CASE WHEN $6 THEN $7 ELSE parent_menu_id END,\n            route_path = CASE WHEN $8 THEN $9 ELSE route_path END,\n            required_permission = CASE WHEN $10 THEN $11 ELSE required_permission END,\n            sort_order = COALESCE($12, sort_order),\n            is_enabled = COALESCE($13, is_enabled),\n            updated_by = $14,\n            updated_at = now()\n        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Bool",
+        "Varchar",
+        "Bool",
+        "Uuid",
+        "Bool",
+        "Varchar",
+        "Bool",
+        "Varchar",
+        "Int4",
+        "Bool",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "aacbe16d6e3311822d120d860a372b9dbef50065e021f690446dcd6182395925"
+}

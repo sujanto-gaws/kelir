@@ -1,12 +1,16 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
+import * as LUCIDE from 'lucide-vue-next'
 import {
   Bell,
   Building2,
+  Circle,
+  FileCog,
   FileText,
   Inbox,
   LayoutDashboard,
+  ListTree,
   LogOut,
   Menu,
   Moon,
@@ -17,11 +21,15 @@ import {
   Users,
 } from 'lucide-vue-next'
 
+import { listMenus } from '@/api/rad'
 import { Button } from '@/components/ui/button'
 import { LOGIN_ROUTE_NAME } from '@/router/guards'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { useNotificationStore } from '@/stores/notifications'
+import type { MenuEntry } from '@/types/rad'
+
+import { mergeNavigation } from './navigation'
 
 const appStore = useAppStore()
 const notifications = useNotificationStore()
@@ -38,7 +46,7 @@ const router = useRouter()
  * the backend re-checks every request and is the only thing that decides.
  */
 const navigation = [
-  { name: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, enabled: true },
+  { name: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, enabled: true, sortOrder: 10 },
   {
     // Enabled in Sprint 10 (#179). The permission was already right: the inbox
     // reads the workflow module's task rows, so it borrows that module's read
@@ -48,6 +56,7 @@ const navigation = [
     icon: Inbox,
     enabled: true,
     permission: 'workflow:task:read',
+    sortOrder: 20,
   },
   {
     name: 'documents',
@@ -55,6 +64,7 @@ const navigation = [
     icon: FileText,
     enabled: true,
     permission: 'document:read',
+    sortOrder: 30,
   },
   {
     // #251. Below the two work queues and above the reference data, which is
@@ -65,6 +75,7 @@ const navigation = [
     icon: Bell,
     enabled: true,
     permission: 'notification:read',
+    sortOrder: 40,
   },
   {
     name: 'master-data',
@@ -72,6 +83,7 @@ const navigation = [
     icon: Users,
     enabled: true,
     permission: 'master-data:party:read',
+    sortOrder: 50,
   },
   {
     name: 'admin-users',
@@ -79,6 +91,7 @@ const navigation = [
     icon: UserCog,
     enabled: true,
     permission: 'identity:user:read',
+    sortOrder: 60,
   },
   {
     name: 'admin-roles',
@@ -86,6 +99,7 @@ const navigation = [
     icon: ShieldCheck,
     enabled: true,
     permission: 'identity:role:read',
+    sortOrder: 70,
   },
   {
     name: 'admin-delegations',
@@ -93,6 +107,7 @@ const navigation = [
     icon: UserRoundCheck,
     enabled: true,
     permission: 'identity:delegation:read',
+    sortOrder: 80,
   },
   {
     name: 'admin-tenants',
@@ -100,12 +115,70 @@ const navigation = [
     icon: Building2,
     enabled: true,
     permission: 'organization:tenant:read',
+    sortOrder: 80,
+  },
+  {
+    // #341. Beside the other four configuration screens, because it is one.
+    name: 'admin-document-types',
+    label: 'Document Types',
+    icon: FileCog,
+    enabled: true,
+    permission: 'document-type:read',
+    sortOrder: 90,
+  },
+  {
+    name: 'admin-menus',
+    label: 'Navigation',
+    icon: ListTree,
+    enabled: true,
+    permission: 'rad:menu:read',
+    sortOrder: 100,
   },
 ] as const
 
+/**
+ * What a tenant has added to the navigation (FR-RAD-004, #341).
+ *
+ * **A failure leaves the built-in navigation standing.** The sidebar is how
+ * somebody gets anywhere, and a configuration read that could take it away
+ * would make an optional feature a dependency of the whole application. A
+ * caller without `rad:menu:read` — which is most of them — simply gets none.
+ */
+const configuredMenus = ref<MenuEntry[]>([])
+
+async function loadConfiguredMenus(): Promise<void> {
+  if (!auth.can('rad:menu:read')) {
+    return
+  }
+
+  try {
+    configuredMenus.value = (await listMenus()).items
+  } catch {
+    configuredMenus.value = []
+  }
+}
+
 const visibleNavigation = computed(() =>
-  navigation.filter((item) => !('permission' in item) || auth.can(item.permission)),
+  mergeNavigation(navigation, configuredMenus.value, (permission) => auth.can(permission)),
 )
+
+/** A configured entry's Lucide icon, or the fallback every entry gets. */
+function iconFor(item: { icon: unknown; iconName: string | null }): unknown {
+  if (item.icon) {
+    return item.icon
+  }
+
+  const icons = LUCIDE as Record<string, unknown>
+  const pascal = (item.iconName ?? '')
+    .split('-')
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join('')
+
+  // An icon name the bundle does not have renders as the neutral one rather
+  // than as nothing: the icon set is the client's and a definition outlives a
+  // release of it.
+  return icons[pascal] ?? Circle
+}
 
 const currentTitle = computed(() =>
   typeof route.meta.title === 'string' ? route.meta.title : 'Kelir',
@@ -125,6 +198,15 @@ watch(
   () => void notifications.refresh(),
   { immediate: true },
 )
+
+// **Once per shell, not per navigation.** The configured navigation changes
+// when an administrator edits it, which is rare, and re-reading it on every
+// route change would put a request on every click to save a refresh nobody is
+// waiting for. `MenuListPage` reloads its own copy after each save; a sidebar
+// that has gone stale is one page reload from correct.
+onMounted(() => {
+  void loadConfiguredMenus()
+})
 
 const isSigningOut = ref(false)
 
@@ -153,23 +235,50 @@ async function signOut(): Promise<void> {
       </div>
 
       <nav class="space-y-1 p-3" aria-label="Main navigation">
-        <template v-for="item in visibleNavigation" :key="item.name">
+        <template v-for="item in visibleNavigation" :key="item.key">
           <RouterLink
-            v-if="item.enabled"
-            :to="{ name: item.name }"
+            v-if="item.enabled && item.routeName"
+            :to="{ name: item.routeName }"
             class="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium hover:bg-secondary"
             active-class="bg-secondary"
+            :data-testid="`nav-${item.key}`"
           >
-            <component :is="item.icon" class="size-4" aria-hidden="true" />
+            <component :is="iconFor(item)" class="size-4" aria-hidden="true" />
             {{ item.label }}
           </RouterLink>
+
+          <!-- A configured entry navigates by path: its route is a string a
+               tenant typed, and the router resolves it. -->
+          <RouterLink
+            v-else-if="item.enabled && item.routePath"
+            :to="item.routePath"
+            class="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium hover:bg-secondary"
+            active-class="bg-secondary"
+            :style="{ paddingLeft: `${0.75 + item.depth * 0.75}rem` }"
+            :data-testid="`nav-${item.key}`"
+          >
+            <component :is="iconFor(item)" class="size-4" aria-hidden="true" />
+            {{ item.label }}
+          </RouterLink>
+
+          <!-- A configured entry with no route is a heading for the ones under
+               it, not a link that does nothing. -->
+          <span
+            v-else-if="item.enabled"
+            class="flex items-center gap-3 px-3 pt-3 pb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground"
+            :style="{ paddingLeft: `${0.75 + item.depth * 0.75}rem` }"
+            :data-testid="`nav-${item.key}`"
+          >
+            {{ item.label }}
+          </span>
 
           <span
             v-else
             class="flex cursor-not-allowed items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground"
             :title="`${item.label} arrives in a later phase`"
+            :data-testid="`nav-${item.key}`"
           >
-            <component :is="item.icon" class="size-4" aria-hidden="true" />
+            <component :is="iconFor(item)" class="size-4" aria-hidden="true" />
             {{ item.label }}
           </span>
         </template>
