@@ -1,8 +1,49 @@
 //! A conversation about a document: adding to it, replying, editing and
 //! deleting (FR-CMT-001 to FR-CMT-004; [#249], [#253]).
 //!
+//! # Seen to fail (coding standard §2.9)
+//!
+//! **Six mutations over [#253]'s own predicates, run against this file on
+//! 2026-09-07, all six red** ([#360]).
+//!
+//! | | Mutation | Reddened |
+//! |---|---|---|
+//! | M1 | `service` — `Some(Some(_)) => reply_to_reply()` never fires, so a reply may answer a reply (**D-50**) | `a_reply_to_a_reply_is_refused_and_the_conversation_stays_one_level` |
+//! | M2 | `repository::find_parent` loses its document scope, so a reply's parent is found on another document | `a_reply_cannot_reach_across_documents` |
+//! | M3 | `service::refuse_unless_author` returns `Ok` for everybody | `a_comment_is_not_somebody_elses_to_edit`, `a_comment_is_not_somebody_elses_to_delete_and_deleting_is_its_own_permission` |
+//! | M4 | `repository::list_for_document` drops the `EXISTS`, so a deleted root is never served and its replies lose their context (**D-51**) | `deleting_a_comment_that_has_replies_leaves_a_tombstone_and_keeps_them` |
+//! | M5 | The same read serves a tombstone's `body` instead of withholding it (**D-51**'s other half) | the same test |
+//! | M6 | `repository::lock_comment` stops excluding tombstones, so a deleted comment is editable | `a_deleted_comment_cannot_be_edited` |
+//!
+//! **M4 and M5 are one rule in two statements and both had to be run.** D-51
+//! says a deleted comment is served *only* while an undeleted reply hangs from
+//! it, *with its body withheld* — the `EXISTS` decides whether the row appears
+//! and `deleted_at.is_none().then_some(body)` decides what it carries. A
+//! mutation of either alone leaves the other looking sufficient.
+//!
+//! **One mutation could not be written, and that is a result rather than a
+//! gap.** Accepting an absent parent by turning `None => return Err(…)` into
+//! `None => {}` does not type-check: the `match` arms disagree, so the
+//! predicate cannot be removed at the service and had to be removed at the
+//! repository instead, which is what M2 does. `rad_menus.rs`'s M8 and M9 record
+//! the same shape for the same reason — a mutation that breaks the compiler
+//! measures the compiler.
+//!
+//! **What this file already had, and why it was not enough** ([#360]). One
+//! inline *Seen red, 2026-08-31* note sits on
+//! `the_total_counts_this_documents_comments_and_no_others`, and it belongs to
+//! [#249] — Sprint 12's baseline — not to the tail built on top of it. So the
+//! threading depth rule, the tombstone, the edit window and the authorship gate
+//! shipped with no campaign behind them, which the [Sprint 13
+//! retrospective][retro]'s sixth action found and Sprint 14's status report
+//! named. **The action offered two discharges and this is the second**: the
+//! report labelled the row, and this table is the campaign the label said was
+//! missing.
+//!
 //! [#249]: https://github.com/sujanto-gaws/kelir/issues/249
 //! [#253]: https://github.com/sujanto-gaws/kelir/issues/253
+//! [#360]: https://github.com/sujanto-gaws/kelir/issues/360
+//! [retro]: ../../projects/retrospectives/11.%20Sprint%2013%20Retrospective.md
 
 mod common;
 
@@ -131,6 +172,14 @@ async fn a_conversation_is_read_in_the_order_it_was_said() {
 ///
 /// **Seen red, 2026-08-31**, with `document_id = $2` dropped from
 /// `count_for_document`: the page stayed at 2 and the total became 5.
+///
+/// **This is [#249]'s mutation, not [#253]'s** — the one note this file carried
+/// before the campaign in its header, and the reason the tail it predates read
+/// as covered. See [#360].
+///
+/// [#249]: https://github.com/sujanto-gaws/kelir/issues/249
+/// [#253]: https://github.com/sujanto-gaws/kelir/issues/253
+/// [#360]: https://github.com/sujanto-gaws/kelir/issues/360
 #[tokio::test]
 async fn the_total_counts_this_documents_comments_and_no_others() {
     let app = TestApp::spawn().await;
