@@ -90,6 +90,21 @@ test('a form calculates as it is typed into, and refuses to be submitted incompl
   // told them nothing.
   await expect(page.getByTestId('field-error')).toHaveCount(0)
 
+  // --- The closed branch, asserted where it would be if it were open -------
+  //
+  // FR-RAD-011's other half, and the one this flow used to claim rather than
+  // check (#357). `justification` lives on the Notes tab and its `conditional`
+  // wants a budget above 1,000, which nothing has typed yet.
+  //
+  // **`toHaveCount(0)` on the open tab, not `not.toBeVisible()` on a closed
+  // one.** A field on a tab nobody has clicked is invisible whatever its
+  // conditional says, so asserting invisibility here would pass against a
+  // renderer that had never heard of `conditional` — which is exactly the
+  // failure the paragraph below says this pair distinguishes.
+  await page.getByRole('tab', { name: 'Notes' }).click()
+  await expect(page.locator('#jfss-justification-field')).toHaveCount(0)
+  await page.getByRole('tab', { name: 'Lines' }).click()
+
   // --- A line total, computed in the browser (AC2) -------------------------
   //
   // `defaultItems: 1`, so row one is already there. `line_total` carries
@@ -135,9 +150,11 @@ test('a form calculates as it is typed into, and refuses to be submitted incompl
 
   // --- A conditional opens a branch (JFSS §7) ------------------------------
   //
-  // The budget above 1,000 is what `justification`'s `conditional` asks for. It
-  // was absent from the page before, and asserting both states is what
-  // distinguishes a working conditional from a field that never rendered.
+  // The budget above 1,000 is what `justification`'s `conditional` asks for,
+  // and the assertion above watched the same locator on the same tab find
+  // nothing before it was typed. **Both states, which is what distinguishes a
+  // working conditional from a field that never rendered** — the sentence this
+  // comment made before #357 gave it its first half.
   await page.getByRole('tab', { name: 'Notes' }).click()
   await expect(page.locator('#jfss-justification-field')).toBeVisible()
 
