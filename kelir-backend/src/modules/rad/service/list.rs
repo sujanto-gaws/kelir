@@ -16,12 +16,9 @@ use super::super::repository::list::{self as repo, ListFields, NewList};
 use super::super::{LIST_CREATE, LIST_DELETE, LIST_READ, LIST_UPDATE};
 use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
-use crate::modules::audit::{self, AuditEntry, ChangeSet};
+use crate::modules::audit::{self, domain::ObjectType, AuditEntry, ChangeSet};
 use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
-
-/// What the audit trail calls a list definition (naming convention §7).
-const OBJECT_TYPE: &str = "RAD_LIST";
 
 /// `rad_lists.page_size`'s own default, repeated here because a create that
 /// omits the field has to send *something* and the column default would
@@ -107,7 +104,7 @@ pub async fn create_list(
             tenant_id,
             event_type: "RadList.Created",
             action: "CREATE",
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::RadList,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),
@@ -201,7 +198,7 @@ pub async fn update_list(
             tenant_id,
             event_type: "RadList.Updated",
             action: "UPDATE",
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::RadList,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),
@@ -239,7 +236,7 @@ pub async fn delete_list(
             tenant_id,
             event_type: "RadList.Deleted",
             action: "DELETE",
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::RadList,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),

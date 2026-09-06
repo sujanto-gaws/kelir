@@ -63,7 +63,7 @@ use super::password::hash_password;
 use super::token::hash_refresh_token;
 use crate::error::{AppError, ValidationDetail};
 use crate::mail::Mail;
-use crate::modules::audit::{self, AuditEntry};
+use crate::modules::audit::{self, domain::ObjectType, AuditEntry};
 use crate::modules::identity::domain::{validate_password_value, UserStatus};
 use crate::modules::identity::repository as identity_repo;
 use crate::state::AppState;
@@ -231,7 +231,7 @@ pub async fn request_reset(
             tenant_id,
             event_type: "User.PasswordResetRequested",
             action: "UPDATE",
-            object_type: "USER",
+            object_type: ObjectType::User,
             object_id: credentials.id,
             actor_user_id: None,
             ip_address: ip,
@@ -314,7 +314,7 @@ pub async fn reset_password(
             tenant_id: stored.tenant_id,
             event_type: "User.PasswordReset",
             action: "UPDATE",
-            object_type: "USER",
+            object_type: ObjectType::User,
             object_id: stored.user_id,
             // No actor: whoever redeemed the token proved they hold it, which
             // is not the same as proving who they are.

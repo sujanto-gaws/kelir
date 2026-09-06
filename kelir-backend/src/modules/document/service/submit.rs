@@ -102,11 +102,11 @@ use uuid::Uuid;
 
 use super::super::domain::{Document, DocumentStatus};
 use super::super::repository::{self as repo, Submission};
-use super::super::{DOCUMENT_SUBMIT, OBJECT_TYPE};
+use super::super::DOCUMENT_SUBMIT;
 use super::form;
 use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
-use crate::modules::audit::{self, AuditEntry};
+use crate::modules::audit::{self, domain::ObjectType, AuditEntry};
 use crate::modules::document_type::numbering::{AllocationContext, GapPolicy};
 use crate::modules::document_type::{
     numbering_repository, numbering_service, repository as document_type_repository,
@@ -409,7 +409,7 @@ pub async fn submit_document(
             // what number did it get" answerable only by reading a payload.
             event_type: "Document.Submitted",
             action: "SUBMIT",
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::Document,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),

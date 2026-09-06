@@ -37,12 +37,11 @@ use super::super::domain::{
 };
 use super::super::repository::{definition as repo, projection};
 use super::super::{
-    DEFINITION_CREATE, DEFINITION_DELETE, DEFINITION_OBJECT_TYPE, DEFINITION_PUBLISH,
-    DEFINITION_READ, DEFINITION_UPDATE,
+    DEFINITION_CREATE, DEFINITION_DELETE, DEFINITION_PUBLISH, DEFINITION_READ, DEFINITION_UPDATE,
 };
 use crate::error::{AppError, ValidationDetail};
 use crate::middleware::auth::Authenticated;
-use crate::modules::audit::{self, AuditEntry, ChangeSet};
+use crate::modules::audit::{self, domain::ObjectType, AuditEntry, ChangeSet};
 use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
 
@@ -133,7 +132,7 @@ pub async fn create_definition(
             tenant_id,
             event_type: "Workflow.Created",
             action: "CREATE",
-            object_type: DEFINITION_OBJECT_TYPE,
+            object_type: ObjectType::WorkflowDefinition,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),
@@ -228,7 +227,7 @@ pub async fn update_definition(
             tenant_id,
             event_type: "Workflow.Updated",
             action: "UPDATE",
-            object_type: DEFINITION_OBJECT_TYPE,
+            object_type: ObjectType::WorkflowDefinition,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),
@@ -305,7 +304,7 @@ pub async fn publish_definition(
             tenant_id,
             event_type: "Workflow.Published",
             action: "UPDATE",
-            object_type: DEFINITION_OBJECT_TYPE,
+            object_type: ObjectType::WorkflowDefinition,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),
@@ -393,7 +392,7 @@ pub async fn create_revision(
             tenant_id,
             event_type: "Workflow.RevisionCreated",
             action: "CREATE",
-            object_type: DEFINITION_OBJECT_TYPE,
+            object_type: ObjectType::WorkflowDefinition,
             object_id: new_id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),
@@ -449,7 +448,7 @@ pub async fn delete_definition(
             tenant_id,
             event_type: "Workflow.Deleted",
             action: "DELETE",
-            object_type: DEFINITION_OBJECT_TYPE,
+            object_type: ObjectType::WorkflowDefinition,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),

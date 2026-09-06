@@ -18,12 +18,9 @@ use super::super::repository::form::{self as repo, FormFields, NewForm};
 use super::super::{FORM_CREATE, FORM_DELETE, FORM_PUBLISH, FORM_READ, FORM_UPDATE};
 use crate::error::{AppError, ValidationDetail};
 use crate::middleware::auth::Authenticated;
-use crate::modules::audit::{self, AuditEntry, ChangeSet};
+use crate::modules::audit::{self, domain::ObjectType, AuditEntry, ChangeSet};
 use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
-
-/// What the audit trail calls a form definition (naming convention §7).
-const OBJECT_TYPE: &str = "RAD_FORM";
 
 /// The JFSS specification version a definition is recorded against.
 ///
@@ -125,7 +122,7 @@ pub async fn create_form(
             tenant_id,
             event_type: "RadForm.Created",
             action: "CREATE",
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::RadForm,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),
@@ -217,7 +214,7 @@ pub async fn update_form(
             tenant_id,
             event_type: "RadForm.Updated",
             action: "UPDATE",
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::RadForm,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),
@@ -285,7 +282,7 @@ pub async fn publish_form(
             tenant_id,
             event_type: "RadForm.Published",
             action: "UPDATE",
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::RadForm,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),
@@ -369,7 +366,7 @@ pub async fn create_revision(
             tenant_id,
             event_type: "RadForm.RevisionCreated",
             action: "CREATE",
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::RadForm,
             object_id: new_id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),
@@ -412,7 +409,7 @@ pub async fn delete_form(
             tenant_id,
             event_type: "RadForm.Deleted",
             action: "DELETE",
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::RadForm,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),

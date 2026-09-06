@@ -10,7 +10,7 @@ use super::domain::{
 use super::repository as repo;
 use crate::error::{AppError, ValidationDetail};
 use crate::middleware::auth::Authenticated;
-use crate::modules::audit::{self, AuditEntry};
+use crate::modules::audit::{self, domain::ObjectType, AuditEntry};
 use crate::modules::auth::password::hash_password;
 use crate::modules::organization::department_repository as department_repo;
 use crate::response::{PageMeta, Pagination};
@@ -102,7 +102,7 @@ pub async fn create_user(
             tenant_id,
             event_type: "User.Created",
             action: "CREATE",
-            object_type: "USER",
+            object_type: ObjectType::User,
             object_id: id,
             actor_user_id: Some(caller.user_id()),
             ip_address: caller.ip_address(),
@@ -175,7 +175,7 @@ pub async fn update_user(
             tenant_id,
             event_type: "User.Updated",
             action: "UPDATE",
-            object_type: "USER",
+            object_type: ObjectType::User,
             object_id: id,
             actor_user_id: Some(caller.user_id()),
             ip_address: caller.ip_address(),
@@ -227,7 +227,7 @@ pub async fn deactivate_user(
             tenant_id,
             event_type: "User.Deactivated",
             action: "DELETE",
-            object_type: "USER",
+            object_type: ObjectType::User,
             object_id: id,
             actor_user_id: Some(caller.user_id()),
             ip_address: caller.ip_address(),
@@ -273,7 +273,7 @@ pub async fn set_password(
             tenant_id: caller.tenant_id(),
             event_type: "User.PasswordChanged",
             action: "UPDATE",
-            object_type: "USER",
+            object_type: ObjectType::User,
             object_id: id,
             actor_user_id: Some(caller.user_id()),
             ip_address: caller.ip_address(),
@@ -474,7 +474,7 @@ async fn audit_permission_change(
             tenant_id: caller.tenant_id(),
             event_type,
             action,
-            object_type: "ROLE",
+            object_type: ObjectType::Role,
             object_id: role_id,
             actor_user_id: Some(caller.user_id()),
             ip_address: caller.ip_address(),

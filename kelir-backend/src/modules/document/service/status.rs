@@ -39,10 +39,10 @@ use uuid::Uuid;
 
 use super::super::domain::{DocumentStatus, TransitionRequest, TransitionResult};
 use super::super::repository as repo;
-use super::super::{DOCUMENT_TRANSITION, OBJECT_TYPE};
+use super::super::DOCUMENT_TRANSITION;
 use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
-use crate::modules::audit::{self, AuditEntry};
+use crate::modules::audit::{self, domain::ObjectType, AuditEntry};
 use crate::state::AppState;
 
 /// Moves one document to a new status, or refuses and says why.
@@ -159,7 +159,7 @@ pub async fn transition(
             // rejected this" must not have to read a payload to find out which
             // kind of write happened.
             action: "STATUS_CHANGE",
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::Document,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),

@@ -17,11 +17,8 @@ use super::repository as type_repo;
 use super::{TYPE_READ, TYPE_UPDATE};
 use crate::error::{AppError, ValidationDetail};
 use crate::middleware::auth::Authenticated;
-use crate::modules::audit::{self, AuditEntry, ChangeSet};
+use crate::modules::audit::{self, domain::ObjectType, AuditEntry, ChangeSet};
 use crate::state::AppState;
-
-/// What the audit trail calls a numbering rule (naming convention §7).
-const OBJECT_TYPE: &str = "DOCUMENT_TYPE_NUMBERING_RULE";
 
 /// `document_type_numbering_rules.sequence_padding`'s own default.
 const DEFAULT_PADDING: i32 = 6;
@@ -169,7 +166,7 @@ pub async fn set_rule(
             // in March?" is the question a reader actually has.
             event_type: "DocumentTypeNumberingRule.Set",
             action: if before.is_some() { "UPDATE" } else { "CREATE" },
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::DocumentTypeNumberingRule,
             object_id: document_type_id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),
@@ -207,7 +204,7 @@ pub async fn clear_rule(
             tenant_id,
             event_type: "DocumentTypeNumberingRule.Cleared",
             action: "DELETE",
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::DocumentTypeNumberingRule,
             object_id: document_type_id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),

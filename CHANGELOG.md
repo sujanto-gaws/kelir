@@ -114,6 +114,28 @@ While the major version is `0`, the public API may change in any release.
 
 ### Changed
 
+- **An audit object type added without a permission no longer compiles**
+  (FR-AUD-004, [#323](https://github.com/sujanto-gaws/kelir/issues/323),
+  **D-49**, **D-61**). `AuditEntry.object_type` was a `&str` and the
+  object-type-to-permission map ended in a wildcard, so a module could write a
+  type nobody had placed: it compiled, it wrote, and every one of its rows
+  withheld its recorded values from everybody — including from a caller holding
+  every permission the object has. That is how `EXTERNAL_REFERENCE` went
+  unnoticed between two items a day apart, and the source-walk test that stood
+  in for the close could not see a write it did not recognise. **The vocabulary
+  is now `audit::domain::ObjectType`** — nineteen variants, an exhaustive
+  `match` with no wildcard — across seventy construction sites in eleven
+  modules. **A twentieth variant went with the wildcard**: `WORKFLOW_INSTANCE`
+  had an arm, a constant and no writer — `PARTY_ROLE`'s shape a second time,
+  and the enumerating test could not see it because the unused constant was one
+  of the three write shapes it counted. `workflow:instance:read` is untouched
+  and still opens `GET /workflow/instances/{id}`.
+  **Nothing changes on the wire or in the column**: `ObjectType::as_db` returns
+  the same text every row already holds, which is what the hash chain was taken
+  over, so no stored row's verification changes. The withholding remains for
+  what it was always for — a row written by a later release or by a plugin,
+  which `ObjectType::from_db` still declines to place.
+
 - **Five merged ADRs read `Adopted`, which is what they should have read since
   2026-09-02** ([#346](https://github.com/sujanto-gaws/kelir/issues/346)).
   ADR-0029 through 0032 and ADR-0034 decide comment threading, comment

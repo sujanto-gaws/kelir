@@ -65,6 +65,3 @@ pub const DOCUMENT_SUBMIT: &str = "document:submit";
 /// set, its own audit action and its own consequences. Putting it behind the
 /// update permission would put approval behind typing.
 pub const DOCUMENT_TRANSITION: &str = "document:transition";
-
-/// What the audit trail calls a document (naming convention §7).
-pub const OBJECT_TYPE: &str = "DOCUMENT";

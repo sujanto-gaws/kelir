@@ -49,6 +49,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::error::{AppError, ValidationDetail};
+use crate::modules::audit::domain::ObjectType;
 
 /// Where a master-data record has got to in its own governance lifecycle
 /// (concepts/03 §5; the `record_status` `CHECK` in Database Schema §4).
@@ -180,10 +181,17 @@ pub enum TransitionTarget {
 
 impl TransitionTarget {
     /// What the audit trail calls this record (naming convention §7).
-    pub fn object_type(self) -> &'static str {
+    ///
+    /// **An [`ObjectType`] rather than a `&'static str` since
+    /// [#323](https://github.com/sujanto-gaws/kelir/issues/323).** This method
+    /// was the third of the three write shapes `tests/audit_object_types.rs`
+    /// had to learn to scan for — a string literal in the body of a
+    /// `fn object_type(` — and it is now the same closed vocabulary every other
+    /// site names.
+    pub fn object_type(self) -> ObjectType {
         match self {
-            Self::Party => "PARTY",
-            Self::Facility => "FACILITY",
+            Self::Party => ObjectType::Party,
+            Self::Facility => ObjectType::Facility,
         }
     }
 

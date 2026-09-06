@@ -68,17 +68,6 @@ pub mod service;
 pub mod storage;
 pub mod worker;
 
-/// What the audit trail calls an attachment (naming convention §7).
-pub const ATTACHMENT_OBJECT_TYPE: &str = "ATTACHMENT";
-
-/// What the audit trail calls an external reference (naming convention §7).
-///
-/// **Its own object type, not `ATTACHMENT`.** A trail that filed both under one
-/// name would make *which of these was a file* a question nobody can answer from
-/// the row, and `audit::domain::readable_by` maps a type to the permission that
-/// governs it — two things governed alike still have to be told apart.
-pub const REFERENCE_OBJECT_TYPE: &str = "EXTERNAL_REFERENCE";
-
 pub const ATTACHMENT_CREATE: &str = "attachment:create";
 /// Seeded by `0031_attachment.sql`, checked by #245. See the module note.
 #[allow(

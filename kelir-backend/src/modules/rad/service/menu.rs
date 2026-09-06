@@ -22,11 +22,8 @@ use super::super::repository::menu::{self as repo, MenuFields, NewMenu};
 use super::super::{MENU_CREATE, MENU_DELETE, MENU_READ, MENU_UPDATE};
 use crate::error::{AppError, ValidationDetail};
 use crate::middleware::auth::Authenticated;
-use crate::modules::audit::{self, AuditEntry, ChangeSet};
+use crate::modules::audit::{self, domain::ObjectType, AuditEntry, ChangeSet};
 use crate::state::AppState;
-
-/// What the audit trail calls a menu entry (naming convention §7).
-const OBJECT_TYPE: &str = "RAD_MENU";
 
 /// The whole configured navigation.
 ///
@@ -111,7 +108,7 @@ pub async fn create_menu(
             tenant_id,
             event_type: "RadMenu.Created",
             action: "CREATE",
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::RadMenu,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),
@@ -200,7 +197,7 @@ pub async fn update_menu(
             tenant_id,
             event_type: "RadMenu.Updated",
             action: "UPDATE",
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::RadMenu,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),
@@ -235,7 +232,7 @@ pub async fn delete_menu(
             tenant_id,
             event_type: "RadMenu.Deleted",
             action: "DELETE",
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::RadMenu,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),

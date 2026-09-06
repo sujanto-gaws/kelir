@@ -30,11 +30,8 @@ use super::super::FORM_SUBMIT;
 use super::evaluation;
 use crate::error::{AppError, ValidationDetail};
 use crate::middleware::auth::Authenticated;
-use crate::modules::audit::{self, AuditEntry};
+use crate::modules::audit::{self, domain::ObjectType, AuditEntry};
 use crate::state::AppState;
-
-/// What the audit trail calls a submission (naming convention §7).
-const OBJECT_TYPE: &str = "RAD_FORM_SUBMISSION";
 
 /// Re-evaluates a submitted payload and stores the server's answer.
 ///
@@ -117,7 +114,7 @@ pub async fn submit_form(
             tenant_id,
             event_type: "RadForm.Submitted",
             action: "CREATE",
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::RadFormSubmission,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),

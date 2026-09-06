@@ -2,7 +2,7 @@
 //!
 //! [#252]: https://github.com/sujanto-gaws/kelir/issues/252
 
-use super::domain::{readable_by, AuditEvent, AuditSearch};
+use super::domain::{AuditEvent, AuditSearch, ObjectType};
 use super::repository as repo;
 use super::AUDIT_READ;
 use crate::error::{AppError, ValidationDetail};
@@ -91,11 +91,18 @@ pub async fn search_audit(
 /// because one row happened to name an object the caller cannot read — which
 /// would make the search's answer depend on what is in it.
 ///
-/// **An object type with no entry withholds** ([`readable_by`] says why), so a
-/// row written by a later release or a plugin is served as an event with no
-/// contents rather than as contents nobody decided about.
+/// **An object type this build cannot place withholds**
+/// ([`ObjectType::from_db`] says why), so a row written by a later release or a
+/// plugin is served as an event with no contents rather than as contents nobody
+/// decided about. Since [#323] that is the *only* way to reach the withholding
+/// by accident: this crate cannot write an object type that is not an
+/// [`ObjectType`], and every variant has a permission or the crate does not
+/// compile.
+///
+/// [#323]: https://github.com/sujanto-gaws/kelir/issues/323
 fn redact_for(caller: &Authenticated, row: AuditEvent) -> AuditEvent {
-    let may_read = readable_by(&row.object_type).is_some_and(|permission| caller.holds(permission));
+    let may_read = ObjectType::from_db(&row.object_type)
+        .is_some_and(|object_type| caller.holds(object_type.readable_by()));
 
     if may_read {
         return row;

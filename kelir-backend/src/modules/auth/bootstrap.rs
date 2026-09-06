@@ -14,7 +14,7 @@ use uuid::Uuid;
 use super::password::hash_password;
 use crate::config::AppConfig;
 use crate::error::AppError;
-use crate::modules::audit::{self, AuditEntry};
+use crate::modules::audit::{self, domain::ObjectType, AuditEntry};
 use crate::modules::identity::domain::validate_password_value;
 use crate::modules::identity::repository as identity_repo;
 use crate::modules::organization::service as organization;
@@ -243,7 +243,7 @@ pub async fn ensure_administrator(
             tenant_id,
             event_type: "User.Created",
             action: "CREATE",
-            object_type: "USER",
+            object_type: ObjectType::User,
             object_id: id,
             actor_user_id: None,
             // **No caller, so no address** (FR-AUD-005). The first-run

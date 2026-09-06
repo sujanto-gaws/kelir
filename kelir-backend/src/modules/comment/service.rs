@@ -9,12 +9,12 @@ use uuid::Uuid;
 
 use super::domain::{self, AddCommentRequest, Comment, EditCommentRequest};
 use super::repository as repo;
-use super::{COMMENT_CREATE, COMMENT_DELETE, COMMENT_OBJECT_TYPE, COMMENT_READ, COMMENT_UPDATE};
+use super::{COMMENT_CREATE, COMMENT_DELETE, COMMENT_READ, COMMENT_UPDATE};
 use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
 use crate::modules::activity::domain::EventCategory;
 use crate::modules::activity::service::{record as record_activity, Happening};
-use crate::modules::audit::{self, AuditEntry};
+use crate::modules::audit::{self, domain::ObjectType, AuditEntry};
 use crate::modules::document::service::document as document_service;
 use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
@@ -156,7 +156,7 @@ pub async fn add_comment(
             tenant_id,
             event_type,
             action: "CREATE",
-            object_type: COMMENT_OBJECT_TYPE,
+            object_type: ObjectType::Comment,
             object_id: id,
             actor_user_id: Some(actor),
             ip_address: caller.ip_address(),
@@ -288,7 +288,7 @@ pub async fn edit_comment(
             tenant_id,
             event_type: "Comment.Edited",
             action: "UPDATE",
-            object_type: COMMENT_OBJECT_TYPE,
+            object_type: ObjectType::Comment,
             object_id: comment_id,
             actor_user_id: Some(actor),
             ip_address: caller.ip_address(),
@@ -400,7 +400,7 @@ pub async fn delete_comment(
             tenant_id,
             event_type: "Comment.Deleted",
             action: "DELETE",
-            object_type: COMMENT_OBJECT_TYPE,
+            object_type: ObjectType::Comment,
             object_id: comment_id,
             actor_user_id: Some(actor),
             ip_address: caller.ip_address(),
