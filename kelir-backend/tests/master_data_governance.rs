@@ -9,6 +9,11 @@
 //! transaction that closes the process, and a rejection leaves the record
 //! exactly as it was.
 //!
+//! **And when the record is not where its change parked it**
+//! ([#322](https://github.com/sujanto-gaws/kelir/issues/322)), the approval is
+//! refused by name and the rejection still closes the task — the two directions
+//! of *either refuses cleanly or completes*.
+//!
 //! # Seen to fail (coding standard §2.9)
 //!
 //! Four mutations, run 2026-09-02:
@@ -27,6 +32,16 @@
 //! |---|---|
 //! | `refuse_if_awaiting_approval` removed from `delete_party` | *a parked record is not deleted while its change awaits approval*, *an approval still settles after a delete was refused* |
 //! | `refuse_if_awaiting_approval` removed from `delete_facility` | *a parked facility is not deleted either* |
+//!
+//! **And three more, run 2026-09-06 with the settle refusal
+//! ([#322](https://github.com/sujanto-gaws/kelir/issues/322), record 13
+//! finding 3):**
+//!
+//! | Mutation | Reddened |
+//! |---|---|
+//! | `moved_on`'s approval arm returning the `AppError::Internal` this issue removed — the defect itself | *an approval is refused by name when the record moved since it parked*, on a 500 where a 409 belongs |
+//! | `moved_on`'s `if approved` guard widened to refuse both decisions | *a rejection closes the task the refused approval left open* — every decision refuses, which is a task nobody can close |
+//! | `resolve_change_request` removed from `moved_on`'s rejection path | the same test, on the record's history: the process ended and the attempt still reads as open |
 //!
 //! **And one thing a mutation could not reach.** Swapping
 //! `repo::lock_record_status` for an unlocked read on the pool leaves all three
@@ -326,22 +341,39 @@ async fn record_status(app: &TestApp, supplier: Uuid) -> String {
 }
 
 async fn decide(app: &TestApp, approver: &Approver, document: Uuid, action: &str) {
-    let task: Uuid = sqlx::query_scalar(
+    let decided = decision(app, approver, document, action).await;
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+}
+
+/// The decision without the 200, for the tests that are about how it refuses
+/// ([#322]).
+///
+/// [#322]: https://github.com/sujanto-gaws/kelir/issues/322
+async fn decision(
+    app: &TestApp,
+    approver: &Approver,
+    document: Uuid,
+    action: &str,
+) -> common::TestResponse {
+    let task = open_task(app, document).await.expect("the open task");
+
+    app.post(
+        &format!("/api/v1/workflow/tasks/{task}/decision"),
+        Some(&approver.token),
+        json!({ "action": action }),
+    )
+    .await
+}
+
+/// The task still waiting on a decision, or `None` once the process has closed.
+async fn open_task(app: &TestApp, document: Uuid) -> Option<Uuid> {
+    sqlx::query_scalar(
         "SELECT id FROM workflow_tasks WHERE document_id = $1 AND status <> 'COMPLETED'",
     )
     .bind(document)
-    .fetch_one(&app.pool)
+    .fetch_optional(&app.pool)
     .await
-    .expect("the open task");
-
-    let decided = app
-        .post(
-            &format!("/api/v1/workflow/tasks/{task}/decision"),
-            Some(&approver.token),
-            json!({ "action": action }),
-        )
-        .await;
-    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+    .expect("the task query")
 }
 
 /// Puts a party at `ACTIVE`, which is where a real supplier lives.
@@ -996,4 +1028,256 @@ async fn a_parked_facility_is_not_deleted_either() {
             .await
             .expect("the facility");
     assert!(alive);
+}
+
+// ---------------------------------------------------------------------------
+// #322 — the record moved since its change parked it
+// ---------------------------------------------------------------------------
+
+/// Moves a record out of `PENDING_APPROVAL` **behind the product's back**.
+///
+/// # Why the statement and not an endpoint
+///
+/// There is no route into this state, and that is the point rather than a
+/// weakness in the test. `/transition` refuses a parked record (the record
+/// status module's header says parking is a process's move and not a person's),
+/// the direct write refuses it ([#255] AC1), and the delete refuses it
+/// (**D-60**). **D-60 closed the last route the product had and did not close
+/// the class** — `settle`'s own comment names *somebody moved it by another
+/// route* as what it guards against, and a later release, a plugin or an
+/// operator at a `psql` prompt is that somebody.
+///
+/// So this reaches the branch the way the branch is actually reached. A test
+/// that could only get here through a route the product still has would be
+/// asserting about a defect somebody had already closed.
+///
+/// [#255]: https://github.com/sujanto-gaws/kelir/issues/255
+async fn move_the_record_behind_the_products_back(app: &TestApp, supplier: Uuid, to: &str) {
+    let moved = sqlx::query("UPDATE mdm_parties SET record_status = $2 WHERE id = $1")
+        .bind(supplier)
+        .bind(to)
+        .execute(&app.pool)
+        .await
+        .expect("the out-of-band move");
+
+    assert_eq!(moved.rows_affected(), 1, "the record to be moved exists");
+}
+
+/// **An approval is refused by name, not by 500** ([#322]).
+///
+/// The record is not where its change parked it, so the change cannot be
+/// applied. Before this issue `settle` answered `AppError::Internal` and the
+/// approver was told `INTERNAL_ERROR`: true, unhelpful, and indistinguishable
+/// from the product having fallen over.
+///
+/// **The refusal names the state**, which is the acceptance criterion — an
+/// approver told *this record is at ACTIVE rather than PENDING_APPROVAL* can go
+/// and look at the record; one told *an unexpected error occurred* cannot.
+///
+/// **And nothing is written**, because the decision runs in one transaction:
+/// the refusal rolls the document's status back alongside the change. An
+/// approval that half-happened would be worse than the 500.
+///
+/// **The mutation:** `moved_on`'s `if approved { return Err(…) }` replaced by
+/// the `AppError::Internal` this issue removed — the assertion on 409 goes red
+/// against a 500. Seen red that way, 2026-09-06.
+///
+/// [#322]: https://github.com/sujanto-gaws/kelir/issues/322
+#[tokio::test]
+async fn an_approval_is_refused_by_name_when_the_record_moved_since_it_parked() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let reviewer = approver(&app, "mdm-moved-reviewer").await;
+
+    let workflow =
+        publish_workflow(&app, &token, approval_workflow("wf_mdm_moved", reviewer.id)).await;
+    let type_id = governed_type(&app, &token, "MDM_MOVED", workflow, Some("PARTY")).await;
+    let supplier = party(&app, &token, "MDM-MOVED-1").await;
+    activate(&app, &token, supplier).await;
+
+    let document = change_document(
+        &app,
+        &token,
+        type_id,
+        supplier,
+        json!({ "externalId": "SUP-9201", "description": "raised before the record moved" }),
+    )
+    .await;
+    let submitted = submit(&app, &token, document).await;
+    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+    assert_eq!(record_status(&app, supplier).await, "PENDING_APPROVAL");
+
+    move_the_record_behind_the_products_back(&app, supplier, "ACTIVE").await;
+
+    let refused = decision(&app, &reviewer, document, "APPROVE").await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::CONFLICT,
+        "an approval over a record that moved answered something other than a refusal: {}",
+        refused.body
+    );
+    assert_eq!(refused.body["error"]["code"], "CONFLICT");
+
+    let message = refused.body["error"]["message"]
+        .as_str()
+        .expect("a message")
+        .to_owned();
+
+    assert!(
+        message.contains("ACTIVE"),
+        "the refusal does not name the state the record is in: {message}"
+    );
+    assert!(
+        message.contains("PENDING_APPROVAL"),
+        "the refusal does not name the state the change expected: {message}"
+    );
+
+    // **Nothing was written by the attempt.** The change is not applied, the
+    // document did not become APPROVED, and the change request is still open —
+    // one transaction, rolled back whole.
+    let (external, status): (Option<String>, String) =
+        sqlx::query_as("SELECT external_id, record_status FROM mdm_parties WHERE id = $1")
+            .bind(supplier)
+            .fetch_one(&app.pool)
+            .await
+            .expect("the record");
+
+    assert_ne!(
+        external.as_deref(),
+        Some("SUP-9201"),
+        "a refused approval wrote the change anyway"
+    );
+    assert_eq!(status, "ACTIVE", "a refused approval moved the record");
+
+    let document_status: String = sqlx::query_scalar("SELECT status FROM documents WHERE id = $1")
+        .bind(document)
+        .fetch_one(&app.pool)
+        .await
+        .expect("the document");
+    assert_ne!(
+        document_status, "APPROVED",
+        "the document was approved while its change was refused"
+    );
+
+    let open_change: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM mdm_change_requests WHERE document_id = $1 AND resolved_at IS NULL",
+    )
+    .bind(document)
+    .fetch_one(&app.pool)
+    .await
+    .expect("the change request");
+    assert_eq!(
+        open_change, 1,
+        "the change request was resolved by a refusal"
+    );
+}
+
+/// **And the rejection closes it**, which is the half a clean refusal alone
+/// would fail ([#322] AC2).
+///
+/// # The asymmetry is the acceptance criterion
+///
+/// *The decision either refuses cleanly or completes. It does not leave a task
+/// that no decision can close.* If a rejection refused for the same reason an
+/// approval does, every decision on this task would refuse — the 500's own
+/// failure wearing a 409, and an approver holding a task with no way out of it.
+///
+/// **A rejection has nothing to write and nothing to put back**, so it can
+/// complete honestly: the attempt is recorded `REFUSED`, the record is left
+/// exactly where whoever moved it put it, and the process ends.
+///
+/// **This runs the refusal first**, because the sequence is the property: the
+/// approver tries to approve, is told why they cannot, and rejects. A test that
+/// only rejected would not show that the first decision left the task open.
+///
+/// **The mutation:** `moved_on`'s `if approved` guard widened to refuse both
+/// ways — the REJECT below answers 409 and the task stays open, which is the
+/// defect this criterion names. Seen red that way, 2026-09-06.
+///
+/// [#322]: https://github.com/sujanto-gaws/kelir/issues/322
+#[tokio::test]
+async fn a_rejection_closes_the_task_the_refused_approval_left_open() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let reviewer = approver(&app, "mdm-wayout-reviewer").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &token,
+        approval_workflow("wf_mdm_wayout", reviewer.id),
+    )
+    .await;
+    let type_id = governed_type(&app, &token, "MDM_WAYOUT", workflow, Some("PARTY")).await;
+    let supplier = party(&app, &token, "MDM-WAYOUT-1").await;
+    activate(&app, &token, supplier).await;
+
+    let document = change_document(
+        &app,
+        &token,
+        type_id,
+        supplier,
+        json!({ "externalId": "SUP-9202", "description": "the record moves under this" }),
+    )
+    .await;
+    let submitted = submit(&app, &token, document).await;
+    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+
+    move_the_record_behind_the_products_back(&app, supplier, "SUSPENDED").await;
+
+    let refused = decision(&app, &reviewer, document, "APPROVE").await;
+    assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.body);
+
+    assert!(
+        open_task(&app, document).await.is_some(),
+        "the refused approval closed the task it refused"
+    );
+
+    // **The way out, and it is the one the refusal's message names.**
+    let rejected = decision(&app, &reviewer, document, "REJECT").await;
+    assert_eq!(
+        rejected.status,
+        StatusCode::OK,
+        "no decision can close this task, which is the defect the 500 produced: {}",
+        rejected.body
+    );
+
+    assert!(
+        open_task(&app, document).await.is_none(),
+        "the rejection left the task open"
+    );
+
+    // The attempt is recorded as what it was, and the record is left where it
+    // was moved to rather than put back to a status two moves ago.
+    let (outcome, resolved): (Option<String>, bool) = sqlx::query_as(
+        "SELECT outcome, resolved_at IS NOT NULL FROM mdm_change_requests WHERE document_id = $1",
+    )
+    .bind(document)
+    .fetch_one(&app.pool)
+    .await
+    .expect("the change request");
+
+    assert!(
+        resolved,
+        "the change request is still open after a rejection"
+    );
+    assert_eq!(outcome.as_deref(), Some("REFUSED"));
+
+    let (external, status): (Option<String>, String) =
+        sqlx::query_as("SELECT external_id, record_status FROM mdm_parties WHERE id = $1")
+            .bind(supplier)
+            .fetch_one(&app.pool)
+            .await
+            .expect("the record");
+
+    assert_ne!(
+        external.as_deref(),
+        Some("SUP-9202"),
+        "a rejection wrote the change"
+    );
+    assert_eq!(
+        status, "SUSPENDED",
+        "the rejection put the record back to where the change had parked it from, overwriting a \
+         status somebody else had set"
+    );
 }

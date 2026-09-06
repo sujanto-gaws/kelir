@@ -149,6 +149,22 @@ While the major version is `0`, the public API may change in any release.
   keeps the refusal as its second line — a form published before this gate
   existed answers 422 naming the fields, never a 500.
 
+### Fixed
+
+- **An approval whose record moved on is refused by name, not by 500**
+  (FR-MDM-010, [#322](https://github.com/sujanto-gaws/kelir/issues/322),
+  [ADR-0033](docs/architectures/adr/0033.%20A%20Governed%20Record%20Parks%20at%20Pending%20Approval.md)).
+  A master-data change settles against a record parked at `PENDING_APPROVAL`;
+  if the record is not there when the decision arrives, `settle` answered
+  `AppError::Internal` and the approver saw `INTERNAL_ERROR` — true, and
+  useless to the person holding the task. **D-60** closed the route the product
+  had into that state and did not close the class, which an out-of-band write,
+  a later release or a plugin can still reach. **The approval is now a 409
+  naming the state the record is in and what to do next; the rejection
+  completes**, recording the attempt as `REFUSED` and leaving the record where
+  it was moved to. The asymmetry is what keeps the task closable — a decision
+  that refused both ways would leave an approver holding a task nothing can
+  close, which is what the 500 produced.
 ## [0.6.0] — 2026-09-03
 
 Phase 6 closes: **a document carries the things people put on it.** A file is

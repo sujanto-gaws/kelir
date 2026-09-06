@@ -280,6 +280,43 @@ pub fn already_in_flight() -> AppError {
     )
 }
 
+/// The refusal for an **approval** of a change whose record has moved on
+/// ([#322](https://github.com/sujanto-gaws/kelir/issues/322)).
+///
+/// # A 409 that names the state, where a 500 used to be
+///
+/// `settle` asked `move_record_status_in` to move the record out of
+/// `PENDING_APPROVAL` and treated *no rows* as `AppError::Internal`. Its comment
+/// said the mismatch should be **loud rather than silent**, and it was right
+/// about the requirement and wrong about the audience: a 500 is loud to a log
+/// and opaque to the approver holding the task, who is told `INTERNAL_ERROR`
+/// with nothing about what happened or what to do next.
+///
+/// **D-60** closed the route that produced this — deleting a record parked at
+/// `PENDING_APPROVAL` — and did not close the class: an out-of-band write, a
+/// later release, or a plugin can still move a record while its change is in
+/// flight.
+///
+/// **The message names the state and the way out**, because a refusal an
+/// approver cannot act on leaves the task where the 500 left it. Rejecting the
+/// document settles cleanly — see [`super::super::service::governance::settle`],
+/// which writes nothing and puts nothing back on that path.
+///
+/// `None` is the record no longer being there at all; naming *absent* rather
+/// than inventing a status is the same choice [`GovernedEntity::from_db`] makes.
+pub fn moved_since_parked(status: Option<RecordStatus>) -> AppError {
+    let where_it_is = match status {
+        Some(status) => format!("is at {}", status.as_db()),
+        None => "is no longer present".to_owned(),
+    };
+
+    AppError::conflict(format!(
+        "this record {where_it_is} rather than PENDING_APPROVAL, so the change this document \
+         carries can no longer be applied to it; reject this document to close the task, and \
+         raise the change again against the record as it now stands"
+    ))
+}
+
 /// The refusal for a record whose status cannot take a change.
 pub fn not_changeable(status: RecordStatus) -> AppError {
     AppError::conflict(format!(

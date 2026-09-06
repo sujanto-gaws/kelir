@@ -30,6 +30,7 @@
 //! would be a record nobody can edit and no approver can see a document for.
 //!
 //! [#255]: https://github.com/sujanto-gaws/kelir/issues/255
+//! [#322]: https://github.com/sujanto-gaws/kelir/issues/322
 //! [ADR-0033]: ../../../../docs/architectures/adr/0033.%20A%20Governed%20Record%20Parks%20at%20Pending%20Approval.md
 
 use serde_json::Value;
@@ -163,6 +164,28 @@ pub async fn raise(
 /// A non-terminal status settles nothing: a document moving to `PENDING` or
 /// `IN_REVIEW` is a change still being decided.
 ///
+/// # When the record is not where this change parked it ([#322])
+///
+/// An out-of-band write, a later release or a plugin can move a record while
+/// its change is in flight — **D-60** closed the one route the product had into
+/// that state and did not close the class. This used to answer
+/// `AppError::Internal`, so the approver saw `INTERNAL_ERROR`: loud to a log,
+/// opaque to the person holding the task.
+///
+/// **The two decisions are answered differently, and the asymmetry is the
+/// point.** [`domain::moved_since_parked`] refuses an *approval* with a 409
+/// naming the state, because approving a change that cannot be applied would
+/// leave the document `APPROVED` and the record untouched — an approval that
+/// says something happened when nothing did. A *rejection* completes: there is
+/// nothing to write and nothing to put back, so the change request resolves
+/// `REFUSED` and the process ends.
+///
+/// **That asymmetry is what keeps the task closable**, which is the half a
+/// clean refusal alone would fail. If both decisions refused, every decision on
+/// that task would refuse and the task would be one no decision can close —
+/// the 500's own failure with a better status code on it. Rejecting is the way
+/// out, and the refusal's message says so.
+///
 /// # The record of the attempt (AC4)
 ///
 /// **The `mdm_change_requests` row is the record**, kept rather than deleted and
@@ -192,6 +215,17 @@ pub async fn settle(
         return Ok(());
     };
 
+    // **Where the record actually is, read under `FOR UPDATE` before anything
+    // is written** ([#322]). `raise` reads it the same way and for the same
+    // reason: the status is what every decision below turns on, and asking for
+    // it is how the refusal can name it.
+    let current =
+        repo::lock_record_status(transaction, tenant_id, change.entity, change.entity_id).await?;
+
+    if !current.is_some_and(RecordStatus::is_parked) {
+        return moved_on(transaction, tenant_id, &change, approved, current, actor).await;
+    }
+
     let target = if approved {
         RecordStatus::Active
     } else {
@@ -214,13 +248,14 @@ pub async fn settle(
     .await?;
 
     if moved == 0 {
-        // The record is not where this change parked it. Somebody moved it by
-        // another route, and applying a change to a record in an unknown state
-        // is worse than refusing: the approval stands, the change does not, and
-        // the mismatch is loud rather than silent.
+        // Unreachable: the row was read at `PENDING_APPROVAL` under `FOR UPDATE`
+        // above and this transaction still holds it. `raise` states the same
+        // thing at the same place, and both are `Internal` because a lock that
+        // did not hold is a broken premise rather than a refusal anybody can act
+        // on.
         return Err(AppError::Internal {
             source: anyhow::anyhow!(
-                "record {} was not at PENDING_APPROVAL when its change was settled",
+                "record {} was locked at PENDING_APPROVAL and then not moved",
                 change.entity_id
             ),
         });
@@ -234,6 +269,43 @@ pub async fn settle(
         actor,
     )
     .await?;
+
+    Ok(())
+}
+
+/// Settles a change whose record is no longer parked where it left it
+/// ([#322]).
+///
+/// **Refuses the approval, completes the rejection**, for the reason
+/// [`settle`]'s header gives: an approval that cannot be applied must not say
+/// it was, and a task no decision can close is what the 500 this replaces
+/// actually produced.
+///
+/// **Nothing is written on either path** — no field is applied, and no status is
+/// moved. The record has been moved by somebody else, and putting it back would
+/// be this function inventing an intent from a `previous_record_status` that is
+/// now describing a record two states ago.
+///
+/// **`REFUSED` rather than a new outcome.** `mdm_change_requests.outcome`'s own
+/// column comment reads *`REFUSED` when the process ended any other way*, and
+/// that is what happened: the change was not applied. A third value would need a
+/// migration to widen the `CHECK` and would tell the record's history something
+/// its reader — `GET /master-data/parties/{id}/change-requests` — has no column
+/// to show. What the document's own status says, and this row does not, is
+/// *why*.
+async fn moved_on(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    change: &super::domain::ChangeRequest,
+    approved: bool,
+    current: Option<RecordStatus>,
+    actor: Option<Uuid>,
+) -> Result<(), AppError> {
+    if approved {
+        return Err(domain::moved_since_parked(current));
+    }
+
+    repo::resolve_change_request(transaction, tenant_id, change.id, "REFUSED", actor).await?;
 
     Ok(())
 }
