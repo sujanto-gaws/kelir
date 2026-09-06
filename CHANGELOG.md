@@ -11,6 +11,17 @@ While the major version is `0`, the public API may change in any release.
 
 ### Added
 
+- **Signing out and the roles screen are driven by a browser**
+  ([#358](https://github.com/sujanto-gaws/kelir/issues/358)). SRS §9 criterion 1
+  is *users can log in and log out*: its login half was driven by every browser
+  spec, because none of them can do anything without signing in first, and its
+  **logout half by nothing**. `sign-out-and-the-roles-screen.spec.ts` reads the
+  roles screen through the navigation, signs out, and then **navigates** to a
+  protected route — a fresh page load, so the router's guard re-runs against
+  what the browser actually kept rather than against a store a test emptied.
+  That is the assertion a component test cannot make, and it is the one a token
+  outliving the sign-out would fail.
+
 - **A frontend image can say which release it is**
   (**#362**). `kelir-frontend:0.6.0`'s served bundle was byte-identical to
   `0.6.0-rc`'s — 45 files, same hash — because no build input carried the
