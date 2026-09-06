@@ -102,6 +102,17 @@ services:
     # There is no depends_on for PostgreSQL because it is not a compose service.
     # The backend runs migrations at startup and exits if the database is not
     # reachable; the restart policy retries until it is.
+    #
+    # **`minio-init` is a dependency, and it was not one at all until #359.**
+    # That container creates the attachment bucket and ends by checking what it
+    # was for; nothing here waited for it, so a stack whose bucket step failed
+    # came up, answered `/health/ready`, and failed at the first upload — the
+    # Sprint 13 retrospective's fifth action, open since it was written.
+    # `service_completed_successfully` is the condition that makes the
+    # postcondition mean something.
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
 
   # **Pinned, like the language runtimes are** (**D-62**). PostgreSQL, Rust and
   # Node have been pinned since Sprint 0; the four infrastructure images this

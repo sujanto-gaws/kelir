@@ -190,6 +190,20 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A one-shot container's failure now fails the deployment**
+  ([#359](https://github.com/sujanto-gaws/kelir/issues/359)). `minio-init`
+  creates the attachment bucket and has ended by checking what it was for since
+  [#305](https://github.com/sujanto-gaws/kelir/pull/305) — and **nothing
+  observed that postcondition**. The development compose declared
+  `depends_on: [minio-init]`, the short form, which waits for a container to
+  *start* rather than to succeed; the staging compose did not depend on it at
+  all. So a stack whose bucket step failed still came up, still answered
+  `/health/ready`, and still failed at the first upload. Both files now use
+  `condition: service_completed_successfully`, and the other dependencies say
+  `service_started` explicitly so the difference is on the page. **No action for
+  a deployment**: a stack whose bucket step works is unchanged, and one whose
+  bucket step fails now stops instead of lying.
+
 - **An approval whose record moved on is refused by name, not by 500**
   (FR-MDM-010, [#322](https://github.com/sujanto-gaws/kelir/issues/322),
   [ADR-0033](docs/architectures/adr/0033.%20A%20Governed%20Record%20Parks%20at%20Pending%20Approval.md)).
