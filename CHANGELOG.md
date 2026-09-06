@@ -95,6 +95,23 @@ While the major version is `0`, the public API may change in any release.
   `CHECK` constraint that catches a self-reference. #191's `rad_form_sections`
   half remains open.
 
+### Removed
+
+- **`activity:read`, one release after the check that used it**
+  (FR-ACT-005, [#301](https://github.com/sujanto-gaws/kelir/issues/301),
+  **D-47**, `0041_activity_read_dropped.sql`). `v0.6.0` stopped checking the
+  permission — a document's timeline reads through the document's own read and
+  nothing else — and could not delete the row in the same release: the
+  [release process](docs/standards/04.%20Release%20Process.md) §6 N−1 rule
+  deprecates in release N and removes in N+1, and dropping the row beside the
+  check would have 403'd every timeline read on the binary still serving a
+  rolling deploy. The row, its `ROLE-ADMIN` grant and the `ACTIVITY_READ`
+  constant are now gone, and `modules::activity` declares no permission of its
+  own. **No action for a deployment**: a role that held the code holds one fewer
+  grant and opens exactly what it opened before, because the code opened
+  nothing. Rehearsed rather than reasoned about — the `v0.6.0` image reads a
+  timeline `200` against a schema this migration has run on.
+
 ### Changed
 
 - **Five merged ADRs read `Adopted`, which is what they should have read since

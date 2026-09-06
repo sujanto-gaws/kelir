@@ -107,9 +107,19 @@
 //! does not, and all it can still do is refuse the person who raised the
 //! document a view of their own document's history.
 //!
-//! [`ACTIVITY_READ`] survives it, checking nothing, and says there why.
+//! **And this module now declares no permission of its own**
+//! ([#301](https://github.com/sujanto-gaws/kelir/issues/301),
+//! `0041_activity_read_dropped.sql`). `ACTIVITY_READ` outlived the check by one
+//! release and no longer exists: the [release process] §6 N−1 rule deprecates
+//! in release N and removes in N+1, `v0.6.0` is the N−1 and it checks nothing,
+//! so the constant, the row and its grants went together. What was left in the
+//! interval was a permission row nothing checks — the `delegations` shape
+//! **D-13** spent two decisions undoing, and the reason `modules::attachment`
+//! and `modules::comment` both declare no `delete` permission. **A grep for
+//! `activity:` in this crate now finds event types and nothing that gates.**
 //!
 //! [Database Schema]: ../../../../docs/design/02.%20Database%20Schema.md
+//! [release process]: ../../../../docs/standards/04.%20Release%20Process.md
 //!
 //! # What is not here
 //!
@@ -137,33 +147,3 @@ pub mod domain;
 pub mod handlers;
 pub mod repository;
 pub mod service;
-
-/// `activity:read`, **which nothing checks any more** (**D-47**, from
-/// [#250](https://github.com/sujanto-gaws/kelir/issues/250) AC2).
-///
-/// # A permission row nothing checks is a thing this project has undone twice
-///
-/// **D-13** spent two decisions on the `delegations` rows, and both
-/// `modules::attachment` and `modules::comment` cite it as the reason they
-/// declare no `delete` permission. So this constant is a known bad shape, kept
-/// deliberately and briefly, and the alternative was worse in a way that is
-/// worth writing down.
-///
-/// **The migration cannot drop the row in the release that stops checking it.**
-/// [Release process](../../../../docs/standards/04.%20Release%20Process.md)'s
-/// N−1 rule says a migration must leave the previous release running, and the
-/// previous release calls `caller.require("activity:read")` — deleting the
-/// permission would make every timeline read 403 for the whole of a rolling
-/// deploy, on the release that is still serving traffic. A permission removed
-/// one release after the check that used it is the only ordering that is safe
-/// in both directions.
-///
-/// **It is also what a downgrade needs.** Rolling back to `v0.6.0`'s
-/// predecessor with the row already gone gives a build whose check can never
-/// pass.
-///
-/// So: the constant stays, the seed stays, and
-/// [#301](https://github.com/sujanto-gaws/kelir/issues/301) drops both once
-/// this release is the N−1. Until then the honest statement is the one above —
-/// nothing reads it, and that is a decision rather than an oversight.
-pub const ACTIVITY_READ: &str = "activity:read";
