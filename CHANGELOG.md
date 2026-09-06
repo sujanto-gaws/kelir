@@ -97,6 +97,26 @@ While the major version is `0`, the public API may change in any release.
 
 ### Changed
 
+- **Five merged ADRs read `Adopted`, which is what they should have read since
+  2026-09-02** ([#346](https://github.com/sujanto-gaws/kelir/issues/346)).
+  ADR-0029 through 0032 and ADR-0034 decide comment threading, comment
+  tombstones, external references, soft-deleted attachment objects and
+  single-attempt notification delivery — all five shipped in `v0.6.0` while the
+  index told a reader they were under review. ADR-0033 was `Adopted` in the
+  record and `Draft` in the index, which is the same drift from the other side.
+  Each carries its own merge date rather than the date of the sweep.
+- **A record that stays `Draft` past its merge says what is holding it**
+  (`**Blocked by:** #NNN`, [standards/06](docs/standards/06.%20Architecture%20Decision%20Records.md)
+  §5.1, new). Adoption follows the merge and does not wait on a second reader;
+  the five above each invented that condition for themselves, which is stricter
+  than the standard asks and is what left them contradicting the index for five
+  sprints.
+- **`adr_records_are_current.rs` refuses the recurrence.** The status
+  vocabulary, the index agreeing with the record, an `Adopted` record carrying
+  its decision date, and a `Draft` naming its blocker — the shape
+  `deployment_images_are_pinned.rs` has for image tags (**D-62**), because a
+  rule that fired once in seven merges is not a rule.
+
 - **Four of the six JWSS task types are refused at publish**, naming
   themselves. `USER_TASK`, `REVIEW_TASK` and `DATA_ENTRY_TASK` would create the
   same row `APPROVAL_TASK` does; `SIGNATURE_TASK` would record an approval as a

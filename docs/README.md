@@ -86,12 +86,12 @@ Architecture decision records — one file per architecturally significant choic
 | [0026](architectures/adr/0026.%20ClamAV%20in%20the%20Stack,%20Scanning%20Asynchronously.md) | ClamAV in the compose stack, scanning asynchronously | Adopted |
 | [0027](architectures/adr/0027.%20A%20Document%20Pins%20the%20Form%20Revision%20It%20Was%20Filled%20Against.md) | A document pins its form revision; re-pointing is refused only for unpinned documents | Adopted |
 | [0028](architectures/adr/0028.%20A%20Definition%20Is%20Refused%20at%20Save%20Rather%20Than%20at%20Render.md) | A malformed definition is refused at save rather than at render | Adopted |
-| [0029](architectures/adr/0029.%20A%20Comment%20Thread%20Is%20One%20Level%20Deep.md) | A comment thread is one level deep — a reply answers a root, never another reply | **Draft** |
-| [0030](architectures/adr/0030.%20A%20Deleted%20Comment%20Leaves%20a%20Tombstone.md) | A deleted comment leaves a tombstone while replies hang from it, and never takes them | **Draft** |
-| [0031](architectures/adr/0031.%20An%20External%20Reference%20Is%20Not%20an%20Attachment%20Row.md) | An external reference is its own table — never an attachment row with a URL in it | **Draft** |
-| [0032](architectures/adr/0032.%20A%20Soft-Deleted%20Attachment%20Keeps%20Its%20Object.md) | A soft-deleted attachment keeps its stored object; removing bytes is retention's | **Draft** |
-| [0033](architectures/adr/0033.%20A%20Governed%20Record%20Parks%20at%20Pending%20Approval.md) | A governed master-data record parks at `PENDING_APPROVAL` while its change is approved | **Draft** |
-| [0034](architectures/adr/0034.%20One%20Delivery%20Attempt,%20Recorded%20Rather%20Than%20Retried.md) | A notification is delivered once per enabled channel, and a failure is logged rather than retried | **Draft** |
+| [0029](architectures/adr/0029.%20A%20Comment%20Thread%20Is%20One%20Level%20Deep.md) | A comment thread is one level deep — a reply answers a root, never another reply | Adopted |
+| [0030](architectures/adr/0030.%20A%20Deleted%20Comment%20Leaves%20a%20Tombstone.md) | A deleted comment leaves a tombstone while replies hang from it, and never takes them | Adopted |
+| [0031](architectures/adr/0031.%20An%20External%20Reference%20Is%20Not%20an%20Attachment%20Row.md) | An external reference is its own table — never an attachment row with a URL in it | Adopted |
+| [0032](architectures/adr/0032.%20A%20Soft-Deleted%20Attachment%20Keeps%20Its%20Object.md) | A soft-deleted attachment keeps its stored object; removing bytes is retention's | Adopted |
+| [0033](architectures/adr/0033.%20A%20Governed%20Record%20Parks%20at%20Pending%20Approval.md) | A governed master-data record parks at `PENDING_APPROVAL` while its change is approved | Adopted |
+| [0034](architectures/adr/0034.%20One%20Delivery%20Attempt,%20Recorded%20Rather%20Than%20Retried.md) | A notification is delivered once per enabled channel, and a failure is logged rather than retried | Adopted |
 | [0035](architectures/adr/0035.%20Rules%20Are%20Resolved%20Before%20a%20Form%20Is%20Published.md) | A form definition's rules are resolved at the write and again at the publish, over one graph spanning `calculate` and `conditional` | Adopted |
 | [0036](architectures/adr/0036.%20The%20Hook%20Chain%20Ships%20Its%20Before%20Half%20First.md) | The lifecycle hook chain ships its before half, driven by a service task; after-hooks wait for the outbox | Adopted |
 
