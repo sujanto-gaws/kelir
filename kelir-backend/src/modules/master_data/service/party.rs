@@ -20,10 +20,10 @@ use super::repository::{
     PartyGroupFields, PartyRow, PersonFields, RelationshipFields,
 };
 use super::role::load_roles;
-use super::{OBJECT_TYPE, PARTY_READ, ROLE_READ};
+use super::{PARTY_READ, ROLE_READ};
 use crate::error::{AppError, ValidationDetail};
 use crate::middleware::auth::Authenticated;
-use crate::modules::audit::{self, AuditEntry, ChangeSet};
+use crate::modules::audit::{self, domain::ObjectType, AuditEntry, ChangeSet};
 use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
 
@@ -231,7 +231,7 @@ pub async fn create_party(
             tenant_id,
             event_type: "Party.Created",
             action: "CREATE",
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::Party,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),
@@ -460,7 +460,7 @@ pub async fn update_party(
             } else {
                 "UPDATE"
             },
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::Party,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),
@@ -584,7 +584,7 @@ pub async fn delete_party(
             tenant_id,
             event_type: "Party.Deleted",
             action: "DELETE",
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::Party,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),

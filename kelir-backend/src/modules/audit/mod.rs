@@ -81,7 +81,13 @@ pub struct AuditEntry<'a> {
     pub tenant_id: Uuid,
     pub event_type: &'a str,
     pub action: &'a str,
-    pub object_type: &'a str,
+    /// **A closed vocabulary, and that is [#323]'s whole content**
+    /// ([`domain::ObjectType`]). It was `&'a str`, so a type nobody had mapped
+    /// to a permission could be written by accident and its values withheld
+    /// from everybody in silence.
+    ///
+    /// [#323]: https://github.com/sujanto-gaws/kelir/issues/323
+    pub object_type: domain::ObjectType,
     pub object_id: Uuid,
     pub actor_user_id: Option<Uuid>,
     pub ip_address: Option<&'a str>,
@@ -228,7 +234,7 @@ pub async fn record(pool: &PgPool, entry: AuditEntry<'_>) -> Result<Uuid, AppErr
         entry.tenant_id,
         entry.event_type,
         entry.action,
-        entry.object_type,
+        entry.object_type.as_db(),
         entry.object_id,
         entry.old_value.as_ref().map(canonical_json),
         entry.new_value.as_ref().map(canonical_json),
@@ -335,7 +341,10 @@ pub fn chain_hash(
     ));
     field(Some(entry.event_type.as_bytes()));
     field(Some(entry.action.as_bytes()));
-    field(Some(entry.object_type.as_bytes()));
+    // **The same bytes the column holds**, which is what makes this change
+    // invisible to the chain: `as_db` is the only place a variant becomes text,
+    // and its text is what every row already written was hashed over (#323).
+    field(Some(entry.object_type.as_db().as_bytes()));
     field(Some(entry.object_id.as_bytes()));
     field(
         entry
@@ -514,7 +523,7 @@ mod tests {
             tenant_id,
             event_type: "Security.SignedIn",
             action,
-            object_type: "USER",
+            object_type: domain::ObjectType::User,
             object_id: Uuid::nil(),
             actor_user_id: None,
             ip_address: None,

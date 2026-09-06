@@ -28,9 +28,6 @@ pub use record_status::*;
 pub use role::*;
 pub use role_view::*;
 
-/// What the audit trail calls a party (naming convention §7).
-const OBJECT_TYPE: &str = "PARTY";
-
 /// The permission that opens a party.
 ///
 /// Named rather than repeated since #136, because it is now checked from three

@@ -25,12 +25,9 @@ use super::department_repository::{self as repo, DepartmentFields, NewDepartment
 use super::{DEPARTMENT_MANAGE, DEPARTMENT_READ};
 use crate::error::{AppError, ValidationDetail};
 use crate::middleware::auth::Authenticated;
-use crate::modules::audit::{self, AuditEntry, ChangeSet};
+use crate::modules::audit::{self, domain::ObjectType, AuditEntry, ChangeSet};
 use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
-
-/// What the audit trail calls a department (naming convention §7).
-const OBJECT_TYPE: &str = "DEPARTMENT";
 
 pub async fn list_departments(
     state: &AppState,
@@ -126,7 +123,7 @@ pub async fn create_department(
             tenant_id,
             event_type: "Department.Created",
             action: "CREATE",
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::Department,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),
@@ -243,7 +240,7 @@ pub async fn update_department(
             tenant_id,
             event_type: "Department.Updated",
             action: "UPDATE",
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::Department,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),
@@ -299,7 +296,7 @@ pub async fn delete_department(
             tenant_id,
             event_type: "Department.Deleted",
             action: "DELETE",
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::Department,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),

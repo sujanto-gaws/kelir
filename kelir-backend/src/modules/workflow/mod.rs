@@ -178,10 +178,3 @@ pub const TASK_READ: &str = "workflow:task:read";
 /// [`domain::task::refuse_unless_theirs`] and, for a hand-off, by the stricter
 /// [`domain::task::refuse_unless_held_by`].
 pub const TASK_EXECUTE: &str = "workflow:task:execute";
-
-/// What the audit trail calls a workflow definition (naming convention §7).
-pub const DEFINITION_OBJECT_TYPE: &str = "WORKFLOW_DEFINITION";
-/// What the audit trail calls a running process.
-pub const INSTANCE_OBJECT_TYPE: &str = "WORKFLOW_INSTANCE";
-/// What the audit trail calls a user task.
-pub const TASK_OBJECT_TYPE: &str = "WORKFLOW_TASK";

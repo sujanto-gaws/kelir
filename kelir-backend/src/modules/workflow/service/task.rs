@@ -78,12 +78,12 @@ use super::super::domain::{
 use super::super::repository::{
     definition as definition_repo, instance as instance_repo, task as repo,
 };
-use super::super::{TASK_EXECUTE, TASK_OBJECT_TYPE};
+use super::super::TASK_EXECUTE;
 use super::assignment::AssignmentContext;
 use super::engine;
 use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
-use crate::modules::audit::{self, AuditEntry};
+use crate::modules::audit::{self, domain::ObjectType, AuditEntry};
 use crate::modules::document::repository as document_repo;
 use crate::modules::identity::delegation_repository as delegation_repo;
 use crate::modules::notification;
@@ -188,7 +188,7 @@ pub async fn claim_task(
             tenant_id,
             event_type: "Workflow.TaskClaimed",
             action: "UPDATE",
-            object_type: TASK_OBJECT_TYPE,
+            object_type: ObjectType::WorkflowTask,
             object_id: id,
             actor_user_id: Some(user_id),
             ip_address: caller.ip_address(),
@@ -349,7 +349,7 @@ pub async fn delegate(
             tenant_id,
             event_type: "Workflow.TaskDelegated",
             action: TransitionAction::Delegate.as_db(),
-            object_type: TASK_OBJECT_TYPE,
+            object_type: ObjectType::WorkflowTask,
             object_id: id,
             actor_user_id: Some(user_id),
             ip_address: caller.ip_address(),
@@ -681,7 +681,7 @@ pub async fn decide(
             // Naming convention §7's own worked example.
             event_type: "Workflow.TaskCompleted",
             action: action.as_db(),
-            object_type: TASK_OBJECT_TYPE,
+            object_type: ObjectType::WorkflowTask,
             object_id: id,
             actor_user_id: Some(user_id),
             ip_address: caller.ip_address(),

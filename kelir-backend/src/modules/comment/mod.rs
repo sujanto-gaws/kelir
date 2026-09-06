@@ -119,9 +119,6 @@ pub mod handlers;
 pub mod repository;
 pub mod service;
 
-/// What the audit trail calls a comment (naming convention §7).
-pub const COMMENT_OBJECT_TYPE: &str = "COMMENT";
-
 pub const COMMENT_CREATE: &str = "comment:create";
 pub const COMMENT_READ: &str = "comment:read";
 /// Editing one's **own** comment (FR-CMT-003). Never enough on its own —

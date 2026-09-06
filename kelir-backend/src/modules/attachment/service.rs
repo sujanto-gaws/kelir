@@ -15,15 +15,12 @@ use super::domain::{
     MAX_FILE_NAME,
 };
 use super::repository as repo;
-use super::{
-    ATTACHMENT_CREATE, ATTACHMENT_DELETE, ATTACHMENT_OBJECT_TYPE, ATTACHMENT_READ,
-    ATTACHMENT_REFERENCE, REFERENCE_OBJECT_TYPE,
-};
+use super::{ATTACHMENT_CREATE, ATTACHMENT_DELETE, ATTACHMENT_READ, ATTACHMENT_REFERENCE};
 use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
 use crate::modules::activity::domain::EventCategory;
 use crate::modules::activity::service::{record as record_activity, Happening};
-use crate::modules::audit::{self, AuditEntry};
+use crate::modules::audit::{self, domain::ObjectType, AuditEntry};
 use crate::modules::document::service::document as document_service;
 use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
@@ -212,7 +209,7 @@ pub async fn upload(
             tenant_id,
             event_type: "Attachment.Added",
             action: "CREATE",
-            object_type: ATTACHMENT_OBJECT_TYPE,
+            object_type: ObjectType::Attachment,
             object_id: id,
             actor_user_id: Some(actor),
             ip_address: caller.ip_address(),
@@ -486,7 +483,7 @@ pub async fn delete_attachment(
             tenant_id,
             event_type: "Attachment.Deleted",
             action: "DELETE",
-            object_type: ATTACHMENT_OBJECT_TYPE,
+            object_type: ObjectType::Attachment,
             object_id: attachment_id,
             actor_user_id: Some(actor),
             ip_address: caller.ip_address(),
@@ -616,7 +613,7 @@ pub async fn add_reference(
             tenant_id,
             event_type: "Reference.Added",
             action: "CREATE",
-            object_type: REFERENCE_OBJECT_TYPE,
+            object_type: ObjectType::ExternalReference,
             object_id: id,
             actor_user_id: Some(actor),
             ip_address: caller.ip_address(),
@@ -733,7 +730,7 @@ pub async fn delete_reference(
             tenant_id,
             event_type: "Reference.Deleted",
             action: "DELETE",
-            object_type: REFERENCE_OBJECT_TYPE,
+            object_type: ObjectType::ExternalReference,
             object_id: reference_id,
             actor_user_id: Some(actor),
             ip_address: caller.ip_address(),

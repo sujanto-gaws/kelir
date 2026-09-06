@@ -16,10 +16,10 @@ use super::repository::{
     self as repo, ContactProfileFields, CustomerProfileFields, EmployeeProfileFields,
     PartyRoleFields, SupplierProfileFields,
 };
-use super::{OBJECT_TYPE, ROLE_READ};
+use super::ROLE_READ;
 use crate::error::{AppError, ValidationDetail};
 use crate::middleware::auth::Authenticated;
-use crate::modules::audit::{self, AuditEntry};
+use crate::modules::audit::{self, domain::ObjectType, AuditEntry};
 use crate::state::AppState;
 
 pub async fn get_party_roles(
@@ -212,7 +212,7 @@ pub async fn assign_role(
             } else {
                 "ROLE_UPDATED"
             },
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::Party,
             object_id: party_id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),
@@ -297,7 +297,7 @@ pub async fn remove_role(
             tenant_id,
             event_type: &event_type,
             action: "ROLE_REMOVED",
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::Party,
             object_id: party_id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),

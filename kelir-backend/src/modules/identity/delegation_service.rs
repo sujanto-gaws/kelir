@@ -28,13 +28,10 @@ use super::delegation::{validate_create, CreateDelegationRequest, Delegation};
 use super::delegation_repository as repo;
 use crate::error::{AppError, ValidationDetail};
 use crate::middleware::auth::Authenticated;
-use crate::modules::audit::{self, AuditEntry};
+use crate::modules::audit::{self, domain::ObjectType, AuditEntry};
 use crate::modules::document_type::repository as document_type_repo;
 use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
-
-/// What the audit trail calls a delegation window (naming convention §7).
-pub const DELEGATION_OBJECT_TYPE: &str = "DELEGATION";
 
 pub const DELEGATION_CREATE: &str = "identity:delegation:create";
 pub const DELEGATION_READ: &str = "identity:delegation:read";
@@ -140,7 +137,7 @@ pub async fn create_delegation(
             tenant_id,
             event_type: "Identity.DelegationOpened",
             action: "CREATE",
-            object_type: DELEGATION_OBJECT_TYPE,
+            object_type: ObjectType::Delegation,
             object_id: id,
             actor_user_id: Some(delegator),
             ip_address: caller.ip_address(),
@@ -197,7 +194,7 @@ pub async fn end_delegation(
             tenant_id,
             event_type: "Identity.DelegationEnded",
             action: "DELETE",
-            object_type: DELEGATION_OBJECT_TYPE,
+            object_type: ObjectType::Delegation,
             object_id: id,
             actor_user_id: Some(caller.user_id()),
             ip_address: caller.ip_address(),

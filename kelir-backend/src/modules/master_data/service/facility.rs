@@ -19,12 +19,9 @@ use super::repository::{self as repo, FacilityFields, NewFacility};
 use super::FACILITY_READ;
 use crate::error::{AppError, ValidationDetail};
 use crate::middleware::auth::Authenticated;
-use crate::modules::audit::{self, AuditEntry, ChangeSet};
+use crate::modules::audit::{self, domain::ObjectType, AuditEntry, ChangeSet};
 use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
-
-/// What the audit trail calls a facility (naming convention §7).
-const OBJECT_TYPE: &str = "FACILITY";
 
 pub async fn list_facilities(
     state: &AppState,
@@ -169,7 +166,7 @@ pub async fn create_facility(
             tenant_id,
             event_type: "Facility.Created",
             action: "CREATE",
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::Facility,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),
@@ -281,7 +278,7 @@ pub async fn update_facility(
             tenant_id,
             event_type: "Facility.Updated",
             action: "UPDATE",
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::Facility,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),
@@ -414,7 +411,7 @@ pub async fn delete_facility(
             tenant_id,
             event_type: "Facility.Deleted",
             action: "DELETE",
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::Facility,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),

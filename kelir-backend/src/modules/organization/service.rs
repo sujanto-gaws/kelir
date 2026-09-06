@@ -42,7 +42,7 @@ use super::repository::{self, TenantRecord};
 use crate::config::AppConfig;
 use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
-use crate::modules::audit::{self, AuditEntry};
+use crate::modules::audit::{self, domain::ObjectType, AuditEntry};
 use crate::modules::identity::service as identity;
 use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
@@ -365,7 +365,7 @@ pub async fn create_tenant(
             tenant_id: administering.id,
             event_type: "Tenant.Created",
             action: "CREATE",
-            object_type: "TENANT",
+            object_type: ObjectType::Tenant,
             object_id: id,
             actor_user_id: Some(caller.user_id()),
             ip_address: caller.ip_address(),
@@ -443,7 +443,7 @@ pub async fn update_tenant(
             tenant_id: administering.id,
             event_type: "Tenant.Updated",
             action: "UPDATE",
-            object_type: "TENANT",
+            object_type: ObjectType::Tenant,
             object_id: id,
             actor_user_id: Some(caller.user_id()),
             ip_address: caller.ip_address(),
@@ -500,7 +500,7 @@ pub async fn delete_tenant(
             tenant_id: administering.id,
             event_type: "Tenant.Deleted",
             action: "DELETE",
-            object_type: "TENANT",
+            object_type: ObjectType::Tenant,
             object_id: id,
             actor_user_id: Some(caller.user_id()),
             ip_address: caller.ip_address(),

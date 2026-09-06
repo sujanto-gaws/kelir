@@ -71,11 +71,11 @@ use super::super::domain::{
     DocumentStatus, MetadataSet, UpdateDocumentRequest,
 };
 use super::super::repository::{self as repo, DocumentFields, LockedDocument, NewDocument};
-use super::super::{DOCUMENT_CREATE, DOCUMENT_DELETE, DOCUMENT_READ, DOCUMENT_UPDATE, OBJECT_TYPE};
+use super::super::{DOCUMENT_CREATE, DOCUMENT_DELETE, DOCUMENT_READ, DOCUMENT_UPDATE};
 use super::form::{self, PinnedForm};
 use crate::error::{AppError, ValidationDetail};
 use crate::middleware::auth::Authenticated;
-use crate::modules::audit::{self, AuditEntry, ChangeSet};
+use crate::modules::audit::{self, domain::ObjectType, AuditEntry, ChangeSet};
 use crate::modules::rad::service::evaluation::Strictness;
 use crate::state::AppState;
 
@@ -221,7 +221,7 @@ pub async fn create_document(
             tenant_id,
             event_type: "Document.Created",
             action: "CREATE",
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::Document,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),
@@ -373,7 +373,7 @@ pub async fn update_document(
             tenant_id,
             event_type: "Document.Updated",
             action: "UPDATE",
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::Document,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),
@@ -474,7 +474,7 @@ pub async fn delete_document(
             tenant_id,
             event_type: "Document.Deleted",
             action: "DELETE",
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::Document,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),

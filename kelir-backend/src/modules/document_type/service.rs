@@ -28,13 +28,10 @@ use super::repository::{self as repo, DocumentTypeFields, NewDocumentType};
 use super::{TYPE_CREATE, TYPE_DELETE, TYPE_READ, TYPE_UPDATE};
 use crate::error::{AppError, ValidationDetail};
 use crate::middleware::auth::Authenticated;
-use crate::modules::audit::{self, AuditEntry, ChangeSet};
+use crate::modules::audit::{self, domain::ObjectType, AuditEntry, ChangeSet};
 use crate::modules::workflow::repository::definition as workflow_repository;
 use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
-
-/// What the audit trail calls a document type (naming convention §7).
-const OBJECT_TYPE: &str = "DOCUMENT_TYPE";
 
 pub async fn list_types(
     state: &AppState,
@@ -132,7 +129,7 @@ pub async fn create_type(
             tenant_id,
             event_type: "DocumentType.Created",
             action: "CREATE",
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::DocumentType,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),
@@ -273,7 +270,7 @@ pub async fn update_type(
             tenant_id,
             event_type: "DocumentType.Updated",
             action: "UPDATE",
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::DocumentType,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),
@@ -324,7 +321,7 @@ pub async fn delete_type(
             tenant_id,
             event_type: "DocumentType.Deleted",
             action: "DELETE",
-            object_type: OBJECT_TYPE,
+            object_type: ObjectType::DocumentType,
             object_id: id,
             actor_user_id: actor,
             ip_address: caller.ip_address(),
