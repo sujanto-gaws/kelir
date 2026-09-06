@@ -114,6 +114,20 @@ While the major version is `0`, the public API may change in any release.
 
 ### Changed
 
+- **ClamAV's `StreamMaxLength` is this project's choice rather than the image's**
+  ([#324](https://github.com/sujanto-gaws/kelir/issues/324), **D-62**). Both
+  compose files and CI now pass `CLAMD_CONF_StreamMaxLength=32M` against a
+  25 MiB upload limit. **The two numbers are one relationship**: clamd must
+  accept everything the backend accepted, because a stream clamd refuses is
+  recorded `FAILED`, and `FAILED` is refused at download exactly as `INFECTED`
+  is — so a file nobody can scan is a file nobody can retrieve. It was
+  configured nowhere, resting on the image's effective default, while clamd's
+  own sample config documents `StreamMaxLength 25M` — *exactly* the upload
+  limit, at which every maximum-size upload would fail. **Nothing was broken**:
+  the pinned image's default was measured well above 25 MiB before the change.
+  What was missing was this project having chosen. Raising
+  `KELIR_STORAGE_MAX_UPLOAD_BYTES` now means raising this with it.
+
 - **An audit object type added without a permission no longer compiles**
   (FR-AUD-004, [#323](https://github.com/sujanto-gaws/kelir/issues/323),
   **D-49**, **D-61**). `AuditEntry.object_type` was a `&str` and the

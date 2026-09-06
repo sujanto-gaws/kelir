@@ -127,23 +127,33 @@ services:
   # one instance is the whole answer. It ships its own database, so it is ready
   # about 20 seconds after start rather than after a freshclam download.
   #
-  # **`StreamMaxLength` must stay strictly above KELIR_STORAGE_MAX_UPLOAD_BYTES.**
-  # clamd's own sample config documents 25M, which is exactly the upload limit;
-  # at that value every maximum-size upload is refused by the scanner, recorded
-  # FAILED and permanently undownloadable. This image's effective default is
-  # 100 MiB, which is why nothing is set here.
+  # **`StreamMaxLength` is set here, and it is set strictly above
+  # `KELIR_STORAGE_MAX_UPLOAD_BYTES`** (#324). The two numbers are one
+  # relationship: the backend refuses an upload over 25 MiB, and clamd must
+  # accept everything the backend accepted — a stream clamd refuses comes back
+  # as an error, the attachment is recorded `FAILED`, and `FAILED` is refused at
+  # download exactly as `INFECTED` is, so a file nobody can scan is a file
+  # nobody can retrieve. **32M gives the larger number ~28% of headroom**, which
+  # is room for the protocol rather than for a larger file; raising the upload
+  # limit means raising this with it.
   #
-  # **That reasoning rests on a pinned image now, and it did not before**
-  # (**D-62**). It is a decision to configure nothing, resting on somebody
-  # else's default, in an image that was fetched fresh on every deployment — so
-  # a ClamAV release shipping the 25M its own sample config documents would have
-  # made every maximum-size upload permanently undownloadable, in a stack whose
-  # compose file explains exactly why. **A version bump here re-checks the
-  # default**; that is the one thing this pin buys that a pin usually does not.
+  # **It used to be unset, and that was a decision resting on somebody else's
+  # default.** clamd's own sample config documents `StreamMaxLength 25M` —
+  # commented out, so a compiled-in default applies — and 25M is *exactly* the
+  # upload limit, at which every maximum-size upload is refused by the scanner.
+  # This image's effective default is far above that (measured: 25 MiB clears),
+  # so nothing was broken; what was missing was this project having chosen.
+  # **D-62**'s pin stopped that default moving underneath a deployment, which is
+  # as far as a pin can close it.
   #
-  # Setting the value outright, rather than inheriting it, is issue #324.
+  # `CLAMD_CONF_<Setting>` is the image's own mechanism: its entrypoint
+  # uncomments the matching line in `clamd.conf`, so this is the documented
+  # setting rather than a mounted file that would have to reproduce every other
+  # default the image ships.
   clamav:
     image: clamav/clamav:1.5
+    environment:
+      - CLAMD_CONF_StreamMaxLength=32M
     ports:
       - "${KELIR_CLAMAV_PORT:-3310}:3310"
 

@@ -66,6 +66,13 @@ jobs:
         # moving it. A scanner that changes under a green pipeline is a
         # product change nobody made.
         image: clamav/clamav:1.5
+        # The same `StreamMaxLength` both compose files set (#324), so CI's
+        # scanner and a deployment's answer the same way about a large upload.
+        # Nothing here uploads near the limit today; the point of D-62 was that
+        # two runs of one tag should not differ in their infrastructure, and a
+        # setting in the deployments and not in CI is that difference.
+        env:
+          CLAMD_CONF_StreamMaxLength: 32M
         ports:
           - 3310:3310
 
