@@ -303,9 +303,14 @@ async fn an_event_from_another_tenant_is_refused_by_the_query() {
 /// with them.
 ///
 /// **The mutation for this is not a deleted guard**, because the guard is the
-/// absence of one. It is `caller.require(ACTIVITY_READ)?` **restored** to
+/// absence of one. It is `caller.require("activity:read")?` **restored** to
 /// `service::list_activity` — the line D-47 removed — which turns this 200 into
-/// a 403. Seen red that way, 2026-09-01.
+/// a 403. Seen red that way, 2026-09-01, and again on 2026-09-06 against the
+/// literal, `ACTIVITY_READ` having gone with the permission
+/// ([#301](https://github.com/sujanto-gaws/kelir/issues/301)). A code no
+/// deployment can grant is a code no caller holds, so the restored check
+/// refuses everybody — which is the second half of why #301 had to delete the
+/// constant as well as the row.
 ///
 /// **`document:read` is still load-bearing**, and the second half asserts it:
 /// a caller holding neither reads no timeline, so this is one permission moving
@@ -362,15 +367,20 @@ async fn reading_a_document_is_permission_to_read_its_timeline() {
     );
     assert_eq!(listed.body["data"][0]["eventType"], "Document.Created");
 
-    // **And the gate that is left still holds.** A caller with neither
-    // permission reads nothing — the document's own read is refusing this, one
-    // service call down, which is what makes D-47 a permission moving rather
-    // than a permission going away.
+    // **And the gate that is left still holds.** A caller without the
+    // document's read reads nothing — the document's own read is refusing this,
+    // one service call down, which is what makes D-47 a permission moving
+    // rather than a permission going away.
+    //
+    // **This role held `activity:read` until #301**, which was the sharpest way
+    // to say the second permission opened nothing. That code is gone from the
+    // catalogue, so the role holds `document:create` instead: somebody who works
+    // with documents and may not read *this* one.
     let stranger_role = fixtures::create_role_with_permissions(
         &app.pool,
         fixtures::SYSTEM_TENANT_ID,
         "ROLE-ACT-STRANGER",
-        &["activity:read"],
+        &["document:create"],
     )
     .await;
 
@@ -399,6 +409,60 @@ async fn reading_a_document_is_permission_to_read_its_timeline() {
         "a caller who may not read the document read its timeline: {}",
         refused.body
     );
+}
+
+/// **`activity:read` is not a permission any more** ([#301], **D-47**,
+/// `0041_activity_read_dropped.sql`).
+///
+/// # Why the catalogue is the assertion and the 200 above is not
+///
+/// The test above already reads a timeline with an account holding
+/// `document:read` and nothing named `activity`, and it did so before this
+/// migration — which is the point: the row was never what let that call
+/// through. What #301 removes is the row's *appearance* of being a control.
+/// A permission in the catalogue is a thing a tenant grants and withholds
+/// believing it opens and closes something; this one did neither, and only the
+/// catalogue can say it is gone.
+///
+/// **Both halves, because a grant outliving its permission is the same defect
+/// one table over.** `0041` deletes `role_permissions` first and `permissions`
+/// second, and this asserts the pair — a `role_permissions` row pointing at a
+/// deleted `permissions` row could not exist under the foreign key, but a
+/// migration that deleted neither, or dropped only the system tenant's copy by
+/// id, would pass a check that looked at one of them.
+///
+/// **The mutation:** either `DELETE` removed from `0041`, against a database
+/// migrated from empty. Seen red both ways, 2026-09-06.
+///
+/// [#301]: https://github.com/sujanto-gaws/kelir/issues/301
+#[tokio::test]
+async fn the_permission_the_timeline_stopped_checking_is_gone_from_the_catalogue() {
+    let app = TestApp::spawn().await;
+
+    let permissions: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM permissions WHERE permission_code = $1")
+            .bind("activity:read")
+            .fetch_one(&app.pool)
+            .await
+            .expect("count the catalogue");
+
+    assert_eq!(
+        permissions, 0,
+        "`activity:read` is still in the permission catalogue, so a tenant can still grant a \
+         permission nothing checks (#301, D-47)"
+    );
+
+    let grants: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM role_permissions rp \
+         JOIN permissions p ON p.id = rp.permission_id \
+         WHERE p.permission_code = $1",
+    )
+    .bind("activity:read")
+    .fetch_one(&app.pool)
+    .await
+    .expect("count the grants");
+
+    assert_eq!(grants, 0, "a role still grants `activity:read`");
 }
 
 /// **The timeline is not the audit trail**, asserted over the rows.
@@ -439,14 +503,18 @@ async fn the_timeline_and_the_audit_trail_are_written_separately() {
 // ---------------------------------------------------------------------------
 
 /// A reader who may see the document and its timeline and **nothing that hangs
-/// on it**: `activity:read` and `document:read`, without `attachment:read` or
-/// `comment:read`.
+/// on it**: `document:read`, without `attachment:read` or `comment:read`.
+///
+/// **`activity:read` was the other half of this role until #301.** It opened
+/// nothing after **D-47** and is no longer a permission; the reader is the same
+/// reader, and what #292 is about — a timeline serving another surface's detail
+/// — is unaffected by which permissions this account holds.
 async fn timeline_only_reader(app: &TestApp, username: &str) -> String {
     let role = fixtures::create_role_with_permissions(
         &app.pool,
         fixtures::SYSTEM_TENANT_ID,
         &format!("ROLE-{}", username.to_uppercase()),
-        &["document:read", "activity:read"],
+        &["document:read"],
     )
     .await;
 
