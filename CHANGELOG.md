@@ -11,6 +11,19 @@ While the major version is `0`, the public API may change in any release.
 
 ### Added
 
+- **A frontend image can say which release it is**
+  (**#362**). `kelir-frontend:0.6.0`'s served bundle was byte-identical to
+  `0.6.0-rc`'s — 45 files, same hash — because no build input carried the
+  release, so Docker gave the new image the rc's creation timestamp and **no
+  frontend image could be told from another**. The bundle now carries
+  `version.json` with its version and commit, emitted by the Vite build and
+  served at `/version.json` — Caddy serves a real file before the SPA fallback,
+  and `/version` is proxied to the backend, so the two identities do not
+  collide. `KELIR_BUILD_SHA` reaches the frontend image the way it already
+  reached the backend's, and the deploy's smoke test checks both. **For a
+  release process whose point is that what ships is what was verified, that now
+  holds for both artefacts rather than one.**
+
 - **The validation and calculation rule engines around the evaluator**
   (FR-RAD-006, [#338](https://github.com/sujanto-gaws/kelir/issues/338),
   **D-67**, [ADR-0035](docs/architectures/adr/0035.%20Rules%20Are%20Resolved%20Before%20a%20Form%20Is%20Published.md)).

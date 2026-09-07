@@ -184,7 +184,7 @@ else
 
     docker build         -f "${SOURCE_DIR}/deploy/docker/backend.Dockerfile"         --build-arg "KELIR_BUILD_SHA=${BUILD_SHA}"         -t "kelir-backend:${VERSION}"         "${SOURCE_DIR}/kelir-backend"
 
-    docker build         -f "${SOURCE_DIR}/deploy/docker/frontend.Dockerfile"         -t "kelir-frontend:${VERSION}"         "${SOURCE_DIR}/kelir-frontend"
+    docker build         -f "${SOURCE_DIR}/deploy/docker/frontend.Dockerfile"         --build-arg "KELIR_BUILD_SHA=${BUILD_SHA}"         -t "kelir-frontend:${VERSION}"         "${SOURCE_DIR}/kelir-frontend"
 fi
 
 # ---------------------------------------------------------------------------
@@ -308,6 +308,21 @@ expected_env="${KELIR_EXPECTED_ENV:-staging}"
 environment="$(json_field "${version_body}" environment)"
 [[ "${environment}" == "${expected_env}" ]] \
     || die "/version reports environment ${environment}, expected ${expected_env}"
+
+# **The other artefact** (#362). `/version` identifies the backend; until this
+# existed nothing identified the frontend, so a step whose whole content is
+# *the expected version and SHA* was run against one image of the two — and
+# `kelir-frontend:0.6.0` shipped byte-identical to `0.6.0-rc` with nobody able
+# to tell. `/version.json` is a static asset of the bundle, which Caddy serves
+# ahead of the SPA fallback.
+printf '  %-16s ' "/version.json"
+frontend_body="$(curl -fsS --max-time 5 "${KELIR_PUBLIC_URL}/version.json")" \
+    || die "/version.json is not served — the frontend image predates #362, or the bundle is not deployed"
+printf '%s\n' "${frontend_body}"
+
+frontend_version="$(json_field "${frontend_body}" version)"
+[[ "${frontend_version}" == "${VERSION}" ]] \
+    || die "the frontend reports ${frontend_version}, expected ${VERSION} — the wrong image is serving"
 
 cat <<EOF
 
