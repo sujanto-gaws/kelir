@@ -218,6 +218,17 @@ While the major version is `0`, the public API may change in any release.
   a deployment**: a stack whose bucket step works is unchanged, and one whose
   bucket step fails now stops instead of lying.
 
+- **The comment tail gets the mutation record every other Sprint 13 item got**
+  ([#360](https://github.com/sujanto-gaws/kelir/issues/360)).
+  `document_comments.rs` carries a `# Seen to fail` table: **six mutations over
+  [#253](https://github.com/sujanto-gaws/kelir/issues/253)'s own predicates, all
+  six red** — **D-50**'s depth rule, `find_parent`'s document scope, the
+  authorship gate on edit and delete, both halves of **D-51**'s tombstone, and
+  the guard that stops a deleted comment being edited. The one note the file
+  already carried belongs to [#249](https://github.com/sujanto-gaws/kelir/issues/249)
+  and is now attributed, which is why the tail read as covered. No behaviour
+  changes; this is evidence that did not exist.
+
 - **An approval whose record moved on is refused by name, not by 500**
   (FR-MDM-010, [#322](https://github.com/sujanto-gaws/kelir/issues/322),
   [ADR-0033](docs/architectures/adr/0033.%20A%20Governed%20Record%20Parks%20at%20Pending%20Approval.md)).
