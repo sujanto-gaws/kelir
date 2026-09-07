@@ -211,6 +211,63 @@ export KELIR_VERSION="${VERSION}"
 docker compose -f "${COMPOSE_FILE}" up -d --remove-orphans
 
 # ---------------------------------------------------------------------------
+# 3b. Every service the compose file declares is in the state it should be in
+# ---------------------------------------------------------------------------
+#
+# **A deployment that cannot be reached must not exit 0** (#361). `v0.6.0`'s
+# release ran this script on a host where another container held the published
+# port; Caddy could not bind, the rest of the stack came up, and the run was
+# reported as a success.
+#
+# `set -e` and the smoke test below both look like they cover that, and
+# measured on 2026-09-07 they nearly do: `docker compose up -d` exits **1** when
+# a published port is already allocated, so the line above aborts. What neither
+# covers is the case that makes the smoke test lie — **something else answering
+# on the address**. `KELIR_PUBLIC_URL` is an address, not a container, so a
+# previous deployment of the same version still listening on that port satisfies
+# every assertion below it: `/health/ready`, the version, the environment.
+#
+# So this asks the compose project about its own containers instead. A service
+# that is not running — or a one-shot that exited non-zero — fails the deploy
+# here, naming itself, rather than being inferred from a curl that reached
+# somebody else.
+#
+# One-shot services are expected to exit: `minio-init` creates the bucket and
+# ends by checking it. `exited (0)` is a pass for those and a failure for
+# anything else, which is the same distinction `service_completed_successfully`
+# makes one layer down (#359).
+
+log "Checking every service came up"
+
+unhealthy=""
+while read -r service state exit_code; do
+    [[ -n "${service}" ]] || continue
+
+    case "${state}" in
+        running)
+            ;;
+        exited)
+            [[ "${exit_code}" == "0" ]] \
+                || unhealthy="${unhealthy}
+  ${service}: exited (${exit_code})"
+            ;;
+        *)
+            unhealthy="${unhealthy}
+  ${service}: ${state}"
+            ;;
+    esac
+done < <(docker compose -f "${COMPOSE_FILE}" ps -a --format '{{.Service}} {{.State}} {{.ExitCode}}')
+
+if [[ -n "${unhealthy}" ]]; then
+    printf '\033[1;31merror:\033[0m the stack is not up. Services not in a good state:%s\n' \
+        "${unhealthy}" >&2
+    printf '\nRecent logs:\n' >&2
+    docker compose -f "${COMPOSE_FILE}" logs --tail 20 >&2
+    exit 1
+fi
+
+
+# ---------------------------------------------------------------------------
 # 4. Smoke test (release process §4 step 7)
 # ---------------------------------------------------------------------------
 

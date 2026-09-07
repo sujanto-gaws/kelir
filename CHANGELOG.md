@@ -242,6 +242,16 @@ While the major version is `0`, the public API may change in any release.
   and is now attributed, which is why the tail read as covered. No behaviour
   changes; this is evidence that did not exist.
 
+- **A deployment whose stack did not come up no longer exits 0**
+  ([#361](https://github.com/sujanto-gaws/kelir/issues/361)). `deploy.sh` now
+  asks the compose project about its own containers after `up`, and fails
+  naming any service that is not running — or any one-shot that exited
+  non-zero. **What this closes is the smoke test's blind spot**:
+  `KELIR_PUBLIC_URL` is an address rather than a container, so a previous
+  deployment of the same version still listening on that port satisfies
+  `/health/ready`, the version and the environment checks. `v0.6.0`'s release
+  was run on a host where another container held the published port.
+
 - **An approval whose record moved on is refused by name, not by 500**
   (FR-MDM-010, [#322](https://github.com/sujanto-gaws/kelir/issues/322),
   [ADR-0033](docs/architectures/adr/0033.%20A%20Governed%20Record%20Parks%20at%20Pending%20Approval.md)).
