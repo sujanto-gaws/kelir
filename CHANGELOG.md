@@ -11,6 +11,30 @@ While the major version is `0`, the public API may change in any release.
 
 ### Added
 
+- **Signing out and the roles screen are driven by a browser**
+  ([#358](https://github.com/sujanto-gaws/kelir/issues/358)). SRS §9 criterion 1
+  is *users can log in and log out*: its login half was driven by every browser
+  spec, because none of them can do anything without signing in first, and its
+  **logout half by nothing**. `sign-out-and-the-roles-screen.spec.ts` reads the
+  roles screen through the navigation, signs out, and then **navigates** to a
+  protected route — a fresh page load, so the router's guard re-runs against
+  what the browser actually kept rather than against a store a test emptied.
+  That is the assertion a component test cannot make, and it is the one a token
+  outliving the sign-out would fail.
+
+- **A frontend image can say which release it is**
+  (**#362**). `kelir-frontend:0.6.0`'s served bundle was byte-identical to
+  `0.6.0-rc`'s — 45 files, same hash — because no build input carried the
+  release, so Docker gave the new image the rc's creation timestamp and **no
+  frontend image could be told from another**. The bundle now carries
+  `version.json` with its version and commit, emitted by the Vite build and
+  served at `/version.json` — Caddy serves a real file before the SPA fallback,
+  and `/version` is proxied to the backend, so the two identities do not
+  collide. `KELIR_BUILD_SHA` reaches the frontend image the way it already
+  reached the backend's, and the deploy's smoke test checks both. **For a
+  release process whose point is that what ships is what was verified, that now
+  holds for both artefacts rather than one.**
+
 - **The validation and calculation rule engines around the evaluator**
   (FR-RAD-006, [#338](https://github.com/sujanto-gaws/kelir/issues/338),
   **D-67**, [ADR-0035](docs/architectures/adr/0035.%20Rules%20Are%20Resolved%20Before%20a%20Form%20Is%20Published.md)).
