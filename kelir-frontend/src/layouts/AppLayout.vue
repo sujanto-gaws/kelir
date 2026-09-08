@@ -127,6 +127,15 @@ const navigation = [
     sortOrder: 90,
   },
   {
+    // #373. The other half of FR-RAD-004, beside the document type builder.
+    name: 'admin-forms',
+    label: 'Forms',
+    icon: FileCog,
+    enabled: true,
+    permission: 'rad:form:read',
+    sortOrder: 95,
+  },
+  {
     name: 'admin-menus',
     label: 'Navigation',
     icon: ListTree,
