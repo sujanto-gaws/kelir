@@ -231,6 +231,25 @@ export const routes: RouteRecordRaw[] = [
         },
       },
       {
+        // The form builder (FR-RAD-004, #373). `rad_forms` has had a full write
+        // API since Sprint 7 and no screen ever called it — **D-70** named this
+        // as the half it left out, and `e2e/support/forms.ts` seeding every
+        // browser test's form over `POST /rad/forms` is what that looked like.
+        path: 'admin/forms',
+        name: 'admin-forms',
+        component: () => import('@/features/admin/FormListPage.vue'),
+        meta: { requiresAuth: true, permission: 'rad:form:read', title: 'Forms' },
+      },
+      {
+        // The editor. `rad:form:read` opens it because a published revision is
+        // worth reading without holding `update` — the screen refuses the edit
+        // rather than the door, which is how the other admin screens gate.
+        path: 'admin/forms/:id',
+        name: 'admin-form-builder',
+        component: () => import('@/features/admin/FormBuilderPage.vue'),
+        meta: { requiresAuth: true, permission: 'rad:form:read', title: 'Form' },
+      },
+      {
         // The configured navigation (FR-RAD-004, #341). `rad_menus` has been in
         // the schema since Sprint 7 with no surface whatever.
         path: 'admin/menus',
