@@ -42,7 +42,12 @@ const open = defineModel<boolean>('open', { default: false })
 
     <template #footer>
       <Button variant="outline" :disabled="pending" @click="open = false">Cancel</Button>
-      <Button variant="destructive" :loading="pending" @click="emit('confirm')">
+      <Button
+        variant="destructive"
+        :loading="pending"
+        data-testid="confirm-action"
+        @click="emit('confirm')"
+      >
         {{ confirmLabel }}
       </Button>
     </template>

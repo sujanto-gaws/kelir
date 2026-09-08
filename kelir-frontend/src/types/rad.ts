@@ -230,6 +230,34 @@ export interface CreateMenuRequest {
 /** Editing an entry. Absent means *leave alone*; `null` clears. */
 export type UpdateMenuRequest = Partial<Omit<CreateMenuRequest, 'menuKey'>>
 
+/**
+ * Creating a form definition (`domain::form::CreateFormRequest`).
+ *
+ * `definition` is the whole JFSS document. The backend validates it against the
+ * meta-schema, both rule registries and the lookup allow-list before it is
+ * stored, and again at publish ([ADR-0035]) — so a client that pre-checks is
+ * being helpful, never authoritative.
+ */
+export interface CreateFormRequest {
+  formKey: string
+  title: string
+  entityId?: string | null
+  definition: JfssDefinition
+}
+
+/**
+ * Editing a draft revision, or seeding the next one.
+ *
+ * **`formKey` is absent because it may not change**: it is the identity a
+ * document pins and what `document_types.form_id` is chosen by. Every field is
+ * optional and absent means *leave alone*.
+ */
+export interface UpdateFormRequest {
+  title?: string
+  entityId?: string | null
+  definition?: JfssDefinition
+}
+
 /** A list definition's status (`domain::list::ListStatus`). */
 export type ListStatus = 'ACTIVE' | 'DEPRECATED'
 
