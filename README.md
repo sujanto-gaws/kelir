@@ -13,7 +13,7 @@ Every business transaction is treated as a document, and every document progress
 The `docs/` folder contains the full design documentation set (see [docs/README.md](docs/README.md) for the complete index, reading order, and authority rules):
 
 - `docs/concepts/` — conceptual foundation: the document-based platform concept, attachments/comments/activity-log design, master data governance (hybrid golden-record + workflow model), and a consolidated sample data structure.
-- `docs/architectures/` — architecture decisions: framework concept, the Kelir module breakdown (backend and frontend), the external-system integration layer, the plugin/extension platform, and the OFBiz-style Party master-data model (adopted for supplier, customer, and employee master data).
+- `docs/architectures/` — architecture decisions: framework concept, the Kelir module breakdown (backend and frontend), the external-system integration layer, the plugin/extension platform, the OFBiz-style Party master-data model (adopted for supplier, customer, and employee master data), and — as a draft with nothing scheduled — the layering an ERP built on Kelir would take.
 - `docs/requirements/srs.md` — the Software Requirements Specification (FR/NFR IDs, MVP acceptance criteria), v0.5.
 - `docs/design/` — the System Design Document (architecture, stack, module structure, database design, workflow/RAD/integration/plugin/security/API/deployment design, roadmap), v0.1 — the successor of the Solution Blueprint formerly bundled in srs.md — and the Database Schema (column-level DDL for all 95 tables across 16 migrations).
 - `docs/schema/` — the JSON standards family: the JSON Form Schema Standard (JFSS v2.0.1) with its normative meta-schema and rule registries (Calculation v1.2.0, Validation v1.1.0), plus the Workflow Schema (JWSS), Lifecycle Hook Contract (LHCS), Plugin Manifest Schema (PMS), Event Envelope Schema (EES), and Document Type Definition Schema (DTDS), each v1.0.0.
@@ -61,7 +61,8 @@ The MVP focuses on:
 │   │   ├── 02. Kelir Framework.md
 │   │   ├── 03. Kelir Modules for Interfacing with External Systems.md
 │   │   ├── 04. Kelir Plugin and Extension Management Concept.md
-│   │   └── 05. Core - Master Data - Party.md
+│   │   ├── 05. Core - Master Data - Party.md
+│   │   └── 06. Building an ERP on Kelir.md
 │   ├── requirements/
 │   │   └── srs.md
 │   ├── design/

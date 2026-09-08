@@ -118,6 +118,27 @@ While the major version is `0`, the public API may change in any release.
   assuming there was no cycle above it — a ring of three is invisible to the
   `CHECK` constraint that catches a self-reference. #191's `rad_form_sections`
   half remains open.
+- **[architectures/06. Building an ERP on Kelir.md](docs/architectures/06.%20Building%20an%20ERP%20on%20Kelir.md)**
+  — documentation only, and **nothing in it is scheduled**
+  ([#371](https://github.com/sujanto-gaws/kelir/issues/371), **D-73**). Every
+  ERP reference in `docs/` until now treats ERP as an *external* system Kelir
+  integrates with; this inverts that and describes the layering if the ledger
+  were ours: Kelir unchanged as the transaction-capture and approval platform,
+  ledger modules that never import `document`, and one posting seam between
+  them. It also names the seven platform gaps an ERP would force, three of
+  which — the `POST` lifecycle stage
+  [architectures/01](docs/architectures/01.%20Basic%20Framework%20Concept%20and%20Architecture.md)
+  §12.1 specifies and nothing implements, the general outbox, and refusing
+  writes to a posted document — are gaps with or without an ERP behind them.
+- **[ADR-0037](docs/architectures/adr/0037.%20ERP%20Posting%20Runs%20Inside%20the%20Document%20Transaction.md)
+  — ERP posting runs inside the document's own transaction**, through
+  `before_document_post`, rather than after the commit on the outbox. A balance
+  is derived from committed rows, so a posting that lands after the completion
+  leaves a window in which the document says complete and the trial balance
+  disagrees; and a closed period, a blocked account or an exhausted budget are
+  refusals, which an after-hook cannot make. The record stays **`Draft`,
+  blocked by [#371](https://github.com/sujanto-gaws/kelir/issues/371)** — the
+  shape is decided, the scope is not.
 
 ### Removed
 
