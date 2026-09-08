@@ -333,9 +333,16 @@ async fn hook_runs(app: &TestApp, document_id: Uuid) -> Vec<(String, String)> {
 
 /// **AC2, and the defect the issue is really about.**
 ///
-/// The mutation that must make this red is removing the
-/// `.filter(|spec| spec.task_type.is_human())` in `engine::enter_once` — the
-/// build before [#339] wrote a `tasks` row for this state.
+/// **Seen red, 2026-09-08**: removing the
+/// `.filter(|spec| spec.task_type.is_human())` from the task-row branch of
+/// `engine::enter_once` — the build before [#339] wrote a `tasks` row for this
+/// state.
+///
+/// **There are two `is_human` sites in that file and only one of them is this
+/// one.** The other guards the automatic-step loop; mutating it leaves this
+/// test green, because an instance that does not advance still writes no task
+/// row. The named site is the `if let Some(spec) = state.task.as_ref()` that
+/// decides whether a row is written at all.
 #[tokio::test]
 async fn a_service_task_produces_no_row_in_anybodys_inbox() {
     let app = TestApp::spawn().await;
@@ -901,8 +908,15 @@ async fn register_hook(
 /// definition already had a guard would be a policy for the definitions that
 /// needed it least.
 ///
-/// The mutation that must make this red is `AND document_type_id = $3` in
+/// **Seen red, 2026-09-08**: `AND document_type_id = $3` in place of
+/// `AND (document_type_id IS NULL OR document_type_id = $3)` in
 /// `hook::repository::registry_chain`.
+///
+/// **That mutation changes SQL text, so it does not compile under
+/// `SQLX_OFFLINE`** — the cached query no longer matches. It was run with
+/// `DATABASE_URL` pointed at a live database and `SQLX_OFFLINE` unset, which
+/// is worth stating: a mutation somebody cannot reproduce from the offline
+/// cache reads as unrunnable rather than as run.
 #[tokio::test]
 async fn a_tenant_wide_registration_runs_on_a_transition_with_no_guards() {
     let app = TestApp::spawn().await;

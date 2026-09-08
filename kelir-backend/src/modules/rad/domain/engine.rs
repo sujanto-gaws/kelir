@@ -684,9 +684,12 @@ mod tests {
     /// **AC2, at the unit.** The definition declares `c`, then `b`, then `a`;
     /// the data says `a` feeds `b` feeds `c`.
     ///
-    /// The mutation that must make this red is replacing
-    /// [`ScopeCatalogue::order`]'s body with `Ok(definition order)` — which is
-    /// exactly the behaviour this module was written to replace.
+    /// **Seen red, 2026-09-08.** [`ScopeCatalogue::order`] returning the
+    /// entries in declaration order — exactly the behaviour this module was
+    /// written to replace — reddens this and eleven others in the module: the
+    /// graph is what almost every test here is about, so a mutation to it is
+    /// broad rather than sharp, and that is worth knowing before reading a
+    /// failure list.
     #[test]
     fn orders_a_chain_declared_backwards_by_its_dependencies() {
         let components = vec![
