@@ -35,7 +35,7 @@ import type { CurrentUser } from '@/types/auth'
  * | Mutation | Reddened |
  * |---|---|
  * | The save stops calling `askWhetherItDraws` | *asks whether the list draws, after every save* |
- * | An unbound list is reported as `broken` rather than `unbound` | *reports a list nothing binds as its own state* |
+ * | The `LIST_NOT_BOUND` branch is dropped, so an unbound list reads as broken | *reports a list nothing binds as its own state* |
  * | `save` sends `columns` and not `filters` | *sends both collections, because either alone replaces the other* |
  * | `sortableColumns` drops its `SORTABLE` check | **green first** — the payload column was `isSortable: false`, so the allow-list was never reached. Red once the fixture marked it `true`: *offers only sortable columns as the opening sort* |
  *
@@ -173,11 +173,27 @@ describe('ListBuilderPage', () => {
    * **A list nothing binds is not a broken list.** It is the ordinary state of
    * one just authored, and reporting it as an error teaches authors to ignore
    * the panel — which would cost the panel its only job.
+   *
+   * **The response shape here is the server's, and the first version of this
+   * test invented one.** It faked a detail-less 404, the code branched on
+   * *has details*, and both agreed with each other and with nothing else:
+   * `require_bound` answers `AppError::validation` with a `LIST_NOT_BOUND`
+   * detail on `listId`, so every freshly authored list landed in the broken
+   * panel. The browser flow caught it on the first CI run of #385; this spec
+   * had passed. Copied from `document::service::list::require_bound` rather
+   * than from memory.
    */
   it('reports a list nothing binds as its own state', async () => {
     renderResponse = {
-      status: 404,
-      body: errorBody('NOT_FOUND', 'No document type names this list'),
+      status: 422,
+      body: errorBody('VALIDATION_FAILED', 'This list has no rows to show', [
+        {
+          path: 'listId',
+          rule: 'binding',
+          code: 'LIST_NOT_BOUND',
+          message: 'no document type in this tenant names this list',
+        },
+      ]),
     }
 
     const wrapper = await render()

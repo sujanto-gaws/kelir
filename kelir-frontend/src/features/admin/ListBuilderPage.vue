@@ -88,6 +88,12 @@ const SORTABLE = new Set([
   'updatedAt',
 ])
 
+/**
+ * The refusal that means *nothing names this list yet* rather than *this
+ * definition is wrong* (`document::service::list::LIST_NOT_BOUND`).
+ */
+const LIST_NOT_BOUND = 'LIST_NOT_BOUND'
+
 /** What a document list can be filtered by (`render::FilterParameter`). */
 const FILTER_PARAMETERS = ['search', 'status', 'priority', 'entityType', 'entityId'] as const
 
@@ -207,15 +213,17 @@ async function askWhetherItDraws(listKey: string): Promise<void> {
   } catch (failure) {
     const failed = toApiError(failure)
 
-    // A plan failure carries S10.3 details naming the column or filter key; a
-    // binding failure carries none, because it is not about the definition.
-    if (failed.details.length > 0) {
-      renderVerdict.value = 'broken'
-      renderDetails.value = failed.details
-    } else {
-      renderVerdict.value = 'unbound'
-    }
+    // **Told apart by the code, not by whether details are present.** Both
+    // refusals carry them: `require_bound` answers `AppError::validation` with
+    // a `LIST_NOT_BOUND` detail on `listId`, exactly as a plan failure answers
+    // with `COLUMN_NOT_RENDERABLE` on a column. Branching on *has details* put
+    // every freshly authored list in the broken panel, which is what the
+    // browser flow caught and the unit spec did not — its fake returned a
+    // detail-less 404, which is a shape the server never sends.
+    const unbound = failed.details.some((detail) => detail.code === LIST_NOT_BOUND)
 
+    renderVerdict.value = unbound ? 'unbound' : 'broken'
+    renderDetails.value = unbound ? [] : failed.details
     renderMessage.value = failed.message
   }
 }
