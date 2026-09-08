@@ -1,6 +1,7 @@
 import { deleteItem, getItem, getPage, postItem, putItem } from './client'
 import type { Page, PageQuery } from '@/types/api'
 import type {
+  CreateFormRequest,
   CreateMenuRequest,
   Form,
   FormSummary,
@@ -12,6 +13,7 @@ import type {
   LookupQuery,
   RadAction,
   RenderableList,
+  UpdateFormRequest,
   UpdateMenuRequest,
 } from '@/types/rad'
 
@@ -153,6 +155,56 @@ export function listActions(context: RadAction['context']): Promise<Page<RadActi
  */
 export function listForms(query: PageQuery = {}): Promise<Page<FormSummary>> {
   return getPage<FormSummary>('/rad/forms', query)
+}
+
+/**
+ * Creates a form definition, in `DRAFT` (`rad:form:create`).
+ *
+ * **The server's answer is the one that counts.** `rad::domain::engine`
+ * resolves the definition's rule names against the Validation Rule Registry and
+ * its operators against the Calculation one, and refuses an unregistered name
+ * or a calculation cycle before anything is stored ([ADR-0035]). A 422 carries
+ * S10.3 details whose `path` addresses the offending component, which is what
+ * the builder shows against the field rather than as a banner.
+ */
+export function createForm(request: CreateFormRequest): Promise<Form> {
+  return postItem<Form>('/rad/forms', request)
+}
+
+/**
+ * Edits a **draft** revision in place.
+ *
+ * A published revision refuses this, and that refusal is the product working:
+ * documents pin the revision they were filled against
+ * ([ADR-0027](../../../docs/architectures/adr/0027.%20A%20Document%20Pins%20the%20Form%20Revision%20It%20Was%20Filled%20Against.md)),
+ * so editing one would change what an already-submitted document claims to
+ * have been. {@link createFormRevision} is the way forward from a published
+ * form.
+ */
+export function updateForm(id: string, request: UpdateFormRequest): Promise<Form> {
+  return putItem<Form>(`/rad/forms/${id}`, request)
+}
+
+/**
+ * Publishes a draft, fixing it for every document that will pin it.
+ *
+ * **The definition is re-validated against the stored revision first**, not
+ * against what the browser last sent: a draft written by an older build keeps
+ * whatever it was stored with, and a published revision is immutable, so a
+ * definition that goes live wrong can never be corrected in place.
+ */
+export function publishForm(id: string): Promise<Form> {
+  return postItem<Form>(`/rad/forms/${id}/publish`, {})
+}
+
+/** Opens the next revision as a `DRAFT`, seeded from this one. */
+export function createFormRevision(id: string, request: UpdateFormRequest = {}): Promise<Form> {
+  return postItem<Form>(`/rad/forms/${id}/revisions`, request)
+}
+
+/** Retires a form definition (`rad:form:delete`). */
+export function deleteForm(id: string): Promise<void> {
+  return deleteItem(`/rad/forms/${id}`)
 }
 
 /**
