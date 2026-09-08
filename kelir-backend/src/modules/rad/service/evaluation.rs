@@ -975,9 +975,16 @@ mod tests {
 
     /// **The security control this whole module exists for** (#164 AC1, AC3).
     ///
-    /// The mutation that must make it red is removing the `calculate` branch in
-    /// [`Evaluation::calculate_pass`] — the arm that writes the computed value
-    /// over the submitted one.
+    /// **Seen red, 2026-09-08.** Removing the `calculate` arm in
+    /// [`Evaluation::calculate_scope`] — the call to
+    /// [`Evaluation::calculate_field`] that writes the computed value over the
+    /// submitted one — reddens this and
+    /// `a_tampered_total_is_the_engines_even_when_the_order_is_the_graphs`.
+    ///
+    /// The method this comment named until 2026-09-08 was `calculate_pass`,
+    /// which does not exist and did not when the comment was written: a stated
+    /// mutation naming a symbol nobody can find is not evidence, and is the
+    /// second thing [#376] found.
     #[test]
     fn a_tampered_total_is_replaced_by_the_one_the_rules_produce() {
         let mut submitted = two_lines_worth_42();
@@ -1054,8 +1061,8 @@ mod tests {
         })
     }
 
-    /// S10.2 and #164 AC2. The mutation that must make it red is removing the
-    /// `hidden` removal loop in [`secure_payload_with`].
+    /// S10.2 and #164 AC2. **Seen red, 2026-09-08**: removing the `hidden`
+    /// removal loop in `secure`, which is what [`secure_payload_with`] calls.
     #[test]
     fn a_value_submitted_for_a_hidden_field_is_not_stored() {
         let payload = secure(
@@ -1249,8 +1256,8 @@ mod tests {
     /// the dependency order in both scopes at once. The totals are the ones the
     /// registry §6.1 invoice is worth.
     ///
-    /// The mutation that must make it red is replacing
-    /// `engine::evaluation_order`'s body with `Ok(components.to_vec())`.
+    /// **Seen red, 2026-09-08**: `engine::evaluation_order` returning
+    /// `Ok(components.to_vec())`.
     #[test]
     fn a_definition_declared_in_reverse_dependency_order_still_totals() {
         let definition = json!({

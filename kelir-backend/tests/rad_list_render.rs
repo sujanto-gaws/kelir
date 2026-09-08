@@ -337,8 +337,14 @@ async fn a_form_data_column_is_read_from_the_stored_payload() {
 /// title; the documents are created in the reverse of that order, so a list
 /// that ignored the definition would answer newest-first and put `Zinc` first.
 ///
-/// The mutation that must make this red is `DocumentSort::default()` in place
-/// of `plan.sort` in `RowQuery::sort`.
+/// **Seen red, 2026-09-08 — on the second attempt, and the first is the
+/// finding.** `DocumentSort::default()` in place of `plan.sort` in
+/// `RowQuery::sort` came back **green**: the fixture created `Zinc` before
+/// `Aluminium`, and the default sort is newest-first, so both orders produced
+/// the same two rows and the mutation was invisible. The comment beside the
+/// documents now says why their order is what it is. With the fixture
+/// corrected the mutation reddens, which is what this test was always supposed
+/// to assert ([#376]).
 #[tokio::test]
 async fn a_definition_that_declares_a_sort_produces_a_different_first_row() {
     let app = TestApp::spawn().await;
@@ -357,9 +363,15 @@ async fn a_definition_that_declares_a_sort_produces_a_different_first_row() {
     .await;
     let type_id = bound_type(&app, &token, "SORTED", list_id).await;
 
-    // Newest last by title, so definition order and creation order disagree.
-    document(&app, &token, type_id, "Zinc").await;
+    // **The creation order is the reverse of the declared one, and it has to
+    // be.** `DocumentSort::default()` is newest-first, so a fixture whose
+    // newest document is also its alphabetically-first produces the same two
+    // rows under both orders — and the mutation this test names then passes.
+    // It did: the stated mutation was run on 2026-09-08 and came back green
+    // with `Zinc` created first, which is the reason this comment is three
+    // lines rather than one.
     document(&app, &token, type_id, "Aluminium").await;
+    document(&app, &token, type_id, "Zinc").await;
 
     let response = rows(&app, &token, list_id, "").await;
 
@@ -706,7 +718,7 @@ async fn a_caller_without_document_read_cannot_render_a_list() {
 /// `service/mod.rs`'s first rule is about: *a 404 that only a permitted caller
 /// could have received is itself a disclosure.*
 ///
-/// The mutation that must make this red is deleting that `require` line.
+/// **Seen red, 2026-09-08**: deleting that `require` line.
 #[tokio::test]
 async fn a_caller_without_document_read_cannot_tell_a_real_list_key_from_an_invented_one() {
     let app = TestApp::spawn().await;
@@ -880,8 +892,8 @@ async fn a_disabled_action_is_not_offered() {
 /// returned and disabled — a disabled button states that the thing exists and
 /// is not for you, which is what `required_permission` was set to withhold.
 ///
-/// The mutation that must make this red is returning every row from
-/// `service::action::list_actions` regardless of `caller.holds`.
+/// **Seen red, 2026-09-08**: `service::action::list_actions` returning every
+/// row regardless of `caller.holds`.
 #[tokio::test]
 async fn an_action_the_caller_may_not_invoke_is_not_returned() {
     let app = TestApp::spawn().await;

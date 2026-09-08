@@ -194,7 +194,7 @@ fn submission_id(body: &Value) -> Uuid {
 /// It posts a total the rules do not produce and asserts the *stored row* holds
 /// the computed one. Coding standard §2.9 makes the red run the evidence, and
 /// the mutation is the one that removes S8.1's overwrite: in
-/// `service::evaluation::Evaluation::calculate_pass`, the `derived` arm of
+/// `service::evaluation::Evaluation::calculate_field`, the `derived` arm of
 /// `let next = if derived {` returning `scope.get(key)` instead of the computed
 /// value. Seen red 2026-08-27.
 ///

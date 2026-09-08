@@ -258,8 +258,8 @@ async fn an_entry_nests_under_a_parent() {
 /// `a → b → c`, then asking `a` to sit under `c`. Every hop is legal on its own
 /// and the database's one-hop constraint is satisfied at every step.
 ///
-/// The mutation that must make this red is removing the `refuse_a_cycle` call
-/// in `service::menu::update_menu`.
+/// **Seen red, 2026-09-08**: removing the `refuse_a_cycle` call in
+/// `service::menu::update_menu`.
 #[tokio::test]
 async fn a_ring_of_three_is_refused_where_the_check_constraint_cannot_see_it() {
     let app = TestApp::spawn().await;
