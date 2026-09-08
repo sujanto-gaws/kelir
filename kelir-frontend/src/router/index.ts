@@ -250,6 +250,20 @@ export const routes: RouteRecordRaw[] = [
         meta: { requiresAuth: true, permission: 'rad:form:read', title: 'Form' },
       },
       {
+        // The list builder (FR-RAD-003/004, #374). `rad_lists` got a renderer
+        // in Sprint 14 (**D-68**) and still had nothing that writes one.
+        path: 'admin/lists',
+        name: 'admin-lists',
+        component: () => import('@/features/admin/ListsPage.vue'),
+        meta: { requiresAuth: true, permission: 'rad:list:read', title: 'Lists' },
+      },
+      {
+        path: 'admin/lists/:id',
+        name: 'admin-list-builder',
+        component: () => import('@/features/admin/ListBuilderPage.vue'),
+        meta: { requiresAuth: true, permission: 'rad:list:read', title: 'List' },
+      },
+      {
         // The configured navigation (FR-RAD-004, #341). `rad_menus` has been in
         // the schema since Sprint 7 with no surface whatever.
         path: 'admin/menus',

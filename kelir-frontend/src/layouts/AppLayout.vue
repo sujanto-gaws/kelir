@@ -136,6 +136,15 @@ const navigation = [
     sortOrder: 95,
   },
   {
+    // #374. Beside the form builder, because it is its sibling.
+    name: 'admin-lists',
+    label: 'Lists',
+    icon: ListTree,
+    enabled: true,
+    permission: 'rad:list:read',
+    sortOrder: 96,
+  },
+  {
     name: 'admin-menus',
     label: 'Navigation',
     icon: ListTree,
