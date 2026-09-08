@@ -2,18 +2,21 @@ import { deleteItem, getItem, getPage, postItem, putItem } from './client'
 import type { Page, PageQuery } from '@/types/api'
 import type {
   CreateFormRequest,
+  CreateListRequest,
   CreateMenuRequest,
   Form,
   FormSummary,
   MenuEntry,
   FormSubmission,
   ListRow,
+  ListDefinition,
   ListSummary,
   LookupOption,
   LookupQuery,
   RadAction,
   RenderableList,
   UpdateFormRequest,
+  UpdateListRequest,
   UpdateMenuRequest,
 } from '@/types/rad'
 
@@ -233,6 +236,36 @@ export function updateMenu(id: string, request: UpdateMenuRequest): Promise<Menu
 /** Removes an entry; its children move up to its own parent. */
 export function deleteMenu(id: string): Promise<void> {
   return deleteItem(`/rad/menus/${id}`)
+}
+
+/**
+ * One list definition, its columns and filters included (`rad:list:read`).
+ *
+ * **The builder's read.** Any status, and what is *stored* rather than what can
+ * be drawn — the two are different questions and §8.2.4 gives them different
+ * endpoints on purpose.
+ */
+export function getList(id: string): Promise<ListDefinition> {
+  return getItem<ListDefinition>(`/rad/lists/${id}`)
+}
+
+export function createList(request: CreateListRequest): Promise<ListDefinition> {
+  return postItem<ListDefinition>('/rad/lists', request)
+}
+
+/**
+ * Replaces a list definition.
+ *
+ * **A collection that is sent replaces the stored set wholesale**, so the
+ * builder sends `columns` and `filters` together every time. Sending one would
+ * delete the other.
+ */
+export function updateList(id: string, request: UpdateListRequest): Promise<ListDefinition> {
+  return putItem<ListDefinition>(`/rad/lists/${id}`, request)
+}
+
+export function deleteList(id: string): Promise<void> {
+  return deleteItem(`/rad/lists/${id}`)
 }
 
 /**

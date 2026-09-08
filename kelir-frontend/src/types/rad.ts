@@ -258,6 +258,69 @@ export interface UpdateFormRequest {
   definition?: JfssDefinition
 }
 
+/** One column of a stored list definition (`domain::list::ListColumnInput`). */
+export interface ListColumn {
+  columnKey: string
+  label: string
+  dataType?: string | null
+  format?: string | null
+  isSortable: boolean
+  width?: string | null
+}
+
+/** One filter of a stored list definition (`domain::list::ListFilterInput`). */
+export interface ListFilter {
+  filterKey: string
+  label: string
+  filterType: ListFilterType
+  optionsJson?: unknown
+  isDefault: boolean
+}
+
+/**
+ * A list definition as the storage API returns it, children included.
+ *
+ * **Not the same thing as {@link RenderableList}**, and the difference is the
+ * point of the builder. This is what is stored; that is what
+ * `rad::domain::render` could make of it. A definition can be stored happily
+ * and be undrawable — [SDD](../../../docs/design/01.%20System%20Design%20Document.md)
+ * §8.2.4 accepted that deliberately, on the stated condition that the builder
+ * shows an author the problem.
+ */
+export interface ListDefinition {
+  id: string
+  listKey: string
+  title: string
+  entityId: string | null
+  defaultSort: unknown
+  pageSize: number
+  status: ListStatus
+  columns: ListColumn[]
+  filters: ListFilter[]
+  createdAt: string
+  updatedAt: string
+}
+
+export interface CreateListRequest {
+  listKey: string
+  title: string
+  entityId?: string | null
+  defaultSort?: unknown
+  pageSize?: number
+  status?: ListStatus
+  columns?: ListColumn[]
+  filters?: ListFilter[]
+}
+
+/**
+ * Editing a list definition.
+ *
+ * **A collection that is sent replaces the stored set wholesale**, which the
+ * backend's own doc comment says — so an editor that sent one column would
+ * delete the rest. The builder always sends both arrays.
+ */
+export type UpdateListRequest = Partial<Omit<CreateListRequest, 'listKey'>>
+
 /** A list definition's status (`domain::list::ListStatus`). */
 export type ListStatus = 'ACTIVE' | 'DEPRECATED'
 
