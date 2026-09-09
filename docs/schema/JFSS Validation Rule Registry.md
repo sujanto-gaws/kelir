@@ -1,7 +1,7 @@
 # JFSS Validation Rule Registry
-**Version:** 1.3.0  
+**Version:** 1.4.0  
 **Status:** Active Standard  
-**Last updated:** 2026-08-21  
+**Last updated:** 2026-09-09  
 **Pairs with:** JFSS v2.0.1  
 **Maintainers:** Full-Stack Engineering Team
 
@@ -84,7 +84,18 @@ Applies a custom regular expression. (Use this when the base `validation.pattern
 >
 > Lookahead and backreferences fail loudly: the Rust `regex` crate rejects them by design, and a password-complexity pattern — the commonest custom `regex` rule there is — cannot be compiled at all. The character-class divergence fails **silently**: ECMA-262 `\d` is ASCII-only, Rust's `\d` is Unicode `Nd`, so the same rule rejects Arabic-Indic digits in the browser and accepts them on the server with no error on either side.
 >
-> Until this is resolved, prefer `validation.pattern` with a plainly ASCII, non-lookahead pattern, and pin digit classes explicitly (`[0-9]`, not `\d`). Two resolutions are open: constrain this rule's params schema to a cross-compatible subset and validate it when the schema is saved, or adopt a backtracking engine (`fancy-regex`) on the backend — which restores lookahead and backreferences but leaves the `\d` divergence needing an explicit pin either way.
+> **Resolved 2026-09-09 as decision D-15, and the guidance below is now a rule the server enforces.** Of the two candidates — constrain the params schema and check it at save, or adopt a backtracking engine (`fancy-regex`) — **the first is taken and the second is rejected on the NFR rather than on the capability**: a pattern is written by a tenant's configuration author, so backtracking makes catastrophic backtracking a denial of service reachable from a stored form definition. A linear-time guarantee is worth more than lookahead in a rule a browser also has to agree with.
+>
+> **What Kelir refuses when a definition is written** ([#391](https://github.com/sujanto-gaws/kelir/issues/391), through the S10.3 envelope, at the same seam that already refuses an unregistered rule name):
+>
+> | Refused | Code | Why |
+> |---|---|---|
+> | A pattern this backend cannot compile — lookahead, backreferences, a syntax error | `PATTERN_NOT_COMPILABLE` | Stored, it **rejects every value**: the evaluator maps a compile error to *no match*, which is correct at submit (a rule that could not be applied has not been satisfied) and is a field nobody can fill |
+> | A bare `\d`, `\w` or `\s`, in either case | `PATTERN_CLASS_NOT_PINNED` | It compiles on both sides and **means different things**, so the two runtimes decide one input opposite ways with nothing raised on either side — §1's Semantic Parity requirement, failing silently |
+>
+> Both apply to `validation.pattern` as well as to this rule, because one evaluator decides both.
+>
+> **The capability limit, stated where you meet it: Kelir patterns carry no lookahead and no backreferences.** So **server-side password complexity is several rules rather than one** — a `minLength` and one pattern per class, or a single pinned pattern per requirement. **`passwordStrength` does not cover this**: its own Rust note says the backend ignores it and relies on `validation.minLength` and `validation.pattern`, which is the keyword this decision constrains. That is a real narrowing, taken deliberately.
 
 #### `oneOf`
 Ensures the value is strictly within a provided array.
@@ -236,6 +247,7 @@ The Vue submission handler must catch the `400` response, iterate through the `d
 
 ## 6. Changelog
 
+- **1.4.0 (2026-09-09):** **Resolved the `regex` rule's open question as decision D-15.** The "ECMA 262 regex" params schema is constrained to what the Rust `regex` crate honours, checked when a form definition is written rather than when it is filled in ([#391](https://github.com/sujanto-gaws/kelir/issues/391)): an uncompilable pattern is `PATTERN_NOT_COMPILABLE` and a bare `\d`, `\w` or `\s` is `PATTERN_CLASS_NOT_PINNED`, both through the S10.3 envelope and both applying to `validation.pattern` too. **`fancy-regex` was the rejected alternative**, on the ReDoS exposure a tenant-authored pattern would open rather than on what it can express. The interim guidance under the `regex` warning becomes the rule; the capability limit — no lookahead, no backreferences, so server-side password complexity is several rules — is stated there. No rule is added, removed, or re-scoped.
 - **1.3.0 (2026-08-21):** **Removed Go.** Decision **D-11**: Kelir's backend is Rust, and this registry had been naming Go alongside it throughout. Restated §1.1 for two runtimes and added a **Semantic Parity** requirement — for a `scope: "both"` rule the two implementations must agree on the edge cases, which is what the `regex` entry had been quietly failing. Converted every `Go/Rust` implementation note to Rust and made them concrete rather than generic: `matchesField` gains the `serde_json::Value` equality caveat; `unique` and `exists` state why the allow-list is the only shape that compiles under `sqlx::query!`; `authorized` names the authenticated claims rather than "the JWT/Session context"; §4 step 4 requires an unrecognised rule name to be an error rather than a skipped `match` arm. No rule is added, removed, or re-scoped.
 - **1.2.0 (2026-08-21):** Recorded the [operator-parity spike](../../projects/spikes/01.%20JFSS%20Operator%20Parity.md) (#31) finding against the `regex` rule: the "ECMA 262 regex" params schema is not honourable by the Rust `regex` crate — lookahead and backreferences are rejected at compile time, and `\d` diverges silently between the ASCII ECMA-262 class and Rust's Unicode `Nd`, which for a `scope: "both"` rule means the two sides reach opposite verdicts on the same input. Added Rust implementation notes and interim guidance; the two candidate resolutions are open.
 - **1.1.0 (2026-08-05):** Aligned the Section 5 error-response contract with JFSS v2.0.1 Section 10.3 (`path` with dot-notation, plus `rule`, `code`, `message`); added the document header and title; added examples for `notMatchesField`, `oneOf`, `notOneOf`, and `exists` (with the SQL-injection allow-list warning); split `oneOf`/`notOneOf` into separate entries; clarified `oneOf`/`notOneOf` vs. `validation.enum`; defined the `async` rule's request/response contract and Zod async-parse note; fixed the stale `jfss-meta.json` filename reference.
