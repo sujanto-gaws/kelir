@@ -130,3 +130,23 @@ lettre = { version = "0.11.23", default-features = false, features = [
 [dev-dependencies]
 # Drives the router in tests via ServiceExt::oneshot, without binding a port.
 tower = { version = "0.5", features = ["util"] }
+
+[profile.dev]
+# Line tables, not full symbol tables.
+#
+# `tests/` holds 72 integration files, and cargo builds each one as its own
+# statically-linked binary carrying this crate and every dependency in the
+# lockfile. Under the default `debug = true` that is a ~340 MB PDB apiece, and
+# cargo never collects the stale ones: `target/` was measured at 74 GB, 43 GB of
+# it symbol tables and nothing else. A full D: drive is what LNK1180 reports,
+# one link too late.
+#
+# `line-tables-only` keeps the file and line numbers a panic backtrace prints —
+# the part of a symbol table anyone reads when a test fails — and drops the
+# rest. `profile.test` inherits from this section, so the test binaries, which
+# are the bulk of the output, are covered too. Measured on `attachment_scan`:
+# 339 MB of PDB became 125 MB. That is a little under two thirds, not a
+# rounding to nothing — the floor is the crate and its dependency graph, which
+# every one of the 72 binaries still carries in full. Cutting the rest means
+# either `debug = 0`, which costs the backtraces, or fewer test binaries.
+debug = "line-tables-only"
