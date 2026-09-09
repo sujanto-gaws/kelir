@@ -1,7 +1,7 @@
 # JFSS Calculation Rule Registry
-**Version:** 1.6.0
+**Version:** 1.7.0
 **Status:** Active Standard
-**Last updated:** 2026-08-26
+**Last updated:** 2026-09-09
 **Pairs with:** JFSS v2.0.1
 **Maintainers:** Full-Stack Engineering Team
 
@@ -23,7 +23,7 @@ Before using an operator in a `calculate` property, the engineering team must en
 2. **Backend Parity:** The operator is supported by `datalogic-rs`, or has been explicitly implemented as a custom operator — and that the library **accepts custom operators at all**, which not every candidate does (Section 4).
 3. **Tamper-Proof Guarantee:** The backend can recalculate the exact same expression to overwrite the frontend's submitted value, **and can fail loudly if it cannot** (Section 4).
 
-**If an operator is not in this registry, it is FORBIDDEN from use in the `calculate` property.**
+**If an operator is not in this registry, it is FORBIDDEN from use in the `calculate` property — and, since 1.7.0, in the `conditional.logic` property too (§2.5).** The two properties draw on different tiers and the rule over them is the same one: a name this registry does not list is a name no Kelir runtime evaluates.
 
 > **Where that is enforced (2026-08-25, #156).** `POST /rad/forms` and `PUT /rad/forms/{id}` validate a definition against the meta-schema **and** against §2's operator sets, and refuse a non-conforming one with the error envelope rather than storing it. The second check is not redundant with the first: the meta-schema's `jsonLogic` definition accepts any single-key object and says so — *"deep operator/arity validation is deferred to the runtime libraries and the Calculation Rule Registry"* — so without it the adopted engine's whole proprietary surface (`datetime`, `ext-string`, `ext-array`, `ext-math`, `flagd`) reaches stored schemas and evaluates identically on both sides. **Parity is not governance.** Refusing at save rather than at render is deliberate: a definition is written once and rendered thousands of times, and a form that half-renders is worse than one that was never stored.
 
@@ -98,13 +98,40 @@ These operators are **strictly forbidden** in `calculate` properties because the
 | `in` | Array membership check returns boolean. |
 | `log` | Side-effect operator, not a pure calculation. |
 
-**Status:** ❌ **FORBIDDEN**
+**Status:** ❌ **FORBIDDEN** in `calculate`.
+
+> **Every operator in this table is *approved* in `conditional.logic`, and the reason above is why** (§2.5). The ban here rests on these operators returning booleans rather than numeric values; a `conditional.logic` expression is required by JFSS §7.1 to evaluate to a boolean, so **the property that disqualifies them from `calculate` is the property that qualifies them for a conditional.** `log` is the exception and stays forbidden in both: it is banned for being a side effect, which no property makes acceptable.
 
 ### 2.4 Generated (Non-Deterministic) Operators
 
 A fourth tier exists for **non-deterministic, server-side operators**. These are permitted **only** in fields declared with `calculateMode: "generated"` (JFSS v2.0.1, S4.2.3 Case C) and are documented in Section 3.3.
 
 **Status:** 🔒 **SERVER-SIDE ONLY, `calculateMode: "generated"` ONLY**
+
+
+### 2.5 Conditional Operators (`conditional.logic`)
+
+The operators approved inside a component's `conditional.logic`. **This tier was governed by nothing until decision D-15** ([#393](https://github.com/sujanto-gaws/kelir/issues/393)): §1's rule named `calculate` alone, this registry governed `calculate` alone, and §2.3 forbade there precisely the operators a conditional cannot do without. The [operator-parity spike](../../projects/spikes/01.%20JFSS%20Operator%20Parity.md) §2.6 found the gap on 2026-08-21 and it stood for four sprints.
+
+**The tier is §2.1 and §2.2 in full, plus §2.3's set.** A conditional may read and compute — a threshold is a comparison against an arithmetic result — so nothing approved for `calculate` is withheld from it.
+
+| Group | Operators | Source |
+| :--- | :--- | :--- |
+| Base | `var`, `+`, `-`, `*`, `/`, `%`, `min`, `max`, `map`, `filter`, `reduce`, `all`, `some`, `none` | §2.1 |
+| Extended | `sum` | §2.2 |
+| Comparison | `==`, `===`, `!=`, `!==`, `>`, `>=`, `<`, `<=` | §2.3, approved here |
+| Logical | `and`, `or`, `!`, `!!`, `if`, `?:` | §2.3, approved here |
+| Membership and presence | `in`, `missing`, `missing_some` | §2.3 and JSON Logic's presence operators |
+
+**Thirty-two in total**, of which seventeen are approved here and nowhere else.
+
+**Status:** ✅ **APPROVED in `conditional.logic`.** An operator outside this table is FORBIDDEN there, by §1's rule.
+
+**`log` is not in this tier.** §2.3 bans it as a side effect rather than as a wrong return type, and a conditional evaluating a side effect is the same defect in a different property.
+
+**`generateInvoiceId` and every §2.4 operator are not in this tier either.** They are non-deterministic and server-side, and a conditional decides what a person sees while they type — a visibility that depended on a sequence number would differ between the browser and the re-evaluation the server performs at submit (S10.2).
+
+> **Where this is enforced.** `rad::domain::jfss::CONDITIONAL_OPERATORS` is this table in code, and `registry_operator_tiers.rs` asserts the two agree name for name. Before 1.7.0 the constant was a *floor* derived from §2.3's stated reason rather than from a normative list — its own doc comment said so, and said D-15 owned making it normative. This is that.
 
 ---
 
@@ -607,6 +634,7 @@ formData.value[component.key] = evaluator.evaluateNumeric(component.calculate, n
 
 ## 9. Changelog
 
+- **1.7.0 (2026-09-09):** **`conditional.logic` gets a tier (§2.5), and §1's *not in this registry, therefore FORBIDDEN* rule reaches it.** Decision **D-15**, [#393](https://github.com/sujanto-gaws/kelir/issues/393), closing a gap the [operator-parity spike](../../projects/spikes/01.%20JFSS%20Operator%20Parity.md) §2.6 found on 2026-08-21 and that stood for four sprints: this registry governed `calculate` alone while the backend re-evaluates conditionals too (S10.2), so the operator surface it had to implement was strictly larger than the matrix and nothing bounded it. **A tier here rather than a registry of its own** — a third document governing thirty-two operators that overlap `calculate`'s by fifteen would duplicate the maintenance and add no reader, and §2.3 already carries the reason the two sets differ. **What changes is normativity, not enforcement**: `rad::domain::jfss::CONDITIONAL_OPERATORS` already refused everything outside the floor when a definition was written, and was a floor derived from §2.3's rationale rather than a list anything could be held to — the browser holds no equivalent. `registry_operator_tiers.rs` now asserts the code and this document agree name for name. No operator is added, removed, or re-scoped for `calculate`.
 - **1.6.0 (2026-08-26):** **Division by zero refuses instead of yielding `0`** (decision **D-24**). Section 3.1's division entry and Section 7.3 change what they require: both environments configure the engine with `ThrowError`, so `10 / 0`, `10.5 / 0`, `0 / 0` and `10 % 0` all fail evaluation identically. A field whose calculation fails renders blank; a submission carrying one is refused with the JFSS S10.3 envelope. **Why this is a version bump and not an errata:** it changes what a conforming implementation does. The `0` this registry asked for from v1.0.0 was never reachable uniformly — the engine's integer division path throws under every `DivisionByZeroHandling` setting — so v1.5.0 recorded the rule as *not fully delivered* and left the correction open. It is closed here in the direction the rest of the registry already leans: §6.2's cap with an absent operand refuses rather than zeroing, for the same reason. **Also corrects an attribution:** v1.5.0 and Section 7.3 assigned this correction to **D-15**, whose text covers the `conditional.logic` tier and the `regex` constraint and not this. **Unchanged:** the approved operator set, the forbidden tier, the Tamper-Proof Pattern, the finiteness wrapper for every other non-finite result, and the two ambiguities Sections 3.1 and 6.2 flag.
 
 - **1.5.1 (2026-08-25):** Recorded **where** §1's "not in this registry, therefore FORBIDDEN" rule is enforced, now that it is anywhere: the form-definition storage API (#156) checks a definition against the meta-schema and against §2's operator sets on save, and refuses rather than stores. Also records what that check cannot yet be — `conditional.logic` is held to a floor derived from §2.3's reason rather than to a registry, because that registry is **D-15**'s. No operator moves tier and no rule changes; this documents an enforcement point that previously existed nowhere.

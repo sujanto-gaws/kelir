@@ -73,19 +73,21 @@ pub(crate) const CALCULATE_OPERATORS: &[&str] = &[
 
 /// Operators approved inside `conditional.logic`.
 ///
-/// **This set is a floor, not a registry, and D-15 owns making it normative.**
-/// The Calculation Rule Registry governs `calculate` only; the
-/// [operator-parity spike](../../../../../projects/spikes/01.%20JFSS%20Operator%20Parity.md)
-/// §2.6 found that `conditional.logic` needs exactly the operators §2.3 forbids
-/// in `calculate` and is bounded by no registry at all. Carrying that gap to
-/// Sprints 14–16 is decision **D-15**.
+/// **This is [Calculation Rule Registry](../../../../../docs/schema/JFSS%20Calculation%20Rule%20Registry.md)
+/// §2.5 in code, and §2.5 is the authority.** `registry_operator_tiers.rs`
+/// asserts the two agree name for name, so the list below cannot drift from the
+/// document that governs it.
 ///
-/// Leaving the tier unbounded until then was the alternative, and it is worse:
-/// it lets the engine's proprietary surface into stored schemas through the
-/// door `calculate` closes. So the set below is the base operators plus the
-/// comparison and logical ones — derived from §2.3's own stated reason for
-/// forbidding them in `calculate`, which is that they return booleans rather
-/// than numbers. That reason makes them exactly what a conditional wants.
+/// **It was a floor until registry 1.7.0, and the difference is what D-15
+/// bought.** The registry governed `calculate` alone, so this set was *derived*
+/// — §2.3 forbids the comparison and logical operators there because they
+/// return booleans rather than numbers, and that reason makes them exactly what
+/// a conditional wants. Deriving it kept stored schemas bounded and left the
+/// bound as one language's opinion about a property both runtimes evaluate
+/// (S10.2): the browser holds no equivalent list. §2.5 is the same set, said
+/// somewhere both sides can be held to it ([#393]).
+///
+/// [#393]: https://github.com/sujanto-gaws/kelir/issues/393
 pub(crate) const CONDITIONAL_OPERATORS: &[&str] = &[
     "var",
     "+",
