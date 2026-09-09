@@ -67,7 +67,7 @@ use super::jfss::{
     check_operators, container_children_at, data_key, role_of, row_template, CALCULATE_OPERATORS,
     CONDITIONAL_OPERATORS,
 };
-use super::validation::is_registered;
+use super::validation::{is_registered, refuse_pattern, PatternRefusal};
 use crate::error::ValidationDetail;
 
 /// The S10.3 `code` a cyclic definition carries, at either moment.
@@ -79,6 +79,29 @@ pub(crate) const CALCULATION_CYCLE: &str = "CALCULATION_CYCLE";
 /// deliberately so: it is one defect reported at two moments, and a builder
 /// that learns to handle the code at publish handles it wherever it appears.
 pub(crate) const RULE_NOT_REGISTERED: &str = "RULE_NOT_REGISTERED";
+
+/// The S10.3 `code` a pattern this backend cannot compile carries.
+///
+/// **The defect it ends is a field nobody can fill.** `matches_pattern` maps a
+/// compile error to `false`, so a stored lookahead — the commonest custom
+/// pattern there is, password complexity — rejected every value with no error
+/// naming the pattern. That is the right verdict at submit, where a rule that
+/// could not be applied has not been satisfied, and the wrong moment: the
+/// definition should not have been stored ([#391], **D-15**).
+///
+/// [#391]: https://github.com/sujanto-gaws/kelir/issues/391
+pub(crate) const PATTERN_NOT_COMPILABLE: &str = "PATTERN_NOT_COMPILABLE";
+
+/// The S10.3 `code` a bare `\d`, `\w` or `\s` carries.
+///
+/// **The silent half of the same decision.** It compiles on both sides and
+/// means different things — ECMA-262's `\d` is ASCII, this crate's is Unicode
+/// `Nd` — so a `both`-scoped rule reaches opposite verdicts on one input with
+/// nothing raised on either side. A rule the two runtimes decide differently is
+/// worse than one only the server enforces, which is the
+/// [Validation Rule Registry](../../../../../docs/schema/JFSS%20Validation%20Rule%20Registry.md)
+/// §1 Semantic Parity requirement in its own words.
+pub(crate) const PATTERN_CLASS_NOT_PINNED: &str = "PATTERN_CLASS_NOT_PINNED";
 
 /// A dependency cycle, as the keys that make it up.
 ///
@@ -531,6 +554,7 @@ fn check_scope(components: &[&Value], path: &str, details: &mut Vec<ValidationDe
     for entry in &catalogue.entries {
         check_rule_names(entry, details);
         check_operator_sets(entry, details);
+        check_patterns(entry, details);
     }
 
     if let Err(cycle) = catalogue.order() {
@@ -601,6 +625,108 @@ fn check_rule_names(entry: &Entry<'_>, details: &mut Vec<ValidationDetail>) {
             ),
         ));
     }
+}
+
+/// Every pattern one component carries, against what this backend can honour.
+///
+/// **Two places declare one, and both are checked here.** §5's `validation.pattern`
+/// keyword and the registry's `regex` rule are evaluated by the same
+/// `matches_pattern` at submit, so they fail the same way and are refused
+/// together rather than in two checks that could drift apart.
+///
+/// **The `regex` rule's `flags` are read, because they change what compiles.**
+/// A pattern is built here exactly as it will be built at submit, which is what
+/// makes this check a promise rather than an approximation.
+fn check_patterns(entry: &Entry<'_>, details: &mut Vec<ValidationDetail>) {
+    if let Some(pattern) = entry
+        .component
+        .get("validation")
+        .and_then(|validation| validation.get("pattern"))
+        .and_then(Value::as_str)
+    {
+        refuse(
+            pattern,
+            "",
+            format!("{}.validation.pattern", entry.path),
+            "pattern",
+            entry.key,
+            details,
+        );
+    }
+
+    let rules = entry
+        .component
+        .get("rules")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+
+    for (index, rule) in rules.iter().enumerate() {
+        if rule.get("rule").and_then(Value::as_str) != Some("regex") {
+            continue;
+        }
+
+        let params = rule.get("params");
+        let Some(pattern) = params
+            .and_then(|params| params.get("pattern"))
+            .and_then(Value::as_str)
+        else {
+            // A `regex` rule with no pattern is a shape problem, and the
+            // meta-schema is what answers for shape.
+            continue;
+        };
+
+        let flags = params
+            .and_then(|params| params.get("flags"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+
+        refuse(
+            pattern,
+            flags,
+            format!("{}.rules.{index}.params.pattern", entry.path),
+            "regex",
+            entry.key,
+            details,
+        );
+    }
+}
+
+/// One pattern's refusal, as the detail an author reads.
+fn refuse(
+    pattern: &str,
+    flags: &str,
+    path: String,
+    rule: &str,
+    key: &str,
+    details: &mut Vec<ValidationDetail>,
+) {
+    let Some(refusal) = refuse_pattern(pattern, flags) else {
+        return;
+    };
+
+    let (code, message) = match refusal {
+        PatternRefusal::Uncompilable { reason } => (
+            PATTERN_NOT_COMPILABLE,
+            format!(
+                "`{key}`'s pattern `{pattern}` is not one this backend can compile — {reason}. \
+                 Kelir patterns carry no lookahead and no backreferences; a rule stored with one \
+                 would reject every value rather than the wrong ones, because a pattern that \
+                 cannot be applied has not been satisfied"
+            ),
+        ),
+        PatternRefusal::UnpinnedClass { class } => (
+            PATTERN_CLASS_NOT_PINNED,
+            format!(
+                "`{key}`'s pattern `{pattern}` uses `\\{class}`, which this backend and the \
+                 browser read differently — ECMA-262's classes are ASCII and this crate's are \
+                 Unicode, so the two would decide the same input opposite ways with nothing \
+                 raised on either side. Write the class out: `[0-9]` rather than `\\d`"
+            ),
+        ),
+    };
+
+    details.push(ValidationDetail::new(path, rule, code, message));
 }
 
 /// The operators one component's expressions use, against the Calculation Rule
@@ -965,6 +1091,122 @@ mod tests {
         ]));
 
         assert!(details.is_empty(), "{details:?}");
+    }
+
+    /// **[#391] AC1 and AC5.** The pattern that cannot compile is refused, and
+    /// the one beside it that can is not — one component cannot tell *refused
+    /// because uncompilable* from *refused for any reason at all*.
+    ///
+    /// **Seen red, 2026-09-09**, twice and at different depths: removing the
+    /// `check_patterns(entry, details)` call from `check_scope`, which reddens
+    /// all five of these tests, and `refuse_pattern` skipping its compile check,
+    /// which reddens the four about compiling and leaves the class one green.
+    /// **The second is the one that matters** — it lands on the branch this test
+    /// names rather than on the call site every pattern test shares.
+    ///
+    /// [#391]: https://github.com/sujanto-gaws/kelir/issues/391
+    #[test]
+    fn refuses_a_regex_pattern_this_backend_cannot_compile() {
+        let mut lookahead = plain("password");
+        lookahead["rules"] = json!([{
+            "rule": "regex", "scope": "both",
+            "params": {"pattern": "(?=.*[A-Z])[A-Za-z]{8,}"},
+            "message": "m",
+        }]);
+
+        // The second subject: a pattern this crate builds happily.
+        let mut ordinary = plain("reference");
+        ordinary["rules"] = json!([{
+            "rule": "regex", "scope": "both",
+            "params": {"pattern": "^[A-Z]{2}-[0-9]{4}$"},
+            "message": "m",
+        }]);
+
+        let details = definition_errors(&definition(vec![lookahead, ordinary]));
+
+        assert_eq!(codes(&details), [PATTERN_NOT_COMPILABLE]);
+        assert_eq!(
+            details[0].path,
+            "definition.components.0.rules.0.params.pattern"
+        );
+        assert!(details[0].message.contains("password"));
+        // The crate's own diagnosis, which is the half that says what to do.
+        assert!(
+            details[0].message.contains("look-around"),
+            "the refusal should carry the compiler's reason: {}",
+            details[0].message
+        );
+    }
+
+    /// **§5's `validation.pattern` is the same defect one keyword over**, and
+    /// is evaluated by the same `matches_pattern` at submit.
+    #[test]
+    fn refuses_an_uncompilable_pattern_in_the_validation_keyword() {
+        let mut component = plain("code");
+        component["validation"] = json!({"pattern": "[unterminated"});
+
+        let ordinary = plain("untouched");
+
+        let details = definition_errors(&definition(vec![component, ordinary]));
+
+        assert_eq!(codes(&details), [PATTERN_NOT_COMPILABLE]);
+        assert_eq!(
+            details[0].path,
+            "definition.components.0.validation.pattern"
+        );
+    }
+
+    /// **[#391] AC2.** The silent half: it compiles on both sides and means
+    /// different things.
+    ///
+    /// **Seen red, 2026-09-09**: `unpinned_class` returning `None` always.
+    #[test]
+    fn refuses_a_bare_character_class_and_accepts_the_pinned_one() {
+        let mut bare = plain("quantity");
+        bare["validation"] = json!({"pattern": r"^\d{3}$"});
+
+        // The second subject, and the fix the message names.
+        let mut pinned = plain("also_quantity");
+        pinned["validation"] = json!({"pattern": "^[0-9]{3}$"});
+
+        let details = definition_errors(&definition(vec![bare, pinned]));
+
+        assert_eq!(codes(&details), [PATTERN_CLASS_NOT_PINNED]);
+        assert_eq!(
+            details[0].path,
+            "definition.components.0.validation.pattern"
+        );
+        assert!(details[0].message.contains("[0-9]"));
+    }
+
+    /// **An escaped backslash is not an escape.** `\d` is a literal
+    /// backslash and a literal `d`, and refusing it would refuse a pattern that
+    /// is portable — the scan consuming the character after every backslash is
+    /// what keeps the two apart.
+    #[test]
+    fn an_escaped_backslash_before_d_is_not_a_character_class() {
+        let mut component = plain("windows_path");
+        component["validation"] = json!({"pattern": r"^C:\\dir$"});
+
+        let details = definition_errors(&definition(vec![component]));
+
+        assert!(
+            details.is_empty(),
+            "an escaped backslash should not read as a class: {details:?}"
+        );
+    }
+
+    /// **The compile refusal returns alone.** A pattern the parser rejected
+    /// cannot be scanned for a class without guessing at text it would not
+    /// accept, so the two codes never arrive together for one pattern.
+    #[test]
+    fn a_pattern_that_is_both_uncompilable_and_unpinned_reports_only_the_first() {
+        let mut component = plain("password");
+        component["validation"] = json!({"pattern": r"(?=.*\d)x"});
+
+        let details = definition_errors(&definition(vec![component]));
+
+        assert_eq!(codes(&details), [PATTERN_NOT_COMPILABLE]);
     }
 
     /// **AC1**: the Validation Rule Registry half of the catalogue.

@@ -11,6 +11,32 @@ While the major version is `0`, the public API may change in any release.
 
 ### Added
 
+- **A form definition is refused when its pattern is one this backend cannot
+  compile** (FR-RAD-006,
+  [#391](https://github.com/sujanto-gaws/kelir/issues/391), decision **D-15**).
+  The `regex` rule's params schema says "ECMA 262 regex" and the Rust `regex`
+  crate is not that: it rejects lookahead and backreferences at compile time.
+  **Stored, such a rule rejected every value** — the evaluator maps a compile
+  error to *no match*, so a password-complexity pattern produced a field nobody
+  could fill, with no error naming the pattern. That is the right verdict at
+  submit and the wrong moment; the definition is now refused when it is written,
+  as `PATTERN_NOT_COMPILABLE`, carrying the compiler's own reason.
+  **A bare `\d`, `\w` or `\s` is refused too**, as `PATTERN_CLASS_NOT_PINNED`:
+  it compiles on both sides and means different things — ECMA-262's classes are
+  ASCII, this crate's are Unicode — so the browser and the server would decide
+  the same input opposite ways with nothing raised on either side. Write the
+  class out: `[0-9]` rather than `\d`.
+  Both apply to §5's `validation.pattern` keyword as well as to the rule,
+  because one evaluator decides both, and both are raised through the S10.3
+  envelope at the seam that already refuses an unregistered rule name.
+  **The capability limit is now stated in the
+  [Validation Rule Registry](docs/schema/JFSS%20Validation%20Rule%20Registry.md)
+  (1.4.0)**: Kelir patterns carry no lookahead and no backreferences, so
+  server-side password complexity is several rules rather than one.
+  **`fancy-regex` was the rejected alternative**, on the denial of service a
+  tenant-authored backtracking pattern would open rather than on what it can
+  express.
+
 - **A configured action can belong to one list** (FR-RAD-003, FR-RAD-010,
   [#348](https://github.com/sujanto-gaws/kelir/issues/348)). `rad_actions` has
   carried a `context` and no `list_id` since `v0.4.0`, so a `LIST` action

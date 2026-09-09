@@ -376,13 +376,100 @@ pub fn js_string(value: &Value) -> String {
 /// `g` and `y` are dropped rather than refused: they change where a *repeated*
 /// match resumes and mean nothing to a single `test`.
 fn matches_pattern(pattern: &str, flags: &str, value: &str) -> bool {
+    compile_pattern(pattern, flags)
+        .map(|compiled| compiled.is_match(value))
+        .unwrap_or(false)
+}
+
+/// The one place a pattern is built, so the check at save and the evaluation at
+/// submit cannot disagree about what this backend accepts.
+fn compile_pattern(pattern: &str, flags: &str) -> Result<regex::Regex, regex::Error> {
     regex::RegexBuilder::new(pattern)
         .case_insensitive(flags.contains('i'))
         .multi_line(flags.contains('m'))
         .dot_matches_new_line(flags.contains('s'))
         .build()
-        .map(|compiled| compiled.is_match(value))
-        .unwrap_or(false)
+}
+
+/// Why this backend will not honour a pattern as written.
+///
+/// **Both arms are refusals at save rather than verdicts at submit**
+/// ([#391](https://github.com/sujanto-gaws/kelir/issues/391), **D-15**), and
+/// they fail for opposite reasons: the first is loud on this side and the
+/// second is silent on both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PatternRefusal {
+    /// The `regex` crate cannot build it — lookahead, backreferences, or a
+    /// syntax error. `matches_pattern` maps that to `false`, so **every value
+    /// fails a rule nobody can satisfy**, which is right at submit and wrong at
+    /// save.
+    Uncompilable { reason: String },
+    /// A bare `\d`, `\w` or `\s`. It compiles on both sides and **means
+    /// different things**: ECMA-262 reads `\d` as ASCII, this crate as Unicode
+    /// `Nd`, so the browser rejects `٣٤٥` and the server accepts it with
+    /// nothing raised anywhere. The registry's interim guidance is to pin the
+    /// class; this is that guidance becoming a rule.
+    UnpinnedClass { class: char },
+}
+
+/// The refusal a pattern earns, or `None` if this backend will honour it.
+///
+/// **The compile check runs first and returns alone.** A pattern that does not
+/// build cannot be scanned for anything else, and reporting a class problem
+/// beside a syntax error would be guessing at text the parser rejected.
+pub(crate) fn refuse_pattern(pattern: &str, flags: &str) -> Option<PatternRefusal> {
+    if let Err(error) = compile_pattern(pattern, flags) {
+        return Some(PatternRefusal::Uncompilable {
+            reason: compile_reason(&error),
+        });
+    }
+
+    unpinned_class(pattern).map(|class| PatternRefusal::UnpinnedClass { class })
+}
+
+/// The crate's own explanation, reduced to the sentence a form author needs.
+///
+/// `regex::Error`'s `Display` is a three-line report with the pattern and a
+/// caret under the offending span; its last `error:` line is the diagnosis
+/// (*look-around … is not supported*), which is the half that tells an author
+/// what to do. The whole report is kept when there is no such line.
+fn compile_reason(error: &regex::Error) -> String {
+    let rendered = error.to_string();
+
+    rendered
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("error: "))
+        .next_back()
+        .map_or_else(
+            || rendered.split_whitespace().collect::<Vec<_>>().join(" "),
+            str::to_owned,
+        )
+}
+
+/// The first bare character class in a pattern, if it has one.
+///
+/// **An escaped backslash is not an escape**: `\\d` is a literal backslash
+/// followed by a literal `d` and is not a class, so the scan consumes the
+/// character after every backslash rather than only looking at it.
+fn unpinned_class(pattern: &str) -> Option<char> {
+    let mut characters = pattern.chars();
+
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            continue;
+        }
+
+        match characters.next() {
+            Some(class @ ('d' | 'D' | 'w' | 'W' | 's' | 'S')) => return Some(class),
+            // Any other escape, consumed so its argument is not re-read.
+            Some(_) => {}
+            // A trailing backslash, which the compile check above has already
+            // refused — reaching here at all would mean it did not.
+            None => break,
+        }
+    }
+
+    None
 }
 
 /// §5's `format` keyword.

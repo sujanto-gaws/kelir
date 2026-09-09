@@ -363,6 +363,95 @@ async fn a_rule_name_no_registry_declares_is_refused_at_save() {
     );
 }
 
+/// **[#391] AC1 and AC3, at the endpoint.** A pattern this backend cannot
+/// compile is refused where the definition is written.
+///
+/// **The defect this ends is a field nobody can fill.** Stored, the rule
+/// rejected every value — `matches_pattern` maps a compile error to `false` —
+/// with no error naming the pattern, because a rule that could not be applied
+/// has not been satisfied. That is right at submit and wrong at save, which is
+/// the reasoning [SDD] §8.2.3 gives for checking a definition when it is
+/// written.
+///
+/// **A second subject, because one component cannot tell *refused because
+/// uncompilable* from *refused at all***: the ordinary pattern beside it must
+/// not be named in the refusal.
+///
+/// [#391]: https://github.com/sujanto-gaws/kelir/issues/391
+/// [SDD]: ../../docs/design/01.%20System%20Design%20Document.md
+#[tokio::test]
+async fn a_pattern_this_backend_cannot_compile_is_refused_at_save() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let mut document = definition("uncompilable-pattern");
+    document["components"][0]["rules"] = json!([{
+        "rule": "regex", "scope": "both",
+        "params": {"pattern": "(?=.*[A-Z])[A-Za-z]{8,}"},
+        "message": "Needs a capital.",
+    }]);
+
+    let response = app
+        .send(
+            Method::POST,
+            "/api/v1/rad/forms",
+            Some(&token),
+            Some(json!({
+                "formKey": "uncompilable-pattern",
+                "title": "Uncompilable pattern",
+                "definition": document,
+            })),
+        )
+        .await;
+
+    assert_eq!(response.status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let detail = response.body["error"]["details"]
+        .as_array()
+        .expect("details")
+        .iter()
+        .find(|detail| detail["code"] == "PATTERN_NOT_COMPILABLE")
+        .cloned()
+        .unwrap_or_else(|| panic!("body {}", response.body));
+
+    assert!(
+        detail["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("look-around")),
+        "the refusal must carry the compiler's own reason; got {detail}"
+    );
+
+    // The second subject: the same definition with a pattern this crate builds
+    // is stored, so the refusal is the pattern rather than the shape of the
+    // request.
+    let mut ordinary = definition("compilable-pattern");
+    ordinary["components"][0]["rules"] = json!([{
+        "rule": "regex", "scope": "both",
+        "params": {"pattern": "^[A-Z]{2}-[0-9]{4}$"},
+        "message": "Two letters, a dash, four digits.",
+    }]);
+
+    let accepted = app
+        .send(
+            Method::POST,
+            "/api/v1/rad/forms",
+            Some(&token),
+            Some(json!({
+                "formKey": "compilable-pattern",
+                "title": "Compilable pattern",
+                "definition": ordinary,
+            })),
+        )
+        .await;
+
+    assert_eq!(
+        accepted.status,
+        StatusCode::CREATED,
+        "a pattern this backend compiles must still be storable: {}",
+        accepted.body
+    );
+}
+
 /// **AC3, at the endpoint.** Two fields that calculate from each other are a
 /// definition JFSS S12.2 calls invalid, and it is refused where it is written.
 #[tokio::test]
