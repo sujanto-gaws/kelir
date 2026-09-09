@@ -11,6 +11,31 @@ While the major version is `0`, the public API may change in any release.
 
 ### Added
 
+- **`conditional.logic` has a registry tier, and the pattern dialect has a
+  decision record** (FR-RAD-006,
+  [#393](https://github.com/sujanto-gaws/kelir/issues/393), decision **D-15**).
+  The [Calculation Rule Registry](docs/schema/JFSS%20Calculation%20Rule%20Registry.md)
+  governed `calculate` alone while the backend re-evaluates conditionals too
+  (JFSS S10.2), and §2.3 forbade in `calculate` precisely the operators a
+  conditional cannot do without — so the operator surface the engine had to
+  implement was strictly larger than the matrix and **nothing bounded it**. The
+  [operator-parity spike](projects/spikes/01.%20JFSS%20Operator%20Parity.md) §2.6
+  found that on 2026-08-21 and it stood for four sprints.
+  **Registry 1.7.0 adds §2.5**, the tier is §2.1 and §2.2 in full plus §2.3's
+  set — thirty-two operators, seventeen of them approved there and nowhere else
+  — and §1's *not in this registry, therefore FORBIDDEN* rule now names both
+  properties. `log` stays forbidden in both: it is banned as a side effect
+  rather than as a wrong return type, which no property makes acceptable.
+  **What changes is normativity, not enforcement.** `CONDITIONAL_OPERATORS`
+  already refused everything outside the floor when a definition was written;
+  it was a floor *derived* from §2.3's rationale rather than a list anything
+  could be held to, and the browser holds no equivalent.
+  `registry_operator_tiers.rs` now asserts the document and the constant agree
+  name for name.
+  **[ADR-0038](docs/architectures/adr/0038.%20Kelir%20Patterns%20Are%20the%20Linear-Time%20Subset.md)**
+  records the shape half of the same decision: a Kelir pattern is what the
+  `regex` crate compiles, with character classes written out.
+
 - **A form definition is refused when its pattern is one this backend cannot
   compile** (FR-RAD-006,
   [#391](https://github.com/sujanto-gaws/kelir/issues/391), decision **D-15**).
