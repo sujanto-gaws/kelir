@@ -141,7 +141,7 @@ fn release_records() -> Vec<((u32, u32, u32), String, String)> {
         records.push((version, name, body));
     }
 
-    records.sort_by(|a, b| a.0.cmp(&b.0));
+    records.sort_by_key(|record| record.0);
     records
 }
 
