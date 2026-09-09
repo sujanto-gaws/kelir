@@ -144,9 +144,25 @@ export function listRenderedRows(
  * whose `required_permission` the caller does not hold, so there is nothing to
  * filter and nothing to disable — a disabled button would publish the existence
  * of an action the permission was set to hide.
+ *
+ * **`listId` narrows a `LIST` catalogue and never excludes**
+ * ([#348](https://github.com/sujanto-gaws/kelir/issues/348)): the answer is the
+ * tenant-wide actions plus that list's own, so naming a list adds rows and
+ * removes none. **Omitting it returns the tenant-wide actions alone** — not
+ * every action — because a caller that has not said which list it is drawing
+ * must not be handed buttons configured for one.
  */
-export function listActions(context: RadAction['context']): Promise<Page<RadAction>> {
-  return getPage<RadAction>('/rad/actions', { context } as Record<string, string>)
+export function listActions(
+  context: RadAction['context'],
+  listId?: string,
+): Promise<Page<RadAction>> {
+  const params: Record<string, string> = { context }
+
+  if (listId) {
+    params.listId = listId
+  }
+
+  return getPage<RadAction>('/rad/actions', params)
 }
 
 /**

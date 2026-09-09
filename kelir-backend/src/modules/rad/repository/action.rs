@@ -40,10 +40,36 @@ pub struct StoredAction {
 /// `CHECK` makes such a row unreachable through this API, so meeting one means
 /// the constraint moved without this code, and a button whose behaviour cannot
 /// be read is worse than a missing one.
+///
+/// # What `list` selects ([#348])
+///
+/// **`Some(id)` is the tenant-wide actions plus that list's own; `None` is the
+/// tenant-wide ones alone.** Not *every action of the context*, which is what
+/// this paragraph claimed until it was read against the statement: with `$3`
+/// null, `list_id = $3` is `NULL` rather than `true` for a scoped row, so the
+/// row falls out of the `WHERE`.
+///
+/// **That is the behaviour to want, not an accident of three-valued logic to be
+/// corrected.** A caller that did not say which list it is drawing must not be
+/// handed buttons configured for one — offering a `LIST` action everywhere is
+/// precisely the defect [#348] exists to close, and a `None` that meant
+/// *everything* would reintroduce it for every caller that omits the parameter.
+///
+/// **An action with no `list_id` is the deployment saying *on every list***,
+/// which is what every row meant before `0042` and why the migration needed no
+/// data migration guessing which list an existing row had belonged to.
+///
+/// So `Some(id)` never sees fewer tenant-wide actions than `None` — naming a
+/// list adds that list's own rows and removes none — which is what makes the
+/// parameter safe to send from a renderer that cannot know whether the
+/// deployment has scoped anything.
+///
+/// [#348]: https://github.com/sujanto-gaws/kelir/issues/348
 pub async fn actions_for(
     pool: &PgPool,
     tenant_id: Uuid,
     context: ActionContext,
+    list: Option<Uuid>,
 ) -> Result<Vec<StoredAction>, sqlx::Error> {
     let rows = sqlx::query!(
         r#"
@@ -54,10 +80,19 @@ pub async fn actions_for(
           AND deleted_at IS NULL
           AND is_enabled
           AND context = $2
+          -- Tenant-wide rows always, plus this list's own when one was named.
+          -- **With `$3` null the second disjunct is `NULL`, not `true`**, so a
+          -- caller naming no list gets the tenant-wide rows alone — the note on
+          -- `list` above is where that is argued for rather than observed.
+          -- One statement rather than two: a second query differing by a clause
+          -- is a second place for the tenant scope and the soft-delete filter
+          -- to be forgotten.
+          AND (list_id IS NULL OR list_id = $3)
         ORDER BY sort_order, action_key
         "#,
         tenant_id,
         context.as_db(),
+        list,
     )
     .fetch_all(pool)
     .await?;

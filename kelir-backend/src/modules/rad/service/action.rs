@@ -24,6 +24,8 @@
 
 use super::super::domain::action::{Action, ActionContext};
 use super::super::repository::action as repo;
+use uuid::Uuid;
+
 use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
 use crate::state::AppState;
@@ -33,8 +35,15 @@ pub async fn list_actions(
     state: &AppState,
     caller: &Authenticated,
     context: ActionContext,
+    list: Option<Uuid>,
 ) -> Result<Vec<Action>, AppError> {
-    let stored = repo::actions_for(&state.pool, caller.tenant_id(), context).await?;
+    // **The list is not checked for existence, and that is deliberate.** An id
+    // naming no list of this tenant matches no `list_id`, so the caller gets the
+    // tenant-wide actions and nothing else — which is the same answer as a list
+    // that exists and has no scoped actions. Verifying it would add a read whose
+    // only product is telling a caller which list ids exist, and the catalogue
+    // is not the surface that should answer that ([#348]).
+    let stored = repo::actions_for(&state.pool, caller.tenant_id(), context, list).await?;
 
     Ok(stored
         .into_iter()

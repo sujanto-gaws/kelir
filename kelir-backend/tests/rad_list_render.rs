@@ -838,6 +838,40 @@ async fn seed_action(
     id
 }
 
+/// The same seed, scoped to one list — `seed_action` is the tenant-wide case
+/// because that is what every row was before `0042`, and this is the new one.
+#[allow(clippy::too_many_arguments)]
+async fn seed_action_for_list(
+    app: &TestApp,
+    tenant_id: Uuid,
+    action_key: &str,
+    context: &str,
+    required_permission: Option<&str>,
+    is_enabled: bool,
+    sort_order: i32,
+    list_id: Uuid,
+) -> Uuid {
+    let id = seed_action(
+        app,
+        tenant_id,
+        action_key,
+        context,
+        required_permission,
+        is_enabled,
+        sort_order,
+    )
+    .await;
+
+    sqlx::query("UPDATE rad_actions SET list_id = $1 WHERE id = $2")
+        .bind(list_id)
+        .bind(id)
+        .execute(&app.pool)
+        .await
+        .expect("the action is scoped to the list");
+
+    id
+}
+
 async fn actions(app: &TestApp, token: &str, context: &str) -> common::TestResponse {
     app.send(
         Method::GET,
@@ -964,4 +998,267 @@ async fn a_context_outside_the_vocabulary_is_refused_rather_than_answered_empty(
         actions(&app, &token, "SIDEBAR").await.status,
         StatusCode::UNPROCESSABLE_ENTITY
     );
+}
+
+// ---------------------------------------------------------------------------
+// Scoping an action to one list (§5.10's `list_id`, [#348])
+// ---------------------------------------------------------------------------
+
+/// A list definition with nothing on it but a column, which is all an action
+/// test needs of one: something with an id that a `list_id` can name.
+async fn plain_list(app: &TestApp, token: &str, key: &str) -> Uuid {
+    create_list(
+        app,
+        token,
+        key,
+        json!({ "status": "ACTIVE", "columns": [column("title", "Subject")] }),
+    )
+    .await
+}
+
+/// The catalogue for one list, which is the reader `0042` adds a parameter to.
+async fn actions_on(
+    app: &TestApp,
+    token: &str,
+    context: &str,
+    list_id: Uuid,
+) -> common::TestResponse {
+    app.send(
+        Method::GET,
+        &format!("/api/v1/rad/actions?context={context}&listId={list_id}"),
+        Some(token),
+        None,
+    )
+    .await
+}
+
+/// **[#348] AC1.** A `LIST` action scoped to one list is not offered on another.
+///
+/// **Two lists, because one cannot tell *scoped to this list* from *not scoped
+/// at all*** (coding standard §2.9, AC4). With a single list the assertion is
+/// identical whatever the predicate says, which is the shape that let five of
+/// Sprint 8's predicates survive a mutation campaign.///
+/// **Seen red, 2026-09-09**, by the predicate ignoring the column —
+/// `AND (list_id IS NULL OR list_id IS NOT NULL OR list_id = $3)`, which is the
+/// pre-`0042` behaviour with `$3` still bound. **Deleting the clause outright
+/// does not compile**: `$3` goes unused and `sqlx::query!` refuses the argument
+/// count, so the mutation has to keep the parameter and neutralise it.
+/// That run turned this test and the two below it red, and nothing else in the
+/// binary — 25 passed, 3 failed.
+#[tokio::test]
+async fn an_action_scoped_to_one_list_is_not_offered_on_another() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let tenant = fixtures::SYSTEM_TENANT_ID;
+
+    let purchases = plain_list(&app, &token, "purchases").await;
+    let suppliers = plain_list(&app, &token, "suppliers").await;
+
+    seed_action_for_list(
+        &app,
+        tenant,
+        "export-purchases",
+        "LIST",
+        None,
+        true,
+        0,
+        purchases,
+    )
+    .await;
+
+    assert_eq!(
+        keys(&actions_on(&app, &token, "LIST", purchases).await.body),
+        ["export-purchases"],
+        "the list the action names must offer it"
+    );
+    assert_eq!(
+        keys(&actions_on(&app, &token, "LIST", suppliers).await.body),
+        Vec::<String>::new(),
+        "a list the action does not name must not offer it"
+    );
+}
+
+/// **[#348] AC2.** The migration changes no existing behaviour: a row with no
+/// `list_id` is what every action was before `0042`, and it is still offered
+/// on every list.
+///
+/// **Three moves over the shared catalogue** — purchases, suppliers, purchases
+/// again (coding standard §2.9). Two cannot tell *offered on every list* from
+/// *consumed by whoever read first*, which is the counter defect [#200] in a
+/// different resource.
+///
+/// **Seen red, 2026-09-09**, by the same mutation as the test above.
+#[tokio::test]
+async fn an_action_scoped_to_no_list_is_offered_on_every_list() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let tenant = fixtures::SYSTEM_TENANT_ID;
+
+    let purchases = plain_list(&app, &token, "purchases").await;
+    let suppliers = plain_list(&app, &token, "suppliers").await;
+
+    // Seeded exactly as a row was before the column existed.
+    seed_action(&app, tenant, "tenant-wide", "LIST", None, true, 0).await;
+    seed_action_for_list(
+        &app,
+        tenant,
+        "just-purchases",
+        "LIST",
+        None,
+        true,
+        1,
+        purchases,
+    )
+    .await;
+
+    assert_eq!(
+        keys(&actions_on(&app, &token, "LIST", purchases).await.body),
+        ["tenant-wide", "just-purchases"]
+    );
+    assert_eq!(
+        keys(&actions_on(&app, &token, "LIST", suppliers).await.body),
+        ["tenant-wide"],
+        "an unscoped action belongs to every list of its context"
+    );
+    assert_eq!(
+        keys(&actions_on(&app, &token, "LIST", purchases).await.body),
+        ["tenant-wide", "just-purchases"],
+        "reading one list must not consume the rows the other shares"
+    );
+}
+
+/// **A catalogue asked without a list is the tenant-wide actions, not every
+/// action** — the sentence `actions_for` and the handler both got wrong before
+/// this test pinned it.
+///
+/// `list_id = $3` is `NULL` rather than `true` when `$3` is null, so a scoped
+/// row falls out of the `WHERE`. That is the behaviour to want: a caller that
+/// did not name a list must not be handed buttons configured for one, which is
+/// [#348]'s own complaint about the renderer.
+///
+/// **Seen red, 2026-09-09**, by the same mutation as the two tests above — and
+/// it would also redden under `AND ($3::uuid IS NULL OR list_id IS NULL OR
+/// list_id = $3)`, the shape `holds_role` uses one module over and the one the
+/// original doc comment here described. That alternative is what this test
+/// exists to rule out rather than a bug to be fixed.
+#[tokio::test]
+async fn a_catalogue_asked_without_a_list_offers_only_the_unscoped_actions() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let tenant = fixtures::SYSTEM_TENANT_ID;
+
+    let purchases = plain_list(&app, &token, "purchases").await;
+
+    seed_action(&app, tenant, "tenant-wide", "LIST", None, true, 0).await;
+    seed_action_for_list(
+        &app,
+        tenant,
+        "just-purchases",
+        "LIST",
+        None,
+        true,
+        1,
+        purchases,
+    )
+    .await;
+
+    assert_eq!(
+        keys(&actions(&app, &token, "LIST").await.body),
+        ["tenant-wide"]
+    );
+}
+
+/// **The `CHECK` refuses a `list_id` on an action of any other context.**
+///
+/// A `DETAIL` action carrying one would be read by nothing and would look, to
+/// whoever configured it, like a scoping that had been applied. `0042` closes
+/// lists alone and this is the constraint that stops the column being quietly
+/// reused for the other three without that decision being taken.
+#[tokio::test]
+async fn only_a_list_action_may_name_a_list() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let tenant = fixtures::SYSTEM_TENANT_ID;
+
+    let purchases = plain_list(&app, &token, "purchases").await;
+    let detail = seed_action(&app, tenant, "on-a-detail", "DETAIL", None, true, 0).await;
+
+    let refused = sqlx::query("UPDATE rad_actions SET list_id = $1 WHERE id = $2")
+        .bind(purchases)
+        .bind(detail)
+        .execute(&app.pool)
+        .await;
+
+    assert!(
+        refused.is_err(),
+        "ck_rad_actions_list_id_is_a_list_action must refuse a scoped DETAIL action"
+    );
+}
+
+/// **An action cannot be scoped to another tenant's list**, because the key
+/// carries the tenant.
+///
+/// The catalogue filters `rad_actions.tenant_id`, so such a row could never be
+/// read back — it would simply never match a list this caller can pass. That
+/// makes it unreadable, and the composite key is what makes it *unwritable*,
+/// which is the stronger guarantee deviation #20 settled on for three tables
+/// before this one.
+///
+/// **Seen red, 2026-09-09**, by `0042` writing the plain
+/// `FOREIGN KEY (list_id) REFERENCES rad_lists (id)` this column was first
+/// drafted with — the mutation the coding standard §2.9 requires of a test
+/// asserting a tenant scope, landed on the migration because that is where the
+/// control lives rather than in a query.
+#[tokio::test]
+async fn an_action_cannot_be_scoped_to_another_tenants_list() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let mine = plain_list(&app, &token, "purchases").await;
+    let other = fixtures::create_tenant(&app.pool, "TNT-SCOPED", "Another Customer").await;
+
+    // Theirs, in their tenant, seeded directly: there is no cross-tenant path
+    // through the API to write one with.
+    let theirs = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO rad_lists (id, tenant_id, list_key, title, status)
+         VALUES ($1, $2, 'theirs', 'Theirs', 'ACTIVE')",
+    )
+    .bind(theirs)
+    .bind(other)
+    .execute(&app.pool)
+    .await
+    .expect("the other tenant's list is seeded");
+
+    let action = seed_action(
+        &app,
+        fixtures::SYSTEM_TENANT_ID,
+        "reaches-across",
+        "LIST",
+        None,
+        true,
+        0,
+    )
+    .await;
+
+    let refused = sqlx::query("UPDATE rad_actions SET list_id = $1 WHERE id = $2")
+        .bind(theirs)
+        .bind(action)
+        .execute(&app.pool)
+        .await;
+
+    assert!(
+        refused.is_err(),
+        "fk_rad_actions_list_id_tenant_id must refuse another tenant's list"
+    );
+
+    // And the same write against this tenant's own list is accepted, so the
+    // refusal above is the tenant column and not the constraint refusing
+    // everything.
+    sqlx::query("UPDATE rad_actions SET list_id = $1 WHERE id = $2")
+        .bind(mine)
+        .bind(action)
+        .execute(&app.pool)
+        .await
+        .expect("this tenant's own list is a legal scoping");
 }

@@ -235,9 +235,19 @@ async function loadDefinition(): Promise<void> {
   }
 }
 
-async function loadActions(): Promise<void> {
+/**
+ * The buttons this list offers: the tenant-wide ones plus its own
+ * ([#348](https://github.com/sujanto-gaws/kelir/issues/348)).
+ *
+ * **Asked by list id rather than by context alone.** `rad_actions` carried no
+ * `list_id` until `0042`, so every `LIST` action belonged to the tenant and this
+ * screen put all of them on whatever list was open — the catalogue was accurate
+ * about what it served and the renderer was not. Passing the id is the half of
+ * that fix which lives here.
+ */
+async function loadActions(listId: string): Promise<void> {
   try {
-    actions.value = (await listActions('LIST')).items
+    actions.value = (await listActions('LIST', listId)).items
   } catch {
     // A list that renders without its buttons is still a list. Failing the
     // whole screen because the action catalogue was unreachable would make a
@@ -250,10 +260,23 @@ watch(
   listKey,
   () => {
     void loadDefinition()
-    void loadActions()
   },
   { immediate: true },
 )
+
+// **The catalogue is asked for after the definition, not beside it** (#348).
+// It is keyed by list id and the id is the definition's, so there is nothing to
+// ask with until that resolves. A definition that failed to load has no buttons
+// to draw either, which is why this is a watcher on the definition rather than a
+// second call on `listKey` — and the buttons are cleared first, so a list whose
+// key changed never shows the previous list's actions while the next loads.
+watch(definition, (loaded) => {
+  actions.value = []
+
+  if (loaded) {
+    void loadActions(loaded.id)
+  }
+})
 
 // One load path for the rows: the definition arrived or the URL changed, so
 // re-apply it. A deep-linked filtered page loads its filters rather than the

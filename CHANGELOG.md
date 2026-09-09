@@ -11,6 +11,27 @@ While the major version is `0`, the public API may change in any release.
 
 ### Added
 
+- **A configured action can belong to one list** (FR-RAD-003, FR-RAD-010,
+  [#348](https://github.com/sujanto-gaws/kelir/issues/348)). `rad_actions` has
+  carried a `context` and no `list_id` since `v0.4.0`, so a `LIST` action
+  belonged to the tenant and was offered on **every** list in it — a deployment
+  with two lists could not give them different buttons.
+  `0042_rad_action_scoped_to_a_list.sql` adds the column that `rad_list_columns`
+  and `rad_list_filters` always had.
+  **The null is the old behaviour**: an action naming no list is still offered
+  on every list of its context, so nothing changes until a deployment scopes
+  something, and no data migration had to guess which list an existing row meant.
+  `GET /api/v1/rad/actions` takes an optional `listId`, returning the
+  tenant-wide actions **plus** that list's own — it narrows and never excludes —
+  and the list renderer now passes the id of the list it is drawing.
+  **Asking without a `listId` returns the tenant-wide actions alone**, which is
+  deliberate: a caller that has not said which list it is drawing must not be
+  handed buttons configured for one.
+  **Lists alone are closed.** A `DETAIL`, `DOCUMENT` or `TASK` action still has
+  the same gap against a document type or a task definition, and a `CHECK`
+  refuses a `list_id` on one so the column cannot be reused for them without
+  that decision being taken.
+
 - **Signing out and the roles screen are driven by a browser**
   ([#358](https://github.com/sujanto-gaws/kelir/issues/358)). SRS §9 criterion 1
   is *users can log in and log out*: its login half was driven by every browser

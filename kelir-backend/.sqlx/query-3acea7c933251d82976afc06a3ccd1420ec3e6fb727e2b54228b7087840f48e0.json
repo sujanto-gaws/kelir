@@ -1,0 +1,60 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, action_key, label, context, action_type, config_json,\n               required_permission\n        FROM rad_actions\n        WHERE tenant_id = $1\n          AND deleted_at IS NULL\n          AND is_enabled\n          AND context = $2\n          -- Tenant-wide rows always, plus this list's own when one was named.\n          -- **With `$3` null the second disjunct is `NULL`, not `true`**, so a\n          -- caller naming no list gets the tenant-wide rows alone — the note on\n          -- `list` above is where that is argued for rather than observed.\n          -- One statement rather than two: a second query differing by a clause\n          -- is a second place for the tenant scope and the soft-delete filter\n          -- to be forgotten.\n          AND (list_id IS NULL OR list_id = $3)\n        ORDER BY sort_order, action_key\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "action_key",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "label",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "context",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "action_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "config_json",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 6,
+        "name": "required_permission",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "3acea7c933251d82976afc06a3ccd1420ec3e6fb727e2b54228b7087840f48e0"
+}
