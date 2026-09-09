@@ -394,6 +394,15 @@ async fn list_lookup_options(
 #[serde(rename_all = "camelCase")]
 struct ActionQuery {
     context: ActionContext,
+    /// Narrows a `LIST` catalogue to one list, without excluding the
+    /// tenant-wide rows ([#348](https://github.com/sujanto-gaws/kelir/issues/348)).
+    ///
+    /// **Absent is the tenant-wide actions alone** — the rows configured for
+    /// every list of this context, which is what every row was before `0042`
+    /// and what a renderer that has not been told about scoping still gets.
+    /// **Deliberately not *every* action**: a caller that did not say which
+    /// list it is drawing must not be handed buttons configured for one.
+    list_id: Option<uuid::Uuid>,
 }
 
 #[utoipa::path(
@@ -410,7 +419,8 @@ async fn list_actions(
     caller: Authenticated,
     QueryParams(query): QueryParams<ActionQuery>,
 ) -> Result<Json<ListEnvelope<Action>>, AppError> {
-    let actions = service::action::list_actions(&state, &caller, query.context).await?;
+    let actions =
+        service::action::list_actions(&state, &caller, query.context, query.list_id).await?;
     // Every row the caller may invoke, so the count is the length rather than a
     // second query: the filter is applied in the service and a `total` from the
     // database would be the *unfiltered* count, which would tell the caller how

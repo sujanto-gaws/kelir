@@ -379,6 +379,31 @@ describe('ListRendererPage', () => {
     expect(button.attributes('disabled')).toBeUndefined()
   })
 
+  it('asks for the actions of the list it is drawing, not of every list', async () => {
+    // #348: `rad_actions` carried no `list_id`, so a `LIST` action was offered
+    // on every list in the tenant and this screen drew all of them. The id is
+    // what narrows it, and it comes from the definition rather than the URL —
+    // the route carries a `listKey`.
+    await render()
+
+    const catalogue = backend.requests.find((request) => request.url.includes('/rad/actions'))
+
+    expect(catalogue?.params).toMatchObject({
+      context: 'LIST',
+      listId: '0199a1a0-0000-7000-8000-0000000000l1',
+    })
+  })
+
+  it('asks for no actions when the definition could not be loaded', async () => {
+    // There is no list id to ask with, and a screen showing a refusal has no
+    // buttons to draw. The catalogue is not a fallback for a broken definition.
+    listReply = { status: 404, body: errorBody('NOT_FOUND', 'No such list', []) }
+
+    await render()
+
+    expect(backend.requests.some((request) => request.url.includes('/rad/actions'))).toBe(false)
+  })
+
   it('renders no action column when the catalogue is empty', async () => {
     const wrapper = await render()
 

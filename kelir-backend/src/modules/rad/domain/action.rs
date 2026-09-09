@@ -7,16 +7,27 @@
 //! checks reads as a control that exists* — and the same sentence is why this
 //! file arrives with a route rather than ahead of one.
 //!
-//! # An action is scoped by context, not by list
+//! # An action is scoped by context, and optionally by one list
 //!
-//! **This is the shape the table has, and it is worth stating plainly because
-//! it is not the shape [#340] assumed.** The issue's scope line says *"the row
-//! actions the definition declares"*, and a list definition declares none:
-//! `rad_actions` carries a `context` and no `list_id`, so a `LIST` action
-//! belongs to the tenant and is offered on **every** list in it. Narrowing that
-//! to a particular list is a schema change rather than a query, and it is filed
-//! rather than smuggled in here — §5.7 and §5.8 are what a list owns, and both
-//! carry `list_id` precisely because they are the list's.
+//! **The second half arrived with [#348] and the first is unchanged.** This
+//! module doc used to say that `rad_actions` carried a `context` and no
+//! `list_id`, so a `LIST` action belonged to the tenant and was offered on
+//! **every** list in it — which is what [#340] found on its way in, against its
+//! own scope line (*"the row actions the definition declares"*, and a list
+//! definition declared none). `0042` closes it with the column §5.7 and §5.8
+//! always had, because a column and a filter belong to a list.
+//!
+//! **A null `list_id` is the old behaviour and the common case**: an action
+//! naming no list is offered on every list of its context, so a deployment that
+//! scopes nothing sees exactly what it saw before. Naming a list *adds* that
+//! list's own actions to the tenant-wide ones rather than replacing them.
+//!
+//! **Only `LIST` is closed.** A `DETAIL`, `DOCUMENT` or `TASK` action is still
+//! scoped by context alone — nothing narrows it to a document type or a task
+//! definition — and a `CHECK` refuses a `list_id` on one, so the column cannot
+//! be quietly reused for them without that decision being taken.
+//!
+//! [#348]: https://github.com/sujanto-gaws/kelir/issues/348
 //!
 //! # The permission is the action's own, and there is no second one
 //!
