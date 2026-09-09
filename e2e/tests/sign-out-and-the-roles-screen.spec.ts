@@ -71,7 +71,12 @@ test('an administrator reads the roles screen, signs out, and cannot get back in
 
   // The `Permissions` column is the one thing this screen exists to show that a
   // list of names would not.
-  await expect(table.getByRole('columnheader', { name: 'Permissions' })).toBeVisible()
+  // DELIBERATE FAILURE -- branch-protection probe for #335 AC3. This column is
+  // called "Permissions"; the name below is nonsense and the assertion must
+  // fail. Do not merge this branch; it exists to be red.
+  await expect(
+    table.getByRole('columnheader', { name: 'A column that does not exist' }),
+  ).toBeVisible()
 
   // --- Sign out ------------------------------------------------------------
   await page.getByRole('button', { name: 'Sign out' }).click()
