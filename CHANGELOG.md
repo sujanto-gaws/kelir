@@ -40,15 +40,22 @@ permission changes that `0040` and `0041` make on their own:
 - **Four `rad:menu:*` permissions arrive**, granted to `ROLE-ADMIN` alone. A
   non-admin role that should configure navigation needs them granted
   explicitly; the menu routes check them.
-- **A stored pattern that this backend cannot compile is now refused when the
-  definition is saved.** A form whose `regex` rule or `validation.pattern` uses
-  lookahead, a backreference, or a bare `\d`, `\w` or `\s` was accepted before
-  and is refused now, as `PATTERN_NOT_COMPILABLE` or `PATTERN_CLASS_NOT_PINNED`.
-  **Such a pattern was already rejecting every value at submit time** — the
-  evaluator maps a compile error to *no match* — so this moves an existing
-  failure to the moment it can be fixed rather than creating one. Write classes
-  out (`[0-9]` rather than `\d`), and see
-  [ADR-0038](docs/architectures/adr/0038.%20Kelir%20Patterns%20Are%20the%20Linear-Time%20Subset.md).
+- **A stored pattern is checked when the definition is saved, and two different
+  things are refused.** **A pattern this backend cannot compile** — lookahead, a
+  backreference — is refused as `PATTERN_NOT_COMPILABLE`, and *that* one was
+  already rejecting every value at submit time, because the evaluator maps a
+  compile error to *no match*. For it, this release moves an existing failure to
+  the moment it can be fixed.
+  **A bare `\d`, `\w` or `\s` is the other case and it was working.** It
+  compiles on both sides and is refused as `PATTERN_CLASS_NOT_PINNED` because it
+  *means* different things — ECMA-262's classes are ASCII, this crate's are
+  Unicode. **So a form carrying one cannot be republished until it is
+  rewritten**: the revision already published keeps serving, and the next
+  publish of that definition is refused until the class is written out.
+  **`[0-9]` is narrower than `\d` rather than equal to it** — `^\d{4}$` matches
+  `١٢٣٤` and `^[0-9]{4}$` does not — so rewriting a class is a
+  decision about which digits the field accepts, not a formatting change.
+  See [ADR-0038](docs/architectures/adr/0038.%20Kelir%20Patterns%20Are%20the%20Linear-Time%20Subset.md).
 
 **No breaking API changes**, and every migration is N−1 compatible: `v0.6.0`'s
 images run against this schema.
