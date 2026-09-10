@@ -67,6 +67,22 @@
 //!
 //! Three mutations, run 2026-09-09, all three red — recorded in the pull
 //! request that adds this file.
+//!
+//! **Three more on 2026-09-10, when the detector was hardened (#406):**
+//!
+//! - `says_final` reverted to the body substring → `a_record_that_only_quotes_
+//!   the_header_is_not_governed` red. This is the pre-#406 behaviour, so the
+//!   mutation is the defect itself rather than a stand-in for it.
+//! - The `**Status:**` line deleted from record 05 → `every_release_record_
+//!   states_a_status_in_its_header` red, **and rule 3 red with it**: taking a
+//!   record out of the gate drops the governed count below its floor.
+//! - `says_final` accepts any status the header states → the same regression
+//!   test red, which is what pins `Draft` from `Final` rather than merely
+//!   pinning *has a header*.
+//!
+//! **One came back green and is recorded rather than replaced**: removing the
+//! `trim_start` after the label changed no answer, because the return already
+//! trims. The dead call is gone and the note sits on [`header_status`].
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -86,7 +102,10 @@ const FIRST_GOVERNED_RELEASE: (u32, u32, u32) = (0, 3, 0);
 /// done**, so governing `Final` alone is what makes this a gate rather than an
 /// obstruction: the checklist can be worked through with the pass still
 /// outstanding, and the record cannot be closed until it is not.
-const FINAL: &str = "**Status:** Final";
+const FINAL: &str = "Final";
+
+/// The label a record's header status line opens with.
+const STATUS_LABEL: &str = "**Status:**";
 
 /// A release as the walks below carry it: version, file name, and the
 /// verification records it cites.
@@ -114,6 +133,53 @@ fn version_in(name: &str) -> Option<(u32, u32, u32)> {
     let patch = parts.next()?.parse().ok()?;
 
     Some((major, minor, patch))
+}
+
+/// The status a record's **header line** states, if it states one.
+///
+/// # Why the line rather than the body
+///
+/// This asked whether the body *contained* `**Status:** Final` until
+/// [#406](https://github.com/sujanto-gaws/kelir/pull/406). A record that quoted
+/// that string in prose — as every copy of the checklist template did, in the
+/// closing line telling the reader to set it — **enrolled itself in this gate
+/// before the release happened**, and then failed rule 2 against citations it
+/// was only listing. [Record 07](../../projects/releases/07.%20Release%20v0.7.0.md)
+/// is where that was found, on the first record copied since this file landed.
+///
+/// **The template escaped and its copies did not**, because [`version_in`]
+/// reads a version out of the file name and the template has none. So the
+/// defect was invisible in the file that carried it.
+///
+/// # What matching the line buys
+///
+/// A record can now say anything it likes about the header — quote the rule,
+/// explain the gate, carry a note like this one — and only the line that *is*
+/// the header decides. A blockquoted mention (`> **Status:** Final`) does not
+/// match either, because the marker must open the trimmed line and `>` is not
+/// trimmed away.
+///
+/// The first matching line is the header by construction: it sits under the
+/// title, above everything a record has to say.
+///
+/// **The label is not trimmed after stripping and does not need to be**: the
+/// return trims both ends, which a mutation found by coming back green — the
+/// inner `trim_start` it removed changed no answer, because it was dead. That
+/// is the finding §2.9 asks to be recorded rather than tidied away.
+fn header_status(body: &str) -> Option<&str> {
+    let line = body
+        .lines()
+        .find(|line| line.trim_start().starts_with(STATUS_LABEL))?;
+
+    let rest = &line.trim_start()[STATUS_LABEL.len()..];
+    let end = rest.find('\u{b7}').unwrap_or(rest.len());
+
+    Some(rest[..end].trim())
+}
+
+/// Whether a record's header says the release is done.
+fn says_final(body: &str) -> bool {
+    header_status(body) == Some(FINAL)
 }
 
 /// `projects/releases/NN. Release vX.Y.Z.md`, oldest first.
@@ -171,7 +237,7 @@ fn citations(body: &str) -> BTreeSet<String> {
 fn governed() -> Vec<Release> {
     release_records()
         .into_iter()
-        .filter(|(version, _, body)| *version >= FIRST_GOVERNED_RELEASE && body.contains(FINAL))
+        .filter(|(version, _, body)| *version >= FIRST_GOVERNED_RELEASE && says_final(body))
         .map(|(version, name, body)| (version, name, citations(&body)))
         .collect()
 }
@@ -244,7 +310,7 @@ fn the_walk_finds_what_exists_and_governs_something() {
     assert!(
         governed.len() >= 4,
         "the walk governs {} releases, which is too few — either the floor rose or Final \
-         records stopped saying {FINAL:?}",
+         records stopped opening with a {STATUS_LABEL:?} line saying {FINAL:?}",
         governed.len()
     );
 
@@ -258,6 +324,92 @@ fn the_walk_finds_what_exists_and_governs_something() {
         "the governed releases cite {} distinct verification records between them, which is \
          too few for rule 2 to be asserting anything",
         cited.len()
+    );
+}
+
+/// Rule 4. **Every release record states a status in its header**, so the gate
+/// cannot be escaped by omitting the line it reads.
+///
+/// The detector answers `None` for a record with no `**Status:**` line, and a
+/// `None` is ungoverned — which is right for a record still being drafted and
+/// wrong as a way out. **Before this rule, deleting one line took a shipped
+/// release out of the gate**, and the old body-substring detector had the same
+/// hole in the same shape. This is the rule that makes the header line
+/// mandatory rather than merely read.
+#[test]
+fn every_release_record_states_a_status_in_its_header() {
+    let silent: Vec<_> = release_records()
+        .into_iter()
+        .filter(|(.., body)| header_status(body).is_none())
+        .map(|(_, name, _)| name)
+        .collect();
+
+    assert!(
+        silent.is_empty(),
+        "a release record states no status in its header (#392, #406):\n  {}\n\n\
+         The header line under the title reads `{STATUS_LABEL} <status>`, and this walk \
+         reads it to decide whether the record is governed. A record without one is \
+         governed by nothing.",
+        silent.join("\n  ")
+    );
+}
+
+/// **A record may say what it likes about the header; only the header decides.**
+///
+/// This is the regression test for the defect [#406](https://github.com/sujanto-gaws/kelir/pull/406)
+/// found: the checklist template's closing line quoted the header string, so
+/// every record copied from it enrolled itself in this gate while still being
+/// drafted. The template escaped its own trap because it carries no version in
+/// its file name; the copies did not.
+///
+/// Synthetic bodies rather than files, because the point is the detector's
+/// rule and not any record's present contents — a record edited tomorrow must
+/// not be able to quietly retire this.
+#[test]
+fn a_record_that_only_quotes_the_header_is_not_governed() {
+    let drafting = "\
+# Release v9.9.9 — 2099-01-01\n\
+\n\
+**Status:** Draft · **Last updated:** 2099-01-01\n\
+\n\
+Set this document's header to `**Status:** Final` when the release is verified.\n\
+\n\
+> The gate reads `**Status:** Final` and refuses a record citing nothing new.\n";
+
+    assert_eq!(
+        header_status(drafting),
+        Some("Draft"),
+        "the header line decides, and this record's header says Draft"
+    );
+    assert!(
+        !says_final(drafting),
+        "a Draft record quoting the header string in prose enrolled itself in the gate \
+         before #406 — that is the defect this test exists to keep closed"
+    );
+
+    let shipped = "\
+# Release v9.9.9 — 2099-01-01\n\
+\n\
+**Status:** Final · **Last updated:** 2099-01-01\n\
+\n\
+Nothing here quotes the header at all.\n";
+
+    assert!(
+        says_final(shipped),
+        "a record whose header says Final is governed — the fix must not have narrowed \
+         the gate to nothing"
+    );
+
+    assert_eq!(
+        header_status("# Release v9.9.9\n\nNo status line at all.\n"),
+        None,
+        "a record with no header status line states no status, which rule 4 refuses"
+    );
+
+    assert_eq!(
+        header_status("**Status:** Final\n"),
+        Some("Final"),
+        "a status line with no trailing separator still states its status"
     );
 }
 
