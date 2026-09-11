@@ -1,7 +1,7 @@
 # JFSS Calculation Rule Registry
-**Version:** 1.7.0
+**Version:** 1.7.1
 **Status:** Active Standard
-**Last updated:** 2026-09-09
+**Last updated:** 2026-09-11
 **Pairs with:** JFSS v2.0.1
 **Maintainers:** Full-Stack Engineering Team
 
@@ -60,12 +60,13 @@ These operators are part of the standard JSON Logic specification (jsonlogic.com
 | `reduce` | Reduce array to single value | ✅ | ✅* |
 | `all` | Check if all elements match condition | ✅ | ✅* |
 | `some` | Check if any element matches condition | ✅ | ✅* |
+| `none` | Check that no element matches condition | ✅ | ✅* |
 
-`none` is likewise a standard JSON Logic operator and falls in this tier if a use case arises.
+`none` has its row since 1.7.1. Until then this line said it *falls in this tier if a use case arises*, while `rad::domain::jfss::CALCULATE_OPERATORS` accepted it, [`parity/cases.json`](../../parity/README.md) asserted it and §2.5 listed it as coming from here — so the approved set read one way in the matrix and another in the code.
 
 **Status:** ✅ **APPROVED FOR USE**
 
-\* **CI Parity Requirement:** `map`, `filter`, `reduce`, `all`, and `some` are standard JSON Logic operators, but the exact behaviour of the Rust library (argument evaluation, lambda scoping, edge cases such as empty arrays) **must be verified in CI parity tests** before an expression using them ships. Vue and Rust must return identical results for identical inputs.
+\* **CI Parity Requirement:** `map`, `filter`, `reduce`, `all`, `some` and `none` are standard JSON Logic operators, but the exact behaviour of the Rust library (argument evaluation, lambda scoping, edge cases such as empty arrays) **must be verified in CI parity tests** before an expression using them ships. Vue and Rust must return identical results for identical inputs.
 
 That verification is **done for `datalogic-rs` 5.2.0**: all eleven array cases in the spike corpus — including empty arrays, a missing source array, and `none` — return identical results to `json-logic-js` 2.0.5.
 
@@ -634,6 +635,7 @@ formData.value[component.key] = evaluator.evaluateNumeric(component.calculate, n
 
 ## 9. Changelog
 
+- **1.7.1 (2026-09-11):** **`none` gets its §2.1 row.** §2.1 said `none` *falls in this tier if a use case arises* while `CALCULATE_OPERATORS` accepted it, `parity/cases.json` asserted it and §2.5 listed it as sourced from §2.1 — so §2.5's *thirty-two* counted a row the matrix did not have. Found by the `v0.7.0` pre-flight schema check. **The approved set does not change; the matrix now states it.** It could stand because `registry_operator_tiers.rs` compares §2.5 with `CONDITIONAL_OPERATORS` and nothing compares §2.1 with `CALCULATE_OPERATORS` ([Sprint 16 independent pass](../../projects/verifications/15.%20Sprint%2016%20Independent%20Pass.md) §4).
 - **1.7.0 (2026-09-09):** **`conditional.logic` gets a tier (§2.5), and §1's *not in this registry, therefore FORBIDDEN* rule reaches it.** Decision **D-15**, [#393](https://github.com/sujanto-gaws/kelir/issues/393), closing a gap the [operator-parity spike](../../projects/spikes/01.%20JFSS%20Operator%20Parity.md) §2.6 found on 2026-08-21 and that stood for four sprints: this registry governed `calculate` alone while the backend re-evaluates conditionals too (S10.2), so the operator surface it had to implement was strictly larger than the matrix and nothing bounded it. **A tier here rather than a registry of its own** — a third document governing thirty-two operators that overlap `calculate`'s by fifteen would duplicate the maintenance and add no reader, and §2.3 already carries the reason the two sets differ. **What changes is normativity, not enforcement**: `rad::domain::jfss::CONDITIONAL_OPERATORS` already refused everything outside the floor when a definition was written, and was a floor derived from §2.3's rationale rather than a list anything could be held to — the browser holds no equivalent. `registry_operator_tiers.rs` now asserts the code and this document agree name for name. No operator is added, removed, or re-scoped for `calculate`.
 - **1.6.0 (2026-08-26):** **Division by zero refuses instead of yielding `0`** (decision **D-24**). Section 3.1's division entry and Section 7.3 change what they require: both environments configure the engine with `ThrowError`, so `10 / 0`, `10.5 / 0`, `0 / 0` and `10 % 0` all fail evaluation identically. A field whose calculation fails renders blank; a submission carrying one is refused with the JFSS S10.3 envelope. **Why this is a version bump and not an errata:** it changes what a conforming implementation does. The `0` this registry asked for from v1.0.0 was never reachable uniformly — the engine's integer division path throws under every `DivisionByZeroHandling` setting — so v1.5.0 recorded the rule as *not fully delivered* and left the correction open. It is closed here in the direction the rest of the registry already leans: §6.2's cap with an absent operand refuses rather than zeroing, for the same reason. **Also corrects an attribution:** v1.5.0 and Section 7.3 assigned this correction to **D-15**, whose text covers the `conditional.logic` tier and the `regex` constraint and not this. **Unchanged:** the approved operator set, the forbidden tier, the Tamper-Proof Pattern, the finiteness wrapper for every other non-finite result, and the two ambiguities Sections 3.1 and 6.2 flag.
 
