@@ -247,6 +247,21 @@ images run against this schema.
   assuming there was no cycle above it — a ring of three is invisible to the
   `CHECK` constraint that catches a self-reference. #191's `rad_form_sections`
   half remains open.
+
+- **The form builder** (FR-RAD-004,
+  [#373](https://github.com/sujanto-gaws/kelir/issues/373)). `/admin/forms`
+  authors a JFSS definition, revises it and publishes it from the browser. The
+  write API has existed since `v0.4.0` and until now no screen called it. It
+  authors structure and rule *selection*, not a visual expression builder:
+  `calculate` and `conditional.logic` are JSON Logic in a text field, checked by
+  the server's own engine and reported through the S10.3 envelope, so an author
+  sees the refusal a save would get.
+- **The list builder** (FR-RAD-003, FR-RAD-004,
+  [#374](https://github.com/sujanto-gaws/kelir/issues/374)). `/admin/lists`
+  authors a list definition and activates it. It calls the resolution the
+  renderer calls, so a definition that would fail to render is shown to its
+  author first — the condition on which SDD §8.2.4 accepted that a broken list
+  definition stores happily.
 - **[architectures/06. Building an ERP on Kelir.md](docs/architectures/06.%20Building%20an%20ERP%20on%20Kelir.md)**
   — documentation only, and **nothing in it is scheduled**
   ([#371](https://github.com/sujanto-gaws/kelir/issues/371), **D-73**). Every
