@@ -48,13 +48,18 @@ permission changes that `0040` and `0041` make on their own:
   the moment it can be fixed.
   **A bare `\d`, `\w` or `\s` is the other case and it was working.** It
   compiles on both sides and is refused as `PATTERN_CLASS_NOT_PINNED` because it
-  *means* different things — ECMA-262's classes are ASCII, this crate's are
-  Unicode. **So a form carrying one cannot be republished until it is
+  *means* different things — ECMA-262's `\d` and `\w` are ASCII where this
+  crate's are Unicode, and the two `\s` sets are both Unicode and differ at the
+  edges (U+0085 is whitespace only here, U+FEFF only in the browser). **So a
+  form carrying one cannot be republished until it is
   rewritten**: the revision already published keeps serving, and the next
   publish of that definition is refused until the class is written out.
   **`[0-9]` is narrower than `\d` rather than equal to it** — `^\d{4}$` matches
   `١٢٣٤` and `^[0-9]{4}$` does not — so rewriting a class is a
   decision about which digits the field accepts, not a formatting change.
+  **And `\s` is not an ASCII class on either side**, so writing it out as
+  `[ \t\r\n]` narrows the browser as well as the server — a no-break space
+  stops counting as whitespace in both.
   See [ADR-0038](docs/architectures/adr/0038.%20Kelir%20Patterns%20Are%20the%20Linear-Time%20Subset.md).
 
 **No breaking API changes**, and every migration is N−1 compatible: `v0.6.0`'s
@@ -98,8 +103,9 @@ images run against this schema.
   submit and the wrong moment; the definition is now refused when it is written,
   as `PATTERN_NOT_COMPILABLE`, carrying the compiler's own reason.
   **A bare `\d`, `\w` or `\s` is refused too**, as `PATTERN_CLASS_NOT_PINNED`:
-  it compiles on both sides and means different things — ECMA-262's classes are
-  ASCII, this crate's are Unicode — so the browser and the server would decide
+  it compiles on both sides and means different things — ECMA-262's `\d` and
+  `\w` are ASCII where this crate's are Unicode, and its `\s` differs from this
+  crate's at U+0085 and U+FEFF — so the browser and the server would decide
   the same input opposite ways with nothing raised on either side. Write the
   class out: `[0-9]` rather than `\d`.
   Both apply to §5's `validation.pattern` keyword as well as to the rule,
