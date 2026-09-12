@@ -9,7 +9,30 @@ While the major version is `0`, the public API may change in any release.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **MinIO's two images are fetched from `quay.io`, because Docker Hub no longer
+  has them** ([#421](https://github.com/sujanto-gaws/kelir/issues/421),
+  **D-80**). On 2026-09-12 `minio/minio` and `minio/mc` stopped resolving
+  there — the Hub API answers 404 for the repository and the registry 401 for
+  the manifest, while `library/alpine` answers 200 through the identical
+  anonymous token flow, which is what separates a removed repository from a
+  pull limit. **Backend (Rust)** failed in *Start object storage and create its
+  bucket* and **End-to-end (browser)** in *Bring the release stack up*, on every
+  branch at once and on `main` first, with no commit touching either.
+  **The tags did not change**, so this moved where the images come from rather
+  than what runs: `quay.io` is MinIO's other official registry and serves both
+  at the same release tags —
+  `sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e` for
+  the server and
+  `sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727` for
+  `mc`, read on 2026-09-12. **What is not claimed is that those bytes are the
+  bytes this project was running**: the images to compare them against are the
+  ones that stopped resolving. What is claimed is the same publisher at the same
+  tag, with the digests recorded so the next move has a baseline.
+  `clamav/clamav` and `axllent/mailpit` are still on Docker Hub and are
+  unchanged. A deployment pulling from a mirror or an air-gapped cache needs its
+  copy of both MinIO images re-sourced.
 
 ## [0.7.0] — 2026-09-10
 
