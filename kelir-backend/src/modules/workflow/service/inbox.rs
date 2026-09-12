@@ -164,8 +164,13 @@ pub async fn list_inbox(
     let tenant_id = caller.tenant_id();
     let user_id = caller.user_id();
 
+    // **Paging counts separately, and that is not the duplication #432 removed.**
+    // The page's own `count(*) OVER ()` describes the rows it returned, so a
+    // page past the end of the list carries no number at all — `meta.total` has
+    // to be the size of the whole list, which is the question
+    // `count_for_caller` answers.
     let total = inbox::count_for_caller(&state.pool, tenant_id, user_id, filters).await?;
-    let rows = inbox::list_for_caller(
+    let page = inbox::list_for_caller(
         &state.pool,
         tenant_id,
         user_id,
@@ -175,62 +180,90 @@ pub async fn list_inbox(
     )
     .await?;
 
-    let tasks = rows.into_iter().map(|row| to_task(row, user_id)).collect();
+    let tasks = page
+        .rows
+        .into_iter()
+        .map(|row| to_task(row, user_id))
+        .collect();
 
     Ok((tasks, pagination.meta(total.max(0) as u64)))
 }
 
-/// How much work is waiting for this caller, as two numbers (FR-RPT-001,
-/// [#431]).
+/// What is waiting for this caller: two numbers, and the top of the queue they
+/// describe (FR-RPT-001, [#431]; FR-RPT-002, [#432]).
 ///
-/// # It counts through the inbox's own predicate, and that is the whole point
+/// # It reads the inbox's own statement, and that is the whole point
 ///
-/// Both numbers come from [`inbox::count_for_caller`] — the same function
-/// [`list_inbox`] uses for `meta.total`, under the same `WHERE` clause that
-/// decides which rows the inbox shows. **A second statement counting "tasks
-/// waiting for me" would be a second answer to *whose task is this*, and this
-/// module's repository is one long argument about what that costs**: the
-/// department clause that `0225` added, the delegation rules, the grant's
-/// validity window, and [#279](https://github.com/sujanto-gaws/kelir/issues/279),
-/// where the one duplication in that file drifted exactly where its own comment
-/// warned it would and an inbox said 23 and ended at 19.
+/// The numbers and the rows come from [`inbox::list_for_caller`] — the
+/// statement [`list_inbox`] pages on, under the `WHERE` clause that decides
+/// which rows the inbox shows. **A second statement answering "what is waiting
+/// for me" would be a second answer to *whose task is this*, and this module's
+/// repository is one long argument about what that costs**: the department
+/// clause that [#225] added, the delegation rules, the grant's validity window,
+/// and [#279](https://github.com/sujanto-gaws/kelir/issues/279), where the one
+/// duplication in that file drifted exactly where its own comment warned it
+/// would and an inbox said 23 and ended at 19.
 ///
-/// So the dashboard's number and the inbox's number cannot disagree, because
-/// there is one of them.
+/// So the dashboard's rows and the inbox's rows cannot disagree, because there
+/// is one statement. [#432] AC2 asks for a **divergence** test rather than a
+/// presence one — a task the inbox lists and the widget does not, or the
+/// reverse — and the reason that test can be written at all is that there is a
+/// single predicate for it to catch somebody forking.
+///
+/// # One read rather than three
+///
+/// This used to take three: a count of what is open, a count of what is late,
+/// and nothing else, because there were no rows to fetch. The widget needed the
+/// rows too, and [#432] AC5 asks that **the count and the list come from one
+/// statement** — so all three answers now come back from one pass, and a
+/// decision landing mid-request can no longer make the card say *5 waiting*
+/// over four rows.
+///
+/// `limit` is how many rows the caller wants; the counts describe the **whole**
+/// queue behind them, which is what makes *3 of 12* sayable. The page is read
+/// at offset 0, which is the case [`inbox::InboxPage::matching`] is exact for.
 ///
 /// # This function requires no permission, and that is the decision
 ///
-/// [`list_inbox`] and [`get_task`] both open with `caller.require(TASK_READ)`,
-/// because both serve task **rows** — a task's name, its document's title, its
-/// due date, who delegated it. `workflow:task:read` is the permission for *the
-/// inbox surface*, and rows are what it protects.
+/// [`list_inbox`] and [`get_task`] both open with `caller.require(TASK_READ)`.
+/// `workflow:task:read` is the permission for **the inbox surface** — the
+/// screen, its paging, its search, its filters.
 ///
-/// **This returns two integers about the caller's own queue.** It names no
-/// task, no document and no person, and it discloses nothing about anybody
-/// else's work: the predicate it counts under is *assigned to this caller, or
-/// offered to a role this caller holds*. There is nothing here for
-/// `workflow:task:read` to protect, and requiring it would make the dashboard
-/// refuse somebody a count of the work waiting for them.
-///
-/// **The surface is gated where a surface should be** — by
+/// **This serves the caller's own queue and nothing else**, and that was true
+/// when it returned two integers and is still true now that it returns five
+/// rows with them. The predicate is *assigned to this caller, or offered to a
+/// role this caller holds*: every row is work this person is being asked to do,
+/// and a task's own holder is the last party its name needs keeping from. So
+/// the widget is gated where a surface should be — by
 /// [`crate::modules::reporting::DASHBOARD_READ`], in the one service that
-/// serves it. Asking for both would be the shape **D-45** found and **D-47**
-/// undid one module over, arriving from the other direction.
+/// serves it — and asking for `workflow:task:read` on top would be the shape
+/// **D-45** found and **D-47** undid one module over, arriving from the other
+/// direction: a person holding `reporting:dashboard:read` and nothing else,
+/// refused a list of their own waiting work on the one screen built to show it.
 ///
-/// **What this does not license.** A count over tasks this caller does *not*
-/// hold is the inbox population, and that is [`TASK_READ`]'s to gate.
-/// FR-RPT-007's workload-by-department report is exactly that, and it cannot be
-/// served by widening this function.
+/// **The line this draws is *whose work*, not *rows versus numbers*.** That
+/// distinction is worth stating because the earlier version of this comment
+/// leaned on the second one, and [ADR-0039] had already taken the first:
+/// FR-RPT-002 "inherits FR-RPT-001's endpoint, its permission and its card".
 ///
+/// **What this does not license.** Tasks this caller does *not* hold are the
+/// inbox population, and that is [`TASK_READ`]'s to gate. FR-RPT-007's
+/// workload-by-department report is exactly that, and it cannot be served by
+/// widening this function.
+///
+/// [ADR-0039]: ../../../../docs/architectures/adr/0039.%20A%20Dashboard%20Widget%20Is%20a%20Purpose-Built%20Endpoint.md
+/// [#225]: https://github.com/sujanto-gaws/kelir/issues/225
 /// [#431]: https://github.com/sujanto-gaws/kelir/issues/431
-pub async fn count_waiting(
+/// [#432]: https://github.com/sujanto-gaws/kelir/issues/432
+pub async fn waiting_work(
     state: &AppState,
     caller: &Authenticated,
+    limit: i64,
 ) -> Result<WaitingWork, AppError> {
     let tenant_id = caller.tenant_id();
     let user_id = caller.user_id();
 
-    let waiting = inbox::count_for_caller(
+    let page = inbox::list_for_caller(
         &state.pool,
         tenant_id,
         user_id,
@@ -238,38 +271,53 @@ pub async fn count_waiting(
             scope: InboxScope::Open,
             ..InboxFilters::default()
         },
+        limit,
+        0,
     )
     .await?;
 
     // **`Overdue` narrows `Open` rather than replacing it** — `InboxScope`'s own
-    // documented shape, `overdue ⊂ open ⊂ all` — so this is a subset of the
-    // number above and a screen may say "3 waiting, 1 late" without the two
-    // being read as four tasks.
-    let overdue = inbox::count_for_caller(
-        &state.pool,
-        tenant_id,
-        user_id,
-        &InboxFilters {
-            scope: InboxScope::Overdue,
-            ..InboxFilters::default()
-        },
-    )
-    .await?;
+    // documented shape, `overdue ⊂ open ⊂ all` — so the second number is a
+    // subset of the first and a screen may say "3 waiting, 1 late" without the
+    // two being read as four tasks. Both are counted over the rows this
+    // statement matched, so neither can be a count of a different set.
+    let waiting = page.matching.unwrap_or(0);
+    let overdue = page.matching_overdue.unwrap_or(0);
 
     Ok(WaitingWork {
         waiting: waiting.max(0),
         overdue: overdue.max(0),
+        next: page
+            .rows
+            .into_iter()
+            .map(|row| to_task(row, user_id))
+            .collect(),
     })
 }
 
-/// Two numbers about one person's queue, as [`count_waiting`] answers them.
-#[derive(Debug, Clone, Copy)]
+/// One person's queue, as [`waiting_work`] answers it.
+#[derive(Debug, Clone)]
 pub struct WaitingWork {
     /// Tasks assigned to the caller, or offered to a role they hold, still open.
     pub waiting: i64,
     /// Those of them that are past their date — **a subset of `waiting`**, never
     /// a separate population.
     pub overdue: i64,
+    /// The first few of them, in the order the inbox opens on.
+    ///
+    /// **A prefix of the inbox, not a selection out of it.** The order is
+    /// `created_at DESC, id DESC` because that is the order the statement
+    /// carries, so a person reading the widget and then opening their inbox
+    /// finds the same rows at the top in the same sequence. A widget that
+    /// ordered by due date would be a second opinion about which work matters
+    /// most, taken by a card rather than by the screen that owns the queue —
+    /// and FR-RPT-005's overdue widget is where *late first* is the question
+    /// being asked.
+    ///
+    /// Shorter than [`Self::waiting`] whenever there is more waiting than the
+    /// card has room for, which is the ordinary case and the reason the count
+    /// is carried beside the rows rather than derived from their length.
+    pub next: Vec<InboxTask>,
 }
 
 pub async fn get_task(
@@ -311,6 +359,7 @@ pub async fn get_task(
         0,
     )
     .await?
+    .rows
     .into_iter()
     .next()
     .ok_or_else(|| AppError::not_found("Task"))?;

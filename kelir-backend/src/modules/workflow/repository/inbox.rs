@@ -63,6 +63,16 @@
 //! these rows would be a second implementation of the rule above, and the two
 //! would drift.
 //!
+//! **`modules::reporting` reads it from the same door** (FR-RPT-002, [#432]).
+//! The dashboard's pending-task widget is the first caller that wants *the
+//! first few rows and how many there are altogether*, and it got the window
+//! counts on [`list_for_caller`] rather than a statement of its own — so the
+//! widget, the inbox and the decision all answer *whose task is this* from the
+//! one `WHERE` clause above. A fourth copy of it is the thing this file has
+//! spent three comments and one incident asking nobody to write.
+//!
+//! [#432]: https://github.com/sujanto-gaws/kelir/issues/432
+//!
 //! [#106]: https://github.com/sujanto-gaws/kelir/issues/106
 //! [#121]: https://github.com/sujanto-gaws/kelir/issues/121
 //! [#179]: https://github.com/sujanto-gaws/kelir/issues/179
@@ -173,6 +183,47 @@ pub struct InboxRow {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
+/// A page of the inbox, and **how many rows the statement matched to produce
+/// it** (FR-RPT-002, [#432]).
+///
+/// # Why the count travels with the page
+///
+/// The dashboard's pending-task widget shows a number and the first few rows
+/// behind it, and [#432] AC5 asks that the two **come from one statement**. A
+/// count query beside a page query is two reads of a table somebody else is
+/// deciding tasks in: an approval landing between them makes the card say *5
+/// waiting* over four rows, which is not a race the viewer can tell from a bug.
+/// `count(*) OVER ()` is evaluated after the `WHERE` and before the `LIMIT`, so
+/// the number and the rows are one answer from one snapshot.
+///
+/// **This is also why the widget needed no fourth copy of the visibility
+/// rule.** It reads the statement below — the one the inbox itself pages on —
+/// rather than a statement of its own, which is what [#432] AC2 asks for and
+/// what [#279](https://github.com/sujanto-gaws/kelir/issues/279) is the price
+/// list for.
+///
+/// [#432]: https://github.com/sujanto-gaws/kelir/issues/432
+pub struct InboxPage {
+    pub rows: Vec<InboxRow>,
+    /// How many rows matched, **or `None` when the page came back empty**.
+    ///
+    /// The count rides on the rows, so an empty page carries no row to carry
+    /// it. At `offset = 0` that is genuinely *nothing matched*; past the end of
+    /// the list it means *nothing on this page*, and the two are not the same
+    /// number. **So paging reads [`count_for_caller`] and this field is for the
+    /// caller that asks for the first page** — which is what
+    /// [`super::super::service::inbox::waiting_work`] does and what the
+    /// `Option` is here to make a caller notice.
+    pub matching: Option<i64>,
+    /// How many of them are late, counted in the same pass over the same rows.
+    ///
+    /// **A subset of [`Self::matching`]**, under the identical predicate the
+    /// `is_overdue` column answers per row — so a card reading *3 waiting, 1
+    /// late* describes three tasks, and the row it highlights is one of the
+    /// rows it listed.
+    pub matching_overdue: Option<i64>,
+}
+
 /// The caller's page of tasks.
 ///
 /// The document's title, reference and number are joined in rather than fetched
@@ -192,7 +243,7 @@ pub async fn list_for_caller(
     filters: &InboxFilters,
     limit: i64,
     offset: i64,
-) -> Result<Vec<InboxRow>, sqlx::Error> {
+) -> Result<InboxPage, sqlx::Error> {
     let (open_only, overdue_only, completed_only) = filters.scope.predicates();
 
     let rows = sqlx::query!(
@@ -203,6 +254,21 @@ pub async fn list_for_caller(
                (t.due_at IS NOT NULL
                 AND t.due_at < now()
                 AND t.status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')) AS "is_overdue!",
+               -- **How many matched, in the statement that matched them**
+               -- (#432 AC5). Evaluated after the `WHERE` and before the
+               -- `LIMIT`, so this is the whole set the visibility rule admitted
+               -- rather than the length of the page. A separate count query
+               -- would be a second read of a table other people are deciding
+               -- tasks in, and a decision landing between the two reads makes a
+               -- card say "5 waiting" over four rows.
+               count(*) OVER () AS "matching!",
+               -- The same subset the per-row `is_overdue` answers, counted over
+               -- the same rows in the same pass — so "3 waiting, 1 late" is
+               -- three tasks and the late one is among those listed.
+               count(*) FILTER (WHERE t.due_at IS NOT NULL
+                                  AND t.due_at < now()
+                                  AND t.status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS'))
+                   OVER () AS "matching_overdue!",
                t.assignee_user_id, t.candidate_role_id,
                r.role_code AS "candidate_role_code?",
                t.delegated_from_user_id,
@@ -275,7 +341,13 @@ pub async fn list_for_caller(
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
+    // Every row carries the same two window counts, so the first row is as good
+    // as any and an empty page has none to read — which is what `matching`
+    // being an `Option` says to the caller.
+    let matching = rows.first().map(|row| row.matching);
+    let matching_overdue = rows.first().map(|row| row.matching_overdue);
+
+    let rows = rows
         .into_iter()
         .map(|row| InboxRow {
             id: row.id,
@@ -303,7 +375,13 @@ pub async fn list_for_caller(
             decision_comment: row.decision_comment,
             completed_at: row.completed_at,
         })
-        .collect())
+        .collect();
+
+    Ok(InboxPage {
+        rows,
+        matching,
+        matching_overdue,
+    })
 }
 
 /// How many the caller can see, under the same rule.

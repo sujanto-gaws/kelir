@@ -27,11 +27,15 @@ pub fn routes() -> Router<AppState> {
 /// a `GET /dashboard/tasks` appearing beside this is the decision being
 /// reversed in a diff rather than in a record.
 ///
+/// **FR-RPT-002 was the first test of that, and it held.** The pending-task
+/// widget added `pendingTasks` to [`DashboardSummary`] and no route beside this
+/// one, so the page still makes a single request on sign-in.
+///
 /// [ADR-0039]: ../../../../docs/architectures/adr/0039.%20A%20Dashboard%20Widget%20Is%20a%20Purpose-Built%20Endpoint.md
 #[utoipa::path(
     get, path = "/api/v1/dashboard/summary", tag = "reporting",
     responses(
-        (status = 200, description = "The caller's own waiting work, as counts", body = DashboardSummary),
+        (status = 200, description = "The caller's own waiting work: the counts, and the first few tasks behind them", body = DashboardSummary),
         (status = 403, description = "Missing reporting:dashboard:read — the summary asks for nothing else, because every number in it is the caller's own work (ADR-0039)")
     ),
     security(("bearer" = []))

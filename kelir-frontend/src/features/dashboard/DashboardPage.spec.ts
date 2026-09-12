@@ -53,13 +53,84 @@ import {
  * which is the argument §2.9 makes for naming the reddened test rather than
  * counting failures.
  *
+ * ## The pending-task widget (FR-RPT-002, [#432])
+ *
+ * **Six mutations, run 2026-09-12, each red and each reddening exactly one
+ * test.** Baseline first: **16 passed, nothing mutated.**
+ *
+ * | Mutation | Red |
+ * |---|---|
+ * | **F1** — the waiting card reads `pendingTasks.length` instead of `tasksWaiting` | *shows what is waiting and what is unsent* |
+ * | **F2** — the widget's empty sentence never renders, leaving a blank list in its place | *says nothing is waiting rather than showing an empty card* |
+ * | **F3** — the overdue badge derived from `dueAt` against the browser's clock | *marks a task late because the server said so, not because of the clock* |
+ * | **F4** — the delegated-from line dropped from the row | *says whose work a delegated task is* |
+ * | **F5** — `canOpenTasks` forced true, so every row is linked | *shows the rows without links when the caller cannot open the inbox* |
+ * | **F6** — the *more waiting* line counts from the rows rather than the queue | *says how many more are waiting than it shows* |
+ *
+ * **F2 was run twice, and the first attempt is recorded rather than tidied
+ * away.** Deleting the empty-state paragraph outright orphaned the `v-else` on
+ * the list beside it, so the component stopped compiling and the whole file
+ * failed with a template error and **zero assertions run**. That is not a
+ * survivor and it is not a red either — it is a mutation that never reached the
+ * code under test, and counting it as evidence would have been the same
+ * mistake as counting a green one. Re-run as `v-if="false"` it compiles, leaves
+ * a genuinely blank card, and reddens exactly the test that names it.
+ *
+ * **F1 and F6 are the pair worth having.** The count and the list now come from
+ * one statement on the server, so the remaining way for a card to lie about how
+ * much work is waiting is on this side: deriving the number from the rows it
+ * was sent. Both mutations are that mistake, from the two ends it can be made.
+ *
  * [#431]: https://github.com/sujanto-gaws/kelir/issues/431
+ * [#432]: https://github.com/sujanto-gaws/kelir/issues/432
  */
 
 const USER_ID = '0199a1a0-0000-7000-8000-0000000000f9'
 
 function summary(overrides: Record<string, unknown> = {}): unknown {
-  return { tasksWaiting: 3, tasksOverdue: 1, draftDocuments: 2, ...overrides }
+  return {
+    tasksWaiting: 3,
+    tasksOverdue: 1,
+    draftDocuments: 2,
+    pendingTasks: [task()],
+    ...overrides,
+  }
+}
+
+/**
+ * One pending row, in the shape the server sends (FR-RPT-002, #432).
+ *
+ * It is an `InboxTask` — the same row `/api/v1/tasks` serves — so the fields
+ * this fixture carries are the fields the inbox's own rows carry, `isOverdue`
+ * included. That is the point of the shape being shared rather than copied.
+ */
+function task(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: '0199a1a0-0000-7000-8000-00000000000a',
+    taskRef: 'TASK-2026-000001',
+    taskName: 'Approve the request',
+    taskType: 'APPROVAL_TASK',
+    status: 'CREATED',
+    priority: 'NORMAL',
+    dueAt: null,
+    assignment: 'ROLE',
+    isOverdue: false,
+    candidateRoleCode: 'APPROVER',
+    delegatedFromUserId: null,
+    delegatedFromDisplayName: null,
+    workflowInstanceId: '0199a1a0-0000-7000-8000-00000000000b',
+    workflowName: 'Standard approval',
+    currentState: 'MANAGER_APPROVAL',
+    documentId: '0199a1a0-0000-7000-8000-00000000000c',
+    documentRef: 'DOC-2026-000001',
+    documentNumber: 'PR-2026-000001',
+    documentTitle: 'Laptop for the new analyst',
+    createdAt: '2026-09-10T02:00:00Z',
+    action: null,
+    decisionComment: null,
+    completedAt: null,
+    ...overrides,
+  }
 }
 
 describe('DashboardPage', () => {
@@ -189,7 +260,9 @@ describe('DashboardPage', () => {
   it('says so plainly when there is nothing waiting', async () => {
     onSummary = () => ({
       status: 200,
-      body: itemBody(summary({ tasksWaiting: 0, tasksOverdue: 0, draftDocuments: 0 })),
+      body: itemBody(
+        summary({ tasksWaiting: 0, tasksOverdue: 0, draftDocuments: 0, pendingTasks: [] }),
+      ),
     })
 
     const wrapper = await render()
@@ -215,6 +288,197 @@ describe('DashboardPage', () => {
    * a page that renders an explanation *and* fires a doomed request has not
    * degraded, it has hidden an error.
    */
+  // -------------------------------------------------------------------------
+  // FR-RPT-002 — the pending-task widget (#432)
+  // -------------------------------------------------------------------------
+
+  it('lists the tasks the server says are waiting', async () => {
+    onSummary = () => ({
+      status: 200,
+      body: itemBody(
+        summary({
+          tasksWaiting: 2,
+          pendingTasks: [task(), task({ id: 'b', taskName: 'Countersign the order' })],
+        }),
+      ),
+    })
+
+    const wrapper = await render()
+    const rows = wrapper.findAll('[data-testid="pending-task"]')
+
+    expect(rows).toHaveLength(2)
+    expect(rows[0].text()).toContain('Approve the request')
+    expect(rows[0].text()).toContain('Laptop for the new analyst')
+    expect(rows[1].text()).toContain('Countersign the order')
+  })
+
+  /**
+   * **The rows render in the order they arrive.**
+   *
+   * The server sends the top of the caller's inbox, in the inbox's own order,
+   * so a person who reads the card and then opens their queue finds the same
+   * rows at the top in the same sequence. A card that sorted them again would
+   * be a second opinion about which work matters most, taken by a widget rather
+   * than by the screen that owns the queue.
+   */
+  it('keeps the order the server sent', async () => {
+    onSummary = () => ({
+      status: 200,
+      body: itemBody(
+        summary({
+          tasksWaiting: 3,
+          pendingTasks: [
+            task({ id: 'a', taskName: 'Newest' }),
+            task({ id: 'b', taskName: 'Middle', isOverdue: true, dueAt: '2026-01-01T00:00:00Z' }),
+            task({ id: 'c', taskName: 'Oldest' }),
+          ],
+        }),
+      ),
+    })
+
+    const wrapper = await render()
+    const names = wrapper
+      .findAll('[data-testid="pending-task"]')
+      .map((row) => row.text().split('\n')[0].trim())
+
+    expect(names[0]).toContain('Newest')
+    expect(names[1]).toContain('Middle')
+    expect(names[2]).toContain('Oldest')
+  })
+
+  /**
+   * **`pendingTasks.length` is not the count** (#432 AC5).
+   *
+   * The server caps the list at five and sends `tasksWaiting` for the whole
+   * queue, so a card that counted its own rows would be wrong by exactly the
+   * number of tasks the reader cannot see — and would say so most confidently
+   * to the busiest person.
+   */
+  it('says how many more are waiting than it shows', async () => {
+    onSummary = () => ({
+      status: 200,
+      body: itemBody(
+        summary({
+          tasksWaiting: 12,
+          pendingTasks: [1, 2, 3, 4, 5].map((n) => task({ id: `t${n}` })),
+        }),
+      ),
+    })
+
+    const wrapper = await render()
+
+    expect(wrapper.findAll('[data-testid="pending-task"]')).toHaveLength(5)
+    expect(wrapper.find('[data-testid="pending-more"]').text()).toContain('7 more waiting')
+  })
+
+  it('does not say there are more when it is showing all of them', async () => {
+    onSummary = () => ({
+      status: 200,
+      body: itemBody(summary({ tasksWaiting: 1, pendingTasks: [task()] })),
+    })
+
+    const wrapper = await render()
+
+    expect(wrapper.find('[data-testid="pending-more"]').exists()).toBe(false)
+  })
+
+  /**
+   * **#432 AC4.** An empty card is indistinguishable from one that failed to
+   * load, so the widget owes the reader a sentence rather than a blank.
+   *
+   * The fixture leaves a draft in place deliberately: this asserts the
+   * *widget's* empty state, not the page-level one, which only appears when
+   * there is nothing at all.
+   */
+  it('says nothing is waiting rather than showing an empty card', async () => {
+    onSummary = () => ({
+      status: 200,
+      body: itemBody(summary({ tasksWaiting: 0, tasksOverdue: 0, pendingTasks: [] })),
+    })
+
+    const wrapper = await render()
+
+    expect(wrapper.find('[data-testid="empty"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="pending-empty"]').text()).toContain('Nothing is waiting')
+    expect(wrapper.findAll('[data-testid="pending-task"]')).toHaveLength(0)
+  })
+
+  /**
+   * **`isOverdue` is read, never derived** (#185 AC4).
+   *
+   * The row below is late by the server's answer and carries **no** due date
+   * the browser could have judged for itself, and the badge still appears. A
+   * card comparing `dueAt` to `Date.now()` would show nothing here, which is
+   * what makes this the assertion that catches the derivation rather than a
+   * test that happens to agree with it.
+   */
+  it('marks a task late because the server said so, not because of the clock', async () => {
+    onSummary = () => ({
+      status: 200,
+      body: itemBody(
+        summary({ tasksWaiting: 1, pendingTasks: [task({ isOverdue: true, dueAt: null })] }),
+      ),
+    })
+
+    const wrapper = await render()
+
+    expect(wrapper.find('[data-testid="pending-task-overdue"]').exists()).toBe(true)
+  })
+
+  /**
+   * **A delegate has to be told whose approval it is** (#184).
+   *
+   * Delegation is the case that fails silently: a widget that dropped it shows
+   * somebody five tasks with no reason they are theirs.
+   */
+  it('says whose work a delegated task is', async () => {
+    onSummary = () => ({
+      status: 200,
+      body: itemBody(
+        summary({
+          tasksWaiting: 1,
+          pendingTasks: [
+            task({ delegatedFromUserId: 'x', delegatedFromDisplayName: 'Ani Wijaya' }),
+          ],
+        }),
+      ),
+    })
+
+    const wrapper = await render()
+
+    expect(wrapper.find('[data-testid="pending-task-delegated"]').text()).toContain(
+      "On Ani Wijaya's behalf",
+    )
+  })
+
+  /**
+   * **The rows are shown; only the links are withheld.**
+   *
+   * The summary is served behind `reporting:dashboard:read` alone, because
+   * every row on it is the caller's own waiting work (ADR-0039). The task
+   * screen holds `workflow:task:read`, so a viewer can legitimately have the
+   * dashboard and not the inbox — and a link would take them to `/forbidden`.
+   *
+   * This is a courtesy, not a control: it hides a link that would not work, and
+   * it hides nothing the server sent.
+   */
+  it('shows the rows without links when the caller cannot open the inbox', async () => {
+    signIn(['reporting:dashboard:read'])
+
+    const wrapper = await render()
+
+    expect(wrapper.find('[data-testid="pending-task"]').text()).toContain('Approve the request')
+    expect(wrapper.find('[data-testid="pending-task"] a').exists()).toBe(false)
+  })
+
+  it('links each row to its task when the caller can open the inbox', async () => {
+    signIn(['reporting:dashboard:read', 'workflow:task:read'])
+
+    const wrapper = await render()
+
+    expect(wrapper.find('[data-testid="pending-task"] a').exists()).toBe(true)
+  })
+
   it('explains itself instead of erroring when the caller has no grant', async () => {
     signIn(['document:read'])
 

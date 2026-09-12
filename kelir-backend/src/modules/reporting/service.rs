@@ -11,7 +11,7 @@
 //! [#431]: https://github.com/sujanto-gaws/kelir/issues/431
 
 use super::domain::DashboardSummary;
-use super::DASHBOARD_READ;
+use super::{DASHBOARD_READ, PENDING_TASKS_SHOWN};
 use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
 use crate::modules::document::service::list as document_list;
@@ -40,32 +40,40 @@ use crate::state::AppState;
 /// rows. `tests/reporting_dashboard.rs` puts a second tenant's and a second
 /// user's rows in the database and asserts on what comes back, for that reason.
 ///
-/// # Three reads rather than one
+/// # Two reads rather than one
 ///
-/// The two task counts and the draft count are three round trips, and they are
-/// not folded into one statement. Folding them would mean this module writing
-/// SQL against two other modules' tables — the thing the module doc's table
-/// exists to say it does not do — and the saving is two round trips on a screen
-/// that makes one request. **If this becomes the dashboard's cost centre the
-/// answer is a statement in each owning module, not a statement here**, so the
+/// The task half and the draft count are two round trips, and they are not
+/// folded into one statement. Folding them would mean this module writing SQL
+/// against two other modules' tables — the thing the module doc's table exists
+/// to say it does not do — and the saving is one round trip on a screen that
+/// makes one request. **If this becomes the dashboard's cost centre the answer
+/// is a statement in each owning module, not a statement here**, so the
 /// predicates stay where their rules are.
+///
+/// It was three until FR-RPT-002 ([#432]). The widget needed the rows behind
+/// the waiting count, and the count, the overdue count and the rows now come
+/// back from one pass through the inbox's statement — so the read that was
+/// added to this screen cost it a round trip *fewer*, and the card's number can
+/// no longer disagree with the card's list.
 ///
 /// [#106]: https://github.com/sujanto-gaws/kelir/issues/106
 /// [#121]: https://github.com/sujanto-gaws/kelir/issues/121
 /// [#171]: https://github.com/sujanto-gaws/kelir/issues/171
 /// [#179]: https://github.com/sujanto-gaws/kelir/issues/179
+/// [#432]: https://github.com/sujanto-gaws/kelir/issues/432
 pub async fn dashboard_summary(
     state: &AppState,
     caller: &Authenticated,
 ) -> Result<DashboardSummary, AppError> {
     caller.require(DASHBOARD_READ)?;
 
-    let tasks = workflow_inbox::count_waiting(state, caller).await?;
+    let tasks = workflow_inbox::waiting_work(state, caller, PENDING_TASKS_SHOWN).await?;
     let draft_documents = document_list::count_own_drafts(state, caller).await?;
 
     Ok(DashboardSummary {
         tasks_waiting: tasks.waiting,
         tasks_overdue: tasks.overdue,
         draft_documents,
+        pending_tasks: tasks.next,
     })
 }

@@ -5,6 +5,8 @@
 use serde::Serialize;
 use utoipa::ToSchema;
 
+use crate::modules::workflow::service::inbox::InboxTask;
+
 /// The dashboard, as one payload.
 ///
 /// # Why one object rather than a card's worth of endpoints
@@ -31,7 +33,7 @@ use utoipa::ToSchema;
 /// first.
 ///
 /// [ADR-0039]: ../../../../docs/architectures/adr/0039.%20A%20Dashboard%20Widget%20Is%20a%20Purpose-Built%20Endpoint.md
-#[derive(Debug, Clone, Copy, Serialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DashboardSummary {
     /// Tasks waiting for the caller — assigned to them, or offered to a role
@@ -66,4 +68,39 @@ pub struct DashboardSummary {
     /// nobody — `documents.created_by` is nullable, and a null author matches no
     /// caller.
     pub draft_documents: i64,
+    /// The first few tasks behind [`Self::tasks_waiting`] (FR-RPT-002, [#432]).
+    ///
+    /// # Why this is the inbox's own row type
+    ///
+    /// It is [`InboxTask`] — the same struct `GET /api/v1/tasks` serves, not a
+    /// trimmed copy of it. **A widget-shaped row would be a second description
+    /// of a task**, and the field that drifts first is `isOverdue`: the inbox
+    /// gets it from the database in the statement that read the row, and a
+    /// second shape is where somebody helpfully recomputes it from `dueAt`.
+    /// FR-TASK-007 names that as the bug nobody can reproduce, and the cheapest
+    /// way not to have it twice is not to have two rows.
+    ///
+    /// It also means the dashboard and the inbox render from one TypeScript
+    /// type, so a field added to a task row arrives on both screens or neither.
+    ///
+    /// **The cost, stated:** an open task's `action`, `decisionComment` and
+    /// `completedAt` are always `null` here, because a task that is waiting has
+    /// not been decided. Three null fields on five rows is the price of one
+    /// shape, and it is the right way round — a payload carrying nulls is
+    /// legible, and two row types that disagree about *late* are not.
+    ///
+    /// # How many, and which
+    ///
+    /// [`super::PENDING_TASKS_SHOWN`] of them, in the order the inbox opens on,
+    /// so the widget is **the top of your inbox** rather than a fresh opinion
+    /// about which work matters most. `tasksWaiting` is the whole queue, so a
+    /// card can say *3 of 12* — and a client must not read this array's length
+    /// as the count, which is exactly what the two fields being separate is for.
+    ///
+    /// **Empty means nothing is waiting**, and the screen has to say so in
+    /// words: an empty card is indistinguishable from one that failed to load
+    /// ([#432] AC4).
+    ///
+    /// [#432]: https://github.com/sujanto-gaws/kelir/issues/432
+    pub pending_tasks: Vec<InboxTask>,
 }
