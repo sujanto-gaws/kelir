@@ -140,12 +140,29 @@ jobs:
         # third place an infrastructure image is named, and the easiest to miss:
         # the compose files are read when somebody deploys, this runs on every
         # push, and both were `:latest`.
+        #
+        # **`quay.io` and not Docker Hub, because Docker Hub no longer has
+        # these images** (#421). On 2026-09-12 `minio/minio` and `minio/mc`
+        # stopped resolving there — the Hub API returns 404 for the
+        # repository and the registry 401 for the manifest, while
+        # `library/alpine` answers 200 through the identical anonymous token
+        # flow, so it is the repositories and not a pull limit. Both jobs that
+        # name an infrastructure image failed on it, and every merge in the
+        # repository was blocked until this line changed.
+        #
+        # **The tags are unchanged**, so this moves where the image is fetched
+        # from and not what runs. What cannot be shown is that the bytes match
+        # what CI used to pull: the images to compare against are the ones that
+        # stopped resolving. The quay manifests are
+        # `sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e`
+        # and `sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727`,
+        # read on 2026-09-12.
         run: |
           docker run -d --name minio --network host \
             -e MINIO_ROOT_USER=minioadmin \
             -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
-          docker run --rm --network host --entrypoint sh minio/mc:RELEASE.2025-08-13T08-35-41Z -c \
+            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
+          docker run --rm --network host --entrypoint sh quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z -c \
             "until mc alias set ci http://localhost:9000 minioadmin minioadmin; \
              do sleep 1; done \
              && mc mb --ignore-existing ci/kelir-test"
