@@ -93,3 +93,22 @@ on the same trigger as the frontend job. That job builds both release images,
 brings the stack up through `deploy-local.sh` and runs this suite against it, so
 what CI exercises is what a release contains. It is the slowest job in the
 pipeline for exactly that reason.
+
+**One thing that job does which the command above does not: it narrows apt to
+Ubuntu's own sources before installing the browser**, through
+[`scripts/narrow-apt-to-ubuntu.sh`](../scripts/narrow-apt-to-ubuntu.sh). The
+divergence is deliberate and is not a step to copy onto your own machine.
+`--with-deps` refreshes *every* configured source, and on 2026-09-09 Google's
+Chrome repository — which nothing here installs from — served a `Release` file
+eight hours newer than the `Packages` file beside it. apt refused the mismatch,
+this step exited 100, and because `End-to-end (browser)` is a required context
+with bypassing off, **for forty minutes nobody in the project could merge
+anything** ([#408](https://github.com/sujanto-gaws/kelir/issues/408)). On a
+runner the narrowing costs nothing, because the runner is destroyed with the
+job; on your machine it would disable repositories you rely on.
+
+**The premise that narrowing is safe is re-checked on every run rather than
+argued once.** `playwright install-deps --dry-run chromium` follows the
+install and exits non-zero naming any dependency still missing — so if an
+image ever stops carrying one of chromium's libraries, the job says which
+package instead of `Hash Sum mismatch`.

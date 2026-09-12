@@ -327,9 +327,39 @@ jobs:
 
       - name: Install the browser
         working-directory: e2e
-        run: npx playwright install --with-deps chromium
+        # `--with-deps` refreshes **every** apt source the runner image carries,
+        # and on 2026-09-09 one of them — Google's, which this job does not use
+        # — served a `Release` file eight hours newer than the `Packages` file
+        # beside it. apt refused the mismatch, the step exited 100, and for
+        # forty minutes `End-to-end (browser)` was red on a tree nobody had
+        # touched. It is a required context and bypassing is off (#335), so
+        # that was every merge in the project, including the one that would
+        # have fixed it (#408).
+        #
+        # The narrowing that answers it, and why the URI rather than the file
+        # name decides, is in the script's own header.
+        #
+        # **The premise is checked rather than assumed.** That chromium's
+        # system dependencies all come from Ubuntu is exactly what the
+        # narrowing rests on, so `install-deps --dry-run` runs afterwards and
+        # exits non-zero naming any dependency still missing. Should a runner
+        # image ever stop carrying one, this job says which package rather
+        # than `Hash Sum mismatch` — and it says it on every run, not once at
+        # the review that introduced the narrowing.
+        run: |
+          set -euo pipefail
+
+          sudo "${GITHUB_WORKSPACE}/scripts/narrow-apt-to-ubuntu.sh"
+          sudo apt-get update
+
+          npx playwright install --with-deps chromium
+
+          echo "::group::Every chromium dependency resolved from Ubuntu's sources"
+          npx playwright install-deps --dry-run chromium
+          echo "::endgroup::"
 
       - name: Configure the deployment
+        id: configure
         # deploy.sh reads this file, refuses placeholder secrets in it, and
         # compose interpolates the same file. KELIR_DB_HOST is left at its
         # default (host.docker.internal) because that is where the service
@@ -358,21 +388,37 @@ jobs:
           KELIR_HOST_IP=127.0.0.1 ./deploy-local.sh "${version}" 8080
 
       - name: Drive the flow
+        id: drive
         working-directory: e2e
         run: npm test
 
       - name: Stack logs
-        if: failure()
-        # KELIR_VERSION is re-derived rather than carried over: the compose file
-        # makes it required, and a diagnostic step that fails to interpolate is
-        # a diagnostic missing exactly when it is wanted.
+        # **A diagnostic must not depend on state a step that never ran would
+        # have produced**, or the last line of a failed job names the
+        # diagnostic instead of the failure. Two things follow from that one
+        # rule, and the rule is stated here because the first instance was
+        # written as if it were about one variable.
+        #
+        # KELIR_VERSION is re-derived rather than carried over, because the
+        # compose file makes it required. And the step is gated on
+        # `Configure the deployment` having succeeded, because compose
+        # interpolates the `.env` that step writes: a browser install failing
+        # six steps earlier used to end its log complaining that
+        # KELIR_JWT_SECRET was unset, which was true and about the wrong step
+        # (#408).
+        if: failure() && steps.configure.outcome == 'success'
         run: |
           version="$(sed -n 's/^version = "\(.*\)"/\1/p' kelir-backend/Cargo.toml | head -1)"
           cd deploy/staging
           KELIR_VERSION="${version}" docker compose -f docker-compose.staging.yml logs --tail 200
 
       - name: Keep the report
-        if: failure()
+        # Gated by the same rule as `Stack logs` above: Playwright writes this
+        # directory when it runs, so asking for it after a failure that
+        # preceded the run uploads nothing and annotates the job with `No
+        # files were found` — a true sentence that reads, to whoever opens the
+        # log next, like the tests ran and produced no report (#408).
+        if: failure() && steps.drive.outcome == 'failure'
         uses: actions/upload-artifact@v5
         with:
           name: playwright-report
