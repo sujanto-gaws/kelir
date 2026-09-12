@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button'
 import { getDashboardSummary } from '@/api/reporting'
 import { ApiError } from '@/api/error'
 import { useAuthStore } from '@/stores/auth'
+import type { DocumentStatus } from '@/types/document'
 import type { DashboardSummary } from '@/types/reporting'
 
 /**
@@ -127,6 +128,62 @@ const notShown = computed(() =>
 const canOpenTasks = computed(() => auth.can('workflow:task:read'))
 
 /**
+ * The documents the caller touched most recently (FR-RPT-003, #433).
+ *
+ * **The server chose these and their order** — most recent touch first, by the
+ * `lastTouchedAt` each row carries. Sorting here on any other field would make
+ * the card a second opinion about what *recent* means, and the one field that
+ * invites it is `updatedAt`: it moves when **anybody** changes the document,
+ * which is a different question from *what did I work on*.
+ */
+const recentDocuments = computed(() => summary.value?.recentDocuments ?? [])
+
+/**
+ * **Whether a row may be a link.**
+ *
+ * The same courtesy `canOpenTasks` is, one card over, and for the same reason:
+ * the document route holds `document:read` and the summary is served behind
+ * `reporting:dashboard:read` alone, because every row on it is the caller's own
+ * work (ADR-0039). A person can legitimately be shown the documents they
+ * themselves acted on and still not hold the document surface.
+ *
+ * **It hides a link that would not work; it hides nothing the server sent.**
+ */
+const canOpenDocuments = computed(() => auth.can('document:read'))
+
+/**
+ * What a status looks like at a glance — three groups, not ten colours.
+ *
+ * Copied in shape from `DocumentListPage`'s own helper rather than imported,
+ * which is a deliberately small duplication: the alternative is exporting a
+ * presentation detail from a feature module so a card can match it, and the
+ * thing that would drift is a colour rather than a rule. **Nothing about which
+ * rows exist is decided here.**
+ */
+function statusVariant(status: DocumentStatus): 'default' | 'secondary' | 'destructive' {
+  if (status === 'REJECTED' || status === 'CANCELLED') {
+    return 'destructive'
+  }
+
+  if (status === 'COMPLETED' || status === 'APPROVED') {
+    return 'default'
+  }
+
+  return 'secondary'
+}
+
+/**
+ * When the caller last touched it, as a person reads it.
+ *
+ * Formatting only. The value is the server's and is the one the list was
+ * ordered by, so this function must not compute, compare or re-derive it — the
+ * same rule `dueLabel` follows one card over.
+ */
+function touchedLabel(lastTouchedAt: string): string {
+  return new Date(lastTouchedAt).toLocaleString()
+}
+
+/**
  * The deadline as a person reads it.
  *
  * Formatting only — **no comparison happens here.** Whether the date has passed
@@ -164,7 +221,7 @@ onMounted(load)
   <section class="space-y-6">
     <div>
       <h2 class="text-xl font-semibold tracking-tight">Dashboard</h2>
-      <p class="mt-1 text-sm text-muted-foreground">What is waiting for you.</p>
+      <p class="mt-1 text-sm text-muted-foreground">What is waiting for you, and what you touched last.</p>
     </div>
 
     <p v-if="!canReadSummary" class="text-sm text-muted-foreground" data-testid="no-permission">
@@ -312,6 +369,87 @@ onMounted(load)
         >
           {{ notShown }} more waiting.
         </p>
+      </article>
+      <!--
+        The recent-documents widget (FR-RPT-003, #433). A card, not a list: the
+        document list is one click away and pages and searches properly, and
+        what this answers is *what was I last working on*.
+      -->
+      <article
+        class="rounded-lg border border-border bg-card p-4"
+        data-testid="recent-documents"
+        aria-labelledby="recent-documents-heading"
+      >
+        <div class="flex flex-wrap items-baseline justify-between gap-2">
+          <h3 id="recent-documents-heading" class="text-sm font-medium">What you touched last</h3>
+          <RouterLink
+            v-if="canOpenDocuments"
+            to="/documents"
+            class="text-sm font-medium text-primary underline-offset-4 hover:underline"
+          >
+            Open documents
+          </RouterLink>
+        </div>
+
+        <!--
+          **The empty state is a sentence, not an absence** (#433 AC5) — the same
+          rule the pending-task card follows. A card with nothing in it is
+          indistinguishable from one that failed to load, and the reader has no
+          way to tell which they are looking at.
+        -->
+        <p
+          v-if="recentDocuments.length === 0"
+          class="mt-3 text-sm text-muted-foreground"
+          data-testid="recent-empty"
+        >
+          You have not worked on any documents yet.
+        </p>
+
+        <ul v-else class="mt-3 divide-y divide-border">
+          <li
+            v-for="document in recentDocuments"
+            :key="document.id"
+            class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 py-2 first:pt-0 last:pb-0"
+            data-testid="recent-document"
+          >
+            <div class="min-w-0">
+              <!--
+                Linked only where the link works: the document route holds
+                `document:read` and this page does not require it. The row is
+                shown either way — what the viewer may see is the server's
+                answer, and it already gave it.
+              -->
+              <RouterLink
+                v-if="canOpenDocuments"
+                :to="`/documents/${document.id}`"
+                class="text-sm font-medium text-primary underline-offset-4 hover:underline"
+              >
+                {{ document.title }}
+              </RouterLink>
+              <span v-else class="text-sm font-medium">{{ document.title }}</span>
+
+              <span class="block truncate text-xs text-muted-foreground">
+                {{ document.documentNumber ?? document.documentRef }} ·
+                {{ document.documentTypeCode }}
+              </span>
+
+              <!--
+                **The date is read, never derived** — `lastTouchedAt` is the
+                value the server ordered by, so the sequence on screen and the
+                dates beside it are one answer. `updatedAt` is the field that
+                would look interchangeable and is not: it moves when anybody
+                changes the document.
+              -->
+              <span class="block text-xs text-muted-foreground" data-testid="recent-touched">
+                {{ touchedLabel(document.lastTouchedAt) }}
+              </span>
+            </div>
+
+            <Badge :variant="statusVariant(document.status)" data-testid="recent-status">
+              {{ document.status }}
+            </Badge>
+          </li>
+        </ul>
       </article>
     </template>
   </section>

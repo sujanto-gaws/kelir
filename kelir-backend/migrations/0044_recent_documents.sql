@@ -1,0 +1,72 @@
+-- 0044_recent_documents.sql — the one index the dashboard's recent-documents
+-- widget reads through (FR-RPT-003; #433).
+--
+-- **No table, no permission, no column.** `0043_reporting.sql` opened the
+-- module with a permission and an index and created nothing else; this adds the
+-- second index and nothing else at all. FR-RPT-003 is the third widget on a
+-- surface that already exists, behind a grant that already exists, over rows two
+-- other modules already own — so the only thing left for a migration to do is
+-- make the read cheap.
+--
+-- **The permission is deliberately absent.** `reporting:dashboard:read` gates
+-- the dashboard and the widget is on the dashboard; a
+-- `reporting:recent-documents:read` beside it would be the mistake
+-- `0041_activity_read_dropped.sql` is this project's record of — a second grant
+-- in front of facts the first one already covers, which outlives the check and
+-- then guards nothing (**D-45**, **D-47**, #301). The invariant that makes one
+-- grant enough is unchanged and is the reason this widget needs no new one:
+-- **every row the dashboard serves is the caller's own work**, and these rows
+-- are documents the caller themselves acted on.
+--
+-- # What "touched" means, because an index is the wrong place to learn it
+--
+-- `activity::domain::TOUCH_EVENT_TYPES` is the definition and #433 AC2 required
+-- it to exist before the query did: **you touched a document when you raised or
+-- changed it, said something on it, attached something to it, or moved its
+-- workflow.** Sixteen event types in four groups, and `Attachment.Downloaded`
+-- is excluded because it records *looking* — a deny-list would have counted it
+-- and turned the widget into *what you looked at* with nobody deciding to.
+--
+-- # Why a third index on activity_events
+--
+-- `0033_activity.sql` built two, and the widget's predicate matches neither:
+--
+-- | Index | Leads with | Why it is wrong here |
+-- |---|---|---|
+-- | `idx_activity_events_document_id` | `(document_id, created_at)` | Answers *what happened to this document* — one document's timeline, which is the surface it was built for. The widget starts from a **person**, not a document, so this index can only be reached by scanning it whole |
+-- | `idx_activity_events_tenant_id_event_type` | `(tenant_id, event_type, created_at)` | Leads past the actor into the tenant's whole population of one event type. Every `Document.Updated` anybody wrote, filtered to one person afterwards |
+--
+-- The widget's predicate is `(tenant_id, actor_user_id)` as equalities with
+-- `created_at` ordered inside them, so those three columns in that order are the
+-- index, and `event_type` is left out on purpose: it arrives as `= ANY(...)` over
+-- sixteen values, which is a filter rather than a seek, and putting it fourth
+-- would only lengthen the key.
+--
+-- **This is the second read on every sign-in that this sprint has made, and the
+-- argument 0043 gave applies unchanged**: a dashboard is the one screen every
+-- signed-in person loads (NFR-PERF-002), so its cost grows with the number of
+-- people rather than with anybody's use of it. An index that turns a scan of the
+-- tenant's whole activity history into a seek of one person's is the difference
+-- between a screen that gets slower as the deployment ages and one that does not.
+--
+-- `actor_user_id` is nullable (`0033`), and a null actor matches no caller:
+-- events the workflow engine and the scheduler wrote are in nobody's widget,
+-- which is correct — `actor_type` already distinguishes `SYSTEM` and
+-- `WORKFLOW_ENGINE` from `USER`, and a person scanning what they worked on is
+-- not looking for what a timer did.
+--
+-- # N−1 compatibility
+--
+-- One index. Nothing created, altered or dropped, and no permission row, so the
+-- `v0.7.0` image — which names this index in no statement — starts against this
+-- schema unchanged (release process §6). In the other direction a `v0.8.0` image
+-- against the `v0.7.0` schema serves the widget correctly and slowly: the
+-- statement is valid without the index, which is a read being expensive rather
+-- than a surface being broken.
+
+-- The caller's own recent activity, read on every dashboard load.
+CREATE INDEX idx_activity_events_tenant_id_actor_user_id_created_at
+    ON activity_events (tenant_id, actor_user_id, created_at);
+
+COMMENT ON INDEX idx_activity_events_tenant_id_actor_user_id_created_at IS
+    'The dashboard lists the documents the caller touched most recently (FR-RPT-003, #433). The other two indexes lead with document_id (one document''s timeline) and event_type (the tenant''s whole population of one event), and this widget starts from a person: without it the read scans the tenant''s entire activity history on every sign-in.';

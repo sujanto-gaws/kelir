@@ -131,6 +131,55 @@ pub struct DocumentSummary {
     pub updated_at: DateTime<Utc>,
 }
 
+/// A document the caller touched, and **when they last touched it**
+/// (FR-RPT-003, [#433]).
+///
+/// # A summary and one field, not a widget-shaped row
+///
+/// The document half is [`DocumentSummary`] — the row `GET /documents` already
+/// serves, flattened onto the wire so the dashboard's rows and the document
+/// list's rows are **one description of a document**. A field added to a
+/// document row then arrives on both screens or neither.
+///
+/// That is the argument FR-RPT-002 made one item earlier for carrying
+/// `InboxTask` on the task widget, and it applies here for the same reason: a
+/// second, trimmer row type is where a screen starts disagreeing with the
+/// screen it links to, and the disagreement is invisible until somebody
+/// compares them.
+///
+/// # Why `last_touched_at` is here and not on [`DocumentSummary`]
+///
+/// **It is a fact about this caller's relationship to the row, not about the
+/// document.** Two people who both edited the same document have two different
+/// answers, and a column on the document could hold only one of them — so a
+/// field on [`DocumentSummary`] would be a field that is meaningless on
+/// `GET /documents`, where there is no caller-relative reading of it at all.
+///
+/// It is `max(activity_events.created_at)` over the caller's own touch events,
+/// **read in the statement that matched the row** rather than derived
+/// afterwards. `updated_at` would have been the tempting substitute and is a
+/// different fact: it moves when *anybody* changes the document, so a list
+/// ordered by it answers *what changed recently among things I have touched*,
+/// which is not what the widget is called.
+///
+/// [#433]: https://github.com/sujanto-gaws/kelir/issues/433
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentlyTouchedDocument {
+    /// The document, as every other list screen describes it.
+    #[serde(flatten)]
+    pub summary: DocumentSummary,
+    /// When this caller last did one of the things
+    /// `activity::domain::TOUCH_EVENT_TYPES` counts as touching.
+    ///
+    /// **The server's answer, and the value the list is ordered by** — so the
+    /// order a client renders and the date it prints cannot disagree. A client
+    /// re-sorting on any other field would be a second opinion about what
+    /// *recent* means, and the definition is deliberately the server's
+    /// ([#433] AC2).
+    pub last_touched_at: DateTime<Utc>,
+}
+
 impl Document {
     /// The link as a pair, when both halves are there.
     ///

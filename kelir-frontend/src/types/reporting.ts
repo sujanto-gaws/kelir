@@ -9,6 +9,7 @@
  * and that matters because it is the screen every session loads.
  */
 
+import type { DocumentSummary } from './document'
 import type { InboxTask } from './workflow'
 
 /** What is waiting for the caller: the counts, and the top of the queue. */
@@ -52,4 +53,49 @@ export interface DashboardSummary {
    * your inbox* rather than a second opinion about which work matters most.
    */
   pendingTasks: InboxTask[]
+  /**
+   * The documents the caller touched most recently (FR-RPT-003, #433).
+   *
+   * **`DocumentSummary` and one field**, not a widget shape — the same row the
+   * document list renders, so a field added to a document row arrives on both
+   * screens or neither. The same argument `pendingTasks` makes for carrying
+   * `InboxTask`.
+   *
+   * **What *touched* means is the server's, and it is written down**: you
+   * touched a document when you raised or changed it, said something on it,
+   * attached something to it, or moved its workflow. Opening an attachment is
+   * deliberately not one of them — that records looking, and counting it would
+   * make this card *what you looked at*.
+   *
+   * **No count beside it**, unlike `pendingTasks` and its `tasksWaiting`: a
+   * queue has a size somebody needs, and *how many documents have you ever
+   * touched* is not a question anybody asks. So this array is everything the
+   * widget claims to carry, and the document list is one click away for the
+   * rest.
+   *
+   * **Empty means the caller has touched nothing** — and the screen owes the
+   * reader that sentence in words, because an empty card is indistinguishable
+   * from one that failed to load (#433 AC5).
+   */
+  recentDocuments: RecentlyTouchedDocument[]
+}
+
+/**
+ * A document on the dashboard, with when this caller last touched it.
+ *
+ * `lastTouchedAt` is **not** on `DocumentSummary` and must not move there: it
+ * is a fact about this caller's relationship to the row rather than about the
+ * document, so two people who both edited one document have two different
+ * answers and a field on the document could hold only one.
+ */
+export interface RecentlyTouchedDocument extends DocumentSummary {
+  /**
+   * When this caller last touched it — `max` over their own touch events.
+   *
+   * **The value the server ordered by**, so the sequence and the dates a client
+   * renders cannot disagree. Re-sorting on `updatedAt` would be a second
+   * opinion about what *recent* means, and `updatedAt` moves when *anybody*
+   * changes the document rather than when this caller did.
+   */
+  lastTouchedAt: string
 }

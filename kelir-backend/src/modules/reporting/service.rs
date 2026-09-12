@@ -11,7 +11,7 @@
 //! [#431]: https://github.com/sujanto-gaws/kelir/issues/431
 
 use super::domain::DashboardSummary;
-use super::{DASHBOARD_READ, PENDING_TASKS_SHOWN};
+use super::{DASHBOARD_READ, PENDING_TASKS_SHOWN, RECENT_DOCUMENTS_SHOWN};
 use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
 use crate::modules::document::service::list as document_list;
@@ -56,11 +56,28 @@ use crate::state::AppState;
 /// added to this screen cost it a round trip *fewer*, and the card's number can
 /// no longer disagree with the card's list.
 ///
+/// **FR-RPT-003 ([#433]) put it back to three, and this one is a real third
+/// read.** The recent-documents widget could not be folded into the draft count
+/// the way the task rows folded into the task count: the two touch different
+/// tables under different predicates — one counts `documents` the caller
+/// authored and still holds as `DRAFT`, the other lists `documents` joined to
+/// the caller's own `activity_events` — and a statement covering both would be
+/// this module writing SQL across two modules' tables, which is the thing the
+/// module doc's table exists to say it does not do.
+///
+/// **Three reads on one screen every session loads is a stated cost, not an
+/// oversight** (NFR-PERF-002). Each is an indexed seek on `(tenant_id, …)` with
+/// a small `LIMIT`, and both indexes the sprint added exist precisely so none of
+/// them grows with the deployment. If this does become the dashboard's cost
+/// centre, the answer remains a statement in each owning module rather than one
+/// here.
+///
 /// [#106]: https://github.com/sujanto-gaws/kelir/issues/106
 /// [#121]: https://github.com/sujanto-gaws/kelir/issues/121
 /// [#171]: https://github.com/sujanto-gaws/kelir/issues/171
 /// [#179]: https://github.com/sujanto-gaws/kelir/issues/179
 /// [#432]: https://github.com/sujanto-gaws/kelir/issues/432
+/// [#433]: https://github.com/sujanto-gaws/kelir/issues/433
 pub async fn dashboard_summary(
     state: &AppState,
     caller: &Authenticated,
@@ -69,11 +86,14 @@ pub async fn dashboard_summary(
 
     let tasks = workflow_inbox::waiting_work(state, caller, PENDING_TASKS_SHOWN).await?;
     let draft_documents = document_list::count_own_drafts(state, caller).await?;
+    let recent_documents =
+        document_list::recent_documents(state, caller, RECENT_DOCUMENTS_SHOWN).await?;
 
     Ok(DashboardSummary {
         tasks_waiting: tasks.waiting,
         tasks_overdue: tasks.overdue,
         draft_documents,
         pending_tasks: tasks.next,
+        recent_documents,
     })
 }

@@ -20,7 +20,7 @@ import {
 } from '@/lib/testing/fake-backend'
 
 /**
- * The dashboard (FR-RPT-001, [#431]).
+ * The dashboard (FR-RPT-001, [#431]; FR-RPT-002, [#432]; FR-RPT-003, [#433]).
  *
  * # Seen to fail (coding standard §2.9)
  *
@@ -81,6 +81,41 @@ import {
  * much work is waiting is on this side: deriving the number from the rows it
  * was sent. Both mutations are that mistake, from the two ends it can be made.
  *
+ * ## The recent-documents widget (FR-RPT-003, [#433])
+ *
+ * **Five mutations, run 2026-09-12, each red and each reddening exactly one
+ * test.** Baseline first: **23 passed, nothing mutated.**
+ *
+ * | Mutation | Red |
+ * |---|---|
+ * | **G1** — the row's date read from `updatedAt` instead of `lastTouchedAt` | *shows when the caller last touched it rather than when it last changed* |
+ * | **G2** — the empty sentence never renders, leaving a blank card | *says nothing has been worked on rather than showing an empty card* |
+ * | **G3** — `canOpenDocuments` forced true, so every row is linked | *shows the rows without links when the caller cannot open documents* |
+ * | **G4** — the card re-sorts the server's rows on `updatedAt` | *lists the documents the caller touched, newest touch first* |
+ * | **G5** — the row always shows `documentRef`, never the number | *identifies a row by its number, or by its reference before it has one* |
+ *
+ * **G1 and G4 are the pair worth having, and they are the same mistake from two
+ * ends.** `updatedAt` is the field on this row that looks interchangeable with
+ * `lastTouchedAt` and is not: it moves when **anybody** changes the document,
+ * while `lastTouchedAt` is `max` over *this caller's* own touch events and is
+ * the value the server ordered by. A card reading it would answer *what changed
+ * recently among things I have touched*, which is a different question from the
+ * one the card is named after — and it would be wrong silently, on a screen
+ * where nobody has a second source to check against.
+ *
+ * Both fixtures set the two timestamps **years** apart and in opposite
+ * directions, which is what makes the tests able to tell them apart at all: on
+ * realistic data the two fields usually agree, and a mutation run against a
+ * fixture where they agreed would have called both of these covered.
+ *
+ * **G2 is F2's lesson applied rather than relearned.** The pending-task run
+ * recorded that deleting an empty-state paragraph outright orphans the `v-else`
+ * beside it, so the component stops compiling and the file fails with zero
+ * assertions run — not a survivor and not a red. This one was written as
+ * `v-if="false"` from the start.
+ *
+ * [#433]: https://github.com/sujanto-gaws/kelir/issues/433
+ *
  * [#431]: https://github.com/sujanto-gaws/kelir/issues/431
  * [#432]: https://github.com/sujanto-gaws/kelir/issues/432
  */
@@ -93,6 +128,36 @@ function summary(overrides: Record<string, unknown> = {}): unknown {
     tasksOverdue: 1,
     draftDocuments: 2,
     pendingTasks: [task()],
+    recentDocuments: [recentDocument()],
+    ...overrides,
+  }
+}
+
+/**
+ * One recent-documents row, in the shape the server sends (FR-RPT-003, #433).
+ *
+ * It is a `DocumentSummary` with `lastTouchedAt` beside it — the same row the
+ * document list renders, plus the one field that is about *this caller's*
+ * relationship to it rather than about the document. `updatedAt` is carried
+ * deliberately: it is the field a card might read by mistake, and several tests
+ * below set the two apart so that mistake is visible.
+ */
+function recentDocument(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: '0199a1a0-0000-7000-8000-0000000000d0',
+    documentRef: 'DOC-2026-000002',
+    documentNumber: 'PR-2026-000002',
+    documentTypeId: '0199a1a0-0000-7000-8000-0000000000d5',
+    documentTypeCode: 'PURCHASE_REQUISITION',
+    title: 'Monitor stand for the design desk',
+    status: 'DRAFT',
+    priority: 'NORMAL',
+    entityType: null,
+    entityId: null,
+    submittedAt: null,
+    createdAt: '2026-09-11T02:00:00Z',
+    updatedAt: '2026-09-11T02:00:00Z',
+    lastTouchedAt: '2026-09-11T06:00:00Z',
     ...overrides,
   }
 }
@@ -489,5 +554,208 @@ describe('DashboardPage', () => {
       'reporting:dashboard:read',
     )
     expect(requested).toHaveLength(0)
+  })
+
+  // -------------------------------------------------------------------------
+  // FR-RPT-003 — the recent-documents widget (#433)
+  // -------------------------------------------------------------------------
+
+  /**
+   * **Shows what the caller touched last, in the order the server chose.**
+   *
+   * The rows and their sequence are the server's answer: most recent touch
+   * first, by the `lastTouchedAt` each row carries. A card that re-sorted would
+   * be a second opinion about what *recent* means, and the fixture is
+   * deliberately given rows whose `updatedAt` runs the **other way** — so a
+   * component sorting on the field that looks interchangeable fails here.
+   */
+  it('lists the documents the caller touched, newest touch first', async () => {
+    onSummary = () => ({
+      status: 200,
+      body: itemBody(
+        summary({
+          recentDocuments: [
+            recentDocument({
+              id: '0199a1a0-0000-7000-8000-0000000000d1',
+              title: 'Touched most recently',
+              lastTouchedAt: '2026-09-12T09:00:00Z',
+              updatedAt: '2026-01-01T00:00:00Z',
+            }),
+            recentDocument({
+              id: '0199a1a0-0000-7000-8000-0000000000d2',
+              title: 'Touched a while ago',
+              lastTouchedAt: '2026-09-01T09:00:00Z',
+              updatedAt: '2026-12-01T00:00:00Z',
+            }),
+          ],
+        }),
+      ),
+    })
+
+    const wrapper = await render()
+    const rows = wrapper.findAll('[data-testid="recent-document"]')
+
+    expect(rows).toHaveLength(2)
+    expect(rows[0].text()).toContain('Touched most recently')
+    expect(rows[1].text()).toContain('Touched a while ago')
+  })
+
+  /**
+   * **Says so in words when the caller has touched nothing** (#433 AC5).
+   *
+   * The third state §3.4 asks for, and the reason it is a sentence rather than
+   * an absence: a card with nothing in it is indistinguishable from one that
+   * failed to load, and the reader has no way to tell which they are looking
+   * at.
+   */
+  it('says nothing has been worked on rather than showing an empty card', async () => {
+    onSummary = () => ({
+      status: 200,
+      body: itemBody(summary({ recentDocuments: [] })),
+    })
+
+    const wrapper = await render()
+
+    expect(wrapper.find('[data-testid="recent-documents"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="recent-empty"]').text()).toContain(
+      'have not worked on any documents',
+    )
+    expect(wrapper.findAll('[data-testid="recent-document"]')).toHaveLength(0)
+  })
+
+  /**
+   * **The rows render without links when the caller cannot open documents.**
+   *
+   * The summary is served behind `reporting:dashboard:read` alone, because every
+   * row on it is the caller's own work (ADR-0039) — so a viewer can legitimately
+   * be shown the documents they acted on and still not hold `document:read`,
+   * whose route would answer 403.
+   *
+   * **This is a courtesy and not a control**: it hides a link that would not
+   * work, and hides nothing the server sent. So the assertion is that the title
+   * is still on screen, not merely that the anchor is gone.
+   */
+  it('shows the rows without links when the caller cannot open documents', async () => {
+    signIn(['reporting:dashboard:read'])
+    onSummary = () => ({
+      status: 200,
+      body: itemBody(
+        summary({ recentDocuments: [recentDocument({ title: 'Still legible' })] }),
+      ),
+    })
+
+    const wrapper = await render()
+    const card = wrapper.find('[data-testid="recent-documents"]')
+
+    expect(card.text()).toContain('Still legible')
+    expect(card.findAll('a')).toHaveLength(0)
+  })
+
+  /** And the other half, so the assertion above is about the grant. */
+  it('links the rows when the caller holds document:read', async () => {
+    signIn(['reporting:dashboard:read', 'document:read'])
+    onSummary = () => ({
+      status: 200,
+      body: itemBody(
+        summary({ recentDocuments: [recentDocument({ title: 'Openable' })] }),
+      ),
+    })
+
+    const wrapper = await render()
+    const card = wrapper.find('[data-testid="recent-documents"]')
+
+    expect(card.text()).toContain('Openable')
+    expect(card.findAll('a').length).toBeGreaterThan(0)
+  })
+
+  /**
+   * **The widget adds no request of its own** (#433 AC1, ADR-0039).
+   *
+   * The decision this row was most likely to reverse, asserted rather than
+   * assumed: its rows genuinely are documents, so the two things that would
+   * have served them are a second endpoint and a RAD list definition. **Neither
+   * is called.** The page still makes exactly one request on sign-in, which is
+   * the whole of what one contract buys.
+   */
+  it('asks for no second endpoint and renders no list definition', async () => {
+    onSummary = () => ({
+      status: 200,
+      body: itemBody(summary({ recentDocuments: [recentDocument()] })),
+    })
+
+    await render()
+
+    // Every request the page made, not merely the ones it was expected to: a
+    // second endpoint would show up here as an extra entry.
+    expect(requested).toEqual([expect.stringContaining('/dashboard/summary')])
+    expect(requested.some((url) => url.includes('/documents'))).toBe(false)
+    expect(requested.some((url) => url.includes('/rad/lists'))).toBe(false)
+  })
+
+  /**
+   * **The date shown is `lastTouchedAt` and not the document's own timestamps.**
+   *
+   * `updatedAt` is the field that looks interchangeable and is not: it moves
+   * when **anybody** changes the document, so a card reading it would answer
+   * *what changed recently among things I have touched* — a different question
+   * from the one the card is named after. The fixture sets the two years apart
+   * so only one of them can be on screen.
+   */
+  it('shows when the caller last touched it rather than when it last changed', async () => {
+    onSummary = () => ({
+      status: 200,
+      body: itemBody(
+        summary({
+          recentDocuments: [
+            recentDocument({
+              lastTouchedAt: '2026-09-12T09:00:00Z',
+              updatedAt: '2024-03-04T05:06:00Z',
+            }),
+          ],
+        }),
+      ),
+    })
+
+    const wrapper = await render()
+    const touched = wrapper.find('[data-testid="recent-touched"]').text()
+
+    expect(touched).toContain('2026')
+    expect(touched).not.toContain('2024')
+  })
+
+  /**
+   * **The row carries the document's own identifiers**, because it is a
+   * `DocumentSummary` rather than a widget shape — the same argument the
+   * pending-task rows make for being `InboxTask`s.
+   *
+   * `documentNumber` where there is one, falling back to `documentRef` for a
+   * draft that has not been numbered yet, which is what the document list does.
+   */
+  it('identifies a row by its number, or by its reference before it has one', async () => {
+    onSummary = () => ({
+      status: 200,
+      body: itemBody(
+        summary({
+          recentDocuments: [
+            recentDocument({
+              id: '0199a1a0-0000-7000-8000-0000000000d3',
+              documentNumber: 'PR-2026-000009',
+              documentRef: 'DOC-2026-000009',
+            }),
+            recentDocument({
+              id: '0199a1a0-0000-7000-8000-0000000000d4',
+              documentNumber: null,
+              documentRef: 'DOC-2026-000010',
+            }),
+          ],
+        }),
+      ),
+    })
+
+    const wrapper = await render()
+    const rows = wrapper.findAll('[data-testid="recent-document"]')
+
+    expect(rows[0].text()).toContain('PR-2026-000009')
+    expect(rows[1].text()).toContain('DOC-2026-000010')
   })
 })

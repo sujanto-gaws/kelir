@@ -31,12 +31,22 @@ pub fn routes() -> Router<AppState> {
 /// widget added `pendingTasks` to [`DashboardSummary`] and no route beside this
 /// one, so the page still makes a single request on sign-in.
 ///
+/// **FR-RPT-003 was the harder test and it held too**, because it is the row
+/// [ADR-0039]'s rejected alternative would have served: its rows genuinely are
+/// documents and a RAD list definition would render them. It added
+/// `recentDocuments` to [`DashboardSummary`] — no `GET /dashboard/recent`, and
+/// no list definition ([#433] AC1). Three of the three widgets this sprint
+/// built are on one contract, which is the whole of what the record claimed
+/// would be cheaper.
+///
+/// [#433]: https://github.com/sujanto-gaws/kelir/issues/433
+///
 /// [ADR-0039]: ../../../../docs/architectures/adr/0039.%20A%20Dashboard%20Widget%20Is%20a%20Purpose-Built%20Endpoint.md
 #[utoipa::path(
     get, path = "/api/v1/dashboard/summary", tag = "reporting",
     responses(
-        (status = 200, description = "The caller's own waiting work: the counts, and the first few tasks behind them", body = DashboardSummary),
-        (status = 403, description = "Missing reporting:dashboard:read — the summary asks for nothing else, because every number in it is the caller's own work (ADR-0039)")
+        (status = 200, description = "The caller's own work: the counts, the first few tasks waiting for them, and the documents they touched most recently", body = DashboardSummary),
+        (status = 403, description = "Missing reporting:dashboard:read — the summary asks for nothing else, because every row in it is the caller's own work (ADR-0039)")
     ),
     security(("bearer" = []))
 )]

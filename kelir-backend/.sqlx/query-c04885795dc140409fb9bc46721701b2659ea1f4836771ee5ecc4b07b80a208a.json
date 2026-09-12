@@ -1,0 +1,103 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT d.id, d.document_ref, d.document_number, d.document_type_id,\n               t.type_code AS document_type_code, d.title, d.status, d.priority,\n               d.entity_type, d.entity_id, d.submitted_at, d.created_at, d.updated_at,\n               max(a.created_at) AS \"last_touched_at!\"\n        FROM documents d\n        JOIN document_types t\n          ON t.id = d.document_type_id AND t.tenant_id = d.tenant_id\n        JOIN activity_events a\n          ON a.document_id = d.id AND a.tenant_id = d.tenant_id\n        WHERE d.tenant_id = $1\n          AND d.deleted_at IS NULL\n          AND a.actor_user_id = $2\n          AND a.event_type = ANY($3::text[])\n        GROUP BY d.id, d.document_ref, d.document_number, d.document_type_id,\n                 t.type_code, d.title, d.status, d.priority, d.entity_type,\n                 d.entity_id, d.submitted_at, d.created_at, d.updated_at\n        ORDER BY max(a.created_at) DESC, d.id DESC\n        LIMIT $4\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "document_ref",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "document_number",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "document_type_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "document_type_code",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "title",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "priority",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "entity_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 9,
+        "name": "entity_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 10,
+        "name": "submitted_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 11,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 12,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 13,
+        "name": "last_touched_at!",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "TextArray",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "c04885795dc140409fb9bc46721701b2659ea1f4836771ee5ecc4b07b80a208a"
+}
