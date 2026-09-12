@@ -639,9 +639,7 @@ describe('DashboardPage', () => {
     signIn(['reporting:dashboard:read'])
     onSummary = () => ({
       status: 200,
-      body: itemBody(
-        summary({ recentDocuments: [recentDocument({ title: 'Still legible' })] }),
-      ),
+      body: itemBody(summary({ recentDocuments: [recentDocument({ title: 'Still legible' })] })),
     })
 
     const wrapper = await render()
@@ -656,9 +654,7 @@ describe('DashboardPage', () => {
     signIn(['reporting:dashboard:read', 'document:read'])
     onSummary = () => ({
       status: 200,
-      body: itemBody(
-        summary({ recentDocuments: [recentDocument({ title: 'Openable' })] }),
-      ),
+      body: itemBody(summary({ recentDocuments: [recentDocument({ title: 'Openable' })] })),
     })
 
     const wrapper = await render()

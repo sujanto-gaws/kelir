@@ -221,7 +221,9 @@ onMounted(load)
   <section class="space-y-6">
     <div>
       <h2 class="text-xl font-semibold tracking-tight">Dashboard</h2>
-      <p class="mt-1 text-sm text-muted-foreground">What is waiting for you, and what you touched last.</p>
+      <p class="mt-1 text-sm text-muted-foreground">
+        What is waiting for you, and what you touched last.
+      </p>
     </div>
 
     <p v-if="!canReadSummary" class="text-sm text-muted-foreground" data-testid="no-permission">
