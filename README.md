@@ -203,9 +203,17 @@ every later file down.
 
 ## Local Development
 
+**If this is your first time here, start with
+[docs/operations/02. Quick Start.md](docs/operations/02.%20Quick%20Start.md)** — one
+path, Docker only, ending in a document you have raised, submitted and
+approved. It covers the one step the command below leaves out: a stack brought
+up without a first administrator serves an application nobody can sign in to.
+
 Full instructions — including bringing the release stack up locally from the
 release images — are in
 [docs/operations/01. Installation and Deployment.md](docs/operations/01.%20Installation%20and%20Deployment.md).
+What the screens then do is
+[docs/operations/03. User Manual.md](docs/operations/03.%20User%20Manual.md).
 
 ### Option A: Docker Compose
 

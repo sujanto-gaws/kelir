@@ -1,6 +1,6 @@
 # Kelir Documentation
 
-**Status:** Living · **Last updated:** 2026-09-11
+**Status:** Living · **Last updated:** 2026-09-12
 
 Kelir is a metadata-driven, document-centric, workflow-enabled full-stack framework for building enterprise business applications rapidly — Rust (Axum + SQLx + PostgreSQL) on the backend, Vue 3 (Vite + Pinia + shadcn-vue + Tailwind CSS v4) on the frontend. This folder is the complete documentation set; this file is its map.
 
@@ -10,6 +10,7 @@ Kelir is a metadata-driven, document-centric, workflow-enabled full-stack framew
 
 New to the project? Read in this order:
 
+0. [operations/02. Quick Start.md](operations/02.%20Quick%20Start.md) — optional, and first if you would rather see it than read about it. One sitting, Docker only, ending in a document you have approved. Everything below reads differently once the thing is running.
 1. [concepts/01. Concept.md](concepts/01.%20Concept.md) — the founding idea: documents + a central workflow engine.
 2. [architectures/01. Basic Framework Concept and Architecture.md](architectures/01.%20Basic%20Framework%20Concept%20and%20Architecture.md) — the architecture rationale, document lifecycle, and key decisions.
 3. [requirements/srs.md](requirements/srs.md) — what the system shall do (FR/NFR, MVP criteria).
@@ -17,6 +18,7 @@ New to the project? Read in this order:
 5. [design/02. Database Schema.md](design/02.%20Database%20Schema.md) — the column-level schema, when you start touching data.
 6. [projects/planning/01. Sprint Plan.md](../projects/planning/01.%20Sprint%20Plan.md) — what gets built when.
 7. [operations/01. Installation and Deployment.md](operations/01.%20Installation%20and%20Deployment.md) — how to run it, when you need it running.
+8. [operations/03. User Manual.md](operations/03.%20User%20Manual.md) — how a person uses what you have built, when you need to know what the screens actually do.
 
 Everything else is reference material you pull in when working on that area.
 
@@ -129,6 +131,8 @@ The JSON standards family. Each specification carries its own version, RFC 2119 
 | Document | Content |
 |---|---|
 | [01. Installation and Deployment.md](operations/01.%20Installation%20and%20Deployment.md) | Running Kelir: the development stack, deploying to an IP for testing, provisioning and deploying staging on Ubuntu 24.04, the full configuration reference, backup and restore, troubleshooting |
+| [02. Quick Start.md](operations/02.%20Quick%20Start.md) | **One path, start to finish**: clone, bring the development stack up with a first administrator, and raise, submit and approve a document. Document 01 is the reference and wins where the two could disagree; this is the route through it that answers *does this work* |
+| [03. User Manual.md](operations/03.%20User%20Manual.md) | Using a running Kelir: documents, tasks, attachments, comments, notifications, master data, and the configuration and administration screens. **It describes the screens that exist** — a capability that is real over the API and has no screen says so in place, and §12 collects them |
 
 ### standards/
 
