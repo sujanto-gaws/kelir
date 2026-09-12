@@ -273,6 +273,48 @@ fn escaped(search: Option<&str>) -> Option<String> {
     })
 }
 
+/// How many documents this caller raised and has not sent yet.
+///
+/// **A different question from [`count_documents`], not a narrowing of it.**
+/// That one counts what the document *list* shows, under the rule this file
+/// opens with — tenant plus `document:read`, no third condition. This counts
+/// rows whose author is the caller, which is a fact about the caller rather
+/// than about the population, and it is what the dashboard summary reports
+/// (FR-RPT-001, [#431]).
+///
+/// **So there is no rule here to drift from**, which is worth saying because
+/// the file above it is one long argument about a duplicated predicate: this is
+/// not a second copy of the visibility rule, it is a different predicate over
+/// the same table, and the two are not expected to agree.
+///
+/// `created_by` is nullable, so a document the system raised belongs to nobody
+/// and is counted for nobody. Served by
+/// `idx_documents_tenant_id_created_by_status` (`0043_reporting.sql`), whose
+/// leading columns are exactly these three.
+///
+/// [#431]: https://github.com/sujanto-gaws/kelir/issues/431
+pub async fn count_own_drafts(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    user_id: Uuid,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar!(
+        r#"
+        SELECT count(*)
+        FROM documents
+        WHERE tenant_id = $1
+          AND created_by = $2
+          AND status = 'DRAFT'
+          AND deleted_at IS NULL
+        "#,
+        tenant_id,
+        user_id,
+    )
+    .fetch_one(pool)
+    .await
+    .map(|count| count.unwrap_or(0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

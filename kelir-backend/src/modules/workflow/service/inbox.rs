@@ -180,6 +180,98 @@ pub async fn list_inbox(
     Ok((tasks, pagination.meta(total.max(0) as u64)))
 }
 
+/// How much work is waiting for this caller, as two numbers (FR-RPT-001,
+/// [#431]).
+///
+/// # It counts through the inbox's own predicate, and that is the whole point
+///
+/// Both numbers come from [`inbox::count_for_caller`] — the same function
+/// [`list_inbox`] uses for `meta.total`, under the same `WHERE` clause that
+/// decides which rows the inbox shows. **A second statement counting "tasks
+/// waiting for me" would be a second answer to *whose task is this*, and this
+/// module's repository is one long argument about what that costs**: the
+/// department clause that `0225` added, the delegation rules, the grant's
+/// validity window, and [#279](https://github.com/sujanto-gaws/kelir/issues/279),
+/// where the one duplication in that file drifted exactly where its own comment
+/// warned it would and an inbox said 23 and ended at 19.
+///
+/// So the dashboard's number and the inbox's number cannot disagree, because
+/// there is one of them.
+///
+/// # This function requires no permission, and that is the decision
+///
+/// [`list_inbox`] and [`get_task`] both open with `caller.require(TASK_READ)`,
+/// because both serve task **rows** — a task's name, its document's title, its
+/// due date, who delegated it. `workflow:task:read` is the permission for *the
+/// inbox surface*, and rows are what it protects.
+///
+/// **This returns two integers about the caller's own queue.** It names no
+/// task, no document and no person, and it discloses nothing about anybody
+/// else's work: the predicate it counts under is *assigned to this caller, or
+/// offered to a role this caller holds*. There is nothing here for
+/// `workflow:task:read` to protect, and requiring it would make the dashboard
+/// refuse somebody a count of the work waiting for them.
+///
+/// **The surface is gated where a surface should be** — by
+/// [`crate::modules::reporting::DASHBOARD_READ`], in the one service that
+/// serves it. Asking for both would be the shape **D-45** found and **D-47**
+/// undid one module over, arriving from the other direction.
+///
+/// **What this does not license.** A count over tasks this caller does *not*
+/// hold is the inbox population, and that is [`TASK_READ`]'s to gate.
+/// FR-RPT-007's workload-by-department report is exactly that, and it cannot be
+/// served by widening this function.
+///
+/// [#431]: https://github.com/sujanto-gaws/kelir/issues/431
+pub async fn count_waiting(
+    state: &AppState,
+    caller: &Authenticated,
+) -> Result<WaitingWork, AppError> {
+    let tenant_id = caller.tenant_id();
+    let user_id = caller.user_id();
+
+    let waiting = inbox::count_for_caller(
+        &state.pool,
+        tenant_id,
+        user_id,
+        &InboxFilters {
+            scope: InboxScope::Open,
+            ..InboxFilters::default()
+        },
+    )
+    .await?;
+
+    // **`Overdue` narrows `Open` rather than replacing it** — `InboxScope`'s own
+    // documented shape, `overdue ⊂ open ⊂ all` — so this is a subset of the
+    // number above and a screen may say "3 waiting, 1 late" without the two
+    // being read as four tasks.
+    let overdue = inbox::count_for_caller(
+        &state.pool,
+        tenant_id,
+        user_id,
+        &InboxFilters {
+            scope: InboxScope::Overdue,
+            ..InboxFilters::default()
+        },
+    )
+    .await?;
+
+    Ok(WaitingWork {
+        waiting: waiting.max(0),
+        overdue: overdue.max(0),
+    })
+}
+
+/// Two numbers about one person's queue, as [`count_waiting`] answers them.
+#[derive(Debug, Clone, Copy)]
+pub struct WaitingWork {
+    /// Tasks assigned to the caller, or offered to a role they hold, still open.
+    pub waiting: i64,
+    /// Those of them that are past their date — **a subset of `waiting`**, never
+    /// a separate population.
+    pub overdue: i64,
+}
+
 pub async fn get_task(
     state: &AppState,
     caller: &Authenticated,
