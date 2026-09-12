@@ -9,7 +9,9 @@
  * and that matters because it is the screen every session loads.
  */
 
-/** What is waiting for the caller, as counts. */
+import type { InboxTask } from './workflow'
+
+/** What is waiting for the caller: the counts, and the top of the queue. */
 export interface DashboardSummary {
   /** Tasks assigned to the caller, or offered to a role they hold, still open. */
   tasksWaiting: number
@@ -28,4 +30,26 @@ export interface DashboardSummary {
   tasksOverdue: number
   /** Documents the caller raised and has not sent yet — `DRAFT` and no other status. */
   draftDocuments: number
+  /**
+   * The first few tasks behind `tasksWaiting` (FR-RPT-002, #432).
+   *
+   * **`InboxTask`, the same row `/api/v1/tasks` serves** — not a dashboard
+   * shape. One type means the widget and the inbox cannot disagree about what a
+   * task row *is*, and the field that would drift first is `isOverdue`: a
+   * second shape is where somebody recomputes it from `dueAt` against the
+   * browser's clock, which is the bug FR-TASK-007 names as unreproducible.
+   *
+   * **Its length is not the count.** The server sends at most five; `tasksWaiting`
+   * is the whole queue, which is what lets the card say *3 of 12*. A component
+   * reading `pendingTasks.length` as the number waiting would be wrong by
+   * exactly the rows the person cannot see.
+   *
+   * **Empty means nothing is waiting** — and the screen owes the reader that
+   * sentence in words, because an empty card is indistinguishable from one that
+   * failed to load (#432 AC4).
+   *
+   * The rows arrive in the order the inbox opens on, so they are the *top of
+   * your inbox* rather than a second opinion about which work matters most.
+   */
+  pendingTasks: InboxTask[]
 }

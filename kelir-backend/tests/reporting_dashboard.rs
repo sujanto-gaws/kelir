@@ -16,17 +16,27 @@
 //! the fixture carries a second user and a second role wherever it asserts a
 //! scope.
 //!
-//! # The one that is not about this module
+//! # The ones that are not about this module
 //!
-//! [`the_summary_and_the_inbox_report_the_same_number`] is the test that would
-//! catch the failure this module's shape exists to prevent. The dashboard does
-//! not count tasks its own way — it counts through
+//! [`the_summary_and_the_inbox_report_the_same_number`] and
+//! [`the_widget_lists_the_rows_the_inbox_lists`] are the tests that would catch
+//! the failure this module's shape exists to prevent — the first on the count,
+//! the second on the rows. **Both read the inbox in the same test and assert
+//! the dashboard against what it answered**, rather than against a number the
+//! fixture wrote down, which is what [#432] AC2 means by a *divergence* test: a
+//! task one surface lists and the other does not is the defect, whichever way
+//! round it falls. A test that merely asserted the widget returned some rows
+//! would pass for a widget that had grown a visibility rule of its own.
+//!
+//! [#432]: https://github.com/sujanto-gaws/kelir/issues/432
+//!
+//! The dashboard neither counts nor lists tasks its own way — both come through
 //! `workflow::repository::inbox`'s statement, the one the inbox pages on — and
 //! [#279](https://github.com/sujanto-gaws/kelir/issues/279) is this project's
 //! record of what the alternative costs: the one duplicated predicate in that
-//! file drifted, and an inbox said 23 and ended at 19. **That test fails if
-//! somebody gives the dashboard a count of its own**, which is the only way the
-//! two numbers can ever disagree.
+//! file drifted, and an inbox said 23 and ended at 19. **These tests fail if
+//! somebody gives the dashboard a query of its own**, which is the only way the
+//! two surfaces can ever disagree.
 //!
 //! # Seen to fail (coding standard §2.9)
 //!
@@ -58,6 +68,37 @@
 //! the seventh was the one that mattered. That is why §2.9 asks for the
 //! reddened test to be *named*.
 //!
+//! ## FR-RPT-002, the pending-task widget ([#432])
+//!
+//! **Five mutations, run 2026-09-12, each red and each reddening exactly one
+//! test.** Baseline first: **16 passed, nothing mutated.**
+//!
+//! | Mutation | Reddened |
+//! |---|---|
+//! | **M1** — the waiting count taken from the page's length instead of the statement's `count(*) OVER ()` | [`the_card_shows_the_top_of_the_queue_and_counts_the_whole_of_it`] |
+//! | **M2** — the paged statement's candidate arm stops scoping to `candidate_department_id` | [`a_department_scoped_task_reaches_only_that_departments_widget`] |
+//! | **M3** — `waiting_work` reads `InboxScope::All` rather than `Open` | [`a_finished_task_has_left_the_waiting_count`] |
+//! | **M4** — the overdue window counts every matched row rather than the late ones | [`overdue_counts_only_what_is_late`] |
+//! | **M5** — the paged statement stops admitting a task by its `assignee_user_id` | [`a_delegated_task_is_on_the_delegates_widget_and_not_the_delegators`] |
+//!
+//! **M2 and M5 were rejected on the first attempt, and it is the anchor rule
+//! working rather than a nuisance.** The visibility predicate is written three
+//! times in `repository::inbox` — the page, the count and the detail gate — so
+//! both mutations matched in more than one place and the runner refused them
+//! instead of picking one. §2.9 names that exact failure: *`if !verified {`
+//! occurring twice in one file is how a mutation lands on the wrong branch,
+//! leaving the test green while nothing beneath it changed.* Here it would have
+//! been worse than green — a mutation landing on `count_for_caller` would have
+//! reddened a **different** test and been recorded as covering the widget's
+//! rows. Both were re-anchored from the `LEFT JOIN users f` line, which only the
+//! paged statement has, and then reddened the two tests above.
+//!
+//! **M1 is the one worth keeping in view.** The count and the rows now come from
+//! one statement, so the way they can diverge is no longer a second query — it
+//! is somebody deriving the count from the list, which reads as a
+//! simplification and is wrong by exactly the number of rows the card is
+//! hiding.
+//!
 //! [#106]: https://github.com/sujanto-gaws/kelir/issues/106
 //! [#121]: https://github.com/sujanto-gaws/kelir/issues/121
 //! [#218]: https://github.com/sujanto-gaws/kelir/issues/218
@@ -66,6 +107,7 @@
 mod common;
 
 use axum::http::{Method, StatusCode};
+use chrono::{Duration, Utc};
 use common::{fixtures, TestApp};
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -109,6 +151,17 @@ fn workflow_for(key: &str, role_code: &str) -> Value {
 }
 
 async fn publish_workflow(app: &TestApp, token: &str, key: &str, role_code: &str) -> Uuid {
+    publish_workflow_definition(app, token, key, workflow_for(key, role_code)).await
+}
+
+/// The same, for the two tests that need an assignment `workflow_for` does not
+/// write — a department-scoped role, and one named person.
+async fn publish_workflow_definition(
+    app: &TestApp,
+    token: &str,
+    key: &str,
+    definition: Value,
+) -> Uuid {
     let created = app
         .post(
             "/api/v1/workflow/definitions",
@@ -116,7 +169,7 @@ async fn publish_workflow(app: &TestApp, token: &str, key: &str, role_code: &str
             json!({
                 "workflowKey": key,
                 "name": "Standard approval",
-                "definition": workflow_for(key, role_code),
+                "definition": definition,
             }),
         )
         .await;
@@ -248,32 +301,63 @@ async fn submitted_document(app: &TestApp, token: &str, type_id: Uuid, title: &s
     id
 }
 
+/// What a dashboard caller holds, before any test adds to it.
+const HOLDER_PERMISSIONS: &[&str] = &[
+    "reporting:dashboard:read",
+    "workflow:task:read",
+    "workflow:instance:read",
+    "document:read",
+    "document:create",
+    // So a fixture author can send their own draft, which is what
+    // `a_submitted_document_has_left_the_drafts_count` needs in order to move a
+    // row out of the count rather than merely never add it.
+    "document:submit",
+    // And so an approver can finish one, which is what
+    // `a_finished_task_has_left_the_waiting_count` needs for the same reason —
+    // see the note on that test.
+    "workflow:task:execute",
+];
+
 /// A role holding what the dashboard and the surfaces behind it need, and a
 /// user holding that role.
 async fn holder(app: &TestApp, role_code: &str, username: &str) -> String {
+    holder_party(app, role_code, username, &[]).await.1
+}
+
+/// The same, with the holder's **id** as well as their token, and room for a
+/// permission the ordinary caller has no use for.
+///
+/// The delegation test needs the id because a `USER` assignment names a person
+/// in the workflow definition itself, and it needs `identity:delegation:create`
+/// because a window is opened by the person handing their work over.
+async fn holder_party(
+    app: &TestApp,
+    role_code: &str,
+    username: &str,
+    extra: &[&str],
+) -> (Uuid, String) {
+    let mut permissions = HOLDER_PERMISSIONS.to_vec();
+    permissions.extend_from_slice(extra);
+
     let role = fixtures::create_role_with_permissions(
         &app.pool,
         fixtures::SYSTEM_TENANT_ID,
         role_code,
-        &[
-            "reporting:dashboard:read",
-            "workflow:task:read",
-            "workflow:instance:read",
-            "document:read",
-            "document:create",
-            // So a fixture author can send their own draft, which is what
-            // `a_submitted_document_has_left_the_drafts_count` needs in order
-            // to move a row out of the count rather than merely never add it.
-            "document:submit",
-            // And so an approver can finish one, which is what
-            // `a_finished_task_has_left_the_waiting_count` needs for the same
-            // reason — see the note on that test.
-            "workflow:task:execute",
-        ],
+        &permissions,
     )
     .await;
 
-    user_with_roles(app, username, &[role]).await
+    let id = fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        username,
+        &format!("{username}@example.test"),
+        common::ADMIN_PASSWORD,
+        &[role],
+    )
+    .await;
+
+    (id, app.sign_in(username, common::ADMIN_PASSWORD).await)
 }
 
 async fn user_with_roles(app: &TestApp, username: &str, roles: &[Uuid]) -> String {
@@ -295,6 +379,113 @@ async fn summary_of(app: &TestApp, token: &str) -> Value {
     assert_eq!(response.status, StatusCode::OK, "{}", response.body);
 
     response.body["data"].clone()
+}
+
+/// The ids of the tasks the widget listed, in the order it listed them.
+fn pending_ids(summary: &Value) -> Vec<String> {
+    summary["pendingTasks"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the summary carries a pendingTasks array: {summary}"))
+        .iter()
+        .map(|task| {
+            task["id"]
+                .as_str()
+                .unwrap_or_else(|| panic!("a pending task has an id: {task}"))
+                .to_owned()
+        })
+        .collect()
+}
+
+/// The ids of the tasks the **inbox** listed, in the order it listed them.
+///
+/// The widget's rows are asserted against these rather than against a fixture's
+/// expectations, which is what makes the tests below divergence tests rather
+/// than presence tests ([#432] AC2): a task one surface lists and the other
+/// does not is the defect, whichever way round it falls.
+async fn inbox_ids(app: &TestApp, token: &str) -> Vec<String> {
+    let response = app.get(TASKS, Some(token)).await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+
+    response.body["data"]
+        .as_array()
+        .expect("the inbox is a page")
+        .iter()
+        .map(|task| task["id"].as_str().expect("an id").to_owned())
+        .collect()
+}
+
+/// A workflow whose one task is offered to a role **within one department**.
+fn department_workflow(key: &str, role_code: &str, department_code: &str) -> Value {
+    let mut definition = workflow_for(key, role_code);
+
+    definition["states"][0]["task"]["assignment"] = json!({
+        "assigneeType": "DEPARTMENT_ROLE",
+        "roleCode": role_code,
+        "departmentScope": department_code,
+    });
+
+    definition
+}
+
+/// A workflow whose one task is assigned to one named person.
+///
+/// A window redirects work that resolves to somebody, and a role task has no
+/// assignee to redirect — `workflow::service::assignment`'s header says why — so
+/// the delegated case has to be a `USER` assignment.
+fn user_workflow(key: &str, assignee: Uuid) -> Value {
+    let mut definition = workflow_for(key, "UNUSED");
+
+    definition["states"][0]["task"]["assignment"] =
+        json!({ "assigneeType": "USER", "userId": assignee.to_string() });
+
+    for transition in definition["transitions"]
+        .as_array_mut()
+        .expect("the transitions")
+    {
+        transition["allowedBy"] = json!({ "assigneeType": "USER", "userId": assignee.to_string() });
+    }
+
+    definition
+}
+
+/// A department, by code.
+async fn department(app: &TestApp, code: &str, name: &str) -> Uuid {
+    let id = Uuid::now_v7();
+
+    sqlx::query(
+        "INSERT INTO departments (id, tenant_id, department_code, name) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(id)
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .bind(code)
+    .bind(name)
+    .execute(&app.pool)
+    .await
+    .expect("insert the department");
+
+    id
+}
+
+/// Scopes a user's grant to one department.
+///
+/// `user_roles.department_id` is the optional department-scoped grant `0002`
+/// created and the column `DEPARTMENT_ROLE` resolves against.
+async fn scope_grant_to(app: &TestApp, username: &str, department: Uuid) {
+    let updated = sqlx::query(
+        "UPDATE user_roles SET department_id = $1 \
+         WHERE user_id = (SELECT id FROM users WHERE username = $2)",
+    )
+    .bind(department)
+    .bind(username)
+    .execute(&app.pool)
+    .await
+    .expect("scope the grant");
+
+    assert_eq!(
+        updated.rows_affected(),
+        1,
+        "the fixture scoped no grant, so the department clause would be untested"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -528,10 +719,19 @@ async fn a_finished_task_has_left_the_waiting_count() {
         .await;
     assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
 
+    let summary = summary_of(&app, &approver).await;
+
     assert_eq!(
-        summary_of(&app, &approver).await["tasksWaiting"],
-        1,
+        summary["tasksWaiting"], 1,
         "a task this caller has already decided was still counted as waiting"
+    );
+    // **And it has left the rows too.** The count and the list come from one
+    // statement now (#432 AC5), so asserting only the number would leave the
+    // scope covered on one of the two things that statement answers.
+    assert_eq!(
+        pending_ids(&summary).len(),
+        1,
+        "a decided task was still listed on the dashboard: {summary}"
     );
 }
 
@@ -569,6 +769,310 @@ async fn overdue_counts_only_what_is_late() {
     assert_eq!(
         summary["tasksOverdue"], 1,
         "the undated task was reported as late, or the late one was not: {summary}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FR-RPT-002 — the pending-task widget ([#432])
+// ---------------------------------------------------------------------------
+
+/// **The widget lists the rows the inbox lists.**
+///
+/// # A divergence test, not a presence test
+///
+/// [#432] AC2 asks for exactly this and says why: *a task the inbox lists and
+/// the widget does not, or the reverse, is the defect.* A test that merely
+/// asserted the widget returned some rows would pass for a widget that had
+/// grown a visibility rule of its own — which is the one failure the whole
+/// shape of this module exists to prevent, and the one
+/// [#279](https://github.com/sujanto-gaws/kelir/issues/279) records the cost of.
+///
+/// So the expected value is **what the inbox answered**, read from the inbox in
+/// the same test, rather than a list the fixture wrote down. The second holder
+/// is here for the reason coding standard §2.9 gives: one subject cannot tell
+/// *scoped to this caller* from *not scoped at all*, because a widget that
+/// listed the tenant's tasks would read identically.
+#[tokio::test]
+async fn the_widget_lists_the_rows_the_inbox_lists() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let theirs = holder(&app, "RD-W-SAME", "rd.w.same").await;
+    let other = holder(&app, "RD-W-OTHER", "rd.w.other").await;
+
+    let workflow = publish_workflow(&app, &token, "rd_w_same", "RD-W-SAME").await;
+    let other_workflow = publish_workflow(&app, &token, "rd_w_other", "RD-W-OTHER").await;
+    let type_id = document_type(&app, &token, "RD_W_SAME", workflow).await;
+    let other_type = document_type(&app, &token, "RD_W_OTH", other_workflow).await;
+
+    submitted_document(&app, &token, type_id, "One").await;
+    submitted_document(&app, &token, type_id, "Two").await;
+    submitted_document(&app, &token, other_type, "Not theirs").await;
+
+    let inbox = inbox_ids(&app, &theirs).await;
+    let summary = summary_of(&app, &theirs).await;
+
+    assert_eq!(
+        inbox.len(),
+        2,
+        "the fixture did not raise the tasks it meant to"
+    );
+    assert_eq!(
+        pending_ids(&summary),
+        inbox,
+        "the widget and the inbox disagree about which tasks are waiting — \
+         two answers to whose task is this: {summary}"
+    );
+
+    // The other holder's, so the assertion above is not passing because every
+    // row in this test belongs to everybody.
+    let other_inbox = inbox_ids(&app, &other).await;
+    let other_summary = summary_of(&app, &other).await;
+
+    assert_eq!(other_inbox.len(), 1);
+    assert_eq!(
+        pending_ids(&other_summary),
+        other_inbox,
+        "the second holder's widget does not match their own inbox: {other_summary}"
+    );
+    assert!(
+        pending_ids(&summary)
+            .iter()
+            .all(|id| !other_inbox.contains(id)),
+        "one person's waiting work appeared on another person's dashboard"
+    );
+}
+
+/// **The card shows the top of the queue, and the count says how deep it is.**
+///
+/// Six tasks, five rows, and `tasksWaiting` reads six ([#432] AC1, AC5). The
+/// count is not the length of the list and must not be derived from it — which
+/// is what makes *3 of 12* sayable, and what this fixture is sized to catch: a
+/// widget whose count came from `pendingTasks.length` would read five here and
+/// be wrong by exactly the number of tasks the person cannot see.
+///
+/// The order is the inbox's own, so the rows are a **prefix** of it rather than
+/// a selection out of it.
+#[tokio::test]
+async fn the_card_shows_the_top_of_the_queue_and_counts_the_whole_of_it() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let approver = holder(&app, "RD-W-DEEP", "rd.w.deep").await;
+    let workflow = publish_workflow(&app, &token, "rd_w_deep", "RD-W-DEEP").await;
+    let type_id = document_type(&app, &token, "RD_W_DEEP", workflow).await;
+
+    for n in 1..=6 {
+        submitted_document(&app, &token, type_id, &format!("Requisition {n}")).await;
+    }
+
+    let summary = summary_of(&app, &approver).await;
+    let listed = pending_ids(&summary);
+
+    assert_eq!(
+        summary["tasksWaiting"], 6,
+        "the count describes the queue, not the card: {summary}"
+    );
+    assert_eq!(
+        listed.len(),
+        5,
+        "the card carries reporting::PENDING_TASKS_SHOWN rows: {summary}"
+    );
+
+    let inbox = inbox_ids(&app, &approver).await;
+    assert_eq!(inbox.len(), 6, "the fixture did not raise six tasks");
+    assert_eq!(
+        listed,
+        inbox[..5].to_vec(),
+        "the widget is not the top of the inbox — it has an order of its own"
+    );
+}
+
+/// **Nothing waiting is an empty list beside a zero, and never a missing
+/// field** ([#432] AC4).
+///
+/// The screen has to be able to say *nothing is waiting for you* in words,
+/// because an empty card is indistinguishable from one that failed to load.
+/// What the contract owes it is the difference between *no rows* and *no
+/// answer*, and `pendingTasks` is an array either way.
+#[tokio::test]
+async fn a_viewer_with_nothing_waiting_gets_an_empty_list_and_a_zero() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let idle = holder(&app, "RD-W-IDLE", "rd.w.idle").await;
+    let busy = holder(&app, "RD-W-BUSY", "rd.w.busy").await;
+
+    // Somebody else's task exists, so this asserts *empty for this caller*
+    // rather than *empty because the tenant has no tasks at all*.
+    let workflow = publish_workflow(&app, &token, "rd_w_busy", "RD-W-BUSY").await;
+    let type_id = document_type(&app, &token, "RD_W_BUSY", workflow).await;
+    submitted_document(&app, &token, type_id, "Somebody else's").await;
+
+    let summary = summary_of(&app, &idle).await;
+
+    assert!(
+        summary["pendingTasks"].is_array(),
+        "pendingTasks is an array even when it is empty: {summary}"
+    );
+    assert_eq!(pending_ids(&summary), Vec::<String>::new());
+    assert_eq!(summary["tasksWaiting"], 0);
+
+    assert_eq!(
+        pending_ids(&summary_of(&app, &busy).await).len(),
+        1,
+        "the fixture's own task was not raised, so the empty above means nothing"
+    );
+}
+
+/// **A department-scoped task is on that department's widget and no other**
+/// ([#432] AC6).
+///
+/// # One of the two cases that has already cost this project a fix
+///
+/// The `candidate_department_id` clause arrived with
+/// [#225](https://github.com/sujanto-gaws/kelir/issues/225), which closed the
+/// half of `DEPARTMENT_ROLE` that was resolved, stored and then read by
+/// nothing. It is the clause a fresh implementation of *whose task is this*
+/// leaves out first, and the widget inherits it only because it inherits the
+/// whole statement.
+///
+/// Both approvers hold the **same role** and differ only in the department
+/// their grant names, which is the fixture that makes the clause observable: a
+/// predicate that dropped it lists Finance's task on Procurement's dashboard,
+/// and every other assertion in this file would still pass.
+#[tokio::test]
+async fn a_department_scoped_task_reaches_only_that_departments_widget() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let finance = department(&app, "RD-DEPT-FIN", "Finance").await;
+    let procurement = department(&app, "RD-DEPT-PROC", "Procurement").await;
+
+    let role = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "RD-W-DEPT",
+        HOLDER_PERMISSIONS,
+    )
+    .await;
+
+    let insider = user_with_roles(&app, "rd.w.fin", &[role]).await;
+    scope_grant_to(&app, "rd.w.fin", finance).await;
+    let outsider = user_with_roles(&app, "rd.w.proc", &[role]).await;
+    scope_grant_to(&app, "rd.w.proc", procurement).await;
+
+    let workflow = publish_workflow_definition(
+        &app,
+        &token,
+        "rd_w_dept",
+        department_workflow("rd_w_dept", "RD-W-DEPT", "RD-DEPT-FIN"),
+    )
+    .await;
+    let type_id = document_type(&app, &token, "RD_W_DEPT", workflow).await;
+
+    submitted_document(&app, &token, type_id, "Finance's requisition").await;
+
+    let theirs = summary_of(&app, &insider).await;
+    let not_theirs = summary_of(&app, &outsider).await;
+
+    assert_eq!(
+        pending_ids(&theirs),
+        inbox_ids(&app, &insider).await,
+        "the department's own approver sees different work on the two surfaces: {theirs}"
+    );
+    assert_eq!(
+        pending_ids(&theirs).len(),
+        1,
+        "the department's own approver was not offered their task: {theirs}"
+    );
+    assert_eq!(
+        pending_ids(&not_theirs),
+        Vec::<String>::new(),
+        "Procurement's approver was offered Finance's task on the dashboard: {not_theirs}"
+    );
+    assert_eq!(
+        not_theirs["tasksWaiting"], 0,
+        "the count crossed the department boundary even though the rows did not: {not_theirs}"
+    );
+}
+
+/// **A delegated task is on the delegate's widget, and off the delegator's**
+/// ([#432] AC6).
+///
+/// # The other case, and the one whose failure is silent
+///
+/// [#234](https://github.com/sujanto-gaws/kelir/pull/234) built delegation end
+/// to end, and a widget that forgot it **shows a delegate an empty dashboard
+/// beside a full inbox** — a person told there is nothing waiting for them
+/// while there is. That is worse than a wrong number, because nobody reports
+/// the absence of work.
+///
+/// The window is opened through the API by the delegator in their own name,
+/// which is the only way one can be opened, so the row reaches the state the
+/// product actually produces rather than one an `UPDATE` invented.
+#[tokio::test]
+async fn a_delegated_task_is_on_the_delegates_widget_and_not_the_delegators() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let (delegator_id, delegator) = holder_party(
+        &app,
+        "RD-W-DELEGATOR",
+        "rd.w.ani",
+        &["identity:delegation:create"],
+    )
+    .await;
+    let (delegate_id, delegate) = holder_party(&app, "RD-W-DELEGATE", "rd.w.budi", &[]).await;
+
+    let opened = app
+        .post(
+            "/api/v1/identity/delegations",
+            Some(&delegator),
+            json!({
+                "delegateUserId": delegate_id,
+                "startsAt": (Utc::now() - Duration::hours(1)).to_rfc3339(),
+                "endsAt": (Utc::now() + Duration::hours(1)).to_rfc3339(),
+            }),
+        )
+        .await;
+    assert_eq!(opened.status, StatusCode::CREATED, "{}", opened.body);
+
+    let workflow = publish_workflow_definition(
+        &app,
+        &token,
+        "rd_w_deleg",
+        user_workflow("rd_w_deleg", delegator_id),
+    )
+    .await;
+    let type_id = document_type(&app, &token, "RD_W_DELEG", workflow).await;
+
+    submitted_document(&app, &token, type_id, "Approved on Ani's behalf").await;
+
+    let theirs = summary_of(&app, &delegate).await;
+    let handed_over = summary_of(&app, &delegator).await;
+
+    assert_eq!(
+        pending_ids(&theirs),
+        inbox_ids(&app, &delegate).await,
+        "the delegate's dashboard and inbox disagree: {theirs}"
+    );
+    assert_eq!(
+        pending_ids(&theirs).len(),
+        1,
+        "the delegate has an empty dashboard beside a full inbox — the widget \
+         forgot delegation: {theirs}"
+    );
+    assert_eq!(
+        theirs["pendingTasks"][0]["delegatedFromUserId"],
+        json!(delegator_id.to_string()),
+        "the row does not say whose approval it is, so the card cannot write \
+         \"on Ani's behalf\": {theirs}"
+    );
+    assert_eq!(
+        pending_ids(&handed_over),
+        Vec::<String>::new(),
+        "the task is still on the dashboard of the person who handed it over: {handed_over}"
     );
 }
 
