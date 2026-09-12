@@ -7,7 +7,7 @@ use crate::health;
 use crate::middleware::cors::cors_layer;
 use crate::modules::{
     activity, attachment, audit, auth, comment, document, document_type, identity, master_data,
-    notification, organization, rad, task_inbox, workflow,
+    notification, organization, rad, reporting, task_inbox, workflow,
 };
 use crate::response::{ErrorBody, ErrorEnvelope, PageMeta};
 use crate::state::AppState;
@@ -150,6 +150,7 @@ use crate::state::AppState;
         document::handlers::document_workflow_history,
         task_inbox::handlers::list_tasks,
         task_inbox::handlers::get_task,
+        reporting::handlers::dashboard_summary,
         organization::handlers::list_departments,
         organization::handlers::get_department,
         organization::handlers::create_department,
@@ -165,6 +166,7 @@ use crate::state::AppState;
         attachment::domain::Attachment,
         attachment::domain::VirusScanStatus,
         activity::domain::ActivityEvent,
+        reporting::domain::DashboardSummary,
         activity::domain::EventCategory,
         audit::domain::AuditEvent,
         notification::domain::Notification,
@@ -440,6 +442,13 @@ fn api_v1_router(state: AppState) -> Router<AppState> {
         )
         .nest("/workflow", workflow::handlers::routes())
         .nest("/tasks", task_inbox::handlers::routes())
+        // Top level and subject-less like the inbox above it: the dashboard
+        // is the caller's own screen and the token is what says whose
+        // (#431). **`/dashboard/…` rather than `/reporting/…`** because the
+        // module is an implementation and the screen is the resource, and
+        // because ADR-0039 puts every FR-RPT widget behind this one path
+        // rather than beside it.
+        .nest("/dashboard", reporting::handlers::routes())
         // Top level and subject-less, beside the inbox rather than under a
         // document: the caller's token is what says whose these are (#251).
         .nest("/notifications", notification::handlers::routes())

@@ -152,3 +152,42 @@ pub async fn require_bound(
          bind it to a document type before rendering it",
     )]))
 }
+
+/// How many documents this caller raised and has not sent yet (FR-RPT-001,
+/// [#431]).
+///
+/// # This function requires no permission, and that is the decision
+///
+/// Every other function in this file opens with `caller.require(DOCUMENT_READ)`,
+/// because every other function serves document **rows** — a title, a number, a
+/// reference, sometimes a form payload. `document:read` is the permission for
+/// *the document surface*, and rows are what it protects.
+///
+/// **This returns one integer about the caller's own unsent work.** It names no
+/// document, says nothing about the tenant's population, and tells the caller
+/// nothing they do not already know first-hand: they raised these rows. There
+/// is nothing here for `document:read` to protect, and requiring it would make
+/// the dashboard refuse somebody a count of their own drafts.
+///
+/// **The alternative was asking for `document:read` as well, and
+/// `0041_activity_read_dropped.sql` is what that costs when it is wrong.**
+/// `activity:read` guarded a surface whose every fact was already behind the
+/// document's own read; it outlived the check by a release and then left the
+/// catalogue (**D-45**, **D-47**, [#301]). The mirror-image mistake is the one
+/// available here — a second permission in front of a fact that needs none —
+/// and the dashboard's own gate, [`crate::modules::reporting::DASHBOARD_READ`],
+/// is where that surface is decided.
+///
+/// **What this does not license.** A count over rows the caller did *not* raise
+/// is the document population, and that is `document:read`'s to gate.
+/// FR-RPT-004's tenant-wide status summary is exactly that, and it cannot be
+/// served by widening this function.
+///
+/// [#301]: https://github.com/sujanto-gaws/kelir/issues/301
+/// [#431]: https://github.com/sujanto-gaws/kelir/issues/431
+pub async fn count_own_drafts(state: &AppState, caller: &Authenticated) -> Result<i64, AppError> {
+    let count =
+        repo::list::count_own_drafts(&state.pool, caller.tenant_id(), caller.user_id()).await?;
+
+    Ok(count)
+}
