@@ -19,12 +19,23 @@
 # apt never reads cannot hold a gate shut.
 #
 # **The predicate is the URI, not the filename.** An allowlist of names would
-# go stale the first time an image renamed a file, and on Ubuntu 24.04 the
-# distribution's own sources live in `sources.list.d/ubuntu.sources` alongside
-# the third parties rather than in `sources.list`. So a file is kept when every
-# URI it carries is on `ubuntu.com`, and disabled otherwise. Comments are
-# stripped first, so a third party someone already commented out is not counted
-# as one and its file is left alone.
+# go stale the first time an image renamed a file — on the hosted runner
+# Chrome's is `google-chrome.sources`, in deb822, not the `.list` the issue's
+# log implies. So a file is disabled when it carries an `http(s)` index that is
+# not on `ubuntu.com`, and kept otherwise. Comments are stripped first, so a
+# third party someone already commented out is not counted as one and its file
+# is left alone.
+#
+# **Only `http(s)` URIs count, and that is the correction the first run of this
+# script bought.** `/etc/apt/sources.list` on the hosted image does not name a
+# host at all — it reads `deb mirror+file:/etc/apt/apt-mirrors.txt noble main`,
+# the indirection GitHub uses to fail over between Azure's Ubuntu mirrors. A
+# scan for `http://` therefore found *no* Ubuntu source, every file it could
+# see was a third party, and the guard at the foot of this file stopped the job
+# saying so. It was right to: judging a file by URIs it does not carry is how
+# you disable the distribution's own archive by accident. A source reached
+# through a mirror file is not an index a third party can hold hostage, so it
+# is left alone and counted as kept.
 #
 # **Disabling is a rename, not a delete.** The suffix takes the file out of the
 # `*.list` / `*.sources` patterns apt reads while leaving it in place to be
@@ -48,22 +59,28 @@ apt_root="${KELIR_APT_ROOT:-/etc/apt}"
 # `security.ubuntu.com` for the security suite.
 ubuntu_uri='^https?://([^/]*\.)?ubuntu\.com(/|$)'
 
+# A line that configures a source at all, in either format: the `deb`/`deb-src`
+# one-liners third parties still ship, and the deb822 `URIs:` stanzas.
+source_line='^[[:space:]]*(deb(-src)?[[:space:]]|URIs:)'
+
 kept=0
 
 for source in "${apt_root}/sources.list" "${apt_root}/sources.list.d/"*; do
   [ -f "${source}" ] || continue
 
-  # Both formats in one sweep: the `deb http://…` one-liners third parties
-  # still ship, and the deb822 `URIs:` lines Ubuntu 24.04 uses for its own.
-  uris="$(sed 's/#.*//' "${source}" | grep -oE 'https?://[^ ]+' || true)"
+  body="$(sed 's/#.*//' "${source}")"
 
-  # Nothing to fetch — the 24.04 `sources.list` stub, or a file whose every
-  # entry is commented out. Neither can fail an update, so neither is touched.
-  [ -n "${uris}" ] || continue
+  # Nothing to fetch — a stub, or a file whose every entry is commented out.
+  # Neither can fail an update, so neither is touched and neither is counted.
+  printf '%s\n' "${body}" | grep -qE "${source_line}" || continue
 
-  if printf '%s\n' "${uris}" | grep -qvE "${ubuntu_uri}"; then
+  foreign="$(printf '%s\n' "${body}" \
+    | grep -oE 'https?://[^ ]+' \
+    | grep -vE "${ubuntu_uri}" || true)"
+
+  if [ -n "${foreign}" ]; then
     echo "disabling ${source}"
-    printf '%s\n' "${uris}" | sort -u | sed 's/^/    /'
+    printf '%s\n' "${foreign}" | sort -u | sed 's/^/    /'
     mv "${source}" "${source}.disabled-by-ci"
   else
     kept=$((kept + 1))
@@ -74,9 +91,10 @@ done
 # loop above would disable all of them.** apt would then update cleanly against
 # nothing and the failure would surface two steps later as a package it cannot
 # locate — the same shape of misdirection #408's second defect is about. Say it
-# here instead.
+# here instead. **This is not hypothetical: it fired on this script's first run
+# and was how the `mirror+file:` indirection above was found.**
 if [ "${kept}" -eq 0 ]; then
-  echo "::error::no apt source survived the narrowing under ${apt_root} — Ubuntu's own sources are not on ubuntu.com on this image"
+  echo "::error::no apt source survived the narrowing under ${apt_root} — nothing here is recognisably Ubuntu's own archive, so refusing to leave apt with no sources at all"
   exit 1
 fi
 
