@@ -169,6 +169,40 @@
 //! in the house shape, cites a record above the high-water mark — a synthetic
 //! `16. A Probe Pass.md`, removed with it — and passes all twelve. A gate that
 //! refused it would be refusing releases rather than governing them.
+//!
+//! # Rule 10, seen red 2026-09-14 (#445)
+//!
+//! **Against the record that earned it, not against a stand-in.**
+//! [Record 07](../../projects/releases/07.%20Release%20v0.7.0.md)'s rollback row
+//! was restored to its wording at `00a27b4` — `**not yet filed**`, where it
+//! stood for four days — and `a_final_record_names_an_issue_for_every_follow_up`
+//! went red naming the record and quoting the row. **The other twelve rules
+//! stayed green**, so the mutation landed on the line rule 10 claims to cover
+//! rather than somewhere beneath it. The record was restored byte-exact
+//! afterwards; [#445](https://github.com/sujanto-gaws/kelir/issues/445) does
+//! not amend it.
+//!
+//! **Six probes the same day, run against rule 10 alone and deleted, positive
+//! control last.** Alone is deliberate: a synthetic `v0.8.0` cites no
+//! verification record, so rules 1, 2, 6 and 7 would refuse it for reasons that
+//! have nothing to do with what is being probed — and a probe that reddens for
+//! the wrong reason is [record 15](../../projects/verifications/15.%20Sprint%2016%20Independent%20Pass.md)
+//! §7's finding wearing a different hat.
+//!
+//! | The Aftermath | Gate |
+//! |---|---|
+//! | A row that **contains** an issue link but does not open with one | **refused** |
+//! | A row opening with a `/pull/` link rather than `/issues/` | **refused** |
+//! | No `- **Follow-ups filed:**` line at all | **refused** |
+//! | The label promises follow-ups and no rows follow it | **refused** |
+//! | A withdrawn follow-up opening with a struck-through issue link | accepted |
+//! | **Control**, last — a row opening with an issue link | accepted |
+//!
+//! **The first probe is the one that matters.** It is the shape record 07's bad
+//! row actually had — prose first, a link later — and a rule asking *does this
+//! row mention an issue* would have accepted it. The two accepted rows are what
+//! stop the rule from being *refuses everything*: one of them is a real shape
+//! [record 01](../../projects/releases/01.%20Release%20v0.1.0.md) already uses.
 
 use std::collections::BTreeSet;
 use std::fs;
