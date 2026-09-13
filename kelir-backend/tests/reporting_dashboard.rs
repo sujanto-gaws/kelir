@@ -42,9 +42,10 @@
 //! # Seen to fail (coding standard §2.9)
 //!
 //! **Seven mutations, run 2026-09-12, each red and each reddening its own test
-//! and no other.** Stated as what was run rather than as what would be run —
-//! the distinction [#404](https://github.com/sujanto-gaws/kelir/issues/404) is
-//! still open about. Baseline first: **11 passed, nothing mutated.**
+//! and no other.** Stated as what was run rather than as what would be run, and
+//! dated, which is what coding standard §2.9 requires of a claim of evidence
+//! ([#404](https://github.com/sujanto-gaws/kelir/issues/404)). Baseline first:
+//! **11 passed, nothing mutated.**
 //!
 //! | Mutation | Reddened |
 //! |---|---|
