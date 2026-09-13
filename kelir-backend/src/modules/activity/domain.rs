@@ -168,3 +168,185 @@ pub fn disclosable(event_type: &str, details: Value) -> Value {
         _ => Value::Object(serde_json::Map::new()),
     }
 }
+
+/// The event types that mean **this person touched this document** (FR-RPT-003,
+/// [#433]).
+///
+/// # The definition, in one sentence, before anything queries it
+///
+/// > **You touched a document when you raised or changed it, said something on
+/// > it, attached something to it, or moved its workflow.**
+///
+/// [#433] AC2 asks for that sentence to exist *before* the query rather than
+/// after it, and the reason is in the requirement's own wording: **`recent` is
+/// exactly the word that hides an unstated join.** A widget called *what you
+/// touched last* whose ordering nobody can state is a widget nobody can test,
+/// because every observed row is consistent with some definition.
+///
+/// So the four clauses below are the definition, and the list is exhaustive —
+/// the groups are the sentence's four verbs in the same order.
+///
+/// # Why this list lives here and not in `modules::reporting`
+///
+/// **`activity_events.event_type` is this module's vocabulary** (naming
+/// convention §7), and [`disclosable`] one screen up is already this module
+/// classifying it. A reader asking *what does `Workflow.TaskClaimed` count as*
+/// should find both answers in one file, and a reporting module holding its own
+/// copy of the vocabulary would be a second place to update when a verb is
+/// added.
+///
+/// # Why an allow-list — the same argument [`disclosable`] makes, pointing the
+/// other way
+///
+/// [`disclosable`] is an allow-list because forgetting to extend a deny-list is
+/// silent, and a silent omission there serves a file name to somebody who may
+/// not read it. **Here a silent omission under-reports a card**, which is the
+/// mild direction — but the allow-list earns its place for a different reason:
+/// **one excluded event type is a read.**
+///
+/// `Attachment.Downloaded` is written when somebody *opens* a file
+/// (`attachment::service`), and it is the one row in the table that records
+/// looking rather than doing. Under a deny-list it counts by default, and the
+/// widget quietly stops being *what you touched* and becomes *what you looked
+/// at* — a different feature, with a different privacy question, arrived at by
+/// nobody deciding anything. **An event type nobody has classified should not
+/// change what a screen means**, and that is what makes the list closed rather
+/// than open.
+///
+/// **`Document.Deleted` is excluded for a different reason**: it is not a
+/// judgement about whether deleting is touching, but that the statement joins
+/// `documents` with `deleted_at IS NULL` ([#433] AC6), so the row it names
+/// cannot come back anyway. A predicate that can never match belongs out of the
+/// list rather than in it looking load-bearing.
+///
+/// The workflow *definition* events — `Workflow.Created`, `Workflow.Updated`,
+/// `Workflow.Published`, `Workflow.RevisionCreated`, `Workflow.Deleted` — are
+/// absent because they carry no `document_id` at all. They are things that
+/// happened to a workflow, and this list is read through a join on the document.
+///
+/// # When a verb is added
+///
+/// A module adding an event type with a `document_id` has to decide whether it
+/// is a touch, and `a_new_event_type_is_classified_deliberately` is what makes
+/// that a decision rather than an omission: it pins the set, so the test fails
+/// and whoever added the verb writes down which of the four clauses it belongs
+/// to.
+///
+/// [#433]: https://github.com/sujanto-gaws/kelir/issues/433
+pub const TOUCH_EVENT_TYPES: &[&str] = &[
+    // **You raised or changed the document itself.** `Document.Deleted` is the
+    // one absence, and the paragraph above says why it is not a judgement.
+    "Document.Created",
+    "Document.Updated",
+    "Document.Submitted",
+    "Document.StatusChanged",
+    // **You said something on it.** An edit and a deletion are in because the
+    // question is *did this person act on this document*, and tidying your own
+    // wording is acting on it — the alternative would date the document from a
+    // comment you have since rewritten.
+    "Comment.Added",
+    "Comment.Replied",
+    "Comment.Edited",
+    "Comment.Deleted",
+    // **You attached something to it, or took something off.** Adding and
+    // removing only — `Attachment.Downloaded` is the read this list exists to
+    // keep out.
+    "Attachment.Added",
+    "Attachment.Deleted",
+    "Reference.Added",
+    "Reference.Deleted",
+    // **You moved its workflow.** Deciding is the obvious one; claiming and
+    // delegating are here because both are a person taking a position on this
+    // document's progress, which is what somebody scanning *what did I work on*
+    // is looking for.
+    "Workflow.Decided",
+    "Workflow.TaskClaimed",
+    "Workflow.TaskCompleted",
+    "Workflow.TaskDelegated",
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_new_event_type_is_classified_deliberately() {
+        // **This test exists to fail.** Adding an event type that names a
+        // document is a decision about whether it is a touch (FR-RPT-003), and
+        // the failure is what turns that into a decision instead of a default.
+        // If you are here because you added a verb: put it in one of
+        // `TOUCH_EVENT_TYPES`' four groups, or add it below with the reason it
+        // is not a touch.
+        assert_eq!(
+            TOUCH_EVENT_TYPES,
+            &[
+                "Document.Created",
+                "Document.Updated",
+                "Document.Submitted",
+                "Document.StatusChanged",
+                "Comment.Added",
+                "Comment.Replied",
+                "Comment.Edited",
+                "Comment.Deleted",
+                "Attachment.Added",
+                "Attachment.Deleted",
+                "Reference.Added",
+                "Reference.Deleted",
+                "Workflow.Decided",
+                "Workflow.TaskClaimed",
+                "Workflow.TaskCompleted",
+                "Workflow.TaskDelegated",
+            ],
+        );
+    }
+
+    #[test]
+    fn opening_a_file_is_not_touching_the_document() {
+        // The one excluded event type that is a **read**, and the reason
+        // `TOUCH_EVENT_TYPES` is closed rather than "everything but". Under a
+        // deny-list this counts by default and the widget silently becomes
+        // *what you looked at* — a different feature nobody chose.
+        assert!(!TOUCH_EVENT_TYPES.contains(&"Attachment.Downloaded"));
+    }
+
+    #[test]
+    fn deleting_a_document_names_a_row_the_statement_cannot_return() {
+        // Not a judgement about whether deleting is touching: the recent-documents
+        // statement joins `documents` with `deleted_at IS NULL` (#433 AC6), so
+        // this event type could only ever match a row already excluded. A
+        // predicate that can never match belongs out of the list rather than in
+        // it looking load-bearing.
+        assert!(!TOUCH_EVENT_TYPES.contains(&"Document.Deleted"));
+    }
+
+    #[test]
+    fn a_workflow_definition_event_is_not_a_document_event() {
+        // These carry no `document_id`, so the join drops them whatever this
+        // list says. They are listed here so the absence reads as known.
+        for event_type in [
+            "Workflow.Created",
+            "Workflow.Updated",
+            "Workflow.Published",
+            "Workflow.RevisionCreated",
+            "Workflow.Deleted",
+        ] {
+            assert!(
+                !TOUCH_EVENT_TYPES.contains(&event_type),
+                "{event_type} names a workflow rather than a document",
+            );
+        }
+    }
+
+    #[test]
+    fn the_touch_list_has_no_duplicates() {
+        // A duplicate would be harmless in `= ANY($n)` and is exactly the kind
+        // of thing a hand-maintained list grows, so it is asserted rather than
+        // trusted.
+        let mut sorted = TOUCH_EVENT_TYPES.to_vec();
+        sorted.sort_unstable();
+        let count = sorted.len();
+        sorted.dedup();
+
+        assert_eq!(sorted.len(), count);
+    }
+}

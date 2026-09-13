@@ -17,12 +17,15 @@
 
 use uuid::Uuid;
 
-use super::super::domain::{DocumentFilters, DocumentQuery, DocumentSort, DocumentSummary};
+use super::super::domain::{
+    DocumentFilters, DocumentQuery, DocumentSort, DocumentSummary, RecentlyTouchedDocument,
+};
 use super::super::repository as repo;
 use super::super::repository::list::DocumentRow;
 use super::super::DOCUMENT_READ;
 use crate::error::{AppError, ValidationDetail};
 use crate::middleware::auth::Authenticated;
+use crate::modules::activity::domain as activity_domain;
 use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
 
@@ -190,4 +193,73 @@ pub async fn count_own_drafts(state: &AppState, caller: &Authenticated) -> Resul
         repo::list::count_own_drafts(&state.pool, caller.tenant_id(), caller.user_id()).await?;
 
     Ok(count)
+}
+
+/// The documents this caller touched most recently (FR-RPT-003, [#433]).
+///
+/// # This function requires no permission either, and the line is *whose work*
+///
+/// [`count_own_drafts`] above argues that at length for a number. **This returns
+/// rows**, and that difference is worth meeting head-on rather than leaving to
+/// the reader, because it is the one an author reviewing this file will stop at.
+///
+/// **The line the dashboard's invariant draws is *whose work*, not *rows versus
+/// counts***, and FR-RPT-002 settled it one item ago: the pending-task widget
+/// serves task rows behind `reporting:dashboard:read` alone, because a task's own
+/// holder is the last party its name needs keeping from. [ADR-0039] had already
+/// taken it — each FR-RPT row "inherits FR-RPT-001's endpoint, its permission
+/// and its card".
+///
+/// The same holds here and more plainly: **the caller is the actor on every
+/// event that put a document in this list.** They raised it, edited it,
+/// commented on it, or decided it. There is no row here whose title they are
+/// learning for the first time, so `document:read` in front of it would be a
+/// check in front of a fact its subject already has first-hand — the shape
+/// `0041_activity_read_dropped.sql` is this project's record of (**D-45**,
+/// **D-47**, [#301]). It would also make the widget refuse somebody a list of
+/// their own work on the one screen built to show it.
+///
+/// **What the frontend does with that is a courtesy, not a control.** The rows
+/// link into the document screen, that route holds `document:read`, so a viewer
+/// without it sees the rows and not the links. The server is not asked to know
+/// this.
+///
+/// **What this does not license.** Documents the caller did *not* touch are the
+/// document population, and that is [`DOCUMENT_READ`]'s to gate. FR-RPT-004's
+/// tenant-wide status summary is exactly that, and **it cannot be served by
+/// widening this function** — an author reaching for it is standing here, which
+/// is why the sentence is here rather than only in the module doc.
+///
+/// # What "touched" means, and where it is written
+///
+/// [`activity::domain::TOUCH_EVENT_TYPES`] — *you touched a document when you
+/// raised or changed it, said something on it, attached something to it, or
+/// moved its workflow*. [#433] AC2 required that sentence before the query
+/// existed, because **`recent` is the word that hides an unstated join**: every
+/// row a widget shows is consistent with *some* definition, so one that is not
+/// written down cannot be tested against.
+///
+/// The visibility and the ordering are both
+/// [`super::super::repository::list::list_recent_touched`]'s, in one statement,
+/// for this file's usual reason.
+///
+/// [ADR-0039]: ../../../../../docs/architectures/adr/0039.%20A%20Dashboard%20Widget%20Is%20a%20Purpose-Built%20Endpoint.md
+/// [#301]: https://github.com/sujanto-gaws/kelir/issues/301
+/// [#433]: https://github.com/sujanto-gaws/kelir/issues/433
+/// [`activity::domain::TOUCH_EVENT_TYPES`]: crate::modules::activity::domain::TOUCH_EVENT_TYPES
+pub async fn recent_documents(
+    state: &AppState,
+    caller: &Authenticated,
+    limit: i64,
+) -> Result<Vec<RecentlyTouchedDocument>, AppError> {
+    let documents = repo::list::list_recent_touched(
+        &state.pool,
+        caller.tenant_id(),
+        caller.user_id(),
+        activity_domain::TOUCH_EVENT_TYPES,
+        limit,
+    )
+    .await?;
+
+    Ok(documents)
 }

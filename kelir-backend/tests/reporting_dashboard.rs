@@ -9,7 +9,8 @@
 //! something about the handler and nothing about the rows.* So every scope test
 //! below puts the row that must **not** be counted into the database and reads
 //! the number back — a second user's draft, a second tenant's draft, a
-//! submitted document, a soft-deleted one, another role's task.
+//! submitted document, a soft-deleted one, another role's task, a document only
+//! somebody else touched, and an activity event belonging to another tenant.
 //!
 //! **One subject cannot tell scoped from unscoped**, and the assertion reads
 //! identically either way (coding standard §2.9, [#218]'s single root cause), so
@@ -98,6 +99,54 @@
 //! is somebody deriving the count from the list, which reads as a
 //! simplification and is wrong by exactly the number of rows the card is
 //! hiding.
+//!
+//! ## FR-RPT-003, the recent-documents widget ([#433])
+//!
+//! **Eight mutations, run 2026-09-12.** Baseline first: **27 passed, nothing
+//! mutated.** Seven were red on the first pass; **M3 survived**, and closing it
+//! is what took the file to 28.
+//!
+//! | Mutation | Reddened |
+//! |---|---|
+//! | **M1** — the statement stops scoping to the caller (`a.actor_user_id = $2` widened to *any actor*) | [`the_widget_lists_the_documents_the_caller_raised`], and three more |
+//! | **M2** — the statement stops honouring the soft delete | [`a_soft_deleted_document_is_not_recent`] |
+//! | **M3** — the join stops carrying the tenant across to the event | **nothing, on the first run** — see below |
+//! | **M4** — `max(a.created_at)` taken as `min` | [`the_rows_carry_the_timestamp_they_were_ordered_by`] |
+//! | **M5** — the list ordered oldest touch first | [`the_newest_touch_decides_the_order`], and four more |
+//! | **M6** — every event type counts as a touch, reads included | [`opening_a_file_does_not_make_a_document_recent`] |
+//! | **M7** — `RECENT_DOCUMENTS_SHOWN` raised from 5 to 50 | [`the_card_shows_five_and_drops_the_oldest_touch`] |
+//! | **M8** — `recent_documents` acquires a `document:read` check | [`the_widget_asks_for_no_document_read`], and two more |
+//!
+//! **M3 is the finding, and it is the same shape as item 3's M6.** Deleting
+//! `a.tenant_id = d.tenant_id` from the join left all twenty-seven tests green.
+//! [`a_second_tenants_document_is_not_recent_here`] was the test that should
+//! have caught it and **could not have**: it puts the foreign event on a foreign
+//! *document*, and `d.tenant_id = $1` excludes that document before the join is
+//! reached. It proves the `WHERE` and says nothing about the `ON`.
+//!
+//! The row that reaches the join is the **mismatched** one — an event stamped
+//! with another tenant, pointing at a document in this one — and
+//! `activity_events` has no composite foreign key forbidding it
+//! (`0033_activity.sql`). What it costs is not a leaked row but a **wrong
+//! date**: the document is this tenant's and appears either way, while the
+//! foreign event wins the `max(a.created_at)` and re-floats it to the top of
+//! somebody's widget on activity recorded elsewhere.
+//! [`a_foreign_tenants_event_cannot_date_this_tenants_document`] asserts the
+//! order and the timestamp rather than presence, because presence is exactly
+//! where the damage would not show, and M3 then reddened that test and no other.
+//!
+//! **M1, M5 and M8 redden more than one test each, and that is recorded rather
+//! than tuned away.** Each is a predicate several tests rest on — *whose events
+//! these are*, the order, and the absence of a second permission — so a
+//! mutation to it ought to break more than one thing. What §2.9 asks is that
+//! the *named* test is the one written for that predicate, and for all three it
+//! is the first in the row.
+//!
+//! **M2, M4, M6, M7 and the re-run of M3 each reddened exactly one test**, which
+//! is what makes the middle of this table load-bearing rather than
+//! reassuring.
+//!
+//! [#433]: https://github.com/sujanto-gaws/kelir/issues/433
 //!
 //! [#106]: https://github.com/sujanto-gaws/kelir/issues/106
 //! [#121]: https://github.com/sujanto-gaws/kelir/issues/121
@@ -1222,5 +1271,854 @@ async fn a_second_tenants_draft_is_not_on_this_callers_dashboard() {
         summary_of(&app, &author).await["draftDocuments"],
         1,
         "a draft in another tenant was counted on this caller's dashboard"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FR-RPT-003 — the recent-documents widget (#433)
+// ---------------------------------------------------------------------------
+
+/// The ids of the documents the widget listed, in the order it listed them.
+fn recent_ids(summary: &Value) -> Vec<String> {
+    summary["recentDocuments"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the summary carries a recentDocuments array: {summary}"))
+        .iter()
+        .map(|document| {
+            document["id"]
+                .as_str()
+                .unwrap_or_else(|| panic!("a recent document has an id: {document}"))
+                .to_owned()
+        })
+        .collect()
+}
+
+/// Writes one activity event directly, for the cases no API call can produce.
+///
+/// **Three tests need a row the product will not write for them**: an event in
+/// another tenant, one whose actor is the workflow engine rather than a person,
+/// and an `Attachment.Downloaded`. The first two are the shapes a dropped
+/// predicate would expose, and the third needs MinIO and ClamAV to arrive
+/// through the attachment surface — a dependency this suite does not take for
+/// one boolean.
+#[allow(clippy::too_many_arguments)]
+async fn record_touch(
+    app: &TestApp,
+    tenant_id: Uuid,
+    document_id: Uuid,
+    actor_user_id: Option<Uuid>,
+    event_type: &str,
+    at: chrono::DateTime<Utc>,
+) {
+    sqlx::query(
+        "INSERT INTO activity_events (id, tenant_id, created_at, document_id, event_type, \
+         event_category, actor_type, actor_user_id, action_summary) \
+         VALUES ($1, $2, $3, $4, $5, 'DOCUMENT', $6, $7, 'written by a test')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(tenant_id)
+    .bind(at)
+    .bind(document_id)
+    .bind(event_type)
+    .bind(if actor_user_id.is_some() {
+        "USER"
+    } else {
+        "WORKFLOW_ENGINE"
+    })
+    .bind(actor_user_id)
+    .execute(&app.pool)
+    .await
+    .expect("insert an activity event");
+}
+
+async fn user_id_of(app: &TestApp, username: &str) -> Uuid {
+    sqlx::query_scalar("SELECT id FROM users WHERE username = $1 AND tenant_id = $2")
+        .bind(username)
+        .bind(fixtures::SYSTEM_TENANT_ID)
+        .fetch_one(&app.pool)
+        .await
+        .expect("read the fixture user")
+}
+
+/// **Raising a document is touching it, and the widget says so.**
+///
+/// The cheapest of the four verbs and the one every other test here rests on:
+/// `draft_document` goes through `POST /documents`, which writes
+/// `Document.Created` in the same transaction, so the row arrives in the widget
+/// without the test writing an event of its own.
+///
+/// Two documents rather than one, because a widget that returned *everything in
+/// the tenant* would also pass a single-row assertion.
+#[tokio::test]
+async fn the_widget_lists_the_documents_the_caller_raised() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let workflow = publish_workflow(&app, &token, "rd_recent", "RD-RECENT").await;
+    let type_id = document_type(&app, &token, "RD_RCNT", workflow).await;
+
+    let author = holder(&app, "RD-RECENT", "rd.recent").await;
+    let stranger = holder(&app, "RD-RECENT-2", "rd.recent.other").await;
+
+    let first = draft_document(&app, &author, type_id, "Mine, first").await;
+    let second = draft_document(&app, &author, type_id, "Mine, second").await;
+    let theirs = draft_document(&app, &stranger, type_id, "Not mine").await;
+
+    let listed = recent_ids(&summary_of(&app, &author).await);
+
+    assert_eq!(
+        listed,
+        vec![second.to_string(), first.to_string()],
+        "the widget did not list the caller's own two documents newest-touch first"
+    );
+    assert!(
+        !listed.contains(&theirs.to_string()),
+        "a document only somebody else touched was on this caller's widget"
+    );
+
+    // And the other direction, so the assertion above is not passing because
+    // the widget scoped to something else that happens to correlate.
+    assert_eq!(
+        recent_ids(&summary_of(&app, &stranger).await),
+        vec![theirs.to_string()],
+        "the stranger's own widget lost their own document"
+    );
+}
+
+/// **Commenting on a document you did not raise makes it yours** ([#433] AC2).
+///
+/// This is the test that would fail for a widget built on
+/// `documents.created_by`, which is the substitute an author reaching for
+/// *recent documents* would try first. The commenter never touches
+/// `POST /documents` for this row — somebody else raised it — and it still has
+/// to appear, because *commented on* is one of the four verbs the definition
+/// names.
+///
+/// **It is also the ordering case that matters**: the commenter's own document
+/// is raised *after* the one they comment on, and the comment then re-floats the
+/// other above it. A widget ordering by `documents.created_at` or by
+/// `updated_at` passes the presence half of this test and fails here.
+///
+/// [#433]: https://github.com/sujanto-gaws/kelir/issues/433
+#[tokio::test]
+async fn commenting_on_somebody_elses_document_makes_it_recent_for_you() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let workflow = publish_workflow(&app, &token, "rd_cmt", "RD-CMT").await;
+    let type_id = document_type(&app, &token, "RD_CMT", workflow).await;
+
+    let owner = holder(&app, "RD-CMT-OWNER", "rd.cmt.owner").await;
+    let commenter_role = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "RD-CMT-VOICE",
+        &[
+            "reporting:dashboard:read",
+            "document:read",
+            "document:create",
+            "comment:create",
+        ],
+    )
+    .await;
+    let commenter = user_with_roles(&app, "rd.cmt.voice", &[commenter_role]).await;
+
+    let theirs = draft_document(&app, &owner, type_id, "Raised by somebody else").await;
+    // Raised *after* the document above, so ordering by the document's own
+    // timestamps would put this one first.
+    let mine = draft_document(&app, &commenter, type_id, "Raised by the commenter").await;
+
+    let added = app
+        .post(
+            &format!("/api/v1/documents/{theirs}/comments"),
+            Some(&commenter),
+            json!({ "body": "is this the right supplier?" }),
+        )
+        .await;
+    assert_eq!(added.status, StatusCode::OK, "{}", added.body);
+
+    assert_eq!(
+        recent_ids(&summary_of(&app, &commenter).await),
+        vec![theirs.to_string(), mine.to_string()],
+        "a comment did not make somebody else's document the commenter's most recent touch"
+    );
+
+    // The owner's own widget is unchanged by somebody else's comment: they
+    // raised one document and touched one document.
+    assert_eq!(
+        recent_ids(&summary_of(&app, &owner).await),
+        vec![theirs.to_string()],
+        "the owner's widget changed when another person commented"
+    );
+}
+
+/// **The newest touch decides the order, not the oldest.**
+///
+/// `max(created_at)` rather than `min`, and a document touched twice is one row
+/// rather than two. Both halves are asserted, because a `GROUP BY` that took the
+/// wrong aggregate would still return the right *set*.
+#[tokio::test]
+async fn the_newest_touch_decides_the_order() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let workflow = publish_workflow(&app, &token, "rd_order", "RD-ORDER").await;
+    let type_id = document_type(&app, &token, "RD_ORD", workflow).await;
+
+    let author = holder(&app, "RD-ORDER", "rd.order").await;
+    let author_id = user_id_of(&app, "rd.order").await;
+
+    let older = draft_document(&app, &author, type_id, "Touched again later").await;
+    let newer = draft_document(&app, &author, type_id, "Touched once").await;
+
+    // `newer` is ahead on its own creation event, so the fixture starts in the
+    // order this test has to reverse.
+    assert_eq!(
+        recent_ids(&summary_of(&app, &author).await),
+        vec![newer.to_string(), older.to_string()],
+    );
+
+    record_touch(
+        &app,
+        fixtures::SYSTEM_TENANT_ID,
+        older,
+        Some(author_id),
+        "Document.Updated",
+        Utc::now() + Duration::minutes(5),
+    )
+    .await;
+
+    let listed = recent_ids(&summary_of(&app, &author).await);
+
+    assert_eq!(
+        listed,
+        vec![older.to_string(), newer.to_string()],
+        "a later touch did not re-float the document above one touched earlier"
+    );
+    assert_eq!(
+        listed.len(),
+        2,
+        "a document touched twice was listed twice: {listed:?}"
+    );
+}
+
+/// **A soft-deleted document is not recent** ([#433] AC6).
+///
+/// The activity events survive the soft delete — `activity_events` is
+/// append-only and has no `deleted_at` of its own (`0033_activity.sql`) — so
+/// this row is only excluded by the `deleted_at IS NULL` the statement inherits
+/// from the document list. **That makes this the test that fails if the join
+/// ever stops carrying it**, and the reason `Document.Deleted` is not in
+/// `TOUCH_EVENT_TYPES`.
+///
+/// [#433]: https://github.com/sujanto-gaws/kelir/issues/433
+#[tokio::test]
+async fn a_soft_deleted_document_is_not_recent() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let workflow = publish_workflow(&app, &token, "rd_rgone", "RD-RGONE").await;
+    let type_id = document_type(&app, &token, "RD_RGN", workflow).await;
+
+    let author = holder(&app, "RD-RGONE", "rd.rgone").await;
+
+    let kept = draft_document(&app, &author, type_id, "Kept").await;
+    let discarded = draft_document(&app, &author, type_id, "Discarded").await;
+
+    sqlx::query("UPDATE documents SET deleted_at = now() WHERE id = $1")
+        .bind(discarded)
+        .execute(&app.pool)
+        .await
+        .expect("soft-delete a document");
+
+    // The events for the deleted document are still in the table, which is what
+    // makes this an assertion about the join rather than about the fixture.
+    let events_survive: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM activity_events WHERE document_id = $1 AND event_type = 'Document.Created'",
+    )
+    .bind(discarded)
+    .fetch_one(&app.pool)
+    .await
+    .expect("read the deleted document's events");
+    assert_eq!(
+        events_survive, 1,
+        "the fixture cannot prove the join excludes the row if the event went too"
+    );
+
+    assert_eq!(
+        recent_ids(&summary_of(&app, &author).await),
+        vec![kept.to_string()],
+        "a soft-deleted document was on the recent-documents widget"
+    );
+}
+
+/// **A second tenant's document is not recent here.**
+///
+/// Both rows are written directly — the document *and* its activity event —
+/// with this caller as the actor, because that is the shape a dropped
+/// `tenant_id` predicate would expose and no API call can produce it: the
+/// endpoints stamp the caller's own tenant, so a test that went through them
+/// could never tell a tenant-scoped read from an unscoped one ([#106]/[#121]).
+///
+/// **The join's `a.tenant_id = d.tenant_id` is the second half of this**, and it
+/// is asserted by the event being written under the *other* tenant alongside
+/// the document.
+#[tokio::test]
+async fn a_second_tenants_document_is_not_recent_here() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let workflow = publish_workflow(&app, &token, "rd_rten", "RD-RTEN").await;
+    let type_id = document_type(&app, &token, "RD_RTN", workflow).await;
+
+    let author = holder(&app, "RD-RTEN", "rd.rten").await;
+    let author_id = user_id_of(&app, "rd.rten").await;
+
+    let mine = draft_document(&app, &author, type_id, "Theirs, in their tenant").await;
+
+    let other_tenant = fixtures::create_tenant(&app.pool, "RD-ROTHER-TENANT", "Other tenant").await;
+    let elsewhere = Uuid::now_v7();
+
+    sqlx::query(
+        "INSERT INTO documents (id, tenant_id, created_by, document_ref, document_type_id, \
+         title, status) VALUES ($1, $2, $3, $4, $5, $6, 'DRAFT')",
+    )
+    .bind(elsewhere)
+    .bind(other_tenant)
+    .bind(author_id)
+    .bind("RD-ROTHER-0001")
+    .bind(type_id)
+    .bind("A document filed under another tenant")
+    .execute(&app.pool)
+    .await
+    .expect("insert a second tenant's document");
+
+    record_touch(
+        &app,
+        other_tenant,
+        elsewhere,
+        Some(author_id),
+        "Document.Created",
+        Utc::now() + Duration::minutes(5),
+    )
+    .await;
+
+    assert_eq!(
+        recent_ids(&summary_of(&app, &author).await),
+        vec![mine.to_string()],
+        "a document in another tenant was on this caller's widget"
+    );
+}
+
+/// **Opening a file is not touching the document.**
+///
+/// `Attachment.Downloaded` is the one event type in the table that records
+/// *looking* rather than doing, and it is the reason `TOUCH_EVENT_TYPES` is a
+/// closed allow-list rather than "everything but". Under a deny-list this row
+/// counts by default and the widget silently becomes *what you looked at* — a
+/// different card, with a different privacy question, arrived at by nobody
+/// deciding anything.
+///
+/// The event is written directly rather than through the attachment surface,
+/// which would need MinIO and ClamAV for one boolean.
+#[tokio::test]
+async fn opening_a_file_does_not_make_a_document_recent() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let workflow = publish_workflow(&app, &token, "rd_read", "RD-READ").await;
+    let type_id = document_type(&app, &token, "RD_READ", workflow).await;
+
+    let author = holder(&app, "RD-READ", "rd.read").await;
+    let author_id = user_id_of(&app, "rd.read").await;
+
+    let reader_role = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "RD-READ-ONLY",
+        &["reporting:dashboard:read", "document:read"],
+    )
+    .await;
+    let reader = user_with_roles(&app, "rd.read.only", &[reader_role]).await;
+    let reader_id = user_id_of(&app, "rd.read.only").await;
+
+    let document = draft_document(&app, &author, type_id, "Somebody else's document").await;
+
+    record_touch(
+        &app,
+        fixtures::SYSTEM_TENANT_ID,
+        document,
+        Some(reader_id),
+        "Attachment.Downloaded",
+        Utc::now(),
+    )
+    .await;
+
+    assert!(
+        recent_ids(&summary_of(&app, &reader).await).is_empty(),
+        "downloading a file put a document on the reader's recent-documents widget"
+    );
+
+    // And the row is reachable — the same document is on its author's widget,
+    // so the assertion above is not passing because the widget is broken.
+    assert_eq!(
+        recent_ids(&summary_of(&app, &author).await),
+        vec![document.to_string()],
+    );
+
+    // Written under this caller and still not counted, which is what makes the
+    // exclusion about the event type rather than about the actor.
+    let downloads: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM activity_events WHERE actor_user_id = $1 AND event_type = 'Attachment.Downloaded'",
+    )
+    .bind(reader_id)
+    .fetch_one(&app.pool)
+    .await
+    .expect("read the download event");
+    assert_eq!(downloads, 1);
+    assert_ne!(reader_id, author_id);
+}
+
+/// **What the workflow engine did is nobody's recent work.**
+///
+/// `activity_events.actor_user_id` is nullable and a system actor leaves it
+/// null, so the predicate is an equality rather than anything looser: a person
+/// scanning *what did I work on* is not looking for what a timer did, and a
+/// `NULL` that matched would put every automated transition on every
+/// dashboard in the tenant.
+#[tokio::test]
+async fn a_system_actor_is_nobodys_recent_work() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let workflow = publish_workflow(&app, &token, "rd_sys", "RD-SYS").await;
+    let type_id = document_type(&app, &token, "RD_SYS", workflow).await;
+
+    let author = holder(&app, "RD-SYS", "rd.sys").await;
+    let onlooker_role = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "RD-SYS-ONLOOKER",
+        &["reporting:dashboard:read", "document:read"],
+    )
+    .await;
+    let onlooker = user_with_roles(&app, "rd.sys.onlooker", &[onlooker_role]).await;
+
+    let document = draft_document(&app, &author, type_id, "Moved by the engine").await;
+
+    record_touch(
+        &app,
+        fixtures::SYSTEM_TENANT_ID,
+        document,
+        None,
+        "Document.StatusChanged",
+        Utc::now() + Duration::minutes(5),
+    )
+    .await;
+
+    assert!(
+        recent_ids(&summary_of(&app, &onlooker).await).is_empty(),
+        "a system-actor event reached a dashboard"
+    );
+    // The author still sees it, on their own `Document.Created` rather than on
+    // the engine's event.
+    assert_eq!(
+        recent_ids(&summary_of(&app, &author).await),
+        vec![document.to_string()],
+    );
+}
+
+/// **The card shows five and does not grow.**
+///
+/// `RECENT_DOCUMENTS_SHOWN`. Six documents, five rows, and the one left out is
+/// the oldest touch rather than an arbitrary one — which is the half a `LIMIT`
+/// without an `ORDER BY` would get wrong while still returning five.
+///
+/// **There is no count beside the list**, unlike the pending-task widget: the
+/// assertion is that `recentDocuments` is all the widget claims to carry, and
+/// *how many documents have you ever touched* is not a question the card asks.
+#[tokio::test]
+async fn the_card_shows_five_and_drops_the_oldest_touch() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let workflow = publish_workflow(&app, &token, "rd_five", "RD-FIVE").await;
+    let type_id = document_type(&app, &token, "RD_FIVE", workflow).await;
+
+    let author = holder(&app, "RD-FIVE", "rd.five").await;
+
+    let mut created = Vec::new();
+    for index in 0..6 {
+        created.push(draft_document(&app, &author, type_id, &format!("Number {index}")).await);
+    }
+
+    let summary = summary_of(&app, &author).await;
+    let listed = recent_ids(&summary);
+
+    assert_eq!(listed.len(), 5, "the widget carried {} rows", listed.len());
+
+    let expected: Vec<String> = created
+        .iter()
+        .rev()
+        .take(5)
+        .map(|id| id.to_string())
+        .collect();
+    assert_eq!(
+        listed, expected,
+        "the five shown were not the five most recently touched"
+    );
+    assert!(
+        !listed.contains(&created[0].to_string()),
+        "the oldest touch was kept and a newer one dropped"
+    );
+    assert!(
+        summary.get("recentDocumentsTotal").is_none(),
+        "a count appeared beside the list; the widget deliberately has none"
+    );
+}
+
+/// **A viewer who has touched nothing gets an empty array and not an error**
+/// ([#433] AC5).
+///
+/// The server half of *the screen says so in words*: an empty list is a
+/// successful answer, so the page can tell *you have touched nothing* from *the
+/// card failed to load*. A summary that omitted the field, or refused, would
+/// leave the page unable to distinguish them.
+///
+/// [#433]: https://github.com/sujanto-gaws/kelir/issues/433
+#[tokio::test]
+async fn a_viewer_who_has_touched_nothing_gets_an_empty_list() {
+    let app = TestApp::spawn().await;
+
+    let role = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "RD-RNONE",
+        &["reporting:dashboard:read"],
+    )
+    .await;
+    let token = user_with_roles(&app, "rd.rnone", &[role]).await;
+
+    let response = app.get(SUMMARY, Some(&token)).await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+
+    let recent = &response.body["data"]["recentDocuments"];
+    assert!(
+        recent.is_array(),
+        "recentDocuments was not an array for a viewer with nothing: {recent}"
+    );
+    assert_eq!(recent.as_array().expect("an array").len(), 0);
+}
+
+/// **The widget is served to a caller holding only `reporting:dashboard:read`.**
+///
+/// [#433] AC7's permission boundary, and the field that makes it worth asserting
+/// again rather than leaning on
+/// [`the_summary_asks_for_no_permission_but_its_own`]: FR-RPT-003 puts document
+/// **rows** — titles, numbers, references — behind a grant that is not
+/// `document:read`.
+///
+/// That is deliberate and ADR-0039 took it: the caller is the *actor* on every
+/// event that put a row in this list, so there is no title here they are
+/// learning for the first time. Requiring `document:read` would refuse somebody
+/// a list of their own work on the one screen built to show it —
+/// `0041_activity_read_dropped.sql`'s mistake arriving from the other direction.
+///
+/// **The row is read back rather than the status alone**, because a summary that
+/// served an empty array to this caller would pass a 200 assertion while having
+/// quietly acquired a permission check.
+///
+/// [#433]: https://github.com/sujanto-gaws/kelir/issues/433
+#[tokio::test]
+async fn the_widget_asks_for_no_document_read() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let workflow = publish_workflow(&app, &token, "rd_noread", "RD-NOREAD").await;
+    let type_id = document_type(&app, &token, "RD_NORD", workflow).await;
+
+    // Raised with `document:create` and read back without `document:read`, so
+    // the two grants are separated inside one test.
+    let raiser_role = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "RD-NOREAD-RAISE",
+        &["document:create", "document:read"],
+    )
+    .await;
+    let dashboard_role = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "RD-NOREAD-DASH",
+        &["reporting:dashboard:read"],
+    )
+    .await;
+
+    let raising = user_with_roles(&app, "rd.noread", &[raiser_role]).await;
+    let document = draft_document(&app, &raising, type_id, "Raised by its own author").await;
+
+    // The same person, now holding the dashboard grant and nothing else.
+    let user = user_id_of(&app, "rd.noread").await;
+    sqlx::query("DELETE FROM user_roles WHERE user_id = $1")
+        .bind(user)
+        .execute(&app.pool)
+        .await
+        .expect("drop the raising role");
+    sqlx::query("INSERT INTO user_roles (id, tenant_id, user_id, role_id) VALUES ($1, $2, $3, $4)")
+        .bind(Uuid::now_v7())
+        .bind(fixtures::SYSTEM_TENANT_ID)
+        .bind(user)
+        .bind(dashboard_role)
+        .execute(&app.pool)
+        .await
+        .expect("grant only the dashboard");
+
+    let dashboard_only = app.sign_in("rd.noread", common::ADMIN_PASSWORD).await;
+
+    // The document surface is refused...
+    let refused = app.get("/api/v1/documents", Some(&dashboard_only)).await;
+    assert_eq!(
+        refused.status,
+        StatusCode::FORBIDDEN,
+        "the fixture did not actually remove document:read: {}",
+        refused.body
+    );
+
+    // ...and the widget still carries the row.
+    assert_eq!(
+        recent_ids(&summary_of(&app, &dashboard_only).await),
+        vec![document.to_string()],
+        "a caller holding only reporting:dashboard:read was refused their own work"
+    );
+}
+
+/// **`lastTouchedAt` is the value the order was taken on.**
+///
+/// The field the row carries beyond `DocumentSummary`, and the one thing a
+/// client must not recompute: it is `max(activity_events.created_at)` over the
+/// caller's own touches, read in the statement that matched the row. A client
+/// re-sorting on `updatedAt` would be a second opinion about what *recent*
+/// means, and `updatedAt` moves when *anybody* changes the document.
+///
+/// Asserted as a property of the payload — descending, and each row's own
+/// timestamp — rather than against fixture times, so it holds whatever the
+/// clock did.
+#[tokio::test]
+async fn the_rows_carry_the_timestamp_they_were_ordered_by() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let workflow = publish_workflow(&app, &token, "rd_stamp", "RD-STAMP").await;
+    let type_id = document_type(&app, &token, "RD_STMP", workflow).await;
+
+    let author = holder(&app, "RD-STAMP", "rd.stamp").await;
+    let author_id = user_id_of(&app, "rd.stamp").await;
+
+    let older = draft_document(&app, &author, type_id, "Touched again later").await;
+    draft_document(&app, &author, type_id, "Touched once").await;
+
+    record_touch(
+        &app,
+        fixtures::SYSTEM_TENANT_ID,
+        older,
+        Some(author_id),
+        "Document.Updated",
+        Utc::now() + Duration::minutes(5),
+    )
+    .await;
+
+    let summary = summary_of(&app, &author).await;
+    let rows = summary["recentDocuments"].as_array().expect("an array");
+    assert_eq!(rows.len(), 2);
+
+    let stamps: Vec<chrono::DateTime<Utc>> = rows
+        .iter()
+        .map(|row| {
+            row["lastTouchedAt"]
+                .as_str()
+                .unwrap_or_else(|| panic!("a row carries lastTouchedAt: {row}"))
+                .parse()
+                .expect("an RFC 3339 timestamp")
+        })
+        .collect();
+
+    assert!(
+        stamps[0] > stamps[1],
+        "the rows were not ordered by lastTouchedAt descending: {stamps:?}"
+    );
+
+    // The document flattened onto the row is the list's own summary, so a field
+    // the document list serves is on it too.
+    assert_eq!(rows[0]["id"], older.to_string());
+    assert!(
+        rows[0]["documentRef"].is_string(),
+        "the row is not a DocumentSummary: {}",
+        rows[0]
+    );
+    assert_eq!(rows[0]["status"], "DRAFT");
+
+    // And `lastTouchedAt` is the *latest* touch rather than the document's own
+    // timestamps, which is what the re-float above proves it is not.
+    let created_at: chrono::DateTime<Utc> = rows[0]["createdAt"]
+        .as_str()
+        .expect("createdAt")
+        .parse()
+        .expect("a timestamp");
+    assert!(
+        stamps[0] > created_at,
+        "lastTouchedAt was the document's own createdAt"
+    );
+}
+
+/// **A foreign tenant's event cannot date this tenant's document.**
+///
+/// # This test exists because a mutation survived
+///
+/// M3 — deleting `a.tenant_id = d.tenant_id` from the join — left all
+/// twenty-seven tests green on the first run, and
+/// [`a_second_tenants_document_is_not_recent_here`] was the test that should
+/// have caught it and did not. **It could not have**, and the reason is worth
+/// writing down: that test puts the foreign event on a foreign *document*, and
+/// `d.tenant_id = $1` had already excluded the document before the join was
+/// reached. It proves the `WHERE` and says nothing about the `ON`.
+///
+/// **The row that reaches the join is the mismatched one**: an event stamped
+/// with another tenant, pointing at a document in *this* one.
+/// `activity_events.document_id` has no composite foreign key tying the two
+/// tenant columns together (`0033_activity.sql`), so nothing in the schema
+/// forbids it.
+///
+/// **What it would cost is not a leaked row but a wrong date.** The document is
+/// this tenant's and appears either way; without the predicate the foreign
+/// event joins, wins the `max(a.created_at)`, and re-floats the document to the
+/// top of somebody's widget on the strength of activity recorded in another
+/// tenant. So the assertion is about *order and timestamp*, which is where the
+/// damage would show, rather than about presence, which is where it would not.
+#[tokio::test]
+async fn a_foreign_tenants_event_cannot_date_this_tenants_document() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let workflow = publish_workflow(&app, &token, "rd_xten", "RD-XTEN").await;
+    let type_id = document_type(&app, &token, "RD_XTN", workflow).await;
+
+    let author = holder(&app, "RD-XTEN", "rd.xten").await;
+    let author_id = user_id_of(&app, "rd.xten").await;
+
+    let older = draft_document(&app, &author, type_id, "Raised first").await;
+    let newer = draft_document(&app, &author, type_id, "Raised second").await;
+
+    let other_tenant = fixtures::create_tenant(&app.pool, "RD-XTEN-OTHER", "Other tenant").await;
+
+    // The mismatched row: this tenant's document, this caller as the actor, and
+    // **another tenant's** `tenant_id`. Dated ahead of everything, so joining it
+    // would be visible in the order rather than only in the timestamp.
+    record_touch(
+        &app,
+        other_tenant,
+        older,
+        Some(author_id),
+        "Document.Updated",
+        Utc::now() + Duration::minutes(30),
+    )
+    .await;
+
+    let summary = summary_of(&app, &author).await;
+
+    assert_eq!(
+        recent_ids(&summary),
+        vec![newer.to_string(), older.to_string()],
+        "an activity event stamped with another tenant re-floated this tenant's document"
+    );
+
+    // And the date the row carries is this tenant's own event, not the foreign
+    // one — the half that would still be wrong if the order happened to survive.
+    let rows = summary["recentDocuments"].as_array().expect("an array");
+    let older_row = rows
+        .iter()
+        .find(|row| row["id"] == older.to_string())
+        .expect("the older document is listed");
+    let stamped: chrono::DateTime<Utc> = older_row["lastTouchedAt"]
+        .as_str()
+        .expect("lastTouchedAt")
+        .parse()
+        .expect("a timestamp");
+
+    assert!(
+        stamped < Utc::now() + Duration::minutes(30),
+        "the row was dated by an event belonging to another tenant: {stamped}"
+    );
+
+    // The mismatched row really is in the table, so this is an assertion about
+    // the join rather than about an insert that silently did nothing.
+    let planted: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM activity_events WHERE document_id = $1 AND tenant_id = $2",
+    )
+    .bind(older)
+    .bind(other_tenant)
+    .fetch_one(&app.pool)
+    .await
+    .expect("read the planted event");
+    assert_eq!(planted, 1, "the fixture did not plant the mismatched event");
+}
+
+/// **The recent-documents row is in the published contract, and it is flat.**
+///
+/// `RecentlyTouchedDocument` carries `DocumentSummary` under `#[serde(flatten)]`,
+/// which serde and utoipa render two different ways: serde inlines the fields,
+/// utoipa emits an `allOf`. **A generated client reads the second and a browser
+/// receives the first**, so the two have to agree, and the way they stop
+/// agreeing is a schema that was never registered — `components(schemas(...))`
+/// in `router.rs` is a separate list from the `ToSchema` derive, and forgetting
+/// it leaves a dangling `$ref` that nothing else in this suite would notice.
+///
+/// The wire shape is asserted by every other test in this file reading
+/// `documentRef` off the row directly. **This asserts the contract half.**
+#[tokio::test]
+async fn the_recent_document_row_is_in_the_published_contract() {
+    let app = TestApp::spawn().await;
+
+    let document = app.get("/api/docs/openapi.json", None).await;
+    assert_eq!(document.status, StatusCode::OK);
+
+    let schemas = &document.body["components"]["schemas"];
+
+    assert!(
+        !schemas["RecentlyTouchedDocument"].is_null(),
+        "RecentlyTouchedDocument is served on the dashboard and is not in the contract"
+    );
+    assert!(
+        !schemas["DocumentSummary"].is_null(),
+        "the flattened half is referenced and is not in the contract"
+    );
+
+    // And the summary names the field, so a client knows the widget exists at
+    // all. `recentDocuments` rather than `recent_documents`: the envelope is
+    // camelCase and the schema has to say so.
+    let summary = &schemas["DashboardSummary"]["properties"];
+    assert!(
+        !summary["recentDocuments"].is_null(),
+        "DashboardSummary does not carry recentDocuments: {summary}"
+    );
+    assert!(
+        !summary["pendingTasks"].is_null(),
+        "the contract lost a field this sprint already shipped"
+    );
+
+    // There is still exactly one dashboard path (#433 AC1, ADR-0039) — the
+    // decision this row was most likely to reverse, asserted in the contract
+    // rather than only in the frontend's request log.
+    let paths = document.body["paths"]
+        .as_object()
+        .expect("the contract has paths");
+    let dashboard: Vec<&String> = paths
+        .keys()
+        .filter(|path| path.contains("/dashboard"))
+        .collect();
+
+    assert_eq!(
+        dashboard,
+        vec!["/api/v1/dashboard/summary"],
+        "a second dashboard endpoint appeared beside the summary"
     );
 }

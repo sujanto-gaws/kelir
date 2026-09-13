@@ -284,6 +284,7 @@ use crate::state::AppState;
         document_type::numbering::GapPolicy,
         document::domain::Document,
         document::domain::DocumentSummary,
+        document::domain::RecentlyTouchedDocument,
         document::domain::DocumentStatus,
         document::domain::DocumentPriority,
         document::domain::CreateDocumentRequest,

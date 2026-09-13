@@ -35,6 +35,7 @@ use serde_json::Value;
 
 use super::super::domain::{
     DocumentFilters, DocumentPriority, DocumentSort, DocumentStatus, DocumentSummary, EntityType,
+    RecentlyTouchedDocument,
 };
 
 /// A document as the list serves it, with the form payload beside it when
@@ -313,6 +314,141 @@ pub async fn count_own_drafts(
     .fetch_one(pool)
     .await
     .map(|count| count.unwrap_or(0))
+}
+
+/// The documents this caller touched most recently (FR-RPT-003, [#433]).
+///
+/// # The visibility rule is this file's, and it is not restated
+///
+/// [#433] AC3 asks for the widget's visibility to **match the document list's,
+/// reusing its predicates rather than restating them**, and the two lines that
+/// do it are the same two [`count_documents`] and [`list_document_rows`] open
+/// with:
+///
+/// ```text
+/// WHERE d.tenant_id = $1
+///   AND d.deleted_at IS NULL
+/// ```
+///
+/// That is the whole of the rule this file states at the top — *a caller sees a
+/// document when it is in their tenant and they hold `document:read`; there is
+/// no third condition* — and it is why this statement lives here beside the
+/// list's rather than in `modules::reporting`. **A widget that had its own
+/// `WHERE` would be a second answer to what a viewer may see, on the same
+/// screen as the first**, and when FR-DTYPE-008 adds the security-level grain
+/// this file's opening comment promises, it has to land on one statement rather
+/// than being remembered onto two.
+///
+/// `deleted_at IS NULL` is also [#433] AC6 on its own: a soft-deleted document
+/// does not appear, and `a_soft_deleted_document_is_not_recent` is the test that
+/// would fail if this line went.
+///
+/// **What is *not* inherited is the filter set.** `DocumentFilters` does not
+/// reach this statement and there is no `touchedBy` filter on the list, because
+/// [#433]'s *deliberately not here* says a configurable widget is the RAD list
+/// path **D-78** rejected: the moment *recent documents* takes a definition,
+/// this row has quietly become the thing the ADR refused.
+///
+/// # The touch predicate, and why the join carries the ordering
+///
+/// `activity_events` is the only record of *who did what to which document* —
+/// `documents.created_by` answers who raised a row and nothing else, so a widget
+/// built on it would miss every document the caller commented on or decided,
+/// which are two of the four verbs [#433] AC2 names. The event types are
+/// [`activity::domain::TOUCH_EVENT_TYPES`], which is where the definition is
+/// written and where a new verb gets classified.
+///
+/// **`max(a.created_at)` is both the order and the answer.** *Recent* means the
+/// most recent touch, so the value the widget sorts on is the value it shows,
+/// read in the statement that matched the row rather than derived from it
+/// afterwards. A `GROUP BY` rather than a `DISTINCT ON` because the aggregate is
+/// the point: a document the caller edited nine times is one row dated by the
+/// ninth edit.
+///
+/// **The scoping is in the statement** ([#106]/[#121], [#433] AC4).
+/// `a.tenant_id = d.tenant_id` is on the join and not only on the document,
+/// which matters more here than it reads: without it a tenant's event row could
+/// date another tenant's document, and the `ORDER BY` would be carrying a fact
+/// across the boundary even though every row returned is still this tenant's.
+///
+/// `actor_user_id` is nullable, so events the workflow engine and the scheduler
+/// wrote match no caller — correct, and the reason the predicate is an equality
+/// rather than anything looser.
+///
+/// Served by `idx_activity_events_tenant_id_actor_user_id_created_at`
+/// (`0044_recent_documents.sql`), whose leading columns are this predicate's two
+/// equalities with the ordering column inside them.
+///
+/// [#106]: https://github.com/sujanto-gaws/kelir/issues/106
+/// [#121]: https://github.com/sujanto-gaws/kelir/issues/121
+/// [#433]: https://github.com/sujanto-gaws/kelir/issues/433
+/// [`activity::domain::TOUCH_EVENT_TYPES`]: crate::modules::activity::domain::TOUCH_EVENT_TYPES
+pub async fn list_recent_touched(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    touch_event_types: &[&str],
+    limit: i64,
+) -> Result<Vec<RecentlyTouchedDocument>, sqlx::Error> {
+    // `&[&str]` does not bind; the lifetime a `TEXT[]` parameter needs is the
+    // statement's, so the borrowed vocabulary is copied once here rather than
+    // `TOUCH_EVENT_TYPES` being declared as owned strings for the sake of one
+    // call site.
+    let touch_event_types: Vec<String> = touch_event_types
+        .iter()
+        .map(|kind| kind.to_string())
+        .collect();
+
+    let rows = sqlx::query!(
+        r#"
+        SELECT d.id, d.document_ref, d.document_number, d.document_type_id,
+               t.type_code AS document_type_code, d.title, d.status, d.priority,
+               d.entity_type, d.entity_id, d.submitted_at, d.created_at, d.updated_at,
+               max(a.created_at) AS "last_touched_at!"
+        FROM documents d
+        JOIN document_types t
+          ON t.id = d.document_type_id AND t.tenant_id = d.tenant_id
+        JOIN activity_events a
+          ON a.document_id = d.id AND a.tenant_id = d.tenant_id
+        WHERE d.tenant_id = $1
+          AND d.deleted_at IS NULL
+          AND a.actor_user_id = $2
+          AND a.event_type = ANY($3::text[])
+        GROUP BY d.id, d.document_ref, d.document_number, d.document_type_id,
+                 t.type_code, d.title, d.status, d.priority, d.entity_type,
+                 d.entity_id, d.submitted_at, d.created_at, d.updated_at
+        ORDER BY max(a.created_at) DESC, d.id DESC
+        LIMIT $4
+        "#,
+        tenant_id,
+        user_id,
+        &touch_event_types,
+        limit,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| RecentlyTouchedDocument {
+            summary: DocumentSummary {
+                id: row.id,
+                document_ref: row.document_ref,
+                document_number: row.document_number,
+                document_type_id: row.document_type_id,
+                document_type_code: row.document_type_code,
+                title: row.title,
+                status: DocumentStatus::from_db(&row.status),
+                priority: DocumentPriority::from_db(&row.priority),
+                entity_type: row.entity_type.as_deref().and_then(EntityType::from_db),
+                entity_id: row.entity_id,
+                submitted_at: row.submitted_at,
+                created_at: row.created_at,
+                updated_at: row.updated_at,
+            },
+            last_touched_at: row.last_touched_at,
+        })
+        .collect())
 }
 
 #[cfg(test)]

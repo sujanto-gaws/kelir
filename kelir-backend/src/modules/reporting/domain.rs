@@ -5,6 +5,7 @@
 use serde::Serialize;
 use utoipa::ToSchema;
 
+use crate::modules::document::domain::RecentlyTouchedDocument;
 use crate::modules::workflow::service::inbox::InboxTask;
 
 /// The dashboard, as one payload.
@@ -103,4 +104,53 @@ pub struct DashboardSummary {
     ///
     /// [#432]: https://github.com/sujanto-gaws/kelir/issues/432
     pub pending_tasks: Vec<InboxTask>,
+    /// The documents the caller touched most recently (FR-RPT-003, [#433]).
+    ///
+    /// # The row the ADR's rejected alternative would have served
+    ///
+    /// **These really are documents.** [SDD] §8.2.4 defines a RAD list's rows
+    /// as the documents of every type that names it, and a list definition
+    /// would render this widget today with no code at all —
+    /// [architectures/06](../../../../docs/architectures/06.%20Building%20an%20ERP%20on%20Kelir.md)
+    /// §7 says that path is the right tool for its own job, and this field is
+    /// its best case in the phase.
+    ///
+    /// **It is a field here anyway, and [ADR-0039] is the reason**: the
+    /// dashboard is one screen and should have one contract. Four widgets
+    /// fetched four ways is four surfaces to secure, four shapes to page, and
+    /// two answers to *what may this viewer see*. So this field is the one the
+    /// decision cost something to take, and [#433] records the trade rather than
+    /// hiding it — if the list path is ever taken for a dashboard widget, this
+    /// is the row it starts from, and the ADR is where the argument reopens.
+    ///
+    /// # What "touched" means
+    ///
+    /// `activity::domain::TOUCH_EVENT_TYPES`, written down before the query
+    /// existed ([#433] AC2): **you touched a document when you raised or
+    /// changed it, said something on it, attached something to it, or moved its
+    /// workflow.** Sixteen event types in four groups, and
+    /// `Attachment.Downloaded` is deliberately not one of them — it records
+    /// *looking*, and counting it would make this *what you looked at*, a
+    /// different card with a different privacy question.
+    ///
+    /// **Ordered by the caller's most recent touch, newest first**, and
+    /// `lastTouchedAt` on each row is the value that ordering used — so the
+    /// sequence and the dates a client renders cannot disagree.
+    ///
+    /// # No count beside it
+    ///
+    /// Unlike [`Self::pending_tasks`], which has `tasksWaiting` for the whole
+    /// queue. *How many documents have you ever touched* is not a question
+    /// anybody asks, so a client may read this array as everything the widget
+    /// has — there is nothing hidden behind it to be honest about, and the
+    /// document list is one click away for the rest.
+    ///
+    /// **Empty means the caller has touched nothing**, and the screen has to
+    /// say so in words rather than rendering an empty card ([#433] AC5): a card
+    /// with nothing in it is indistinguishable from one that failed to load.
+    ///
+    /// [ADR-0039]: ../../../../docs/architectures/adr/0039.%20A%20Dashboard%20Widget%20Is%20a%20Purpose-Built%20Endpoint.md
+    /// [SDD]: ../../../../docs/design/01.%20System%20Design%20Document.md
+    /// [#433]: https://github.com/sujanto-gaws/kelir/issues/433
+    pub recent_documents: Vec<RecentlyTouchedDocument>,
 }

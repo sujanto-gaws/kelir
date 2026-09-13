@@ -11,12 +11,22 @@
 //!
 //! **[ADR-0039] (D-78) puts every FR-RPT widget on the second path**, and the
 //! count is the argument: four of Phase 8's five widgets have rows a list cannot
-//! carry — two over `workflow_tasks`, one an aggregate over statuses, and this
-//! one counts rather than lists — while the fifth, FR-RPT-003, genuinely is a
+//! carry — two over `workflow_tasks`, one an aggregate over statuses, and one
+//! that counts rather than lists — while the fifth, FR-RPT-003, genuinely is a
 //! page of documents and would render as a list definition today. **That fifth
 //! is why the decision had to be taken rather than assumed.** A dashboard that
 //! fetched its cards two ways would have two answers to *what may this viewer
 //! see* on one screen.
+//!
+//! **FR-RPT-003 is now built, and it is a field on
+//! [`domain::DashboardSummary`] rather than a list definition** ([#433]). It is
+//! the row where the decision cost something, so it is worth being plain about
+//! what was paid: a list definition would have rendered this widget with no
+//! Rust at all. What the endpoint bought instead is one visibility rule on the
+//! screen rather than two, and one shape for a client to render. **[#433]
+//! records the trade rather than hiding it** — if the list path is ever taken
+//! for a dashboard widget, that is the row it starts from and [ADR-0039] is
+//! where the argument reopens.
 //!
 //! So this module has the ordinary shape — domain, repository, service,
 //! handlers — and the dashboard has **one contract that the later widgets
@@ -39,6 +49,7 @@
 //! |---|---|---|
 //! | `tasksWaiting`, `tasksOverdue`, `pendingTasks` | [`workflow::service::inbox::waiting_work`] | `workflow::repository::inbox`'s `WHERE` — the one the inbox itself pages on |
 //! | `draftDocuments` | [`document::service::list::count_own_drafts`] | `tenant_id`, `created_by`, `status = 'DRAFT'` |
+//! | `recentDocuments` | [`document::service::list::recent_documents`] | `document::repository::list`'s own `WHERE` — `tenant_id` and `deleted_at IS NULL`, the two lines the document list opens with |
 //!
 //! **The first row is the one that matters.** *Whose task is this* is a rule
 //! with four clauses — assignee, unassigned-plus-candidate-role, the role
@@ -64,6 +75,27 @@
 //!
 //! [#432]: https://github.com/sujanto-gaws/kelir/issues/432
 //!
+//! **FR-RPT-003 ([#433]) tested the same rule on the other table and it held
+//! the same way.** The recent-documents widget takes the document list's own
+//! `WHERE` — `tenant_id` and `deleted_at IS NULL`, the rule that file states at
+//! its top — rather than restating it, so a document the list refuses and the
+//! widget shows is a defect neither can have separately ([#433] AC3). What the
+//! widget adds is a join and no filter: `activity_events` narrowed to the
+//! caller's own touch events, which is a **different** predicate over the same
+//! rows rather than a second copy of the visibility rule.
+//!
+//! **`activity_events` is the only record of who did what to which document**,
+//! and that is why the widget reads it rather than `documents.created_by`. That
+//! column answers who *raised* a row and nothing else, so a widget built on it
+//! would miss every document the caller commented on or decided — two of the
+//! four verbs [`activity::domain::TOUCH_EVENT_TYPES`] names. The definition
+//! lives there, in the module that owns the vocabulary, beside the other
+//! function that classifies it.
+//!
+//! [#433]: https://github.com/sujanto-gaws/kelir/issues/433
+//! [`activity::domain::TOUCH_EVENT_TYPES`]: crate::modules::activity::domain::TOUCH_EVENT_TYPES
+//! [`document::service::list::recent_documents`]: crate::modules::document::service::list::recent_documents
+//!
 //! # One permission, and the invariant that makes one enough
 //!
 //! [`DASHBOARD_READ`] is the only thing [`service::dashboard_summary`] requires.
@@ -71,9 +103,10 @@
 //!
 //! **The invariant: everything this module serves is about the caller's own
 //! work.** Tasks assigned to them or offered to a role they hold; documents they
-//! raised themselves. Nothing on the dashboard describes another person's work,
-//! another department's workload, or the tenant's population — so there is no
-//! second surface's data here for a second permission to be protecting.
+//! raised themselves; documents they themselves acted on. Nothing on the
+//! dashboard describes another person's work, another department's workload, or
+//! the tenant's population — so there is no second surface's data here for a
+//! second permission to be protecting.
 //!
 //! **It says *everything* rather than *every number* because FR-RPT-002 put
 //! rows on the dashboard**, and the distinction is worth being exact about. The
@@ -84,6 +117,18 @@
 //! FR-RPT-001's endpoint, its permission and its card" — and requiring
 //! `workflow:task:read` for the rows would have made the count and the list
 //! disagree by permission, which is the one thing [#432] AC5 forbids.
+//!
+//! **FR-RPT-003 is the plainest case of that line rather than the hardest.**
+//! The caller is the *actor* on every event that put a document in
+//! `recentDocuments` — they raised it, edited it, commented on it or decided it
+//! — so there is no title in that list a viewer is learning for the first time.
+//! `document:read` in front of it would be a check standing between somebody
+//! and a record of their own actions, and it would refuse a person a list of
+//! their own work on the one screen built to show it.
+//!
+//! The `document:read` **route** still holds, which is what makes the rows
+//! links only where a link would work — the same courtesy the task rows get,
+//! and the same non-control.
 //!
 //! **What the frontend does with that** is narrower and is a courtesy rather
 //! than a rule: the widget's rows link into the task screen, that route holds
@@ -115,14 +160,19 @@
 //!
 //! - **FR-RPT-004** — a status summary over the tenant's documents. Those are
 //!   not the caller's own rows, and counting them is the document population,
-//!   which `document:read` gates.
+//!   which `document:read` gates. **It cannot be served by widening
+//!   [`document::service::list::recent_documents`] either**, which is worth
+//!   saying now that a function on this path returns document rows rather than a
+//!   number: the widening that would serve it is dropping `actor_user_id`, and
+//!   that one deletion turns *the caller's own work* into *the tenant's*.
 //! - **FR-RPT-007** — workload by department. That is other people's queues,
 //!   which `workflow:task:read` gates.
 //!
 //! Neither can ship behind [`DASHBOARD_READ`] alone, and neither can be served
-//! by widening [`workflow::service::inbox::waiting_work`] or
-//! [`document::service::list::count_own_drafts`] — both of which say so in their
-//! own doc comments, where an author reaching for them will be standing.
+//! by widening [`workflow::service::inbox::waiting_work`],
+//! [`document::service::list::count_own_drafts`] or
+//! [`document::service::list::recent_documents`] — all three of which say so in
+//! their own doc comments, where an author reaching for them will be standing.
 //!
 //! [ADR-0039]: ../../../../docs/architectures/adr/0039.%20A%20Dashboard%20Widget%20Is%20a%20Purpose-Built%20Endpoint.md
 //! [`workflow::service::inbox::waiting_work`]: crate::modules::workflow::service::inbox::waiting_work
@@ -130,10 +180,25 @@
 //!
 //! # What is not here
 //!
-//! **FR-RPT-003** (recent documents) is Sprint 17's last row and extends
-//! [`domain::DashboardSummary`] the way FR-RPT-002 just did — a field beside
-//! the others, not an endpoint beside this one. FR-RPT-004 and FR-RPT-005 are
-//! Sprint 18 (**D-77**).
+//! **FR-RPT-004 and FR-RPT-005 are Sprint 18** (**D-77**). FR-RPT-003 was this
+//! module's last Sprint 17 row and is built: it extended
+//! [`domain::DashboardSummary`] the way FR-RPT-002 did, a field beside the
+//! others rather than an endpoint beside this one.
+//!
+//! **A count of the documents the caller has ever touched.**
+//! [`RECENT_DOCUMENTS_SHOWN`] has no `recentDocumentsTotal` beside it, unlike
+//! `pendingTasks` and its `tasksWaiting`. A queue's size is a thing somebody
+//! needs — *3 of 12* is the difference between nothing waiting and a backlog —
+//! and *how many documents have you ever touched* is not a question anybody
+//! asks. It would be a count over the caller's whole history, on the screen
+//! every session loads, to caption a card.
+//!
+//! **Search over the recent-documents widget.** The document list has search
+//! ([#171](https://github.com/sujanto-gaws/kelir/issues/171)) and the card
+//! links to it. **A configurable widget** is further out than that and is the
+//! same refusal from the other end: the moment *recent documents* takes a
+//! definition, the row has quietly become the RAD list path [ADR-0039]
+//! rejected.
 //!
 //! **Deciding a task from the dashboard.** The widget links to the task;
 //! approve and reject live where
@@ -186,3 +251,24 @@ pub const DASHBOARD_READ: &str = "reporting:dashboard:read";
 ///
 /// [#432]: https://github.com/sujanto-gaws/kelir/issues/432
 pub const PENDING_TASKS_SHOWN: i64 = 5;
+
+/// How many recent documents the widget carries (FR-RPT-003, [#433]).
+///
+/// **Five, matching [`PENDING_TASKS_SHOWN`], and they are separate constants on
+/// purpose.** The two cards sit side by side and a grid whose rows are five and
+/// seven deep reads as a layout accident rather than a decision — but they are
+/// not one constant, because *how much room a card has* is a per-card property
+/// and a later widget with a different shape should not have to change this
+/// one's cap to get its own.
+///
+/// **There is no count beside this list**, and that is the difference from the
+/// pending-task widget rather than an omission. `tasksWaiting` exists because a
+/// queue has a size somebody needs — *3 of 12* is the difference between
+/// nothing waiting and a backlog. **"How many documents have you ever touched"
+/// is not a question anybody asks**, and a number that answered it would be a
+/// count over the caller's whole history, on a screen every session loads, to
+/// caption a card. So the widget shows the top five and links to the document
+/// list, which pages properly.
+///
+/// [#433]: https://github.com/sujanto-gaws/kelir/issues/433
+pub const RECENT_DOCUMENTS_SHOWN: i64 = 5;
