@@ -70,6 +70,20 @@
 //!    own header and the specimen header it carries are two `**Status:**`
 //!    lines, so a verbatim copy was decided by the wrong one.
 //!
+//! Rule 10 is [#445](https://github.com/sujanto-gaws/kelir/issues/445), Sprint
+//! 18 item 3, and it is the first rule here that reads a record's *body* rather
+//! than its header, its name or its citations.
+//!
+//! 10. **A `Final` record names an issue for every follow-up its Aftermath
+//!     filed**, or says `none`. [Record 07](../../projects/releases/07.%20Release%20v0.7.0.md)
+//!     went `Final` carrying a **reproduced** defect under the words
+//!     `not yet filed` and stayed that way for four days, because nothing reads
+//!     an Aftermath list. The row had to **open** with its issue link: the bad
+//!     row cited the guard that was bypassed and the row above it cited another
+//!     issue for context, so *mentions an issue* would have passed it. Governed
+//!     from [`FIRST_AFTERMATH_GOVERNED_RELEASE`] rather than from the floor
+//!     above, because the section shape is younger than most of the records.
+//!
 //! # The floor, and why it is not the next release
 //!
 //! [`FIRST_GOVERNED_RELEASE`] is `v0.3.0` rather than `v0.7.0`, and the
@@ -167,6 +181,61 @@ use std::path::PathBuf;
 /// a claim that `v0.1.0` or `v0.2.0` should have cited a record that did not
 /// exist when they were tagged.**
 const FIRST_GOVERNED_RELEASE: (u32, u32, u32) = (0, 3, 0);
+
+/// The first release whose Aftermath is governed by rule 10, as
+/// `(major, minor, patch)`.
+///
+/// **Higher than [`FIRST_GOVERNED_RELEASE`], and it has to be.** Rule 10 reads
+/// a section shape that did not exist for most of this project's life:
+///
+/// - `05` has **no Aftermath section at all**.
+/// - `04`'s Aftermath is a numbered list of prose findings, no issue links.
+/// - `02` and `03` put their follow-ups inline on the `- **Follow-ups filed:**`
+///   line, with no rows beneath it.
+/// - `01` and `06` have rows, and most of them open with bold prose rather than
+///   with an issue — `**A frontend image has no version identity.**` is a
+///   follow-up that became [#362](https://github.com/sujanto-gaws/kelir/issues/362)
+///   months later, and the row never learned.
+///
+/// **The template's own rule is that a settled record is not amended** — it
+/// says so twice, about record 06 and about the status line — so a floor low
+/// enough to reach those records would demand exactly the edit the house
+/// forbids, and would be red on the tree as it stands rather than on anything
+/// anybody did wrong.
+///
+/// `v0.7.0` is the first record written after
+/// [#382](https://github.com/sujanto-gaws/kelir/pull/382) put *reproduced or
+/// only observed* in the template, which is the convention this rule extends.
+///
+/// # The honest cost: this governs one record today
+///
+/// The module doc above says a floor at the next release would govern **zero**
+/// records and could only ever be red against something planted. **One is not
+/// zero, and the difference is the whole argument for this floor:** record 07
+/// is the case that earned the rule, it was **red** at `00a27b4` where the row
+/// read `not yet filed`, and it is **green** now that the row cites
+/// [#440](https://github.com/sujanto-gaws/kelir/issues/440). A real red and a
+/// real green on a real record, rather than a synthetic pair.
+///
+/// **Raising this is a claim that a settled record should be edited. Lowering
+/// it is the same claim about an older one.**
+const FIRST_AFTERMATH_GOVERNED_RELEASE: (u32, u32, u32) = (0, 7, 0);
+
+/// The Aftermath heading rule 10 looks for.
+const AFTERMATH_HEADING: &str = "## Aftermath";
+
+/// The line beneath it that rule 10 reads, and the rows it governs are the ones
+/// indented under this one.
+const FOLLOW_UPS_LABEL: &str = "- **Follow-ups filed:**";
+
+/// The prefix of an issue link, as the records write it.
+///
+/// **`/issues/` and not `/pull/`, deliberately.** A follow-up is an issue
+/// somebody can be assigned and can close; a pull request is the change that
+/// closed one. Record 07's own bad row cited
+/// [#367](https://github.com/sujanto-gaws/kelir/pull/367) — *the guard that was
+/// bypassed* — which is a useful thing to say and is not a filed follow-up.
+const ISSUE_URL: &str = "https://github.com/sujanto-gaws/kelir/issues/";
 
 /// A record is governed once it says the release happened.
 ///
@@ -463,6 +532,99 @@ fn citations(body: &str) -> BTreeSet<String> {
     }
 
     found
+}
+
+/// The Aftermath's follow-up block: the `- **Follow-ups filed:**` line and the
+/// rows indented under it.
+///
+/// `None` means the record has no such line inside an `## Aftermath` section —
+/// which rule 10 treats as a failure rather than an exemption, for door B's
+/// reason: **a shape the walk cannot find must not be a shape the walk
+/// ignores.**
+///
+/// The rows end at the first line that is not an indented list item, so the
+/// block-quoted note every record carries after its Aftermath is not mistaken
+/// for a follow-up.
+fn follow_up_block(body: &str) -> Option<(String, Vec<String>)> {
+    let after_heading = body.split_once(AFTERMATH_HEADING)?.1;
+
+    // Stop at the next section, so a `- **Follow-ups filed:**` line further
+    // down the document cannot stand in for a missing one here.
+    let section = match after_heading.split_once("\n## ") {
+        Some((section, _)) => section,
+        None => after_heading,
+    };
+
+    let mut lines = section.lines();
+    let label = lines.find(|line| line.trim_start().starts_with(FOLLOW_UPS_LABEL))?;
+
+    let rows = lines
+        .take_while(|line| {
+            let trimmed = line.trim_start();
+            line.starts_with(' ') && (trimmed.starts_with("- ") || trimmed.starts_with("~~"))
+        })
+        .map(|line| line.trim().to_owned())
+        .collect();
+
+    Some((label.trim().to_owned(), rows))
+}
+
+/// Whether a follow-up row **opens with** a link to an issue.
+///
+/// # Why opening with one, rather than containing one
+///
+/// **Record 07's bad row contained an issue-shaped link and was still the
+/// defect this rule exists to catch.** As it stood at `00a27b4` the row read
+///
+/// ```text
+///   - **`deploy.sh`'s rollback command exits 1 …** · **reproduced** ·
+///     **not yet filed** · the guard is [#367](…/pull/367)'s `/version.json` assertion
+/// ```
+///
+/// and the row above it in the same list ends `([#335](…/issues/335))`, citing
+/// a *different* issue as context. **A rule that asked whether the row
+/// mentioned an issue anywhere would pass both**: the first on a pull-request
+/// link, the second on somebody else's issue number. What makes a row a filed
+/// follow-up is that the issue is the row's subject, and the subject is what a
+/// row opens with — which is the shape the template already prints.
+///
+/// This is the rule's load-bearing half, and it is the half a probe has to
+/// attack. [Record 15](../../projects/verifications/15.%20Sprint%2016%20Independent%20Pass.md)
+/// §7 defeated three earlier probes with one-character edits precisely because
+/// they attacked the half that was not carrying anything.
+fn row_opens_with_issue_link(row: &str) -> bool {
+    let row = row.trim_start().trim_start_matches("- ").trim_start();
+
+    // The row may open with a struck-through link, which is how a withdrawn
+    // follow-up is written. The strike is cosmetic and the link beneath it is
+    // still the row's subject.
+    let row = row.trim_start_matches("~~");
+
+    let Some(rest) = row.strip_prefix('[') else {
+        return false;
+    };
+
+    // The first `](` closes the link text. Link texts in these rows carry
+    // backticks, em dashes and `#NNN`, but never a nested bracket pair.
+    let Some((_text, target)) = rest.split_once("](") else {
+        return false;
+    };
+
+    target.starts_with(ISSUE_URL)
+        && target
+            .trim_start_matches(ISSUE_URL)
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit())
+}
+
+/// Whether a line says there is nothing to file.
+///
+/// `none` is the template's own word for it and rule 10 accepts it on the
+/// label line, which is how records 02 and 03 already write an empty Aftermath
+/// — and how a future release with a clean run will.
+fn says_none(line: &str) -> bool {
+    line.to_ascii_lowercase().contains("none")
 }
 
 fn governed() -> Vec<Release> {
@@ -997,4 +1159,105 @@ fn the_pre_rule_releases_are_named_rather_than_silently_skipped() {
             cited.len()
         );
     }
+}
+
+/// Rule 10. **A `Final` release record names an issue for every follow-up its
+/// Aftermath filed**, or says `none`.
+///
+/// [Record 07](../../projects/releases/07.%20Release%20v0.7.0.md) went `Final`
+/// on 2026-09-12 carrying a **reproduced** defect in the rollback path under
+/// the words `not yet filed`, and stayed that way for four days. Nothing
+/// noticed, because nothing reads an Aftermath list. It became
+/// [#440](https://github.com/sujanto-gaws/kelir/issues/440) only when
+/// [retrospective 14](../../projects/retrospectives/14.%20Sprint%2016%20Retrospective.md)
+/// went looking at the record — and `v0.6.0` was `v0.7.0`'s only rollback
+/// target, so the first operator to follow the script's own instruction after
+/// that release would have got a red rollback that was not one.
+///
+/// # What the existing rule does, and what it does not
+///
+/// [Retrospective 12](../../projects/retrospectives/12.%20Sprint%2014%20Retrospective.md)'s
+/// fifth action put **reproduced or only observed** in the template, carried
+/// since [#382](https://github.com/sujanto-gaws/kelir/pull/382). **It worked**:
+/// all three of record 07's rows carry the word. **It governs a follow-up's
+/// description and not its existence** — an honest description of an unfiled
+/// follow-up is still an unfiled follow-up, and `not yet filed` is the template
+/// being obeyed.
+///
+/// # What this rule will not notice
+///
+/// Stated rather than implied, on the module doc's own terms.
+///
+/// - **An issue that is closed, or labelled to no sprint.** A follow-up that
+///   was filed and then dealt with is not a defect, and requiring more than
+///   existence is a separate judgement ([#445](https://github.com/sujanto-gaws/kelir/issues/445),
+///   *Not in scope*).
+/// - **An issue number that does not exist on GitHub.** Rule 6 resolves
+///   verification citations because they are paths on disk; an issue link
+///   resolves over the network, and a test that needed the network would be a
+///   test that fails when GitHub does.
+/// - **A follow-up nobody wrote down at all.** Every rule in this file reads
+///   what a record says. A run that saw something and recorded nothing is
+///   invisible here and always was.
+#[test]
+fn a_final_record_names_an_issue_for_every_follow_up() {
+    let mut unfiled: Vec<String> = Vec::new();
+    let mut shapeless: Vec<String> = Vec::new();
+
+    for (version, name, body) in release_records() {
+        if version < FIRST_AFTERMATH_GOVERNED_RELEASE || !says_final(&body) {
+            continue;
+        }
+
+        let Some((label, rows)) = follow_up_block(&body) else {
+            shapeless.push(name);
+            continue;
+        };
+
+        // `none` on the label line settles the record: records 02 and 03
+        // already write an empty Aftermath that way, and a clean run should not
+        // have to invent a row in order to say that nothing happened.
+        if says_none(&label) {
+            continue;
+        }
+
+        // A label that neither says `none` nor has rows beneath it is the shape
+        // record 07 would have had if its row had been deleted rather than left
+        // unfiled — which must not be the cheap way out.
+        if rows.is_empty() {
+            shapeless.push(name);
+            continue;
+        }
+
+        for row in rows {
+            if !row_opens_with_issue_link(&row) && !says_none(&row) {
+                let shown: String = row.chars().take(110).collect();
+                unfiled.push(format!("{name}\n      {shown}"));
+            }
+        }
+    }
+
+    assert!(
+        shapeless.is_empty(),
+        "a `Final` release record from v{}.{}.{} on has no `{FOLLOW_UPS_LABEL}` line under \
+         `{AFTERMATH_HEADING}` carrying either rows or the word `none` (#445):\n  {}\n\n\
+         An Aftermath the walk cannot read is an Aftermath the walk does not govern, which is \
+         door B one section down. Say `none` when a run filed nothing.",
+        FIRST_AFTERMATH_GOVERNED_RELEASE.0,
+        FIRST_AFTERMATH_GOVERNED_RELEASE.1,
+        FIRST_AFTERMATH_GOVERNED_RELEASE.2,
+        shapeless.join("\n  ")
+    );
+
+    assert!(
+        unfiled.is_empty(),
+        "a `Final` release record carries a follow-up with no issue (#445):\n  {}\n\n\
+         Every row under `{FOLLOW_UPS_LABEL}` opens with a link to {ISSUE_URL}<number>, or says \
+         `none`. **Opening with it, not merely containing it**: record 07's own bad row cited \
+         the guard that was bypassed, and the row above it cited somebody else's issue for \
+         context, so a rule asking whether the row mentioned an issue anywhere would have \
+         passed the very defect it was written for.\n\n\
+         `not yet filed` is not a follow-up that was filed. File it, then link it.",
+        unfiled.join("\n  ")
+    );
 }
