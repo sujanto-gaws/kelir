@@ -149,9 +149,13 @@ fn registry_rule(name: &str) -> Option<RegistryRule> {
         // the same pattern differently: this crate refuses lookahead and
         // backreferences at compile time, and reads `\d` as Unicode `Nd` where
         // ECMA-262 reads it as ASCII. For a `both`-scoped rule that means the
-        // two sides can reach opposite verdicts on one input. The registry's
-        // interim guidance is to pin digit classes explicitly (`[0-9]`), and
-        // resolving it properly is decision **D-15**.
+        // two sides can reach opposite verdicts on one input.
+        //
+        // **That is closed at the write rather than here** (**D-15**, ADR-0038;
+        // registry 1.5.0). `refuse_pattern` refuses a definition carrying a
+        // construct the two engines read differently, so a pattern reaching
+        // this arm is one both sides agree about. Nothing is re-checked here:
+        // a second scan would be a second definition of the dialect.
         //
         // An uncompilable pattern is a violation rather than a pass, which is
         // the browser's `catch` arm too: a rule that could not be applied has
@@ -404,12 +408,44 @@ pub(crate) enum PatternRefusal {
     /// fails a rule nobody can satisfy**, which is right at submit and wrong at
     /// save.
     Uncompilable { reason: String },
-    /// A bare `\d`, `\w` or `\s`. It compiles on both sides and **means
-    /// different things**: ECMA-262 reads `\d` as ASCII, this crate as Unicode
-    /// `Nd`, so the browser rejects `٣٤٥` and the server accepts it with
-    /// nothing raised anywhere. The registry's interim guidance is to pin the
-    /// class; this is that guidance becoming a rule.
-    UnpinnedClass { class: char },
+    /// A construct both engines compile and **read differently**, so the two
+    /// decide one input opposite ways with nothing raised on either side.
+    ///
+    /// **This is the refusal [ADR-0038] §1 argues is the important one** — a
+    /// construct only the server enforces is loud, and a construct both sides
+    /// accept while disagreeing is silent.
+    ///
+    /// [ADR-0038]: ../../../../../docs/architectures/adr/0038.%20Kelir%20Patterns%20Are%20the%20Linear-Time%20Subset.md
+    Divergent(DivergentConstruct),
+}
+
+/// A construct the `regex` crate and ECMA-262 both accept and read differently.
+///
+/// **Each arm carries its own reason, because they do not share one.**
+/// [#413](https://github.com/sujanto-gaws/kelir/issues/413): one message said
+/// *ECMA-262's classes are ASCII and this crate's are Unicode* for all of
+/// `\d`, `\w` and `\s`, and told an author whose pattern used `\s` to write
+/// `[0-9]`. **`\s` is Unicode on both sides** — the two sets differ at exactly
+/// U+0085 and U+FEFF, in opposite directions — so the reason was wrong and the
+/// remedy belonged to a different pattern.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DivergentConstruct {
+    /// A bare `\d`, `\D`, `\w`, `\W`, `\s` or `\S`.
+    Class(char),
+    /// `\b` or `\B`, whose word-character set is ASCII in ECMA-262 and Unicode
+    /// here. **The one arm with no portable spelling**: `\d` becomes `[0-9]`
+    /// and a POSIX name becomes the class it abbreviates, but a boundary has to
+    /// be re-expressed with the characters around it.
+    WordBoundary(char),
+    /// A POSIX bracket expression such as `[[:digit:]]`. **ECMA-262 has no such
+    /// syntax**: the browser reads it as an ordinary class containing `[`, `:`
+    /// and the letters of the name, which is a different set entirely rather
+    /// than a wider or narrower one.
+    PosixClass(String),
+    /// `\p{…}` or `\P{…}`. **ECMA-262 reads these only under the `u` flag**,
+    /// which this renderer does not pass unless the rule asks for it; without
+    /// it `\p` is an identity escape and the browser reads a literal `p`.
+    UnicodeProperty(char),
 }
 
 /// The refusal a pattern earns, or `None` if this backend will honour it.
@@ -424,7 +460,7 @@ pub(crate) fn refuse_pattern(pattern: &str, flags: &str) -> Option<PatternRefusa
         });
     }
 
-    unpinned_class(pattern).map(|class| PatternRefusal::UnpinnedClass { class })
+    divergent_construct(pattern).map(PatternRefusal::Divergent)
 }
 
 /// The crate's own explanation, reduced to the sentence a form author needs.
@@ -446,27 +482,118 @@ fn compile_reason(error: &regex::Error) -> String {
         )
 }
 
-/// The first bare character class in a pattern, if it has one.
+/// The first construct in a pattern that the two engines read differently.
 ///
 /// **An escaped backslash is not an escape**: `\\d` is a literal backslash
 /// followed by a literal `d` and is not a class, so the scan consumes the
 /// character after every backslash rather than only looking at it.
-fn unpinned_class(pattern: &str) -> Option<char> {
-    let mut characters = pattern.chars();
+///
+/// **The boundary this scan draws**, which [coding standard] §2.9 asks to be
+/// stated rather than left to be inferred from an absence of findings:
+///
+/// - **Covered:** `\d \D \w \W \s \S` anywhere; `\b` and `\B` outside a
+///   bracket expression; `\p{…}` and `\P{…}` anywhere; POSIX bracket
+///   expressions (`[[:alpha:]]`, negated or not) inside one.
+/// - **Not covered, deliberately:** `\b` *inside* a bracket expression, which
+///   is a backspace escape on both sides and agrees; and any construct the
+///   `regex` crate refuses outright, which [`refuse_pattern`]'s compile check
+///   has already returned on before this runs.
+/// - **Not covered, and it is a limit rather than a decision:** a divergence
+///   neither engine expresses as syntax — case folding under `i` differs on a
+///   handful of code points, and nothing here detects that.
+///
+/// [coding standard]: ../../../../../docs/standards/01.%20Coding%20Standard.md
+fn divergent_construct(pattern: &str) -> Option<DivergentConstruct> {
+    let characters: Vec<char> = pattern.chars().collect();
+    let mut index = 0;
+    let mut in_class = false;
 
-    while let Some(character) = characters.next() {
-        if character != '\\' {
+    while index < characters.len() {
+        let character = characters[index];
+
+        if character == '\\' {
+            let Some(&escaped) = characters.get(index + 1) else {
+                // A trailing backslash, which the compile check has already
+                // refused — reaching here at all would mean it did not.
+                break;
+            };
+            index += 2;
+
+            match escaped {
+                'd' | 'D' | 'w' | 'W' | 's' | 'S' => {
+                    return Some(DivergentConstruct::Class(escaped));
+                }
+                'p' | 'P' => return Some(DivergentConstruct::UnicodeProperty(escaped)),
+                // Inside a class this is a backspace on both sides, and the two
+                // agree. Outside it, it is the boundary the engines disagree on.
+                'b' | 'B' if !in_class => {
+                    return Some(DivergentConstruct::WordBoundary(escaped));
+                }
+                // Any other escape, consumed so its argument is not re-read.
+                _ => {}
+            }
+
             continue;
         }
 
-        match characters.next() {
-            Some(class @ ('d' | 'D' | 'w' | 'W' | 's' | 'S')) => return Some(class),
-            // Any other escape, consumed so its argument is not re-read.
-            Some(_) => {}
-            // A trailing backslash, which the compile check above has already
-            // refused — reaching here at all would mean it did not.
-            None => break,
+        if !in_class && character == '[' {
+            in_class = true;
+            index += 1;
+
+            // A leading `^` negates and a leading `]` is an ordinary member;
+            // neither opens anything, so neither is re-read as structure.
+            if characters.get(index) == Some(&'^') {
+                index += 1;
+            }
+            if characters.get(index) == Some(&']') {
+                index += 1;
+            }
+
+            continue;
         }
+
+        if in_class {
+            if character == '[' && characters.get(index + 1) == Some(&':') {
+                if let Some(name) = posix_class_name(&characters, index + 2) {
+                    return Some(DivergentConstruct::PosixClass(name));
+                }
+            }
+
+            if character == ']' {
+                in_class = false;
+            }
+        }
+
+        index += 1;
+    }
+
+    None
+}
+
+/// The name in a POSIX bracket expression, given the index just past `[:`.
+///
+/// Returns `None` for anything that is not one — `[[:` can open an ordinary
+/// class containing `[` and `:`, and treating that as POSIX would refuse a
+/// pattern both engines agree about.
+fn posix_class_name(characters: &[char], start: usize) -> Option<String> {
+    let mut index = start;
+    let mut name = String::new();
+
+    while index + 1 < characters.len() {
+        if characters[index] == ':' && characters[index + 1] == ']' {
+            return (!name.is_empty()).then_some(name);
+        }
+
+        // `[:^alpha:]` negates, and the caret is part of the name as written.
+        let belongs_to_the_name = characters[index].is_ascii_alphabetic()
+            || (name.is_empty() && characters[index] == '^');
+
+        if !belongs_to_the_name {
+            return None;
+        }
+
+        name.push(characters[index]);
+        index += 1;
     }
 
     None
@@ -916,6 +1043,201 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// The dialect's boundary, as a table rather than as prose.
+    ///
+    /// **Every row of [#413]'s own table is here, plus the constructs that must
+    /// keep working.** The issue's finding was that three constructs decided
+    /// one input two ways and were stored with a `201`; the refusals are what
+    /// close that, and the accepted half is what stops the close from being a
+    /// blanket refusal of anything containing a backslash or a bracket.
+    ///
+    /// **Seen red, 2026-09-13**: `divergent_construct` returning `None` always
+    /// reddens this on `caf\b`, the first refused row.
+    ///
+    /// [#413]: https://github.com/sujanto-gaws/kelir/issues/413
+    #[test]
+    fn the_dialect_refuses_what_it_says_it_refuses_and_no_more() {
+        let refused = [
+            // The three [#413] found still divergent, in its own spellings.
+            r"caf\b",
+            r"^[[:digit:]]+$",
+            r"^\p{Nd}+$",
+            // The half Sprint 16 closed, which must stay closed.
+            r"^\d{4}$",
+            r"^\w+$",
+            r"^\s+$",
+            // The same three constructs in their other spellings.
+            r"\B",
+            r"^\P{L}+$",
+            r"[[:^alpha:]]",
+            // A class inside a bracket expression still diverges.
+            r"^[\d]+$",
+        ];
+
+        for pattern in refused {
+            assert!(
+                matches!(
+                    refuse_pattern(pattern, ""),
+                    Some(PatternRefusal::Divergent(_))
+                ),
+                "`{pattern}` should be refused as divergent"
+            );
+        }
+
+        let accepted = [
+            // The remedies each message names, which must not themselves be
+            // refused — a message telling an author to write `[0-9]` is only
+            // worth reading if `[0-9]` is accepted.
+            r"^[0-9]{4}$",
+            r"^[A-Za-z0-9_]+$",
+            r"^[ \t\r\n]+$",
+            r"(^|[^A-Za-z0-9_])caf",
+            // An escaped backslash is not an escape.
+            r"^\\d$",
+            // A bracket expression that merely contains a colon.
+            r"^[a:b]+$",
+        ];
+
+        for pattern in accepted {
+            assert_eq!(
+                refuse_pattern(pattern, ""),
+                None,
+                "`{pattern}` should be accepted"
+            );
+        }
+    }
+
+    /// **The `\s` message names two code points, so this sends them.**
+    ///
+    /// [Coding standard] §2.9: a comment stating what something returns for a
+    /// named input has a test that sends that input. The refusal for `\s` says
+    /// the two sides differ at exactly **U+0085 NEXT LINE**, which only this
+    /// crate matches, and **U+FEFF BYTE ORDER MARK**, which only the browser
+    /// does. **This pins the half that runs here.** The browser half is
+    /// [#413](https://github.com/sujanto-gaws/kelir/issues/413)'s own measured
+    /// table and cannot be run from Rust; what this stops is the Rust claim
+    /// going stale against a crate upgrade while the message still asserts it.
+    ///
+    /// **Seen red, 2026-09-13**: swapping the two expectations reddens both.
+    ///
+    /// [Coding standard]: ../../../../../docs/standards/01.%20Coding%20Standard.md
+    #[test]
+    fn this_crates_whitespace_class_is_what_the_refusal_says_it_is() {
+        let whitespace = compile_pattern(r"^\s$", "").expect("`\\s` builds");
+
+        assert!(
+            whitespace.is_match("\u{0085}"),
+            "U+0085 is whitespace to this crate, which is why the message says only this side matches it"
+        );
+        assert!(
+            !whitespace.is_match("\u{FEFF}"),
+            "U+FEFF is not whitespace to this crate, which is why the message says only the browser matches it"
+        );
+
+        // The uncontroversial members, so the test is about the two edges
+        // rather than about `\s` working at all.
+        assert!(whitespace.is_match(" "));
+        assert!(whitespace.is_match("\t"));
+    }
+
+    /// **`\b` inside a bracket expression is a backspace on both sides.**
+    ///
+    /// It is the one place the two engines agree about a `\b`, so refusing it
+    /// would refuse a portable pattern — which is the boundary
+    /// [`divergent_construct`] states and this is the test that holds it.
+    ///
+    /// **Seen red, 2026-09-13**: dropping the `if !in_class` guard on the
+    /// `'b' | 'B'` arm refuses `[\b]` and reddens this.
+    #[test]
+    fn a_backspace_escape_is_not_a_word_boundary() {
+        // Whether the crate compiles `[\b]` at all is its business; what this
+        // pins is that the scan does not call it a boundary.
+        assert!(!matches!(
+            divergent_construct(r"[\b]"),
+            Some(DivergentConstruct::WordBoundary(_))
+        ));
+
+        // Outside a class it is the boundary, in both spellings.
+        assert_eq!(
+            divergent_construct(r"caf\b"),
+            Some(DivergentConstruct::WordBoundary('b'))
+        );
+        assert_eq!(
+            divergent_construct(r"\Bcaf"),
+            Some(DivergentConstruct::WordBoundary('B'))
+        );
+    }
+
+    /// **The first divergence wins, and the compile check wins over all of
+    /// them.** A pattern that does not build cannot be scanned for anything
+    /// else, and reporting a class problem beside a syntax error would be
+    /// guessing at text the parser rejected.
+    ///
+    /// **Seen red, 2026-09-13**: moving the `unpinned`/divergence scan above
+    /// the compile check in [`refuse_pattern`] reddens the third assertion.
+    #[test]
+    fn the_compile_check_answers_before_the_dialect_scan() {
+        assert_eq!(
+            divergent_construct(r"\d and \p{L}"),
+            Some(DivergentConstruct::Class('d')),
+            "the earlier construct is the one reported"
+        );
+
+        assert_eq!(
+            refuse_pattern(r"^[0-9]+$", ""),
+            None,
+            "a portable pattern earns no refusal"
+        );
+
+        assert!(
+            matches!(
+                refuse_pattern(r"(?=x)\d", ""),
+                Some(PatternRefusal::Uncompilable { .. })
+            ),
+            "a pattern that cannot be built is reported as that, not as a class"
+        );
+    }
+
+    /// **`[[:` does not always open a POSIX class**, and the scan says so on
+    /// its own rather than relying on the compile check to cover for it.
+    ///
+    /// `^[[:]+$` is a bracket expression holding `[` and `:`. The `regex` crate
+    /// happens to refuse it — *unclosed character class*, because it reads
+    /// `[[:` as the start of a POSIX name — so [`refuse_pattern`] never reaches
+    /// the scan for this input. **That makes the crate's behaviour the thing
+    /// being relied on**, and relying on it silently is how a scan acquires a
+    /// bug nobody can see. Asserted directly instead.
+    ///
+    /// **Seen red, 2026-09-13**: `posix_class_name` returning `Some(name)`
+    /// instead of `None` when its loop runs out reddens the `[[:dig` assertion.
+    /// **It came back green on the first run and that was the finding** — the
+    /// branch was reachable only through a pattern the compile check refuses
+    /// first, so the two unterminated cases below were added to reach it.
+    #[test]
+    fn a_bracket_and_a_colon_are_not_a_posix_class() {
+        assert_eq!(divergent_construct(r"^[[:]+$"), None);
+        assert_eq!(divergent_construct(r"^[a:b]+$"), None);
+
+        // **A name that never reaches `:]` is not a class either**, and this
+        // assertion exists because a mutation found it uncovered: the `regex`
+        // crate refuses `[[:dig` outright, so [`refuse_pattern`]'s compile check
+        // answered first and nothing ever reached the end of the scan's loop.
+        // A gate absorbing a branch is the usual cause of a green mutation
+        // ([coding standard] §2.9), and the fix is a fixture that reaches it.
+        assert_eq!(divergent_construct(r"[[:dig"), None);
+        assert_eq!(divergent_construct(r"[[:"), None);
+
+        // The real thing, in both spellings, is still caught.
+        assert_eq!(
+            divergent_construct(r"^[[:digit:]]+$"),
+            Some(DivergentConstruct::PosixClass("digit".to_owned()))
+        );
+        assert_eq!(
+            divergent_construct(r"[[:^alpha:]]"),
+            Some(DivergentConstruct::PosixClass("^alpha".to_owned()))
+        );
+    }
 
     fn field(validation: Value) -> Value {
         json!({

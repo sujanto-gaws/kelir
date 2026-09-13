@@ -153,8 +153,20 @@ export const VALIDATION_RULES: Readonly<Record<string, RegistryRule>> = {
    * crate refuses lookahead and backreferences at compile time and reads `\d`
    * as Unicode `Nd` where ECMA-262 reads it as ASCII. For a `both`-scoped rule
    * that means the two sides can reach opposite verdicts on the same input,
-   * with nothing raised on either. The registry's interim guidance is to pin
-   * digit classes explicitly, and resolving it properly is **D-15**.
+   * with nothing raised on either.
+   *
+   * **That is closed at the write rather than here** (**D-15**,
+   * [ADR-0038](../../../../../docs/architectures/adr/0038.%20Kelir%20Patterns%20Are%20the%20Linear-Time%20Subset.md);
+   * Validation Rule Registry 1.5.0). A definition carrying a construct the two
+   * engines read differently — a bare `\d`, `\w` or `\s`, a POSIX bracket
+   * expression, `\p{…}`, or `\b` — is refused by the server when it is saved,
+   * so a pattern that reaches this function is one both sides agree about.
+   * **Nothing is checked here**, deliberately: a second scan in the renderer
+   * would be a second definition of the dialect, and the two would drift.
+   *
+   * **This side passes no `u` flag unless the rule's `params.flags` asks for
+   * one**, which is why `\p{…}` is refused rather than merely warned about:
+   * without `u` the browser reads a literal `p`.
    *
    * An uncompilable pattern is a violation rather than a pass: a rule that
    * cannot be applied has not been satisfied.
