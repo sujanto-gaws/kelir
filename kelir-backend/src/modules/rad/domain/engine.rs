@@ -67,7 +67,7 @@ use super::jfss::{
     check_operators, container_children_at, data_key, role_of, row_template, CALCULATE_OPERATORS,
     CONDITIONAL_OPERATORS,
 };
-use super::validation::{is_registered, refuse_pattern, PatternRefusal};
+use super::validation::{is_registered, refuse_pattern, DivergentConstruct, PatternRefusal};
 use crate::error::ValidationDetail;
 
 /// The S10.3 `code` a cyclic definition carries, at either moment.
@@ -102,6 +102,15 @@ pub(crate) const PATTERN_NOT_COMPILABLE: &str = "PATTERN_NOT_COMPILABLE";
 /// [Validation Rule Registry](../../../../../docs/schema/JFSS%20Validation%20Rule%20Registry.md)
 /// §1 Semantic Parity requirement in its own words.
 pub(crate) const PATTERN_CLASS_NOT_PINNED: &str = "PATTERN_CLASS_NOT_PINNED";
+
+/// A construct whose meaning differs between the two engines and which **has no
+/// spelling both accept** — `\b` and `\B`.
+///
+/// **It is a separate code from [`PATTERN_CLASS_NOT_PINNED`] because the remedy
+/// is different in kind.** A class can be written out; a boundary cannot, so an
+/// author reading this one has to re-express the intent rather than transcribe
+/// it ([#413](https://github.com/sujanto-gaws/kelir/issues/413)).
+pub(crate) const PATTERN_CONSTRUCT_NOT_PORTABLE: &str = "PATTERN_CONSTRUCT_NOT_PORTABLE";
 
 /// A dependency cycle, as the keys that make it up.
 ///
@@ -715,18 +724,87 @@ fn refuse(
                  cannot be applied has not been satisfied"
             ),
         ),
-        PatternRefusal::UnpinnedClass { class } => (
-            PATTERN_CLASS_NOT_PINNED,
-            format!(
-                "`{key}`'s pattern `{pattern}` uses `\\{class}`, which this backend and the \
-                 browser read differently — ECMA-262's classes are ASCII and this crate's are \
-                 Unicode, so the two would decide the same input opposite ways with nothing \
-                 raised on either side. Write the class out: `[0-9]` rather than `\\d`"
-            ),
-        ),
+        PatternRefusal::Divergent(construct) => {
+            let (code, reason) = divergence_reason(&construct);
+            (
+                code,
+                format!(
+                    "`{key}`'s pattern `{pattern}` uses a construct this backend and the browser \
+                     read differently, so the two would decide the same input opposite ways with \
+                     nothing raised on either side. {reason}"
+                ),
+            )
+        }
     };
 
     details.push(ValidationDetail::new(path, rule, code, message));
+}
+
+/// The code and the sentence a divergent construct earns.
+///
+/// **One message per construct, because the reasons are not the same one.**
+/// [#413](https://github.com/sujanto-gaws/kelir/issues/413) found a single
+/// sentence — *ECMA-262's classes are ASCII and this crate's are Unicode* —
+/// serving all of `\d`, `\w` and `\s`, and ending *write `[0-9]` rather than
+/// `\d`* whatever the author had written. **For `\s` both halves were wrong**:
+/// the two `\s` sets are Unicode on both sides and differ at exactly U+0085 and
+/// U+FEFF, in opposite directions, and `[0-9]` is not a remedy for a whitespace
+/// class. An author who believed it would have narrowed the browser as well as
+/// the server.
+fn divergence_reason(construct: &DivergentConstruct) -> (&'static str, String) {
+    match construct {
+        DivergentConstruct::Class(class @ ('d' | 'D')) => (
+            PATTERN_CLASS_NOT_PINNED,
+            format!(
+                "ECMA-262 reads `\\{class}` as ASCII `0-9`; this crate reads it as Unicode `Nd`, \
+                 so `١٢٣` fails in the browser and passes here. Write the class out: `[0-9]`"
+            ),
+        ),
+        DivergentConstruct::Class(class @ ('w' | 'W')) => (
+            PATTERN_CLASS_NOT_PINNED,
+            format!(
+                "ECMA-262 reads `\\{class}` as `[A-Za-z0-9_]`; this crate reads it as Unicode word \
+                 characters, so `café` fails in the browser and passes here. Write the class out: \
+                 `[A-Za-z0-9_]`, which is what the browser was already doing"
+            ),
+        ),
+        DivergentConstruct::Class(class) => (
+            PATTERN_CLASS_NOT_PINNED,
+            format!(
+                "`\\{class}` is Unicode whitespace on both sides and the two sets differ at \
+                 exactly two characters — U+0085 NEXT LINE, which only this crate matches, and \
+                 U+FEFF BYTE ORDER MARK, which only the browser does. Write out the characters \
+                 this field should treat as space, such as `[ \\t\\r\\n]` — and note that is \
+                 narrower than either side's `\\{class}` rather than equal to it"
+            ),
+        ),
+        DivergentConstruct::WordBoundary(boundary) => (
+            PATTERN_CONSTRUCT_NOT_PORTABLE,
+            format!(
+                "ECMA-262 defines `\\{boundary}` over `[A-Za-z0-9_]` and this crate defines it \
+                 over Unicode word characters, so `caf\\b` matches `café` in the browser and not \
+                 here. **There is no spelling of `\\{boundary}` both sides agree on** — express \
+                 the boundary with the characters the field allows, such as `(^|[^A-Za-z0-9_])`"
+            ),
+        ),
+        DivergentConstruct::PosixClass(name) => (
+            PATTERN_CLASS_NOT_PINNED,
+            format!(
+                "ECMA-262 has no POSIX bracket expressions: where this crate reads `[[:{name}:]]` \
+                 as a named class, the browser reads an ordinary class containing `[`, `:` and the \
+                 letters of the name — a different set rather than a wider or narrower one. Write \
+                 the class out, such as `[0-9]` rather than `[[:digit:]]`"
+            ),
+        ),
+        DivergentConstruct::UnicodeProperty(property) => (
+            PATTERN_CLASS_NOT_PINNED,
+            format!(
+                "ECMA-262 reads `\\{property}{{…}}` only under the `u` flag, which this rule does \
+                 not carry; without it the browser reads a literal `{property}` followed by the \
+                 braces. Write the class out, such as `[0-9]` rather than `\\p{{Nd}}`"
+            ),
+        ),
+    }
 }
 
 /// The operators one component's expressions use, against the Calculation Rule
@@ -1177,6 +1255,108 @@ mod tests {
             "definition.components.0.validation.pattern"
         );
         assert!(details[0].message.contains("[0-9]"));
+    }
+
+    /// **[#413] AC2.** The three constructs Sprint 16 left open, each refused
+    /// at the seam a bare `\d` already was.
+    ///
+    /// `caf\b` matches `café` in the browser and not here; `[[:digit:]]` and
+    /// `\p{Nd}` are the same defect in the other direction, and ECMA-262 has no
+    /// syntax for either. All three were stored with a `201`.
+    ///
+    /// **A second subject in every case** ([coding standard] §2.9): the
+    /// portable spelling each message names sits beside the refused one, so the
+    /// test cannot pass by refusing everything.
+    ///
+    /// **Seen red, 2026-09-13**: `divergent_construct` returning `None` for
+    /// every arm but `Class` reddens all three assertions.
+    ///
+    /// [#413]: https://github.com/sujanto-gaws/kelir/issues/413
+    /// [coding standard]: ../../../../../docs/standards/01.%20Coding%20Standard.md
+    #[test]
+    fn refuses_the_three_constructs_that_still_decided_one_input_two_ways() {
+        // `\b` — the sharpest, because it is ordinary and has no rewrite.
+        let mut boundary = plain("name");
+        boundary["validation"] = json!({"pattern": r"caf\b"});
+        let mut spelled_out = plain("also_name");
+        spelled_out["validation"] = json!({"pattern": "(^|[^A-Za-z0-9_])caf"});
+
+        let details = definition_errors(&definition(vec![boundary, spelled_out]));
+        assert_eq!(codes(&details), [PATTERN_CONSTRUCT_NOT_PORTABLE]);
+        assert_eq!(
+            details[0].path,
+            "definition.components.0.validation.pattern"
+        );
+
+        // A POSIX bracket expression, which the browser reads as a literal set.
+        let mut posix = plain("quantity");
+        posix["validation"] = json!({"pattern": "^[[:digit:]]+$"});
+        let mut pinned = plain("also_quantity");
+        pinned["validation"] = json!({"pattern": "^[0-9]+$"});
+
+        let details = definition_errors(&definition(vec![posix, pinned]));
+        assert_eq!(codes(&details), [PATTERN_CLASS_NOT_PINNED]);
+        assert!(details[0].message.contains("POSIX"));
+
+        // A Unicode property, which the browser reads only under the `u` flag.
+        let mut property = plain("digits");
+        property["validation"] = json!({"pattern": r"^\p{Nd}+$"});
+        let mut also_pinned = plain("also_digits");
+        also_pinned["validation"] = json!({"pattern": "^[0-9]+$"});
+
+        let details = definition_errors(&definition(vec![property, also_pinned]));
+        assert_eq!(codes(&details), [PATTERN_CLASS_NOT_PINNED]);
+        assert!(details[0].message.contains("`u` flag"));
+    }
+
+    /// **[#413]'s second defect: the refusal explained itself wrongly.**
+    ///
+    /// One message served `\d`, `\w` and `\s` — *ECMA-262's classes are ASCII
+    /// and this crate's are Unicode* — and ended *write `[0-9]` rather than
+    /// `\d`* whatever the author had written.
+    ///
+    /// **For `\s` both halves were wrong.** ECMA-262's `\s` is Unicode
+    /// whitespace, not ASCII; the two sets differ at exactly U+0085 and U+FEFF,
+    /// in opposite directions. And `[0-9]` is not a remedy for a whitespace
+    /// class — an author who trusted the message would have narrowed the
+    /// browser as well as the server, so a pasted no-break space stopped
+    /// counting as whitespace on both sides where both had counted it.
+    ///
+    /// **Seen red, 2026-09-13**: restoring the single shared message reddens
+    /// the two `\s` assertions — which is the defect itself rather than a
+    /// stand-in for it.
+    ///
+    /// [#413]: https://github.com/sujanto-gaws/kelir/issues/413
+    #[test]
+    fn each_character_class_is_refused_with_its_own_reason() {
+        let message_for = |pattern: &str| {
+            let mut component = plain("f");
+            component["validation"] = json!({ "pattern": pattern });
+            let details = definition_errors(&definition(vec![component]));
+            assert_eq!(details.len(), 1, "`{pattern}` earned one detail");
+            details[0].message.clone()
+        };
+
+        let digits = message_for(r"^\d+$");
+        assert!(digits.contains("ASCII `0-9`"), "{digits}");
+        assert!(digits.contains("[0-9]"), "{digits}");
+
+        let word = message_for(r"^\w+$");
+        assert!(word.contains("[A-Za-z0-9_]"), "{word}");
+
+        let space = message_for(r"^\s+$");
+        assert!(
+            space.contains("U+0085") && space.contains("U+FEFF"),
+            "the `\\s` message names the two characters that differ: {space}"
+        );
+        assert!(
+            !space.contains("ASCII"),
+            "the `\\s` message must not call either side ASCII: {space}"
+        );
+        assert!(
+            !space.contains("[0-9]"),
+            "the `\\s` message must not offer a digit class as the remedy: {space}"
+        );
     }
 
     /// **An escaped backslash is not an escape.** `\d` is a literal

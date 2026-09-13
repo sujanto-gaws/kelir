@@ -375,6 +375,106 @@ async fn a_rule_name_no_registry_declares_is_refused_at_save() {
 ///
 /// **A second subject, because one component cannot tell *refused because
 /// uncompilable* from *refused at all***: the ordinary pattern beside it must
+/// **[#413] at the seam that reported a `201`.**
+///
+/// The issue's own table: `caf\b` matches `café` in the browser and not here;
+/// `[[:digit:]]` and `\p{Nd}` are syntax ECMA-262 does not have. All three were
+/// stored, so the divergence reached a deployment rather than an author.
+///
+/// **Each refused pattern sits beside the portable spelling its message names**
+/// ([coding standard] §2.9's second subject), so a blanket refusal of anything
+/// containing a backslash would fail this rather than pass it.
+///
+/// **Seen red, 2026-09-13**: `divergent_construct` returning `None` for every
+/// arm but `Class` restores the `201` for all three and reddens this.
+///
+/// [#413]: https://github.com/sujanto-gaws/kelir/issues/413
+/// [coding standard]: ../../docs/standards/01.%20Coding%20Standard.md
+#[tokio::test]
+async fn the_three_constructs_that_decided_one_input_two_ways_are_refused_at_save() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    // (pattern, expected code, the portable spelling that must still store)
+    let cases = [
+        (
+            r"caf\b",
+            "PATTERN_CONSTRUCT_NOT_PORTABLE",
+            "(^|[^A-Za-z0-9_])caf",
+        ),
+        ("^[[:digit:]]+$", "PATTERN_CLASS_NOT_PINNED", "^[0-9]+$"),
+        (r"^\p{Nd}+$", "PATTERN_CLASS_NOT_PINNED", "^[0-9]+$"),
+    ];
+
+    for (index, (pattern, code, portable)) in cases.iter().enumerate() {
+        let key = format!("divergent-{index}");
+        let mut document = definition(&key);
+        document["components"][0]["rules"] = json!([{
+            "rule": "regex", "scope": "both",
+            "params": {"pattern": pattern},
+            "message": "No.",
+        }]);
+
+        let response = app
+            .send(
+                Method::POST,
+                "/api/v1/rad/forms",
+                Some(&token),
+                Some(json!({
+                    "formKey": key,
+                    "title": "Divergent pattern",
+                    "definition": document,
+                })),
+            )
+            .await;
+
+        assert_eq!(
+            response.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "`{pattern}` must not be stored; body {}",
+            response.body
+        );
+        assert!(
+            response.body["error"]["details"]
+                .as_array()
+                .expect("details")
+                .iter()
+                .any(|detail| detail["code"] == *code),
+            "`{pattern}` must be refused as {code}; body {}",
+            response.body
+        );
+
+        // The second subject: the spelling the message names is still stored.
+        let portable_key = format!("portable-{index}");
+        let mut portable_document = definition(&portable_key);
+        portable_document["components"][0]["rules"] = json!([{
+            "rule": "regex", "scope": "both",
+            "params": {"pattern": portable},
+            "message": "No.",
+        }]);
+
+        let stored = app
+            .send(
+                Method::POST,
+                "/api/v1/rad/forms",
+                Some(&token),
+                Some(json!({
+                    "formKey": portable_key,
+                    "title": "Portable pattern",
+                    "definition": portable_document,
+                })),
+            )
+            .await;
+
+        assert_eq!(
+            stored.status,
+            StatusCode::CREATED,
+            "`{portable}` is what the refusal tells an author to write, so it must store; body {}",
+            stored.body
+        );
+    }
+}
+
 /// not be named in the refusal.
 ///
 /// [#391]: https://github.com/sujanto-gaws/kelir/issues/391
