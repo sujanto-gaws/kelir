@@ -42,12 +42,64 @@ json_field() {
     local json="$1" field="$2"
 
     if command -v jq >/dev/null 2>&1; then
-        printf '%s' "${json}" | jq -r ".${field} // empty"
+        # `|| true`, and stderr discarded, because **the body is not always
+        # JSON and that is a case this script has to survive rather than abort
+        # on** (#440): `/version.json` answers with Caddy's single-page
+        # fallback on every frontend image that predates #362, and a `jq` parse
+        # error arriving as a non-zero exit under `set -euo pipefail` would end
+        # the script here — before the branch below that tells *this image does
+        # not carry the file* apart from *the wrong image is serving*. Absent
+        # is what an unparseable body has, which is what empty already means to
+        # every caller: each one compares the value rather than trusting it.
+        #
+        # The `sed` arm below has always behaved this way, so on a host with jq
+        # the script used to fail differently from a host without it, reading
+        # the same response. Only the hosts without jq reached the message
+        # record 07 recorded.
+        printf '%s' "${json}" | jq -r ".${field} // empty" 2>/dev/null || true
     else
         printf '%s' "${json}" \
             | sed -n "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"
     fi
 }
+
+# True when the first version is an earlier release than the second — the three
+# numeric components compared in order, any pre-release suffix ignored, so
+# `0.7.0-rc` counts as `0.7.0` and is built from the same source.
+#
+# **A version this cannot read is never earlier.** Returning false for an
+# unrecognised string sends it to the strict branch of the caller below, which
+# is the safe direction: an unparseable version is not *known* to predate
+# anything, and the cost of being wrong is a deploy that refuses rather than a
+# deploy that passes something through unchecked.
+version_precedes() {
+    local left="${1%%-*}" right="${2%%-*}"
+
+    [[ "${left}"  =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    [[ "${right}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+
+    local IFS='.'
+    # Word splitting on the IFS above is the intent, so the expansions are
+    # deliberately unquoted.
+    # shellcheck disable=SC2206
+    local left_parts=(${left}) right_parts=(${right})
+
+    local index
+    for index in 0 1 2; do
+        # `10#` so a zero-padded component is read as decimal rather than as
+        # an octal literal that would make `08` a syntax error.
+        if (( 10#${left_parts[index]} < 10#${right_parts[index]} )); then
+            return 0
+        fi
+        if (( 10#${left_parts[index]} > 10#${right_parts[index]} )); then
+            return 1
+        fi
+    done
+
+    # Equal is not earlier: the floor version itself carries the file.
+    return 1
+}
+
 [[ -f "${COMPOSE_FILE}" ]] || die "compose file not found: ${COMPOSE_FILE}"
 [[ -f "${KELIR_APP_DIR}/.env" ]] || die "${KELIR_APP_DIR}/.env not found — copy .env.staging.example and fill it in"
 
@@ -315,14 +367,85 @@ environment="$(json_field "${version_body}" environment)"
 # `kelir-frontend:0.6.0` shipped byte-identical to `0.6.0-rc` with nobody able
 # to tell. `/version.json` is a static asset of the bundle, which Caddy serves
 # ahead of the SPA fallback.
+#
+# **An image older than the assertion is *unknown*, not *wrong*** (#440). The
+# path the Caddyfile gives an unmatched request is `/index.html`, so a frontend
+# built before #362 answers `/version.json` with `200 text/html` and the whole
+# single-page document. Read as JSON that carries no version, and compared as a
+# version, it reported the right image as the wrong one — so the first operator
+# to follow the rollback command this script prints at the bottom got
+#
+#     error: the frontend reports , expected 0.6.0 — the wrong image is serving
+#
+# on a rollback whose stack was up and answering ([record 07](../../projects/releases/07.%20Release%20v0.7.0.md),
+# *The failure this row asks to be recorded*). A rollback is run when something
+# is already wrong, and being told a working one failed is the worst possible
+# moment to be told it.
+#
+# **The fix is a third outcome rather than a weaker assertion.** The check now
+# separates *this bundle says it is a different release* from *this bundle
+# cannot say which release it is*, and only the second is excused — for images
+# below the floor named below, where it is the expected answer rather than a
+# symptom. A version that is present and different still fails at any version,
+# which is the whole of what #362 bought.
+#
+# The floor is the first release whose frontend emits the file. #367 added it
+# on 2026-09-07 and `v0.7.0` is the first release tagged after that, so every
+# frontend image before `0.7.0` serves the fallback and none of them can be
+# told apart by this check — which is stated here rather than discovered again.
+frontend_version_json_since='0.7.0'
+
 printf '  %-16s ' "/version.json"
-frontend_body="$(curl -fsS --max-time 5 "${KELIR_PUBLIC_URL}/version.json")" \
-    || die "/version.json is not served — the frontend image predates #362, or the bundle is not deployed"
+
+# `-f` is deliberately absent and the status code read instead: the three
+# answers this has to tell apart are not distinguishable from a body alone, and
+# `curl -f` collapses two of them into one exit code. The trailing `-w` line is
+# stripped back off below.
+frontend_response="$(curl -sS --max-time 5 -w '\n%{http_code} %{content_type}' \
+    "${KELIR_PUBLIC_URL}/version.json")" \
+    || die "/version.json could not be fetched from ${KELIR_PUBLIC_URL} — the frontend is not answering"
+
+frontend_meta="$(printf '%s' "${frontend_response}" | tail -1)"
+frontend_status="${frontend_meta%% *}"
+frontend_type="${frontend_meta#* }"
+frontend_body="$(printf '%s' "${frontend_response}" | sed '$d')"
+
 printf '%s\n' "${frontend_body}"
 
 frontend_version="$(json_field "${frontend_body}" version)"
-[[ "${frontend_version}" == "${VERSION}" ]] \
-    || die "the frontend reports ${frontend_version}, expected ${VERSION} — the wrong image is serving"
+
+if [[ "${frontend_status}" != 2[0-9][0-9] ]]; then
+    # Not even the fallback answered. The Caddyfile sends every unmatched path
+    # to `/index.html`, so there is no frontend image at all for which this is
+    # the normal reply.
+    die "/version.json answered ${frontend_status} — the frontend is not serving its bundle"
+
+elif [[ -n "${frontend_version}" ]]; then
+    # The bundle named itself. **This branch is not gated by the floor**: an
+    # answer that is present and different is a wrong image whatever version
+    # was asked for, and excusing it below the floor would drop the assertion
+    # instead of narrowing it.
+    [[ "${frontend_version}" == "${VERSION}" ]] \
+        || die "the frontend reports ${frontend_version}, expected ${VERSION} — the wrong image is serving"
+
+elif version_precedes "${VERSION}" "${frontend_version_json_since}"; then
+    # Unknown, and expected to be: this release predates the file. Said out
+    # loud rather than passed over, because what the deploy is proceeding
+    # without is a real check — the backend's identity is confirmed above and
+    # the frontend's is not.
+    printf '\033[1;33mwarning:\033[0m the frontend does not identify itself and %s predates %s, so this is expected:\n' \
+        "${VERSION}" "${frontend_version_json_since}" >&2
+    printf '  /version.json answered %s %s — Caddy'"'"'s single-page fallback, not the asset (#362, #440).\n' \
+        "${frontend_status}" "${frontend_type}" >&2
+    printf '  The frontend image is unverified on this deploy. The backend is not: /version reports %s above.\n' \
+        "${VERSION}" >&2
+
+else
+    # Unknown, and not expected to be: this release should emit the file. The
+    # most likely cause is the one #362 was filed for — an older frontend image
+    # serving under a newer version's name.
+    die "/version.json carries no version, and ${VERSION} is not older than ${frontend_version_json_since}, whose bundle emits one — answered ${frontend_status} ${frontend_type}, which is the single-page fallback; an older frontend image is serving"
+fi
 
 cat <<EOF
 

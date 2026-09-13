@@ -11,6 +11,26 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A rollback that worked no longer exits 1**
+  ([#440](https://github.com/sujanto-gaws/kelir/issues/440)). The
+  `/version.json` assertion [#367](https://github.com/sujanto-gaws/kelir/pull/367)
+  added on 2026-09-07 read Caddy's single-page fallback — `200 text/html`, the
+  whole SPA document, which is what **every frontend image before `0.7.0`**
+  answers that path with — as a version that was empty, and an empty version is
+  not the expected one. **`v0.6.0` is `v0.7.0`'s only rollback target**, so the
+  command `deploy.sh` itself prints as the rollback ended
+  `error: the frontend reports , expected 0.6.0 — the wrong image is serving`
+  with both `0.6.0` images running and `/health/ready` answering 200. A rollback
+  is run when something is already wrong, which is the worst moment to be told
+  a working one failed.
+  **The assertion is narrowed rather than dropped.** A bundle that names a
+  *different* version still fails at every version, floor or no floor; only an
+  **absent** answer is excused, only below `0.7.0` where it is the expected
+  reply, and only out loud — the deploy prints which artefact it could not
+  verify and that the backend's identity is unaffected. On a host with `jq`
+  the same response aborted the script with a parse error under
+  `set -euo pipefail` instead of reaching that message at all, which is fixed
+  with it.
 - **MinIO's two images are fetched from `quay.io`, because Docker Hub no longer
   has them** ([#421](https://github.com/sujanto-gaws/kelir/issues/421),
   **D-80**). On 2026-09-12 `minio/minio` and `minio/mc` stopped resolving
