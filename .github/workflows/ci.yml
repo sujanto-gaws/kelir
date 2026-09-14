@@ -87,6 +87,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          # **All of history, and a test depends on it** (#453).
+          # `sprint_reports_are_verified.rs` asks whether `e2e/tests/` gained a
+          # spec in the pull requests a status report cites, and a depth-1 clone
+          # answers that wrongly rather than not at all: its one grafted commit
+          # adds every file in the tree. The test refuses a shallow clone, so
+          # removing this line turns the job red rather than quietly weaker.
+          # 275 commits and 5.4 MiB of pack on 2026-09-14.
+          fetch-depth: 0
 
       # Attachments put bytes in object storage and the integration tests read
       # them back out of it (#244). The harness's rule is that nothing is mocked

@@ -39,9 +39,11 @@
 //! # What this deliberately does not check
 //!
 //! **Whether the file is on `main`.** That is the property the rule is really
-//! about, and it needs `git log`, which CI does not have: `actions/checkout`
-//! runs at depth 1 and the history is not there to ask. Rule 4 is the reachable
-//! substitute — it does not know *when* a record merged, and it does not need
+//! about, and it needs `git log`. When this was written CI did not have it —
+//! `actions/checkout` ran at depth 1 — and since
+//! [#453](https://github.com/sujanto-gaws/kelir/issues/453) the backend job
+//! fetches full history, so the question is now reachable and simply not
+//! asked here. Rule 4 is the substitute — it does not know *when* a record merged, and it does not need
 //! to, because a `Draft` that names its blocker is honest whenever it merged
 //! and one that does not is not.
 //!
