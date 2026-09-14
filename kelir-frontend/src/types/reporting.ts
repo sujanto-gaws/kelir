@@ -4,8 +4,8 @@
  * **One object rather than one per card**, which is
  * [ADR-0039](../../../docs/architectures/adr/0039.%20A%20Dashboard%20Widget%20Is%20a%20Purpose-Built%20Endpoint.md)
  * (**D-78**): the dashboard is one screen with one contract, so FR-RPT-002's
- * pending-task rows and FR-RPT-003's recent documents become fields here rather
- * than a second call beside this one. The page makes one request on sign-in,
+ * pending-task rows, FR-RPT-003's recent documents and FR-RPT-005's late tasks
+ * become fields here rather than a second call beside this one. The page makes one request on sign-in,
  * and that matters because it is the screen every session loads.
  */
 
@@ -17,11 +17,18 @@ export interface DashboardSummary {
   /** Tasks assigned to the caller, or offered to a role they hold, still open. */
   tasksWaiting: number
   /**
-   * Those of them that are past their due date.
+   * Those of them that are past their due date — **the count behind
+   * `overdueTasks`, from the same read** (FR-RPT-005, #446).
    *
    * **A subset of `tasksWaiting`, never a separate population** — so a card may
    * read *3 waiting, 1 late* and mean three tasks. Adding the two would be
    * wrong.
+   *
+   * **One answer with the rows beside it.** The number and the late tasks come
+   * from one statement, so the card cannot say *2 late* over three late rows. A
+   * client subtracting the rows it was sent from this count is reading the part
+   * of the late set it cannot see, which is the only thing the subtraction is
+   * for.
    *
    * **The server's answer.** It is computed against the clock that stamped the
    * due date, in the statement that read the row. A browser comparing a due
@@ -53,6 +60,30 @@ export interface DashboardSummary {
    * your inbox* rather than a second opinion about which work matters most.
    */
   pendingTasks: InboxTask[]
+  /**
+   * The caller's late tasks, most overdue first (FR-RPT-005, #446).
+   *
+   * **`InboxTask` again**, for the reason `pendingTasks` gives: one row type is
+   * what stops the widget and the inbox disagreeing about what a task *is*, and
+   * a second shape is where somebody recomputes lateness from `dueAt` against
+   * the browser's clock.
+   *
+   * **The server chose these and their order** — `dueAt` ascending, so the task
+   * that has been late longest is on top. The client never re-sorts them. The
+   * order is part of the answer, and a card that sorted again would be a second
+   * opinion about which late work is latest.
+   *
+   * **Its length is not the count.** The server sends at most five;
+   * `tasksOverdue` is the whole late set, from the same read. A component
+   * reading `overdueTasks.length` as the number late would be wrong by exactly
+   * the rows the person cannot see — and most wrong for the person furthest
+   * behind.
+   *
+   * **Empty means nothing is late** — and the screen owes the reader that
+   * sentence in words, because an empty card is indistinguishable from one that
+   * failed to load.
+   */
+  overdueTasks: InboxTask[]
   /**
    * The documents the caller touched most recently (FR-RPT-003, #433).
    *

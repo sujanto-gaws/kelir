@@ -94,3 +94,26 @@ export async function createDraft(
 
   return ((await created.json()) as { data: { id: string } }).data.id
 }
+
+/**
+ * Submits a draft over the API, which starts its type's workflow in the same
+ * transaction.
+ *
+ * **Seeding, not asserting**, for the reason `createDraft` gives. It exists for
+ * a flow whose subject is what an approver *later* sees ([#446] AC6): the
+ * requester's submit button is `a-document-is-approved.spec.ts`'s to drive, and
+ * driving it again here would fail this flow for a reason that one covers.
+ *
+ * Returns nothing, because what the submit produced — the number, the task — is
+ * the browser's to assert.
+ *
+ * [#446]: https://github.com/sujanto-gaws/kelir/issues/446
+ */
+export async function submitDocument(session: ApiSession, documentId: string): Promise<void> {
+  const submitted = await session.context.post(`${API_PREFIX}/documents/${documentId}/submission`)
+
+  expect(
+    submitted.ok(),
+    `submitting the document failed: ${submitted.status()} ${await submitted.text()}`,
+  ).toBeTruthy()
+}

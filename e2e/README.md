@@ -53,17 +53,26 @@ video are kept for failures only.
 
 ## What it covers
 
-Six flows, each the criterion that decides whether an item is Done rather than
-a broad sweep:
+Fourteen flows, each the criterion that decides whether an item is Done rather
+than a broad sweep. **This table said six until 2026-09-14**, while eight more
+specs landed beside it; it is listed in the order the flows were added.
 
 | Flow | Item |
 |---|---|
 | Sign in → reach the supplier list → filter it (`find-a-supplier.spec.ts`) | #101 |
+| Create a tenant with its first administrator (`create-a-tenant.spec.ts`) | #27, **D-18** |
 | A published definition renders as a form (`render-a-form.spec.ts`) | #162 |
 | The rendered form evaluates its own rules as they are typed (`a-form-calculates-and-validates.spec.ts`) | #163 |
 | A filled-in form is submitted, and a payload tampered with in flight is overwritten (`a-form-is-submitted.spec.ts`) | #164 |
 | A document is created from a **type**, filled in, submitted, found in the list and moved through a transition (`a-document-is-created-and-submitted.spec.ts`) | #172, and the Phase 4 exit demo |
 | A submitted document is approved **by somebody else**, and its status follows (`a-document-is-approved.spec.ts`) | #179, and the Sprint 10 exit demo |
+| A file is attached and a conversation held on a document (`a-file-and-a-conversation-on-a-document.spec.ts`) | SRS §9 criteria 6 and 11 |
+| A stored list definition becomes a list that sorts, filters and pages (`render-a-list.spec.ts`) | #340 |
+| An administrator configures a document type through a screen, and a document is raised from it (`configure-a-document-type.spec.ts`) | #341, **D-64** |
+| Signing out ends the session, and the roles screen is driven (`sign-out-and-the-roles-screen.spec.ts`) | #358 |
+| A form is built through a screen, and a document is raised against it (`build-a-form.spec.ts`) | #373 |
+| A list is built through a screen, and opens with rows in it (`build-a-list.spec.ts`) | #374 |
+| The dashboard lists the late task and not the undated one, and the row opens it (`the-dashboard-says-what-is-late.spec.ts`) | #446 |
 
 The suites seed their rows over the API and assert only through the browser —
 arranging through HTTP is faster and fails where it is meant to, but an

@@ -46,18 +46,34 @@ pub struct DashboardSummary {
     /// bug nobody can reproduce, and the way to make that impossible is to have
     /// one count rather than two that are checked against each other.
     pub tasks_waiting: i64,
-    /// Those of them that are past their due date.
+    /// Tasks waiting for the caller that are past their due date — **the whole
+    /// late set behind [`Self::overdue_tasks`]** (FR-RPT-005, [#446]).
     ///
-    /// **A subset of [`Self::tasks_waiting`], never a separate population** —
-    /// `InboxScope`'s documented shape is `overdue ⊂ open`. So a card may read
-    /// *3 waiting, 1 late* and mean three tasks, and a client that added them
-    /// would be wrong rather than merely odd.
+    /// **Counted by the read that listed those rows.** It is `count(*) OVER ()`
+    /// on the inbox's statement narrowed to `InboxScope::Overdue`, so the
+    /// overdue card's number and its rows are one answer from one snapshot —
+    /// [#432] AC5's rule, applied to the fourth widget. A client says *N more
+    /// late* as `tasksOverdue - overdueTasks.length`.
+    ///
+    /// **The same population as ever, and no longer the same read as
+    /// [`Self::tasks_waiting`].** `overdue ⊂ open` is still `InboxScope`'s shape
+    /// under one `WHERE`, so a card may read *3 waiting, 1 late* and mean three
+    /// tasks, and a client that added them would be wrong rather than merely
+    /// odd. Until FR-RPT-005 the two came from one pass; now they are two
+    /// statements, and a task changing hands between them — decided, reassigned,
+    /// a grant arriving — can leave the two numbers describing different sets
+    /// for that one request. **That is the trade taken, and it is stated rather
+    /// than hidden**: the card that lists late tasks agreeing with its own count
+    /// was chosen over this number agreeing with a different card's.
     ///
     /// **Late is the database's opinion**, computed against the same clock that
     /// stamped `due_at`, for the reason `workflow::repository::inbox` gives at
     /// length: a browser subtracting a due date from its own clock is a second
     /// opinion, and a task late on one machine and not on another is FR-TASK-007's
     /// named unreproducible bug report.
+    ///
+    /// [#432]: https://github.com/sujanto-gaws/kelir/issues/432
+    /// [#446]: https://github.com/sujanto-gaws/kelir/issues/446
     pub tasks_overdue: i64,
     /// Documents the caller raised and has not sent yet.
     ///
@@ -104,6 +120,46 @@ pub struct DashboardSummary {
     ///
     /// [#432]: https://github.com/sujanto-gaws/kelir/issues/432
     pub pending_tasks: Vec<InboxTask>,
+    /// The tasks behind [`Self::tasks_overdue`] that have been late longest
+    /// (FR-RPT-005, [#446]).
+    ///
+    /// # What the issue asked for, and what the requirement lacked
+    ///
+    /// [#446] AC1 asked for *an overdue count on the summary*, and that count had
+    /// been here since FR-RPT-001. **FR-RPT-005 is *show overdue tasks*, and what
+    /// it lacked was these rows** — so this field is the widget, and
+    /// `tasksOverdue` moved to the read that produces it so the card's number and
+    /// the card's list are one answer.
+    ///
+    /// # The inbox's own row type, for the reason `pendingTasks` gives
+    ///
+    /// [`InboxTask`], served by the statement `GET /api/v1/tasks?scope=overdue`
+    /// pages on. `isOverdue` is `true` on every row because the database said so
+    /// in the statement that read it — **not** because this field implies it,
+    /// and a client must not set it from the field's name any more than from
+    /// `dueAt`.
+    ///
+    /// # How many, and which
+    ///
+    /// [`super::OVERDUE_TASKS_SHOWN`] of them, **longest late first** — `dueAt`
+    /// ascending, ties broken the inbox's way (`createdAt` then `id`, both
+    /// descending) so the order is total. That is the difference from
+    /// [`Self::pending_tasks`], which is the top of the inbox in the inbox's
+    /// order: this card is asked *what has waited longest past its date*, and
+    /// newest first would put the task that went late an hour ago above the one
+    /// that went late last month.
+    ///
+    /// **Late means late and still open.** A task with no `dueAt` is not here,
+    /// and neither is one finished after its date passed — the predicate is
+    /// `workflow::repository::inbox`'s, not this field's. `tasksOverdue` is the
+    /// whole set, so *N more late* is `tasksOverdue - overdueTasks.length`, and a
+    /// client must not read this array's length as the count.
+    ///
+    /// **Empty means nothing is late**, and the screen has to say so in words:
+    /// an empty card is indistinguishable from one that failed to load.
+    ///
+    /// [#446]: https://github.com/sujanto-gaws/kelir/issues/446
+    pub overdue_tasks: Vec<InboxTask>,
     /// The documents the caller touched most recently (FR-RPT-003, [#433]).
     ///
     /// # The row the ADR's rejected alternative would have served

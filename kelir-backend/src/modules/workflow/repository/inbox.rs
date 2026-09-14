@@ -71,7 +71,14 @@
 //! one `WHERE` clause above. A fourth copy of it is the thing this file has
 //! spent three comments and one incident asking nobody to write.
 //!
+//! **FR-RPT-005's overdue widget came through the same door** ([#446]). It wanted
+//! the late tasks longest late first, which the inbox's order is not, and it got
+//! an [`InboxOrder`] applied inside [`list_for_caller`]'s `ORDER BY` rather than
+//! a statement that sorts differently — so there is still one `WHERE`, and the
+//! widget and `?scope=overdue` differ only in sequence.
+//!
 //! [#432]: https://github.com/sujanto-gaws/kelir/issues/432
+//! [#446]: https://github.com/sujanto-gaws/kelir/issues/446
 //!
 //! [#106]: https://github.com/sujanto-gaws/kelir/issues/106
 //! [#121]: https://github.com/sujanto-gaws/kelir/issues/121
@@ -125,10 +132,48 @@ impl InboxScope {
     }
 }
 
+/// **Which task comes first** — the inbox's own order, or the longest-late
+/// first (FR-RPT-005, [#446]).
+///
+/// # A second axis, and deliberately not a point on the first
+///
+/// [`InboxScope`] says *which* tasks; this says *in what sequence*. The overdue
+/// widget wants `Overdue` rows **most late first**, and folding that into the
+/// scope would make `Overdue` sort two ways depending on who asked — the
+/// inbox's `?scope=overdue` pages newest first, and a person paging it does not
+/// expect the order to change with the filter.
+///
+/// # Applied inside the paged statement, not beside it
+///
+/// It is a `CASE` in [`list_for_caller`]'s `ORDER BY`, so the widget's rows come
+/// from the one `WHERE` clause this file states at its top rather than from a
+/// copy of it that sorts differently. [`count_for_caller`] does not take it,
+/// because a count has no order.
+///
+/// **The inbox's HTTP API does not offer it.** `task_inbox::domain` sets
+/// [`InboxOrder::Newest`] rather than reading an order from the query string;
+/// exposing one there is a decision nobody has taken.
+///
+/// [#446]: https://github.com/sujanto-gaws/kelir/issues/446
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InboxOrder {
+    /// `created_at DESC, id DESC` — the order the inbox opens on.
+    #[default]
+    Newest,
+    /// `due_at ASC`, with the inbox's own order breaking ties so the sequence
+    /// stays total: the task whose date passed longest ago first.
+    ///
+    /// A task with no date sorts last, which only matters under a scope that
+    /// admits undated tasks — under `Overdue` there are none.
+    MostOverdueFirst,
+}
+
 /// What the inbox may be narrowed to.
 #[derive(Debug, Clone, Default)]
 pub struct InboxFilters {
     pub scope: InboxScope,
+    /// The sequence the page comes back in. Only [`list_for_caller`] reads it.
+    pub order: InboxOrder,
     pub document_id: Option<Uuid>,
     /// One task, by id.
     ///
@@ -212,16 +257,18 @@ pub struct InboxPage {
     /// the list it means *nothing on this page*, and the two are not the same
     /// number. **So paging reads [`count_for_caller`] and this field is for the
     /// caller that asks for the first page** — which is what
-    /// [`super::super::service::inbox::waiting_work`] does and what the
+    /// [`super::super::service::inbox::waiting_work`] and
+    /// [`super::super::service::inbox::late_work`] both do and what the
     /// `Option` is here to make a caller notice.
-    pub matching: Option<i64>,
-    /// How many of them are late, counted in the same pass over the same rows.
     ///
-    /// **A subset of [`Self::matching`]**, under the identical predicate the
-    /// `is_overdue` column answers per row — so a card reading *3 waiting, 1
-    /// late* describes three tasks, and the row it highlights is one of the
-    /// rows it listed.
-    pub matching_overdue: Option<i64>,
+    /// **There used to be a `matching_overdue` beside it**, a filtered window
+    /// count for the waiting card's *1 late*. FR-RPT-005 ([#446]) took that
+    /// number from the overdue widget's own read instead — the count over the
+    /// rows that card lists — and the field had no other reader, so it went
+    /// rather than stand as a second count of the late set.
+    ///
+    /// [#446]: https://github.com/sujanto-gaws/kelir/issues/446
+    pub matching: Option<i64>,
 }
 
 /// The caller's page of tasks.
@@ -262,13 +309,6 @@ pub async fn list_for_caller(
                -- tasks in, and a decision landing between the two reads makes a
                -- card say "5 waiting" over four rows.
                count(*) OVER () AS "matching!",
-               -- The same subset the per-row `is_overdue` answers, counted over
-               -- the same rows in the same pass — so "3 waiting, 1 late" is
-               -- three tasks and the late one is among those listed.
-               count(*) FILTER (WHERE t.due_at IS NOT NULL
-                                  AND t.due_at < now()
-                                  AND t.status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS'))
-                   OVER () AS "matching_overdue!",
                t.assignee_user_id, t.candidate_role_id,
                r.role_code AS "candidate_role_code?",
                t.delegated_from_user_id,
@@ -324,7 +364,15 @@ pub async fn list_for_caller(
                OR d.document_number ILIKE '%' || $10 || '%' ESCAPE '\')
         -- **Totally ordered** (#256 AC6). `created_at` alone leaves ties, and a
         -- page boundary inside a tie is a row shown twice or not at all.
-        ORDER BY t.created_at DESC, t.id DESC
+        --
+        -- The `CASE` is `InboxOrder::MostOverdueFirst` (#446): the date that
+        -- passed longest ago first, with the inbox's own order breaking ties so
+        -- the sequence stays total. When `$11` is false every row's key is
+        -- `NULL`, the first term sorts nothing, and this is the inbox's order
+        -- unchanged — one statement, rather than a copy of the `WHERE` above
+        -- that sorts differently.
+        ORDER BY CASE WHEN $11 THEN t.due_at END ASC NULLS LAST,
+                 t.created_at DESC, t.id DESC
         LIMIT $7 OFFSET $8
         "#,
         tenant_id,
@@ -336,16 +384,16 @@ pub async fn list_for_caller(
         limit,
         offset,
         completed_only,
-        filters.search.as_deref()
+        filters.search.as_deref(),
+        filters.order == InboxOrder::MostOverdueFirst
     )
     .fetch_all(pool)
     .await?;
 
-    // Every row carries the same two window counts, so the first row is as good
-    // as any and an empty page has none to read — which is what `matching`
-    // being an `Option` says to the caller.
+    // Every row carries the same window count, so the first row is as good as
+    // any and an empty page has none to read — which is what `matching` being
+    // an `Option` says to the caller.
     let matching = rows.first().map(|row| row.matching);
-    let matching_overdue = rows.first().map(|row| row.matching_overdue);
 
     let rows = rows
         .into_iter()
@@ -377,11 +425,7 @@ pub async fn list_for_caller(
         })
         .collect();
 
-    Ok(InboxPage {
-        rows,
-        matching,
-        matching_overdue,
-    })
+    Ok(InboxPage { rows, matching })
 }
 
 /// How many the caller can see, under the same rule.
