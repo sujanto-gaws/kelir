@@ -9,7 +9,7 @@
  * and that matters because it is the screen every session loads.
  */
 
-import type { DocumentSummary } from './document'
+import type { DocumentStatus, DocumentSummary } from './document'
 import type { InboxTask } from './workflow'
 
 /** What is waiting for the caller: the counts, and the top of the queue. */
@@ -109,6 +109,30 @@ export interface DashboardSummary {
    * from one that failed to load (#433 AC5).
    */
   recentDocuments: RecentlyTouchedDocument[]
+  /**
+   * The documents the caller raised, counted by status (FR-RPT-004, #447).
+   *
+   * **Always all ten statuses, zeros included**, so a status nothing is in is a
+   * row saying `0` rather than a missing row a client has to notice.
+   *
+   * **The server chose the order** — the lifecycle's, `DRAFT` first. It is an
+   * array of pairs rather than an object keyed by status for exactly that reason:
+   * a JSON object promises no order, and a client sorting the rows would be a
+   * second opinion about how a document's life reads.
+   *
+   * **`draftDocuments` is the `DRAFT` row, by construction on the server.** The
+   * client reads each where it is shown and never derives one from the other.
+   */
+  documentsByStatus: DocumentStatusCount[]
+}
+
+/**
+ * How many of the caller's documents are in one status — the backend's
+ * `document::domain::DocumentStatusCount`.
+ */
+export interface DocumentStatusCount {
+  status: DocumentStatus
+  count: number
 }
 
 /**

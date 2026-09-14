@@ -6,7 +6,7 @@ import axios, {
   type InternalAxiosRequestConfig,
 } from 'axios'
 import { createPinia, setActivePinia } from 'pinia'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import DashboardPage from './DashboardPage.vue'
 import { useAuthStore } from '@/stores/auth'
@@ -18,6 +18,32 @@ import {
   type FakeBackendHandle,
   type FakeReply,
 } from '@/lib/testing/fake-backend'
+
+/**
+ * **The chart is replaced, and the page's numbers are tested without it.**
+ *
+ * Unovis draws with d3 under a `ResizeObserver`, which jsdom does not lay out,
+ * so the real chart would render an empty SVG here and prove nothing. The stub
+ * records the rows it was handed. Every count assertion below reads the card's
+ * text, which is what a screen reader reads too — so they hold whether the chart
+ * has loaded or not.
+ */
+vi.mock('./DocumentStatusChart.vue', async () => {
+  const { defineComponent, h } = await import('vue')
+
+  return {
+    // `defineAsyncComponent` unwraps `default` only from something marked as a
+    // module; without this it takes the mock's namespace for the component.
+    __esModule: true,
+    default: defineComponent({
+      name: 'DocumentStatusChart',
+      props: { counts: { type: Array, required: true } },
+      setup(props) {
+        return () => h('div', { 'data-testid': 'status-chart-stub' }, String(props.counts.length))
+      },
+    }),
+  }
+})
 
 /**
  * The dashboard (FR-RPT-001, [#431]; FR-RPT-002, [#432]; FR-RPT-003, [#433];
@@ -137,6 +163,38 @@ import {
  * the server, so the remaining way for this card to misstate how much is late
  * is on this side: deriving the number from the five rows it was sent.
  *
+ * ## The status widget (FR-RPT-004, [#447])
+ *
+ * **Six mutations, run 2026-09-14.** Baseline first: **43 passed, nothing
+ * mutated** (this file and `DocumentStatusChart.spec.ts`) for J1–J5, and **46
+ * passed** for J6, with the chart-failure file and the tile tests added. Five
+ * were red on the first run; **J5 was green, and it is recorded rather than
+ * tidied away.**
+ *
+ * | Mutation | Result | Reddened |
+ * |---|---|---|
+ * | **J1** — the count list re-sorts the server's rows by count, descending | Seen red, 2026-09-14 | *lists every status with its count, in the order the server sent* |
+ * | **J2** — the count list drops the zero rows | Seen red, 2026-09-14 | *shows a status nothing is in as a zero, not as a missing row*; also the order test and the link test, both of which count ten rows |
+ * | **J3** — the all-zero check inverted | Seen red, 2026-09-14 | *says the caller has raised nothing rather than drawing ten empty bars*, and four more — every test that expects the counts on a card with documents |
+ * | **J4** — the status card's link loses its `document:read` condition | Seen red, 2026-09-14 | *links to the document list only when the caller can open it* |
+ * | **J5** — a failed chart load hides the count list (`onError` sets a flag the list's `v-if` reads) | **Green, 2026-09-14** — then Seen red, 2026-09-14 | first run: nothing, 43 passed; second run: *keeps the counts on screen and says the chart could not be drawn*, in `DashboardPage.chart-failure.spec.ts` |
+ * | **J6** — the two tiles' links lose their grant condition: the behaviour since #431, which linked `/tasks` and `/documents` whatever the caller held, so **the defect itself rather than a stand-in for it** | Seen red, 2026-09-14 | *shows both tiles without links when the caller can open neither screen*; *links each tile only to the screen the caller can open* |
+ *
+ * **J5 is the finding.** The page's comment said a failed chunk leaves the
+ * numbers where they are, and no test could see otherwise: every test in this
+ * file loads the chart stub successfully, so a card that dropped its counts on
+ * a loader error passed all 43. The chart-failure file makes the import reject
+ * and asserts both the error sentence and the counts; against it, J5 reddens
+ * exactly that test. The error-sentence half is what keeps it from passing on a
+ * loader that never actually failed.
+ *
+ * **J2 and J3 redden more than their own test**, and the extra reds are
+ * genuine rather than collateral: J2 removes rows the order and link tests
+ * count, and J3 hides the whole list on every fixture that has documents. They
+ * are listed rather than narrowed, because a mutation that reddens one test
+ * only when the others are made weaker is not better evidence.
+ *
+ * [#447]: https://github.com/sujanto-gaws/kelir/issues/447
  * [#446]: https://github.com/sujanto-gaws/kelir/issues/446
  * [#433]: https://github.com/sujanto-gaws/kelir/issues/433
  *
@@ -157,8 +215,38 @@ function summary(overrides: Record<string, unknown> = {}): unknown {
     // *more late* line no real response could produce.
     overdueTasks: [overdueTask()],
     recentDocuments: [recentDocument()],
+    // The `DRAFT` row matches `draftDocuments: 2` above: the server reads one out
+    // of the other, and a fixture that disagreed would be a response it cannot send.
+    documentsByStatus: statusCounts({ DRAFT: 2, SUBMITTED: 1, APPROVED: 4 }),
     ...overrides,
   }
+}
+
+/** The ten statuses, in the lifecycle order the server sends them. */
+const STATUSES = [
+  'DRAFT',
+  'SUBMITTED',
+  'IN_REVIEW',
+  'PENDING_APPROVAL',
+  'APPROVED',
+  'REJECTED',
+  'RETURNED',
+  'COMPLETED',
+  'ARCHIVED',
+  'CANCELLED',
+] as const
+
+type Status = (typeof STATUSES)[number]
+
+/**
+ * The per-status rows, in the shape the server sends (FR-RPT-004, #447): all
+ * ten, zeros included, in lifecycle order. A status not named is a zero row,
+ * never a missing one.
+ */
+function statusCounts(
+  counts: Partial<Record<Status, number>> = {},
+): { status: Status; count: number }[] {
+  return STATUSES.map((status) => ({ status, count: counts[status] ?? 0 }))
 }
 
 /**
@@ -349,6 +437,49 @@ describe('DashboardPage', () => {
   })
 
   /**
+   * **The tiles keep their numbers; only their links follow the grant.**
+   *
+   * The same courtesy every card below extends: the tiles are served behind
+   * `reporting:dashboard:read` alone, the inbox holds `workflow:task:read` and
+   * the document list `document:read`, so a link the caller cannot follow is a
+   * trip to `/forbidden`. The assertion is that the value and caption are still
+   * on screen, not merely that the anchor is gone.
+   */
+  it('shows both tiles without links when the caller can open neither screen', async () => {
+    const wrapper = await render()
+    const waiting = wrapper.find('[data-testid="tasks-waiting"]')
+    const drafts = wrapper.find('[data-testid="draft-documents"]')
+
+    expect(waiting.text()).toContain('3')
+    expect(waiting.text()).toContain('1 past its date')
+    expect(waiting.find('a').exists()).toBe(false)
+    expect(drafts.text()).toContain('2')
+    expect(drafts.text()).toContain('Raised by you, not sent yet')
+    expect(drafts.find('a').exists()).toBe(false)
+  })
+
+  /**
+   * **Each grant opens its own tile's link and not the other's.** One grant at
+   * a time, so a tile gated on the wrong permission fails here as surely as an
+   * ungated one.
+   */
+  it('links each tile only to the screen the caller can open', async () => {
+    signIn(['reporting:dashboard:read', 'workflow:task:read'])
+    const tasksOnly = await render()
+
+    expect(tasksOnly.find('[data-testid="tasks-waiting"] a').text()).toContain('Open your inbox')
+    expect(tasksOnly.find('[data-testid="draft-documents"] a').exists()).toBe(false)
+
+    signIn(['reporting:dashboard:read', 'document:read'])
+    const documentsOnly = await render()
+
+    expect(documentsOnly.find('[data-testid="tasks-waiting"] a').exists()).toBe(false)
+    expect(documentsOnly.find('[data-testid="draft-documents"] a').text()).toContain(
+      'Open documents',
+    )
+  })
+
+  /**
    * `tasksOverdue ⊂ tasksWaiting`, which the server states and the screen has
    * to respect: two tiles would read as two populations and invite a reader to
    * add them to four.
@@ -385,6 +516,7 @@ describe('DashboardPage', () => {
           draftDocuments: 0,
           pendingTasks: [],
           overdueTasks: [],
+          documentsByStatus: statusCounts(),
         }),
       ),
     })
@@ -978,5 +1110,148 @@ describe('DashboardPage', () => {
 
     expect(rows[0].text()).toContain('PR-2026-000009')
     expect(rows[1].text()).toContain('DOC-2026-000010')
+  })
+
+  // -------------------------------------------------------------------------
+  // FR-RPT-004 — the status widget (#447)
+  // -------------------------------------------------------------------------
+
+  /**
+   * **Every status, with its count, in the order the server sent.**
+   *
+   * The server sends lifecycle order; this fixture sends the lifecycle
+   * **reversed**, with counts that rise and fall, so the order on screen can
+   * only be the order of the array. A component sorting by lifecycle, by label
+   * or by count puts a different row first and fails here — which is the
+   * mistake the fixture exists to make visible, not a response the server sends.
+   */
+  it('lists every status with its count, in the order the server sent', async () => {
+    const counts = [3, 0, 5, 1, 0, 8, 2, 0, 6, 4]
+    const sent = [...STATUSES].reverse().map((status, index) => ({ status, count: counts[index] }))
+
+    onSummary = () => ({
+      status: 200,
+      body: itemBody(summary({ draftDocuments: 4, documentsByStatus: sent })),
+    })
+
+    const wrapper = await render()
+    const rows = wrapper.findAll('[data-testid="status-count"]')
+
+    expect(rows.map((row) => row.attributes('data-status'))).toEqual(sent.map((row) => row.status))
+    expect(rows.map((row) => row.find('[data-testid="status-value"]').text())).toEqual(
+      counts.map(String),
+    )
+    // The product's own names for a status, not the wire's.
+    expect(rows[0].find('[data-testid="status-label"]').text()).toBe('Cancelled')
+    expect(rows[6].find('[data-testid="status-label"]').text()).toBe('Pending approval')
+  })
+
+  /**
+   * **A status nothing is in is a row that says `0`.** The server fills the
+   * zeros so the card never has to notice a missing status, and a card that
+   * dropped the zero rows would make the ten statuses a different list from one
+   * caller to the next.
+   */
+  it('shows a status nothing is in as a zero, not as a missing row', async () => {
+    const wrapper = await render()
+    const rows = wrapper.findAll('[data-testid="status-count"]')
+    const inReview = rows.find((row) => row.attributes('data-status') === 'IN_REVIEW')
+
+    expect(rows).toHaveLength(10)
+    expect(inReview?.find('[data-testid="status-label"]').text()).toBe('In review')
+    expect(inReview?.find('[data-testid="status-value"]').text()).toBe('0')
+  })
+
+  /**
+   * **Says so in words when the caller has raised nothing.** Ten empty bars read
+   * as a chart that failed to draw, and ten zeros read as a list nobody checked;
+   * a sentence is the only form of *none* that cannot be mistaken for a fault.
+   */
+  it('says the caller has raised nothing rather than drawing ten empty bars', async () => {
+    onSummary = () => ({
+      status: 200,
+      body: itemBody(summary({ draftDocuments: 0, documentsByStatus: statusCounts() })),
+    })
+
+    const wrapper = await render()
+    const card = wrapper.find('[data-testid="documents-by-status"]')
+
+    expect(card.find('[data-testid="status-empty"]').text()).toContain(
+      'You have not raised any documents yet',
+    )
+    expect(card.findAll('[data-testid="status-count"]')).toHaveLength(0)
+    expect(card.find('[data-testid="status-chart-stub"]').exists()).toBe(false)
+  })
+
+  /**
+   * **The chart is loaded on demand, and handed the server's rows untouched.**
+   *
+   * What this can see is that the page holds the chart behind an async wrapper
+   * and passes it the array as it arrived. **What it cannot see is whether the
+   * build keeps Unovis out of the first-load chunks** — a module a test imports
+   * is reachable either way — and that is `scripts/check-bundle-split.mjs`'s to
+   * assert against the manifest.
+   */
+  it('loads the chart only when the card renders, and hands it the rows as sent', async () => {
+    const wrapper = await render()
+
+    expect(wrapper.findComponent({ name: 'AsyncComponentWrapper' }).exists()).toBe(true)
+
+    await vi.dynamicImportSettled()
+    await flushPromises()
+
+    const chart = wrapper.findComponent({ name: 'DocumentStatusChart' })
+
+    expect(chart.exists()).toBe(true)
+    expect(chart.props('counts')).toEqual(statusCounts({ DRAFT: 2, SUBMITTED: 1, APPROVED: 4 }))
+  })
+
+  /**
+   * **No card without the grant, and none over a failed load** — the same
+   * degradation every other widget has, because the card lives inside the
+   * summary and not beside it. A status card that rendered its ten zeros over an
+   * error would be a confident answer to a question the server did not answer.
+   */
+  it('shows no status card without the grant, or when the summary fails', async () => {
+    signIn(['document:read'])
+    const withoutGrant = await render()
+
+    expect(withoutGrant.find('[data-testid="no-permission"]').exists()).toBe(true)
+    expect(withoutGrant.find('[data-testid="documents-by-status"]').exists()).toBe(false)
+
+    signIn(['reporting:dashboard:read'])
+    onSummary = () => ({ status: 500, body: errorBody('INTERNAL_ERROR', 'nope') })
+    const failed = await render()
+
+    expect(failed.find('[data-testid="error"]').exists()).toBe(true)
+    expect(failed.find('[data-testid="documents-by-status"]').exists()).toBe(false)
+  })
+
+  /**
+   * **A courtesy, not a control** — the recent-documents card's rule, for the
+   * same reason: the counts are the caller's own, served behind
+   * `reporting:dashboard:read` alone, and the document list holds
+   * `document:read`. The counts render either way.
+   */
+  it('links to the document list only when the caller can open it', async () => {
+    const withoutDocuments = await render()
+    const plainCard = withoutDocuments.find('[data-testid="documents-by-status"]')
+
+    expect(plainCard.findAll('[data-testid="status-count"]')).toHaveLength(10)
+    expect(plainCard.findAll('a')).toHaveLength(0)
+
+    signIn(['reporting:dashboard:read', 'document:read'])
+    const withDocuments = await render()
+
+    expect(withDocuments.find('[data-testid="documents-by-status"]').text()).toContain(
+      'Open documents',
+    )
+  })
+
+  /** **The widget adds no request of its own** (#447 AC1, ADR-0039). */
+  it('asks for no second endpoint to count documents by status', async () => {
+    await render()
+
+    expect(requested).toEqual([expect.stringContaining('/dashboard/summary')])
   })
 })

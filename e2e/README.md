@@ -53,7 +53,7 @@ video are kept for failures only.
 
 ## What it covers
 
-Fourteen flows, each the criterion that decides whether an item is Done rather
+Fifteen flows, each the criterion that decides whether an item is Done rather
 than a broad sweep. **This table said six until 2026-09-14**, while eight more
 specs landed beside it; it is listed in the order the flows were added.
 
@@ -73,6 +73,7 @@ specs landed beside it; it is listed in the order the flows were added.
 | A form is built through a screen, and a document is raised against it (`build-a-form.spec.ts`) | #373 |
 | A list is built through a screen, and opens with rows in it (`build-a-list.spec.ts`) | #374 |
 | The dashboard lists the late task and not the undated one, and the row opens it (`the-dashboard-says-what-is-late.spec.ts`) | #446 |
+| The dashboard counts the caller's documents by status as text, leaves out somebody else's, and draws the chart (`the-dashboard-counts-your-documents-by-status.spec.ts`) | #447 |
 
 The suites seed their rows over the API and assert only through the browser —
 arranging through HTTP is faster and fails where it is meant to, but an

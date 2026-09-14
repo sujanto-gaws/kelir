@@ -19,6 +19,8 @@
   },
   "dependencies": {
     "@goplasmatic/datalogic-wasm": "5.2.0",
+    "@unovis/ts": "1.7.0",
+    "@unovis/vue": "1.7.0",
     "axios": "^1.8.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

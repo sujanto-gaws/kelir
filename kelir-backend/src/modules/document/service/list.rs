@@ -18,7 +18,8 @@
 use uuid::Uuid;
 
 use super::super::domain::{
-    DocumentFilters, DocumentQuery, DocumentSort, DocumentSummary, RecentlyTouchedDocument,
+    DocumentFilters, DocumentQuery, DocumentSort, DocumentStatusCount, DocumentSummary,
+    RecentlyTouchedDocument,
 };
 use super::super::repository as repo;
 use super::super::repository::list::DocumentRow;
@@ -156,8 +157,12 @@ pub async fn require_bound(
     )]))
 }
 
-/// How many documents this caller raised and has not sent yet (FR-RPT-001,
-/// [#431]).
+/// How many documents this caller raised, in every status (FR-RPT-001,
+/// FR-RPT-004; [#431], [#447]).
+///
+/// **All ten statuses, zeros included, in [`DocumentStatus::ALL`]'s order** —
+/// the dashboard serves this array as it comes, and `draftDocuments` is its
+/// `DRAFT` entry rather than a count of its own.
 ///
 /// # This function requires no permission, and that is the decision
 ///
@@ -166,7 +171,7 @@ pub async fn require_bound(
 /// reference, sometimes a form payload. `document:read` is the permission for
 /// *the document surface*, and rows are what it protects.
 ///
-/// **This returns one integer about the caller's own unsent work.** It names no
+/// **This returns ten integers about the caller's own work.** It names no
 /// document, says nothing about the tenant's population, and tells the caller
 /// nothing they do not already know first-hand: they raised these rows. There
 /// is nothing here for `document:read` to protect, and requiring it would make
@@ -182,24 +187,31 @@ pub async fn require_bound(
 /// is where that surface is decided.
 ///
 /// **What this does not license.** A count over rows the caller did *not* raise
-/// is the document population, and that is `document:read`'s to gate.
-/// FR-RPT-004's tenant-wide status summary is exactly that, and it cannot be
-/// served by widening this function.
+/// is the document population, and that is `document:read`'s to gate. A
+/// *tenant-wide* status summary is exactly that — the reading of FR-RPT-004
+/// [#447] did not take — and it cannot be served by widening this function: the
+/// widening is dropping `created_by`, and that one deletion turns *the caller's
+/// own work* into *the tenant's* behind a grant that was never argued for it.
 ///
 /// [#301]: https://github.com/sujanto-gaws/kelir/issues/301
 /// [#431]: https://github.com/sujanto-gaws/kelir/issues/431
-pub async fn count_own_drafts(state: &AppState, caller: &Authenticated) -> Result<i64, AppError> {
-    let count =
-        repo::list::count_own_drafts(&state.pool, caller.tenant_id(), caller.user_id()).await?;
+/// [#447]: https://github.com/sujanto-gaws/kelir/issues/447
+/// [`DocumentStatus::ALL`]: super::super::domain::DocumentStatus::ALL
+pub async fn count_own_by_status(
+    state: &AppState,
+    caller: &Authenticated,
+) -> Result<Vec<DocumentStatusCount>, AppError> {
+    let counted =
+        repo::list::count_own_by_status(&state.pool, caller.tenant_id(), caller.user_id()).await?;
 
-    Ok(count)
+    Ok(DocumentStatusCount::every_status(counted))
 }
 
 /// The documents this caller touched most recently (FR-RPT-003, [#433]).
 ///
 /// # This function requires no permission either, and the line is *whose work*
 ///
-/// [`count_own_drafts`] above argues that at length for a number. **This returns
+/// [`count_own_by_status`] above argues that at length for numbers. **This returns
 /// rows**, and that difference is worth meeting head-on rather than leaving to
 /// the reader, because it is the one an author reviewing this file will stop at.
 ///
@@ -225,10 +237,11 @@ pub async fn count_own_drafts(state: &AppState, caller: &Authenticated) -> Resul
 /// this.
 ///
 /// **What this does not license.** Documents the caller did *not* touch are the
-/// document population, and that is [`DOCUMENT_READ`]'s to gate. FR-RPT-004's
-/// tenant-wide status summary is exactly that, and **it cannot be served by
-/// widening this function** — an author reaching for it is standing here, which
-/// is why the sentence is here rather than only in the module doc.
+/// document population, and that is [`DOCUMENT_READ`]'s to gate. A tenant-wide
+/// status summary is exactly that — FR-RPT-004 was built over the caller's own
+/// documents instead ([#447]) — and **no view of the tenant's documents can be
+/// served by widening this function**. An author reaching for it is standing
+/// here, which is why the sentence is here rather than only in the module doc.
 ///
 /// # What "touched" means, and where it is written
 ///
@@ -246,6 +259,7 @@ pub async fn count_own_drafts(state: &AppState, caller: &Authenticated) -> Resul
 /// [ADR-0039]: ../../../../../docs/architectures/adr/0039.%20A%20Dashboard%20Widget%20Is%20a%20Purpose-Built%20Endpoint.md
 /// [#301]: https://github.com/sujanto-gaws/kelir/issues/301
 /// [#433]: https://github.com/sujanto-gaws/kelir/issues/433
+/// [#447]: https://github.com/sujanto-gaws/kelir/issues/447
 /// [`activity::domain::TOUCH_EVENT_TYPES`]: crate::modules::activity::domain::TOUCH_EVENT_TYPES
 pub async fn recent_documents(
     state: &AppState,

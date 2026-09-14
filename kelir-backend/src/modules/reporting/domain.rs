@@ -5,7 +5,7 @@
 use serde::Serialize;
 use utoipa::ToSchema;
 
-use crate::modules::document::domain::RecentlyTouchedDocument;
+use crate::modules::document::domain::{DocumentStatusCount, RecentlyTouchedDocument};
 use crate::modules::workflow::service::inbox::InboxTask;
 
 /// The dashboard, as one payload.
@@ -30,8 +30,8 @@ use crate::modules::workflow::service::inbox::InboxTask;
 /// this struct rather than of the handler: **no field here describes another
 /// person's work, another department's load, or the tenant's population.** A
 /// field that did would need the permission of the surface it came from, and
-/// the module doc names the two roadmap requirements that will reach that line
-/// first.
+/// the module doc names the roadmap requirement still on the far side of that
+/// line and the reading of FR-RPT-004 that would have been.
 ///
 /// [ADR-0039]: ../../../../docs/architectures/adr/0039.%20A%20Dashboard%20Widget%20Is%20a%20Purpose-Built%20Endpoint.md
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -75,16 +75,59 @@ pub struct DashboardSummary {
     /// [#432]: https://github.com/sujanto-gaws/kelir/issues/432
     /// [#446]: https://github.com/sujanto-gaws/kelir/issues/446
     pub tasks_overdue: i64,
-    /// Documents the caller raised and has not sent yet.
+    /// Documents the caller raised and has not sent yet — **the `DRAFT` entry of
+    /// [`Self::documents_by_status`]**, read out of it rather than counted
+    /// again.
     ///
     /// **`DRAFT` and no other status**, which makes this *what you have not
     /// finished* rather than *what you have ever touched*. The second question
     /// is FR-RPT-003's, and it is a list rather than a number.
     ///
+    /// **One count, not two checked against each other.** Until FR-RPT-004
+    /// ([#447]) this had a statement of its own. With a per-status count on the
+    /// same payload that would have been two answers to *how many drafts* on
+    /// one screen, so the statement went: this number and the chart's `DRAFT`
+    /// bar are equal by construction. It stays on the wire because a card that
+    /// says *3 drafts* should not have to find one entry in an array to say it.
+    ///
     /// A document raised by the system belongs to nobody and is counted for
     /// nobody — `documents.created_by` is nullable, and a null author matches no
     /// caller.
+    ///
+    /// [#447]: https://github.com/sujanto-gaws/kelir/issues/447
     pub draft_documents: i64,
+    /// The documents the caller raised, counted in each status (FR-RPT-004,
+    /// [#447]).
+    ///
+    /// # Whose documents
+    ///
+    /// **The ones the caller raised** — `documents.created_by`, in their
+    /// tenant, not soft-deleted: the population [`Self::draft_documents`] has
+    /// always counted, with the status filter taken off. **Not the tenant's.** A
+    /// status summary over documents the caller did not raise is the document
+    /// population, which `document:read` gates, and a field carrying it would
+    /// break the invariant above; the module doc says what that other widget
+    /// would need. The product owner chose this reading on 2026-09-14.
+    ///
+    /// A document raised by the system has no author and is counted for nobody.
+    ///
+    /// # Every status, always, in a fixed order
+    ///
+    /// **All ten of [`DocumentStatus::ALL`], zeros included, in its declaration
+    /// order** — `DRAFT` first, `CANCELLED` last. A client draws a fixed axis
+    /// from this array without knowing the enum, and a status with nothing in
+    /// it is a zero rather than a missing entry, so a chart keeps its shape when
+    /// somebody's last rejected document is cancelled. Hiding the zeros is a
+    /// presentation choice a client may make; the server does not make it for
+    /// the client.
+    ///
+    /// **Never empty.** A caller who has raised nothing gets ten zeros, which is
+    /// how the screen tells *you have no documents* from *the card failed to
+    /// load*.
+    ///
+    /// [#447]: https://github.com/sujanto-gaws/kelir/issues/447
+    /// [`DocumentStatus::ALL`]: crate::modules::document::domain::DocumentStatus::ALL
+    pub documents_by_status: Vec<DocumentStatusCount>,
     /// The first few tasks behind [`Self::tasks_waiting`] (FR-RPT-002, [#432]).
     ///
     /// # Why this is the inbox's own row type

@@ -7,11 +7,20 @@
     "jsx": "preserve",
     "resolveJsonModule": true,
     "isolatedModules": true,
-    // ESNext.Disposable is here for one reason: the JSON Logic engine's own
+    // ESNext.Disposable was added for one reason: the JSON Logic engine's own
     // type declarations expose `[Symbol.dispose]()`, and without the library
-    // that declares that symbol `vue-tsc` fails inside node_modules. It adds a
-    // declaration, not a runtime feature — nothing in src/ uses `using`.
+    // that declares that symbol `vue-tsc` failed inside node_modules. Under
+    // `skipLibCheck` below no declaration file is checked, so this entry is no
+    // longer what keeps the check green — it stays so that turning
+    // `skipLibCheck` off again fails only on what it was turned on for. It adds
+    // a declaration, not a runtime feature — nothing in src/ uses `using`.
     "lib": ["ES2020", "DOM", "DOM.Iterable", "ESNext.Disposable"],
+    // **Every `.d.ts` goes unchecked, ours in src/ included** (ADR-0040).
+    // Unovis 1.5.2–1.7.0 ship declaration files that do not compile — leftover
+    // `__VLS_*` helpers from 1.6.7 on, `style` module paths that do not exist
+    // in 1.5.2 — and a library's declarations are not ours to repair. Source
+    // files are still checked in full under `strict`.
+    "skipLibCheck": true,
     "types": ["vite/client"],
     "baseUrl": ".",
     "paths": {

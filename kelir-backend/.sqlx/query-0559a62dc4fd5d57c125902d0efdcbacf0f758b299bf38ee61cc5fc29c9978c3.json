@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT status, count(*) AS \"count!\"\n        FROM documents\n        WHERE tenant_id = $1\n          AND created_by = $2\n          AND deleted_at IS NULL\n        GROUP BY status\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "0559a62dc4fd5d57c125902d0efdcbacf0f758b299bf38ee61cc5fc29c9978c3"
+}
