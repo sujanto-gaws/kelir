@@ -49,7 +49,8 @@
 //! |---|---|---|
 //! | `tasksWaiting`, `pendingTasks` | [`workflow::service::inbox::waiting_work`] | `workflow::repository::inbox`'s `WHERE` — the one the inbox itself pages on |
 //! | `tasksOverdue`, `overdueTasks` | [`workflow::service::inbox::late_work`] | the same `WHERE`, narrowed to `InboxScope::Overdue` and read longest late first |
-//! | `draftDocuments` | [`document::service::list::count_own_drafts`] | `tenant_id`, `created_by`, `status = 'DRAFT'` |
+//! | `documentsByStatus` | [`document::service::list::count_own_by_status`] | `tenant_id`, `created_by`, `deleted_at IS NULL`, grouped by `status` and filled to all ten |
+//! | `draftDocuments` | the `DRAFT` entry of that same read | the same — one count, not a second statement beside it |
 //! | `recentDocuments` | [`document::service::list::recent_documents`] | `document::repository::list`'s own `WHERE` — `tenant_id` and `deleted_at IS NULL`, the two lines the document list opens with |
 //!
 //! [`workflow::service::inbox::late_work`]: crate::modules::workflow::service::inbox::late_work
@@ -98,6 +99,18 @@
 //! [#433]: https://github.com/sujanto-gaws/kelir/issues/433
 //! [`activity::domain::TOUCH_EVENT_TYPES`]: crate::modules::activity::domain::TOUCH_EVENT_TYPES
 //! [`document::service::list::recent_documents`]: crate::modules::document::service::list::recent_documents
+//!
+//! **FR-RPT-004 ([#447]) is the drafts count widened, and it replaced that
+//! count rather than joining it.** One `GROUP BY` over the caller's own
+//! documents answers all ten statuses, and `draftDocuments` is read out of the
+//! result — so the card's number and the chart's `DRAFT` bar cannot disagree,
+//! because there is one of them. It is [#279]'s argument applied inside a
+//! single module: a fifth statement counting drafts beside a per-status count
+//! would have been a duplicated predicate on one screen.
+//!
+//! [#279]: https://github.com/sujanto-gaws/kelir/issues/279
+//! [#447]: https://github.com/sujanto-gaws/kelir/issues/447
+//! [`document::service::list::count_own_by_status`]: crate::modules::document::service::list::count_own_by_status
 //!
 //! # One permission, and the invariant that makes one enough
 //!
@@ -156,38 +169,48 @@
 //! not want somebody on the dashboard has one grant to withhold, and that is a
 //! real capability rather than a duplicated one.
 //!
-//! ## The boundary, named before Sprint 18 meets it
+//! ## The boundary, and where Sprint 18 met it
 //!
-//! **This is not a general reporting permission**, and two of the requirements
-//! already on the roadmap cross the line it draws:
+//! **This is not a general reporting permission.** This section was first
+//! written forecasting that two roadmap requirements would cross the line it
+//! draws; one of them was built on this side of it instead.
 //!
-//! - **FR-RPT-004** — a status summary over the tenant's documents. Those are
-//!   not the caller's own rows, and counting them is the document population,
-//!   which `document:read` gates. **It cannot be served by widening
-//!   [`document::service::list::recent_documents`] either**, which is worth
-//!   saying now that a function on this path returns document rows rather than a
-//!   number: the widening that would serve it is dropping `actor_user_id`, and
-//!   that one deletion turns *the caller's own work* into *the tenant's*.
+//! - **FR-RPT-004** — a summary of documents by status. **It was built over the
+//!   caller's own documents** ([#447]; the product owner's call, 2026-09-14):
+//!   what they raised, in each of the ten statuses — the population
+//!   `draftDocuments` always counted, with the status filter taken off. That
+//!   keeps it inside the invariant and behind [`DASHBOARD_READ`] alone. The
+//!   forecast had read it as **tenant-wide**, and **a tenant-wide status view is
+//!   still a different widget that was not built**: counting documents the
+//!   caller did not raise is the document population, which `document:read`
+//!   gates, and it would need that grant and an argument of its own. It cannot
+//!   be served by widening [`document::service::list::count_own_by_status`] —
+//!   the widening is dropping `created_by`, and that one deletion turns *the
+//!   caller's own work* into *the tenant's* — nor by widening
+//!   [`document::service::list::recent_documents`], where the same deletion is
+//!   `actor_user_id`.
 //! - **FR-RPT-007** — workload by department. That is other people's queues,
 //!   which `workflow:task:read` gates.
 //!
-//! Neither can ship behind [`DASHBOARD_READ`] alone, and neither can be served
-//! by widening [`workflow::service::inbox::waiting_work`],
+//! **Neither FR-RPT-007 nor a tenant-wide status view can ship behind
+//! [`DASHBOARD_READ`] alone**, and neither can be served by widening
+//! [`workflow::service::inbox::waiting_work`],
 //! [`workflow::service::inbox::late_work`],
-//! [`document::service::list::count_own_drafts`] or
+//! [`document::service::list::count_own_by_status`] or
 //! [`document::service::list::recent_documents`] — all four of which say so in
 //! their own doc comments, where an author reaching for them will be standing.
 //!
 //! [ADR-0039]: ../../../../docs/architectures/adr/0039.%20A%20Dashboard%20Widget%20Is%20a%20Purpose-Built%20Endpoint.md
 //! [`workflow::service::inbox::waiting_work`]: crate::modules::workflow::service::inbox::waiting_work
-//! [`document::service::list::count_own_drafts`]: crate::modules::document::service::list::count_own_drafts
 //!
 //! # What is not here
 //!
-//! **FR-RPT-004 is Sprint 18** (**D-77**). FR-RPT-003 was this module's last
-//! Sprint 17 row, and FR-RPT-005 is Sprint 18's first; both are built, and both
-//! extended [`domain::DashboardSummary`] the way FR-RPT-002 did — a field beside
-//! the others rather than an endpoint beside this one.
+//! **A tenant-wide status summary.** FR-RPT-004 is built, over the caller's own
+//! documents; the section above says what the other reading would need.
+//! FR-RPT-003 was this module's last Sprint 17 row, and FR-RPT-005 and FR-RPT-004
+//! are Sprint 18's (**D-77**). All three extended [`domain::DashboardSummary`]
+//! the way FR-RPT-002 did — a field beside the others rather than an endpoint
+//! beside this one.
 //!
 //! **A count of the documents the caller has ever touched.**
 //! [`RECENT_DOCUMENTS_SHOWN`] has no `recentDocumentsTotal` beside it, unlike
@@ -221,9 +244,11 @@
 //!
 //! [#446]: https://github.com/sujanto-gaws/kelir/issues/446
 //!
-//! **Any charting dependency.** The tree has none, and the first surface that
-//! needs one is FR-RPT-004, where the choice gets its own decision rather than
-//! arriving as a transitive dependency of a card.
+//! **Any charting, in this crate.** FR-RPT-004 is the first surface that needs
+//! a chart, and the library is the frontend's choice, recorded in ADR-0040
+//! rather than arriving as a transitive dependency of a card. What the server
+//! sends is ten counts in a fixed order: an axis a client can draw, and no
+//! opinion about how.
 //!
 //! **Export.** FR-RPT-008 (CSV, Excel) is unscheduled in the
 //! [Product Backlog](../../../../projects/planning/02.%20Product%20Backlog.md).

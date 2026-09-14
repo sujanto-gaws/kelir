@@ -9,8 +9,9 @@
 //! something about the handler and nothing about the rows.* So every scope test
 //! below puts the row that must **not** be counted into the database and reads
 //! the number back — a second user's draft, a second tenant's draft, a
-//! submitted document, a soft-deleted one, another role's task, a document only
-//! somebody else touched, and an activity event belonging to another tenant.
+//! submitted document, a soft-deleted one, a document with no author, another
+//! role's task, a document only somebody else touched, and an activity event
+//! belonging to another tenant.
 //!
 //! **One subject cannot tell scoped from unscoped**, and the assertion reads
 //! identically either way (coding standard §2.9, [#218]'s single root cause), so
@@ -203,6 +204,68 @@
 //! run again and reddened as tabled.
 //!
 //! [#446]: https://github.com/sujanto-gaws/kelir/issues/446
+//!
+//! ## FR-RPT-004, the documents-by-status widget ([#447])
+//!
+//! **Seven mutations, run 2026-09-14, and all seven red** — seen red,
+//! 2026-09-14. Baseline first: **42 passed, nothing mutated**, and the fifteen
+//! `document::domain::status` unit tests beside them. None survived, so no test
+//! in this section was written to close one.
+//!
+//! | Mutation | Reddened |
+//! |---|---|
+//! | **M1** — `count_own_by_status` stops scoping to the tenant (`tenant_id = $1` → `$1::uuid IS NOT NULL`) | [`a_second_tenants_documents_are_not_in_the_status_summary`], and its drafts twin |
+//! | **M2** — `count_own_by_status` stops scoping to the author (`created_by = $2` → `$2::uuid IS NOT NULL`) | [`another_authors_documents_are_not_in_the_callers_status_summary`], and two more |
+//! | **M3** — `count_own_by_status` admits a null author (`created_by = $2 OR created_by IS NULL`) | [`a_document_nobody_raised_is_in_nobodys_status_summary`] |
+//! | **M4** — `count_own_by_status` stops honouring the soft delete | [`a_soft_deleted_document_is_not_in_the_status_summary`], and its drafts twin |
+//! | **M5** — `DocumentStatusCount::every_status` drops the zeros | [`the_status_summary_counts_the_callers_documents_on_a_fixed_axis`], five more, and two unit tests |
+//! | **M6** — `every_status` fills in reverse declaration order | the same six, and the same two unit tests |
+//! | **M7** — `draftDocuments` read off the `RETURNED` entry | [`draft_documents_is_the_draft_entry_of_the_status_summary`], and the four drafts tests |
+//!
+//! **M3 is the one worth keeping in view, and the only one that reddened
+//! exactly one test.** No fixture in this file had a document without an author
+//! before [#447], so *the caller's, or nobody's* was never under test for the
+//! drafts count either — its comment said a null author was counted for nobody
+//! and nothing checked it. The test was written as one of AC2's subjects rather
+//! than after a survivor, but it is now the only thing between that looser
+//! predicate and every system-raised document appearing on every dashboard.
+//!
+//! **M2 reddens the null-author test as well**, which is the predicate being
+//! honest rather than the test being loose: dropping `created_by` admits the
+//! authorless row along with the other author's.
+//!
+//! **A "drafts twin" is the FR-RPT-001 test on the same predicate** —
+//! [`a_second_tenants_draft_is_not_on_this_callers_dashboard`] for M1,
+//! [`drafts_are_the_callers_own_not_the_tenants`] for M2,
+//! [`a_deleted_draft_is_not_counted`] for M4. They were not written against
+//! this statement and went red on it anyway, because `draftDocuments` now comes
+//! from it: the count moved and the older tests followed it without being
+//! edited, as the FR-RPT-005 table's M2 records for `tasksOverdue`. M7 reddens
+//! all four drafts tests for the same reason.
+//!
+//! **M5 and M6 redden every test that asserts a whole axis** — six, because each
+//! compares the served array with all ten entries — and the two fill tests in
+//! `document::domain::status` beside them, so the zeros and the order are
+//! covered below the endpoint as well as through it.
+//!
+//! **The four SQL mutations were anchored on the four-line block only
+//! `count_own_by_status` has** — `deleted_at IS NULL` directly above
+//! `GROUP BY status` — and the runner refused any anchor that did not occur
+//! exactly once. A mutated statement is not in `.sqlx`, so those four compiled
+//! against a live schema.
+//!
+//! **One mutation was not run, and it is an equivalent mutant rather than a
+//! gap.** `entry.count += count` changed to `=` stays green by construction: a
+//! `GROUP BY status` cannot return one status twice.
+//!
+//! **The FR-RPT-001 table above names `count_own_drafts`, which [#447]
+//! removed.** Those rows record what was run on 2026-09-12 and are left as
+//! written. Their M3, M2 and M5 predicates now live in `count_own_by_status` and
+//! were run again as this table's M1, M2 and M4; their M4, *stops filtering to
+//! `DRAFT`*, is this table's M7, because the filter is now which entry
+//! `draftDocuments` is read from.
+//!
+//! [#447]: https://github.com/sujanto-gaws/kelir/issues/447
 //!
 //! [#106]: https://github.com/sujanto-gaws/kelir/issues/106
 //! [#121]: https://github.com/sujanto-gaws/kelir/issues/121
@@ -660,6 +723,14 @@ async fn the_summary_asks_for_no_permission_but_its_own() {
     );
     assert_eq!(response.body["data"]["tasksWaiting"], 0);
     assert_eq!(response.body["data"]["draftDocuments"], 0);
+    // FR-RPT-004 (#447) is served to this caller too, and a caller who has
+    // raised nothing gets the whole axis at zero rather than an empty array.
+    assert_eq!(
+        by_status(&response.body["data"]),
+        axis_with(&[]),
+        "a caller with nothing raised did not get ten zeros: {}",
+        response.body
+    );
 }
 
 #[tokio::test]
@@ -2166,6 +2237,15 @@ async fn the_recent_document_row_is_in_the_published_contract() {
         !summary["overdueTasks"].is_null(),
         "DashboardSummary does not carry overdueTasks: {summary}"
     );
+    // FR-RPT-004's counts (#447), and the element type they reference.
+    assert!(
+        !summary["documentsByStatus"].is_null(),
+        "DashboardSummary does not carry documentsByStatus: {summary}"
+    );
+    assert!(
+        !schemas["DocumentStatusCount"].is_null(),
+        "documentsByStatus references DocumentStatusCount and it is not in the contract"
+    );
 
     // There is still exactly one dashboard path (#433 AC1, ADR-0039) — the
     // decision this row was most likely to reverse, asserted in the contract
@@ -2762,4 +2842,358 @@ async fn a_delegated_late_task_is_on_the_delegates_overdue_widget_and_not_the_de
         "the late task is still on the overdue widget of the person who handed it over: {handed_over}"
     );
     assert_eq!(handed_over["tasksOverdue"], 0, "{handed_over}");
+}
+
+// ---------------------------------------------------------------------------
+// FR-RPT-004 — the documents-by-status widget ([#447])
+// ---------------------------------------------------------------------------
+
+/// The ten statuses in `DocumentStatus`'s declaration order, **written out here
+/// rather than read from the crate** — so reordering the enum reddens these
+/// tests instead of quietly moving the expectation along with it.
+const STATUS_AXIS: [&str; 10] = [
+    "DRAFT",
+    "SUBMITTED",
+    "IN_REVIEW",
+    "PENDING_APPROVAL",
+    "APPROVED",
+    "REJECTED",
+    "RETURNED",
+    "COMPLETED",
+    "ARCHIVED",
+    "CANCELLED",
+];
+
+/// `documentsByStatus` as `(status, count)` pairs, in the order it was served.
+fn by_status(summary: &Value) -> Vec<(String, i64)> {
+    summary["documentsByStatus"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the summary carries a documentsByStatus array: {summary}"))
+        .iter()
+        .map(|entry| {
+            (
+                entry["status"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("an entry has a status: {entry}"))
+                    .to_owned(),
+                entry["count"]
+                    .as_i64()
+                    .unwrap_or_else(|| panic!("an entry has a count: {entry}")),
+            )
+        })
+        .collect()
+}
+
+/// The whole axis, with the counts given and zero everywhere else.
+fn axis_with(counts: &[(&str, i64)]) -> Vec<(String, i64)> {
+    STATUS_AXIS
+        .iter()
+        .map(|&status| {
+            let count = counts
+                .iter()
+                .find(|(named, _)| *named == status)
+                .map_or(0, |(_, count)| *count);
+            (status.to_owned(), count)
+        })
+        .collect()
+}
+
+/// Writes a document directly: any status, any author (or none), any tenant,
+/// live or soft-deleted.
+///
+/// **Most of the ten statuses are reachable only by running a workflow to
+/// them**, and what is under test is the count rather than the engine — the
+/// reason [`late_by`] dates a task with an `UPDATE`. The other three shapes, a
+/// null author, another tenant and a soft delete, are the ones a dropped
+/// predicate would expose and no API call produces at all.
+async fn plant_document(
+    app: &TestApp,
+    tenant_id: Uuid,
+    created_by: Option<Uuid>,
+    type_id: Uuid,
+    status: &str,
+    deleted: bool,
+) -> Uuid {
+    let id = Uuid::now_v7();
+
+    sqlx::query(
+        "INSERT INTO documents (id, tenant_id, created_by, document_ref, document_type_id, \
+         title, status, deleted_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, CASE WHEN $8 THEN now() END)",
+    )
+    .bind(id)
+    .bind(tenant_id)
+    .bind(created_by)
+    .bind(format!("RD-S-{id}"))
+    .bind(type_id)
+    .bind(format!("Planted, {status}"))
+    .bind(status)
+    .bind(deleted)
+    .execute(&app.pool)
+    .await
+    .expect("plant a document");
+
+    id
+}
+
+/// **The caller's documents, counted in every status, on a fixed axis**
+/// ([#447] AC1).
+///
+/// # What the array promises a client
+///
+/// **All ten statuses, zeros included, in declaration order.** A chart draws
+/// its axis from this array without knowing the enum, so an entry missing
+/// because nothing is in it — or the ten arriving in whatever order a
+/// `GROUP BY` produced them — is a chart that changes shape between two
+/// callers.
+///
+/// **The fixture mixes both ways a document gets its status.** Two drafts and
+/// one submission go through the API, so `DRAFT` and `PENDING_APPROVAL` are
+/// the states the product actually produces; the rest are planted. The counts
+/// are uneven and scattered — 2, 1, 3, 1, 1 across positions 0, 3, 4, 6 and 9
+/// — so a fill that ran in arrival order, in reverse, or by count reads
+/// differently from the one asserted.
+///
+/// [#447]: https://github.com/sujanto-gaws/kelir/issues/447
+#[tokio::test]
+async fn the_status_summary_counts_the_callers_documents_on_a_fixed_axis() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let workflow = publish_workflow(&app, &token, "rd_s_axis", "RD-S-AXIS").await;
+    let type_id = document_type(&app, &token, "RD_S_AXIS", workflow).await;
+
+    let (author_id, author) = holder_party(&app, "RD-S-AXIS", "rd.s.axis", &[]).await;
+
+    draft_document(&app, &author, type_id, "Draft one").await;
+    draft_document(&app, &author, type_id, "Draft two").await;
+    let sent = submitted_document(&app, &author, type_id, "Sent for approval").await;
+
+    let tenant = fixtures::SYSTEM_TENANT_ID;
+    for status in ["APPROVED", "CANCELLED", "APPROVED", "RETURNED", "APPROVED"] {
+        plant_document(&app, tenant, Some(author_id), type_id, status, false).await;
+    }
+
+    // The submission's status is the engine's, so it is read back rather than
+    // assumed: `workflow_for`'s initial state maps to PENDING_APPROVAL.
+    let sent_status: String = sqlx::query_scalar("SELECT status FROM documents WHERE id = $1")
+        .bind(sent)
+        .fetch_one(&app.pool)
+        .await
+        .expect("read the submitted document's status");
+    assert_eq!(sent_status, "PENDING_APPROVAL", "the fixture's submission");
+
+    let summary = summary_of(&app, &author).await;
+    let served = by_status(&summary);
+
+    assert_eq!(
+        served
+            .iter()
+            .map(|(status, _)| status.as_str())
+            .collect::<Vec<_>>(),
+        STATUS_AXIS,
+        "documentsByStatus is not every status in declaration order: {summary}"
+    );
+    assert_eq!(
+        served,
+        axis_with(&[
+            ("DRAFT", 2),
+            ("PENDING_APPROVAL", 1),
+            ("APPROVED", 3),
+            ("RETURNED", 1),
+            ("CANCELLED", 1),
+        ]),
+        "the caller's documents were miscounted: {summary}"
+    );
+}
+
+/// **Another author's documents are not in the caller's status summary**
+/// ([#447] AC2).
+///
+/// Two authors in one tenant, asserted both ways round, because one subject
+/// cannot tell *the caller's documents* from *the tenant's* (coding standard
+/// §2.9): with `created_by` gone, both read `DRAFT 3, APPROVED 1`.
+///
+/// [#447]: https://github.com/sujanto-gaws/kelir/issues/447
+#[tokio::test]
+async fn another_authors_documents_are_not_in_the_callers_status_summary() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let workflow = publish_workflow(&app, &token, "rd_s_who", "RD-S-WHO").await;
+    let type_id = document_type(&app, &token, "RD_S_WHO", workflow).await;
+
+    let ani = holder(&app, "RD-S-ANI", "rd.s.ani").await;
+    let (budi_id, budi) = holder_party(&app, "RD-S-BUDI", "rd.s.budi", &[]).await;
+
+    draft_document(&app, &ani, type_id, "Ani's draft").await;
+    draft_document(&app, &budi, type_id, "Budi's draft").await;
+    draft_document(&app, &budi, type_id, "Budi's second draft").await;
+    plant_document(
+        &app,
+        fixtures::SYSTEM_TENANT_ID,
+        Some(budi_id),
+        type_id,
+        "APPROVED",
+        false,
+    )
+    .await;
+
+    assert_eq!(
+        by_status(&summary_of(&app, &ani).await),
+        axis_with(&[("DRAFT", 1)]),
+        "Ani's status summary counted somebody else's documents"
+    );
+    assert_eq!(
+        by_status(&summary_of(&app, &budi).await),
+        axis_with(&[("DRAFT", 2), ("APPROVED", 1)]),
+        "Budi's status summary lost his own documents or gained Ani's"
+    );
+}
+
+/// **A second tenant's documents are not in the status summary** ([#447] AC2).
+///
+/// Planted under another tenant **with this caller as the author**, because
+/// that is the only row a dropped `tenant_id` would expose: the document
+/// endpoints stamp the caller's own tenant, so a fixture that went through them
+/// could never tell a tenant-scoped count from an unscoped one.
+///
+/// [#447]: https://github.com/sujanto-gaws/kelir/issues/447
+#[tokio::test]
+async fn a_second_tenants_documents_are_not_in_the_status_summary() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let workflow = publish_workflow(&app, &token, "rd_s_ten", "RD-S-TEN").await;
+    let type_id = document_type(&app, &token, "RD_S_TEN", workflow).await;
+
+    let (author_id, author) = holder_party(&app, "RD-S-TEN", "rd.s.ten", &[]).await;
+    draft_document(&app, &author, type_id, "In their own tenant").await;
+
+    let other_tenant = fixtures::create_tenant(&app.pool, "RD-S-OTHER", "Other tenant").await;
+    for status in ["DRAFT", "APPROVED"] {
+        plant_document(&app, other_tenant, Some(author_id), type_id, status, false).await;
+    }
+
+    assert_eq!(
+        by_status(&summary_of(&app, &author).await),
+        axis_with(&[("DRAFT", 1)]),
+        "documents filed under another tenant were counted on this caller's dashboard"
+    );
+}
+
+/// **A soft-deleted document is not in the status summary** ([#447] AC2).
+///
+/// Two `COMPLETED` documents, one of them deleted, so the assertion is *one*
+/// rather than *none* — a count that collapsed to zero would not pass it. The
+/// deleted row is read back, so this is about the statement and not about an
+/// insert that did nothing.
+///
+/// [#447]: https://github.com/sujanto-gaws/kelir/issues/447
+#[tokio::test]
+async fn a_soft_deleted_document_is_not_in_the_status_summary() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let workflow = publish_workflow(&app, &token, "rd_s_gone", "RD-S-GONE").await;
+    let type_id = document_type(&app, &token, "RD_S_GONE", workflow).await;
+
+    let (author_id, author) = holder_party(&app, "RD-S-GONE", "rd.s.gone", &[]).await;
+    let tenant = fixtures::SYSTEM_TENANT_ID;
+
+    plant_document(&app, tenant, Some(author_id), type_id, "COMPLETED", false).await;
+    let deleted = plant_document(&app, tenant, Some(author_id), type_id, "COMPLETED", true).await;
+
+    let is_deleted: bool =
+        sqlx::query_scalar("SELECT deleted_at IS NOT NULL FROM documents WHERE id = $1")
+            .bind(deleted)
+            .fetch_one(&app.pool)
+            .await
+            .expect("read the deleted document");
+    assert!(is_deleted, "the fixture did not soft-delete the document");
+
+    assert_eq!(
+        by_status(&summary_of(&app, &author).await),
+        axis_with(&[("COMPLETED", 1)]),
+        "a soft-deleted document was counted"
+    );
+}
+
+/// **A document nobody raised is in nobody's status summary** ([#447] AC2).
+///
+/// `documents.created_by` is nullable, and a document the system raised has no
+/// author. The predicate is an equality, so a null matches no caller; the
+/// looser spelling — *the caller's, or nobody's* — would put every
+/// system-raised document on every dashboard in the tenant, and this is the
+/// only test here whose fixture has such a row.
+///
+/// [#447]: https://github.com/sujanto-gaws/kelir/issues/447
+#[tokio::test]
+async fn a_document_nobody_raised_is_in_nobodys_status_summary() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let workflow = publish_workflow(&app, &token, "rd_s_sys", "RD-S-SYS").await;
+    let type_id = document_type(&app, &token, "RD_S_SYS", workflow).await;
+
+    let author = holder(&app, "RD-S-SYS", "rd.s.sys").await;
+    draft_document(&app, &author, type_id, "Raised by a person").await;
+
+    for status in ["DRAFT", "APPROVED"] {
+        plant_document(
+            &app,
+            fixtures::SYSTEM_TENANT_ID,
+            None,
+            type_id,
+            status,
+            false,
+        )
+        .await;
+    }
+
+    assert_eq!(
+        by_status(&summary_of(&app, &author).await),
+        axis_with(&[("DRAFT", 1)]),
+        "a document with no author was counted on a person's dashboard"
+    );
+}
+
+/// **`draftDocuments` is the `DRAFT` entry, and the two cannot disagree**
+/// ([#447]).
+///
+/// One read serves both — the card's number and the chart's first bar — so
+/// this is the assertion that they are one number. The caller's other statuses
+/// hold counts that are not two, so reading `draftDocuments` off any other
+/// entry fails here rather than agreeing by accident.
+///
+/// [#447]: https://github.com/sujanto-gaws/kelir/issues/447
+#[tokio::test]
+async fn draft_documents_is_the_draft_entry_of_the_status_summary() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let workflow = publish_workflow(&app, &token, "rd_s_one", "RD-S-ONE").await;
+    let type_id = document_type(&app, &token, "RD_S_ONE", workflow).await;
+
+    let (author_id, author) = holder_party(&app, "RD-S-ONE", "rd.s.one", &[]).await;
+    draft_document(&app, &author, type_id, "Draft one").await;
+    draft_document(&app, &author, type_id, "Draft two").await;
+
+    let tenant = fixtures::SYSTEM_TENANT_ID;
+    for status in ["RETURNED", "APPROVED", "APPROVED", "APPROVED"] {
+        plant_document(&app, tenant, Some(author_id), type_id, status, false).await;
+    }
+
+    let summary = summary_of(&app, &author).await;
+    let draft_entry = by_status(&summary)
+        .into_iter()
+        .find(|(status, _)| status == "DRAFT")
+        .map(|(_, count)| count);
+
+    assert_eq!(draft_entry, Some(2), "the DRAFT entry: {summary}");
+    assert_eq!(
+        summary["draftDocuments"].as_i64(),
+        draft_entry,
+        "draftDocuments and the DRAFT entry disagree — two answers to how many drafts: {summary}"
+    );
 }

@@ -67,6 +67,28 @@ pub enum DocumentStatus {
 }
 
 impl DocumentStatus {
+    /// Every status, in the order this enum declares them.
+    ///
+    /// **The order is part of a contract.** The dashboard's `documentsByStatus`
+    /// (FR-RPT-004, [#447]) is served in it, so a client draws a fixed axis
+    /// without knowing the enum — and reordering the variants reorders that
+    /// array. `every_status_is_listed_once_in_declaration_order` is what fails
+    /// when a variant is added here and not there.
+    ///
+    /// [#447]: https://github.com/sujanto-gaws/kelir/issues/447
+    pub const ALL: [Self; 10] = [
+        Self::Draft,
+        Self::Submitted,
+        Self::InReview,
+        Self::PendingApproval,
+        Self::Approved,
+        Self::Rejected,
+        Self::Returned,
+        Self::Completed,
+        Self::Archived,
+        Self::Cancelled,
+    ];
+
     pub fn as_db(self) -> &'static str {
         match self {
             Self::Draft => "DRAFT",
@@ -251,22 +273,132 @@ pub struct TransitionResult {
     pub status: DocumentStatus,
 }
 
+/// How many of the caller's documents are in one status (FR-RPT-004, [#447]).
+///
+/// **A pair rather than a map keyed by status**, because the order is the
+/// contract: an array of these is served in [`DocumentStatus::ALL`]'s order, and
+/// a JSON object promises a client no order at all.
+///
+/// [#447]: https://github.com/sujanto-gaws/kelir/issues/447
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentStatusCount {
+    pub status: DocumentStatus,
+    pub count: i64,
+}
+
+impl DocumentStatusCount {
+    /// Every status once, in [`DocumentStatus::ALL`]'s order, with the count
+    /// `counted` gives it and zero where it gives none.
+    ///
+    /// **A `GROUP BY` has no row for a status nothing is in**, so the zeros are
+    /// written here rather than generated in SQL: a `VALUES` list of ten
+    /// statuses inside the statement would be a third list of them, beside this
+    /// enum and the column's `CHECK`.
+    ///
+    /// A status given twice is summed. The repository's `GROUP BY` cannot give
+    /// one twice, and `from_db`'s fallback could only do so for a value the
+    /// `CHECK` keeps out of the column.
+    pub fn every_status(counted: impl IntoIterator<Item = (DocumentStatus, i64)>) -> Vec<Self> {
+        let mut counts: Vec<Self> = DocumentStatus::ALL
+            .iter()
+            .map(|&status| Self { status, count: 0 })
+            .collect();
+
+        for (status, count) in counted {
+            if let Some(entry) = counts.iter_mut().find(|entry| entry.status == status) {
+                entry.count += count;
+            }
+        }
+
+        counts
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const ALL: [DocumentStatus; 10] = [
-        DocumentStatus::Draft,
-        DocumentStatus::Submitted,
-        DocumentStatus::InReview,
-        DocumentStatus::PendingApproval,
-        DocumentStatus::Approved,
-        DocumentStatus::Rejected,
-        DocumentStatus::Returned,
-        DocumentStatus::Completed,
-        DocumentStatus::Archived,
-        DocumentStatus::Cancelled,
-    ];
+    const ALL: [DocumentStatus; 10] = DocumentStatus::ALL;
+
+    #[test]
+    fn every_status_is_listed_once_in_declaration_order() {
+        // The `match` has no wildcard, so a variant added to the enum stops this
+        // compiling until somebody decides where it goes — which is the moment
+        // `ALL`, and the dashboard axis served in its order, get looked at.
+        for (index, status) in ALL.iter().enumerate() {
+            let declared = match status {
+                DocumentStatus::Draft => 0,
+                DocumentStatus::Submitted => 1,
+                DocumentStatus::InReview => 2,
+                DocumentStatus::PendingApproval => 3,
+                DocumentStatus::Approved => 4,
+                DocumentStatus::Rejected => 5,
+                DocumentStatus::Returned => 6,
+                DocumentStatus::Completed => 7,
+                DocumentStatus::Archived => 8,
+                DocumentStatus::Cancelled => 9,
+            };
+
+            assert_eq!(index, declared, "{} is out of place", status.as_db());
+        }
+    }
+
+    #[test]
+    fn nothing_counted_is_ten_zeros_rather_than_nothing() {
+        let counts = DocumentStatusCount::every_status([]);
+
+        assert_eq!(
+            counts.iter().map(|entry| entry.status).collect::<Vec<_>>(),
+            ALL
+        );
+        assert!(counts.iter().all(|entry| entry.count == 0), "{counts:?}");
+    }
+
+    #[test]
+    fn counts_land_on_their_own_status_whatever_order_they_arrive_in() {
+        // Arriving in neither declaration order nor its reverse, so filling in
+        // arrival order and filling in reverse both produce something else.
+        let counts = DocumentStatusCount::every_status([
+            (DocumentStatus::Returned, 1),
+            (DocumentStatus::Draft, 3),
+            (DocumentStatus::Cancelled, 2),
+        ]);
+
+        let expected: Vec<(DocumentStatus, i64)> = ALL
+            .iter()
+            .map(|&status| {
+                let count = match status {
+                    DocumentStatus::Draft => 3,
+                    DocumentStatus::Returned => 1,
+                    DocumentStatus::Cancelled => 2,
+                    _ => 0,
+                };
+                (status, count)
+            })
+            .collect();
+
+        assert_eq!(
+            counts
+                .iter()
+                .map(|entry| (entry.status, entry.count))
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    #[test]
+    fn a_count_serialises_with_the_status_spelled_as_everywhere_else() {
+        let entry = DocumentStatusCount {
+            status: DocumentStatus::PendingApproval,
+            count: 4,
+        };
+
+        assert_eq!(
+            serde_json::to_value(entry).expect("serialise"),
+            serde_json::json!({ "status": "PENDING_APPROVAL", "count": 4 })
+        );
+    }
 
     #[test]
     fn every_status_round_trips_through_the_database_spelling() {

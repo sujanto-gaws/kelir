@@ -286,6 +286,7 @@ use crate::state::AppState;
         document::domain::DocumentSummary,
         document::domain::RecentlyTouchedDocument,
         document::domain::DocumentStatus,
+        document::domain::DocumentStatusCount,
         document::domain::DocumentPriority,
         document::domain::CreateDocumentRequest,
         document::domain::UpdateDocumentRequest,

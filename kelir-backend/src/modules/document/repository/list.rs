@@ -274,46 +274,71 @@ fn escaped(search: Option<&str>) -> Option<String> {
     })
 }
 
-/// How many documents this caller raised and has not sent yet.
+/// How many documents this caller raised, in each status that has any
+/// (FR-RPT-001, FR-RPT-004; [#431], [#447]).
 ///
 /// **A different question from [`count_documents`], not a narrowing of it.**
 /// That one counts what the document *list* shows, under the rule this file
 /// opens with — tenant plus `document:read`, no third condition. This counts
 /// rows whose author is the caller, which is a fact about the caller rather
-/// than about the population, and it is what the dashboard summary reports
-/// (FR-RPT-001, [#431]).
+/// than about the population, and it is what the dashboard summary reports.
 ///
 /// **So there is no rule here to drift from**, which is worth saying because
 /// the file above it is one long argument about a duplicated predicate: this is
 /// not a second copy of the visibility rule, it is a different predicate over
 /// the same table, and the two are not expected to agree.
 ///
+/// **One `GROUP BY`, and the drafts count is one of its rows.** Until [#447]
+/// this was `count_own_drafts` — the same predicate with `status = 'DRAFT'`
+/// added. Keeping it beside a per-status count would have been two statements
+/// answering *how many drafts* on one screen, so it went, and the dashboard
+/// reads `draftDocuments` out of this.
+///
+/// **A status nothing is in has no row here**;
+/// [`DocumentStatusCount::every_status`] writes the zeros.
+///
 /// `created_by` is nullable, so a document the system raised belongs to nobody
-/// and is counted for nobody. Served by
-/// `idx_documents_tenant_id_created_by_status` (`0043_reporting.sql`), whose
-/// leading columns are exactly these three.
+/// and is counted for nobody.
+///
+/// # The index
+///
+/// Served by `idx_documents_tenant_id_created_by_status`
+/// (`0043_reporting.sql`): its two leading columns are this statement's two
+/// equalities, and its third is the grouping key. **`deleted_at` is not in
+/// it**, so every matched entry is checked against the heap — which was
+/// equally true of the drafts count this replaces, whose comment said the index
+/// was *exactly* its predicate and left the soft delete out. What changed is
+/// the width: the scan now covers everything the caller ever raised rather than
+/// their drafts, which grows with one person's history and not with the
+/// tenant's.
 ///
 /// [#431]: https://github.com/sujanto-gaws/kelir/issues/431
-pub async fn count_own_drafts(
+/// [#447]: https://github.com/sujanto-gaws/kelir/issues/447
+/// [`DocumentStatusCount::every_status`]: super::super::domain::DocumentStatusCount::every_status
+pub async fn count_own_by_status(
     pool: &PgPool,
     tenant_id: Uuid,
     user_id: Uuid,
-) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar!(
+) -> Result<Vec<(DocumentStatus, i64)>, sqlx::Error> {
+    let rows = sqlx::query!(
         r#"
-        SELECT count(*)
+        SELECT status, count(*) AS "count!"
         FROM documents
         WHERE tenant_id = $1
           AND created_by = $2
-          AND status = 'DRAFT'
           AND deleted_at IS NULL
+        GROUP BY status
         "#,
         tenant_id,
         user_id,
     )
-    .fetch_one(pool)
-    .await
-    .map(|count| count.unwrap_or(0))
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| (DocumentStatus::from_db(&row.status), row.count))
+        .collect())
 }
 
 /// The documents this caller touched most recently (FR-RPT-003, [#433]).

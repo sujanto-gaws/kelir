@@ -261,11 +261,13 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Evaluator is off the first-load path
-        # Decision D-10 accepted ~596 KB gzipped of WebAssembly on one condition
-        # -- only a page that renders a form pays it -- and no unit test can
-        # observe a chunk graph. This reads the manifest the build above wrote.
-        # It runs after Build for that reason and cannot run without it.
+      - name: Heavy libraries are off the first-load path
+        # Decision D-10 accepted 588 KB gzipped of WebAssembly on one condition
+        # -- only a page that renders a form pays it -- and ADR-0040 took
+        # Unovis, and the d3 it draws with, on the same condition for the one
+        # card that charts. No unit test can observe a chunk graph. This reads
+        # what the build above wrote. It runs after Build for that reason and
+        # cannot run without it.
         run: npm run check:bundle
 
   e2e:

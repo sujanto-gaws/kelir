@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, defineAsyncComponent, h, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 
 import { Alert } from '@/components/ui/alert'
@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button'
 import { getDashboardSummary } from '@/api/reporting'
 import { ApiError } from '@/api/error'
 import { useAuthStore } from '@/stores/auth'
-import type { DocumentStatus } from '@/types/document'
+import { DOCUMENT_STATUS_LABELS, type DocumentStatus } from '@/types/document'
 import type { DashboardSummary } from '@/types/reporting'
 
 /**
@@ -49,7 +49,18 @@ const summary = ref<DashboardSummary | null>(null)
 const error = ref<ApiError | null>(null)
 const isLoading = ref(false)
 
-/** The cards, derived rather than written out, so the grid has one shape. */
+/**
+ * The cards, derived rather than written out, so the grid has one shape.
+ *
+ * **Each tile's link follows the grant its screen holds** — `canOpen`, the same
+ * courtesy every card further down extends. The tiles are served behind
+ * `reporting:dashboard:read` alone, so a viewer can be told how much is waiting
+ * and still not hold the inbox or the document list, and a link would take
+ * them to `/forbidden`.
+ *
+ * **It hides a link that would not work; it hides nothing the server sent.**
+ * The number and its caption render either way.
+ */
 const cards = computed(() => {
   const data = summary.value
 
@@ -69,6 +80,7 @@ const cards = computed(() => {
       emphasis: data.tasksOverdue > 0,
       to: '/tasks',
       linkLabel: 'Open your inbox',
+      canOpen: canOpenTasks.value,
     },
     {
       key: 'draft-documents',
@@ -78,6 +90,7 @@ const cards = computed(() => {
       emphasis: false,
       to: '/documents',
       linkLabel: 'Open documents',
+      canOpen: canOpenDocuments.value,
     },
   ]
 })
@@ -218,6 +231,57 @@ function dueLabel(dueAt: string): string {
   return new Date(dueAt).toLocaleString()
 }
 
+/**
+ * The caller's documents by status (FR-RPT-004, #447).
+ *
+ * **The server chose these and their order** — all ten statuses, zeros
+ * included, in the lifecycle's order. Sorting by count would turn the card into
+ * a ranking of statuses, and the order a reader can check it against is the
+ * life of a document, which is the server's to state.
+ *
+ * **Documents the caller raised**, not every document they can see, so the card
+ * says *your* documents. The drafts tile above is this list's `DRAFT` row by
+ * construction on the server, and neither is derived from the other here.
+ */
+const documentsByStatus = computed(() => summary.value?.documentsByStatus ?? [])
+
+/**
+ * Whether the caller has raised nothing at all — ten zeros.
+ *
+ * A chart of ten empty bars looks like a chart that failed to draw, so this is
+ * the condition under which the card says so in a sentence instead.
+ */
+const hasNoDocuments = computed(() => documentsByStatus.value.every((row) => row.count === 0))
+
+/**
+ * **The chart, fetched only when the card renders.**
+ *
+ * Unovis draws with d3, and this page is the home route, so a static import
+ * here would put the library in front of every sign-in.
+ * `defineAsyncComponent` is the edge that keeps it a chunk of its own, and
+ * `scripts/check-bundle-split.mjs` fails the build when it is not one.
+ *
+ * **Neither fallback hides a number.** The counts are text beside the chart, so
+ * a slow chunk shows a sentence in the chart's place, and a failed one — a
+ * deploy that rotated the file away mid-session — says the chart could not be
+ * drawn while the numbers stay where they are.
+ */
+const DocumentStatusChart = defineAsyncComponent({
+  loader: () => import('./DocumentStatusChart.vue'),
+  loadingComponent: () =>
+    h(
+      'p',
+      { class: 'text-xs text-muted-foreground', 'data-testid': 'status-chart-loading' },
+      'Drawing the chart…',
+    ),
+  errorComponent: () =>
+    h(
+      'p',
+      { class: 'text-xs text-muted-foreground', 'data-testid': 'status-chart-error' },
+      'The chart could not be drawn. The counts below are the same numbers.',
+    ),
+})
+
 async function load(): Promise<void> {
   if (!canReadSummary.value) {
     return
@@ -244,7 +308,8 @@ onMounted(load)
     <div>
       <h2 class="text-xl font-semibold tracking-tight">Dashboard</h2>
       <p class="mt-1 text-sm text-muted-foreground">
-        What is waiting for you, what is late, and what you touched last.
+        What is waiting for you, what is late, what you touched last, and where your documents
+        stand.
       </p>
     </div>
 
@@ -284,7 +349,9 @@ onMounted(load)
           >
             {{ card.caption }}
           </p>
+          <!-- Linked only where the link works: `canOpen` is the grant the screen holds. -->
           <RouterLink
+            v-if="card.canOpen"
             :to="card.to"
             class="mt-3 inline-block text-sm font-medium text-primary underline-offset-4 hover:underline"
           >
@@ -576,6 +643,80 @@ onMounted(load)
             </Badge>
           </li>
         </ul>
+      </article>
+
+      <!--
+        The status widget (FR-RPT-004, #447). It answers *where do the documents
+        I raised stand*; the document list is one click away for acting on any
+        of them.
+      -->
+      <article
+        class="rounded-lg border border-border bg-card p-4"
+        data-testid="documents-by-status"
+        aria-labelledby="documents-by-status-heading"
+      >
+        <div class="flex flex-wrap items-baseline justify-between gap-2">
+          <h3 id="documents-by-status-heading" class="text-sm font-medium">
+            Your documents by status
+          </h3>
+          <!-- Linked only where the link works, as the recent-document rows are. -->
+          <RouterLink
+            v-if="canOpenDocuments"
+            to="/documents"
+            class="text-sm font-medium text-primary underline-offset-4 hover:underline"
+          >
+            Open documents
+          </RouterLink>
+        </div>
+
+        <!--
+          **The empty state is a sentence, not an absence** — and here not ten
+          empty bars either, which read as a chart that failed to draw.
+        -->
+        <p
+          v-if="hasNoDocuments"
+          class="mt-3 text-sm text-muted-foreground"
+          data-testid="status-empty"
+        >
+          You have not raised any documents yet.
+        </p>
+
+        <template v-else>
+          <!--
+            Held at the chart's height while its chunk arrives, so the counts
+            below do not jump when it does.
+          -->
+          <div class="mt-3 min-h-[280px]">
+            <DocumentStatusChart :counts="documentsByStatus" />
+          </div>
+
+          <!--
+            **The numbers, as text.** The chart above is a picture of these and
+            is hidden from assistive technology; this list is what a screen
+            reader reads and what holds if the chart never loads. In the order
+            the server sent — **nothing here sorts.**
+          -->
+          <ul
+            class="mt-3 grid grid-cols-2 gap-x-6 gap-y-1 sm:grid-cols-5"
+            aria-labelledby="documents-by-status-heading"
+            data-testid="status-counts"
+          >
+            <li
+              v-for="row in documentsByStatus"
+              :key="row.status"
+              class="flex items-baseline justify-between gap-2 text-xs"
+              data-testid="status-count"
+              :data-status="row.status"
+            >
+              <span class="text-muted-foreground" data-testid="status-label">
+                {{ DOCUMENT_STATUS_LABELS[row.status] }}
+              </span>
+              <span class="font-medium tabular-nums" data-testid="status-value">
+                {{ row.count }}
+              </span>
+            </li>
+          </ul>
+        </template>
       </article>
     </template>
   </section>
