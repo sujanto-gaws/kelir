@@ -220,6 +220,84 @@ export async function publishWorkflow(
   return { id, workflowKey, roleCode }
 }
 
+/**
+ * A workflow with **one** task, offered to a role, and a deadline only if asked
+ * ([#446] AC6).
+ *
+ * **Beside `publishWorkflow` rather than a flag on it.** That definition's only
+ * dated task is the director's, which is assigned to a *named user* and reached
+ * only through the branch — right for delegation, and wrong for a flow that
+ * needs a late task sitting in a *role's* queue straight after submit. Adding an
+ * option there would change the shape every approval flow already relies on.
+ *
+ * `dueInHours` absent means **no deadline at all**, not a long one: the overdue
+ * widget's rule is that an undated task is never late, and a far-off date would
+ * prove only that it has not arrived yet.
+ *
+ * [#446]: https://github.com/sujanto-gaws/kelir/issues/446
+ */
+export async function publishSingleStepWorkflow(
+  session: ApiSession,
+  roleCode: string,
+  options: { readonly taskName: string; readonly dueInHours?: number },
+): Promise<SeededWorkflow> {
+  const workflowKey = `e2e_single_${runSuffix()}`.toLowerCase().replace(/[^a-z0-9_]/g, '_')
+
+  const task: Record<string, unknown> = {
+    taskDefinitionKey: 'single_approval',
+    taskName: options.taskName,
+    assignment: { assigneeType: 'ROLE', roleCode },
+  }
+
+  if (options.dueInHours !== undefined) {
+    task.dueInHours = options.dueInHours
+  }
+
+  const definition = {
+    workflowKey,
+    version: '1.0.0',
+    name: 'Single-step approval',
+    initialState: 'APPROVAL',
+    states: [
+      {
+        code: 'APPROVAL',
+        name: 'Approval',
+        mapsToDocumentStatus: 'PENDING_APPROVAL',
+        task,
+      },
+      { code: 'COMPLETED', name: 'Completed', mapsToDocumentStatus: 'COMPLETED', isFinal: true },
+      { code: 'REJECTED', name: 'Rejected', mapsToDocumentStatus: 'REJECTED', isFinal: true },
+    ],
+    transitions: [
+      { from: 'APPROVAL', to: 'COMPLETED', action: 'APPROVE', allowedBy: `ROLE:${roleCode}` },
+      { from: 'APPROVAL', to: 'REJECTED', action: 'REJECT', allowedBy: `ROLE:${roleCode}` },
+    ],
+  }
+
+  const created = await session.context.post(`${API_PREFIX}/workflow/definitions`, {
+    data: { workflowKey, name: 'Single-step approval', definition },
+  })
+
+  expect(
+    created.ok(),
+    `seeding the workflow failed: ${created.status()} ${await created.text()}`,
+  ).toBeTruthy()
+
+  const id = ((await created.json()) as { data: { id: string } }).data.id
+
+  const published = await session.context.post(
+    `${API_PREFIX}/workflow/definitions/${id}/publication`,
+    { data: {} },
+  )
+
+  expect(
+    published.ok(),
+    `publishing the workflow failed: ${published.status()} ${await published.text()}`,
+  ).toBeTruthy()
+
+  return { id, workflowKey, roleCode }
+}
+
 /** Points an existing document type at a published workflow. */
 export async function bindWorkflow(
   session: ApiSession,

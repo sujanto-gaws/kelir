@@ -47,11 +47,14 @@
 //!
 //! | Number | Comes from | Under whose predicate |
 //! |---|---|---|
-//! | `tasksWaiting`, `tasksOverdue`, `pendingTasks` | [`workflow::service::inbox::waiting_work`] | `workflow::repository::inbox`'s `WHERE` — the one the inbox itself pages on |
+//! | `tasksWaiting`, `pendingTasks` | [`workflow::service::inbox::waiting_work`] | `workflow::repository::inbox`'s `WHERE` — the one the inbox itself pages on |
+//! | `tasksOverdue`, `overdueTasks` | [`workflow::service::inbox::late_work`] | the same `WHERE`, narrowed to `InboxScope::Overdue` and read longest late first |
 //! | `draftDocuments` | [`document::service::list::count_own_drafts`] | `tenant_id`, `created_by`, `status = 'DRAFT'` |
 //! | `recentDocuments` | [`document::service::list::recent_documents`] | `document::repository::list`'s own `WHERE` — `tenant_id` and `deleted_at IS NULL`, the two lines the document list opens with |
 //!
-//! **The first row is the one that matters.** *Whose task is this* is a rule
+//! [`workflow::service::inbox::late_work`]: crate::modules::workflow::service::inbox::late_work
+//!
+//! **The first two rows are the ones that matter.** *Whose task is this* is a rule
 //! with four clauses — assignee, unassigned-plus-candidate-role, the role
 //! grant's validity window, and the department scoping
 //! [#225](https://github.com/sujanto-gaws/kelir/issues/225) added — and it is
@@ -170,8 +173,9 @@
 //!
 //! Neither can ship behind [`DASHBOARD_READ`] alone, and neither can be served
 //! by widening [`workflow::service::inbox::waiting_work`],
+//! [`workflow::service::inbox::late_work`],
 //! [`document::service::list::count_own_drafts`] or
-//! [`document::service::list::recent_documents`] — all three of which say so in
+//! [`document::service::list::recent_documents`] — all four of which say so in
 //! their own doc comments, where an author reaching for them will be standing.
 //!
 //! [ADR-0039]: ../../../../docs/architectures/adr/0039.%20A%20Dashboard%20Widget%20Is%20a%20Purpose-Built%20Endpoint.md
@@ -180,10 +184,10 @@
 //!
 //! # What is not here
 //!
-//! **FR-RPT-004 and FR-RPT-005 are Sprint 18** (**D-77**). FR-RPT-003 was this
-//! module's last Sprint 17 row and is built: it extended
-//! [`domain::DashboardSummary`] the way FR-RPT-002 did, a field beside the
-//! others rather than an endpoint beside this one.
+//! **FR-RPT-004 is Sprint 18** (**D-77**). FR-RPT-003 was this module's last
+//! Sprint 17 row, and FR-RPT-005 is Sprint 18's first; both are built, and both
+//! extended [`domain::DashboardSummary`] the way FR-RPT-002 did — a field beside
+//! the others rather than an endpoint beside this one.
 //!
 //! **A count of the documents the caller has ever touched.**
 //! [`RECENT_DOCUMENTS_SHOWN`] has no `recentDocumentsTotal` beside it, unlike
@@ -208,11 +212,14 @@
 //! property of the edge the engine actually chooses — which a card has no way
 //! to know.
 //!
-//! **A second filter on the pending-task query.** FR-RPT-005's overdue widget
-//! is exactly that and is Sprint 18's; `workflow_tasks.due_at` and its index
-//! have existed since [#235](https://github.com/sujanto-gaws/kelir/pull/235).
-//! That is a reason to leave this query fit to carry one more filter, and not a
-//! reason to write it now.
+//! **An ordering control on the task inbox.** FR-RPT-005's overdue widget
+//! ([#446]) is the pending-task query read a second time with one more filter
+//! and a longest-late order, and that order is an `InboxOrder` the repository
+//! takes rather than a parameter `GET /api/v1/tasks` accepts. The inbox opens
+//! newest first whatever it is narrowed to; offering the other order there is a
+//! decision about the inbox screen, and nobody has taken it.
+//!
+//! [#446]: https://github.com/sujanto-gaws/kelir/issues/446
 //!
 //! **Any charting dependency.** The tree has none, and the first surface that
 //! needs one is FR-RPT-004, where the choice gets its own decision rather than
@@ -251,6 +258,25 @@ pub const DASHBOARD_READ: &str = "reporting:dashboard:read";
 ///
 /// [#432]: https://github.com/sujanto-gaws/kelir/issues/432
 pub const PENDING_TASKS_SHOWN: i64 = 5;
+
+/// How many overdue tasks the widget carries (FR-RPT-005, [#446]).
+///
+/// **Five, matching [`PENDING_TASKS_SHOWN`], and a separate constant for the
+/// reason [`RECENT_DOCUMENTS_SHOWN`] gives**: how much room a card has is a
+/// per-card property, and three cards sharing a grid is a reason for the numbers
+/// to agree, not for them to be one number.
+///
+/// **The rows are the five longest late, and the count is all of them.**
+/// `tasksOverdue` is the size of the late set, counted by the read that listed
+/// these rows, so a person with eight late tasks sees the five whose dates
+/// passed first and a card that can say *3 more* — `tasksOverdue` minus the
+/// rows — rather than a list that looks complete.
+///
+/// **It is this module's decision for the reason [`PENDING_TASKS_SHOWN`] is**:
+/// `late_work` takes the number and has no opinion about it.
+///
+/// [#446]: https://github.com/sujanto-gaws/kelir/issues/446
+pub const OVERDUE_TASKS_SHOWN: i64 = 5;
 
 /// How many recent documents the widget carries (FR-RPT-003, [#433]).
 ///

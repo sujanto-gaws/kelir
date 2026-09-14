@@ -39,13 +39,21 @@ pub fn routes() -> Router<AppState> {
 /// built are on one contract, which is the whole of what the record claimed
 /// would be cheaper.
 ///
+/// **FR-RPT-005 is the fourth, and the one whose issue asked for less than it
+/// needed.** [#446] AC1 asked for an overdue count, which `tasksOverdue` had
+/// carried since FR-RPT-001; what the requirement lacked was the rows. They
+/// arrived as `overdueTasks` on [`DashboardSummary`] — the inbox's statement
+/// read a second time, longest late first — and no `GET /dashboard/overdue`.
+/// Four widgets, one contract.
+///
 /// [#433]: https://github.com/sujanto-gaws/kelir/issues/433
+/// [#446]: https://github.com/sujanto-gaws/kelir/issues/446
 ///
 /// [ADR-0039]: ../../../../docs/architectures/adr/0039.%20A%20Dashboard%20Widget%20Is%20a%20Purpose-Built%20Endpoint.md
 #[utoipa::path(
     get, path = "/api/v1/dashboard/summary", tag = "reporting",
     responses(
-        (status = 200, description = "The caller's own work: the counts, the first few tasks waiting for them, and the documents they touched most recently", body = DashboardSummary),
+        (status = 200, description = "The caller's own work: the counts, the first few tasks waiting for them, the tasks longest overdue, and the documents they touched most recently", body = DashboardSummary),
         (status = 403, description = "Missing reporting:dashboard:read — the summary asks for nothing else, because every row in it is the caller's own work (ADR-0039)")
     ),
     security(("bearer" = []))

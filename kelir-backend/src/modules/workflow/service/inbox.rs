@@ -14,7 +14,7 @@
 use uuid::Uuid;
 
 use super::super::domain::{Assignment, Graph, TaskStatus, TransitionAction};
-use super::super::repository::inbox::{self, InboxFilters, InboxScope};
+use super::super::repository::inbox::{self, InboxFilters, InboxOrder, InboxScope};
 use super::super::repository::{definition as definition_repo, instance as instance_repo};
 use super::super::TASK_READ;
 use crate::error::AppError;
@@ -189,8 +189,8 @@ pub async fn list_inbox(
     Ok((tasks, pagination.meta(total.max(0) as u64)))
 }
 
-/// What is waiting for this caller: two numbers, and the top of the queue they
-/// describe (FR-RPT-001, [#431]; FR-RPT-002, [#432]).
+/// What is waiting for this caller: how much, and the top of the queue it
+/// describes (FR-RPT-001, [#431]; FR-RPT-002, [#432]).
 ///
 /// # It reads the inbox's own statement, and that is the whole point
 ///
@@ -210,16 +210,20 @@ pub async fn list_inbox(
 /// reverse — and the reason that test can be written at all is that there is a
 /// single predicate for it to catch somebody forking.
 ///
-/// # One read rather than three
+/// # One read, and the late count is no longer in it
 ///
 /// This used to take three: a count of what is open, a count of what is late,
 /// and nothing else, because there were no rows to fetch. The widget needed the
 /// rows too, and [#432] AC5 asks that **the count and the list come from one
-/// statement** — so all three answers now come back from one pass, and a
-/// decision landing mid-request can no longer make the card say *5 waiting*
-/// over four rows.
+/// statement** — so the answers came back from one pass, and a decision landing
+/// mid-request can no longer make the card say *5 waiting* over four rows.
 ///
-/// `limit` is how many rows the caller wants; the counts describe the **whole**
+/// **The late count rode on that pass until FR-RPT-005** ([#446]), as a filtered
+/// window count. The overdue widget lists late tasks of its own, and the same
+/// AC5 rule says its count comes from the read that lists them — so it moved to
+/// [`late_work`], and this function answers *what is waiting* and nothing else.
+///
+/// `limit` is how many rows the caller wants; the count describes the **whole**
 /// queue behind them, which is what makes *3 of 12* sayable. The page is read
 /// at offset 0, which is the case [`inbox::InboxPage::matching`] is exact for.
 ///
@@ -230,8 +234,8 @@ pub async fn list_inbox(
 /// screen, its paging, its search, its filters.
 ///
 /// **This serves the caller's own queue and nothing else**, and that was true
-/// when it returned two integers and is still true now that it returns five
-/// rows with them. The predicate is *assigned to this caller, or offered to a
+/// when it returned two integers and is still true now that it returns one
+/// integer and five rows. The predicate is *assigned to this caller, or offered to a
 /// role this caller holds*: every row is work this person is being asked to do,
 /// and a task's own holder is the last party its name needs keeping from. So
 /// the widget is gated where a surface should be — by
@@ -276,17 +280,12 @@ pub async fn waiting_work(
     )
     .await?;
 
-    // **`Overdue` narrows `Open` rather than replacing it** — `InboxScope`'s own
-    // documented shape, `overdue ⊂ open ⊂ all` — so the second number is a
-    // subset of the first and a screen may say "3 waiting, 1 late" without the
-    // two being read as four tasks. Both are counted over the rows this
-    // statement matched, so neither can be a count of a different set.
+    // Counted over the rows this statement matched, so the number cannot be a
+    // count of a different set from the one the rows were taken from.
     let waiting = page.matching.unwrap_or(0);
-    let overdue = page.matching_overdue.unwrap_or(0);
 
     Ok(WaitingWork {
         waiting: waiting.max(0),
-        overdue: overdue.max(0),
         next: page
             .rows
             .into_iter()
@@ -300,9 +299,6 @@ pub async fn waiting_work(
 pub struct WaitingWork {
     /// Tasks assigned to the caller, or offered to a role they hold, still open.
     pub waiting: i64,
-    /// Those of them that are past their date — **a subset of `waiting`**, never
-    /// a separate population.
-    pub overdue: i64,
     /// The first few of them, in the order the inbox opens on.
     ///
     /// **A prefix of the inbox, not a selection out of it.** The order is
@@ -311,12 +307,108 @@ pub struct WaitingWork {
     /// finds the same rows at the top in the same sequence. A widget that
     /// ordered by due date would be a second opinion about which work matters
     /// most, taken by a card rather than by the screen that owns the queue —
-    /// and FR-RPT-005's overdue widget is where *late first* is the question
-    /// being asked.
+    /// and *late first* is a question only the overdue widget asks, which is
+    /// why it has [`late_work`] rather than a different order here.
     ///
     /// Shorter than [`Self::waiting`] whenever there is more waiting than the
     /// card has room for, which is the ordinary case and the reason the count
     /// is carried beside the rows rather than derived from their length.
+    pub next: Vec<InboxTask>,
+}
+
+/// What is late for this caller: how much of it, and the longest-late of it
+/// (FR-RPT-005, [#446]).
+///
+/// # The premise this was built on, corrected
+///
+/// [#446] AC1 asked for *an overdue count on the summary*. **That already
+/// existed** — [`waiting_work`] had counted the late subset since FR-RPT-001, and
+/// the waiting card captioned it. What FR-RPT-005 (*show overdue tasks*) lacked
+/// was **the rows**, and this is the read that returns them. The count moved
+/// here with them, so the card that lists late tasks and the number beside it
+/// are one answer.
+///
+/// # The inbox's statement, read along a different axis
+///
+/// [`inbox::list_for_caller`] under [`InboxScope::Overdue`] — the scope
+/// `GET /api/v1/tasks?scope=overdue` pages on — and
+/// [`InboxOrder::MostOverdueFirst`]. **No second answer to *whose task is
+/// this***: the scope and the order are arguments to the one `WHERE` clause
+/// [`waiting_work`]'s doc argues for, so this widget and the inbox's overdue view
+/// hold the same set and differ only in sequence.
+///
+/// `overdue` is that statement's `count(*) OVER ()`, read at offset 0 — the case
+/// [`inbox::InboxPage::matching`] is exact for — so the count and the rows come
+/// from one snapshot, which is [#432] AC5 applied to this card. It is a separate
+/// read from [`waiting_work`]'s, and `reporting::service` states what that
+/// costs.
+///
+/// # This function requires no permission, for the reason `waiting_work` gives
+///
+/// Every row is a task assigned to this caller or offered to a role they hold,
+/// narrowed to the ones past their date — **their own work, only more urgent**.
+/// The line is *whose work*, and it is drawn in the statement; the surface is
+/// gated by [`crate::modules::reporting::DASHBOARD_READ`] in the one service that
+/// serves it. Asking for `workflow:task:read` here would refuse a person holding
+/// only the dashboard grant the list of their own late work, on the one screen
+/// built to show it.
+///
+/// **What this does not license.** Late tasks this caller does *not* hold — a
+/// department's backlog, a lead's view of who is behind — are the inbox
+/// population, and that is [`TASK_READ`]'s to gate. FR-RPT-007's workload report
+/// asks that question, and it cannot be served by widening this function.
+///
+/// [#432]: https://github.com/sujanto-gaws/kelir/issues/432
+/// [#446]: https://github.com/sujanto-gaws/kelir/issues/446
+pub async fn late_work(
+    state: &AppState,
+    caller: &Authenticated,
+    limit: i64,
+) -> Result<LateWork, AppError> {
+    let user_id = caller.user_id();
+
+    let page = inbox::list_for_caller(
+        &state.pool,
+        caller.tenant_id(),
+        user_id,
+        &InboxFilters {
+            scope: InboxScope::Overdue,
+            order: InboxOrder::MostOverdueFirst,
+            ..InboxFilters::default()
+        },
+        limit,
+        0,
+    )
+    .await?;
+
+    Ok(LateWork {
+        overdue: page.matching.unwrap_or(0).max(0),
+        next: page
+            .rows
+            .into_iter()
+            .map(|row| to_task(row, user_id))
+            .collect(),
+    })
+}
+
+/// What is late for one person, as [`late_work`] answers it.
+#[derive(Debug, Clone)]
+pub struct LateWork {
+    /// Tasks waiting for the caller that are past their date — **the whole late
+    /// set**, counted by the statement that listed [`Self::next`].
+    pub overdue: i64,
+    /// The longest-late of them: `due_at` ascending, ties broken the inbox's own
+    /// way so the order is total.
+    ///
+    /// **A selection out of the inbox's overdue view, in an order that view does
+    /// not use**, and that is the difference from [`WaitingWork::next`] rather
+    /// than a contradiction of it. The pending card is the top of the queue
+    /// because the queue owns *what next*; this card is asked *what has waited
+    /// longest past its date*, and newest first would put the task that went
+    /// late an hour ago above the one that went late last month.
+    ///
+    /// Shorter than [`Self::overdue`] whenever more is late than the card has
+    /// room for, and a client must not read its length as the count.
     pub next: Vec<InboxTask>,
 }
 
@@ -351,6 +443,7 @@ pub async fn get_task(
             // reading — narrowing to what is open, late or finished here would
             // answer 404 for a task somebody opened to see what happened to it.
             scope: InboxScope::All,
+            order: InboxOrder::Newest,
             document_id: None,
             task_id: Some(id),
             search: None,

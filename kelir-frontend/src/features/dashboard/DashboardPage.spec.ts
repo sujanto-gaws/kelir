@@ -20,7 +20,8 @@ import {
 } from '@/lib/testing/fake-backend'
 
 /**
- * The dashboard (FR-RPT-001, [#431]; FR-RPT-002, [#432]; FR-RPT-003, [#433]).
+ * The dashboard (FR-RPT-001, [#431]; FR-RPT-002, [#432]; FR-RPT-003, [#433];
+ * FR-RPT-005, [#446]).
  *
  * # Seen to fail (coding standard §2.9)
  *
@@ -115,6 +116,28 @@ import {
  * assertions run — not a survivor and not a red. This one was written as
  * `v-if="false"` from the start.
  *
+ * ## The late-task widget (FR-RPT-005, [#446])
+ *
+ * **Two mutations, run 2026-09-14, each red and each reddening exactly one
+ * test.** Baseline first: **31 passed, nothing mutated.**
+ *
+ * | Mutation | Red |
+ * |---|---|
+ * | **H1** — the card re-sorts the server's late rows on `dueAt`, descending | *lists the late tasks in the order the server sent* |
+ * | **H2** — the *more late* line counts from the rows rather than `tasksOverdue` | *says how many more are late than it shows* |
+ *
+ * **H1 is only a red because the fixture was built to make it one.** The due
+ * dates in that test are deliberately out of order in both directions, so the
+ * server's sequence matches neither an ascending nor a descending sort. On a
+ * fixture already in `dueAt` order — which is what realistic data from this
+ * endpoint looks like — an ascending sort would have passed and been called
+ * covered. It is G4's lesson from the recent-documents card applied here.
+ *
+ * **H2 is F6 on a second card.** The count and the rows come from one read on
+ * the server, so the remaining way for this card to misstate how much is late
+ * is on this side: deriving the number from the five rows it was sent.
+ *
+ * [#446]: https://github.com/sujanto-gaws/kelir/issues/446
  * [#433]: https://github.com/sujanto-gaws/kelir/issues/433
  *
  * [#431]: https://github.com/sujanto-gaws/kelir/issues/431
@@ -129,9 +152,35 @@ function summary(overrides: Record<string, unknown> = {}): unknown {
     tasksOverdue: 1,
     draftDocuments: 2,
     pendingTasks: [task()],
+    // One late row to match `tasksOverdue: 1` above: the two come from one read
+    // on the server, and a fixture that disagreed with itself would render a
+    // *more late* line no real response could produce.
+    overdueTasks: [overdueTask()],
     recentDocuments: [recentDocument()],
     ...overrides,
   }
+}
+
+/**
+ * One late row, in the shape the server sends (FR-RPT-005, #446).
+ *
+ * The same `InboxTask` as the pending rows, late by the server's word: it
+ * carries `isOverdue: true` and a `dueAt` in the past. Nothing in the component
+ * may compare that date with the clock, so the date is here to be formatted and
+ * ordered by — never judged.
+ */
+function overdueTask(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return task({
+    id: '0199a1a0-0000-7000-8000-0000000000e0',
+    taskRef: 'TASK-2026-000009',
+    taskName: 'Sign off the quote',
+    dueAt: '2026-09-01T02:00:00Z',
+    isOverdue: true,
+    documentRef: 'DOC-2026-000009',
+    documentNumber: 'PR-2026-000009',
+    documentTitle: 'Chairs for the meeting room',
+    ...overrides,
+  })
 }
 
 /**
@@ -312,7 +361,10 @@ describe('DashboardPage', () => {
   })
 
   it('says nothing is late when nothing is', async () => {
-    onSummary = () => ({ status: 200, body: itemBody(summary({ tasksOverdue: 0 })) })
+    onSummary = () => ({
+      status: 200,
+      body: itemBody(summary({ tasksOverdue: 0, overdueTasks: [] })),
+    })
 
     const wrapper = await render()
 
@@ -327,7 +379,13 @@ describe('DashboardPage', () => {
     onSummary = () => ({
       status: 200,
       body: itemBody(
-        summary({ tasksWaiting: 0, tasksOverdue: 0, draftDocuments: 0, pendingTasks: [] }),
+        summary({
+          tasksWaiting: 0,
+          tasksOverdue: 0,
+          draftDocuments: 0,
+          pendingTasks: [],
+          overdueTasks: [],
+        }),
       ),
     })
 
@@ -459,7 +517,9 @@ describe('DashboardPage', () => {
   it('says nothing is waiting rather than showing an empty card', async () => {
     onSummary = () => ({
       status: 200,
-      body: itemBody(summary({ tasksWaiting: 0, tasksOverdue: 0, pendingTasks: [] })),
+      body: itemBody(
+        summary({ tasksWaiting: 0, tasksOverdue: 0, pendingTasks: [], overdueTasks: [] }),
+      ),
     })
 
     const wrapper = await render()
@@ -555,6 +615,170 @@ describe('DashboardPage', () => {
       'reporting:dashboard:read',
     )
     expect(requested).toHaveLength(0)
+  })
+
+  // -------------------------------------------------------------------------
+  // FR-RPT-005 — the late-task widget (#446)
+  // -------------------------------------------------------------------------
+
+  /**
+   * **The rows render in the order the server sent** — most overdue first.
+   *
+   * The fixture's due dates are deliberately **not** ascending, so the order on
+   * screen can only be the order of the array: a component sorting on `dueAt`
+   * either way would put the rows in a different sequence and fail here. The
+   * server's order is the answer; the dates beside the rows are only formatted.
+   */
+  it('lists the late tasks in the order the server sent', async () => {
+    onSummary = () => ({
+      status: 200,
+      body: itemBody(
+        summary({
+          tasksOverdue: 3,
+          overdueTasks: [
+            overdueTask({ id: 'l1', taskName: 'First sent', dueAt: '2026-09-01T02:00:00Z' }),
+            overdueTask({ id: 'l2', taskName: 'Second sent', dueAt: '2026-06-01T02:00:00Z' }),
+            overdueTask({ id: 'l3', taskName: 'Third sent', dueAt: '2026-08-01T02:00:00Z' }),
+          ],
+        }),
+      ),
+    })
+
+    const wrapper = await render()
+    const rows = wrapper.findAll('[data-testid="overdue-task"]')
+
+    expect(rows).toHaveLength(3)
+    expect(rows[0].text()).toContain('First sent')
+    expect(rows[1].text()).toContain('Second sent')
+    expect(rows[2].text()).toContain('Third sent')
+    expect(rows[0].text()).toContain('PR-2026-000009')
+    expect(rows[0].text()).toContain('Chairs for the meeting room')
+    expect(rows[0].find('[data-testid="overdue-task-due"]').text()).toContain('Was due')
+  })
+
+  /**
+   * **`overdueTasks.length` is not the count.**
+   *
+   * The server caps the rows at five and sends `tasksOverdue` for the whole late
+   * set from the same read, so a card counting its own rows would be wrong by
+   * exactly the late tasks the reader cannot see.
+   */
+  it('says how many more are late than it shows', async () => {
+    onSummary = () => ({
+      status: 200,
+      body: itemBody(
+        summary({
+          tasksWaiting: 12,
+          tasksOverdue: 9,
+          overdueTasks: [1, 2, 3, 4, 5].map((n) => overdueTask({ id: `l${n}` })),
+        }),
+      ),
+    })
+
+    const wrapper = await render()
+
+    expect(wrapper.findAll('[data-testid="overdue-task"]')).toHaveLength(5)
+    expect(wrapper.find('[data-testid="overdue-more"]').text()).toContain('4 more late')
+  })
+
+  it('does not say more are late when it is showing all of them', async () => {
+    onSummary = () => ({
+      status: 200,
+      body: itemBody(
+        summary({
+          tasksOverdue: 2,
+          overdueTasks: [overdueTask({ id: 'l1' }), overdueTask({ id: 'l2' })],
+        }),
+      ),
+    })
+
+    const wrapper = await render()
+
+    expect(wrapper.findAll('[data-testid="overdue-task"]')).toHaveLength(2)
+    expect(wrapper.find('[data-testid="overdue-more"]').exists()).toBe(false)
+  })
+
+  /**
+   * **Says so in words when nothing is late.** An empty card is
+   * indistinguishable from one that failed to load, and this is the card where
+   * the blank would hide good news.
+   */
+  it('says nothing is late rather than showing an empty card', async () => {
+    onSummary = () => ({
+      status: 200,
+      body: itemBody(summary({ tasksOverdue: 0, overdueTasks: [] })),
+    })
+
+    const wrapper = await render()
+
+    expect(wrapper.find('[data-testid="overdue-tasks"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="overdue-empty"]').text()).toContain(
+      'Nothing waiting for you is past its date',
+    )
+    expect(wrapper.findAll('[data-testid="overdue-task"]')).toHaveLength(0)
+    expect(wrapper.find('[data-testid="overdue-more"]').exists()).toBe(false)
+  })
+
+  it('says whose work a late delegated task is', async () => {
+    onSummary = () => ({
+      status: 200,
+      body: itemBody(
+        summary({
+          overdueTasks: [
+            overdueTask({ delegatedFromUserId: 'x', delegatedFromDisplayName: 'Budi Santoso' }),
+          ],
+        }),
+      ),
+    })
+
+    const wrapper = await render()
+
+    expect(wrapper.find('[data-testid="overdue-task-delegated"]').text()).toContain(
+      "On Budi Santoso's behalf",
+    )
+  })
+
+  /**
+   * **The late rows are shown; only the links are withheld** — the same
+   * courtesy the pending-task card extends, for the same reason. The assertion
+   * is scoped to this card and checks the name is still on screen, so it is
+   * about this widget's links and not about hiding anything the server sent.
+   */
+  it('shows the late rows without links when the caller cannot open the inbox', async () => {
+    signIn(['reporting:dashboard:read'])
+
+    const wrapper = await render()
+    const card = wrapper.find('[data-testid="overdue-tasks"]')
+
+    expect(card.find('[data-testid="overdue-task"]').text()).toContain('Sign off the quote')
+    expect(card.findAll('a')).toHaveLength(0)
+  })
+
+  it('links each late row to its task when the caller can open the inbox', async () => {
+    signIn(['reporting:dashboard:read', 'workflow:task:read'])
+
+    const wrapper = await render()
+    const card = wrapper.find('[data-testid="overdue-tasks"]')
+
+    expect(card.find('[data-testid="overdue-task"] a').exists()).toBe(true)
+    expect(card.text()).toContain('Open your inbox')
+  })
+
+  /**
+   * **The widget adds no request of its own** (#446 AC1, ADR-0039). The late
+   * rows are tasks, so the endpoint that would have served them is the inbox —
+   * and it is not called.
+   */
+  it('asks for no second endpoint to show what is late', async () => {
+    onSummary = () => ({
+      status: 200,
+      body: itemBody(summary({ tasksOverdue: 1, overdueTasks: [overdueTask()] })),
+    })
+
+    await render()
+
+    expect(requested).toEqual([expect.stringContaining('/dashboard/summary')])
+    expect(requested.some((url) => url.includes('/tasks'))).toBe(false)
   })
 
   // -------------------------------------------------------------------------

@@ -8,9 +8,9 @@ import type { DashboardSummary } from '@/types/reporting'
  *
  * **One function, and the later widgets do not add a second.**
  * [ADR-0039](../../../docs/architectures/adr/0039.%20A%20Dashboard%20Widget%20Is%20a%20Purpose-Built%20Endpoint.md)
- * (**D-78**) makes the dashboard one screen with one contract: FR-RPT-002 and
- * FR-RPT-003 extend `DashboardSummary`, so what changes here is the type rather
- * than the number of requests. A `getDashboardTasks` appearing beside this is
+ * (**D-78**) makes the dashboard one screen with one contract: FR-RPT-002,
+ * FR-RPT-003 and FR-RPT-005 extend `DashboardSummary`, so what changes here is
+ * the type rather than the number of requests. A `getDashboardTasks` appearing beside this is
  * the decision being reversed in a diff.
  */
 

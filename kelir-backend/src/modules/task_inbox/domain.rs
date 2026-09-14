@@ -20,7 +20,7 @@ use utoipa::IntoParams;
 use uuid::Uuid;
 
 use crate::error::{AppError, ValidationDetail};
-use crate::modules::workflow::repository::inbox::{InboxFilters, InboxScope};
+use crate::modules::workflow::repository::inbox::{InboxFilters, InboxOrder, InboxScope};
 use crate::response::Pagination;
 
 /// The longest search term this list will take.
@@ -135,6 +135,10 @@ impl InboxQuery {
 
         Ok(InboxFilters {
             scope,
+            // Never from the query string either: the inbox opens newest first
+            // whatever it is narrowed to, and a longest-late order is the
+            // dashboard's question (#446), not a control this screen offers.
+            order: InboxOrder::Newest,
             document_id: self.document_id,
             // Never from the query string: the list is a list, and one task by
             // id is `GET /tasks/{id}`.

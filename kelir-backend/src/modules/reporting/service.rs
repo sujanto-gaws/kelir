@@ -11,7 +11,7 @@
 //! [#431]: https://github.com/sujanto-gaws/kelir/issues/431
 
 use super::domain::DashboardSummary;
-use super::{DASHBOARD_READ, PENDING_TASKS_SHOWN, RECENT_DOCUMENTS_SHOWN};
+use super::{DASHBOARD_READ, OVERDUE_TASKS_SHOWN, PENDING_TASKS_SHOWN, RECENT_DOCUMENTS_SHOWN};
 use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
 use crate::modules::document::service::list as document_list;
@@ -40,9 +40,9 @@ use crate::state::AppState;
 /// rows. `tests/reporting_dashboard.rs` puts a second tenant's and a second
 /// user's rows in the database and asserts on what comes back, for that reason.
 ///
-/// # Two reads rather than one
+/// # Four reads, and why none is folded into another
 ///
-/// The task half and the draft count are two round trips, and they are not
+/// The task half and the draft count are separate round trips, and they are not
 /// folded into one statement. Folding them would mean this module writing SQL
 /// against two other modules' tables — the thing the module doc's table exists
 /// to say it does not do — and the saving is one round trip on a screen that
@@ -51,12 +51,12 @@ use crate::state::AppState;
 /// predicates stay where their rules are.
 ///
 /// It was three until FR-RPT-002 ([#432]). The widget needed the rows behind
-/// the waiting count, and the count, the overdue count and the rows now come
-/// back from one pass through the inbox's statement — so the read that was
-/// added to this screen cost it a round trip *fewer*, and the card's number can
-/// no longer disagree with the card's list.
+/// the waiting count, and the count, the overdue count and the rows came back
+/// from one pass through the inbox's statement — so the read that was added to
+/// this screen cost it a round trip *fewer*, and the card's number could no
+/// longer disagree with the card's list.
 ///
-/// **FR-RPT-003 ([#433]) put it back to three, and this one is a real third
+/// **FR-RPT-003 ([#433]) put it back to three, and that one is a real third
 /// read.** The recent-documents widget could not be folded into the draft count
 /// the way the task rows folded into the task count: the two touch different
 /// tables under different predicates — one counts `documents` the caller
@@ -65,10 +65,29 @@ use crate::state::AppState;
 /// this module writing SQL across two modules' tables, which is the thing the
 /// module doc's table exists to say it does not do.
 ///
-/// **Three reads on one screen every session loads is a stated cost, not an
-/// oversight** (NFR-PERF-002). Each is an indexed seek on `(tenant_id, …)` with
-/// a small `LIMIT`, and both indexes the sprint added exist precisely so none of
-/// them grows with the deployment. If this does become the dashboard's cost
+/// **FR-RPT-005 ([#446]) makes it four, and the fourth is the inbox's statement
+/// read a second time.** The waiting card wants the queue newest first and the
+/// overdue card wants the late tasks longest late first. One `ORDER BY` cannot
+/// serve both, and five rows of the open queue cannot promise to contain the
+/// five longest late. So [`workflow_inbox::late_work`] reads the same `WHERE`
+/// narrowed to `InboxScope::Overdue`, and `tasksOverdue` is taken from that read
+/// — the count over the rows the overdue card lists — rather than from the
+/// waiting pass it used to ride on.
+///
+/// **The trade, stated.** `tasksOverdue ⊂ tasksWaiting` used to hold by
+/// construction, one pass counting both. It now spans two reads, so a task
+/// changing hands between them — a decision landing, a reassignment, a grant
+/// arriving — can leave the two numbers describing different sets for that one
+/// request. **What was chosen over it is the card agreeing with itself**: the
+/// overdue card's count and its rows are one answer from one snapshot, which is
+/// [#432] AC5's rule and the disagreement a viewer can see on the face of a
+/// single card. Two cards a moment apart settle on the next load.
+///
+/// **Four reads on one screen every session loads is a stated cost, not an
+/// oversight** (NFR-PERF-002). Each is a `(tenant_id, …)`-scoped read with a
+/// small `LIMIT`, and the fourth matches a subset of what the first already
+/// matched — the same `WHERE` with one more predicate — so it is never the
+/// larger of the two task reads. If this does become the dashboard's cost
 /// centre, the answer remains a statement in each owning module rather than one
 /// here.
 ///
@@ -78,6 +97,7 @@ use crate::state::AppState;
 /// [#179]: https://github.com/sujanto-gaws/kelir/issues/179
 /// [#432]: https://github.com/sujanto-gaws/kelir/issues/432
 /// [#433]: https://github.com/sujanto-gaws/kelir/issues/433
+/// [#446]: https://github.com/sujanto-gaws/kelir/issues/446
 pub async fn dashboard_summary(
     state: &AppState,
     caller: &Authenticated,
@@ -85,15 +105,17 @@ pub async fn dashboard_summary(
     caller.require(DASHBOARD_READ)?;
 
     let tasks = workflow_inbox::waiting_work(state, caller, PENDING_TASKS_SHOWN).await?;
+    let late = workflow_inbox::late_work(state, caller, OVERDUE_TASKS_SHOWN).await?;
     let draft_documents = document_list::count_own_drafts(state, caller).await?;
     let recent_documents =
         document_list::recent_documents(state, caller, RECENT_DOCUMENTS_SHOWN).await?;
 
     Ok(DashboardSummary {
         tasks_waiting: tasks.waiting,
-        tasks_overdue: tasks.overdue,
+        tasks_overdue: late.overdue,
         draft_documents,
         pending_tasks: tasks.next,
+        overdue_tasks: late.next,
         recent_documents,
     })
 }

@@ -149,6 +149,61 @@
 //!
 //! [#433]: https://github.com/sujanto-gaws/kelir/issues/433
 //!
+//! ## FR-RPT-005, the overdue-tasks widget ([#446])
+//!
+//! **Eight mutations, run 2026-09-14, and all eight red** — seen red,
+//! 2026-09-14. Baseline first: **36 passed, nothing mutated.** None survived,
+//! so no test in this section was written to close one.
+//!
+//! | Mutation | Reddened |
+//! |---|---|
+//! | **M1** — the paged statement's `MostOverdueFirst` key sorted `DESC` | [`the_task_late_longest_comes_first`], and two more |
+//! | **M2** — `late_work` reads `InboxScope::Open` rather than `Overdue` | [`an_undated_task_and_a_finished_late_one_are_not_overdue`], and three more |
+//! | **M3** — `OVERDUE_TASKS_SHOWN` raised from 5 to 50 | [`the_card_shows_the_five_longest_late_and_counts_all_six`] |
+//! | **M4** — `tasks_overdue` taken from `late.next.len()` instead of the statement's `count(*) OVER ()` | [`the_card_shows_the_five_longest_late_and_counts_all_six`] |
+//! | **M5** — the `MostOverdueFirst` branch never taken (`CASE WHEN $11 AND false`) | [`the_task_late_longest_comes_first`], and one more |
+//! | **M6** — `late_work` called with `waiting_work`'s filters, `Open` and `Newest` | [`the_overdue_widget_lists_what_the_inbox_calls_overdue`], and five more |
+//! | **M7** — the paged statement's candidate arm stops scoping to `candidate_department_id` | [`a_department_scoped_late_task_reaches_only_that_departments_overdue_widget`], and its FR-RPT-002 twin |
+//! | **M8** — the paged statement stops admitting a task by its `assignee_user_id` | [`a_delegated_late_task_is_on_the_delegates_overdue_widget_and_not_the_delegators`], and its FR-RPT-002 twin |
+//!
+//! **The four SQL mutations are anchored on lines only the paged statement
+//! has**, which is the anchor rule the FR-RPT-002 table records paying for. M1
+//! and M5 land on the `ORDER BY CASE WHEN $11` line, which exists once; M7 and
+//! M8 are anchored from the `LEFT JOIN users f` line, as that table's M2 and M5
+//! were, because the visibility predicate is written three times in
+//! `repository::inbox` and a mutation landing on `count_for_caller` would
+//! redden a different test and read as coverage of this one. A mutated
+//! statement is not in `.sqlx`, so those four were compiled against a live
+//! schema.
+//!
+//! **M3 and M4 are the pair worth keeping in view.** They are the two ways *N
+//! more late* goes wrong — a card that quietly grows, and a count derived from
+//! the card — and each reddens exactly one test, the same one. Only a fixture
+//! with more late tasks than the card holds can tell either from correct, which
+//! is why that test has six.
+//!
+//! **M1, M2, M5 and M6 redden more than one test each, and that is recorded
+//! rather than tuned away.** Order and scope are what several tests here rest
+//! on. The one worth naming is M2 reddening [`overdue_counts_only_what_is_late`]
+//! — FR-RPT-001's test — because `tasksOverdue` now comes from `late_work`: the
+//! count moved, and the older test followed it without being edited.
+//!
+//! **M7 and M8 redden a widget test and its FR-RPT-002 twin, and no other**,
+//! which is [#446] AC3's *inherited, not restated* observed rather than
+//! asserted: one predicate, one mutation, both cards.
+//!
+//! **One mutation was not run, and the reason is written as an intention.**
+//! `NULLS LAST` changed to `NULLS FIRST` would stay green, because no undated
+//! row reaches the sort key under `Overdue` — an equivalent mutant rather than
+//! a gap, so it is not listed as coverage.
+//!
+//! **M1, M3, M5 and M7 came back with no result on the first pass**: the
+//! previous run's test binary was still locked when the next one linked
+//! (`LNK1104`). That is not a green, and it was not recorded as one; each was
+//! run again and reddened as tabled.
+//!
+//! [#446]: https://github.com/sujanto-gaws/kelir/issues/446
+//!
 //! [#106]: https://github.com/sujanto-gaws/kelir/issues/106
 //! [#121]: https://github.com/sujanto-gaws/kelir/issues/121
 //! [#218]: https://github.com/sujanto-gaws/kelir/issues/218
@@ -2105,6 +2160,12 @@ async fn the_recent_document_row_is_in_the_published_contract() {
         !summary["pendingTasks"].is_null(),
         "the contract lost a field this sprint already shipped"
     );
+    // FR-RPT-005's rows (#446), on the same object — the field a generated
+    // client reads to know the overdue card exists.
+    assert!(
+        !summary["overdueTasks"].is_null(),
+        "DashboardSummary does not carry overdueTasks: {summary}"
+    );
 
     // There is still exactly one dashboard path (#433 AC1, ADR-0039) — the
     // decision this row was most likely to reverse, asserted in the contract
@@ -2122,4 +2183,583 @@ async fn the_recent_document_row_is_in_the_published_contract() {
         vec!["/api/v1/dashboard/summary"],
         "a second dashboard endpoint appeared beside the summary"
     );
+}
+
+// ---------------------------------------------------------------------------
+// FR-RPT-005 — the overdue-tasks widget ([#446])
+// ---------------------------------------------------------------------------
+
+/// The ids of the tasks the overdue widget listed, in the order it listed them.
+fn overdue_ids(summary: &Value) -> Vec<String> {
+    summary["overdueTasks"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the summary carries an overdueTasks array: {summary}"))
+        .iter()
+        .map(|task| {
+            task["id"]
+                .as_str()
+                .unwrap_or_else(|| panic!("an overdue task has an id: {task}"))
+                .to_owned()
+        })
+        .collect()
+}
+
+fn sorted(mut ids: Vec<String>) -> Vec<String> {
+    ids.sort();
+    ids
+}
+
+/// What the **inbox** calls overdue for this caller: the ids on its
+/// `?scope=overdue` page, in the inbox's order, and the `meta.total` beside
+/// them.
+///
+/// The widget is asserted against this rather than against a list the fixture
+/// wrote down, for the reason [`inbox_ids`] gives ([#432] AC2). **As a set**,
+/// because the inbox pages newest first and the widget is longest late first —
+/// the same rows in a different sequence is the design, not a divergence.
+async fn inbox_overdue(app: &TestApp, token: &str) -> (Vec<String>, Value) {
+    let response = app
+        .get(&format!("{TASKS}?scope=overdue"), Some(token))
+        .await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+
+    let ids = response.body["data"]
+        .as_array()
+        .expect("the inbox is a page")
+        .iter()
+        .map(|task| task["id"].as_str().expect("an id").to_owned())
+        .collect();
+
+    (ids, response.body["meta"]["total"].clone())
+}
+
+/// The open task a document raised.
+async fn open_task_of(app: &TestApp, document: Uuid) -> String {
+    let id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM workflow_tasks WHERE document_id = $1 \
+         AND status IN ('CREATED','ASSIGNED','IN_PROGRESS')",
+    )
+    .bind(document)
+    .fetch_one(&app.pool)
+    .await
+    .expect("read the open task");
+
+    id.to_string()
+}
+
+/// Dates the open task on `document` as due `hours` hours ago, and returns it.
+///
+/// Set by an `UPDATE`, as [`overdue_counts_only_what_is_late`] does, because
+/// what is under test is the widget rather than the engine's own due-date
+/// derivation — which `workflow_due_dates.rs` owns. Against the database's
+/// `now()`, so the fixture and the predicate read one clock.
+async fn late_by(app: &TestApp, document: Uuid, hours: i32) -> String {
+    let task = open_task_of(app, document).await;
+
+    let updated = sqlx::query(
+        "UPDATE workflow_tasks SET due_at = now() - make_interval(hours => $2) \
+         WHERE id = $1::uuid",
+    )
+    .bind(&task)
+    .bind(hours)
+    .execute(&app.pool)
+    .await
+    .expect("set a due date in the past");
+    assert_eq!(updated.rows_affected(), 1, "the fixture dated no task");
+
+    task
+}
+
+/// Gives `task` exactly the due date `other` has, so the two tie on it.
+async fn same_due_as(app: &TestApp, task: &str, other: &str) {
+    let updated = sqlx::query(
+        "UPDATE workflow_tasks SET due_at = (SELECT due_at FROM workflow_tasks WHERE id = $2::uuid) \
+         WHERE id = $1::uuid",
+    )
+    .bind(task)
+    .bind(other)
+    .execute(&app.pool)
+    .await
+    .expect("tie two due dates");
+    assert_eq!(updated.rows_affected(), 1, "the fixture tied no task");
+}
+
+/// **The overdue widget lists what the inbox calls overdue, and counts what the
+/// inbox totals** ([#446] AC3).
+///
+/// # A divergence test, for the reason the pending-task one is
+///
+/// The expected value is `GET /api/v1/tasks?scope=overdue`, read in the same
+/// test: the ids as a set, and `meta.total` against `tasksOverdue`. A widget
+/// that had grown its own idea of *late* — or of *whose* — disagrees with that
+/// page whichever way round it falls, and a test that merely found some late
+/// rows on the card would pass for it.
+///
+/// **The fixture has the three tasks a wrong rule would admit**: a late task of
+/// a second holder, which a widget without the visibility rule lists; and an
+/// undated task of this holder's own, which a widget reading *open* rather than
+/// *overdue* lists.
+///
+/// [#446]: https://github.com/sujanto-gaws/kelir/issues/446
+#[tokio::test]
+async fn the_overdue_widget_lists_what_the_inbox_calls_overdue() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let theirs = holder(&app, "RD-O-SAME", "rd.o.same").await;
+    let other = holder(&app, "RD-O-OTHER", "rd.o.other").await;
+
+    let workflow = publish_workflow(&app, &token, "rd_o_same", "RD-O-SAME").await;
+    let other_workflow = publish_workflow(&app, &token, "rd_o_other", "RD-O-OTHER").await;
+    let type_id = document_type(&app, &token, "RD_O_SAME", workflow).await;
+    let other_type = document_type(&app, &token, "RD_O_OTH", other_workflow).await;
+
+    let very_late = submitted_document(&app, &token, type_id, "Two days late").await;
+    let bit_late = submitted_document(&app, &token, type_id, "Three hours late").await;
+    submitted_document(&app, &token, type_id, "Waiting, with no date").await;
+    let elsewhere = submitted_document(&app, &token, other_type, "Late, and not theirs").await;
+
+    let very_late = late_by(&app, very_late, 48).await;
+    let bit_late = late_by(&app, bit_late, 3).await;
+    let not_theirs = late_by(&app, elsewhere, 96).await;
+
+    let (inbox, total) = inbox_overdue(&app, &theirs).await;
+    let summary = summary_of(&app, &theirs).await;
+    let listed = overdue_ids(&summary);
+
+    assert_eq!(
+        sorted(inbox.clone()),
+        sorted(vec![very_late, bit_late]),
+        "the fixture did not make the tasks late it meant to"
+    );
+    assert_eq!(
+        sorted(listed.clone()),
+        sorted(inbox),
+        "the overdue widget and the inbox's overdue view disagree about which \
+         tasks are late — two answers to whose late task this is: {summary}"
+    );
+    assert_eq!(
+        summary["tasksOverdue"], total,
+        "the card's count and the inbox's total disagree: {summary}"
+    );
+    assert!(
+        !listed.contains(&not_theirs),
+        "another holder's late task was on this caller's overdue widget: {summary}"
+    );
+    // The undated task is still this caller's and still waiting, so its absence
+    // above is the date doing it rather than the task never being visible.
+    assert_eq!(summary["tasksWaiting"], 3, "{summary}");
+
+    // And the other holder's, so the assertions above are not passing because
+    // every late row in this test belongs to everybody.
+    let (other_inbox, other_total) = inbox_overdue(&app, &other).await;
+    let other_summary = summary_of(&app, &other).await;
+
+    assert_eq!(other_inbox, vec![not_theirs]);
+    assert_eq!(
+        overdue_ids(&other_summary),
+        other_inbox,
+        "the second holder's overdue widget does not match their own inbox: {other_summary}"
+    );
+    assert_eq!(other_summary["tasksOverdue"], other_total);
+}
+
+/// **Late means dated and still open: an undated task is not overdue, and
+/// neither is a late one somebody finished** ([#446] AC2, both halves).
+///
+/// The finished task is **on the widget first** and decided through
+/// `POST /api/v1/workflow/tasks/{id}/decision`, so the assertion is that it
+/// *left* rather than that it was never there, and the row reaches the state
+/// the product produces rather than one an `UPDATE` of `status` invented. Its
+/// date has still passed afterwards — read back from the table — so what takes
+/// it off the card is the status and nothing else.
+///
+/// [#446]: https://github.com/sujanto-gaws/kelir/issues/446
+#[tokio::test]
+async fn an_undated_task_and_a_finished_late_one_are_not_overdue() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let approver = holder(&app, "RD-O-AC2", "rd.o.ac2").await;
+    let workflow = publish_workflow(&app, &token, "rd_o_ac2", "RD-O-AC2").await;
+    let type_id = document_type(&app, &token, "RD_O_AC2", workflow).await;
+
+    let late = submitted_document(&app, &token, type_id, "Late, still open").await;
+    let undated = submitted_document(&app, &token, type_id, "Open, no date").await;
+    let finished = submitted_document(&app, &token, type_id, "Late, then decided").await;
+
+    let late = late_by(&app, late, 24).await;
+    let undated = open_task_of(&app, undated).await;
+    let finished = late_by(&app, finished, 48).await;
+
+    let before = summary_of(&app, &approver).await;
+    assert_eq!(
+        overdue_ids(&before),
+        vec![finished.clone(), late.clone()],
+        "the fixture's two late tasks were not both on the widget before the decision: {before}"
+    );
+
+    let decided = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{finished}/decision"),
+            Some(&approver),
+            json!({ "action": "APPROVE" }),
+        )
+        .await;
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+
+    let (status, date_passed): (String, bool) =
+        sqlx::query_as("SELECT status, due_at < now() FROM workflow_tasks WHERE id = $1::uuid")
+            .bind(&finished)
+            .fetch_one(&app.pool)
+            .await
+            .expect("read the decided task");
+    assert_eq!(status, "COMPLETED");
+    assert!(
+        date_passed,
+        "the decided task's date no longer reads as passed"
+    );
+
+    let after = summary_of(&app, &approver).await;
+    let listed = overdue_ids(&after);
+
+    assert!(
+        !listed.contains(&undated),
+        "a task with no due date was listed as overdue: {after}"
+    );
+    assert!(
+        !listed.contains(&finished),
+        "a task finished after its date passed was still listed as overdue: {after}"
+    );
+    assert_eq!(listed, vec![late], "{after}");
+    assert_eq!(after["tasksOverdue"], 1, "{after}");
+    // The undated task is still waiting, so it is visible and merely not late.
+    assert_eq!(after["tasksWaiting"], 2, "{after}");
+}
+
+/// **The task late longest comes first** — and that is not the inbox's order.
+///
+/// Five tasks raised in one order and dated in another, with **four dating
+/// moves and a tie** (coding standard §2.9's three-move rule). The due order is
+/// neither the order they were raised in nor its reverse, so a widget that kept
+/// the inbox's newest-first order, sorted `due_at` the wrong way, or ignored
+/// the date altogether produces a different list than the one asserted.
+///
+/// **The tie is broken the inbox's way** — `created_at DESC, id DESC` — so the
+/// order is total and a card reloaded twice lists the same rows in the same
+/// sequence.
+///
+/// [#446]: https://github.com/sujanto-gaws/kelir/issues/446
+#[tokio::test]
+async fn the_task_late_longest_comes_first() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let approver = holder(&app, "RD-O-ORDER", "rd.o.order").await;
+    let workflow = publish_workflow(&app, &token, "rd_o_order", "RD-O-ORDER").await;
+    let type_id = document_type(&app, &token, "RD_O_ORD", workflow).await;
+
+    let mut raised = Vec::new();
+    for n in 1..=5 {
+        raised.push(submitted_document(&app, &token, type_id, &format!("Raised {n}")).await);
+    }
+
+    let first = late_by(&app, raised[0], 2).await;
+    let second = late_by(&app, raised[1], 72).await;
+    let third = late_by(&app, raised[2], 1).await;
+    let fourth = late_by(&app, raised[3], 24).await;
+    // Exactly as late as the second, so only the tie-break can order the two.
+    let fifth = open_task_of(&app, raised[4]).await;
+    same_due_as(&app, &fifth, &second).await;
+
+    let summary = summary_of(&app, &approver).await;
+    let listed = overdue_ids(&summary);
+
+    assert_eq!(
+        listed,
+        vec![
+            fifth.clone(),
+            second.clone(),
+            fourth.clone(),
+            first.clone(),
+            third.clone()
+        ],
+        "the overdue widget is not longest late first, ties newest first: {summary}"
+    );
+
+    // The same rows as the inbox's overdue view, and **not** in its order —
+    // which is newest first, and here would be fifth, fourth, third, second,
+    // first.
+    let (inbox, _) = inbox_overdue(&app, &approver).await;
+    assert_eq!(sorted(listed.clone()), sorted(inbox.clone()));
+    assert_ne!(
+        listed, inbox,
+        "the overdue widget kept the inbox's newest-first order"
+    );
+
+    // And as a property of the payload: `dueAt` never goes backwards.
+    let due: Vec<chrono::DateTime<Utc>> = summary["overdueTasks"]
+        .as_array()
+        .expect("an array")
+        .iter()
+        .map(|task| {
+            task["dueAt"]
+                .as_str()
+                .unwrap_or_else(|| panic!("an overdue task has a dueAt: {task}"))
+                .parse()
+                .expect("an RFC 3339 timestamp")
+        })
+        .collect();
+    assert!(
+        due.windows(2).all(|pair| pair[0] <= pair[1]),
+        "dueAt is not ascending down the card: {due:?}"
+    );
+    assert!(
+        summary["overdueTasks"]
+            .as_array()
+            .expect("an array")
+            .iter()
+            .all(|task| task["isOverdue"] == true),
+        "a row on the overdue card does not say it is overdue: {summary}"
+    );
+}
+
+/// **Six late, five rows, and the count says six** ([#446]).
+///
+/// `OVERDUE_TASKS_SHOWN`. The row left off is **the least late**, and it was
+/// raised third — neither the oldest nor the newest — so a card capped in the
+/// inbox's order, or in raising order, drops a different task. `tasksOverdue`
+/// is six because it counts the late set rather than the card, which is what
+/// lets a client write *1 more late* as `tasksOverdue - overdueTasks.length`.
+///
+/// [#446]: https://github.com/sujanto-gaws/kelir/issues/446
+#[tokio::test]
+async fn the_card_shows_the_five_longest_late_and_counts_all_six() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let approver = holder(&app, "RD-O-CAP", "rd.o.cap").await;
+    let workflow = publish_workflow(&app, &token, "rd_o_cap", "RD-O-CAP").await;
+    let type_id = document_type(&app, &token, "RD_O_CAP", workflow).await;
+
+    let lateness = [5, 60, 1, 30, 10, 3];
+    let mut tasks = Vec::new();
+    for (n, hours) in lateness.iter().enumerate() {
+        let document = submitted_document(&app, &token, type_id, &format!("Late {n}")).await;
+        tasks.push(late_by(&app, document, *hours).await);
+    }
+
+    let summary = summary_of(&app, &approver).await;
+    let listed = overdue_ids(&summary);
+
+    assert_eq!(
+        summary["tasksOverdue"], 6,
+        "the count describes the late set, not the card: {summary}"
+    );
+    assert_eq!(
+        listed,
+        vec![
+            tasks[1].clone(),
+            tasks[3].clone(),
+            tasks[4].clone(),
+            tasks[0].clone(),
+            tasks[5].clone()
+        ],
+        "the card does not carry the five longest late, longest first: {summary}"
+    );
+    assert!(
+        !listed.contains(&tasks[2]),
+        "the least late task was kept and a later one dropped: {summary}"
+    );
+
+    let (inbox, total) = inbox_overdue(&app, &approver).await;
+    assert_eq!(inbox.len(), 6, "the fixture did not make six tasks late");
+    assert_eq!(summary["tasksOverdue"], total);
+}
+
+/// **Nothing late is an empty list beside a zero** ([#446]).
+///
+/// The caller has work waiting — an undated task — and somebody else has a late
+/// one, so this asserts *nothing late for this caller* rather than *nothing
+/// waiting* or *nothing late in the tenant*.
+///
+/// [#446]: https://github.com/sujanto-gaws/kelir/issues/446
+#[tokio::test]
+async fn a_viewer_with_nothing_late_gets_an_empty_list_and_a_zero() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let idle = holder(&app, "RD-O-IDLE", "rd.o.idle").await;
+    let busy = holder(&app, "RD-O-BUSY", "rd.o.busy").await;
+
+    let idle_workflow = publish_workflow(&app, &token, "rd_o_idle", "RD-O-IDLE").await;
+    let busy_workflow = publish_workflow(&app, &token, "rd_o_busy", "RD-O-BUSY").await;
+    let idle_type = document_type(&app, &token, "RD_O_IDLE", idle_workflow).await;
+    let busy_type = document_type(&app, &token, "RD_O_BUSY", busy_workflow).await;
+
+    submitted_document(&app, &token, idle_type, "Waiting, not late").await;
+    let late = submitted_document(&app, &token, busy_type, "Somebody else's, late").await;
+    late_by(&app, late, 24).await;
+
+    let summary = summary_of(&app, &idle).await;
+
+    assert!(
+        summary["overdueTasks"].is_array(),
+        "overdueTasks is an array even when it is empty: {summary}"
+    );
+    assert_eq!(overdue_ids(&summary), Vec::<String>::new());
+    assert_eq!(summary["tasksOverdue"], 0, "{summary}");
+    assert_eq!(
+        summary["tasksWaiting"], 1,
+        "the caller's own undated task was not raised, so the empty above means less: {summary}"
+    );
+
+    assert_eq!(
+        overdue_ids(&summary_of(&app, &busy).await).len(),
+        1,
+        "the fixture's late task was not on its own holder's widget, so the empty above means nothing"
+    );
+}
+
+/// **A department-scoped late task reaches only that department's overdue
+/// widget** ([#446] AC3).
+///
+/// The same fixture as
+/// [`a_department_scoped_task_reaches_only_that_departments_widget`], made late.
+/// **Inherited rather than restated**: the widget reads the inbox's statement,
+/// so the `candidate_department_id` clause [#225] added is the one thing
+/// deciding this — and this test is what fails if a later author gives the
+/// overdue card a query of its own that leaves the clause out.
+///
+/// [#225]: https://github.com/sujanto-gaws/kelir/issues/225
+/// [#446]: https://github.com/sujanto-gaws/kelir/issues/446
+#[tokio::test]
+async fn a_department_scoped_late_task_reaches_only_that_departments_overdue_widget() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let finance = department(&app, "RD-O-DEPT-FIN", "Finance").await;
+    let procurement = department(&app, "RD-O-DEPT-PROC", "Procurement").await;
+
+    let role = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "RD-O-DEPT",
+        HOLDER_PERMISSIONS,
+    )
+    .await;
+
+    let insider = user_with_roles(&app, "rd.o.fin", &[role]).await;
+    scope_grant_to(&app, "rd.o.fin", finance).await;
+    let outsider = user_with_roles(&app, "rd.o.proc", &[role]).await;
+    scope_grant_to(&app, "rd.o.proc", procurement).await;
+
+    let workflow = publish_workflow_definition(
+        &app,
+        &token,
+        "rd_o_dept",
+        department_workflow("rd_o_dept", "RD-O-DEPT", "RD-O-DEPT-FIN"),
+    )
+    .await;
+    let type_id = document_type(&app, &token, "RD_O_DEPT", workflow).await;
+
+    let document = submitted_document(&app, &token, type_id, "Finance's, late").await;
+    let task = late_by(&app, document, 24).await;
+
+    let theirs = summary_of(&app, &insider).await;
+    let not_theirs = summary_of(&app, &outsider).await;
+
+    assert_eq!(
+        overdue_ids(&theirs),
+        vec![task],
+        "the department's own approver was not shown their late task: {theirs}"
+    );
+    assert_eq!(
+        overdue_ids(&theirs),
+        inbox_overdue(&app, &insider).await.0,
+        "the department's approver sees different late work on the two surfaces: {theirs}"
+    );
+    assert_eq!(
+        overdue_ids(&not_theirs),
+        Vec::<String>::new(),
+        "Procurement's approver was shown Finance's late task: {not_theirs}"
+    );
+    assert_eq!(
+        not_theirs["tasksOverdue"], 0,
+        "the overdue count crossed the department boundary: {not_theirs}"
+    );
+}
+
+/// **A delegated late task is on the delegate's overdue widget, and off the
+/// delegator's** ([#446] AC3).
+///
+/// The same fixture as
+/// [`a_delegated_task_is_on_the_delegates_widget_and_not_the_delegators`], made
+/// late — and the case where forgetting delegation costs most, because the
+/// person standing in is the one who has to know the work is *late*.
+///
+/// [#446]: https://github.com/sujanto-gaws/kelir/issues/446
+#[tokio::test]
+async fn a_delegated_late_task_is_on_the_delegates_overdue_widget_and_not_the_delegators() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let (delegator_id, delegator) = holder_party(
+        &app,
+        "RD-O-DELEGATOR",
+        "rd.o.ani",
+        &["identity:delegation:create"],
+    )
+    .await;
+    let (delegate_id, delegate) = holder_party(&app, "RD-O-DELEGATE", "rd.o.budi", &[]).await;
+
+    let opened = app
+        .post(
+            "/api/v1/identity/delegations",
+            Some(&delegator),
+            json!({
+                "delegateUserId": delegate_id,
+                "startsAt": (Utc::now() - Duration::hours(1)).to_rfc3339(),
+                "endsAt": (Utc::now() + Duration::hours(1)).to_rfc3339(),
+            }),
+        )
+        .await;
+    assert_eq!(opened.status, StatusCode::CREATED, "{}", opened.body);
+
+    let workflow = publish_workflow_definition(
+        &app,
+        &token,
+        "rd_o_deleg",
+        user_workflow("rd_o_deleg", delegator_id),
+    )
+    .await;
+    let type_id = document_type(&app, &token, "RD_O_DELEG", workflow).await;
+
+    let document = submitted_document(&app, &token, type_id, "Late, on Ani's behalf").await;
+    let task = late_by(&app, document, 24).await;
+
+    let theirs = summary_of(&app, &delegate).await;
+    let handed_over = summary_of(&app, &delegator).await;
+
+    assert_eq!(
+        overdue_ids(&theirs),
+        vec![task],
+        "the delegate's overdue widget is empty beside a late task they hold: {theirs}"
+    );
+    assert_eq!(
+        overdue_ids(&theirs),
+        inbox_overdue(&app, &delegate).await.0,
+        "the delegate's overdue widget and overdue inbox disagree: {theirs}"
+    );
+    assert_eq!(
+        theirs["overdueTasks"][0]["delegatedFromUserId"],
+        json!(delegator_id.to_string()),
+        "the late row does not say whose approval it is: {theirs}"
+    );
+    assert_eq!(
+        overdue_ids(&handed_over),
+        Vec::<String>::new(),
+        "the late task is still on the overdue widget of the person who handed it over: {handed_over}"
+    );
+    assert_eq!(handed_over["tasksOverdue"], 0, "{handed_over}");
 }

@@ -24,9 +24,9 @@ import type { DashboardSummary } from '@/types/reporting'
  * **One request, and the widgets will not add a second.**
  * [ADR-0039](../../../../docs/architectures/adr/0039.%20A%20Dashboard%20Widget%20Is%20a%20Purpose-Built%20Endpoint.md)
  * (**D-78**) makes the dashboard one screen with one contract, so FR-RPT-002's
- * pending-task rows and FR-RPT-003's recent documents arrive as fields on
- * `DashboardSummary` and as cards in the grid below. This file is the shell
- * they land in.
+ * pending-task rows, FR-RPT-005's late tasks and FR-RPT-003's recent documents
+ * arrive as fields on `DashboardSummary` and as cards in the grid below. This
+ * file is the shell they land in.
  */
 const auth = useAuthStore()
 
@@ -128,6 +128,28 @@ const notShown = computed(() =>
 const canOpenTasks = computed(() => auth.can('workflow:task:read'))
 
 /**
+ * The caller's late tasks (FR-RPT-005, #446).
+ *
+ * **The server chose these and their order** — most overdue first, `dueAt`
+ * ascending. Sorting here would look harmless because the field is right there
+ * on the row, and it is not: the order is the server's answer about which late
+ * work is latest, and lateness itself is judged against the clock that stamped
+ * the deadline rather than the browser's (FR-TASK-007).
+ */
+const overdueTasks = computed(() => summary.value?.overdueTasks ?? [])
+
+/**
+ * How many are late but not shown.
+ *
+ * From `tasksOverdue` rather than from the array's length, for the reason
+ * `notShown` gives one card up: the array is capped at five and the count is
+ * the whole late set, read in the same statement as the rows.
+ */
+const lateNotShown = computed(() =>
+  Math.max((summary.value?.tasksOverdue ?? 0) - overdueTasks.value.length, 0),
+)
+
+/**
  * The documents the caller touched most recently (FR-RPT-003, #433).
  *
  * **The server chose these and their order** — most recent touch first, by the
@@ -222,7 +244,7 @@ onMounted(load)
     <div>
       <h2 class="text-xl font-semibold tracking-tight">Dashboard</h2>
       <p class="mt-1 text-sm text-muted-foreground">
-        What is waiting for you, and what you touched last.
+        What is waiting for you, what is late, and what you touched last.
       </p>
     </div>
 
@@ -372,6 +394,108 @@ onMounted(load)
           {{ notShown }} more waiting.
         </p>
       </article>
+
+      <!--
+        The late-task widget (FR-RPT-005, #446). The waiting card already says
+        *how many* are late; this card says *which*, so the caption and these
+        rows are one answer read in one statement.
+      -->
+      <article
+        class="rounded-lg border border-border bg-card p-4"
+        data-testid="overdue-tasks"
+        aria-labelledby="overdue-tasks-heading"
+      >
+        <div class="flex flex-wrap items-baseline justify-between gap-2">
+          <h3 id="overdue-tasks-heading" class="text-sm font-medium">What is late</h3>
+          <RouterLink
+            v-if="canOpenTasks"
+            to="/tasks"
+            class="text-sm font-medium text-primary underline-offset-4 hover:underline"
+          >
+            Open your inbox
+          </RouterLink>
+        </div>
+
+        <!--
+          **The empty state is a sentence, not an absence** — the same rule the
+          pending-task card follows. Here it is also good news, and a blank card
+          would withhold it.
+        -->
+        <p
+          v-if="overdueTasks.length === 0"
+          class="mt-3 text-sm text-muted-foreground"
+          data-testid="overdue-empty"
+        >
+          Nothing waiting for you is past its date.
+        </p>
+
+        <!--
+          In the order the server sent, most overdue first. **Nothing here
+          sorts, and nothing here decides a row is late** — every row in this
+          list is late because the server put it here.
+        -->
+        <ul v-else class="mt-3 divide-y divide-border">
+          <li
+            v-for="task in overdueTasks"
+            :key="task.id"
+            class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 py-2 first:pt-0 last:pb-0"
+            data-testid="overdue-task"
+          >
+            <div class="min-w-0">
+              <!-- Linked only where the link works, as the pending-task rows are. -->
+              <RouterLink
+                v-if="canOpenTasks"
+                :to="`/tasks/${task.id}`"
+                class="text-sm font-medium text-primary underline-offset-4 hover:underline"
+              >
+                {{ task.taskName }}
+              </RouterLink>
+              <span v-else class="text-sm font-medium">{{ task.taskName }}</span>
+
+              <span class="block truncate text-xs text-muted-foreground">
+                {{ task.documentNumber ?? task.documentRef }} · {{ task.documentTitle }}
+              </span>
+
+              <!--
+                Whose approval it is (#184). A late task that is somebody else's
+                work stood in for is the one a delegate most needs explained.
+              -->
+              <span
+                v-if="task.delegatedFromDisplayName"
+                class="block text-xs text-muted-foreground"
+                data-testid="overdue-task-delegated"
+              >
+                On {{ task.delegatedFromDisplayName }}'s behalf
+              </span>
+            </div>
+
+            <!--
+              The deadline, formatted and never compared: `dueLabel` is
+              formatting only, and the row is late on the server's word.
+            -->
+            <span
+              v-if="task.dueAt"
+              class="text-xs font-medium text-destructive"
+              data-testid="overdue-task-due"
+            >
+              Was due {{ dueLabel(task.dueAt) }}
+            </span>
+          </li>
+        </ul>
+
+        <!--
+          What the card is hiding, from the count rather than from the rows —
+          `tasksOverdue` is the whole late set and this list is its first five.
+        -->
+        <p
+          v-if="lateNotShown > 0"
+          class="mt-3 text-xs text-muted-foreground"
+          data-testid="overdue-more"
+        >
+          {{ lateNotShown }} more late.
+        </p>
+      </article>
+
       <!--
         The recent-documents widget (FR-RPT-003, #433). A card, not a list: the
         document list is one click away and pages and searches properly, and
