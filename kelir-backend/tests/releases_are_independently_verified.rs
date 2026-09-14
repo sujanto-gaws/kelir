@@ -101,8 +101,12 @@
 //!
 //! - **Claim a pass that never ran.** Every rule here reads records. The act is
 //!   `sprint_reports_are_verified.rs`'s limit too, for the same reason: §2's
-//!   own independence criterion needs `git log`, and CI clones at depth 1
+//!   own independence criterion needs `git log`, and CI cloned at depth 1
 //!   ([finding 4](../../projects/verifications/15.%20Sprint%2016%20Independent%20Pass.md)).
+//!   Since [#453](https://github.com/sujanto-gaws/kelir/issues/453) the backend
+//!   job fetches full history; reading a named reader's absence from trailers
+//!   is [#448](https://github.com/sujanto-gaws/kelir/issues/448)'s question
+//!   and is still not asked.
 //! - **Cite a record that is new, resolves, is numbered above the high-water
 //!   mark, and read none of this release's work.** Rule 7 sharpens rule 2's
 //!   *new* and does not make it *relevant*. Matching a release to the sprints
