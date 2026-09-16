@@ -11,6 +11,8 @@ import { useAuthStore } from '@/stores/auth'
 import { DOCUMENT_STATUS_LABELS, type DocumentStatus } from '@/types/document'
 import type { DashboardSummary } from '@/types/reporting'
 
+import { durationLabel } from './duration'
+
 /**
  * The dashboard (FR-RPT-001, #431).
  *
@@ -24,9 +26,9 @@ import type { DashboardSummary } from '@/types/reporting'
  * **One request, and the widgets will not add a second.**
  * [ADR-0039](../../../../docs/architectures/adr/0039.%20A%20Dashboard%20Widget%20Is%20a%20Purpose-Built%20Endpoint.md)
  * (**D-78**) makes the dashboard one screen with one contract, so FR-RPT-002's
- * pending-task rows, FR-RPT-005's late tasks and FR-RPT-003's recent documents
- * arrive as fields on `DashboardSummary` and as cards in the grid below. This
- * file is the shell they land in.
+ * pending-task rows, FR-RPT-005's late tasks, FR-RPT-003's recent documents and
+ * FR-RPT-006's approval time arrive as fields on `DashboardSummary` and as cards
+ * in the grid below. This file is the shell they land in.
  */
 const auth = useAuthStore()
 
@@ -282,6 +284,18 @@ const DocumentStatusChart = defineAsyncComponent({
     ),
 })
 
+/**
+ * An approval time on the card, or a dash where the server sent none.
+ *
+ * The card shows the times only when `documents` is above zero, and the server
+ * sends `null` only when it is zero — so the dash is for a response that
+ * disagreed with itself, where printing *under a minute* for `null` would be a
+ * confident answer to a question nobody answered.
+ */
+function timeLabel(seconds: number | null): string {
+  return seconds === null ? '—' : durationLabel(seconds)
+}
+
 async function load(): Promise<void> {
   if (!canReadSummary.value) {
     return
@@ -308,8 +322,8 @@ onMounted(load)
     <div>
       <h2 class="text-xl font-semibold tracking-tight">Dashboard</h2>
       <p class="mt-1 text-sm text-muted-foreground">
-        What is waiting for you, what is late, what you touched last, and where your documents
-        stand.
+        What is waiting for you, what is late, what you touched last, where your documents stand,
+        and how long they take to be decided.
       </p>
     </div>
 
@@ -717,6 +731,61 @@ onMounted(load)
             </li>
           </ul>
         </template>
+      </article>
+
+      <!--
+        The approval time card (FR-RPT-006, #461; D-83). **Three numbers and no
+        chart**: a median, a slowest and a count are read, not compared along an
+        axis, so nothing here loads Unovis (ADR-0040 §6).
+
+        **Nothing here measures.** Each document's time is the server's, from
+        its first submission to the decision, and the window is the server's
+        `windowDays` rather than a number this page holds.
+      -->
+      <article
+        class="rounded-lg border border-border bg-card p-4"
+        data-testid="approval-time"
+        aria-labelledby="approval-time-heading"
+      >
+        <h3 id="approval-time-heading" class="text-sm font-medium">How long approval takes</h3>
+        <p class="mt-1 text-xs text-muted-foreground" data-testid="approval-time-scope">
+          Documents you raised, decided in the last {{ summary.approvalTime.windowDays }} days —
+          from the first time each was sent to its approval or rejection, rounds sent back included.
+        </p>
+
+        <!--
+          **The empty state is a sentence, not an absence** — and not three
+          dashes either, which read as a card that failed to load.
+        -->
+        <p
+          v-if="summary.approvalTime.documents === 0"
+          class="mt-3 text-sm text-muted-foreground"
+          data-testid="approval-time-empty"
+        >
+          None of your documents has been decided in the last
+          {{ summary.approvalTime.windowDays }} days.
+        </p>
+
+        <dl v-else class="mt-3 grid grid-cols-3 gap-4">
+          <div data-testid="approval-time-median">
+            <dt class="text-xs text-muted-foreground">Median</dt>
+            <dd class="mt-1 text-xl font-semibold tabular-nums">
+              {{ timeLabel(summary.approvalTime.medianSeconds) }}
+            </dd>
+          </div>
+          <div data-testid="approval-time-slowest">
+            <dt class="text-xs text-muted-foreground">Slowest</dt>
+            <dd class="mt-1 text-xl font-semibold tabular-nums">
+              {{ timeLabel(summary.approvalTime.slowestSeconds) }}
+            </dd>
+          </div>
+          <div data-testid="approval-time-documents">
+            <dt class="text-xs text-muted-foreground">Decided</dt>
+            <dd class="mt-1 text-xl font-semibold tabular-nums">
+              {{ summary.approvalTime.documents }}
+            </dd>
+          </div>
+        </dl>
       </article>
     </template>
   </section>

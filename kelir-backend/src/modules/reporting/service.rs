@@ -11,12 +11,16 @@
 //! [#431]: https://github.com/sujanto-gaws/kelir/issues/431
 
 use super::domain::DashboardSummary;
-use super::{DASHBOARD_READ, OVERDUE_TASKS_SHOWN, PENDING_TASKS_SHOWN, RECENT_DOCUMENTS_SHOWN};
+use super::{
+    APPROVAL_TIME_WINDOW_DAYS, DASHBOARD_READ, OVERDUE_TASKS_SHOWN, PENDING_TASKS_SHOWN,
+    RECENT_DOCUMENTS_SHOWN,
+};
 use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
 use crate::modules::document::domain::DocumentStatus;
 use crate::modules::document::service::list as document_list;
 use crate::modules::workflow::service::inbox as workflow_inbox;
+use crate::modules::workflow::service::instance as workflow_instance;
 use crate::state::AppState;
 
 /// The dashboard summary for whoever is asking.
@@ -42,7 +46,7 @@ use crate::state::AppState;
 /// rows. `tests/reporting_dashboard.rs` puts a second tenant's and a second
 /// user's rows in the database and asserts on what comes back, for that reason.
 ///
-/// # Four reads, and why none is folded into another
+/// # Five reads, and why none is folded into another
 ///
 /// The task half and the document counts are separate round trips, and they are
 /// not folded into one statement. Folding them would mean this module writing SQL
@@ -108,6 +112,16 @@ use crate::state::AppState;
 /// the tenant's, and `document::repository::list::count_own_by_status` says what
 /// the index does and does not cover.
 ///
+/// **FR-RPT-006 ([#461]) makes it five, and the fifth is a read no other card
+/// could carry.** The approval time is over `workflow_instances` — each
+/// document's first start and its deciding instance's end — for the documents
+/// the caller raised. Folding it into the status count would put the workflow
+/// module's outcomes into the document module's `GROUP BY`, and folding it into
+/// the inbox's statement would join tasks the caller holds to documents the
+/// caller raised, which are different rows. **It is a statement in the owning
+/// module, as the paragraph above says the answer always is**, and it grows
+/// with one person's ninety days of decisions rather than with the tenant.
+///
 /// [#106]: https://github.com/sujanto-gaws/kelir/issues/106
 /// [#121]: https://github.com/sujanto-gaws/kelir/issues/121
 /// [#171]: https://github.com/sujanto-gaws/kelir/issues/171
@@ -117,6 +131,7 @@ use crate::state::AppState;
 /// [#433]: https://github.com/sujanto-gaws/kelir/issues/433
 /// [#446]: https://github.com/sujanto-gaws/kelir/issues/446
 /// [#447]: https://github.com/sujanto-gaws/kelir/issues/447
+/// [#461]: https://github.com/sujanto-gaws/kelir/issues/461
 pub async fn dashboard_summary(
     state: &AppState,
     caller: &Authenticated,
@@ -128,6 +143,8 @@ pub async fn dashboard_summary(
     let documents_by_status = document_list::count_own_by_status(state, caller).await?;
     let recent_documents =
         document_list::recent_documents(state, caller, RECENT_DOCUMENTS_SHOWN).await?;
+    let approval_time =
+        workflow_instance::approval_time(state, caller, APPROVAL_TIME_WINDOW_DAYS).await?;
 
     // The `DRAFT` entry of the read above, not a second count — see "FR-RPT-004
     // adds a widget and no read".
@@ -144,5 +161,6 @@ pub async fn dashboard_summary(
         pending_tasks: tasks.next,
         overdue_tasks: late.next,
         recent_documents,
+        approval_time,
     })
 }

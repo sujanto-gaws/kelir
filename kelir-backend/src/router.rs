@@ -307,6 +307,7 @@ use crate::state::AppState;
         workflow::domain::WorkflowVariable,
         workflow::domain::InstanceStatus,
         workflow::domain::InstanceOutcome,
+        workflow::domain::ApprovalTime,
         workflow::domain::WorkflowTask,
         workflow::domain::TaskStatus,
         workflow::domain::DecisionAction,

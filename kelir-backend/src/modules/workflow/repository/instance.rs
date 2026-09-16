@@ -276,6 +276,86 @@ pub async fn instance_id_of_document<'e, E: PgExecutor<'e>>(
     .await
 }
 
+/// One approval time, in seconds, for each document **this caller raised** whose
+/// final decision landed in the last `window_days` days (FR-RPT-006, [#461];
+/// **D-83**).
+///
+/// # One row per document, and which instance decides it
+///
+/// A document's instances are partitioned together. **The latest is the one
+/// that says whether it was decided** — `started_at` descending, the UUIDv7
+/// `id` breaking a tie — and it counts only if it ended `APPROVED` or
+/// `REJECTED` with its `completed_at` inside the window. **The earliest is where
+/// the time starts**, so a document returned and sent again over two instances
+/// is timed from its first submission rather than its last. So these drop out:
+///
+/// - **a document still in flight** — its latest instance has no outcome yet,
+///   even if an earlier one was decided;
+/// - **a document whose latest instance ended `CANCELLED`**, or `RETURNED`
+///   with nothing after it — withdrawn, not decided;
+/// - **a decision older than the window**.
+///
+/// # Whose documents, and the rule is in the statement
+///
+/// `documents.created_by` — **the caller raised it** — in the caller's tenant,
+/// not soft-deleted, with the instances not soft-deleted either. A document the
+/// system raised has no author and is timed for nobody. **The tenant is carried
+/// across the join as well as fixed on the instance**: `workflow_instances`
+/// references `documents (id)` alone, so nothing in the schema stops an
+/// instance stamped with one tenant pointing at another's document, and the
+/// join is what refuses it.
+///
+/// # This is not the tenant's approval time
+///
+/// Dropping `created_by` turns *how long your documents took* into *how long
+/// the tenant's documents took*, which is the document population and
+/// `document:read`'s to gate. That report was the alternative D-83 did not
+/// choose, and it cannot be served by widening this function.
+///
+/// # The index
+///
+/// `idx_documents_tenant_id_created_by_status` (`0043_reporting.sql`) finds the
+/// caller's documents on its two leading columns, and
+/// `idx_workflow_instances_document_id` finds each one's instances. The scan
+/// grows with one person's history, not the tenant's — the same width
+/// `document::repository::list::count_own_by_status` states — so no index was
+/// added for this.
+///
+/// [#461]: https://github.com/sujanto-gaws/kelir/issues/461
+pub async fn decided_document_seconds<'e, E: PgExecutor<'e>>(
+    executor: E,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    window_days: i32,
+) -> Result<Vec<i64>, sqlx::Error> {
+    sqlx::query_scalar!(
+        r#"
+        SELECT EXTRACT(EPOCH FROM (latest.completed_at - latest.first_started_at))::bigint
+               AS "seconds!"
+        FROM (
+            SELECT DISTINCT ON (i.document_id)
+                   i.outcome,
+                   i.completed_at,
+                   min(i.started_at) OVER (PARTITION BY i.document_id) AS first_started_at
+            FROM workflow_instances i
+            JOIN documents d ON d.id = i.document_id AND d.tenant_id = i.tenant_id
+            WHERE i.tenant_id = $1
+              AND d.created_by = $2
+              AND d.deleted_at IS NULL
+              AND i.deleted_at IS NULL
+            ORDER BY i.document_id, i.started_at DESC, i.id DESC
+        ) AS latest
+        WHERE latest.outcome IN ('APPROVED', 'REJECTED')
+          AND latest.completed_at >= now() - make_interval(days => $3)
+        "#,
+        tenant_id,
+        user_id,
+        window_days,
+    )
+    .fetch_all(executor)
+    .await
+}
+
 /// Writes an instance's variables (§7.5).
 ///
 /// Insert-only rather than replace-the-set: variables are written once, at

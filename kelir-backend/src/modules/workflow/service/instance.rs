@@ -8,7 +8,9 @@
 
 use uuid::Uuid;
 
-use super::super::domain::{Graph, WorkflowHistoryEntry, WorkflowInstance, WorkflowTask};
+use super::super::domain::{
+    ApprovalTime, Graph, WorkflowHistoryEntry, WorkflowInstance, WorkflowTask,
+};
 use super::super::repository::{
     definition as definition_repo, history as history_repo, instance as repo, task as task_repo,
 };
@@ -120,6 +122,47 @@ async fn load_instance(
     };
 
     Ok(DocumentWorkflow { instance, tasks })
+}
+
+/// How long the documents this caller raised took to be decided (FR-RPT-006,
+/// [#461]; **D-83**): the median, the slowest and the count, over decisions in
+/// the last `window_days` days.
+///
+/// # This function requires no permission, and the line is *whose work*
+///
+/// [`workflow_of_document`] and [`history_of_document`] open with
+/// `caller.require(INSTANCE_READ)`, and this does not. **Every time it counts is
+/// a document the caller raised**, the population the dashboard's status card
+/// already counts behind `reporting:dashboard:read` alone (**D-82**), and three
+/// numbers about how long their own requests waited tell them nothing about
+/// anybody else's. The surface is gated where the other cards are — by
+/// [`crate::modules::reporting::DASHBOARD_READ`], in the one service that
+/// serves it — and asking for `workflow:instance:read` on top would refuse a
+/// person holding only the dashboard grant a number about their own documents.
+///
+/// **What this does not license.** Approval times over documents the caller did
+/// not raise — a department's, the tenant's — are the document population and
+/// need a grant and an argument of their own; the repository function says why
+/// it cannot be widened to serve them.
+///
+/// **The window is the caller's to pass**, as the task cards' row counts are:
+/// how far back a dashboard card looks is the dashboard's decision.
+///
+/// [#461]: https://github.com/sujanto-gaws/kelir/issues/461
+pub async fn approval_time(
+    state: &AppState,
+    caller: &Authenticated,
+    window_days: i32,
+) -> Result<ApprovalTime, AppError> {
+    let seconds = repo::decided_document_seconds(
+        &state.pool,
+        caller.tenant_id(),
+        caller.user_id(),
+        window_days,
+    )
+    .await?;
+
+    Ok(ApprovalTime::summarise(window_days, seconds))
 }
 
 /// One document's workflow history, oldest first and paginated ([#181] AC3).

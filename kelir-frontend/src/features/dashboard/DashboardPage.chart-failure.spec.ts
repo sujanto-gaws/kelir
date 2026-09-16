@@ -72,6 +72,7 @@ describe('DashboardPage when the status chart cannot load', () => {
         overdueTasks: [],
         recentDocuments: [],
         documentsByStatus: statusCounts(),
+        approvalTime: { windowDays: 90, documents: 0, medianSeconds: null, slowestSeconds: null },
       }),
     }))
   })
