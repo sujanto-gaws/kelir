@@ -18,9 +18,10 @@
 //! **`before_*` is built. `after_*` is not, and the reason is not a schedule.**
 //! Architectures/01 §12.5 specifies an after-hook as *published to the outbox in
 //! the same transaction, executed by the worker* — and this product has no
-//! outbox. Notifications are delivered by a worker over their own table
-//! (`notification::worker`, and the note in `notification::service` that says a
-//! general outbox is Phase 8), which is a queue for one subject rather than the
+//! outbox, and will not until Phase 9 (D-79, moved a sprint by D-81).
+//! Notifications are delivered by a worker over their own table
+//! (`notification::worker`; `notification::service` argues why in-app delivery
+//! took no outbox), which is a queue for one subject rather than the
 //! dispatcher §12.5 describes. Building after-hooks over a queue that does not
 //! exist would mean either a second private queue or a synchronous call in the
 //! caller's transaction, and the second is precisely what §12.5 forbids.
