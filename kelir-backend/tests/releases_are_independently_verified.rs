@@ -83,6 +83,9 @@
 //!     issue for context, so *mentions an issue* would have passed it. Governed
 //!     from [`FIRST_AFTERMATH_GOVERNED_RELEASE`] rather than from the floor
 //!     above, because the section shape is younger than most of the records.
+//!     **Hardened by [#467](https://github.com/sujanto-gaws/kelir/issues/467)**
+//!     (Sprint 19 item 2b): `none` is the whole answer, and the walk reads every
+//!     row in the block — see *Rule 10, hardened 2026-09-16* below.
 //!
 //! # The floor, and why it is not the next release
 //!
@@ -207,6 +210,80 @@
 //! row mention an issue* would have accepted it. The two accepted rows are what
 //! stop the rule from being *refuses everything*: one of them is a real shape
 //! [record 01](../../projects/releases/01.%20Release%20v0.1.0.md) already uses.
+//!
+//! **Those six are committed now** (2026-09-16, #467): the four refusals in
+//! `record_07_at_00a27b4_and_the_earlier_probes_are_still_refused`, the two
+//! acceptances in `the_shapes_rule_10_accepts_are_still_accepted`. What the
+//! 2026-09-14 table records is what was run then; the tests are what holds it.
+//!
+//! # Rule 10, hardened 2026-09-16 (#467)
+//!
+//! **Six probes and every one of them was a shape rule 10 already had an
+//! answer for.** [Record 16](../../projects/verifications/16.%20Sprint%2018%20Independent%20Pass.md)
+//! finding 4 sent four it had not, each a synthetic `v0.8.0` carrying record
+//! 07's unfiled row verbatim from `00a27b4`, and **all four passed** while the
+//! control — the same row, alone under `one:` — failed:
+//!
+//! | # | The Aftermath | Before #467 | Now, and the test that sends it |
+//! |---|---|---|---|
+//! | A | Answer `one, and none of it filed yet:`, then the row | passed | **refused** — `an_answer_that_contains_none_is_not_the_answer_none` |
+//! | B | Answer `one:`, the row ending `— recorded nonetheless` | passed | **refused** — `a_row_that_contains_none_is_still_a_follow_up` |
+//! | C | Answer `two:`, a filed row, **a blank line**, the row | passed | **refused** — `a_blank_line_does_not_hide_the_rows_after_it` |
+//! | D | Answer `two:`, a filed row, **a wrapped line**, the row | passed | **refused** — `a_wrapped_line_does_not_hide_the_rows_after_it` |
+//!
+//! **Two causes.** A and B: `says_none` was `contains("none")`, applied to the
+//! label line and to every row, and *nonetheless* contains *none*. C and D: the
+//! rows were a `take_while` over indented `- ` lines, so the first blank or
+//! wrapped line ended the walk. The fixes are [`says_none`] matching the whole
+//! answer and [`follow_up_block`] ending only at a line back at column 0. **A
+//! third change came out of reading the second:** a `none` answer used to skip
+//! the rows beneath it, so an *exact* `none` over record 07's row passed as
+//! surely as shape A did. [`read_aftermath`] now judges the rows under any
+//! answer, and no row is excused for saying `none`.
+//!
+//! **The shapes are committed text, not files.** [`read_aftermath`] is rule
+//! 10's judgement of one body, apart from the walk that finds the records, so
+//! a synthetic record is a string in this file and nothing is planted in
+//! `projects/releases/`. Record 07 is read and never written: the `00a27b4`
+//! control swaps its row in memory.
+//!
+//! **The controls still hold**: record 07 as it is on `main` passes; record 07
+//! with its row restored to `00a27b4` is refused, quoting the row; a withdrawn
+//! struck-through issue row, a row opening with an issue link, and the answer
+//! `none` alone are accepted — as are C and D with both rows filed, which is
+//! what shows a blank line or a wrapped line is not itself what is refused.
+//!
+//! **Seen red, 2026-09-16.** Ten mutations to the rule, each applied alone to
+//! this file, the suite run, and the file restored:
+//!
+//! | # | Mutation | Red |
+//! |---|---|---|
+//! | 1 | [`says_none`] back to `contains("none")` | `an_answer_that_contains_none_is_not_the_answer_none` (A's answer alone), `says_none_matches_the_whole_answer` |
+//! | 2 | A blank line ends the walk | `a_blank_line_does_not_hide_the_rows_after_it` (C) |
+//! | 3 | A wrapped line ends the walk | `a_wrapped_line_does_not_hide_the_rows_after_it` (D), and the wrapped-`none` case |
+//! | 4 | A `none` answer skips the rows again | `an_answer_of_none_does_not_excuse_the_rows_under_it` |
+//! | 5 | Rows excused by `contains("none")` again | `a_row_that_contains_none_is_still_a_follow_up` (B) |
+//! | 6 | Rows excused by a whole-answer `none` | `a_row_that_contains_none_is_still_a_follow_up` (a row of `none`) |
+//! | 7 | A wrapped line before any row dropped rather than joined to the answer | `an_answer_that_contains_none_is_not_the_answer_none` (wrapped `none`) |
+//! | 8 | A column-0 line no longer ends the block | `the_shapes_rule_10_accepts_are_still_accepted` (the next top-level item's rows) |
+//! | 9 | 1 and 4 together | shape A itself, plus 1's and 4's reds |
+//! | 10 | 1, 2, 3, 4 and 5 together — the rule as #455 shipped it | all six new tests; **15 passed**, the controls among them |
+//!
+//! **Mutation 1 does not redden shape A's own fixture, and that is recorded
+//! rather than tuned away**: with the rows judged under any answer, A's row is
+//! refused whatever [`says_none`] says. Mutation 9 turns both guards off and A
+//! goes red, which is what shows the fixture is connected; the answer-alone
+//! case is what pins the match by itself.
+//!
+//! **Two came back green on the first run and were closed, not replaced.**
+//! Mutation 6 left all nineteen tests green, because shape B's row is not
+//! `none` under either match, so nothing sent the row `- none` that
+//! [`read_aftermath`]'s doc says is refused. Mutation 8 left them green,
+//! because no fixture put an indented list under the *next* top-level item —
+//! record 02's shape — so the column-0 edge [`follow_up_block`] draws was
+//! written and not tested. Both inputs are now sent, and both mutations were
+//! re-run red. Mutation 10 is the pre-#467 rule, and its reds are the four
+//! shapes above going back to passing.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -572,17 +649,36 @@ fn citations(body: &str) -> BTreeSet<String> {
     found
 }
 
-/// The Aftermath's follow-up block: the `- **Follow-ups filed:**` line and the
-/// rows indented under it.
+/// The Aftermath's follow-up block: the answer on the `- **Follow-ups filed:**`
+/// line, and every row indented under it.
 ///
 /// `None` means the record has no such line inside an `## Aftermath` section —
 /// which rule 10 treats as a failure rather than an exemption, for door B's
 /// reason: **a shape the walk cannot find must not be a shape the walk
 /// ignores.**
 ///
-/// The rows end at the first line that is not an indented list item, so the
-/// block-quoted note every record carries after its Aftermath is not mistaken
-/// for a follow-up.
+/// # Where the block ends, and where it does not
+///
+/// **It ends at the first non-blank line back at column 0** — the next
+/// top-level item, the block-quoted note every record carries after its
+/// Aftermath, or prose — so that note is not mistaken for a follow-up.
+///
+/// **It does not end at a blank line or at an indented line that is not a list
+/// item**, and until [#467](https://github.com/sujanto-gaws/kelir/issues/467) it
+/// did. The rows were a `take_while` over indented `- ` and `~~` lines, so
+/// [record 16](../../projects/verifications/16.%20Sprint%2018%20Independent%20Pass.md)
+/// finding 4 put a blank line (shape C) or a wrapped sentence (shape D) after a
+/// filed row and every row beneath the break was out of view. Markdown renders
+/// C as one loose list and D as one wrapped item, so **the break a reader never
+/// sees was the break the walk stopped at.**
+///
+/// - An indented line opening `- ` or `~~` starts a row. **A nested item under
+///   a row is a row too**, and must open with its own issue link: the strict
+///   reading, because an unfiled follow-up tucked under a filed one is the
+///   shape C and D were.
+/// - Any other indented line continues whatever came before it — the previous
+///   row, or the answer when no row has started yet — so a wrapped answer is
+///   judged whole, `none` and the words after it together.
 fn follow_up_block(body: &str) -> Option<(String, Vec<String>)> {
     let after_heading = body.split_once(AFTERMATH_HEADING)?.1;
 
@@ -596,15 +692,34 @@ fn follow_up_block(body: &str) -> Option<(String, Vec<String>)> {
     let mut lines = section.lines();
     let label = lines.find(|line| line.trim_start().starts_with(FOLLOW_UPS_LABEL))?;
 
-    let rows = lines
-        .take_while(|line| {
-            let trimmed = line.trim_start();
-            line.starts_with(' ') && (trimmed.starts_with("- ") || trimmed.starts_with("~~"))
-        })
-        .map(|line| line.trim().to_owned())
-        .collect();
+    let mut answer = label.trim_start()[FOLLOW_UPS_LABEL.len()..]
+        .trim()
+        .to_owned();
+    let mut rows: Vec<String> = Vec::new();
 
-    Some((label.trim().to_owned(), rows))
+    for line in lines {
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() {
+            // Shape C: a blank line makes the list loose, and does not end it.
+            continue;
+        }
+
+        if !line.starts_with([' ', '\t']) {
+            break;
+        }
+
+        if trimmed.starts_with("- ") || trimmed.starts_with("~~") {
+            rows.push(trimmed.to_owned());
+        } else {
+            // Shape D: a wrapped line belongs to the item above it.
+            let item = rows.last_mut().unwrap_or(&mut answer);
+            item.push(' ');
+            item.push_str(trimmed);
+        }
+    }
+
+    Some((answer, rows))
 }
 
 /// Whether a follow-up row **opens with** a link to an issue.
@@ -656,13 +771,83 @@ fn row_opens_with_issue_link(row: &str) -> bool {
             .is_some_and(|c| c.is_ascii_digit())
 }
 
-/// Whether a line says there is nothing to file.
+/// Whether an answer says there is nothing to file.
 ///
-/// `none` is the template's own word for it and rule 10 accepts it on the
-/// label line, which is how records 02 and 03 already write an empty Aftermath
-/// — and how a future release with a clean run will.
-fn says_none(line: &str) -> bool {
-    line.to_ascii_lowercase().contains("none")
+/// `none` is the template's own word for it, and rule 10 accepts it as the
+/// label line's answer — how a future release with a clean run will write an
+/// empty Aftermath.
+///
+/// # The whole answer, not a substring of it
+///
+/// This was `to_ascii_lowercase().contains("none")` until
+/// [#467](https://github.com/sujanto-gaws/kelir/issues/467), and
+/// [record 16](../../projects/verifications/16.%20Sprint%2018%20Independent%20Pass.md)
+/// finding 4 passed record 07's unfiled row through it twice: under the answer
+/// `one, and none of it filed yet:` (shape A), and with `— recorded
+/// nonetheless` appended to the row itself (shape B). *Nonetheless* contains
+/// *none*, and so do *none yet* and *none of them*.
+///
+/// **So the answer is `none` and nothing else**, in any case, with two
+/// allowances that cannot carry a word: the backticks the template prints
+/// around it, and a closing full stop. `none from this rehearsal`, record 03's
+/// own wording, is refused — record 03 is below
+/// [`FIRST_AFTERMATH_GOVERNED_RELEASE`], and a governed record that wants to
+/// explain an empty Aftermath can do it in a paragraph after the list. **Not
+/// on an indented line under the answer**: [`follow_up_block`] joins that to
+/// the answer, which is what stops `none` wrapping onto `of it filed yet`.
+fn says_none(answer: &str) -> bool {
+    let answer = answer.trim();
+    let answer = answer.strip_suffix('.').unwrap_or(answer);
+    let answer = answer
+        .strip_prefix('`')
+        .and_then(|inner| inner.strip_suffix('`'))
+        .unwrap_or(answer);
+
+    answer.eq_ignore_ascii_case("none")
+}
+
+/// What rule 10 finds in one record's Aftermath.
+#[derive(Debug, PartialEq)]
+enum Aftermath {
+    /// No follow-up block, or an answer that is not `none` with no rows under
+    /// it.
+    Unreadable,
+    /// The rows that do not open with an issue link. **Empty is a pass.**
+    Unfiled(Vec<String>),
+}
+
+/// Rule 10's judgement of one record body, apart from the walk that finds the
+/// records — so the shapes [record 16](../../projects/verifications/16.%20Sprint%2018%20Independent%20Pass.md)
+/// finding 4 probed can be sent to it as committed text rather than as files
+/// planted in `projects/releases/` and deleted.
+///
+/// Two things changed here under [#467](https://github.com/sujanto-gaws/kelir/issues/467),
+/// both on the reading that `none` is an answer to the label and nothing else:
+///
+/// - **A `none` answer does not excuse the rows under it.** The answer used to
+///   be checked first and the record skipped, so an unfiled row under
+///   `- **Follow-ups filed:** none` was never read. `none` now means *no rows
+///   are required*, and every row there is still judged.
+/// - **A row cannot say `none`.** Rows used to pass on `says_none` as well —
+///   which is how shape B's `— recorded nonetheless` got through. A row is a
+///   follow-up, and a follow-up opens with its issue.
+fn read_aftermath(body: &str) -> Aftermath {
+    let Some((answer, rows)) = follow_up_block(body) else {
+        return Aftermath::Unreadable;
+    };
+
+    // An answer that neither says `none` nor has rows beneath it is the shape
+    // record 07 would have had if its row had been deleted rather than left
+    // unfiled — which must not be the cheap way out.
+    if rows.is_empty() && !says_none(&answer) {
+        return Aftermath::Unreadable;
+    }
+
+    Aftermath::Unfiled(
+        rows.into_iter()
+            .filter(|row| !row_opens_with_issue_link(row))
+            .collect(),
+    )
 }
 
 fn governed() -> Vec<Release> {
@@ -1237,6 +1422,23 @@ fn the_pre_rule_releases_are_named_rather_than_silently_skipped() {
 /// - **A follow-up nobody wrote down at all.** Every rule in this file reads
 ///   what a record says. A run that saw something and recorded nothing is
 ///   invisible here and always was.
+///
+/// Three more, drawn 2026-09-16 when [#467](https://github.com/sujanto-gaws/kelir/issues/467)
+/// closed shapes A–D, because a wider walk has a new edge and the edge should be
+/// on the page:
+///
+/// - **A follow-up written back at column 0**, as a sibling of the
+///   `- **Follow-ups filed:**` item rather than a row under it. The block ends
+///   there, because a column-0 line is where the block-quoted note and the
+///   next top-level item begin, and nothing in the line says which it is.
+///   Markdown renders it outside the follow-up list too, so a reader sees the
+///   same edge the walk does.
+/// - **A follow-up under another label** — `- **Issues found post-release:**`,
+///   or record 02's `- **Carried into the sprint plan:**`. Rule 10 reads the
+///   one label the template gives follow-ups.
+/// - **A row that opens with an issue and then describes a second follow-up
+///   that has none.** The row's subject is filed; what else the row says is
+///   prose, and judging prose is what the pass is for.
 #[test]
 fn a_final_record_names_an_issue_for_every_follow_up() {
     let mut unfiled: Vec<String> = Vec::new();
@@ -1247,30 +1449,13 @@ fn a_final_record_names_an_issue_for_every_follow_up() {
             continue;
         }
 
-        let Some((label, rows)) = follow_up_block(&body) else {
-            shapeless.push(name);
-            continue;
-        };
-
-        // `none` on the label line settles the record: records 02 and 03
-        // already write an empty Aftermath that way, and a clean run should not
-        // have to invent a row in order to say that nothing happened.
-        if says_none(&label) {
-            continue;
-        }
-
-        // A label that neither says `none` nor has rows beneath it is the shape
-        // record 07 would have had if its row had been deleted rather than left
-        // unfiled — which must not be the cheap way out.
-        if rows.is_empty() {
-            shapeless.push(name);
-            continue;
-        }
-
-        for row in rows {
-            if !row_opens_with_issue_link(&row) && !says_none(&row) {
-                let shown: String = row.chars().take(110).collect();
-                unfiled.push(format!("{name}\n      {shown}"));
+        match read_aftermath(&body) {
+            Aftermath::Unreadable => shapeless.push(name),
+            Aftermath::Unfiled(rows) => {
+                for row in rows {
+                    let shown: String = row.chars().take(110).collect();
+                    unfiled.push(format!("{name}\n      {shown}"));
+                }
             }
         }
     }
@@ -1278,9 +1463,10 @@ fn a_final_record_names_an_issue_for_every_follow_up() {
     assert!(
         shapeless.is_empty(),
         "a `Final` release record from v{}.{}.{} on has no `{FOLLOW_UPS_LABEL}` line under \
-         `{AFTERMATH_HEADING}` carrying either rows or the word `none` (#445):\n  {}\n\n\
+         `{AFTERMATH_HEADING}` carrying either rows or the answer `none` (#445, #467):\n  {}\n\n\
          An Aftermath the walk cannot read is an Aftermath the walk does not govern, which is \
-         door B one section down. Say `none` when a run filed nothing.",
+         door B one section down. When a run filed nothing, the answer is `none` and nothing \
+         else — `none yet` or `none of it filed` is a follow-up that exists and has no issue.",
         FIRST_AFTERMATH_GOVERNED_RELEASE.0,
         FIRST_AFTERMATH_GOVERNED_RELEASE.1,
         FIRST_AFTERMATH_GOVERNED_RELEASE.2,
@@ -1289,13 +1475,382 @@ fn a_final_record_names_an_issue_for_every_follow_up() {
 
     assert!(
         unfiled.is_empty(),
-        "a `Final` release record carries a follow-up with no issue (#445):\n  {}\n\n\
-         Every row under `{FOLLOW_UPS_LABEL}` opens with a link to {ISSUE_URL}<number>, or says \
-         `none`. **Opening with it, not merely containing it**: record 07's own bad row cited \
+        "a `Final` release record carries a follow-up with no issue (#445, #467):\n  {}\n\n\
+         Every row under `{FOLLOW_UPS_LABEL}` opens with a link to {ISSUE_URL}<number> — \
+         including rows after a blank line, rows after a wrapped line, rows nested under \
+         another row, and rows under an answer of `none`. **Opening with it, not merely \
+         containing it**: record 07's own bad row cited \
          the guard that was bypassed, and the row above it cited somebody else's issue for \
          context, so a rule asking whether the row mentioned an issue anywhere would have \
          passed the very defect it was written for.\n\n\
          `not yet filed` is not a follow-up that was filed. File it, then link it.",
         unfiled.join("\n  ")
+    );
+}
+
+/// Record 07's rollback row **as it stood at `00a27b4`**, verbatim: the row
+/// rule 10 was written for, and the row every shape in
+/// [record 16](../../projects/verifications/16.%20Sprint%2018%20Independent%20Pass.md)
+/// finding 4 carried.
+const RECORD_07_UNFILED_ROW: &str = "  - **`deploy.sh`'s rollback command exits 1 on a healthy rollback to `0.6.0`** · **reproduced** · **not yet filed** · the guard is [#367](https://github.com/sujanto-gaws/kelir/pull/367)'s `/version.json` assertion, which reads the single-page fallback every frontend image before it serves as an empty version — see *The failure this row asks to be recorded*";
+
+/// Record 07's first row, verbatim: a filed follow-up, for the shapes that need
+/// one above the break.
+const RECORD_07_FILED_ROW: &str = r"  - [`#404` — §2.9 never gained the stated-versus-run mutation rule it was ordered to](https://github.com/sujanto-gaws/kelir/issues/404) · **reproduced** · found while building [#395](https://github.com/sujanto-gaws/kelir/issues/395); the missing sentence is verifiable by `grep -nE '\bdated\b|\bSeen red\b'` over the coding standard, which returns nothing, and [#376](https://github.com/sujanto-gaws/kelir/issues/376) asserts the rule exists";
+
+/// Where record 07 is, for the two tests that read it as it is on disk.
+const RECORD_07: &str = "projects/releases/07. Release v0.7.0.md";
+
+/// A synthetic `Final` record for `v0.8.0` whose Aftermath carries `follow_ups`
+/// — the shape of finding 4's probes, as text rather than as a file planted in
+/// `projects/releases/`.
+///
+/// **The block-quoted note and the closing sentence are kept**, because they
+/// are what a real record has after its Aftermath list and what the walk must
+/// stop before.
+fn record_with_follow_ups(follow_ups: &str) -> String {
+    format!(
+        "# Release v0.8.0 — 2099-01-01\n\
+         \n\
+         **Status:** Final · **Last updated:** 2099-01-01\n\
+         \n\
+         {AFTERMATH_HEADING}\n\
+         \n\
+         - **Issues found post-release:** none\n\
+         {follow_ups}\n\
+         \n\
+         > **A follow-up filed from a release run says whether its mechanism was *reproduced* \
+         or *only observed*.**\n\
+         \n\
+         Set this document's header status to `Final` when the release is verified in \
+         production.\n"
+    )
+}
+
+/// Whether rule 10 lets a record through.
+fn accepted(body: &str) -> bool {
+    read_aftermath(body) == Aftermath::Unfiled(Vec::new())
+}
+
+/// Whether rule 10 refuses a record **by quoting record 07's unfiled row** —
+/// the right row, rather than some other refusal that happens to be red.
+fn refuses_the_unfiled_row(body: &str) -> bool {
+    matches!(
+        read_aftermath(body),
+        Aftermath::Unfiled(rows) if rows.len() == 1 && rows[0].contains("**not yet filed**")
+    )
+}
+
+/// **Shape A: an answer that contains `none` is not the answer `none`**
+/// ([#467](https://github.com/sujanto-gaws/kelir/issues/467)).
+///
+/// [Record 16](../../projects/verifications/16.%20Sprint%2018%20Independent%20Pass.md)
+/// finding 4 found shape A passing rule 10. **It is now shut twice** — by the
+/// whole-answer match in [`says_none`], and by [`read_aftermath`] judging the
+/// rows under any answer — so shape A itself reddens only with both guards
+/// off. The cases that pin the match alone are A's answer with its row taken
+/// away, and a `none` wrapped onto the words after it.
+#[test]
+fn an_answer_that_contains_none_is_not_the_answer_none() {
+    let shape_a = record_with_follow_ups(&format!(
+        "- **Follow-ups filed:** one, and none of it filed yet:\n{RECORD_07_UNFILED_ROW}"
+    ));
+    assert!(
+        refuses_the_unfiled_row(&shape_a),
+        "shape A: an answer containing `none` settled the Aftermath and record 07's unfiled \
+         row went unread"
+    );
+
+    let shape_a_answer_alone =
+        record_with_follow_ups("- **Follow-ups filed:** one, and none of it filed yet:");
+    assert_eq!(
+        read_aftermath(&shape_a_answer_alone),
+        Aftermath::Unreadable,
+        "shape A's answer with no row under it promises a follow-up and names none; only the \
+         whole-answer match refuses it"
+    );
+
+    let wrapped =
+        record_with_follow_ups("- **Follow-ups filed:** none\n    of it filed yet, see below");
+    assert_eq!(
+        read_aftermath(&wrapped),
+        Aftermath::Unreadable,
+        "an answer of `none` wrapped onto `of it filed yet` is one answer, and it is not `none`"
+    );
+}
+
+/// **Shape B: a row that contains `none` is still a follow-up**
+/// ([#467](https://github.com/sujanto-gaws/kelir/issues/467)).
+///
+/// Rows used to be excused by the same substring match as the answer, so record
+/// 07's unfiled row with `— recorded nonetheless` appended passed.
+#[test]
+fn a_row_that_contains_none_is_still_a_follow_up() {
+    let shape_b = record_with_follow_ups(&format!(
+        "- **Follow-ups filed:** one:\n{RECORD_07_UNFILED_ROW} — recorded nonetheless"
+    ));
+    assert!(
+        refuses_the_unfiled_row(&shape_b),
+        "shape B: `— recorded nonetheless` on the row passed it, because rows were also \
+         excused by a substring `none`"
+    );
+
+    // Seen green 2026-09-16 and closed here: restoring the row excuse as a
+    // *whole-answer* `none` left every test green, because B's row is not
+    // `none` either way. `read_aftermath`'s doc says a row cannot say `none`,
+    // and a sentence naming an input has a test that sends it (§2.9).
+    let a_row_of_none = record_with_follow_ups("- **Follow-ups filed:** one:\n  - none");
+    assert_eq!(
+        read_aftermath(&a_row_of_none),
+        Aftermath::Unfiled(vec!["- none".to_owned()]),
+        "`none` answers the label; a row is a follow-up, and a follow-up opens with its issue"
+    );
+}
+
+/// **[`says_none`] matches the whole answer**, with the two allowances its doc
+/// names and nothing else.
+#[test]
+fn says_none_matches_the_whole_answer() {
+    for answer in ["none", "None", "NONE", "`none`", "none.", "  none  "] {
+        assert!(says_none(answer), "{answer:?} is the answer `none`");
+    }
+
+    for answer in [
+        "one, and none of it filed yet:",
+        "none yet",
+        "none of them",
+        "nonetheless",
+        "none from this rehearsal.",
+        "`none` yet",
+        "none..",
+    ] {
+        assert!(
+            !says_none(answer),
+            "{answer:?} contains `none` and is not the answer `none` — the substring match \
+             #467 replaced accepted it"
+        );
+    }
+}
+
+/// **Shape C: a blank line does not end the follow-up block**
+/// ([#467](https://github.com/sujanto-gaws/kelir/issues/467)).
+///
+/// Markdown renders a filed row, a blank line and an unfiled row as one loose
+/// list. The walk stopped at the blank line, and passed.
+#[test]
+fn a_blank_line_does_not_hide_the_rows_after_it() {
+    let shape_c = record_with_follow_ups(&format!(
+        "- **Follow-ups filed:** two:\n{RECORD_07_FILED_ROW}\n\n{RECORD_07_UNFILED_ROW}"
+    ));
+    assert!(
+        refuses_the_unfiled_row(&shape_c),
+        "shape C: the walk stopped at the blank line and record 07's unfiled row, one list \
+         item further down, went unread"
+    );
+
+    let blank_lines_everywhere = record_with_follow_ups(&format!(
+        "- **Follow-ups filed:** two:\n\n{RECORD_07_FILED_ROW}\n\n\n{RECORD_07_UNFILED_ROW}"
+    ));
+    assert!(
+        refuses_the_unfiled_row(&blank_lines_everywhere),
+        "a blank line under the answer and two between the rows are still one list"
+    );
+}
+
+/// **Shape D: a wrapped line does not end the follow-up block**
+/// ([#467](https://github.com/sujanto-gaws/kelir/issues/467)).
+///
+/// Markdown renders a filed row, an indented line that is not a list item, and
+/// an unfiled row as a wrapped item followed by another. The walk stopped at
+/// the wrapped line, and passed.
+#[test]
+fn a_wrapped_line_does_not_hide_the_rows_after_it() {
+    let shape_d = record_with_follow_ups(&format!(
+        "- **Follow-ups filed:** two:\n{RECORD_07_FILED_ROW}\n    \
+         and the issue carries the reproduction in full\n{RECORD_07_UNFILED_ROW}"
+    ));
+    assert!(
+        refuses_the_unfiled_row(&shape_d),
+        "shape D: the walk stopped at the wrapped line and record 07's unfiled row, the next \
+         list item, went unread"
+    );
+
+    let nested = record_with_follow_ups(&format!(
+        "- **Follow-ups filed:** two:\n{RECORD_07_FILED_ROW}\n  {RECORD_07_UNFILED_ROW}"
+    ));
+    assert!(
+        refuses_the_unfiled_row(&nested),
+        "an unfiled row nested under a filed one is a row, and it opens with no issue"
+    );
+}
+
+/// **An answer of `none` does not excuse the rows under it**
+/// ([#467](https://github.com/sujanto-gaws/kelir/issues/467)).
+///
+/// Not one of finding 4's shapes: it is the door behind shape A. Before this
+/// change a `none` answer skipped the rows entirely, so an exact `none` with
+/// record 07's row beneath it passed as surely as `none of it filed yet` did.
+#[test]
+fn an_answer_of_none_does_not_excuse_the_rows_under_it() {
+    let contradicted = record_with_follow_ups(&format!(
+        "- **Follow-ups filed:** none\n{RECORD_07_UNFILED_ROW}"
+    ));
+    assert!(
+        refuses_the_unfiled_row(&contradicted),
+        "the answer said `none` and a follow-up with no issue sat under it, unread"
+    );
+}
+
+/// **What rule 10 accepts is still accepted**, so the shapes above are refused
+/// for what they carry rather than because the rule now refuses everything.
+///
+/// Record 07 as it is, the answer `none` alone, a row opening with an issue
+/// link, and a withdrawn struck-through one — plus C and D with the unfiled
+/// row filed, which is what shows a blank line or a wrapped line is not itself
+/// the thing refused.
+#[test]
+fn the_shapes_rule_10_accepts_are_still_accepted() {
+    let record_07 =
+        fs::read_to_string(repository_root().join(RECORD_07)).expect("record 07 is readable");
+    assert!(
+        accepted(&record_07),
+        "record 07 as it is, with #440 opening the row that was unfiled, passes rule 10: {:?}",
+        read_aftermath(&record_07)
+    );
+
+    for answer in ["none", "`none`", "None."] {
+        let clean = record_with_follow_ups(&format!("- **Follow-ups filed:** {answer}"));
+        assert!(
+            accepted(&clean),
+            "the answer {answer:?} alone says a clean run filed nothing: {:?}",
+            read_aftermath(&clean)
+        );
+    }
+
+    let filed = record_with_follow_ups(&format!(
+        "- **Follow-ups filed:** one:\n{RECORD_07_FILED_ROW}"
+    ));
+    assert!(
+        accepted(&filed),
+        "a row opening with an issue link is a filed follow-up"
+    );
+
+    let withdrawn = record_with_follow_ups(
+        "- **Follow-ups filed:** one, withdrawn:\n  \
+         - ~~[#999](https://github.com/sujanto-gaws/kelir/issues/999) — a duplicate~~ · \
+         **only observed** · withdrawn in favour of #404",
+    );
+    assert!(
+        accepted(&withdrawn),
+        "a withdrawn follow-up opening with a struck-through issue link is still a filed one"
+    );
+
+    let c_filed = record_with_follow_ups(&format!(
+        "- **Follow-ups filed:** two:\n{RECORD_07_FILED_ROW}\n\n{RECORD_07_FILED_ROW}"
+    ));
+    assert!(
+        accepted(&c_filed),
+        "shape C with both rows filed: a loose list is not a defect"
+    );
+
+    let d_filed = record_with_follow_ups(&format!(
+        "- **Follow-ups filed:** two:\n{RECORD_07_FILED_ROW}\n    \
+         and the issue carries the reproduction in full\n{RECORD_07_FILED_ROW}"
+    ));
+    assert!(
+        accepted(&d_filed),
+        "shape D with both rows filed: a wrapped row is not a defect"
+    );
+
+    // Seen green 2026-09-16 and closed here: letting the walk run past a
+    // column-0 line left every test green, because no fixture put an indented
+    // list under the *next* top-level item. Record 02's Aftermath has exactly
+    // that shape, and its rows are not follow-ups.
+    let next_item = record_with_follow_ups(
+        "- **Follow-ups filed:** none\n\
+         - **Carried into the sprint plan:**\n  \
+         - the Sprint 5 exit debt, closed by items 1–4",
+    );
+    assert!(
+        accepted(&next_item),
+        "the block ends at the next top-level item, so rows under another label are not read \
+         as follow-ups: {:?}",
+        read_aftermath(&next_item)
+    );
+}
+
+/// **What rule 10 refused before [#467](https://github.com/sujanto-gaws/kelir/issues/467)
+/// is still refused** — record 07's own row first, then the four refusals of
+/// 2026-09-14, committed here rather than run once and deleted.
+#[test]
+fn record_07_at_00a27b4_and_the_earlier_probes_are_still_refused() {
+    let control = record_with_follow_ups(&format!(
+        "- **Follow-ups filed:** one:\n{RECORD_07_UNFILED_ROW}"
+    ));
+    assert!(
+        refuses_the_unfiled_row(&control),
+        "finding 4's control: record 07's unfiled row, alone under `one:`"
+    );
+
+    // Record 07 read from disk and never written: the row is swapped in memory.
+    let record_07 =
+        fs::read_to_string(repository_root().join(RECORD_07)).expect("record 07 is readable");
+    let filed_row = "  - [#440](https://github.com/sujanto-gaws/kelir/issues/440) — ";
+    assert_eq!(
+        record_07
+            .lines()
+            .filter(|line| line.starts_with(filed_row))
+            .count(),
+        1,
+        "record 07 carries its #440 row exactly once — a settled record is not amended, so \
+         this failing means somebody amended it"
+    );
+    let at_00a27b4 = record_07
+        .lines()
+        .map(|line| {
+            if line.starts_with(filed_row) {
+                RECORD_07_UNFILED_ROW
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        refuses_the_unfiled_row(&at_00a27b4),
+        "record 07 with its rollback row restored to `00a27b4` is the defect rule 10 exists for"
+    );
+
+    let contains_but_does_not_open = record_with_follow_ups(
+        "- **Follow-ups filed:** one:\n  \
+         - the rollback exits 1 · **reproduced** · \
+         see [#440](https://github.com/sujanto-gaws/kelir/issues/440)",
+    );
+    assert!(
+        !accepted(&contains_but_does_not_open),
+        "a row that contains an issue link but does not open with one"
+    );
+
+    let pull_request = record_with_follow_ups(
+        "- **Follow-ups filed:** one:\n  \
+         - [#367](https://github.com/sujanto-gaws/kelir/pull/367) — the guard that was bypassed",
+    );
+    assert!(
+        !accepted(&pull_request),
+        "a row opening with a pull request rather than an issue"
+    );
+
+    let no_label = record_with_follow_ups("- **Carried into the sprint plan:** the rollback fix");
+    assert_eq!(
+        read_aftermath(&no_label),
+        Aftermath::Unreadable,
+        "an Aftermath with no follow-ups label"
+    );
+
+    let promised = record_with_follow_ups("- **Follow-ups filed:** one:");
+    assert_eq!(
+        read_aftermath(&promised),
+        Aftermath::Unreadable,
+        "an answer that promises a follow-up with no row under it"
     );
 }
