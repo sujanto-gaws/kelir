@@ -78,7 +78,7 @@ pub struct AppConfig {
     /// How often the worker looks for attachments nobody has scanned.
     ///
     /// **A poll rather than a queue**, because the queue this would use is the
-    /// outbox and the outbox is Phase 8. The cost of the choice is latency
+    /// outbox and the outbox is Phase 9 (D-79). The cost of the choice is latency
     /// bounded by this number; the benefit is that a scan lost to a restart is
     /// picked up again, which a spawned task would not be.
     pub clamav_poll_seconds: u64,

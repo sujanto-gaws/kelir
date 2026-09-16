@@ -73,7 +73,7 @@
 //!   missing is the call, and it goes beside `fire`'s own authorization check.
 //! - **`actions` never run.** They are `after_workflow_transition`, and
 //!   architectures/01 §12.5 delivers an after-hook through the outbox — which
-//!   this product does not have until Phase 8. [`crate::modules::hook`]'s
+//!   this product does not have until Phase 9. [`crate::modules::hook`]'s
 //!   module doc is where that is argued.
 //!
 //! # `AUTO` transitions fire from a service task, and from nothing else
