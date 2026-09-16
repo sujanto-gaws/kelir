@@ -51,6 +51,12 @@ pub fn routes() -> Router<AppState> {
 /// arrived as `documentsByStatus` on [`DashboardSummary`] and the path was
 /// never needed. Five widgets, one contract.
 ///
+/// **FR-RPT-006 is the sixth, and the one the SRS calls a *report*.** **D-83**
+/// put it on the dashboard over the caller's own documents ([#461]), so it
+/// arrived as `approvalTime` on [`DashboardSummary`] and no
+/// `GET /reports/approval-time` beside this. Six widgets, one contract.
+///
+/// [#461]: https://github.com/sujanto-gaws/kelir/issues/461
 /// [#433]: https://github.com/sujanto-gaws/kelir/issues/433
 /// [#446]: https://github.com/sujanto-gaws/kelir/issues/446
 /// [#447]: https://github.com/sujanto-gaws/kelir/issues/447
@@ -59,7 +65,7 @@ pub fn routes() -> Router<AppState> {
 #[utoipa::path(
     get, path = "/api/v1/dashboard/summary", tag = "reporting",
     responses(
-        (status = 200, description = "The caller's own work: the counts, the documents they raised in each status, the first few tasks waiting for them, the tasks longest overdue, and the documents they touched most recently", body = DashboardSummary),
+        (status = 200, description = "The caller's own work: the counts, the documents they raised in each status, the first few tasks waiting for them, the tasks longest overdue, the documents they touched most recently, and how long the documents they raised took to be decided", body = DashboardSummary),
         (status = 403, description = "Missing reporting:dashboard:read — the summary asks for nothing else, because every row in it is the caller's own work (ADR-0039)")
     ),
     security(("bearer" = []))

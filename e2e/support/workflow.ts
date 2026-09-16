@@ -448,6 +448,59 @@ export async function openDelegationWindow(
   }
 }
 
+/**
+ * Decides the open task on `documentId` as `approver`, over the API ([#461]).
+ *
+ * **Seeding, not asserting**, for the reason `submitDocument` gives: deciding
+ * through the task screen is `a-document-is-approved.spec.ts`'s subject, and a
+ * flow about what the *requester* later reads on the dashboard would fail here
+ * for a reason that one already reports.
+ *
+ * The task is found in the approver's own inbox by its document, so the
+ * decision goes through the same visibility rule a person deciding it would.
+ *
+ * [#461]: https://github.com/sujanto-gaws/kelir/issues/461
+ */
+export async function decideDocumentTask(
+  approver: SeededApprover,
+  documentId: string,
+  action: 'APPROVE' | 'REJECT',
+): Promise<void> {
+  const asApprover = await signInOverApi({
+    username: approver.username,
+    password: approver.password,
+  })
+
+  try {
+    const inbox = await asApprover.context.get(`${API_PREFIX}/tasks`, {
+      params: { pageSize: '100' },
+    })
+
+    expect(
+      inbox.ok(),
+      `reading the approver's inbox failed: ${inbox.status()} ${await inbox.text()}`,
+    ).toBeTruthy()
+
+    const task = ((await inbox.json()) as { data: { id: string; documentId: string }[] }).data.find(
+      (row) => row.documentId === documentId,
+    )
+
+    expect(task, `no open task for document ${documentId} in the approver's inbox`).toBeDefined()
+
+    const decided = await asApprover.context.post(
+      `${API_PREFIX}/workflow/tasks/${task?.id}/decision`,
+      { data: { action, comment: `Seeded ${action.toLowerCase()}.` } },
+    )
+
+    expect(
+      decided.ok(),
+      `deciding the task failed: ${decided.status()} ${await decided.text()}`,
+    ).toBeTruthy()
+  } finally {
+    await asApprover.context.dispose()
+  }
+}
+
 /** The catalogue ids of the permissions named, failing if any is absent. */
 async function permissionIdsFor(session: ApiSession, codes: string[]): Promise<string[]> {
   // The catalogue is small and the endpoint pages; asking for one page big

@@ -6,6 +6,7 @@ use serde::Serialize;
 use utoipa::ToSchema;
 
 use crate::modules::document::domain::{DocumentStatusCount, RecentlyTouchedDocument};
+use crate::modules::workflow::domain::ApprovalTime;
 use crate::modules::workflow::service::inbox::InboxTask;
 
 /// The dashboard, as one payload.
@@ -252,4 +253,34 @@ pub struct DashboardSummary {
     /// [SDD]: ../../../../docs/design/01.%20System%20Design%20Document.md
     /// [#433]: https://github.com/sujanto-gaws/kelir/issues/433
     pub recent_documents: Vec<RecentlyTouchedDocument>,
+    /// How long the documents the caller raised took to be decided
+    /// (FR-RPT-006, [#461]).
+    ///
+    /// # What is measured (D-83)
+    ///
+    /// **One time per document**, from the `started_at` of its first workflow
+    /// instance to the `completed_at` of the instance that ended `APPROVED` or
+    /// `REJECTED` — so a document sent back and resubmitted is timed from the
+    /// first time it was sent, and the rounds in between count. The median,
+    /// the slowest and the count are over the documents whose final decision
+    /// landed in the last [`super::APPROVAL_TIME_WINDOW_DAYS`] days.
+    ///
+    /// **Not timed**: a document still in flight, one whose last instance ended
+    /// `CANCELLED`, a decision older than the window, and anything the caller
+    /// did not raise — another author's, another tenant's, a soft-deleted one,
+    /// or a document the system raised.
+    ///
+    /// # Whose documents
+    ///
+    /// **The caller's own**, the population [`Self::documents_by_status`]
+    /// counts, so the invariant above holds and [`super::DASHBOARD_READ`] is
+    /// still the only grant. The product owner chose this over a tenant-wide
+    /// report on 2026-09-16.
+    ///
+    /// **Always present.** A caller with nothing decided gets `documents: 0` and
+    /// `null` times, which is how the screen tells *nothing was decided* from
+    /// *decided instantly*.
+    ///
+    /// [#461]: https://github.com/sujanto-gaws/kelir/issues/461
+    pub approval_time: ApprovalTime,
 }

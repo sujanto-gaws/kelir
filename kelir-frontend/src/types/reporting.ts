@@ -4,8 +4,8 @@
  * **One object rather than one per card**, which is
  * [ADR-0039](../../../docs/architectures/adr/0039.%20A%20Dashboard%20Widget%20Is%20a%20Purpose-Built%20Endpoint.md)
  * (**D-78**): the dashboard is one screen with one contract, so FR-RPT-002's
- * pending-task rows, FR-RPT-003's recent documents and FR-RPT-005's late tasks
- * become fields here rather than a second call beside this one. The page makes one request on sign-in,
+ * pending-task rows, FR-RPT-003's recent documents, FR-RPT-005's late tasks and
+ * FR-RPT-006's approval time become fields here rather than a second call beside this one. The page makes one request on sign-in,
  * and that matters because it is the screen every session loads.
  */
 
@@ -124,6 +124,36 @@ export interface DashboardSummary {
    * client reads each where it is shown and never derives one from the other.
    */
   documentsByStatus: DocumentStatusCount[]
+  /**
+   * How long the documents the caller raised took to be decided (FR-RPT-006,
+   * #461; D-83).
+   *
+   * **One time per document**, from its first submission to the approval or
+   * rejection that ended it — rounds sent back and resubmitted count toward it.
+   * Over the decisions of the last `windowDays` days.
+   *
+   * **Always present.** Nothing decided is `documents: 0` with `null` times, so
+   * a card can say *nothing decided yet* rather than *decided instantly*.
+   */
+  approvalTime: ApprovalTime
+}
+
+/**
+ * The approval time card's numbers — the backend's
+ * `workflow::domain::ApprovalTime`.
+ *
+ * **Seconds, not a formatted duration.** How to say *2 days 4 hours* is the
+ * screen's; the server does not pick a unit a client would have to undo.
+ */
+export interface ApprovalTime {
+  /** How far back a decision counts, in days — the card says so rather than holding its own copy. */
+  windowDays: number
+  /** How many of the caller's documents were decided inside the window. */
+  documents: number
+  /** The middle time, in seconds; with an even count, the mean of the middle two. `null` when nothing was decided. */
+  medianSeconds: number | null
+  /** The longest time, in seconds. `null` when nothing was decided. */
+  slowestSeconds: number | null
 }
 
 /**

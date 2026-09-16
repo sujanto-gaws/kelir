@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT EXTRACT(EPOCH FROM (latest.completed_at - latest.first_started_at))::bigint\n               AS \"seconds!\"\n        FROM (\n            SELECT DISTINCT ON (i.document_id)\n                   i.outcome,\n                   i.completed_at,\n                   min(i.started_at) OVER (PARTITION BY i.document_id) AS first_started_at\n            FROM workflow_instances i\n            JOIN documents d ON d.id = i.document_id AND d.tenant_id = i.tenant_id\n            WHERE i.tenant_id = $1\n              AND d.created_by = $2\n              AND d.deleted_at IS NULL\n              AND i.deleted_at IS NULL\n            ORDER BY i.document_id, i.started_at DESC, i.id DESC\n        ) AS latest\n        WHERE latest.outcome IN ('APPROVED', 'REJECTED')\n          AND latest.completed_at >= now() - make_interval(days => $3)\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "seconds!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "a5a209dba9af98729808fe1e8054002236ca19a739fbeb4618c948e055427ff3"
+}

@@ -47,7 +47,7 @@ vi.mock('./DocumentStatusChart.vue', async () => {
 
 /**
  * The dashboard (FR-RPT-001, [#431]; FR-RPT-002, [#432]; FR-RPT-003, [#433];
- * FR-RPT-005, [#446]).
+ * FR-RPT-005, [#446]; FR-RPT-004, [#447]; FR-RPT-006, [#461]).
  *
  * # Seen to fail (coding standard §2.9)
  *
@@ -195,6 +195,39 @@ vi.mock('./DocumentStatusChart.vue', async () => {
  * only when the others are made weaker is not better evidence.
  *
  * [#447]: https://github.com/sujanto-gaws/kelir/issues/447
+ *
+ * ## The approval time card (FR-RPT-006, [#461])
+ *
+ * **Ten mutations, run 2026-09-16, and all ten red** — seen red, 2026-09-16.
+ * Baseline first: **56 passed, nothing mutated** (this file, `duration.spec.ts`,
+ * `DocumentStatusChart.spec.ts` and the chart-failure file). None survived, so
+ * no test in this section was written to close one.
+ *
+ * | Mutation | Reddened |
+ * |---|---|
+ * | **K1** — the median and the slowest swapped on the card | *shows the median, the slowest and how many documents were decided*, and the dash test |
+ * | **K2** — the count shown as `1` for any non-empty card | *shows the median, the slowest and how many documents were decided* |
+ * | **K3** — the scope line holds its own `90` rather than reading `windowDays` | *says which window the times cover, from the server rather than its own copy* |
+ * | **K4** — the empty sentence never renders (`v-if="false"`) | *says nothing has been decided rather than showing empty times*, and the window test |
+ * | **K5** — a `null` time printed as `durationLabel(0)` | *shows a dash rather than a duration for a time the server did not send* |
+ * | **K6** — the empty check reads `medianSeconds === null` rather than `documents === 0` | *shows a dash rather than a duration for a time the server did not send* |
+ * | **K7** — `durationLabel` loses its *under a minute* branch | `duration.spec.ts`: *says a decision under a minute in words rather than as zero minutes* |
+ * | **K8** — a whole day kept in hours (`< day` read as `<= day`) | `duration.spec.ts`: *gives days and hours from a day up…* |
+ * | **K9** — a zero smaller unit printed rather than dropped | both `duration.spec.ts` pair tests, the card test, and the dash test |
+ * | **K10** — a day-scale time's smaller unit taken as minutes | `duration.spec.ts`: *gives days and hours…*, and the card test |
+ *
+ * **K6 is the one worth keeping in view.** On every response the server can
+ * send, `documents === 0` and `medianSeconds === null` are the same condition,
+ * so the mutant is equivalent against real data — and only the dash test, whose
+ * fixture disagrees with itself on purpose, tells them apart. The count is the
+ * condition because it is the field the card is *about*; the test holds it
+ * there rather than leaving the choice to whoever next edits the template.
+ *
+ * **K9 reddens four tests**, because a zero smaller unit is on the card's own
+ * fixture (`10 d`) as well as in the formatter's; that is the rule being used
+ * in two places, not a loose test.
+ *
+ * [#461]: https://github.com/sujanto-gaws/kelir/issues/461
  * [#446]: https://github.com/sujanto-gaws/kelir/issues/446
  * [#433]: https://github.com/sujanto-gaws/kelir/issues/433
  *
@@ -218,6 +251,27 @@ function summary(overrides: Record<string, unknown> = {}): unknown {
     // The `DRAFT` row matches `draftDocuments: 2` above: the server reads one out
     // of the other, and a fixture that disagreed would be a response it cannot send.
     documentsByStatus: statusCounts({ DRAFT: 2, SUBMITTED: 1, APPROVED: 4 }),
+    // Three decided documents with a median and a slowest that differ in both
+    // units, so a card that swapped the two, or dropped the smaller unit, reads
+    // differently from the one asserted.
+    approvalTime: approvalTime(),
+    ...overrides,
+  }
+}
+
+const HOUR = 3_600
+const DAY = 24 * HOUR
+
+/**
+ * The approval time card's numbers, in the shape the server sends (FR-RPT-006,
+ * #461): seconds, with `null` times only when nothing was decided.
+ */
+function approvalTime(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    windowDays: 90,
+    documents: 3,
+    medianSeconds: 2 * DAY + 4 * HOUR,
+    slowestSeconds: 10 * DAY,
     ...overrides,
   }
 }
@@ -1253,5 +1307,137 @@ describe('DashboardPage', () => {
     await render()
 
     expect(requested).toEqual([expect.stringContaining('/dashboard/summary')])
+  })
+
+  /**
+   * **The median, the slowest and the count, as the server sent them**
+   * (FR-RPT-006, #461).
+   *
+   * The two times differ in both units — 2 d 4 h and 10 d — so a card that
+   * swapped them, or read one field twice, shows a different pair. The count is
+   * a third number again, so none of the three can stand in for another.
+   */
+  it('shows the median, the slowest and how many documents were decided', async () => {
+    const wrapper = await render()
+    const card = wrapper.find('[data-testid="approval-time"]')
+
+    expect(card.find('h3').text()).toBe('How long approval takes')
+    expect(card.find('[data-testid="approval-time-median"] dd').text()).toBe('2 d 4 h')
+    expect(card.find('[data-testid="approval-time-slowest"] dd').text()).toBe('10 d')
+    expect(card.find('[data-testid="approval-time-documents"] dd').text()).toBe('3')
+    expect(card.find('[data-testid="approval-time-empty"]').exists()).toBe(false)
+  })
+
+  /**
+   * **The window is the server's number.** The card says *the last N days* from
+   * `windowDays`, so a fixture of thirty makes a card holding its own ninety
+   * visible, in the scope line and in the empty sentence both.
+   */
+  it('says which window the times cover, from the server rather than its own copy', async () => {
+    onSummary = () => ({
+      status: 200,
+      body: itemBody(summary({ approvalTime: approvalTime({ windowDays: 30 }) })),
+    })
+
+    const decided = await render()
+
+    expect(decided.find('[data-testid="approval-time-scope"]').text()).toContain(
+      'decided in the last 30 days',
+    )
+
+    onSummary = () => ({
+      status: 200,
+      body: itemBody(
+        summary({
+          approvalTime: approvalTime({
+            windowDays: 30,
+            documents: 0,
+            medianSeconds: null,
+            slowestSeconds: null,
+          }),
+        }),
+      ),
+    })
+
+    const none = await render()
+
+    expect(none.find('[data-testid="approval-time-empty"]').text()).toContain('the last 30 days')
+  })
+
+  /**
+   * **Nothing decided is a sentence**, not three dashes and not *under a minute*
+   * — the server's `null` times mean *no answer*, and a card printing a
+   * duration for them would say the caller's documents were decided instantly.
+   */
+  it('says nothing has been decided rather than showing empty times', async () => {
+    onSummary = () => ({
+      status: 200,
+      body: itemBody(
+        summary({
+          approvalTime: approvalTime({ documents: 0, medianSeconds: null, slowestSeconds: null }),
+        }),
+      ),
+    })
+
+    const wrapper = await render()
+    const card = wrapper.find('[data-testid="approval-time"]')
+
+    expect(card.find('[data-testid="approval-time-empty"]').text()).toContain(
+      'None of your documents has been decided in the last 90 days',
+    )
+    expect(card.find('[data-testid="approval-time-median"]').exists()).toBe(false)
+    expect(card.text()).not.toContain('under a minute')
+  })
+
+  /**
+   * **A time the server did not send is a dash, never a duration.** The server
+   * sends `null` only with a zero count, so this response disagrees with itself
+   * — and that is the point of it: the card is shown because `documents` says
+   * two, and `null` must still not be printed as *under a minute*.
+   */
+  it('shows a dash rather than a duration for a time the server did not send', async () => {
+    onSummary = () => ({
+      status: 200,
+      body: itemBody(
+        summary({ approvalTime: approvalTime({ documents: 2, medianSeconds: null }) }),
+      ),
+    })
+
+    const wrapper = await render()
+
+    expect(wrapper.find('[data-testid="approval-time-median"] dd').text()).toBe('—')
+    expect(wrapper.find('[data-testid="approval-time-slowest"] dd').text()).toBe('10 d')
+  })
+
+  /**
+   * **No card without the grant, and none over a failed load** — the card lives
+   * inside the summary, so it degrades the way every other one does.
+   */
+  it('shows no approval time card without the grant, or when the summary fails', async () => {
+    signIn(['document:read'])
+    const withoutGrant = await render()
+
+    expect(withoutGrant.find('[data-testid="approval-time"]').exists()).toBe(false)
+
+    signIn(['reporting:dashboard:read'])
+    onSummary = () => ({ status: 500, body: errorBody('INTERNAL_ERROR', 'nope') })
+    const failed = await render()
+
+    expect(failed.find('[data-testid="error"]').exists()).toBe(true)
+    expect(failed.find('[data-testid="approval-time"]').exists()).toBe(false)
+  })
+
+  /**
+   * **No second request and no chart** (#461 AC1 and AC6, ADR-0039, ADR-0040
+   * §6). Three numbers are read, not compared along an axis, so the card has
+   * no async chart component inside it for a chunk to arrive through.
+   */
+  it('asks for no second endpoint and draws no chart for the approval time', async () => {
+    const wrapper = await render()
+    const card = wrapper.find('[data-testid="approval-time"]')
+
+    expect(requested).toEqual([expect.stringContaining('/dashboard/summary')])
+    expect(card.findComponent({ name: 'AsyncComponentWrapper' }).exists()).toBe(false)
+    expect(card.find('svg').exists()).toBe(false)
   })
 })

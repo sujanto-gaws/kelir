@@ -1,5 +1,6 @@
 //! The dashboard summary: what is waiting for the person looking at it
-//! (FR-RPT-001, [#431]).
+//! (FR-RPT-001, [#431]), and every widget since, down to FR-RPT-006's approval
+//! time card ([#461]).
 //!
 //! # Every assertion here reaches the rows
 //!
@@ -267,6 +268,77 @@
 //!
 //! [#447]: https://github.com/sujanto-gaws/kelir/issues/447
 //!
+//! ## FR-RPT-006, the approval time card ([#461])
+//!
+//! **Eighteen mutations, run across midnight 2026-09-16 to 2026-09-17, and all
+//! eighteen red** — M1–M10 seen red, 2026-09-16; M11–M14 and D1–D4 seen red,
+//! 2026-09-17. Baseline first: **56 passed, nothing mutated**, and the five
+//! `workflow::domain::approval_time` unit tests beside them. None survived at
+//! the level the predicate lives at, so no test in this section was written to
+//! close one; **D2 is green through the endpoint**, and that is recorded below
+//! rather than tidied away.
+//!
+//! | Mutation | Reddened |
+//! |---|---|
+//! | **M1** — the statement stops scoping the instance to the tenant (`i.tenant_id = $1` → `$1::uuid IS NOT NULL`) | [`a_second_tenants_documents_are_not_timed_here`] |
+//! | **M2** — the join stops carrying the tenant across to the document | [`another_tenants_document_is_not_timed_through_an_instance_filed_here`] |
+//! | **M3** — the statement stops scoping to the author (`d.created_by = $2` → `$2::uuid IS NOT NULL`) | [`another_authors_documents_are_not_timed_for_the_caller`] |
+//! | **M4** — the statement admits a null author | [`another_authors_documents_are_not_timed_for_the_caller`] |
+//! | **M5** — the document's soft delete dropped | [`a_soft_deleted_document_is_not_timed`] |
+//! | **M6** — the instance's soft delete dropped | [`a_soft_deleted_instance_is_not_timed`] |
+//! | **M7** — the deciding instance taken as the earliest (`started_at ASC, id ASC`) | [`a_document_still_in_flight_is_not_timed`], [`a_document_whose_last_instance_was_cancelled_is_not_timed`], [`a_document_decided_over_two_instances_is_timed_from_the_first`] |
+//! | **M8** — `DISTINCT ON` dropped, so every instance is a row | [`a_document_still_in_flight_is_not_timed`], [`a_document_whose_last_instance_was_cancelled_is_not_timed`] |
+//! | **M9** — a `CANCELLED` outcome counts as a decision | [`a_document_whose_last_instance_was_cancelled_is_not_timed`] |
+//! | **M10** — a `REJECTED` outcome stops counting | [`the_approval_time_is_the_median_and_the_slowest_of_the_callers_decided_documents`] |
+//! | **M11** — the clock starts at the latest instance (`min(started_at)` → `max`) | [`a_document_decided_over_two_instances_is_timed_from_the_first`] |
+//! | **M12** — the window read the wrong way round (`>=` → `<=`) | twelve of the fourteen — every test with a recent decision |
+//! | **M13** — `approval_time` passes the statement ten times the window it serves | [`a_decision_older_than_ninety_days_is_not_timed`] |
+//! | **M14** — `approval_time` acquires `caller.require(INSTANCE_READ)` | [`the_approval_time_is_timed_under_the_dashboard_grant_alone`], and six earlier tests whose callers hold no `workflow:instance:read` |
+//! | **D1** — the times are not sorted before the middle is read | both median unit tests; [`the_approval_time_is_the_median_and_the_slowest_of_the_callers_decided_documents`] |
+//! | **D2** — an even count takes the lower middle rather than the mean | *an even count takes the mean of the middle two, rounded down* (unit); **green through the endpoint** |
+//! | **D3** — the slowest taken as the fastest | both median unit tests; [`the_approval_time_is_the_median_and_the_slowest_of_the_callers_decided_documents`] |
+//! | **D4** — nothing decided served as a zero-second median | both empty unit tests; [`a_caller_with_nothing_decided_has_nothing_timed`] |
+//!
+//! **M2 is the one worth keeping in view**, and it is the FR-RPT-003 table's M3
+//! written down before the mutation rather than found after it.
+//! `workflow_instances` references `documents (id)` alone, so an instance can
+//! carry one tenant and point at another's document. M1's test cannot see
+//! that: its foreign instance is foreign too, and `i.tenant_id = $1` drops it
+//! first. Each of the two tenant predicates reddens its own test and no other.
+//!
+//! **M7 and M8 are the two halves of *the latest instance decides*.** M8 is
+//! green on the two-instance test, and that is an equivalent mutant on that
+//! fixture rather than a gap: its earlier round ended `RETURNED`, which the
+//! outcome filter drops whether or not each document is one row, and the
+//! window function still starts the clock at the first round. The in-flight and
+//! cancelled tests each carry a document **whose earlier round was decided**,
+//! which is the only shape that tells *any decided instance* from *the latest*.
+//!
+//! **D2 is green through the endpoint, by construction.** No integration
+//! fixture decides an even number of documents, so the lower middle and the mean
+//! agree on every one of them. The rule is the domain's, and the unit test that
+//! reddened is where it is held. A fixture of four documents here would test the
+//! same arithmetic a second time, through a database.
+//!
+//! **M12 and M14 redden more than one test each, and that is recorded rather
+//! than tuned away.** Reversing the window empties every fixture that decided
+//! something recently, and a permission added to one read of the summary fails
+//! every caller the older sections deliberately gave the dashboard grant alone.
+//!
+//! **The first run of M3 came back with no result**, `LNK1104` on the previous
+//! run's locked test binary. That is not a green and was not recorded as one;
+//! the runner now retries a locked link, and M3 was run again and reddened as
+//! tabled. A mutated statement is not in `.sqlx`, so the fourteen `M` mutations
+//! compiled against a live schema. Every anchor had to occur exactly once in its
+//! file or the runner refused it.
+//!
+//! **Not run, and why.** `id DESC` as the tie-break under `started_at DESC` is
+//! not mutated on its own: UUIDv7 ids are time-ordered, so it breaks a tie the
+//! same way `started_at` would have, and no fixture here has two rounds of one
+//! document starting in the same microsecond.
+//!
+//! [#461]: https://github.com/sujanto-gaws/kelir/issues/461
+//!
 //! [#106]: https://github.com/sujanto-gaws/kelir/issues/106
 //! [#121]: https://github.com/sujanto-gaws/kelir/issues/121
 //! [#218]: https://github.com/sujanto-gaws/kelir/issues/218
@@ -275,7 +347,7 @@
 mod common;
 
 use axum::http::{Method, StatusCode};
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use common::{fixtures, TestApp};
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -3195,5 +3267,869 @@ async fn draft_documents_is_the_draft_entry_of_the_status_summary() {
         summary["draftDocuments"].as_i64(),
         draft_entry,
         "draftDocuments and the DRAFT entry disagree — two answers to how many drafts: {summary}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FR-RPT-006 — the approval time card ([#461])
+// ---------------------------------------------------------------------------
+
+const DAY: i64 = 86_400;
+
+/// A workflow whose states cover every way an instance can end, so a planted
+/// round can stand in any of them: decided either way, sent back, or withdrawn.
+///
+/// `RETURNED` is **not** final and has a `RESUBMIT` edge out of it, which is the
+/// shape the product runs a return on — the instance stays live and the
+/// resubmission moves it — and the one
+/// [`a_returned_and_resubmitted_document_is_timed_from_its_first_submission`]
+/// drives through the engine.
+fn approval_time_workflow(key: &str, role_code: &str) -> Value {
+    json!({
+        "workflowKey": key,
+        "version": "1.0.0",
+        "name": "Approval that can send back or be withdrawn",
+        "initialState": "MANAGER_APPROVAL",
+        "states": [
+            { "code": "MANAGER_APPROVAL", "name": "Manager approval",
+              "mapsToDocumentStatus": "PENDING_APPROVAL",
+              "task": { "taskDefinitionKey": "manager_approval",
+                        "taskName": "Decide the request",
+                        "assignment": { "assigneeType": "ROLE", "roleCode": role_code } } },
+            { "code": "RETURNED", "name": "Sent back", "mapsToDocumentStatus": "RETURNED" },
+            { "code": "COMPLETED", "name": "Completed", "mapsToDocumentStatus": "COMPLETED",
+              "isFinal": true },
+            { "code": "REJECTED", "name": "Rejected", "mapsToDocumentStatus": "REJECTED",
+              "isFinal": true },
+            { "code": "WITHDRAWN", "name": "Withdrawn", "mapsToDocumentStatus": "CANCELLED",
+              "isFinal": true }
+        ],
+        "transitions": [
+            { "from": "MANAGER_APPROVAL", "to": "COMPLETED", "action": "APPROVE",
+              "allowedBy": format!("ROLE:{role_code}") },
+            { "from": "MANAGER_APPROVAL", "to": "REJECTED", "action": "REJECT",
+              "allowedBy": format!("ROLE:{role_code}") },
+            { "from": "MANAGER_APPROVAL", "to": "RETURNED", "action": "RETURN",
+              "allowedBy": format!("ROLE:{role_code}") },
+            { "from": "RETURNED", "to": "MANAGER_APPROVAL", "action": "RESUBMIT",
+              "allowedBy": "OWNER" },
+            { "from": "MANAGER_APPROVAL", "to": "WITHDRAWN", "action": "CANCEL",
+              "allowedBy": "OWNER" }
+        ]
+    })
+}
+
+/// A published workflow of that shape and a type bound to it.
+async fn approval_time_type(app: &TestApp, token: &str, code: &str) -> (Uuid, Uuid) {
+    let key = code.to_lowercase();
+    let workflow =
+        publish_workflow_definition(app, token, &key, approval_time_workflow(&key, code)).await;
+
+    (workflow, document_type(app, token, code, workflow).await)
+}
+
+/// One `workflow_instances` row, as it stands once a round has ended — or not.
+struct Round {
+    /// The state the round stopped in; `MANAGER_APPROVAL` while it is live.
+    state: &'static str,
+    /// `None` while it is live, and on a round that ended without one.
+    outcome: Option<&'static str>,
+    started: DateTime<Utc>,
+    /// `None` while it is live.
+    completed: Option<DateTime<Utc>>,
+    deleted: bool,
+}
+
+impl Round {
+    fn ended(state: &'static str, outcome: &'static str, days_ago: (i64, i64)) -> Self {
+        let now = Utc::now();
+
+        Self {
+            state,
+            outcome: Some(outcome),
+            started: now - Duration::days(days_ago.0),
+            completed: Some(now - Duration::days(days_ago.1)),
+            deleted: false,
+        }
+    }
+
+    fn approved(days_ago: (i64, i64)) -> Self {
+        Self::ended("COMPLETED", "APPROVED", days_ago)
+    }
+
+    fn live(started_days_ago: i64) -> Self {
+        Self {
+            state: "MANAGER_APPROVAL",
+            outcome: None,
+            started: Utc::now() - Duration::days(started_days_ago),
+            completed: None,
+            deleted: false,
+        }
+    }
+}
+
+/// Writes one instance directly.
+///
+/// **Planted rather than driven, for the reason [`plant_document`] is**: a
+/// decision ninety-one days old, a round in another tenant, an instance on a
+/// soft-deleted document and a document with two instances are all shapes a
+/// dropped predicate would expose and no API call produces today.
+/// [`a_returned_and_resubmitted_document_is_timed_from_its_first_submission`]
+/// is the one test here whose rows the engine wrote.
+///
+/// **The timestamps are bound from one Rust clock**, so the time the statement
+/// computes between them is exact to the second and the assertions can be
+/// equalities. Only the window is read against the database's `now()`, and every
+/// fixture keeps a day's margin from its edge.
+async fn plant_round(
+    app: &TestApp,
+    tenant_id: Uuid,
+    document: Uuid,
+    workflow: Uuid,
+    round: Round,
+) -> Uuid {
+    let id = Uuid::now_v7();
+    let status = if round.completed.is_some() {
+        "COMPLETED"
+    } else {
+        "RUNNING"
+    };
+
+    sqlx::query(
+        "INSERT INTO workflow_instances (id, tenant_id, instance_ref, workflow_definition_id, \
+         document_id, status, current_state, outcome, started_at, completed_at, deleted_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CASE WHEN $11 THEN now() END)",
+    )
+    .bind(id)
+    .bind(tenant_id)
+    .bind(format!("WFI-AT-{id}"))
+    .bind(workflow)
+    .bind(document)
+    .bind(status)
+    .bind(round.state)
+    .bind(round.outcome)
+    .bind(round.started)
+    .bind(round.completed)
+    .bind(round.deleted)
+    .execute(&app.pool)
+    .await
+    .expect("plant a workflow instance");
+
+    id
+}
+
+/// A document of the caller's in `tenant_id`, with the rounds given.
+async fn decided_document(
+    app: &TestApp,
+    tenant_id: Uuid,
+    author: Option<Uuid>,
+    (workflow, type_id): (Uuid, Uuid),
+    rounds: Vec<Round>,
+) -> Uuid {
+    let document = plant_document(app, tenant_id, author, type_id, "COMPLETED", false).await;
+
+    for round in rounds {
+        plant_round(app, tenant_id, document, workflow, round).await;
+    }
+
+    document
+}
+
+/// `approvalTime` as `(documents, medianSeconds, slowestSeconds)`, after
+/// asserting the window it was read over.
+fn approval_time(summary: &Value) -> (i64, Option<i64>, Option<i64>) {
+    let card = &summary["approvalTime"];
+
+    assert_eq!(
+        card["windowDays"], 90,
+        "the card was not read over D-83's ninety days: {summary}"
+    );
+
+    (
+        card["documents"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("the card carries a count: {summary}")),
+        card["medianSeconds"].as_i64(),
+        card["slowestSeconds"].as_i64(),
+    )
+}
+
+/// **The median, the slowest and the count of the caller's decided documents**
+/// ([#461] AC1).
+///
+/// Three documents taking 1, 2 and 10 days, planted in neither ascending nor
+/// descending order, **one of them rejected** — a rejection is a decision, and
+/// a statement counting approvals alone reads two documents with a median of
+/// five and a half days.
+///
+/// [#461]: https://github.com/sujanto-gaws/kelir/issues/461
+#[tokio::test]
+async fn the_approval_time_is_the_median_and_the_slowest_of_the_callers_decided_documents() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let shape = approval_time_type(&app, &token, "RD_T_SUM").await;
+    let (author_id, author) = holder_party(&app, "RD-T-SUM", "rd.t.sum", &[]).await;
+    let tenant = fixtures::SYSTEM_TENANT_ID;
+
+    decided_document(
+        &app,
+        tenant,
+        Some(author_id),
+        shape,
+        vec![Round::approved((12, 2))],
+    )
+    .await;
+    decided_document(
+        &app,
+        tenant,
+        Some(author_id),
+        shape,
+        vec![Round::ended("REJECTED", "REJECTED", (3, 1))],
+    )
+    .await;
+    decided_document(
+        &app,
+        tenant,
+        Some(author_id),
+        shape,
+        vec![Round::approved((4, 3))],
+    )
+    .await;
+
+    assert_eq!(
+        approval_time(&summary_of(&app, &author).await),
+        (3, Some(2 * DAY), Some(10 * DAY)),
+        "the approval time is not the median and slowest of three decided documents"
+    );
+}
+
+/// **A document sent back and resubmitted is timed from the first time it was
+/// sent** ([#461] AC2) — through the engine, so the rows are the product's.
+///
+/// # The shape the product runs a return on
+///
+/// A `RETURN` into a state that is not final **leaves the instance running**,
+/// and the resubmission moves that same instance on
+/// (`document::service::submit`'s `resubmit_workflow`). So there is one
+/// instance, and the test asserts that before trusting anything else: the
+/// time starts from *its* `started_at`, and the thing that must not happen is
+/// the resubmission restarting the clock.
+///
+/// # How a round lasts longer than the test
+///
+/// The first submission is **dated three days back** straight after it is made,
+/// with an `UPDATE` — the way [`late_by`] dates a task. Everything after it —
+/// the return, the resubmission, the approval — is the engine's own, happening
+/// now. A card timing from the resubmission reads seconds; one timing from the
+/// first submission reads three days and the seconds the rest took.
+///
+/// [#461]: https://github.com/sujanto-gaws/kelir/issues/461
+#[tokio::test]
+async fn a_returned_and_resubmitted_document_is_timed_from_its_first_submission() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let (_, type_id) = approval_time_type(&app, &token, "RD_T_BACK").await;
+    let approver = holder(&app, "RD_T_BACK", "rd.t.back.approver").await;
+    let (_, author) = holder_party(&app, "RD-T-BACK-AUTHOR", "rd.t.back", &[]).await;
+
+    let document = submitted_document(&app, &author, type_id, "Sent back once").await;
+
+    let dated = sqlx::query(
+        "UPDATE workflow_instances SET started_at = now() - interval '3 days' \
+         WHERE document_id = $1",
+    )
+    .bind(document)
+    .execute(&app.pool)
+    .await
+    .expect("date the first submission");
+    assert_eq!(
+        dated.rows_affected(),
+        1,
+        "the submission started no instance"
+    );
+
+    let decide = |task: String, action: &'static str| {
+        let app = &app;
+        let approver = &approver;
+        async move {
+            let decided = app
+                .post(
+                    &format!("/api/v1/workflow/tasks/{task}/decision"),
+                    Some(approver),
+                    json!({ "action": action, "comment": "Round decided." }),
+                )
+                .await;
+            assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+        }
+    };
+
+    decide(open_task_of(&app, document).await, "RETURN").await;
+
+    assert_eq!(
+        approval_time(&summary_of(&app, &author).await).0,
+        0,
+        "a document sent back to its author was timed as decided"
+    );
+
+    let resubmitted = app
+        .send(
+            Method::POST,
+            &format!("/api/v1/documents/{document}/submission"),
+            Some(&author),
+            None,
+        )
+        .await;
+    assert_eq!(resubmitted.status, StatusCode::OK, "{}", resubmitted.body);
+
+    decide(open_task_of(&app, document).await, "APPROVE").await;
+
+    let (instances, started_days_ago, took): (i64, f64, i64) = sqlx::query_as(
+        "SELECT count(*), \
+                EXTRACT(EPOCH FROM now() - min(started_at))::float8 / 86400, \
+                EXTRACT(EPOCH FROM (max(completed_at) - min(started_at)))::bigint \
+         FROM workflow_instances WHERE document_id = $1",
+    )
+    .bind(document)
+    .fetch_one(&app.pool)
+    .await
+    .expect("read the document's rounds");
+
+    assert_eq!(
+        instances, 1,
+        "the resubmission started a second instance, which is not the shape this test is about"
+    );
+    assert!(
+        started_days_ago > 2.99,
+        "the resubmission restarted the instance's clock: it started {started_days_ago} days ago"
+    );
+
+    assert_eq!(
+        approval_time(&summary_of(&app, &author).await),
+        (1, Some(took), Some(took)),
+        "the returned document was not timed from its first submission"
+    );
+    assert!(
+        took >= 3 * DAY,
+        "timed from the resubmission: {took} seconds"
+    );
+}
+
+/// **A document decided over two instances is timed from the first**
+/// ([#461] AC2).
+///
+/// The other shape a return can take: a definition whose return state is final
+/// ends the instance `RETURNED`, and the next submission starts another. Round
+/// one runs from ten days ago to eight; round two from five days ago to one day
+/// ago, approved. **Nine days**, not the four the deciding instance lasted and
+/// not the six the two rounds spent open.
+///
+/// [#461]: https://github.com/sujanto-gaws/kelir/issues/461
+#[tokio::test]
+async fn a_document_decided_over_two_instances_is_timed_from_the_first() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let shape = approval_time_type(&app, &token, "RD_T_TWO").await;
+    let (author_id, author) = holder_party(&app, "RD-T-TWO", "rd.t.two", &[]).await;
+
+    decided_document(
+        &app,
+        fixtures::SYSTEM_TENANT_ID,
+        Some(author_id),
+        shape,
+        vec![
+            Round::ended("RETURNED", "RETURNED", (10, 8)),
+            Round::approved((5, 1)),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        approval_time(&summary_of(&app, &author).await),
+        (1, Some(9 * DAY), Some(9 * DAY)),
+        "a document with two rounds was not timed from the first one's start"
+    );
+}
+
+/// **A document still in flight is not timed** ([#461] AC3).
+///
+/// Two of them: one on its first round, and one **whose earlier round was
+/// rejected** and which is running again. The second is the case a statement
+/// looking for *any* decided instance would count; it is decided only when its
+/// latest instance says so. A third document, decided, keeps the count at one
+/// rather than zero, so a card that timed nothing does not pass.
+///
+/// [#461]: https://github.com/sujanto-gaws/kelir/issues/461
+#[tokio::test]
+async fn a_document_still_in_flight_is_not_timed() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let shape = approval_time_type(&app, &token, "RD_T_FLY").await;
+    let (author_id, author) = holder_party(&app, "RD-T-FLY", "rd.t.fly", &[]).await;
+    let tenant = fixtures::SYSTEM_TENANT_ID;
+
+    decided_document(&app, tenant, Some(author_id), shape, vec![Round::live(4)]).await;
+    decided_document(
+        &app,
+        tenant,
+        Some(author_id),
+        shape,
+        vec![
+            Round::ended("REJECTED", "REJECTED", (20, 15)),
+            Round::live(6),
+        ],
+    )
+    .await;
+    decided_document(
+        &app,
+        tenant,
+        Some(author_id),
+        shape,
+        vec![Round::approved((3, 1))],
+    )
+    .await;
+
+    assert_eq!(
+        approval_time(&summary_of(&app, &author).await),
+        (1, Some(2 * DAY), Some(2 * DAY)),
+        "a document still in flight was timed"
+    );
+}
+
+/// **A document whose last instance ended `CANCELLED` is not timed**
+/// ([#461] AC3).
+///
+/// Withdrawn, not decided — and, as with the in-flight test, twice: once on its
+/// only round, and once **after an earlier round was rejected**, which a
+/// statement reading any decided instance would time at fifteen days.
+///
+/// [#461]: https://github.com/sujanto-gaws/kelir/issues/461
+#[tokio::test]
+async fn a_document_whose_last_instance_was_cancelled_is_not_timed() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let shape = approval_time_type(&app, &token, "RD_T_OFF").await;
+    let (author_id, author) = holder_party(&app, "RD-T-OFF", "rd.t.off", &[]).await;
+    let tenant = fixtures::SYSTEM_TENANT_ID;
+
+    decided_document(
+        &app,
+        tenant,
+        Some(author_id),
+        shape,
+        vec![Round::ended("WITHDRAWN", "CANCELLED", (6, 2))],
+    )
+    .await;
+    decided_document(
+        &app,
+        tenant,
+        Some(author_id),
+        shape,
+        vec![
+            Round::ended("REJECTED", "REJECTED", (20, 15)),
+            Round::ended("WITHDRAWN", "CANCELLED", (10, 5)),
+        ],
+    )
+    .await;
+    decided_document(
+        &app,
+        tenant,
+        Some(author_id),
+        shape,
+        vec![Round::approved((3, 1))],
+    )
+    .await;
+
+    assert_eq!(
+        approval_time(&summary_of(&app, &author).await),
+        (1, Some(2 * DAY), Some(2 * DAY)),
+        "a withdrawn document was timed as decided"
+    );
+}
+
+/// **A decision older than ninety days is not timed** ([#461] AC3).
+///
+/// One decided ninety-one days ago and one eighty-nine, a day either side of
+/// the edge, so the database's clock and this test's can disagree by less than
+/// a day and change nothing. The old one took four days and the recent one
+/// one, so a window read the wrong way round is a different number rather than
+/// the same count.
+///
+/// [#461]: https://github.com/sujanto-gaws/kelir/issues/461
+#[tokio::test]
+async fn a_decision_older_than_ninety_days_is_not_timed() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let shape = approval_time_type(&app, &token, "RD_T_OLD").await;
+    let (author_id, author) = holder_party(&app, "RD-T-OLD", "rd.t.old", &[]).await;
+    let tenant = fixtures::SYSTEM_TENANT_ID;
+
+    decided_document(
+        &app,
+        tenant,
+        Some(author_id),
+        shape,
+        vec![Round::approved((95, 91))],
+    )
+    .await;
+    decided_document(
+        &app,
+        tenant,
+        Some(author_id),
+        shape,
+        vec![Round::approved((90, 89))],
+    )
+    .await;
+
+    assert_eq!(
+        approval_time(&summary_of(&app, &author).await),
+        (1, Some(DAY), Some(DAY)),
+        "a decision older than the window was timed, or a recent one was not"
+    );
+}
+
+/// **Another author's documents are not timed for the caller** ([#461] AC3).
+///
+/// Two authors in one tenant, asserted both ways round (coding standard §2.9),
+/// and a third document **nobody raised** — `created_by` is nullable, and a
+/// looser *the caller's, or nobody's* would time every system-raised document on
+/// every dashboard.
+///
+/// [#461]: https://github.com/sujanto-gaws/kelir/issues/461
+#[tokio::test]
+async fn another_authors_documents_are_not_timed_for_the_caller() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let shape = approval_time_type(&app, &token, "RD_T_WHO").await;
+    let (ani_id, ani) = holder_party(&app, "RD-T-ANI", "rd.t.ani", &[]).await;
+    let (budi_id, budi) = holder_party(&app, "RD-T-BUDI", "rd.t.budi", &[]).await;
+    let tenant = fixtures::SYSTEM_TENANT_ID;
+
+    decided_document(
+        &app,
+        tenant,
+        Some(ani_id),
+        shape,
+        vec![Round::approved((2, 1))],
+    )
+    .await;
+    decided_document(
+        &app,
+        tenant,
+        Some(budi_id),
+        shape,
+        vec![Round::approved((8, 1))],
+    )
+    .await;
+    decided_document(&app, tenant, None, shape, vec![Round::approved((30, 1))]).await;
+
+    assert_eq!(
+        approval_time(&summary_of(&app, &ani).await),
+        (1, Some(DAY), Some(DAY)),
+        "Ani's approval time included somebody else's document"
+    );
+    assert_eq!(
+        approval_time(&summary_of(&app, &budi).await),
+        (1, Some(7 * DAY), Some(7 * DAY)),
+        "Budi's approval time lost his own document or gained another"
+    );
+}
+
+/// **A second tenant's documents are not timed here** ([#461] AC3).
+///
+/// Planted under another tenant — the document and its instance both — **with
+/// this caller as the author**, because that is the only row a dropped tenant
+/// predicate would expose: anything raised through the API is stamped with the
+/// caller's own tenant.
+///
+/// [#461]: https://github.com/sujanto-gaws/kelir/issues/461
+#[tokio::test]
+async fn a_second_tenants_documents_are_not_timed_here() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let shape = approval_time_type(&app, &token, "RD_T_TEN").await;
+    let (author_id, author) = holder_party(&app, "RD-T-TEN", "rd.t.ten", &[]).await;
+    let other_tenant = fixtures::create_tenant(&app.pool, "RD-T-OTHER", "Other tenant").await;
+
+    decided_document(
+        &app,
+        fixtures::SYSTEM_TENANT_ID,
+        Some(author_id),
+        shape,
+        vec![Round::approved((2, 1))],
+    )
+    .await;
+    decided_document(
+        &app,
+        other_tenant,
+        Some(author_id),
+        shape,
+        vec![Round::approved((40, 1))],
+    )
+    .await;
+
+    assert_eq!(
+        approval_time(&summary_of(&app, &author).await),
+        (1, Some(DAY), Some(DAY)),
+        "a document filed under another tenant was timed on this caller's dashboard"
+    );
+}
+
+/// **An instance stamped with this tenant cannot bring another tenant's
+/// document onto the card** ([#461] AC3).
+///
+/// `workflow_instances.document_id` references `documents (id)` alone, so the
+/// schema allows an instance whose tenant is not its document's. That row
+/// **passes the instance's tenant predicate** — it is this tenant's — and only
+/// carrying the tenant across the join refuses the document on the other end.
+/// [`a_second_tenants_documents_are_not_timed_here`] cannot see that half: its
+/// foreign instance is foreign too, and the instance's own predicate drops it
+/// first. This is the FR-RPT-003 table's M3 finding, written before the
+/// mutation rather than after it.
+///
+/// [#461]: https://github.com/sujanto-gaws/kelir/issues/461
+#[tokio::test]
+async fn another_tenants_document_is_not_timed_through_an_instance_filed_here() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let (workflow, type_id) = approval_time_type(&app, &token, "RD_T_MIX").await;
+    let (author_id, author) = holder_party(&app, "RD-T-MIX", "rd.t.mix", &[]).await;
+    let tenant = fixtures::SYSTEM_TENANT_ID;
+    let other_tenant = fixtures::create_tenant(&app.pool, "RD-T-MIX-OTHER", "Other tenant").await;
+
+    decided_document(
+        &app,
+        tenant,
+        Some(author_id),
+        (workflow, type_id),
+        vec![Round::approved((2, 1))],
+    )
+    .await;
+
+    let foreign = plant_document(
+        &app,
+        other_tenant,
+        Some(author_id),
+        type_id,
+        "COMPLETED",
+        false,
+    )
+    .await;
+    plant_round(&app, tenant, foreign, workflow, Round::approved((40, 1))).await;
+
+    assert_eq!(
+        approval_time(&summary_of(&app, &author).await),
+        (1, Some(DAY), Some(DAY)),
+        "an instance in this tenant timed a document filed under another"
+    );
+}
+
+/// **A soft-deleted document is not timed** ([#461] AC3).
+///
+/// Two decided documents, one deleted, so the assertion is *one* rather than
+/// *none*.
+///
+/// [#461]: https://github.com/sujanto-gaws/kelir/issues/461
+#[tokio::test]
+async fn a_soft_deleted_document_is_not_timed() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let (workflow, type_id) = approval_time_type(&app, &token, "RD_T_GONE").await;
+    let (author_id, author) = holder_party(&app, "RD-T-GONE", "rd.t.gone", &[]).await;
+    let tenant = fixtures::SYSTEM_TENANT_ID;
+
+    decided_document(
+        &app,
+        tenant,
+        Some(author_id),
+        (workflow, type_id),
+        vec![Round::approved((2, 1))],
+    )
+    .await;
+
+    let deleted = plant_document(&app, tenant, Some(author_id), type_id, "COMPLETED", true).await;
+    plant_round(&app, tenant, deleted, workflow, Round::approved((20, 1))).await;
+
+    assert_eq!(
+        approval_time(&summary_of(&app, &author).await),
+        (1, Some(DAY), Some(DAY)),
+        "a soft-deleted document was timed"
+    );
+}
+
+/// **A soft-deleted instance does not start a document's clock.**
+///
+/// The document is live and decided in one day. A deleted round from thirty
+/// days before is planted beside that one, so a statement that read it would
+/// both see an earlier start — twenty-nine days — and not merely one more row.
+///
+/// [#461]: https://github.com/sujanto-gaws/kelir/issues/461
+#[tokio::test]
+async fn a_soft_deleted_instance_is_not_timed() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let shape = approval_time_type(&app, &token, "RD_T_UNDO").await;
+    let (author_id, author) = holder_party(&app, "RD-T-UNDO", "rd.t.undo", &[]).await;
+
+    let mut deleted_round = Round::ended("RETURNED", "RETURNED", (30, 29));
+    deleted_round.deleted = true;
+
+    decided_document(
+        &app,
+        fixtures::SYSTEM_TENANT_ID,
+        Some(author_id),
+        shape,
+        vec![deleted_round, Round::approved((2, 1))],
+    )
+    .await;
+
+    assert_eq!(
+        approval_time(&summary_of(&app, &author).await),
+        (1, Some(DAY), Some(DAY)),
+        "a soft-deleted instance moved the document's start"
+    );
+}
+
+/// **Nothing decided is a zero and no times, not zero seconds** ([#461] AC1).
+///
+/// The caller has a document in flight and nothing else. `null` is what lets
+/// the card say *nothing decided yet* rather than *decided instantly*.
+///
+/// [#461]: https://github.com/sujanto-gaws/kelir/issues/461
+#[tokio::test]
+async fn a_caller_with_nothing_decided_has_nothing_timed() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let shape = approval_time_type(&app, &token, "RD_T_NONE").await;
+    let (author_id, author) = holder_party(&app, "RD-T-NONE", "rd.t.none", &[]).await;
+
+    decided_document(
+        &app,
+        fixtures::SYSTEM_TENANT_ID,
+        Some(author_id),
+        shape,
+        vec![Round::live(3)],
+    )
+    .await;
+
+    let summary = summary_of(&app, &author).await;
+
+    assert_eq!(approval_time(&summary), (0, None, None), "{summary}");
+    assert!(
+        summary["approvalTime"]["medianSeconds"].is_null()
+            && summary["approvalTime"]["slowestSeconds"].is_null(),
+        "nothing decided was served as a time rather than null: {summary}"
+    );
+}
+
+/// **The card needs the dashboard grant and nothing else** ([#461] AC1,
+/// **D-82**'s invariant).
+///
+/// The caller holds `reporting:dashboard:read` alone — not
+/// `workflow:instance:read`, not `document:read` — and is still timed, because
+/// every number on the card is about documents they raised.
+///
+/// [#461]: https://github.com/sujanto-gaws/kelir/issues/461
+#[tokio::test]
+async fn the_approval_time_is_timed_under_the_dashboard_grant_alone() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let shape = approval_time_type(&app, &token, "RD_T_ONLY").await;
+
+    let role = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "RD-T-ONLY",
+        &["reporting:dashboard:read"],
+    )
+    .await;
+    let author_id = fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "rd.t.only",
+        "rd.t.only@example.test",
+        common::ADMIN_PASSWORD,
+        &[role],
+    )
+    .await;
+    let author = app.sign_in("rd.t.only", common::ADMIN_PASSWORD).await;
+
+    decided_document(
+        &app,
+        fixtures::SYSTEM_TENANT_ID,
+        Some(author_id),
+        shape,
+        vec![Round::approved((6, 1))],
+    )
+    .await;
+
+    assert_eq!(
+        approval_time(&summary_of(&app, &author).await),
+        (1, Some(5 * DAY), Some(5 * DAY)),
+        "the approval time asked for a grant beyond the dashboard's"
+    );
+}
+
+/// **The card is in the published contract, with its four fields**
+/// ([#461] AC1) — and there is still one dashboard path.
+///
+/// `ApprovalTime` is registered in `router.rs`'s `components(schemas(...))`
+/// separately from its `ToSchema` derive, so forgetting it leaves a dangling
+/// `$ref`. The field names are asserted, camelCase, because a generated client
+/// reads them from here and not from the wire.
+///
+/// [#461]: https://github.com/sujanto-gaws/kelir/issues/461
+#[tokio::test]
+async fn the_approval_time_is_in_the_published_contract() {
+    let app = TestApp::spawn().await;
+
+    let document = app.get("/api/docs/openapi.json", None).await;
+    assert_eq!(document.status, StatusCode::OK);
+
+    let schemas = &document.body["components"]["schemas"];
+
+    assert!(
+        !schemas["DashboardSummary"]["properties"]["approvalTime"].is_null(),
+        "DashboardSummary does not carry approvalTime"
+    );
+
+    let properties = schemas["ApprovalTime"]["properties"]
+        .as_object()
+        .unwrap_or_else(|| {
+            panic!("approvalTime references ApprovalTime and it is not in the contract")
+        });
+    let mut fields: Vec<&str> = properties.keys().map(String::as_str).collect();
+    fields.sort_unstable();
+
+    assert_eq!(
+        fields,
+        ["documents", "medianSeconds", "slowestSeconds", "windowDays"],
+        "ApprovalTime's fields"
+    );
+
+    let paths = document.body["paths"]
+        .as_object()
+        .expect("the contract has paths");
+    let reporting: Vec<&String> = paths
+        .keys()
+        .filter(|path| path.contains("/dashboard") || path.contains("/report"))
+        .collect();
+
+    assert_eq!(
+        reporting,
+        vec!["/api/v1/dashboard/summary"],
+        "the approval time arrived as an endpoint beside the summary (ADR-0039)"
     );
 }

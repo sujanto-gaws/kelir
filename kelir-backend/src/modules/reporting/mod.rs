@@ -52,6 +52,7 @@
 //! | `documentsByStatus` | [`document::service::list::count_own_by_status`] | `tenant_id`, `created_by`, `deleted_at IS NULL`, grouped by `status` and filled to all ten |
 //! | `draftDocuments` | the `DRAFT` entry of that same read | the same — one count, not a second statement beside it |
 //! | `recentDocuments` | [`document::service::list::recent_documents`] | `document::repository::list`'s own `WHERE` — `tenant_id` and `deleted_at IS NULL`, the two lines the document list opens with |
+//! | `approvalTime` | [`workflow::service::instance::approval_time`] | `tenant_id` on the instance and across the join, `created_by`, both soft deletes, the latest instance decided inside [`APPROVAL_TIME_WINDOW_DAYS`] |
 //!
 //! [`workflow::service::inbox::late_work`]: crate::modules::workflow::service::inbox::late_work
 //!
@@ -111,6 +112,17 @@
 //! [#279]: https://github.com/sujanto-gaws/kelir/issues/279
 //! [#447]: https://github.com/sujanto-gaws/kelir/issues/447
 //! [`document::service::list::count_own_by_status`]: crate::modules::document::service::list::count_own_by_status
+//!
+//! **FR-RPT-006 ([#461]) is the one widget that reads the workflow's own table
+//! over the documents' author**, and it is a fifth read rather than a widening
+//! of one of the four. *How long did my documents take* joins `workflow_instances`
+//! to `documents.created_by` — the population the status card counts — and the
+//! statement lives in the workflow module, which owns the instances and the
+//! outcomes it filters on. **D-83** fixed what it measures: one time per
+//! document, from its first instance's start to the decision.
+//!
+//! [#461]: https://github.com/sujanto-gaws/kelir/issues/461
+//! [`workflow::service::instance::approval_time`]: crate::modules::workflow::service::instance::approval_time
 //!
 //! # One permission, and the invariant that makes one enough
 //!
@@ -205,8 +217,11 @@
 //!
 //! # What is not here
 //!
-//! **A tenant-wide status summary.** FR-RPT-004 is built, over the caller's own
-//! documents; the section above says what the other reading would need.
+//! **A tenant-wide status summary, or a tenant-wide approval time.** FR-RPT-004
+//! and FR-RPT-006 are built over the caller's own documents (**D-82**, **D-83**);
+//! the section above says what the other reading would need, and
+//! `workflow::repository::instance::decided_document_seconds` says the same for
+//! the approval time, where an author reaching for it will be standing.
 //! FR-RPT-003 was this module's last Sprint 17 row, and FR-RPT-005 and FR-RPT-004
 //! are Sprint 18's (**D-77**). All three extended [`domain::DashboardSummary`]
 //! the way FR-RPT-002 did — a field beside the others rather than an endpoint
@@ -248,7 +263,12 @@
 //! a chart, and the library is the frontend's choice, recorded in ADR-0040
 //! rather than arriving as a transitive dependency of a card. What the server
 //! sends is ten counts in a fixed order: an axis a client can draw, and no
-//! opinion about how.
+//! opinion about how. FR-RPT-006 sends three numbers and draws nothing.
+//!
+//! **Which document was slowest.** The approval time card carries the slowest
+//! *time*, not the document behind it. D-83 asked for the median, the slowest
+//! and the count; a row naming the document would be a list with one entry, and
+//! the document list is where a person looks for rows.
 //!
 //! **Export.** FR-RPT-008 (CSV, Excel) is unscheduled in the
 //! [Product Backlog](../../../../projects/planning/02.%20Product%20Backlog.md).
@@ -323,3 +343,18 @@ pub const OVERDUE_TASKS_SHOWN: i64 = 5;
 ///
 /// [#433]: https://github.com/sujanto-gaws/kelir/issues/433
 pub const RECENT_DOCUMENTS_SHOWN: i64 = 5;
+
+/// How far back a decision counts on the approval time card, in days
+/// (FR-RPT-006, [#461]).
+///
+/// **Ninety, and it is D-83's number**, by the final decision's `completed_at`.
+/// A window keeps the card about how approval goes *now* — a document decided a
+/// year ago under a different workflow is not evidence about this quarter — and
+/// keeps the read the width of one person's recent history.
+///
+/// **It is this module's decision for the reason [`PENDING_TASKS_SHOWN`] is**:
+/// `approval_time` takes the number and has no opinion about it, and the summary
+/// serves it back as `windowDays` so the card does not hold a second copy.
+///
+/// [#461]: https://github.com/sujanto-gaws/kelir/issues/461
+pub const APPROVAL_TIME_WINDOW_DAYS: i32 = 90;
