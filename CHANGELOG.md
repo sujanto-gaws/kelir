@@ -9,6 +9,27 @@ While the major version is `0`, the public API may change in any release.
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- **A draft form that uses `\b`, `\B`, a POSIX bracket expression such as
+  `[[:digit:]]`, or `\p{…}`/`\P{…}` in a pattern can no longer be published**
+  ([#413](https://github.com/sujanto-gaws/kelir/issues/413),
+  [#465](https://github.com/sujanto-gaws/kelir/issues/465)). This release
+  refuses those constructs where a definition is written, because the browser
+  and the server decide them differently. **Publishing re-validates the stored
+  definition**, so a draft saved under `0.7.0` with one of them is refused when
+  it is published, and so is a new revision copied from a published form that
+  has one, even if only its title changed. A form **already published** is not
+  reopened and keeps working as it did. **Before upgrading, find the patterns**
+  (`validation.pattern` and `regex` rules) that use them and write each out:
+  `[0-9]` for a digit class, and a boundary re-expressed with the characters
+  around it, such as `(^|[^A-Za-z0-9_])`.
+- **The refusal is a list, not a guarantee of agreement.** A pattern the
+  server accepts may still decide some inputs differently in the browser, for
+  example `.` against an emoji or an inline flag such as `(?i)`. The
+  [Validation Rule Registry](docs/schema/JFSS%20Validation%20Rule%20Registry.md)
+  1.5.1 lists the known cases and the subset that is safe.
+
 ### Fixed
 
 - **A rollback that worked no longer exits 1**

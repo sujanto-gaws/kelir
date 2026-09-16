@@ -155,12 +155,16 @@ export const VALIDATION_RULES: Readonly<Record<string, RegistryRule>> = {
    * that means the two sides can reach opposite verdicts on the same input,
    * with nothing raised on either.
    *
-   * **That is closed at the write rather than here** (**D-15**,
+   * **It is narrowed at the write rather than here** (**D-15**,
    * [ADR-0038](../../../../../docs/architectures/adr/0038.%20Kelir%20Patterns%20Are%20the%20Linear-Time%20Subset.md);
-   * Validation Rule Registry 1.5.0). A definition carrying a construct the two
-   * engines read differently — a bare `\d`, `\w` or `\s`, a POSIX bracket
-   * expression, `\p{…}`, or `\b` — is refused by the server when it is saved,
-   * so a pattern that reaches this function is one both sides agree about.
+   * Validation Rule Registry 1.5.1). A definition carrying a construct on the
+   * server's list — a bare `\d`, `\w` or `\s`, a POSIX bracket expression,
+   * `\p{…}`, or `\b` — is refused when it is saved. **That list is not every
+   * divergence** (#465): `.` against a character outside the BMP, set
+   * operations, `\A`/`\z` and inline flags such as `(?i)` are still stored,
+   * and the last kind cannot be built here at all, so every value fails. A
+   * pattern that reaches this function is one the server did not refuse, not
+   * one both sides are known to agree about.
    * **Nothing is checked here**, deliberately: a second scan in the renderer
    * would be a second definition of the dialect, and the two would drift.
    *
