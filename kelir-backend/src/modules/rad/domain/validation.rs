@@ -151,11 +151,12 @@ fn registry_rule(name: &str) -> Option<RegistryRule> {
         // ECMA-262 reads it as ASCII. For a `both`-scoped rule that means the
         // two sides can reach opposite verdicts on one input.
         //
-        // **That is closed at the write rather than here** (**D-15**, ADR-0038;
-        // registry 1.5.0). `refuse_pattern` refuses a definition carrying a
-        // construct the two engines read differently, so a pattern reaching
-        // this arm is one both sides agree about. Nothing is re-checked here:
-        // a second scan would be a second definition of the dialect.
+        // **It is narrowed at the write rather than here** (**D-15**, ADR-0038;
+        // registry 1.5.1). `refuse_pattern` refuses a definition carrying a
+        // construct on its list, and **the list is not every divergence**
+        // (#465): a pattern reaching this arm is one the list does not name,
+        // not one both sides are known to agree about. Nothing is re-checked
+        // here: a second scan would be a second definition of the dialect.
         //
         // An uncompilable pattern is a violation rather than a pass, which is
         // the browser's `catch` arm too: a rule that could not be applied has
@@ -501,6 +502,16 @@ fn compile_reason(error: &regex::Error) -> String {
 /// - **Not covered, and it is a limit rather than a decision:** a divergence
 ///   neither engine expresses as syntax — case folding under `i` differs on a
 ///   handful of code points, and nothing here detects that.
+/// - **Not covered, and not known to be covered until 2026-09-16** (#465,
+///   record 16 finding 2): constructs this crate compiles that ECMA-262 reads
+///   differently or refuses. They include `.` against `\r`, U+2028 and
+///   characters outside the BMP; an astral literal in a class; nested classes
+///   and set operations (`[[a-c]]`, `&&`, `--`); braced and 8-digit escapes
+///   (`\x{41}`, `\u{41}`, `\U00000041`); `\A`, `\z`, `\<`, `\>` and `\a`;
+///   inline flags and named groups (`(?i)`, `(?P<x>…)`, `(?x)`); and `$` under
+///   `m` before `\r\n`. **This scan is a list, so a construct missing from it
+///   is stored**; ADR-0038's 2026-09-16 amendment says what that means for the
+///   dialect.
 ///
 /// [coding standard]: ../../../../../docs/standards/01.%20Coding%20Standard.md
 fn divergent_construct(pattern: &str) -> Option<DivergentConstruct> {
