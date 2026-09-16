@@ -69,8 +69,8 @@
 //! CI and the history was not there to ask; **since [#453](https://github.com/sujanto-gaws/kelir/issues/453)
 //! the backend job fetches all of it**, for rules 4–6 below. The trailer check
 //! is still not attempted here — it is a claim about *who* read a range rather
-//! than *what* changed in it, and that question is
-//! [#448](https://github.com/sujanto-gaws/kelir/issues/448)'s. This is the
+//! than *what* changed in it, and sprint plan §2 records that nothing asks it
+//! ([#448](https://github.com/sujanto-gaws/kelir/issues/448)). This is the
 //! reachable half: the record exists, or the report says it does not.
 //!
 //! **Whether a verification record is any good.** A record naming a sprint
