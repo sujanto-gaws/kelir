@@ -105,8 +105,8 @@
 //!   ([finding 4](../../projects/verifications/15.%20Sprint%2016%20Independent%20Pass.md)).
 //!   Since [#453](https://github.com/sujanto-gaws/kelir/issues/453) the backend
 //!   job fetches full history; reading a named reader's absence from trailers
-//!   is [#448](https://github.com/sujanto-gaws/kelir/issues/448)'s question
-//!   and is still not asked.
+//!   is still not asked, and sprint plan §2 has said so since
+//!   [#448](https://github.com/sujanto-gaws/kelir/issues/448).
 //! - **Cite a record that is new, resolves, is numbered above the high-water
 //!   mark, and read none of this release's work.** Rule 7 sharpens rule 2's
 //!   *new* and does not make it *relevant*. Matching a release to the sprints
