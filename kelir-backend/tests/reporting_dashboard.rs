@@ -1189,6 +1189,129 @@ async fn a_viewer_with_nothing_waiting_gets_an_empty_list_and_a_zero() {
 /// their grant names, which is the fixture that makes the clause observable: a
 /// predicate that dropped it lists Finance's task on Procurement's dashboard,
 /// and every other assertion in this file would still pass.
+/// **[#487]: a task offered to a deleted role stayed *waiting for you*.**
+///
+/// Record 17 finding 6. Deleting a role stamps `roles.deleted_at` and leaves
+/// `user_roles` live, and the inbox's holder predicate read only the grant. So
+/// the widget, the inbox and the task page all kept offering a task whose
+/// decision then refused as `ASSIGNMENT_UNRESOLVED`, and the count never fell.
+///
+/// **One holder per outcome.** `gone` holds the dashboard on one role and the
+/// queue on a second, which is deleted. `kept` has the same arrangement on a
+/// queue that is not deleted, **the second subject**: a predicate that dropped
+/// every role-offered task would pass the first half and fail this one.
+///
+/// **Every surface the predicate reaches is asserted**, not only the card: the
+/// summary's count and rows, the inbox page, the task page (the visibility
+/// gate), and a claim (`holds_role`), which would otherwise hand the holder a
+/// task nobody can decide.
+///
+/// **Seen red, 2026-09-17**: without the `roles` join in the list statement,
+/// the test fails at `gone`'s widget rows.
+///
+/// [#487]: https://github.com/sujanto-gaws/kelir/issues/487
+#[tokio::test]
+async fn a_task_offered_to_a_deleted_role_leaves_the_widget_and_the_inbox() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let gone_dashboard = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "RD-GONE-DASH",
+        HOLDER_PERMISSIONS,
+    )
+    .await;
+    let gone_queue = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "RD-GONE-QUEUE",
+        &[],
+    )
+    .await;
+    let gone = user_with_roles(&app, "rd.gone", &[gone_dashboard, gone_queue]).await;
+
+    let kept_dashboard = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "RD-KEPT-DASH",
+        HOLDER_PERMISSIONS,
+    )
+    .await;
+    let kept_queue = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "RD-KEPT-QUEUE",
+        &[],
+    )
+    .await;
+    let kept = user_with_roles(&app, "rd.kept", &[kept_dashboard, kept_queue]).await;
+
+    let gone_workflow = publish_workflow(&app, &token, "rd_gone", "RD-GONE-QUEUE").await;
+    let kept_workflow = publish_workflow(&app, &token, "rd_kept", "RD-KEPT-QUEUE").await;
+    let gone_type = document_type(&app, &token, "RD_GONE", gone_workflow).await;
+    let kept_type = document_type(&app, &token, "RD_KEPT", kept_workflow).await;
+    submitted_document(&app, &token, gone_type, "Offered to a role about to go").await;
+    submitted_document(&app, &token, kept_type, "Offered to a role that stays").await;
+
+    // Before: each holder is offered their one task, on every surface.
+    let before = summary_of(&app, &gone).await;
+    assert_eq!(before["tasksWaiting"], 1, "{before}");
+    let task = pending_ids(&before);
+    assert_eq!(task.len(), 1, "{before}");
+    let task = task[0].clone();
+    assert_eq!(inbox_ids(&app, &gone).await, std::slice::from_ref(&task));
+    assert_eq!(summary_of(&app, &kept).await["tasksWaiting"], 1);
+
+    let deleted = app
+        .delete(
+            &format!("/api/v1/identity/roles/{gone_queue}"),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
+
+    // After: the deleted role's task has left every surface.
+    let after = summary_of(&app, &gone).await;
+    assert!(
+        pending_ids(&after).is_empty(),
+        "the widget still lists a task offered to a deleted role: {after}"
+    );
+    assert_eq!(after["tasksWaiting"], 0, "{after}");
+    assert!(
+        inbox_ids(&app, &gone).await.is_empty(),
+        "the inbox still lists a task offered to a deleted role"
+    );
+
+    let detail = app.get(&format!("{TASKS}/{task}"), Some(&gone)).await;
+    assert_eq!(
+        detail.status,
+        StatusCode::NOT_FOUND,
+        "the task page still opens for a deleted role's task: {}",
+        detail.body
+    );
+
+    let claimed = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/claim"),
+            Some(&gone),
+            serde_json::json!({}),
+        )
+        .await;
+    assert_eq!(
+        claimed.status,
+        StatusCode::FORBIDDEN,
+        "a holder of a deleted role could still claim its task: {}",
+        claimed.body
+    );
+
+    // The second subject: a live role's task is still offered.
+    let kept_after = summary_of(&app, &kept).await;
+    assert_eq!(kept_after["tasksWaiting"], 1, "{kept_after}");
+    assert_eq!(pending_ids(&kept_after).len(), 1, "{kept_after}");
+    assert_eq!(inbox_ids(&app, &kept).await.len(), 1);
+}
+
 #[tokio::test]
 async fn a_department_scoped_task_reaches_only_that_departments_widget() {
     let app = TestApp::spawn().await;

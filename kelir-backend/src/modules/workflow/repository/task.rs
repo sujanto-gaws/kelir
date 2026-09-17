@@ -518,6 +518,11 @@ pub struct Decision<'a> {
 /// working control. The validity window is honoured in the same predicate,
 /// because a grant that has expired is not a grant.
 ///
+/// **So is the role itself** ([#487](https://github.com/sujanto-gaws/kelir/issues/487)):
+/// deleting a role leaves its `user_roles` rows live, and without the join a
+/// holder of a deleted role could still claim that role's task and then be
+/// refused its decision.
+///
 /// # The department half, and what an unscoped grant means
 ///
 /// `DEPARTMENT_ROLE` resolves to a role **and** a department
@@ -551,11 +556,14 @@ pub async fn holds_role<'e, E: PgExecutor<'e>>(
     let found = sqlx::query_scalar!(
         r#"
         SELECT 1 AS "found!"
-        FROM user_roles
-        WHERE tenant_id = $1 AND user_id = $2 AND role_id = $3 AND deleted_at IS NULL
-          AND (valid_from IS NULL OR valid_from <= current_date)
-          AND (valid_to   IS NULL OR valid_to   >= current_date)
-          AND ($4::uuid IS NULL OR department_id IS NULL OR department_id = $4)
+        FROM user_roles ur
+        JOIN roles ro ON ro.id = ur.role_id AND ro.tenant_id = ur.tenant_id
+                     AND ro.deleted_at IS NULL
+        WHERE ur.tenant_id = $1 AND ur.user_id = $2 AND ur.role_id = $3
+          AND ur.deleted_at IS NULL
+          AND (ur.valid_from IS NULL OR ur.valid_from <= current_date)
+          AND (ur.valid_to   IS NULL OR ur.valid_to   >= current_date)
+          AND ($4::uuid IS NULL OR ur.department_id IS NULL OR ur.department_id = $4)
         LIMIT 1
         "#,
         tenant_id,
