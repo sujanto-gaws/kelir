@@ -59,6 +59,16 @@ fn workflow_for(key: &str, role_code: &str) -> Value {
 }
 
 async fn publish_workflow(app: &TestApp, token: &str, key: &str, role_code: &str) -> Uuid {
+    publish_workflow_definition(app, token, key, workflow_for(key, role_code)).await
+}
+
+/// The same, for a definition `workflow_for` does not write.
+async fn publish_workflow_definition(
+    app: &TestApp,
+    token: &str,
+    key: &str,
+    definition: Value,
+) -> Uuid {
     let created = app
         .post(
             "/api/v1/workflow/definitions",
@@ -66,7 +76,7 @@ async fn publish_workflow(app: &TestApp, token: &str, key: &str, role_code: &str
             json!({
                 "workflowKey": key,
                 "name": "Standard approval",
-                "definition": workflow_for(key, role_code),
+                "definition": definition,
             }),
         )
         .await;
@@ -1092,4 +1102,322 @@ async fn the_count_the_page_and_the_gate_agree_when_a_document_is_gone() {
         "the gate and the read agree: {}",
         detail.body
     );
+}
+
+// ---------------------------------------------------------------------------
+// D-89 — a role with open work is not deleted out from under it (#487)
+// ---------------------------------------------------------------------------
+
+/// **A role with an open task is not deleted, and is once the task is decided**
+/// (**D-89**, [#487]).
+///
+/// Deleting a role used to answer 204 whatever was waiting on it, leaving its
+/// open tasks offered to nobody and their documents in `PENDING_APPROVAL`. The
+/// refusal is a 409 that says how many, and **nothing changes**: the role is
+/// still live and its holder is still offered the task. The last step is the
+/// other half: the same delete succeeds once the task has been decided, so the
+/// refusal is about the open task and not about the role.
+///
+/// **Seen red** against `identity::service::delete_role` with the count's
+/// refusal removed: the first delete answers 204.
+///
+/// [#487]: https://github.com/sujanto-gaws/kelir/issues/487
+#[tokio::test]
+async fn a_role_with_an_open_task_is_not_deleted_until_the_task_is_decided() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let (role, approver) = holder(&app, "TI-D89-OPEN", "ti.d89.open").await;
+
+    let workflow = publish_workflow(&app, &token, "ti_d89_open", "TI-D89-OPEN").await;
+    let type_id = document_type(&app, &token, "TI_D89_OPEN", workflow).await;
+    let document = submitted_document(&app, &token, type_id, "Waiting on the role").await;
+    let task = open_task_of(&app, document).await;
+
+    let refused = delete_role(&app, &token, role).await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::CONFLICT,
+        "a role with an open task was deleted: {}",
+        refused.body
+    );
+    assert_eq!(
+        refused.body["error"]["code"], "CONFLICT",
+        "{}",
+        refused.body
+    );
+    assert!(
+        refused.body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("1 open task needs")),
+        "the refusal says how many tasks: {}",
+        refused.body
+    );
+
+    let still = app
+        .get(&format!("/api/v1/identity/roles/{role}"), Some(&token))
+        .await;
+    assert_eq!(
+        still.status,
+        StatusCode::OK,
+        "the role is still live: {}",
+        still.body
+    );
+
+    let inbox = app.get(TASKS, Some(&approver)).await;
+    assert_eq!(
+        inbox.body["data"].as_array().expect("a page").len(),
+        1,
+        "the holder is still offered the task: {}",
+        inbox.body
+    );
+
+    decide(&app, &approver, task).await;
+
+    let deleted = delete_role(&app, &token, role).await;
+    assert_eq!(
+        deleted.status,
+        StatusCode::NO_CONTENT,
+        "with nothing open, the role deletes: {}",
+        deleted.body
+    );
+}
+
+/// **A claimed task holds its role, and so does a transition that names it**
+/// (**D-89**).
+///
+/// Both look safe and are not. A claimed task names its assignee, but a
+/// decision resolves the transition's `allowedBy` again, and `ROLE:X` with X
+/// gone refuses it as `ASSIGNMENT_UNRESOLVED`. The second is the same refusal
+/// reached from a role the task was never offered to: JWSS §5 lets a task's
+/// `assignment` and its edges' `allowedBy` name different roles.
+///
+/// So the fixture offers the task to one role, `queue`, and lets a second,
+/// `edge`, decide it, and the approver holds both and claims the task. **An
+/// unrelated role deletes**, which is the second subject: a refusal of every
+/// delete while anything is open would pass the two 409s.
+///
+/// **Seen red** twice against `count_open_tasks_needing_role`: without its
+/// `candidate_role_id` clause the `queue` delete answers 204, and without its
+/// `workflow_transitions` clause the `edge` delete does.
+#[tokio::test]
+async fn a_claimed_task_and_a_transition_each_hold_the_role_they_need() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let permissions = &[
+        "workflow:task:read",
+        "workflow:task:execute",
+        "workflow:instance:read",
+        "document:read",
+    ];
+    let queue = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "TI-D89-QUEUE",
+        permissions,
+    )
+    .await;
+    let edge = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "TI-D89-EDGE",
+        &[],
+    )
+    .await;
+    let unrelated = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "TI-D89-UNRELATED",
+        &[],
+    )
+    .await;
+    fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "ti.d89.both",
+        "ti.d89.both@example.test",
+        common::ADMIN_PASSWORD,
+        &[queue, edge],
+    )
+    .await;
+    let approver = app.sign_in("ti.d89.both", common::ADMIN_PASSWORD).await;
+
+    let mut definition = workflow_for("ti_d89_edge", "TI-D89-QUEUE");
+    for transition in definition["transitions"]
+        .as_array_mut()
+        .expect("transitions")
+    {
+        transition["allowedBy"] = json!("ROLE:TI-D89-EDGE");
+    }
+    let workflow = publish_workflow_definition(&app, &token, "ti_d89_edge", definition).await;
+    let type_id = document_type(&app, &token, "TI_D89_EDGE", workflow).await;
+    let document =
+        submitted_document(&app, &token, type_id, "Claimed, decided by another role").await;
+    let task = open_task_of(&app, document).await;
+
+    let claim = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/claim"),
+            Some(&approver),
+            json!({}),
+        )
+        .await;
+    assert_eq!(claim.status, StatusCode::OK, "{}", claim.body);
+
+    let queue_refused = delete_role(&app, &token, queue).await;
+    assert_eq!(
+        queue_refused.status,
+        StatusCode::CONFLICT,
+        "a claimed task did not hold the role it was offered to: {}",
+        queue_refused.body
+    );
+
+    let edge_refused = delete_role(&app, &token, edge).await;
+    assert_eq!(
+        edge_refused.status,
+        StatusCode::CONFLICT,
+        "a transition did not hold the role its allowedBy names: {}",
+        edge_refused.body
+    );
+
+    let unrelated_deleted = delete_role(&app, &token, unrelated).await;
+    assert_eq!(
+        unrelated_deleted.status,
+        StatusCode::NO_CONTENT,
+        "a role no open task needs was refused: {}",
+        unrelated_deleted.body
+    );
+
+    decide(&app, &approver, task).await;
+
+    for role in [queue, edge] {
+        let deleted = delete_role(&app, &token, role).await;
+        assert_eq!(
+            deleted.status,
+            StatusCode::NO_CONTENT,
+            "with the task decided, the role deletes: {}",
+            deleted.body
+        );
+    }
+}
+
+async fn delete_role(app: &TestApp, token: &str, role: Uuid) -> common::TestResponse {
+    app.delete(&format!("/api/v1/identity/roles/{role}"), Some(token))
+        .await
+}
+
+async fn decide(app: &TestApp, token: &str, task: Uuid) {
+    let decided = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(token),
+            json!({ "action": "APPROVE" }),
+        )
+        .await;
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+}
+
+/// **A task cannot be offered to a role while its delete is under way**
+/// (**D-89**).
+///
+/// The delete counts open tasks under a `FOR UPDATE` lock on the role row, and
+/// the count is only true if no task can arrive before the delete commits. A
+/// task being raised is invisible to the count until its own transaction
+/// commits, and the foreign key does not stop it, because a soft delete leaves
+/// the key alone. So the transition takes `FOR KEY SHARE` on the role it
+/// resolves, and waits.
+///
+/// The test holds the delete's half itself, in a transaction on the pool, so it
+/// controls the moment between the lock and the commit: it locks the row,
+/// starts a submission, soft-deletes the role and commits. The submission must
+/// have waited, and must then find the role gone and refuse as
+/// `ASSIGNMENT_UNRESOLVED`, with no task written.
+///
+/// **Seen red** against `workflow::service::assignment::direct` without its
+/// `FOR KEY SHARE`: the submission answers 200 and a task is offered to the
+/// deleted role.
+#[tokio::test]
+async fn a_submission_racing_a_role_delete_waits_and_then_finds_the_role_gone() {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+
+    let (role, _) = holder(&app, "TI-D89-RACE", "ti.d89.race").await;
+
+    let workflow = publish_workflow(&app, &token, "ti_d89_race", "TI-D89-RACE").await;
+    let type_id = document_type(&app, &token, "TI_D89_RACE", workflow).await;
+
+    let created = app
+        .post(
+            "/api/v1/documents",
+            Some(&token),
+            json!({
+                "documentTypeId": type_id,
+                "title": "Submitted during a delete",
+                "formData": { "amount": 1_000 },
+            }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let document = id_of(&created.body["data"]);
+
+    let mut delete = app.pool.begin().await.expect("a transaction");
+    sqlx::query("SELECT id FROM roles WHERE id = $1 FOR UPDATE")
+        .bind(role)
+        .execute(&mut *delete)
+        .await
+        .expect("the delete's lock");
+
+    let submission = {
+        let app = Arc::clone(&app);
+        let token = token.clone();
+        tokio::spawn(async move {
+            app.send(
+                Method::POST,
+                &format!("/api/v1/documents/{document}/submission"),
+                Some(&token),
+                None,
+            )
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !submission.is_finished(),
+        "the submission did not wait for the role's delete"
+    );
+
+    sqlx::query("UPDATE roles SET deleted_at = now() WHERE id = $1")
+        .bind(role)
+        .execute(&mut *delete)
+        .await
+        .expect("the delete");
+    delete.commit().await.expect("the delete commits");
+
+    let submitted = submission.await.expect("the submission did not panic");
+
+    assert_eq!(
+        submitted.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a task was offered to a role deleted under it: {}",
+        submitted.body
+    );
+    assert!(
+        submitted.body.to_string().contains("ASSIGNMENT_UNRESOLVED"),
+        "{}",
+        submitted.body
+    );
+
+    let tasks: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM workflow_tasks WHERE document_id = $1")
+            .bind(document)
+            .fetch_one(&app.pool)
+            .await
+            .expect("count the tasks");
+    assert_eq!(tasks, 0, "no task was written");
 }

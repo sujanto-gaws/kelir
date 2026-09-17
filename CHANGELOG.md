@@ -9,6 +9,22 @@ While the major version is `0`, the public API may change in any release.
 
 ## [Unreleased]
 
+### Changed
+
+- **A role that an open task still needs cannot be deleted**
+  ([#487](https://github.com/sujanto-gaws/kelir/issues/487), decision **D-89**).
+  `DELETE /api/v1/identity/roles/{id}` used to answer 204 whatever was
+  waiting on the role. It now answers **409 `CONFLICT`**, says how many
+  open tasks need the role, and changes nothing. A task needs a role when it
+  is offered to it, **claimed or not**, or when a decision it offers is
+  `allowedBy` that role. Once those tasks are decided the delete goes
+  through. **No route reassigns or cancels a task yet**, so deciding them is
+  the one way to clear the way. A document submitted while a role is being
+  deleted waits for the delete, then is refused as `ASSIGNMENT_UNRESOLVED`
+  if the delete went through, with nothing written.
+  **Upgrade:** a role deleted before this release, with tasks still open,
+  stays as it was: those tasks are offered to nobody.
+
 ### Fixed
 
 - **A task offered to a deleted role is no longer *waiting for you***
@@ -17,9 +33,9 @@ While the major version is `0`, the public API may change in any release.
   on the inbox, the dashboard's waiting count and its pending-task card, and
   its page opened and could be claimed, while deciding it failed with
   `ASSIGNMENT_UNRESOLVED`. A grant of a deleted role is no longer read as a
-  grant anywhere the inbox or a claim asks who holds a task. **The task itself
-  stays open and is now offered to nobody.** What deleting a role should do to
-  its open tasks is decision **D-89**, still open.
+  grant anywhere the inbox or a claim asks who holds a task. Such a task
+  stays open and is offered to nobody, and a role can no longer be deleted
+  into that state (see *Changed*, **D-89**).
 - **A role or user that lists one id twice is refused with a 422, not a 500**
   ([#469](https://github.com/sujanto-gaws/kelir/issues/469)). A repeated id in
   a role's `permissionIds` or a user's `roleIds` reached a unique constraint

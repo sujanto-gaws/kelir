@@ -13,6 +13,7 @@ use crate::middleware::auth::Authenticated;
 use crate::modules::audit::{self, domain::ObjectType, AuditEntry};
 use crate::modules::auth::password::hash_password;
 use crate::modules::organization::department_repository as department_repo;
+use crate::modules::workflow::service::task as workflow_task;
 use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
 
@@ -443,21 +444,50 @@ pub async fn delete_role(
 ) -> Result<(), AppError> {
     caller.require("identity:role:delete")?;
 
-    let removed =
-        repo::soft_delete_role(&state.pool, caller.tenant_id(), id, Some(caller.user_id())).await?;
+    let tenant_id = caller.tenant_id();
+    let mut transaction = state.pool.begin().await?;
 
-    if removed == 0 {
-        // Either it does not exist or it is a system role. The repository guards
-        // is_system, so tell the caller which rather than a bare 404.
-        let exists = repo::find_role(&state.pool, caller.tenant_id(), id).await?;
+    let is_system = repo::lock_role_for_delete(&mut transaction, tenant_id, id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Role"))?;
 
-        return match exists {
-            Some(role) if role.is_system => Err(AppError::conflict(
-                "System roles cannot be deleted; a tenant would be left unable to grant permissions",
-            )),
-            _ => Err(AppError::not_found("Role")),
-        };
+    if is_system {
+        return Err(AppError::conflict(
+            "System roles cannot be deleted; a tenant would be left unable to grant permissions",
+        ));
     }
+
+    // **D-89** (#487): a role an open task still needs is not deleted. Deleting
+    // it would leave the task open, holding its document, and decidable by
+    // nobody: offered to a role nobody holds, or with every decision refused as
+    // `ASSIGNMENT_UNRESOLVED`. The count says which tasks need a role.
+    //
+    // Counted under the row lock above, which a transition offering a new task
+    // to this role waits on (`workflow::service::assignment`'s `FOR KEY SHARE`),
+    // so that task cannot arrive between this count and the delete (coding
+    // standard §2.5). A task raised before the lock is counted; one raised after
+    // the commit finds the role gone and is refused as `ASSIGNMENT_UNRESOLVED`.
+    // **Not covered**: a task offered to another role, arriving in a state whose
+    // `allowedBy` names this one. Nothing resolves `allowedBy` when the task is
+    // raised, so nothing waits on this lock.
+    let open = workflow_task::open_tasks_needing_role(&mut transaction, tenant_id, id).await?;
+
+    if open > 0 {
+        let tasks = if open == 1 {
+            "task needs"
+        } else {
+            "tasks need"
+        };
+
+        return Err(AppError::conflict(format!(
+            "{open} open {tasks} this role to be decided, and deleting it would leave nobody \
+             able to decide them. They need to be decided first"
+        )));
+    }
+
+    repo::soft_delete_role(&mut *transaction, tenant_id, id, Some(caller.user_id())).await?;
+
+    transaction.commit().await?;
 
     audit_permission_change(state, caller, id, "Role.Deleted", "DELETE", &[]).await;
 

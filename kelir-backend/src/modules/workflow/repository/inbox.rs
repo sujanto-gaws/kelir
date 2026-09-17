@@ -60,9 +60,9 @@
 //! inbox and the dashboard while its decision refused as
 //! `ASSIGNMENT_UNRESOLVED`, with a count that never fell. Each copy of the rule
 //! below now joins the role and requires it live, as
-//! [`super::task::holds_role`] does. **What deleting a role should do to its open
-//! tasks is a separate question**, **D-89**, and this only stops offering work
-//! nobody can do.
+//! [`super::task::holds_role`] does. **Deleting a role that open tasks still
+//! need is now refused** (**D-89**, `identity::service::delete_role`), so the
+//! rows this clause excludes are the ones deleted before that refusal shipped.
 //!
 //! [#487]: https://github.com/sujanto-gaws/kelir/issues/487
 //!

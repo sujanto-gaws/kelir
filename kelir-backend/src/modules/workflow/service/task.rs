@@ -765,3 +765,22 @@ async fn load(state: &AppState, tenant_id: Uuid, id: Uuid) -> Result<WorkflowTas
             source: anyhow::anyhow!("task {id} vanished after it was written"),
         })
 }
+
+/// How many open tasks could not be decided if `role_id` were deleted
+/// (**D-89**, [#487]). `repository::task::count_open_tasks_needing_role` says
+/// what *needs* means.
+///
+/// `identity::service::delete_role` asks, and refuses the delete while the
+/// answer is not zero. It takes the caller's transaction because the answer is
+/// only true under the lock that transaction holds on the role row: see that
+/// function for the lock, and `assignment::direct` for the one task creation
+/// takes against it.
+///
+/// [#487]: https://github.com/sujanto-gaws/kelir/issues/487
+pub async fn open_tasks_needing_role(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    role_id: Uuid,
+) -> Result<i64, AppError> {
+    Ok(repo::count_open_tasks_needing_role(&mut **transaction, tenant_id, role_id).await?)
+}

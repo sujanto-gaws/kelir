@@ -1173,28 +1173,19 @@ async fn a_viewer_with_nothing_waiting_gets_an_empty_list_and_a_zero() {
     );
 }
 
-/// **A department-scoped task is on that department's widget and no other**
-/// ([#432] AC6).
-///
-/// # One of the two cases that has already cost this project a fix
-///
-/// The `candidate_department_id` clause arrived with
-/// [#225](https://github.com/sujanto-gaws/kelir/issues/225), which closed the
-/// half of `DEPARTMENT_ROLE` that was resolved, stored and then read by
-/// nothing. It is the clause a fresh implementation of *whose task is this*
-/// leaves out first, and the widget inherits it only because it inherits the
-/// whole statement.
-///
-/// Both approvers hold the **same role** and differ only in the department
-/// their grant names, which is the fixture that makes the clause observable: a
-/// predicate that dropped it lists Finance's task on Procurement's dashboard,
-/// and every other assertion in this file would still pass.
 /// **[#487]: a task offered to a deleted role stayed *waiting for you*.**
 ///
 /// Record 17 finding 6. Deleting a role stamps `roles.deleted_at` and leaves
 /// `user_roles` live, and the inbox's holder predicate read only the grant. So
 /// the widget, the inbox and the task page all kept offering a task whose
 /// decision then refused as `ASSIGNMENT_UNRESOLVED`, and the count never fell.
+///
+/// **The role is soft-deleted in SQL, not through the API.** Since **D-89** the
+/// API refuses to delete a role with an open task
+/// (`task_inbox.rs`'s `a_role_with_an_open_task_is_not_deleted_until_the_task_is_decided`),
+/// so the state this test needs is reachable only as data: a role deleted
+/// before that refusal shipped, with its tasks still open. The predicate has to
+/// answer for those rows, whichever way they arrived.
 ///
 /// **One holder per outcome.** `gone` holds the dashboard on one role and the
 /// queue on a second, which is deleted. `kept` has the same arrangement on a
@@ -1263,13 +1254,11 @@ async fn a_task_offered_to_a_deleted_role_leaves_the_widget_and_the_inbox() {
     assert_eq!(inbox_ids(&app, &gone).await, std::slice::from_ref(&task));
     assert_eq!(summary_of(&app, &kept).await["tasksWaiting"], 1);
 
-    let deleted = app
-        .delete(
-            &format!("/api/v1/identity/roles/{gone_queue}"),
-            Some(&token),
-        )
-        .await;
-    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
+    sqlx::query("UPDATE roles SET deleted_at = now() WHERE id = $1")
+        .bind(gone_queue)
+        .execute(&app.pool)
+        .await
+        .expect("soft-delete the queue role");
 
     // After: the deleted role's task has left every surface.
     let after = summary_of(&app, &gone).await;
@@ -1312,6 +1301,22 @@ async fn a_task_offered_to_a_deleted_role_leaves_the_widget_and_the_inbox() {
     assert_eq!(inbox_ids(&app, &kept).await.len(), 1);
 }
 
+/// **A department-scoped task is on that department's widget and no other**
+/// ([#432] AC6).
+///
+/// # One of the two cases that has already cost this project a fix
+///
+/// The `candidate_department_id` clause arrived with
+/// [#225](https://github.com/sujanto-gaws/kelir/issues/225), which closed the
+/// half of `DEPARTMENT_ROLE` that was resolved, stored and then read by
+/// nothing. It is the clause a fresh implementation of *whose task is this*
+/// leaves out first, and the widget inherits it only because it inherits the
+/// whole statement.
+///
+/// Both approvers hold the **same role** and differ only in the department
+/// their grant names, which is the fixture that makes the clause observable: a
+/// predicate that dropped it lists Finance's task on Procurement's dashboard,
+/// and every other assertion in this file would still pass.
 #[tokio::test]
 async fn a_department_scoped_task_reaches_only_that_departments_widget() {
     let app = TestApp::spawn().await;
