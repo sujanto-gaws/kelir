@@ -1043,6 +1043,28 @@ async fn enter_once(
         let resolved =
             assignment::resolve(transaction, tenant_id, &spec.assignment, context, &path).await?;
 
+        // The roles that decide the task, held like the one it is offered to,
+        // so a role delete cannot strand it by naming only its edges (#509).
+        assignment::hold_deciding_roles(
+            transaction,
+            tenant_id,
+            graph
+                .transitions
+                .iter()
+                .filter(|edge| edge.from == state.code)
+                .filter_map(|edge| {
+                    let rule = edge.allowed_by.as_ref()?;
+                    let path = format!(
+                        "transitions.{}.{}.allowedBy",
+                        edge.from,
+                        edge.action.as_db()
+                    );
+
+                    Some((path, rule))
+                }),
+        )
+        .await?;
+
         let year = Utc::now().year();
         let task_ref = reference::allocate(transaction, tenant_id, RefKind::Task, year)
             .await

@@ -3244,3 +3244,137 @@ async fn a_draft_with_no_process_behind_it_is_still_discarded() {
         discarded.body
     );
 }
+
+// ---------------------------------------------------------------------------
+// The roles that decide a task are held when it is raised (#509, D-89)
+// ---------------------------------------------------------------------------
+
+/// **A task whose edge names a role that is gone is not raised** ([#509]).
+///
+/// The task is offered to `APPROVER_ROLE`, which exists, and its APPROVE edge is
+/// `allowedBy` a role that does not. Before #509 the submit succeeded and the
+/// approve was refused later as `ASSIGNMENT_UNRESOLVED`, on a document already
+/// `PENDING_APPROVAL`. Now the submit is refused with the same code, naming the
+/// edge, and rolls back whole.
+///
+/// The live-edge case is the second subject, and
+/// `a_transition_the_task_permits_but_allowed_by_refuses_is_forbidden` already
+/// raises it: the same shape with the edge's role created submits.
+///
+/// **Seen red** against `engine::enter_once` without its
+/// `assignment::hold_deciding_roles` call: the submit answers 200.
+///
+/// [#509]: https://github.com/sujanto-gaws/kelir/issues/509
+#[tokio::test]
+async fn an_edge_naming_a_role_that_is_gone_refuses_the_submit() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    approver_role(&app).await;
+
+    let workflow = publish_workflow(
+        &app,
+        &token,
+        split_control_workflow("wf_edge_gone", "WF-EDGE-NOT-THERE"),
+    )
+    .await;
+    let type_id = document_type(&app, &token, "PR_EDGE_GONE", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+
+    let refused = submit(&app, &token, id).await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a task nobody can approve was raised: {}",
+        refused.body
+    );
+    let details = refused.body["error"]["details"].to_string();
+    assert!(details.contains("ASSIGNMENT_UNRESOLVED"), "{details}");
+    assert!(
+        details.contains("transitions.MANAGER_APPROVAL.APPROVE.allowedBy.roleCode"),
+        "the refusal names the edge: {details}"
+    );
+
+    assert_eq!(stored_status(&app, id).await, "DRAFT");
+    assert!(instance_of(&app, id).await.is_none());
+}
+
+/// **A task cannot be raised while a role its edge names is being deleted**
+/// ([#509], **D-89**).
+///
+/// `identity::service::delete_role` counts the open tasks that need a role
+/// under `FOR UPDATE`, and a task whose edge names the role counts. A task
+/// offered to a different role used to read nothing of this one, so it did not
+/// wait for that lock, and it committed beside the delete.
+///
+/// The test holds the delete's half, as `task_inbox.rs`'s race test does: it
+/// locks the **edge** role, starts a submission of a task offered to
+/// `APPROVER_ROLE`, soft-deletes the edge role and commits. The submission must
+/// have waited, and must then refuse with nothing written.
+///
+/// **Seen red** against `assignment::hold_deciding_roles` without its
+/// `FOR KEY SHARE`: the submission does not wait.
+///
+/// [#509]: https://github.com/sujanto-gaws/kelir/issues/509
+#[tokio::test]
+async fn a_submission_racing_the_delete_of_its_edges_role_waits_and_refuses() {
+    use std::time::Duration;
+
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+
+    approver_role(&app).await;
+    let edge = given_bare_role(&app, "WF-EDGE-RACE").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &token,
+        split_control_workflow("wf_edge_race", "WF-EDGE-RACE"),
+    )
+    .await;
+    let type_id = document_type(&app, &token, "PR_EDGE_RACE", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+
+    let mut delete = app.pool.begin().await.expect("a transaction");
+    sqlx::query("SELECT id FROM roles WHERE id = $1 FOR UPDATE")
+        .bind(edge)
+        .execute(&mut *delete)
+        .await
+        .expect("the delete's lock");
+
+    let submission = {
+        let app = Arc::clone(&app);
+        let token = token.clone();
+        tokio::spawn(async move { submit(&app, &token, id).await })
+    };
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !submission.is_finished(),
+        "the submission did not wait for the delete of its edge's role"
+    );
+
+    sqlx::query("UPDATE roles SET deleted_at = now() WHERE id = $1")
+        .bind(edge)
+        .execute(&mut *delete)
+        .await
+        .expect("the delete");
+    delete.commit().await.expect("the delete commits");
+
+    let submitted = submission.await.expect("the submission did not panic");
+
+    assert_eq!(
+        submitted.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a task was raised on an edge whose role was deleted under it: {}",
+        submitted.body
+    );
+    assert!(
+        submitted.body.to_string().contains("ASSIGNMENT_UNRESOLVED"),
+        "{}",
+        submitted.body
+    );
+    assert_eq!(stored_status(&app, id).await, "DRAFT");
+    assert!(instance_of(&app, id).await.is_none());
+}

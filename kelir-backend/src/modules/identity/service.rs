@@ -462,14 +462,13 @@ pub async fn delete_role(
     // nobody: offered to a role nobody holds, or with every decision refused as
     // `ASSIGNMENT_UNRESOLVED`. The count says which tasks need a role.
     //
-    // Counted under the row lock above, which a transition offering a new task
-    // to this role waits on (`workflow::service::assignment`'s `FOR KEY SHARE`),
-    // so that task cannot arrive between this count and the delete (coding
-    // standard §2.5). A task raised before the lock is counted; one raised after
-    // the commit finds the role gone and is refused as `ASSIGNMENT_UNRESOLVED`.
-    // **Not covered**: a task offered to another role, arriving in a state whose
-    // `allowedBy` names this one. Nothing resolves `allowedBy` when the task is
-    // raised, so nothing waits on this lock.
+    // Counted under the row lock above, which a transition raising a task that
+    // needs this role waits on, whether the task is offered to the role or its
+    // edges name it (`workflow::service::assignment`'s `direct` and
+    // `hold_deciding_roles`, both `FOR KEY SHARE`, #509). So that task cannot
+    // arrive between this count and the delete (coding standard §2.5). A task
+    // raised before the lock is counted; one raised after the commit finds the
+    // role gone and is refused as `ASSIGNMENT_UNRESOLVED`.
     let open = workflow_task::open_tasks_needing_role(&mut transaction, tenant_id, id).await?;
 
     if open > 0 {

@@ -2,7 +2,7 @@
 **Version:** 1.0.0
 **Status:** Draft Standard
 **Target Stack:** Rust (Workflow Engine), Vue.js (Workflow Designer)
-**Last updated:** 2026-08-30
+**Last updated:** 2026-09-17
 
 ---
 
@@ -182,6 +182,8 @@ The same applies to `guards` and `actions`: they are **stored and not executed**
 **It authorizes; it does not select.** Where a state offers two transitions for one action, `condition` chooses between them (S7, fallback last) and `allowedBy` is then applied to the one chosen. A caller who may not take that edge is refused rather than routed down the next — an approver silently taking a branch the definition did not point them at is a worse outcome than the refusal, because a rejection routed as a return reads as their own decision.
 
 **A task's `assignment` and a transition's `allowedBy` are two controls and both apply.** They coincide in the common shape and §8's example has them differ: a `RESUBMIT` out of `RETURNED`, a state that declares no task at all.
+
+**A task is not raised when a role one of its edges names is not live.** Entering a state that declares a task resolves the task's `assignment`, and also checks that every `ROLE` or `DEPARTMENT_ROLE` named by the `allowedBy` of a transition out of that state is a live role in the tenant. If one is not, the transition is refused as `ASSIGNMENT_UNRESOLVED` at `transitions.<from>.<action>.allowedBy.roleCode`, as an unresolvable `assignment` is. A task whose decision is already certain to be refused is an approval that has silently stopped ([#509](https://github.com/sujanto-gaws/kelir/issues/509)). **One edge is enough**: a live `APPROVE` does not excuse a dead `REJECT`.
 
 ---
 
