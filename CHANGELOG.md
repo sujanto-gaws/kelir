@@ -24,6 +24,18 @@ While the major version is `0`, the public API may change in any release.
   if the delete went through, with nothing written.
   **Upgrade:** a role deleted before this release, with tasks still open,
   stays as it was: those tasks are offered to nobody.
+- **A task is not raised when a decision on it names a role that is gone**
+  ([#509](https://github.com/sujanto-gaws/kelir/issues/509)). A task offered to one role, in a state
+  whose `APPROVE` or `REJECT` is `allowedBy` a role that is not live, used to
+  be raised and then refuse that decision as `ASSIGNMENT_UNRESOLVED`, on a
+  document already `PENDING_APPROVAL`. The transition that would raise it is
+  now refused with the same code, naming the edge
+  (`transitions.<state>.<action>.allowedBy.roleCode`), and nothing is
+  written: a submit leaves the document in `DRAFT`. The roles an edge names
+  are also held while the task is raised, so a role delete can no longer slip
+  between them and strand the task. **Upgrade:** a published definition
+  whose edge names a role that no longer exists now refuses at submit rather
+  than at decision. Publish a revision naming a live role.
 
 ### Fixed
 

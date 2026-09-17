@@ -243,9 +243,9 @@ pub async fn permits(
 /// when the task referencing it is inserted. The foreign key keeps the row, and
 /// the `FOR KEY SHARE` in [`direct`] keeps it *live*, which a soft delete would
 /// otherwise change underneath the insert (**D-89**). The delegation window
-/// read below is in the same transaction for a second reason — the window that was open when the task was
-/// written is the window the task's `delegated_from_user_id` then claims was
-/// open.
+/// read below is in the same transaction for a second reason — the window that
+/// was open when the task was written is the window the task's
+/// `delegated_from_user_id` then claims was open.
 pub async fn resolve(
     transaction: &mut sqlx::PgTransaction<'_>,
     tenant_id: Uuid,
@@ -258,6 +258,90 @@ pub async fn resolve(
 
     // JWSS §5.1: **after the rule resolves**, and not part of it.
     redirect(transaction, tenant_id, resolved, context).await
+}
+
+/// Holds every role that decides a task being raised, and refuses the task if
+/// one is gone ([#509], **D-89**).
+///
+/// `edges` are the `(path, rule)` pairs of the transitions leaving the state
+/// the task is raised in. Each `ROLE` or `DEPARTMENT_ROLE` among them names a
+/// role a decision on the task will resolve again, through [`permits`].
+///
+/// # Why a task's own role is not enough
+///
+/// `identity::service::delete_role` counts the open tasks that need a role
+/// under `FOR UPDATE` on the role row, and counts a task whose edges name the
+/// role as well as one offered to it. [`direct`] makes a task **offered** to the
+/// role wait for that lock. A task offered to *another* role, whose edges name
+/// this one, read nothing here before [#509], so it did not wait. It committed
+/// alongside the delete, and every decision on it was refused.
+///
+/// **So each edge's role is read `FOR KEY SHARE` too**, for [`direct`]'s
+/// reason. A delete in progress makes this wait, and a role it deleted no
+/// longer matches when the wait ends.
+///
+/// # A role that is gone refuses the transition
+///
+/// That is the lock's other half, since a lock on a row that no longer matches
+/// holds nothing. It is also [`direct`]'s rule for a task's own role, applied to
+/// the roles that decide it: a task raised where a decision is already
+/// certain to be refused is an approval that has silently stopped. **One edge
+/// is enough.** A state whose `APPROVE` names a live role and whose `REJECT`
+/// names a deleted one would raise a task that can be approved and never
+/// rejected, and the delete count treats that task as needing both roles.
+///
+/// Before [#509] this refusal came at the decision, and the document had
+/// already been submitted.
+///
+/// [#509]: https://github.com/sujanto-gaws/kelir/issues/509
+pub async fn hold_deciding_roles<'a>(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    edges: impl IntoIterator<Item = (String, &'a AssignmentRule)>,
+) -> Result<(), AppError> {
+    // Once per role however many edges name it, in a stable order.
+    let mut roles = std::collections::BTreeMap::new();
+
+    for (path, rule) in edges {
+        if !matches!(
+            rule.assignee_type,
+            AssigneeType::Role | AssigneeType::DepartmentRole
+        ) {
+            continue;
+        }
+
+        let role_code = rule.role_code.clone().unwrap_or_default();
+        roles.entry(role_code).or_insert(path);
+    }
+
+    for (role_code, path) in roles {
+        let live = sqlx::query_scalar!(
+            r#"
+            SELECT id FROM roles
+            WHERE tenant_id = $1 AND role_code = $2 AND deleted_at IS NULL
+            FOR KEY SHARE
+            "#,
+            tenant_id,
+            role_code
+        )
+        .fetch_optional(&mut **transaction)
+        .await?;
+
+        if live.is_none() {
+            return Err(AppError::validation(vec![ValidationDetail::new(
+                format!("{path}.roleCode"),
+                "assignment",
+                "ASSIGNMENT_UNRESOLVED",
+                format!(
+                    "`{role_code}` is not a live role in this tenant. Every decision this \
+                     edge offers on the task this transition would create would be refused, \
+                     so the transition is refused rather than raising a task nobody can decide"
+                ),
+            )]));
+        }
+    }
+
+    Ok(())
 }
 
 /// An open window applied to a resolution ([#184] AC2).
