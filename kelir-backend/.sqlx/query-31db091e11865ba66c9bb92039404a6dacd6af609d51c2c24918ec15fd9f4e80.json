@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT 1 AS \"found!\"\n        FROM user_roles ur\n        JOIN roles ro ON ro.id = ur.role_id AND ro.tenant_id = ur.tenant_id\n                     AND ro.deleted_at IS NULL\n        WHERE ur.tenant_id = $1 AND ur.user_id = $2 AND ur.role_id = $3\n          AND ur.deleted_at IS NULL\n          AND (ur.valid_from IS NULL OR ur.valid_from <= current_date)\n          AND (ur.valid_to   IS NULL OR ur.valid_to   >= current_date)\n          AND ($4::uuid IS NULL OR ur.department_id IS NULL OR ur.department_id = $4)\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "found!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "31db091e11865ba66c9bb92039404a6dacd6af609d51c2c24918ec15fd9f4e80"
+}

@@ -53,6 +53,19 @@
 //! The grant's validity window is honoured in the same predicate, because a
 //! grant that has expired is not a grant.
 //!
+//! **And a grant of a deleted role is not a grant either** ([#487]). Deleting a
+//! role stamps `roles.deleted_at` and leaves `user_roles` alone, so the grant
+//! row stays live after the role behind it is gone. The predicate read only the
+//! grant, and a task offered to a deleted role stayed *waiting for you* on the
+//! inbox and the dashboard while its decision refused as
+//! `ASSIGNMENT_UNRESOLVED`, with a count that never fell. Each copy of the rule
+//! below now joins the role and requires it live, as
+//! [`super::task::holds_role`] does. **What deleting a role should do to its open
+//! tasks is a separate question**, **D-89**, and this only stops offering work
+//! nobody can do.
+//!
+//! [#487]: https://github.com/sujanto-gaws/kelir/issues/487
+//!
 //! # This lives in `workflow` and is called from `task_inbox`
 //!
 //! Coding standard §2.2 keeps a repository private to its module, with
@@ -331,6 +344,9 @@ pub async fn list_for_caller(
                 t.assignee_user_id = $2
              OR (t.assignee_user_id IS NULL AND EXISTS (
                     SELECT 1 FROM user_roles ur
+                    -- A grant of a deleted role is not a grant (#487).
+                    JOIN roles ro ON ro.id = ur.role_id AND ro.tenant_id = ur.tenant_id
+                                 AND ro.deleted_at IS NULL
                     WHERE ur.tenant_id = $1 AND ur.user_id = $2 AND ur.deleted_at IS NULL
                       AND ur.role_id = t.candidate_role_id
                       AND (ur.valid_from IS NULL OR ur.valid_from <= current_date)
@@ -466,6 +482,9 @@ pub async fn count_for_caller(
                 t.assignee_user_id = $2
              OR (t.assignee_user_id IS NULL AND EXISTS (
                     SELECT 1 FROM user_roles ur
+                    -- A grant of a deleted role is not a grant (#487).
+                    JOIN roles ro ON ro.id = ur.role_id AND ro.tenant_id = ur.tenant_id
+                                 AND ro.deleted_at IS NULL
                     WHERE ur.tenant_id = $1 AND ur.user_id = $2 AND ur.deleted_at IS NULL
                       AND ur.role_id = t.candidate_role_id
                       AND (ur.valid_from IS NULL OR ur.valid_from <= current_date)
@@ -529,6 +548,9 @@ pub async fn is_visible_to(
                 t.assignee_user_id = $2
              OR (t.assignee_user_id IS NULL AND EXISTS (
                     SELECT 1 FROM user_roles ur
+                    -- A grant of a deleted role is not a grant (#487).
+                    JOIN roles ro ON ro.id = ur.role_id AND ro.tenant_id = ur.tenant_id
+                                 AND ro.deleted_at IS NULL
                     WHERE ur.tenant_id = $1 AND ur.user_id = $2 AND ur.deleted_at IS NULL
                       AND ur.role_id = t.candidate_role_id
                       AND (ur.valid_from IS NULL OR ur.valid_from <= current_date)

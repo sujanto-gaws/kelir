@@ -11,6 +11,15 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A task offered to a deleted role is no longer *waiting for you***
+  ([#487](https://github.com/sujanto-gaws/kelir/issues/487)). Deleting a role
+  left its grants live, and the inbox read only the grant. So the task stayed
+  on the inbox, the dashboard's waiting count and its pending-task card, and
+  its page opened and could be claimed, while deciding it failed with
+  `ASSIGNMENT_UNRESOLVED`. A grant of a deleted role is no longer read as a
+  grant anywhere the inbox or a claim asks who holds a task. **The task itself
+  stays open and is now offered to nobody.** What deleting a role should do to
+  its open tasks is decision **D-89**, still open.
 - **A role or user that lists one id twice is refused with a 422, not a 500**
   ([#469](https://github.com/sujanto-gaws/kelir/issues/469)). A repeated id in
   a role's `permissionIds` or a user's `roleIds` reached a unique constraint
