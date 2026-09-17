@@ -11,6 +11,14 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A role or user that lists one id twice is refused with a 422, not a 500**
+  ([#469](https://github.com/sujanto-gaws/kelir/issues/469)). A repeated id in
+  a role's `permissionIds` or a user's `roleIds` reached a unique constraint
+  and came back as `INTERNAL_ERROR`, naming nothing. It is now refused before
+  anything is written, with a `DUPLICATE_IN_ARRAY` detail at the repeat's own
+  index (`permissionIds.2`) naming the id and where it first appeared. A
+  refused create stores nothing, and a refused update leaves the grant as it
+  was. A list with no repeats behaves as before.
 - **A refused pattern is told a reason that is true for it**
   ([#466](https://github.com/sujanto-gaws/kelir/issues/466)). A negated class
   was given its positive class's reason and remedy. `^\D+$` was told `١٢٣`

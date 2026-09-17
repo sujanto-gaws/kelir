@@ -343,3 +343,116 @@ async fn chain_tip(app: &TestApp) -> (String, i64) {
 
     (hash, count)
 }
+
+/// **[#469]: a role naming one permission twice answered 500.**
+///
+/// `replace_role_permissions` inserted the second row into
+/// `uq_role_permissions_role_id_permission_id`, and the unique violation came
+/// back as `INTERNAL_ERROR`. It is now a 422 naming the repeat at its own
+/// index, **checked before the transaction opens**, so a refused create leaves
+/// no role behind and a refused update leaves the old grant in place.
+///
+/// **Two second subjects**: the same create without the repeat stores, and the
+/// update's refusal is judged by the grant still being what it was, not by the
+/// response alone.
+///
+/// [#469]: https://github.com/sujanto-gaws/kelir/issues/469
+#[tokio::test]
+async fn a_repeated_permission_id_is_refused_and_nothing_is_written() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let read = permission_id(&app, "identity:user:read").await;
+    let create = permission_id(&app, "identity:user:create").await;
+
+    // --- Create --------------------------------------------------------------
+    let refused = app
+        .post(
+            "/api/v1/identity/roles",
+            Some(&token),
+            json!({
+                "roleCode": "ROLE-REPEATED",
+                "name": "Repeated",
+                "permissionIds": [read.to_string(), create.to_string(), read.to_string()],
+            }),
+        )
+        .await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+    assert_eq!(refused.error_code(), Some("VALIDATION_ERROR"));
+    let details = refused.body["error"]["details"]
+        .as_array()
+        .expect("details");
+    assert_eq!(details.len(), 1, "{}", refused.body);
+    assert_eq!(details[0]["path"], "permissionIds.2");
+    assert_eq!(details[0]["code"], "DUPLICATE_IN_ARRAY");
+    assert!(
+        details[0]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains(&read.to_string())),
+        "the detail names the repeated id: {}",
+        details[0]
+    );
+
+    let left_behind: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM roles WHERE role_code = 'ROLE-REPEATED'")
+            .fetch_one(&app.pool)
+            .await
+            .expect("query runs");
+    assert_eq!(
+        left_behind, 0,
+        "a refused create must not leave a role behind"
+    );
+
+    let stored = app
+        .post(
+            "/api/v1/identity/roles",
+            Some(&token),
+            json!({
+                "roleCode": "ROLE-REPEATED",
+                "name": "Repeated",
+                "permissionIds": [read.to_string(), create.to_string()],
+            }),
+        )
+        .await;
+    assert_eq!(stored.status, StatusCode::CREATED, "{}", stored.body);
+
+    // --- Update --------------------------------------------------------------
+    let id: Uuid = stored.data()["id"]
+        .as_str()
+        .expect("id is a string")
+        .parse()
+        .expect("id is a uuid");
+
+    let refused_update = app
+        .put(
+            &format!("/api/v1/identity/roles/{id}"),
+            Some(&token),
+            json!({ "permissionIds": [create.to_string(), create.to_string()] }),
+        )
+        .await;
+
+    assert_eq!(
+        refused_update.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused_update.body
+    );
+    assert_eq!(
+        refused_update.body["error"]["details"][0]["path"],
+        "permissionIds.1"
+    );
+    assert_eq!(
+        granted_codes(&app, id).await,
+        vec![
+            "identity:user:create".to_owned(),
+            "identity:user:read".to_owned()
+        ],
+        "a refused update must leave the grant as it was"
+    );
+}

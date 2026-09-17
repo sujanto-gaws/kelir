@@ -346,3 +346,84 @@ async fn reading_another_tenants_user_by_id_is_not_found() {
         response.body
     );
 }
+
+/// **[#469], for a user's roles.** `replace_user_roles` has the same shape as
+/// the role grant, and `uq_user_roles_user_id_role_id_department_id` refused a
+/// repeated role the same way: 500. It is refused as a 422 at its own index,
+/// on create with the other invalid fields and on update before anything is
+/// written.
+///
+/// [#469]: https://github.com/sujanto-gaws/kelir/issues/469
+#[tokio::test]
+async fn a_repeated_role_id_is_refused_on_create_and_on_update() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let role: Uuid = sqlx::query_scalar("SELECT id FROM roles WHERE role_code = 'ROLE-ADMIN'")
+        .fetch_one(&app.pool)
+        .await
+        .expect("the administrator role is seeded");
+
+    let mut body = payload("repeated.roles");
+    body["roleIds"] = json!([role.to_string(), role.to_string()]);
+
+    let refused = app.post("/api/v1/identity/users", Some(&token), body).await;
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+    assert_eq!(refused.body["error"]["details"][0]["path"], "roleIds.1");
+    assert_eq!(
+        refused.body["error"]["details"][0]["code"],
+        "DUPLICATE_IN_ARRAY"
+    );
+
+    let left_behind: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM users WHERE username = 'repeated.roles'")
+            .fetch_one(&app.pool)
+            .await
+            .expect("query runs");
+    assert_eq!(
+        left_behind, 0,
+        "a refused create must not leave a user behind"
+    );
+
+    // The second subject: the same user with the role once is created.
+    let mut once = payload("repeated.roles");
+    once["roleIds"] = json!([role.to_string()]);
+    let created = app.post("/api/v1/identity/users", Some(&token), once).await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+    let id = user_id_of(&app, "repeated.roles").await;
+    let refused_update = app
+        .put(
+            &format!("/api/v1/identity/users/{id}"),
+            Some(&token),
+            json!({ "roleIds": [role.to_string(), role.to_string()] }),
+        )
+        .await;
+    assert_eq!(
+        refused_update.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused_update.body
+    );
+    assert_eq!(
+        refused_update.body["error"]["details"][0]["path"],
+        "roleIds.1"
+    );
+
+    let grants: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM user_roles WHERE user_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .fetch_one(&app.pool)
+    .await
+    .expect("query runs");
+    assert_eq!(
+        grants, 1,
+        "a refused update must leave the one grant in place"
+    );
+}
