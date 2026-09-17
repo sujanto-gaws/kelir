@@ -39,6 +39,14 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **The browser harness's `build-a-list` passes on a database with more than
+  20 document types** ([#503](https://github.com/sujanto-gaws/kelir/issues/503)).
+  It waited for the new type's row on the type list, which shows 20 rows
+  ordered by code, so on a database already holding twenty types it timed out
+  on a type that had saved. A release rehearsal running the harness twice on
+  one database hit it. It now confirms the save by the `201` and the closed
+  dialog, and finds the type on the new-document screen. Reproduced red, then
+  green, against a stack holding 26 types.
 - **A task offered to a deleted role is no longer *waiting for you***
   ([#487](https://github.com/sujanto-gaws/kelir/issues/487)). Deleting a role
   left its grants live, and the inbox read only the grant. So the task stayed
