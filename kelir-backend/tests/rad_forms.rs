@@ -363,22 +363,11 @@ async fn a_rule_name_no_registry_declares_is_refused_at_save() {
     );
 }
 
-/// **[#391] AC1 and AC3, at the endpoint.** A pattern this backend cannot
-/// compile is refused where the definition is written.
-///
-/// **The defect this ends is a field nobody can fill.** Stored, the rule
-/// rejected every value — `matches_pattern` maps a compile error to `false` —
-/// with no error naming the pattern, because a rule that could not be applied
-/// has not been satisfied. That is right at submit and wrong at save, which is
-/// the reasoning [SDD] §8.2.3 gives for checking a definition when it is
-/// written.
-///
-/// **A second subject, because one component cannot tell *refused because
-/// uncompilable* from *refused at all***: the ordinary pattern beside it must
 /// **[#413] at the seam that reported a `201`.**
 ///
 /// The issue's own table: `caf\b` matches `café` in the browser and not here;
-/// `[[:digit:]]` and `\p{Nd}` are syntax ECMA-262 does not have. All three were
+/// `[[:digit:]]` is syntax ECMA-262 does not have, and `\p{Nd}` is syntax it reads
+/// only under the `u` flag. All three were
 /// stored, so the divergence reached a deployment rather than an author.
 ///
 /// **Each refused pattern sits beside the portable spelling its message names**
@@ -475,6 +464,143 @@ async fn the_three_constructs_that_decided_one_input_two_ways_are_refused_at_sav
     }
 }
 
+/// **[#466] at the endpoint that sent the false reasons.**
+///
+/// Record 16 finding 3 posted five patterns to this route on 2026-09-16 and
+/// read a message that was false for each: `^\D+$`, `^\W+$`, `^\S$`, `caf\B`,
+/// and `^\p{Nd}+$` under `params.flags` `u`. **This sends the same five** and
+/// checks each detail for a phrase only its own reason carries, beside the
+/// remedy that reason names, which must store ([coding standard] §2.9's
+/// second subject).
+///
+/// [#466]: https://github.com/sujanto-gaws/kelir/issues/466
+/// [coding standard]: ../../docs/standards/01.%20Coding%20Standard.md
+#[tokio::test]
+async fn a_negated_construct_and_a_flagged_property_are_refused_with_true_reasons() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    // (pattern, flags, code, a phrase only its own reason carries, the remedy)
+    let cases = [
+        (
+            r"^\D+$",
+            "",
+            "PATTERN_CLASS_NOT_PINNED",
+            "passes `^\\D+$` in the browser and fails here",
+            "^[^0-9]+$",
+        ),
+        (
+            r"^\W+$",
+            "",
+            "PATTERN_CLASS_NOT_PINNED",
+            "`[^A-Za-z0-9_]`",
+            "^[^A-Za-z0-9_]+$",
+        ),
+        (
+            r"^\S$",
+            "",
+            "PATTERN_CLASS_NOT_PINNED",
+            "should not treat as space",
+            r"^[^ \t\r\n]$",
+        ),
+        (
+            r"caf\B",
+            "",
+            "PATTERN_CONSTRUCT_NOT_PORTABLE",
+            "`caf\\B` does not match `café` in the browser",
+            "caf[A-Za-z0-9_]",
+        ),
+        (
+            r"^\p{Nd}+$",
+            "u",
+            "PATTERN_CLASS_NOT_PINNED",
+            "Under the `u` flag",
+            "^[0-9]+$",
+        ),
+    ];
+
+    for (index, (pattern, flags, code, phrase, remedy)) in cases.iter().enumerate() {
+        let key = format!("negated-{index}");
+        let mut document = definition(&key);
+        document["components"][0]["rules"] = json!([{
+            "rule": "regex", "scope": "both",
+            "params": {"pattern": pattern, "flags": flags},
+            "message": "No.",
+        }]);
+
+        let response = app
+            .send(
+                Method::POST,
+                "/api/v1/rad/forms",
+                Some(&token),
+                Some(json!({"formKey": key, "title": "Negated pattern", "definition": document})),
+            )
+            .await;
+
+        assert_eq!(
+            response.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "`{pattern}` must not be stored; body {}",
+            response.body
+        );
+        let detail = response.body["error"]["details"]
+            .as_array()
+            .expect("details")
+            .iter()
+            .find(|detail| detail["code"] == *code)
+            .cloned()
+            .unwrap_or_else(|| {
+                panic!(
+                    "`{pattern}` must be refused as {code}; body {}",
+                    response.body
+                )
+            });
+        assert!(
+            detail["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(phrase)),
+            "`{pattern}`'s reason must be its own, containing {phrase:?}; got {detail}"
+        );
+
+        // The second subject: the remedy the reason names still stores.
+        let remedy_key = format!("negated-remedy-{index}");
+        let mut remedy_document = definition(&remedy_key);
+        remedy_document["components"][0]["rules"] = json!([{
+            "rule": "regex", "scope": "both",
+            "params": {"pattern": remedy},
+            "message": "No.",
+        }]);
+
+        let stored = app
+            .send(
+                Method::POST,
+                "/api/v1/rad/forms",
+                Some(&token),
+                Some(json!({"formKey": remedy_key, "title": "Remedy", "definition": remedy_document})),
+            )
+            .await;
+
+        assert_eq!(
+            stored.status,
+            StatusCode::CREATED,
+            "`{remedy}` is what `{pattern}`'s refusal tells an author to write, so it must store; body {}",
+            stored.body
+        );
+    }
+}
+
+/// **[#391] AC1 and AC3, at the endpoint.** A pattern this backend cannot
+/// compile is refused where the definition is written.
+///
+/// **The defect this ends is a field nobody can fill.** Stored, the rule
+/// rejected every value — `matches_pattern` maps a compile error to `false` —
+/// with no error naming the pattern, because a rule that could not be applied
+/// has not been satisfied. That is right at submit and wrong at save, which is
+/// the reasoning [SDD] §8.2.3 gives for checking a definition when it is
+/// written.
+///
+/// **A second subject, because one component cannot tell *refused because
+/// uncompilable* from *refused at all***: the ordinary pattern beside it must
 /// not be named in the refusal.
 ///
 /// [#391]: https://github.com/sujanto-gaws/kelir/issues/391
