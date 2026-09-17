@@ -104,9 +104,26 @@ test('an administrator builds a list through a screen, and it opens with rows', 
   await page.getByTestId('type-form').selectOption({ label: `${form.title} (r1)` })
   await page.getByTestId('type-list').selectOption({ label: `Built in the browser (${listKey})` })
   await page.getByTestId('type-status').selectOption('ACTIVE')
+
+  // **The save is confirmed by its response, not by the row** (#503). The type
+  // list pages at 20 rows ordered by code, so on a database that already holds
+  // twenty types the new row is on a page this screen is not showing, and a
+  // wait for it times out on a type that saved. CI starts empty and never gets
+  // there; a release rehearsal running the harness twice on one database does.
+  // The row is found through a screen two steps down, where the new-document
+  // chooser offers the type by its code.
+  const created = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === '/api/v1/document-types',
+  )
   await page.getByTestId('save-document-type').click()
 
-  await expect(page.getByTestId(`type-${typeCode}`)).toBeVisible()
+  const response = await created
+  expect(response.status(), await response.text()).toBe(201)
+  expect(((await response.json()) as { data: { typeCode: string } }).data.typeCode).toBe(typeCode)
+  // The dialog closes only on a save it accepted.
+  await expect(page.getByTestId('save-document-type')).toBeHidden()
 
   // --- Give it a document to show -------------------------------------------
   await page.goto('/documents/new')
