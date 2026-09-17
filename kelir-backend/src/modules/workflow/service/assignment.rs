@@ -240,9 +240,10 @@ pub async fn permits(
 /// A rule, resolved to the row a task is written with.
 ///
 /// Runs inside the transition's transaction: the role it names must still exist
-/// when the task referencing it is inserted, and the foreign key is what makes
-/// that true rather than a lock. The delegation window read below is in the same
-/// transaction for a second reason — the window that was open when the task was
+/// when the task referencing it is inserted. The foreign key keeps the row, and
+/// the `FOR KEY SHARE` in [`direct`] keeps it *live*, which a soft delete would
+/// otherwise change underneath the insert (**D-89**). The delegation window
+/// read below is in the same transaction for a second reason — the window that was open when the task was
 /// written is the window the task's `delegated_from_user_id` then claims was
 /// open.
 pub async fn resolve(
@@ -425,10 +426,19 @@ async fn direct(
             role_code,
             department,
         } => {
+            // `FOR KEY SHARE` holds the role until the task naming it is
+            // committed (**D-89**, #487). The foreign key alone does not: a
+            // soft delete is an `UPDATE` that leaves the key alone, so it passes
+            // straight through the key-share lock the insert takes, and a delete
+            // counting open tasks cannot see one that is not committed yet.
+            // `identity::service::delete_role` locks the row `FOR UPDATE`, which
+            // this waits on, and a role deleted meanwhile no longer matches when
+            // the wait ends. Transitions do not block one another.
             let role_id = sqlx::query_scalar!(
                 r#"
                 SELECT id FROM roles
                 WHERE tenant_id = $1 AND role_code = $2 AND deleted_at IS NULL
+                FOR KEY SHARE
                 "#,
                 tenant_id,
                 role_code

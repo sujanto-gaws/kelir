@@ -577,6 +577,54 @@ pub async fn holds_role<'e, E: PgExecutor<'e>>(
     Ok(found.is_some())
 }
 
+/// How many open tasks still need `role_id` in order to be decided (**D-89**,
+/// [#487]).
+///
+/// **Two ways a task needs a role**, and a delete strands the task through
+/// either one:
+///
+/// * **It is offered to the role**, `candidate_role_id`, **claimed or not.** An
+///   unclaimed one is offered through the role and nothing else. A claimed one
+///   looks safe, since it names its assignee, and is not: see the second point.
+/// * **A transition out of the instance's current state names the role in
+///   `allowedBy`.** A decision resolves that rule again (`engine::fire`, through
+///   `assignment::permits`), and a role that is gone refuses it as
+///   `ASSIGNMENT_UNRESOLVED`. That is the usual shape, where the task and its
+///   edges name one role, and the shape where they differ (JWSS §5).
+///
+/// Read from the `workflow_transitions` projection, whose `allowed_by_json` is
+/// the **normalized** rule, so `"ROLE:X"` and `{ "assigneeType": "ROLE", … }`
+/// both arrive as `roleCode`. `DEPARTMENT_ROLE` carries a `roleCode` too and is
+/// counted by the same clause. A task counts once whichever way it needs the
+/// role, and however many of its edges do.
+///
+/// [#487]: https://github.com/sujanto-gaws/kelir/issues/487
+pub async fn count_open_tasks_needing_role<'e, E: PgExecutor<'e>>(
+    executor: E,
+    tenant_id: Uuid,
+    role_id: Uuid,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar!(
+        r#"
+        SELECT COUNT(*) AS "count!"
+        FROM workflow_tasks t
+        JOIN workflow_instances i ON i.id = t.workflow_instance_id AND i.tenant_id = t.tenant_id
+        JOIN roles r ON r.id = $2 AND r.tenant_id = t.tenant_id
+        WHERE t.tenant_id = $1 AND t.deleted_at IS NULL
+          AND t.status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')
+          AND (t.candidate_role_id = r.id
+               OR EXISTS (SELECT 1 FROM workflow_transitions tr
+                          WHERE tr.workflow_definition_id = i.workflow_definition_id
+                            AND tr.from_state = i.current_state
+                            AND tr.allowed_by_json->>'roleCode' = r.role_code))
+        "#,
+        tenant_id,
+        role_id
+    )
+    .fetch_one(executor)
+    .await
+}
+
 /// Reads one task.
 pub async fn find_task<'e, E: PgExecutor<'e>>(
     executor: E,

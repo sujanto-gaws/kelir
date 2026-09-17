@@ -103,8 +103,9 @@ async function confirmDelete(): Promise<void> {
     confirming.value = null
     await roles.refresh()
   } catch (error) {
-    // Includes the 409 for a system role, should one ever be reached — the
-    // server's exact wording, not ours.
+    // Includes the 409 for a system role, should one ever be reached, and the
+    // 409 for a role open tasks still need (D-89), which the list cannot
+    // predict. The server's exact wording, not ours.
     deleteError.value = toApiError(error).message
   } finally {
     isDeleting.value = false

@@ -747,6 +747,30 @@ pub async fn update_role_fields(
     .map(|result| result.rows_affected())
 }
 
+/// Locks a live role's row for a delete, answering whether it is a system role.
+///
+/// `FOR UPDATE` rather than the `FOR NO KEY UPDATE` the delete's own `UPDATE`
+/// would take, because only `FOR UPDATE` conflicts with the `FOR KEY SHARE` a
+/// transition holds on the role it is offering a task to (**D-89**). `None`
+/// when there is no live role by that id in the tenant.
+pub async fn lock_role_for_delete(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<Option<bool>, sqlx::Error> {
+    sqlx::query_scalar!(
+        r#"
+        SELECT is_system FROM roles
+        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+        FOR UPDATE
+        "#,
+        tenant_id,
+        id
+    )
+    .fetch_optional(&mut **transaction)
+    .await
+}
+
 pub async fn soft_delete_role(
     executor: impl PgExecutor<'_>,
     tenant_id: Uuid,

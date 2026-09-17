@@ -229,7 +229,8 @@ async fn update_role(
     delete, path = "/api/v1/identity/roles/{id}", tag = "identity",
     responses(
         (status = 204, description = "Deleted"),
-        (status = 409, description = "System roles cannot be deleted")
+        (status = 404, description = "No live role by that id in this tenant"),
+        (status = 409, description = "A system role, or a role that open tasks still need (D-89)")
     ),
     security(("bearer" = []))
 )]
