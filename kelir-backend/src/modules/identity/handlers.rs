@@ -100,7 +100,10 @@ async fn create_user(
 #[utoipa::path(
     put, path = "/api/v1/identity/users/{id}", tag = "identity",
     request_body = UpdateUserRequest,
-    responses((status = 200, description = "Updated", body = User)),
+    responses(
+        (status = 200, description = "Updated", body = User),
+        (status = 422, description = "Validation failed, including a role id listed twice in roleIds")
+    ),
     security(("bearer" = []))
 )]
 async fn update_user(
@@ -183,7 +186,10 @@ async fn get_role(
 #[utoipa::path(
     post, path = "/api/v1/identity/roles", tag = "identity",
     request_body = CreateRoleRequest,
-    responses((status = 201, description = "Created", body = Role)),
+    responses(
+        (status = 201, description = "Created", body = Role),
+        (status = 422, description = "A permission id listed twice in permissionIds")
+    ),
     security(("bearer" = []))
 )]
 async fn create_role(
@@ -202,7 +208,10 @@ async fn create_role(
 #[utoipa::path(
     put, path = "/api/v1/identity/roles/{id}", tag = "identity",
     request_body = UpdateRoleRequest,
-    responses((status = 200, description = "Updated", body = Role)),
+    responses(
+        (status = 200, description = "Updated", body = Role),
+        (status = 422, description = "A permission id listed twice in permissionIds")
+    ),
     security(("bearer" = []))
 )]
 async fn update_role(

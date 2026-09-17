@@ -4,8 +4,8 @@
 use uuid::Uuid;
 
 use super::domain::{
-    validate_create_user, validate_password_value, CreateRoleRequest, CreateUserRequest,
-    Permission, Role, UpdateRoleRequest, UpdateUserRequest, User, UserStatus,
+    validate_create_user, validate_distinct_ids, validate_password_value, CreateRoleRequest,
+    CreateUserRequest, Permission, Role, UpdateRoleRequest, UpdateUserRequest, User, UserStatus,
 };
 use super::repository as repo;
 use crate::error::{AppError, ValidationDetail};
@@ -127,6 +127,10 @@ pub async fn update_user(
     request: UpdateUserRequest,
 ) -> Result<User, AppError> {
     caller.require("identity:user:update")?;
+
+    if let Some(role_ids) = &request.role_ids {
+        validate_distinct_ids("roleIds", "role", role_ids)?;
+    }
 
     let tenant_id = caller.tenant_id();
     let before = repo::find_user(&state.pool, tenant_id, id)
@@ -338,6 +342,10 @@ pub async fn create_role(
     request: CreateRoleRequest,
 ) -> Result<Role, AppError> {
     caller.require("identity:role:create")?;
+    // Before anything is written: a repeated id would otherwise reach
+    // `uq_role_permissions_role_id_permission_id` inside the transaction and
+    // answer 500 (#469).
+    validate_distinct_ids("permissionIds", "permission", &request.permission_ids)?;
 
     let tenant_id = caller.tenant_id();
     let id = Uuid::now_v7();
@@ -385,6 +393,10 @@ pub async fn update_role(
     request: UpdateRoleRequest,
 ) -> Result<Role, AppError> {
     caller.require("identity:role:update")?;
+
+    if let Some(permission_ids) = &request.permission_ids {
+        validate_distinct_ids("permissionIds", "permission", permission_ids)?;
+    }
 
     let tenant_id = caller.tenant_id();
     let mut transaction = state.pool.begin().await?;

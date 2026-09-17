@@ -163,10 +163,53 @@ pub fn validate_create_user(request: &CreateUserRequest) -> Result<(), AppError>
         ));
     }
 
+    repeated_ids("roleIds", "role", &request.role_ids, &mut details);
+
     if details.is_empty() {
         Ok(())
     } else {
         Err(AppError::validation(details))
+    }
+}
+
+/// Refuses a list of grants that names one id twice.
+///
+/// **[#469](https://github.com/sujanto-gaws/kelir/issues/469): a repeated id
+/// answered 500.** `replace_role_permissions` and `replace_user_roles` insert
+/// one row per id, and `uq_role_permissions_role_id_permission_id` and
+/// `uq_user_roles_user_id_role_id_department_id` refuse the second row. So the
+/// caller's mistake reached the database as a unique violation and came back as
+/// `INTERNAL_ERROR`, with the constraint's name in the log and nothing in the
+/// response to say which id.
+///
+/// **Refused rather than deduplicated**, as `check_department` refuses an id
+/// that names nothing: the list is what the caller asked to grant, and a request
+/// that repeats itself is more likely a caller building it wrongly than one
+/// meaning the set. The code is `DUPLICATE_IN_ARRAY`, the one JFSS §10.3 already
+/// uses for an array whose items must be unique, and the path is the repeat's
+/// own index, so a form can put the message on the entry to remove.
+pub fn validate_distinct_ids(field: &str, noun: &str, ids: &[Uuid]) -> Result<(), AppError> {
+    let mut details = Vec::new();
+    repeated_ids(field, noun, ids, &mut details);
+
+    if details.is_empty() {
+        Ok(())
+    } else {
+        Err(AppError::validation(details))
+    }
+}
+
+/// One detail for every id that repeats an earlier one, naming both positions.
+fn repeated_ids(field: &str, noun: &str, ids: &[Uuid], details: &mut Vec<ValidationDetail>) {
+    for (index, id) in ids.iter().enumerate() {
+        if let Some(first) = ids[..index].iter().position(|earlier| earlier == id) {
+            details.push(ValidationDetail::new(
+                format!("{field}.{index}"),
+                "uniqueItems",
+                "DUPLICATE_IN_ARRAY",
+                format!("The {noun} {id} is already listed at {field}.{first}"),
+            ));
+        }
     }
 }
 
@@ -259,6 +302,51 @@ mod tests {
     #[test]
     fn accepts_a_valid_request() {
         assert!(validate_create_user(&request()).is_ok());
+    }
+
+    /// **[#469].** Each repeat is named at its own index, beside the first
+    /// occurrence, and a list with no repeat passes: the second subject.
+    ///
+    /// **Seen red, 2026-09-17**: `repeated_ids` pushing nothing reddens the
+    /// test where the refusal is expected.
+    ///
+    /// [#469]: https://github.com/sujanto-gaws/kelir/issues/469
+    #[test]
+    fn a_repeated_id_is_refused_at_its_own_index() {
+        let read = Uuid::from_u128(1);
+        let create = Uuid::from_u128(2);
+
+        let details = details_of(
+            validate_distinct_ids("permissionIds", "permission", &[read, create, read, read])
+                .expect_err("a repeated id is refused"),
+        );
+        let paths: Vec<&str> = details.iter().map(|d| d.path.as_str()).collect();
+        assert_eq!(paths, ["permissionIds.2", "permissionIds.3"]);
+        assert!(details.iter().all(|d| d.code == "DUPLICATE_IN_ARRAY"));
+        assert!(
+            details[0].message.contains(&read.to_string())
+                && details[0].message.contains("permissionIds.0"),
+            "{}",
+            details[0].message
+        );
+
+        assert!(validate_distinct_ids("permissionIds", "permission", &[read, create]).is_ok());
+        assert!(validate_distinct_ids("permissionIds", "permission", &[]).is_ok());
+    }
+
+    #[test]
+    fn a_user_created_with_a_repeated_role_is_refused_with_the_other_problems() {
+        let role = Uuid::from_u128(7);
+        let bad = CreateUserRequest {
+            display_name: "".to_owned(),
+            role_ids: vec![role, role],
+            ..request()
+        };
+
+        let details = details_of(validate_create_user(&bad).expect_err("invalid"));
+        let paths: Vec<&str> = details.iter().map(|d| d.path.as_str()).collect();
+        assert!(paths.contains(&"displayName"), "{paths:?}");
+        assert!(paths.contains(&"roleIds.1"), "{paths:?}");
     }
 
     #[test]
