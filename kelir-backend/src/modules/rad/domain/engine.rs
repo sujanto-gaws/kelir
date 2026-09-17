@@ -725,7 +725,7 @@ fn refuse(
             ),
         ),
         PatternRefusal::Divergent(construct) => {
-            let (code, reason) = divergence_reason(&construct);
+            let (code, reason) = divergence_reason(&construct, flags);
             (
                 code,
                 format!(
@@ -751,21 +751,69 @@ fn refuse(
 /// U+FEFF, in opposite directions, and `[0-9]` is not a remedy for a whitespace
 /// class. An author who believed it would have narrowed the browser as well as
 /// the server.
-fn divergence_reason(construct: &DivergentConstruct) -> (&'static str, String) {
+///
+/// **And one per case, because a negated class is not its positive class**
+/// ([#466](https://github.com/sujanto-gaws/kelir/issues/466), record 16
+/// findings 3 and 7). #451 matched `'d' | 'D'` and `'w' | 'W'`, so `^\D+$` was
+/// told that `١٢٣` fails in the browser and passes here — the reverse of what
+/// happens — and to write `[0-9]`, the complement of the class it had written.
+/// Every sentence below was probed on both engines on 2026-09-17 (node
+/// v24.15.0 against `regex` 1.13.1). **A negated remedy says what it does not
+/// settle**: a negated class still counts a character outside the BMP as two
+/// units in the browser and one here, so `[^0-9]` agrees with the server about
+/// digits and not about an emoji.
+///
+/// **`\p{…}` is refused whatever the flags, and the reason depends on them.**
+/// Without `u` the browser reads a literal letter. With `u` it reads a property
+/// too, but the two accept different spellings — `\p{nd}` and `\pN` compile
+/// here and throw there — so this backend refuses the construct rather than
+/// decide which spellings both sides share.
+fn divergence_reason(construct: &DivergentConstruct, flags: &str) -> (&'static str, String) {
+    /// What a negated remedy leaves unsettled, said once.
+    const NEGATED_REMEDY_LIMIT: &str = "A negated class still counts a character outside the \
+         BMP, such as an emoji, as two units in the browser and one here, so this settles the \
+         class and not that; the Validation Rule Registry's `regex` warning has the measurement";
+
     match construct {
-        DivergentConstruct::Class(class @ ('d' | 'D')) => (
+        DivergentConstruct::Class('d') => (
+            PATTERN_CLASS_NOT_PINNED,
+            "ECMA-262 reads `\\d` as ASCII `0-9`; this crate reads it as Unicode `Nd`, so `١٢٣` \
+             fails in the browser and passes here. Write the class out: `[0-9]`"
+                .to_owned(),
+        ),
+        DivergentConstruct::Class('D') => (
             PATTERN_CLASS_NOT_PINNED,
             format!(
-                "ECMA-262 reads `\\{class}` as ASCII `0-9`; this crate reads it as Unicode `Nd`, \
-                 so `١٢٣` fails in the browser and passes here. Write the class out: `[0-9]`"
+                "ECMA-262 reads `\\D` as anything but ASCII `0-9`; this crate reads it as anything \
+                 but Unicode `Nd`, so `١٢٣` passes `^\\D+$` in the browser and fails here. Write \
+                 the class out: `[^0-9]`. {NEGATED_REMEDY_LIMIT}"
             ),
         ),
-        DivergentConstruct::Class(class @ ('w' | 'W')) => (
+        DivergentConstruct::Class('w') => (
+            PATTERN_CLASS_NOT_PINNED,
+            "ECMA-262 reads `\\w` as `[A-Za-z0-9_]`; this crate reads it as Unicode word \
+             characters, so `café` fails in the browser and passes here. Write the class out: \
+             `[A-Za-z0-9_]`, which is what the browser was already doing"
+                .to_owned(),
+        ),
+        DivergentConstruct::Class('W') => (
             PATTERN_CLASS_NOT_PINNED,
             format!(
-                "ECMA-262 reads `\\{class}` as `[A-Za-z0-9_]`; this crate reads it as Unicode word \
-                 characters, so `café` fails in the browser and passes here. Write the class out: \
-                 `[A-Za-z0-9_]`, which is what the browser was already doing"
+                "ECMA-262 reads `\\W` as anything but `[A-Za-z0-9_]`; this crate reads it as \
+                 anything but a Unicode word character, so `é` passes `^\\W$` in the browser and \
+                 fails here. Write the class out: `[^A-Za-z0-9_]`, which is what the browser was \
+                 already doing. {NEGATED_REMEDY_LIMIT}"
+            ),
+        ),
+        DivergentConstruct::Class('S') => (
+            PATTERN_CLASS_NOT_PINNED,
+            format!(
+                "`\\S` is anything but Unicode whitespace on both sides, and the two whitespace \
+                 sets differ at exactly two characters — so U+0085 NEXT LINE passes `^\\S$` only \
+                 in the browser, and U+FEFF BYTE ORDER MARK passes it only here. Write out the \
+                 characters this field should not treat as space, such as `[^ \\t\\r\\n]` — and \
+                 note that is wider than either side's `\\S` rather than equal to it: it admits a \
+                 no-break space, which neither does. {NEGATED_REMEDY_LIMIT}"
             ),
         ),
         DivergentConstruct::Class(class) => (
@@ -777,6 +825,15 @@ fn divergence_reason(construct: &DivergentConstruct) -> (&'static str, String) {
                  this field should treat as space, such as `[ \\t\\r\\n]` — and note that is \
                  narrower than either side's `\\{class}` rather than equal to it"
             ),
+        ),
+        DivergentConstruct::WordBoundary('B') => (
+            PATTERN_CONSTRUCT_NOT_PORTABLE,
+            "ECMA-262 decides `\\B` over `[A-Za-z0-9_]` and this crate over Unicode word \
+             characters, so `caf\\B` does not match `café` in the browser and does here. **There \
+             is no spelling of `\\B` both sides agree on** — express it with the characters the \
+             field allows next to it, such as `caf[A-Za-z0-9_]` where that character may be part \
+             of the match"
+                .to_owned(),
         ),
         DivergentConstruct::WordBoundary(boundary) => (
             PATTERN_CONSTRUCT_NOT_PORTABLE,
@@ -796,12 +853,25 @@ fn divergence_reason(construct: &DivergentConstruct) -> (&'static str, String) {
                  the class out, such as `[0-9]` rather than `[[:digit:]]`"
             ),
         ),
+        DivergentConstruct::UnicodeProperty(property) if flags.contains('u') => (
+            PATTERN_CLASS_NOT_PINNED,
+            format!(
+                "Under the `u` flag the browser reads `\\{property}{{…}}` as a Unicode property \
+                 too, but the two sides accept different spellings of one: this crate compiles \
+                 `\\{property}{{nd}}` and `\\{property}N`, and the browser throws a `SyntaxError` \
+                 on both, which fails every value. This backend refuses `\\{property}` whatever \
+                 its spelling rather than decide which spellings both sides share. Write the \
+                 class out with the characters the field allows, such as `[0-9]` if ASCII digits \
+                 are what it wants"
+            ),
+        ),
         DivergentConstruct::UnicodeProperty(property) => (
             PATTERN_CLASS_NOT_PINNED,
             format!(
                 "ECMA-262 reads `\\{property}{{…}}` only under the `u` flag, which this rule does \
                  not carry; without it the browser reads a literal `{property}` followed by the \
-                 braces. Write the class out, such as `[0-9]` rather than `\\p{{Nd}}`"
+                 braces. Write the class out with the characters the field allows, such as \
+                 `[0-9]` if ASCII digits are what it wants"
             ),
         ),
     }
@@ -1357,6 +1427,145 @@ mod tests {
             !space.contains("[0-9]"),
             "the `\\s` message must not offer a digit class as the remedy: {space}"
         );
+    }
+
+    /// **[#466]: a negated class is not its positive class, and its reason
+    /// must not be.**
+    ///
+    /// #451 matched `'d' | 'D'`, `'w' | 'W'` and gave every other class `\s`'s
+    /// text, so `^\D+$` was told `١٢٣` *fails in the browser and passes here*
+    /// — the reverse — and to write `[0-9]`, the complement of what it wrote.
+    /// `^\W+$` got `[A-Za-z0-9_]`, `^\S$` was told to write out the characters
+    /// it treats as **space**, and `caf\B` was explained with `caf\b`.
+    ///
+    /// **A second subject in every case** ([coding standard] §2.9): the remedy
+    /// each message names is written beside the refused pattern and must store,
+    /// so the test cannot pass by refusing everything. **And each message is
+    /// checked for the positive class's words**, which is the defect itself.
+    ///
+    /// **Seen red, 2026-09-17, twice.** Restoring #451's `'d' | 'D'` and
+    /// `'w' | 'W'` arms, with `\S` falling to the `\s` arm, reddens the test
+    /// at `\D`'s reason, its first assertion. Letting `\B` fall to `\b`'s arm
+    /// reddens it at `\B`'s reason.
+    ///
+    /// [#466]: https://github.com/sujanto-gaws/kelir/issues/466
+    /// [coding standard]: ../../../../../docs/standards/01.%20Coding%20Standard.md
+    #[test]
+    fn each_negated_construct_is_refused_with_its_own_reason() {
+        let refused_beside = |pattern: &str, remedy: &str| {
+            let mut refused = plain("f");
+            refused["validation"] = json!({ "pattern": pattern });
+            let mut written_out = plain("g");
+            written_out["validation"] = json!({ "pattern": remedy });
+
+            let details = definition_errors(&definition(vec![refused, written_out]));
+            assert_eq!(
+                details.len(),
+                1,
+                "`{pattern}` is refused and `{remedy}` stores: {details:?}"
+            );
+            assert_eq!(
+                details[0].path,
+                "definition.components.0.validation.pattern"
+            );
+            (details[0].code.clone(), details[0].message.clone())
+        };
+
+        let (code, not_digits) = refused_beside(r"^\D+$", "^[^0-9]+$");
+        assert_eq!(code, PATTERN_CLASS_NOT_PINNED);
+        assert!(
+            not_digits.contains("passes `^\\D+$` in the browser and fails here"),
+            "{not_digits}"
+        );
+        assert!(not_digits.contains("[^0-9]"), "{not_digits}");
+        assert!(
+            !not_digits.contains("fails in the browser and passes here"),
+            "{not_digits}"
+        );
+        assert!(
+            !not_digits.contains("Write the class out: `[0-9]`"),
+            "{not_digits}"
+        );
+        assert!(
+            not_digits.contains("outside the BMP"),
+            "the negated remedy says what it leaves: {not_digits}"
+        );
+
+        let (code, not_word) = refused_beside(r"^\W+$", "^[^A-Za-z0-9_]+$");
+        assert_eq!(code, PATTERN_CLASS_NOT_PINNED);
+        assert!(not_word.contains("[^A-Za-z0-9_]"), "{not_word}");
+        assert!(
+            !not_word.contains("Write the class out: `[A-Za-z0-9_]`"),
+            "{not_word}"
+        );
+
+        let (code, not_space) = refused_beside(r"^\S$", r"^[^ \t\r\n]$");
+        assert_eq!(code, PATTERN_CLASS_NOT_PINNED);
+        assert!(
+            not_space.contains("should not treat as space"),
+            "{not_space}"
+        );
+        assert!(not_space.contains("wider than either side"), "{not_space}");
+        assert!(!not_space.contains("should treat as space"), "{not_space}");
+        assert!(!not_space.contains("narrower"), "{not_space}");
+
+        let (code, not_boundary) = refused_beside(r"caf\B", "caf[A-Za-z0-9_]");
+        assert_eq!(code, PATTERN_CONSTRUCT_NOT_PORTABLE);
+        assert!(
+            not_boundary.contains("`caf\\B` does not match `café` in the browser"),
+            "{not_boundary}"
+        );
+        assert!(!not_boundary.contains("caf\\b"), "{not_boundary}");
+        assert!(
+            !not_boundary.contains("(^|[^A-Za-z0-9_])"),
+            "{not_boundary}"
+        );
+    }
+
+    /// **[#466]: `\p{…}` under the `u` flag was refused for lacking the flag.**
+    ///
+    /// The message said *ECMA-262 reads `\p{…}` only under the `u` flag, which
+    /// this rule does not carry* to a rule that carried it. **It is still
+    /// refused, for a reason that holds**: under `u` both sides read a
+    /// property, and they accept different spellings — `\p{nd}` and `\pN`
+    /// compile here and throw in the browser (probed 2026-09-17, node v24.15.0
+    /// against `regex` 1.13.1). The same pattern without the flag keeps the
+    /// flag reason, so the test tells the two arms apart.
+    ///
+    /// **Seen red, 2026-09-17**: `refuse` passing no flags to
+    /// `divergence_reason` reddens the test at the `u`-flagged reason's first
+    /// assertion.
+    ///
+    /// [#466]: https://github.com/sujanto-gaws/kelir/issues/466
+    #[test]
+    fn a_unicode_property_is_refused_for_the_reason_its_flags_make_true() {
+        let refusal_for = |flags: &str| {
+            let mut component = plain("digits");
+            component["rules"] = json!([{
+                "rule": "regex", "scope": "both",
+                "params": {"pattern": r"^\p{Nd}+$", "flags": flags},
+                "message": "Digits only.",
+            }]);
+            let details = definition_errors(&definition(vec![component]));
+            assert_eq!(details.len(), 1, "flags `{flags}`: {details:?}");
+            assert_eq!(details[0].code, PATTERN_CLASS_NOT_PINNED);
+            details[0].message.clone()
+        };
+
+        let flagged = refusal_for("u");
+        assert!(flagged.contains("Under the `u` flag"), "{flagged}");
+        assert!(flagged.contains("different spellings"), "{flagged}");
+        assert!(
+            !flagged.contains("does not carry"),
+            "the rule carries `u`: {flagged}"
+        );
+
+        let unflagged = refusal_for("");
+        assert!(
+            unflagged.contains("which this rule does not carry"),
+            "{unflagged}"
+        );
+        assert!(!unflagged.contains("Under the `u` flag"), "{unflagged}");
     }
 
     /// **An escaped backslash is not an escape.** `\d` is a literal

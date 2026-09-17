@@ -9,6 +9,22 @@ While the major version is `0`, the public API may change in any release.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A refused pattern is told a reason that is true for it**
+  ([#466](https://github.com/sujanto-gaws/kelir/issues/466)). A negated class
+  was given its positive class's reason and remedy. `^\D+$` was told `١٢٣`
+  *fails in the browser and passes here*, which is the reverse, and to write
+  `[0-9]`. `^\W+$` was offered `[A-Za-z0-9_]`, `^\S$` was told to write out
+  the characters it treats as space, and `caf\B` was explained with `caf\b`.
+  Each now gets its own reason and remedy (`[^0-9]`, `[^A-Za-z0-9_]`,
+  `[^ \t\r\n]`, and the characters next to the non-boundary), and a negated
+  remedy says what it does not settle. **`\p{…}` under the `u` flag** was
+  refused for lacking the flag. It is still refused, now for a reason that
+  holds: the browser and the server accept different spellings of a property.
+  **Nothing that was refused is now stored, and nothing stored is now
+  refused**: only the messages changed.
+
 ## [0.8.0] — 2026-09-17
 
 Phase 8 closes: **a person who signs in sees their own work, not a version
