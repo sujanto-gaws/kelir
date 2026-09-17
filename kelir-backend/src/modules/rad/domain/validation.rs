@@ -152,7 +152,7 @@ fn registry_rule(name: &str) -> Option<RegistryRule> {
         // two sides can reach opposite verdicts on one input.
         //
         // **It is narrowed at the write rather than here** (**D-15**, ADR-0038;
-        // registry 1.5.1). `refuse_pattern` refuses a definition carrying a
+        // registry 1.5.3). `refuse_pattern` refuses a definition carrying a
         // construct on its list, and **the list is not every divergence**
         // (#465): a pattern reaching this arm is one the list does not name,
         // not one both sides are known to agree about. Nothing is re-checked

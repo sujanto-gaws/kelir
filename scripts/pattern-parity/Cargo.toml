@@ -1,0 +1,10 @@
+[package]
+name = "pattern-parity"
+version = "0.1.0"
+edition = "2021"
+# Not a workspace member. Pinned to the version kelir-backend/Cargo.lock uses.
+[workspace]
+
+[dependencies]
+regex = "=1.13.1"
+serde_json = "1"

@@ -31,9 +31,19 @@ While the major version is `0`, the public API may change in any release.
   only `i`, `m` and `s`, and even `i` decides `k` and `s` differently on the
   two sides ([#482](https://github.com/sujanto-gaws/kelir/issues/482)). The
   [Validation Rule Registry](docs/schema/JFSS%20Validation%20Rule%20Registry.md)
-  1.5.2 lists the known cases, and a subset **no probe has split**: printable
-  ASCII, classes that are not negated, the ordinary quantifiers, and no flags.
-  That subset is measured, not proven.
+  1.5.3 lists the known cases and a subset of patterns measured to agree.
+  **Check a pattern against the registry's table, not against a summary of
+  it**: the subset is defined by that table, part by part.
+- **A pattern can also split by taking too long in the browser**
+  ([#492](https://github.com/sujanto-gaws/kelir/issues/492),
+  [#493](https://github.com/sujanto-gaws/kelir/issues/493)). The server matches
+  in linear time, and the browsers backtrack. `(?:[a-z]|[a-z0-9])*$` against 28
+  `a`s and a `!` holds a Chrome tab for more than 20 seconds. Firefox throws, and
+  the form counts that as a refusal. WebKit answers *no match*. The server
+  accepts the value. Long values do the same to simpler patterns: Firefox
+  refuses `[a-z]*$` at 100,000 characters. **Give a patterned field a
+  `validation.maxLength`**, and see the registry for the measurements and for
+  what `maxLength` does and does not bound.
 
 ### Fixed
 

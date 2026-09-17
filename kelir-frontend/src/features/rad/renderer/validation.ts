@@ -157,7 +157,7 @@ export const VALIDATION_RULES: Readonly<Record<string, RegistryRule>> = {
    *
    * **It is narrowed at the write rather than here** (**D-15**,
    * [ADR-0038](../../../../../docs/architectures/adr/0038.%20Kelir%20Patterns%20Are%20the%20Linear-Time%20Subset.md);
-   * Validation Rule Registry 1.5.1). A definition carrying a construct on the
+   * Validation Rule Registry 1.5.3). A definition carrying a construct on the
    * server's list — a bare `\d`, `\w` or `\s`, a POSIX bracket expression,
    * `\p{…}`, or `\b` — is refused when it is saved. **That list is not every
    * divergence** (#465): `.` against a character outside the BMP, set
@@ -174,6 +174,14 @@ export const VALIDATION_RULES: Readonly<Record<string, RegistryRule>> = {
    *
    * An uncompilable pattern is a violation rather than a pass: a rule that
    * cannot be applied has not been satisfied.
+   *
+   * **The same `catch` also receives an engine that gave up** (#493). A
+   * pattern that backtracks long enough makes Firefox throw *too much
+   * recursion* for a value the server's linear-time crate matches, so the form
+   * refuses what the server would accept. Chrome does not throw, it just keeps
+   * the tab busy. Registry 1.5.3 measures both. Nothing here tells a
+   * compile error from a give-up, and deciding what a give-up should mean is
+   * not done here.
    */
   regex: {
     scope: 'both',
@@ -549,6 +557,9 @@ function checkValidation(validation: JfssValidation, value: unknown): FieldViola
  *
  * A pattern the browser cannot compile is a violation and not a pass, for the
  * reason the rule gives: a check that could not be applied has not been met.
+ * An engine that gives up on a long backtrack lands in the same `catch`, as
+ * the rule's comment says (#493). `checkValidation` decides `maxLength` first,
+ * so a value longer than that never reaches here.
  */
 function matchesPattern(pattern: string, value: string): boolean {
   try {
