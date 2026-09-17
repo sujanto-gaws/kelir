@@ -1,7 +1,7 @@
 # JFSS Validation Rule Registry
-**Version:** 1.5.1  
+**Version:** 1.5.2  
 **Status:** Active Standard  
-**Last updated:** 2026-09-16  
+**Last updated:** 2026-09-17  
 **Pairs with:** JFSS v2.0.1  
 **Maintainers:** Full-Stack Engineering Team
 
@@ -66,7 +66,7 @@ Applies a custom regular expression. (Use this when the base `validation.pattern
 * **Use Case:** Complex string formatting (e.g., specific ID formats).
 * **Params Schema:**
   ```json
-  { "pattern": "string (ECMA 262 regex)", "flags": "string (e.g., 'i', 'g')" }
+  { "pattern": "string (ECMA 262 regex)", "flags": "string (ECMA 262 flags; for a `both` rule, see the subset below before setting any)" }
   ```
 * **Implementation Notes:**
   * **Vue:** `new RegExp(params.pattern, params.flags).test(value)`
@@ -94,14 +94,37 @@ Applies a custom regular expression. (Use this when the base `validation.pattern
 > |---|---|---|
 > | `.` | `^.{1,3}$` | A character outside the BMP is two units in the browser and one here; `\r` and U+2028 match here and not there |
 > | A literal astral character in a class | `^[😀]$` | Two units in the browser, one here |
-> | Nested classes and set operations | `[[a-c]]`, `[a-z&&[^aeiou]]`, `[a-z--b]` | Crate syntax; an ordinary class in the browser |
+> | Nested classes and set operations | `[[a-c]]`, `[a-z&&[^aeiou]]`, `[a-z--b]`; and, added in 1.5.2, `[a~~b]` and `[&&]` | Crate syntax; an ordinary class in the browser |
 > | Braced and 8-digit escapes | `\x{41}`, `\u{41}`, `\U00000041` | Crate syntax; literal characters in the browser |
 > | Crate-only anchors and `\a` | `\A`, `\z`, `\<`, `\>`, `\a` | Anchors here; identity escapes there, and `\a` the other way |
 > | Inline flags and named groups | `(?i)abc`, `(?P<x>a)`, `(?x) a b` | Compile here; a `SyntaxError` in the browser, **so the browser fails every value** |
-> | Case folding under `i` | `^k$` against U+212A | The crate folds more code points |
+> | Case folding under `i` | `^k$` against U+212A; `^[a-z]+$` against U+017F | The crate folds more code points, **and two of them fold onto ASCII letters**: U+212A onto `k` and U+017F onto `s`. So `i` splits a pattern of ASCII literals whenever it can match `k` or `s` |
 > | `$` under `m` | `^a$` against `a\r\nb` | ECMA-262 treats `\r` as a line terminator |
 >
-> **Until the list is extended or the dialect is redefined, write a `both`-scoped pattern from ASCII literals, written-out classes, `^`, `$` without `m`, and the ordinary quantifiers.** What the refusal promises is narrower than *the two sides agree*: **a pattern the server refuses would certainly have diverged; a pattern it accepts may still diverge.** [ADR-0038](../architectures/adr/0038.%20Kelir%20Patterns%20Are%20the%20Linear-Time%20Subset.md) §2 records which dialect Kelir means.
+> **Measured again 2026-09-17, and also stored** ([record 17](../../projects/verifications/17.%20Sprint%2019%20and%20Sprint%2017%20Independent%20Pass.md) finding 1, [#482](https://github.com/sujanto-gaws/kelir/issues/482), then the probe described below). **The first row and the flags row were inside, or outside the reach of, the subset 1.5.1 recommended**:
+>
+> | Construct | Example | Where they part |
+> |---|---|---|
+> | A negated class | `^[^,]{1,3}$` against two emoji | A character outside the BMP is two units in the browser and one here, so `[^,]` matches half of one there |
+> | A class opening with `]` | `[]a]` | A literal `]` or `a` here; in the browser an empty class, which never matches, then the text `a]` |
+> | A space inside a counted repetition | `a{1, 3}` | A repetition here; the literal text `a{1, 3}` in the browser |
+> | Two quantifiers on one atom, or a quantified anchor | `a**`, `a{2}{3}`, `^*`, `$+` | Compile here; a `SyntaxError` in the browser, **so the browser fails every value** |
+> | A flag other than `i`, `m` and `s` | `y`, `u`, `v`, `q`, `ii` | **Ignored here**: `compile_pattern` reads `i`, `m` and `s` and no other letter. The browser anchors the match at the start under `y`, refuses identity escapes such as `\-` under `u` and `v`, and throws on a letter it does not know or one given twice, **so it fails every value** |
+>
+> ~~**Until the list is extended or the dialect is redefined, write a `both`-scoped pattern from ASCII literals, written-out classes, `^`, `$` without `m`, and the ordinary quantifiers.**~~ **Corrected in 1.5.2: that subset was not safe** ([#482](https://github.com/sujanto-gaws/kelir/issues/482)). A negated class was inside it, it said nothing about flags, and it did not exclude `i`, which the table above already showed splitting ASCII literals.
+>
+> **Until the list is extended or the dialect is redefined, write a `both`-scoped pattern inside the subset below. It is the subset no probe has split, which is less than a proof.** On 2026-09-17, 1,200,000 random pairs of a pattern drawn from it and a value (100,000 patterns, node v24.15.0 against `regex` 1.13.1 built as `compile_pattern` builds it) were decided the same way on both sides. The values mixed ASCII with characters outside the BMP, `\r`, `\n`, U+2028, U+0085, U+212A, U+017F, `é` and Arabic-Indic digits. **The same generator, allowed negated classes, found splits**, and allowed the flag `i`, found 201. **The last column is not a list of known divergences.** Most of it was split by a fixed probe or is refused at save, but some was simply left out of the probe (`\x41` and `\t` agreed where they were tried), and it stays out until something draws from it:
+>
+> | Part | Inside the subset | Outside it |
+> |---|---|---|
+> | **Flags** | **None**: `params.flags` absent or empty. `validation.pattern` carries none | Every flag. `i` splits on `k` and `s`; `m`, `s`, `u`, `v`, `y` and unknown or repeated letters are in the tables above. `g` and `d` split nothing in the probe, and change nothing for a single `test` either |
+> | **Literals** | Printable ASCII, U+0020 to U+007E. These escaped with a backslash: `.` `+` `*` `?` `(` `)` `[` `]` `{` `}` `\|` `^` `$` `\` `/`, and `-` if you like | Every character above U+007E, even written literally; every escape not listed, including `\d`, `\b`, `\x41` and `\t` |
+> | **Classes** | Not negated, over the same literals and ASCII ranges: `[A-Za-z0-9_-]`, `[\]\\^.]`. A `-` first, last or escaped | `[^…]`; a class opening with `]`; an unescaped `[` inside one; `&&`, `~~` or `--` |
+> | **Anchors** | `^` first in the pattern and `$` last, unquantified | Anchors anywhere else; `^*`, `$+`; `$` under `m` |
+> | **Groups** | `(…)`, `(?:…)`, and `\|` between alternatives | Named groups, inline flags, look-around |
+> | **Quantifiers** | `*`, `+`, `?`, `{n}`, `{n,}`, `{n,m}`, each optionally followed by `?` | A space inside the braces; two on one atom; `{,n}` |
+>
+> **Case-insensitive matching is written out** — `[Aa][Bb][Cc]`, not `abc` with `i`. **A pattern outside the subset is not known to diverge. It is just not known to agree.** What the refusal promises is narrower than *the two sides agree*: **a pattern the server refuses would certainly have diverged; a pattern it accepts may still diverge.** [ADR-0038](../architectures/adr/0038.%20Kelir%20Patterns%20Are%20the%20Linear-Time%20Subset.md) §2 records which dialect Kelir means.
 >
 > **What Kelir refuses when a definition is written** ([#391](https://github.com/sujanto-gaws/kelir/issues/391), through the S10.3 envelope, at the same seam that already refuses an unregistered rule name):
 >
@@ -274,6 +297,7 @@ The Vue submission handler must catch the `400` response, iterate through the `d
 ## 6. Changelog
 
 - **1.4.1 (2026-09-11):** **1.4.0 called the `regex` question resolved, and it is not wholly.** The save-time refusal closes lookahead, backreferences and a bare `\d`, `\w` or `\s`; `\b`, POSIX bracket expressions and `\p{…}` still compile on the server and diverge silently in the browser ([#413](https://github.com/sujanto-gaws/kelir/issues/413), the [Sprint 16 independent pass](../../projects/verifications/15.%20Sprint%2016%20Independent%20Pass.md) finding 1). The warning under `regex` now says which. Found again by the `v0.7.0` pre-flight schema check; 1.4.0's entry below is left as written. No rule is added, removed, or re-scoped.
+- **1.5.2 (2026-09-17):** **1.5.1 called a subset safe, and it was not.** [#482](https://github.com/sujanto-gaws/kelir/issues/482), [record 17](../../projects/verifications/17.%20Sprint%2019%20and%20Sprint%2017%20Independent%20Pass.md) finding 1: `^[^,]{1,3}$`, built only from what 1.5.1 recommended, rejects two emoji in the browser and accepts them on the server. The subset said nothing about flags, and the server reads only `i`, `m` and `s`. **The warning under `regex` now carries a subset probed on both engines and says it is measured, not proven**, with its method, its size and a positive control. It also tabulates five more stored constructs: a negated class, a class opening with `]`, a space inside `{n, m}`, stacked quantifiers, and flags other than `i`, `m` and `s`. `~~` and `&&` join the set-operation row. `i` over ASCII is now named (U+212A onto `k`, U+017F onto `s`), and the params example stops suggesting `i`. No rule, code or refusal changed; two code comments that repeated a wrong claim are corrected in the same change.
 - **1.5.1 (2026-09-16):** **1.5.0 said *Closed*, and it was not.** [#465](https://github.com/sujanto-gaws/kelir/issues/465), [record 16](../../projects/verifications/16.%20Sprint%2018%20Independent%20Pass.md) finding 2: about twenty constructs outside the refusal's list are still stored and still decide inputs differently on the two sides. `.` against a character outside the BMP is the ordinary one, and inline flags such as `(?i)` are the worst, because the browser cannot build them and fails every value. **The warning under `regex` now tabulates them, states what the refusal does and does not promise, and gives the subset an author can rely on.** No rule, code or refusal changed; this is a correction to a claim.
 - **1.5.0 (2026-09-13):** **Closed the three divergences 1.4.1 recorded as open** ([#413](https://github.com/sujanto-gaws/kelir/issues/413), Sprint 18 item 1). `\b`/`\B`, POSIX bracket expressions and `\p{…}`/`\P{…}` are refused where a definition is written, joining the bare classes. **`\b` earns its own code**, `PATTERN_CONSTRUCT_NOT_PORTABLE`, because it has no portable spelling — a class can be transcribed and a boundary has to be re-expressed. **The check's boundary is now stated** rather than left to be inferred. **And the refusal's explanation is corrected**: one message had served `\d`, `\w` and `\s`, saying *ECMA-262's classes are ASCII and this crate's are Unicode* and ending *write `[0-9]`* whatever the pattern was. **For `\s` both halves were wrong** — both sides read it as Unicode whitespace, differing at exactly U+0085 and U+FEFF in opposite directions, and a digit class is not a remedy for a whitespace one. Each construct now carries its own reason.
 - **1.4.0 (2026-09-09):** **Resolved the `regex` rule's open question as decision D-15.** The "ECMA 262 regex" params schema is constrained to what the Rust `regex` crate honours, checked when a form definition is written rather than when it is filled in ([#391](https://github.com/sujanto-gaws/kelir/issues/391)): an uncompilable pattern is `PATTERN_NOT_COMPILABLE` and a bare `\d`, `\w` or `\s` is `PATTERN_CLASS_NOT_PINNED`, both through the S10.3 envelope and both applying to `validation.pattern` too. **`fancy-regex` was the rejected alternative**, on the ReDoS exposure a tenant-authored pattern would open rather than on what it can express. The interim guidance under the `regex` warning becomes the rule; the capability limit — no lookahead, no backreferences, so server-side password complexity is several rules — is stated there. No rule is added, removed, or re-scoped.

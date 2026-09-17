@@ -26,9 +26,14 @@ While the major version is `0`, the public API may change in any release.
   around it, such as `(^|[^A-Za-z0-9_])`.
 - **The refusal is a list, not a guarantee of agreement.** A pattern the
   server accepts may still decide some inputs differently in the browser, for
-  example `.` against an emoji or an inline flag such as `(?i)`. The
+  example `.` or a negated class such as `[^,]` against an emoji, or an inline
+  flag such as `(?i)`. **The same goes for `params.flags`**: the server reads
+  only `i`, `m` and `s`, and even `i` decides `k` and `s` differently on the
+  two sides ([#482](https://github.com/sujanto-gaws/kelir/issues/482)). The
   [Validation Rule Registry](docs/schema/JFSS%20Validation%20Rule%20Registry.md)
-  1.5.1 lists the known cases and the subset that is safe.
+  1.5.2 lists the known cases, and a subset **no probe has split**: printable
+  ASCII, classes that are not negated, the ordinary quantifiers, and no flags.
+  That subset is measured, not proven.
 
 ### Fixed
 

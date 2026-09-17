@@ -378,8 +378,13 @@ pub fn js_string(value: &Value) -> String {
 ///
 /// Unanchored on both sides — `test` searches, and so does `Regex::is_match` —
 /// and an uncompilable pattern is `false`, which is the browser's `catch` arm.
-/// `g` and `y` are dropped rather than refused: they change where a *repeated*
-/// match resumes and mean nothing to a single `test`.
+/// **Every flag but `i`, `m` and `s` is dropped rather than refused.** That is
+/// harmless for `g` and `d`, which mean nothing to a single `test`. **It is not
+/// harmless for the rest** (#482, record 17 finding 1): the browser anchors
+/// the match at the start under `y`, refuses identity escapes such as `\-`
+/// under `u` and `v`, and throws on a letter it does not know or one given
+/// twice. Validation Rule Registry
+/// 1.5.2 tabulates them.
 fn matches_pattern(pattern: &str, flags: &str, value: &str) -> bool {
     compile_pattern(pattern, flags)
         .map(|compiled| compiled.is_match(value))
@@ -496,9 +501,11 @@ fn compile_reason(error: &regex::Error) -> String {
 ///   bracket expression; `\p{…}` and `\P{…}` anywhere; POSIX bracket
 ///   expressions (`[[:alpha:]]`, negated or not) inside one.
 /// - **Not covered, deliberately:** `\b` *inside* a bracket expression, which
-///   is a backspace escape on both sides and agrees; and any construct the
-///   `regex` crate refuses outright, which [`refuse_pattern`]'s compile check
-///   has already returned on before this runs.
+///   ECMA-262 reads as a backspace and ~~this crate reads the same way~~ this
+///   crate refuses to compile (corrected 2026-09-17, #482), so the compile
+///   check refuses it first; and any other construct the `regex` crate refuses
+///   outright, which [`refuse_pattern`]'s compile check has already returned
+///   on before this runs.
 /// - **Not covered, and it is a limit rather than a decision:** a divergence
 ///   neither engine expresses as syntax — case folding under `i` differs on a
 ///   handful of code points, and nothing here detects that.
@@ -509,8 +516,11 @@ fn compile_reason(error: &regex::Error) -> String {
 ///   and set operations (`[[a-c]]`, `&&`, `--`); braced and 8-digit escapes
 ///   (`\x{41}`, `\u{41}`, `\U00000041`); `\A`, `\z`, `\<`, `\>` and `\a`;
 ///   inline flags and named groups (`(?i)`, `(?P<x>…)`, `(?x)`); and `$` under
-///   `m` before `\r\n`. **This scan is a list, so a construct missing from it
-///   is stored**; ADR-0038's 2026-09-16 amendment says what that means for the
+///   `m` before `\r\n`. Record 17 and #482 added more on 2026-09-17: a negated
+///   class against a character outside the BMP, a class opening with `]`,
+///   `~~`, a space inside `{n, m}`, stacked quantifiers, flags other than `i`,
+///   `m` and `s`, and `i` itself on `k` and `s`. **This scan is a list, so a
+///   construct missing from it is stored**; ADR-0038's 2026-09-16 amendment says what that means for the
 ///   dialect.
 ///
 /// [coding standard]: ../../../../../docs/standards/01.%20Coding%20Standard.md
