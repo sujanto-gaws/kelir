@@ -9,8 +9,35 @@ While the major version is `0`, the public API may change in any release.
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-09-17
+
+Phase 8 closes: **a person who signs in sees their own work, not a version
+string.** The dashboard is seven cards over one request: what is waiting for
+you and what of it is late, your drafts, the top of your inbox, the documents
+you touched last, where the documents you raised stand, and how long they took
+to be decided. **[SDD](docs/design/01.%20System%20Design%20Document.md) §14
+names six things for this phase — dashboard summary, pending tasks, recent
+documents, status chart, overdue tasks and approval reports — and all six
+exist.** The phase ran three sprints, not one (**D-77**, **D-81**), and the
+third also carried the release run's own controls and four corrections to one
+registry claim about which patterns the browser and the server decide alike.
+
 ### Upgrade notes
 
+- **Only administrators see the dashboard until a role is granted
+  `reporting:dashboard:read`.** `0043` adds the permission and grants it to
+  `ROLE-ADMIN` alone. Everybody else still lands on the dashboard after signing
+  in, and it tells them which permission they are missing
+  ([User Manual](docs/operations/03.%20User%20Manual.md) §3). **Grant it to
+  each role that should see its own work there.** It shows nobody else's data:
+  every card is about the person looking (**D-82**,
+  [ADR-0039](docs/architectures/adr/0039.%20A%20Dashboard%20Widget%20Is%20a%20Purpose-Built%20Endpoint.md)).
+- **`0043` and `0044` each build one index, and a plain `CREATE INDEX` blocks
+  writes to its table while it builds**: `documents` for `0043`,
+  `activity_events` for `0044`. The backend runs migrations as it starts, so on
+  a deployment with many rows in either table, plan the upgrade for a quiet
+  moment. Both migrations are additive, and `v0.7.0` runs against the migrated
+  schema (release process §6).
 - **A draft form that uses `\b`, `\B`, a POSIX bracket expression such as
   `[[:digit:]]`, or `\p{…}`/`\P{…}` in a pattern can no longer be published**
   ([#413](https://github.com/sujanto-gaws/kelir/issues/413),
@@ -26,6 +53,64 @@ While the major version is `0`, the public API may change in any release.
   around it, such as `(^|[^A-Za-z0-9_])`.
 - **A pattern the server accepts may still decide differently in the browser;
   see the [Validation Rule Registry](docs/schema/JFSS%20Validation%20Rule%20Registry.md).**
+
+### Added
+
+- **The dashboard** (FR-RPT-001 to FR-RPT-006; [#436](https://github.com/sujanto-gaws/kelir/pull/436), [#437](https://github.com/sujanto-gaws/kelir/pull/437), [#438](https://github.com/sujanto-gaws/kelir/pull/438), [#457](https://github.com/sujanto-gaws/kelir/pull/457), [#458](https://github.com/sujanto-gaws/kelir/pull/458), [#481](https://github.com/sujanto-gaws/kelir/pull/481)).
+  One request, `GET /api/v1/dashboard/summary`, returns every card, under one
+  permission (see *Upgrade notes*). Each card is a field on one summary, not an
+  endpoint of its own, so the page has a single answer to *what may this viewer
+  see* ([ADR-0039](docs/architectures/adr/0039.%20A%20Dashboard%20Widget%20Is%20a%20Purpose-Built%20Endpoint.md)).
+  - **Waiting for you** and **Your drafts** — counts, with how many waiting
+    tasks are late.
+  - **Your pending tasks** — the top of your inbox, in the inbox's own order and
+    from the inbox's own statement, so the card and **My Tasks** cannot
+    disagree about what you may see.
+  - **What is late** — your waiting tasks past their date, the longest late
+    first. Lateness is the server's answer, not the browser's clock.
+  - **What you touched last** — the documents you most recently worked on.
+  - **Your documents by status** — the documents you raised, at each of the ten
+    statuses, drawn as a chart with the numbers under it. The chart library
+    loads only when the card does
+    ([ADR-0040](docs/architectures/adr/0040.%20A%20Chart%20Is%20Drawn%20with%20Unovis%2C%20Off%20the%20First-Load%20Path.md)).
+  - **How long approval takes** — for the documents you raised that were
+    approved or rejected in the last 90 days: the median time, the slowest,
+    and how many. A document that was returned and resubmitted is timed from
+    its first submission (**D-83**).
+  A row links to its task or document only if you may open that screen too, and
+  an empty card says so in words.
+
+### Changed
+
+- **The dashboard no longer shows the backend's version.** It was the page's
+  only content before this release ([#436](https://github.com/sujanto-gaws/kelir/pull/436)).
+  `/version` still answers.
+- **Three more pattern constructs are refused where a definition is written**:
+  `\b`/`\B`, POSIX bracket expressions and `\p{…}`/`\P{…}`, with `\b` under
+  its own code, `PATTERN_CONSTRUCT_NOT_PORTABLE`
+  ([#451](https://github.com/sujanto-gaws/kelir/pull/451)). See *Upgrade notes*
+  above for what that does to a draft.
+- **The [Validation Rule Registry](docs/schema/JFSS%20Validation%20Rule%20Registry.md)
+  claims no subset of patterns that the browser and the server decide alike**
+  (1.5.4, [#499](https://github.com/sujanto-gaws/kelir/issues/499)). 1.5.0 to 1.5.3 each made such a claim, and a probe
+  split each one. The registry keeps what was measured, and the probe is in
+  `scripts/pattern-parity/`.
+- **For contributors, four controls now run where they used to be
+  instructions:**
+  - A commit co-authored by Claude with no `Claude-Session` line fails its pull
+    request ([#476](https://github.com/sujanto-gaws/kelir/pull/476), **D-84**).
+  - A release record cannot go `Final` carrying a follow-up without an issue
+    ([#455](https://github.com/sujanto-gaws/kelir/pull/455),
+    [#479](https://github.com/sujanto-gaws/kelir/pull/479)), and the release
+    gate no longer accepts a citation that resolves to nothing, an unparseable
+    record name or an unrecognised status
+    ([#435](https://github.com/sujanto-gaws/kelir/pull/435)).
+  - A sprint status report either cites a merge that added a browser flow or
+    says `verified by inspection only`
+    ([#456](https://github.com/sujanto-gaws/kelir/pull/456)).
+  - `End-to-end (browser)` disables every apt source outside `ubuntu.com`
+    before installing the browser, so a third party's index cannot hold every
+    merge shut ([#430](https://github.com/sujanto-gaws/kelir/pull/430)).
 
 ### Fixed
 
