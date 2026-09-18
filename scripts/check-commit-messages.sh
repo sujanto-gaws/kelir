@@ -100,31 +100,66 @@ check_header() {
 #
 # **Against the commit that earned it:** `62f14c9` (#459) is refused, as are
 # #460, #462 and #463. Sprint 18's construction, #450 to #458, passes.
+#
+# **Since #485 those probes are a script**, `check-commit-messages.probe.sh`,
+# with record 17 finding 4's five shapes added. CI runs it on every pull
+# request. Four mutations, run 2026-09-18, each red on its own probe and then
+# restored:
+#
+#   `unfenced` never applied       → the fenced line accepted, and the human
+#                                    commit quoting a trailer refused
+#   the co-author match back to `claude` alone → both Anthropic addresses accepted
+#   the key's `[[:space:]]*` removed → the spaced key accepted
+#   the nil-UUID filter removed    → the nil UUID accepted
+#
+# The script as it was before #485 fails the same five refusals, and it fails
+# the fenced human-commit control too.
 SESSION_URL='https://claude\.ai/code/session_[A-Za-z0-9]+'
 SESSION_UUID='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 SESSION_LINE="^Claude-Session:[[:space:]]+(${SESSION_URL}|${SESSION_UUID})[[:space:]]*$"
+NIL_SESSION='^Claude-Session:[[:space:]]+0{8}-0{4}-0{4}-0{4}-0{12}[[:space:]]*$'
+
+# **Who counts as Claude** (#485, record 17 finding 4). The name is not
+# enough: `Opus 5 <noreply@anthropic.com>` never says `claude`, so an Anthropic
+# address counts too. **The key is matched the way git parses it**, and git
+# reads `Co-Authored-By : …`, with a space before the colon, as a trailer.
+CO_AUTHOR='^co-authored-by[[:space:]]*:.*(claude|@anthropic\.com)'
+
+# A message with its fenced blocks removed. **A line quoted in a fence is not
+# the commit's own line**: a body that quotes another session's
+# `Claude-Session:` in a code block would otherwise pass for that session
+# (#485). The co-author is looked for the same way, so a human commit that
+# quotes a Claude trailer in a fence stays a human commit. A fence opens and
+# closes on a line starting with ``` or ~~~, and the two are not told apart.
+unfenced() {
+  awk '/^[[:space:]]*(```|~~~)/ { fenced = !fenced; next } !fenced { print }'
+}
 
 check_session() {
   local sha="$1"
   local short="${sha:0:8}"
   local message
-  message="$(git log -1 --format=%B "${sha}" | tr -d '\r')"
+  message="$(git log -1 --format=%B "${sha}" | tr -d '\r' | unfenced)"
 
-  # A human commit needs no line. Only a message that names Claude as a
-  # co-author is governed, and the key's case is not a way around it.
-  if ! grep -qiE '^co-authored-by:.*claude' <<< "${message}"; then
+  # A human commit needs no line. Only a message that names Claude or an
+  # Anthropic address as a co-author is governed, and neither the key's case
+  # nor a space before its colon is a way around it.
+  if ! grep -qiE "${CO_AUTHOR}" <<< "${message}"; then
     return 0
   fi
 
-  if grep -qE "${SESSION_LINE}" <<< "${message}"; then
+  # **The nil UUID is a placeholder, not a session**: it is well-formed, so the
+  # shape check alone accepted it.
+  if grep -E "${SESSION_LINE}" <<< "${message}" | grep -qvE "${NIL_SESSION}"; then
     return 0
   fi
 
-  if grep -qiE '^claude-session:' <<< "${message}"; then
+  if grep -qiE '^claude-session' <<< "${message}"; then
     echo "  FAIL  ${short}  its Claude-Session line is not a session URL or UUID"
-    echo "        $(grep -iE '^claude-session:' <<< "${message}" | head -1)"
+    echo "        $(grep -iE '^claude-session' <<< "${message}" | head -1)"
   else
     echo "  FAIL  ${short}  co-authored by Claude with no Claude-Session line"
+    echo "        (a line inside a fenced block is quoted, and does not count)"
   fi
   echo "        add 'Claude-Session: <id>' to the message, where <id> is"
   echo "        https://claude.ai/code/session_… or \$CLAUDE_CODE_SESSION_ID"
