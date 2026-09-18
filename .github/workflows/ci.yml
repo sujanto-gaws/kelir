@@ -453,6 +453,11 @@ jobs:
             "origin/${{ github.base_ref }}" \
             "${{ github.event.pull_request.head.sha }}"
 
+      # The session rule's shapes, each a scratch commit expected to be
+      # refused or accepted (#485). Seconds of bash, so it runs every time.
+      - name: Probe the session rule
+        run: ./scripts/check-commit-messages.probe.sh
+
       # **The pull-request title is checked in `pull-request-title.yml`**, not
       # here (**D-65**). It lived in this job from D-38 until 2026-09-03, and
       # the move is not tidying: this workflow triggers on the default
