@@ -24,6 +24,7 @@ import { credentials } from '../support/env'
  */
 let session: ApiSession
 let formKey: string
+let formTitle: string
 let typeCode: string
 
 test.beforeAll(async () => {
@@ -32,6 +33,11 @@ test.beforeAll(async () => {
   // conflict on the second one — the reason `runSuffix` exists.
   formKey = `e2e_built_${runSuffix()}`.toLowerCase()
   typeCode = `E2E_BUILT_${runSuffix()}`.toUpperCase()
+  // **The title too** (#521). The type builder's chooser is picked by label,
+  // and a fixed title matched every earlier run's form as well: from the
+  // second run on `selectOption` took the first run's, and the document below
+  // was raised against a form this run had not built.
+  formTitle = `Built in the browser ${runSuffix()}`
 })
 
 test.afterAll(async () => {
@@ -65,12 +71,13 @@ test('an administrator builds a form through a screen, and a document is raised 
   await expect(page.getByTestId('form-create-dialog')).toBeVisible()
 
   await page.getByTestId('form-key').fill(formKey)
-  await page.getByTestId('form-title').fill('Built in the browser')
+  await page.getByTestId('form-title').fill(formTitle)
   await page.getByTestId('save-form').click()
 
   // Straight into the editor, which is where somebody who just made a form
   // wants to be.
   await expect(page).toHaveURL(/\/admin\/forms\/[0-9a-f-]{36}$/)
+  const formId = new URL(page.url()).pathname.split('/').pop()
   await expect(page.getByTestId('component-field_1')).toBeVisible()
 
   // --- Author the definition ------------------------------------------------
@@ -115,11 +122,28 @@ test('an administrator builds a form through a screen, and a document is raised 
 
   // The chooser offers published revisions, which is what a document may pin —
   // and the only published revision this flow has is the one it just made.
-  await page.getByTestId('type-form').selectOption({ label: 'Built in the browser (r1)' })
+  await page.getByTestId('type-form').selectOption({ label: `${formTitle} (r1)` })
   await page.getByTestId('type-status').selectOption('ACTIVE')
+
+  // **The save is confirmed by its response, not by the row** (#503, #521).
+  // The type list shows 20 rows ordered by code, so on a database that already
+  // holds twenty types this row is not on page one. The response also names
+  // the form the type is bound to, which is a stronger claim than the row's
+  // *Bound*: it is this run's form, not a form.
+  const created = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === '/api/v1/document-types',
+  )
   await page.getByTestId('save-document-type').click()
 
-  await expect(page.getByTestId(`type-${typeCode}`)).toContainText('Bound')
+  const response = await created
+  expect(response.status(), await response.text()).toBe(201)
+  const saved = ((await response.json()) as { data: { typeCode: string; formId: string } }).data
+  expect(saved.typeCode).toBe(typeCode)
+  expect(saved.formId).toBe(formId)
+  // The dialog closes only on a save it accepted.
+  await expect(page.getByTestId('save-document-type')).toBeHidden()
 
   // --- **The assertion #373 AC5 asks for** ----------------------------------
   //

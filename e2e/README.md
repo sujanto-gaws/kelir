@@ -87,15 +87,32 @@ about the seam it exists for. The task has to reach somebody else's inbox, and
 the requester has to see the result without doing anything. It drives two browser
 pages in one test for that reason.
 
-Adding a flow means adding a file under `tests/`. Two rules the existing one
-follows:
+Adding a flow means adding a file under `tests/`. Three rules the existing ones
+follow:
 
 1. **Seed what you assert on.** The deployment keeps its database between runs,
    so a spec that depends on rows another spec created is a spec that passes in
    the wrong order and fails in the right one. `runSuffix()` keeps each run's
-   codes unique.
+   codes unique, **and anything a screen picks by label, such as a form title
+   in a chooser, needs the suffix too**: a fixed title matches every earlier
+   run's row, and `selectOption` takes the first of them.
 2. **Assert in the browser.** `support/api.ts` deliberately holds no helper that
    reads a list.
+3. **Find your row, not a position** ([#521](https://github.com/sujanto-gaws/kelir/issues/521)).
+   CI starts every run on an empty database, so whatever a spec looks for is
+   on page one and is the only row there. A rehearsal, or a second run on one
+   stack, is not empty. Reach this run's row by its suffix: through the
+   screen's search or filter where it has one, by the save's own response, or
+   by opening the row's page. Where a screen has none of those, turn its pages
+   with `pageUntilVisible` in `support/paging.ts`. Never wait for a row on the
+   first page, count rows across the tenant, or take `.first()` of a list
+   other runs write to.
+
+   **What the harness cannot get round:** the new-document type chooser, and
+   the form and list choosers in the document type dialog, read one page of
+   100 and offer no search. On a database holding more than 100 of those rows
+   that sort ahead of the run's own, the flows that use them fail, because a
+   person could not make the choice either.
 
 ## Where it runs
 
