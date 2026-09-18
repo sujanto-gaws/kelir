@@ -6,6 +6,7 @@ import { expect, test } from '@playwright/test'
 import { signInOverApi, runSuffix, type ApiSession } from '../support/api'
 import { credentials } from '../support/env'
 import { publishForm, type SeededForm } from '../support/forms'
+import { pageUntilVisible } from '../support/paging'
 
 /**
  * An administrator configures a document type through a screen, and a document
@@ -43,10 +44,16 @@ let typeCode: string
 
 test.beforeAll(async () => {
   session = await signInOverApi()
-  form = await publishForm(session, definition, 'Configured requisition (e2e)')
+  // **The title carries the suffix as well as the code** (#521). The chooser
+  // below picks by label, and every run publishes this form, so a fixed title
+  // matched every earlier run's revision too and `selectOption` took the first
+  // of them: from the second run on, the type was bound to the *first* run's
+  // form and the flow passed on a binding it had not made.
+  const suffix = runSuffix()
+  form = await publishForm(session, definition, `Configured requisition (e2e ${suffix})`)
   // The deployment keeps its database between runs, so a fixed code conflicts
   // on the second one — the reason `runSuffix` exists.
-  typeCode = `E2E_CONFIGURED_${runSuffix()}`.toUpperCase()
+  typeCode = `E2E_CONFIGURED_${suffix}`.toUpperCase()
 })
 
 test.afterAll(async () => {
@@ -94,10 +101,32 @@ test('an administrator configures a document type through a screen, and a docume
   // A document may only be created from an ACTIVE type, so the flow sets it —
   // which is the state a person configuring a type actually has to reach.
   await page.getByTestId('type-status').selectOption('ACTIVE')
+
+  // **The save is confirmed by its response**, as `build-a-list.spec.ts` does
+  // it (#503), and the binding by the form it names: this run's form, not
+  // merely *a* form.
+  const created = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === '/api/v1/document-types',
+  )
   await page.getByTestId('save-document-type').click()
 
+  const response = await created
+  expect(response.status(), await response.text()).toBe(201)
+  const saved = ((await response.json()) as { data: { typeCode: string; formId: string } }).data
+  expect(saved.typeCode).toBe(typeCode)
+  expect(saved.formId).toBe(form.id)
+
   await expect(page.getByTestId('document-type-dialog')).toBeHidden()
-  await expect(page.getByTestId(`type-${typeCode}`)).toBeVisible()
+
+  // **The row is then found on whichever page it landed on** (#521). The list
+  // shows 20 types ordered by code, so on a database that already holds twenty
+  // types this one is not on page one, and the numbering button below is on
+  // its row. The screen has no search, so the pages are turned. Reloaded
+  // first, so the walk starts from page one and not from a refresh in flight.
+  await page.reload()
+  await pageUntilVisible(page, page.getByTestId(`type-${typeCode}`))
   await expect(page.getByTestId(`type-${typeCode}`)).toContainText('Bound')
 
   // --- Give it a numbering rule --------------------------------------------

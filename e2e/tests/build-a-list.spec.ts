@@ -39,7 +39,10 @@ let typeCode: string
 
 test.beforeAll(async () => {
   session = await signInOverApi()
-  form = await publishForm(session, definition, 'Listed requisition (e2e)')
+  // **The title carries the suffix** (#521). The type builder's chooser is
+  // picked by label, and a fixed title matched every earlier run's form too:
+  // from the second run on, `selectOption` bound the type to the first run's.
+  form = await publishForm(session, definition, `Listed requisition (e2e ${runSuffix()})`)
   listKey = `e2e_built_list_${runSuffix()}`.toLowerCase()
   typeCode = `E2E_LISTED_${runSuffix()}`.toUpperCase()
 })
@@ -121,7 +124,9 @@ test('an administrator builds a list through a screen, and it opens with rows', 
 
   const response = await created
   expect(response.status(), await response.text()).toBe(201)
-  expect(((await response.json()) as { data: { typeCode: string } }).data.typeCode).toBe(typeCode)
+  const saved = ((await response.json()) as { data: { typeCode: string; formId: string } }).data
+  expect(saved.typeCode).toBe(typeCode)
+  expect(saved.formId).toBe(form.id)
   // The dialog closes only on a save it accepted.
   await expect(page.getByTestId('save-document-type')).toBeHidden()
 
