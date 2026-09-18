@@ -32,13 +32,30 @@ import {
  * The administrator raises one too and it is approved. The card is about what
  * the caller raised, so it must not move the count to `3`.
  *
- * # What is not asserted
+ * # Two times the card cannot confuse (#488)
  *
- * **The durations' values.** Every decision here lands within seconds of its
- * submission, so the median and the slowest are *under a minute* on a quick run
- * and a few minutes on a slow one; asserting a number would fail on the
- * runner's speed rather than on the card. The flow asserts that both are shown
- * as a duration, and the unit specs own the formatting.
+ * **The rejection waits a planted 75 seconds; the approval does not.** Until
+ * #488 every decision landed seconds after its submission, so both labels were
+ * *under a minute*. The flow asserted only that each was *a* duration, and
+ * record 17 finding 7 showed it passing with the median rendering the slowest,
+ * and with every time labelled *under a minute*.
+ *
+ * The seeding holds each label a wide margin from its edges:
+ *
+ * - **Slowest: `1 min`.** The rejection is decided at least 75 seconds after it
+ *   was submitted. The label turns `2 min` only past 120 seconds, 45 seconds of
+ *   slack for a slow runner.
+ * - **Median: `under a minute`.** Two decided, so the median is the mean of
+ *   the two, rounded down (`approval_time.rs`). The approval takes a few
+ *   seconds and the rejection about 75, which averages about 40. The approval
+ *   would have to take 45 seconds before the median reached a minute.
+ *
+ * So a median that renders the slowest reads `1 min`, and a label that always
+ * says *under a minute* reads that for the slowest. Both fail here.
+ *
+ * **The wait is real time, because the release stack gives the flow no other
+ * way to date a submission.** The flow seeds over the API, and nothing on the
+ * API sets `started_at`. The wait costs this spec 75 seconds.
  *
  * # A requester of this run's own
  *
@@ -70,7 +87,13 @@ const definition = {
 let session: ApiSession
 let requester: SeededApprover
 
+/** How long the rejection waits after its submission: see *Two times* above. */
+const SLOW_DECISION_MS = 75_000
+
 test.beforeAll(async () => {
+  // The planted wait, plus the seeding around it.
+  test.setTimeout(SLOW_DECISION_MS + 90_000)
+
   session = await signInOverApi()
 
   const form = await publishForm(session, definition, `Approval time request ${suffix}`)
@@ -101,11 +124,18 @@ test.beforeAll(async () => {
     const waiting = await createDraft(asRequester, documentType, `Still waiting ${suffix}`)
     await createDraft(asRequester, documentType, `Never sent ${suffix}`)
 
-    for (const id of [approved, rejected, waiting]) {
+    // The slow one first, so its clock starts before anything else is done.
+    await submitDocument(asRequester, rejected)
+    const rejectedSubmittedAt = Date.now()
+
+    for (const id of [approved, waiting]) {
       await submitDocument(asRequester, id)
     }
 
     await decideDocumentTask(approver, approved, 'APPROVE')
+
+    const remaining = rejectedSubmittedAt + SLOW_DECISION_MS - Date.now()
+    await new Promise((resolve) => setTimeout(resolve, Math.max(0, remaining)))
     await decideDocumentTask(approver, rejected, 'REJECT')
   } finally {
     await asRequester.context.dispose()
@@ -145,9 +175,7 @@ test('the dashboard says how long the requester’s documents took to be decided
   await expect(card.getByTestId('approval-time-documents').locator('dd')).toHaveText('2')
   await expect(card.getByTestId('approval-time-empty')).toHaveCount(0)
 
-  // --- Both times are shown as durations ------------------------------------
-  const duration = /^(under a minute|\d+ min|\d+ h( \d+ min)?)$/
-
-  await expect(card.getByTestId('approval-time-median').locator('dd')).toHaveText(duration)
-  await expect(card.getByTestId('approval-time-slowest').locator('dd')).toHaveText(duration)
+  // --- The two times, exactly: a few seconds and about 75 --------------------
+  await expect(card.getByTestId('approval-time-median').locator('dd')).toHaveText('under a minute')
+  await expect(card.getByTestId('approval-time-slowest').locator('dd')).toHaveText('1 min')
 })
