@@ -254,11 +254,25 @@ fn the_walk_finds_both_tables_and_governs_something() {
         resolved.len()
     );
 
-    assert!(
-        !open.is_empty(),
-        "the walk found no rows in §6.2. An empty Open table would pass rule 1 for ever — \
-         if every decision really is resolved, this assertion is the one to change, \
-         deliberately."
+    // Changed deliberately on 2026-09-18, when D-73, D-86, D-90 and D-91 were
+    // answered and §6.2 emptied. An empty Open table is now legitimate, so what
+    // is asserted is that the walk misses no row: every body row of §6.2's table
+    // is one `decision_rows` reads. A row written in another shape fails here
+    // instead of passing rule 1 unseen.
+    let open_section = section(&document, OPEN);
+    let table_rows = open_section
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with('|'))
+        .count();
+
+    assert_eq!(
+        table_rows.saturating_sub(2),
+        open.len(),
+        "§6.2's table has {} body rows but the walk read {} as decisions. Each row opens \
+         `| **D-n**`, or rule 1 never sees it",
+        table_rows.saturating_sub(2),
+        open.len()
     );
 
     assert_eq!(
