@@ -23,7 +23,13 @@ While the major version is `0`, the public API may change in any release.
   deleted waits for the delete, then is refused as `ASSIGNMENT_UNRESOLVED`
   if the delete went through, with nothing written.
   **Upgrade:** a role deleted before this release, with tasks still open,
-  stays as it was: those tasks are offered to nobody.
+  stays as it was: those tasks are offered to nobody, and no screen lists
+  them. Nothing repairs them automatically, because the obvious repair —
+  making the role live again — would silently re-grant its permissions to
+  everybody who held it. [Installation and Deployment
+  §9](docs/operations/01.%20Installation%20and%20Deployment.md#9-troubleshooting)
+  has a query that finds them and the steps to clear one by hand
+  ([#511](https://github.com/sujanto-gaws/kelir/issues/511)).
 - **A task is not raised when a decision on it names a role that is gone**
   ([#509](https://github.com/sujanto-gaws/kelir/issues/509)). A task offered to one role, in a state
   whose `APPROVE` or `REJECT` is `allowedBy` a role that is not live, used to
