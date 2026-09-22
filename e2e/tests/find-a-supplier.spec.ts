@@ -78,17 +78,26 @@ test('a signed-in administrator finds one supplier among many', async ({ page })
   await page.getByRole('button', { name: 'Suppliers' }).click()
   await expect(page).toHaveURL(/\/master-data\/suppliers/)
 
-  // Both seeded rows are here before anything is filtered. Asserting this
+  // Both seeded rows are here before the filter narrows to one. Asserting this
   // first is what makes the assertion after the filter mean something.
+  //
+  // **Found by this run's suffix, not on the unfiltered first page** (#521).
+  // The list shows 20 suppliers ordered by code, so on a database that already
+  // holds twenty suppliers that sort ahead of `E2E-`, neither row is on page
+  // one. Both names carry the suffix, so a search for it is the widest view
+  // that still holds only this run's rows.
+  //
+  // `fill` then `blur`: the search box commits on `change`, which is the event
+  // a person produces by leaving the field, not by typing into it.
   const table = page.getByRole('table')
+  const search = page.getByLabel('Search')
+  await search.fill(suffix)
+  await search.blur()
+
   await expect(table.getByRole('row', { name: new RegExp(wanted.code) })).toBeVisible()
   await expect(table.getByRole('row', { name: new RegExp(other.code) })).toBeVisible()
 
   // --- Filter it -----------------------------------------------------------
-  //
-  // `fill` then `blur`: the search box commits on `change`, which is the event
-  // a person produces by leaving the field, not by typing into it.
-  const search = page.getByLabel('Search')
   await search.fill(wanted.name)
   await search.blur()
 
@@ -97,8 +106,12 @@ test('a signed-in administrator finds one supplier among many', async ({ page })
   // Read through `searchParams` rather than matched as a pattern: the router
   // encodes a space as `+` and `encodeURIComponent` writes `%20`, so a regex
   // over the raw URL asserts an encoding rather than a value.
-  await expect(page).toHaveURL(/[?&]search=/)
-  expect(new URL(page.url()).searchParams.get('search')).toBe(wanted.name)
+  //
+  // Polled, because the URL already carries the suffix search above and the
+  // new value replaces it only once the change has been committed.
+  await expect
+    .poll(() => new URL(page.url()).searchParams.get('search'))
+    .toBe(wanted.name)
 
   const row = table.getByRole('row', { name: new RegExp(wanted.code) })
   await expect(row).toBeVisible()

@@ -53,6 +53,19 @@ While the major version is `0`, the public API may change in any release.
   one database hit it. It now confirms the save by the `201` and the closed
   dialog, and finds the type on the new-document screen. Reproduced red, then
   green, against a stack holding 26 types.
+- **Five more browser specs pass on a database that is not empty**
+  ([#521](https://github.com/sujanto-gaws/kelir/issues/521)). An audit of all
+  sixteen found five that waited for a row on page one of a 20-row list:
+  `build-a-form` and `configure-a-document-type` on the type list,
+  `create-a-tenant` for the deployment's own tenant, `find-a-supplier` before
+  filtering, and `sign-out-and-the-roles-screen` for `ROLE-ADMIN`. They now
+  confirm a save by its response, search by the run's suffix, or turn the
+  pages. It also found that `build-a-form`, `build-a-list` and
+  `configure-a-document-type` chose their form by a title every run shares, so
+  from the second run on they bound the **first** run's form and still
+  passed. Each now suffixes the title and checks the saved type names its own
+  form. All five were red against a stack padded past 20 rows, and green
+  after.
 - **A task offered to a deleted role is no longer *waiting for you***
   ([#487](https://github.com/sujanto-gaws/kelir/issues/487)). Deleting a role
   left its grants live, and the inbox read only the grant. So the task stayed
