@@ -97,8 +97,10 @@ While the major version is `0`, the public API may change in any release.
   `[0-9]`. `^\W+$` was offered `[A-Za-z0-9_]`, `^\S$` was told to write out
   the characters it treats as space, and `caf\B` was explained with `caf\b`.
   Each now gets its own reason and remedy (`[^0-9]`, `[^A-Za-z0-9_]`,
-  `[^ \t\r\n]`, and the characters next to the non-boundary), and a negated
-  remedy says what it does not settle. **`\p{…}` under the `u` flag** was
+  `[^ \t\r\n]`, and the characters next to the non-boundary). A negated
+  remedy claims no agreement between the engines. It first said it *settled
+  the class*, which splits under `i`, and the claim was struck under D-88
+  ([#531](https://github.com/sujanto-gaws/kelir/issues/531)). **`\p{…}` under the `u` flag** was
   refused for lacking the flag. It is still refused, now for a reason that
   holds: the browser and the server accept different spellings of a property.
   **Nothing that was refused is now stored, and nothing stored is now

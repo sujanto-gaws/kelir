@@ -758,10 +758,16 @@ fn refuse(
 /// told that `١٢٣` fails in the browser and passes here — the reverse of what
 /// happens — and to write `[0-9]`, the complement of the class it had written.
 /// Every sentence below was probed on both engines on 2026-09-17 (node
-/// v24.15.0 against `regex` 1.13.1). **A negated remedy says what it does not
-/// settle**: a negated class still counts a character outside the BMP as two
-/// units in the browser and one here, so `[^0-9]` agrees with the server about
-/// digits and not about an emoji.
+/// v24.15.0 against `regex` 1.13.1).
+///
+/// **A negated remedy claims no agreement between the engines**
+/// ([#531](https://github.com/sujanto-gaws/kelir/issues/531), record 18
+/// finding 4). It used to say it *settles the class and not* an emoji. Under
+/// `i` the `\W` remedy splits at `ſ` and `K`, and under `u` the emoji premise
+/// is false: the sentence read no flags. D-88's stopping rule strikes a claim
+/// that has split rather than narrowing it, so the sentence now promises
+/// nothing a probe can refute. It says the remedy is not a claim of
+/// agreement, and it points at the registry's measurement.
 ///
 /// **`\p{…}` is refused whatever the flags, and the reason depends on them.**
 /// Without `u` the browser reads a literal letter. With `u` it reads a property
@@ -769,10 +775,10 @@ fn refuse(
 /// here and throw there — so this backend refuses the construct rather than
 /// decide which spellings both sides share.
 fn divergence_reason(construct: &DivergentConstruct, flags: &str) -> (&'static str, String) {
-    /// What a negated remedy leaves unsettled, said once.
-    const NEGATED_REMEDY_LIMIT: &str = "A negated class still counts a character outside the \
-         BMP, such as an emoji, as two units in the browser and one here, so this settles the \
-         class and not that; the Validation Rule Registry's `regex` warning has the measurement";
+    /// What a negated remedy does not promise, said once.
+    const NEGATED_REMEDY_LIMIT: &str = "This remedy is not a claim that the browser and this \
+         server agree about every character it admits; the Validation Rule Registry's `regex` \
+         warning has what was measured to split";
 
     match construct {
         DivergentConstruct::Class('d') => (
@@ -1486,10 +1492,16 @@ mod tests {
             !not_digits.contains("Write the class out: `[0-9]`"),
             "{not_digits}"
         );
+        // #531: the limit claims no agreement, in any wording (D-88). Seen
+        // red, 2026-09-24: with `so this settles the class` put back into the
+        // limit.
         assert!(
-            not_digits.contains("outside the BMP"),
-            "the negated remedy says what it leaves: {not_digits}"
+            not_digits.contains("is not a claim that the browser and this server agree"),
+            "the negated remedy disclaims agreement: {not_digits}"
         );
+        for claim in ["settles", "outside the BMP"] {
+            assert!(!not_digits.contains(claim), "{claim}: {not_digits}");
+        }
 
         let (code, not_word) = refused_beside(r"^\W+$", "^[^A-Za-z0-9_]+$");
         assert_eq!(code, PATTERN_CLASS_NOT_PINNED);
