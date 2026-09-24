@@ -11,6 +11,13 @@ While the major version is `0`, the public API may change in any release.
 
 ### Changed
 
+- **MinIO and `mc` are fetched from `ghcr.io/sujanto-gaws`** (decision **D-92**).
+  `quay.io/minio/*`, where D-80 moved them, closed to anonymous pulls on
+  2026-09-24. The copies are MinIO's own linux/amd64 filesystems, rebuilt
+  unmodified with their original configuration and checked file by file. The
+  tags are unchanged and the digests are new. **Upgrade note:** a deployment on
+  arm64 cannot use them. Pull MinIO's images with credentials there, or build
+  them from source.
 - **A role that an open task still needs cannot be deleted**
   ([#487](https://github.com/sujanto-gaws/kelir/issues/487), decision **D-89**).
   `DELETE /api/v1/identity/roles/{id}` used to answer 204 whatever was

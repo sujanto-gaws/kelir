@@ -166,12 +166,25 @@ jobs:
         # `sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e`
         # and `sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727`,
         # read on 2026-09-12.
+        #
+        # **`ghcr.io/sujanto-gaws` and not quay, because quay closed too**
+        # (D-92). On 2026-09-24 both quay repositories answered 401 to an
+        # anonymous pull, and the API answered *Requires authentication* for
+        # the repository itself. Every PR's backend and browser jobs died in
+        # the same two steps as on 2026-09-12. **These are Kelir's own copies**:
+        # the linux/amd64 filesystem of each quay image, rebuilt unmodified
+        # with its original entrypoint, command, environment, ports and volume,
+        # and checked against the original entry by entry (type, mode, owner,
+        # size, link and SHA-256 of every file: 902 and 896 entries, none
+        # different). The digests are new, because the compressed layers were
+        # no longer held anywhere to re-push. **amd64 only**, which is what
+        # every runner and the staging host are.
         run: |
           docker run -d --name minio --network host \
             -e MINIO_ROOT_USER=minioadmin \
             -e MINIO_ROOT_PASSWORD=minioadmin \
-            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
-          docker run --rm --network host --entrypoint sh quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z -c \
+            ghcr.io/sujanto-gaws/minio:RELEASE.2025-09-07T16-13-09Z server /data
+          docker run --rm --network host --entrypoint sh ghcr.io/sujanto-gaws/mc:RELEASE.2025-08-13T08-35-41Z -c \
             "until mc alias set ci http://localhost:9000 minioadmin minioadmin; \
              do sleep 1; done \
              && mc mb --ignore-existing ci/kelir-test"
