@@ -365,7 +365,7 @@ pub async fn run_after_chain(
 
         if breaker_is_open(&recent) {
             failures.push(format!(
-                "`{reference}` is switched off by its circuit breaker until {BREAKER_COOL_DOWN:?} \
+                "`{reference}` is paused by its circuit breaker until {BREAKER_COOL_DOWN:?} \
                  after its last failure"
             ));
 
@@ -522,8 +522,10 @@ async fn report_if_opened(
 
     let body = format!(
         "{reference} failed on its last {BREAKER_THRESHOLD} runs of {hook_name}, so it has been \
-         switched off. The events it would have handled are held and retried, not lost. It is \
-         tried once more ten minutes after its last failure, and a success switches it back on."
+         paused. While it is paused it is not run, and an event that reaches it is retried later \
+         rather than dropped — unless its failure is one no retry can fix, such as a handler that \
+         cannot run after a transition, which is recorded as an error and not retried. It is \
+         tried once more ten minutes after its last failure, and a success resumes it."
     );
 
     for recipient in
@@ -538,7 +540,7 @@ async fn report_if_opened(
                 workflow_instance_id: None,
                 task_id: None,
                 notification_type: notification::domain::NotificationType::HookCircuitOpened,
-                title: "An after-hook has been switched off",
+                title: "An after-hook has been paused",
                 body: &body,
                 actor: None,
             },

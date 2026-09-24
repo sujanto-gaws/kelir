@@ -994,6 +994,9 @@ async fn concurrent_passes_deliver_each_event_exactly_once() {
 ///
 /// Seen red, 2026-09-24: the error branch of `outbox::worker::deliver_one`
 /// returning before its `settle` — the row stayed `PROCESSING`, uncounted.
+/// And, for the cause assertion: `cause_of(&error)` replaced by
+/// `error.to_string()` — `last_error` read `INTERNAL_ERROR: An unexpected
+/// error occurred`.
 /// (`rollback` replaced by `commit` stays green, and is equivalent: the
 /// database error has already aborted the transaction, so the commit rolls
 /// back.)
@@ -1049,10 +1052,16 @@ async fn a_delivery_that_errors_part_way_rolls_back_its_runs_and_counts_the_atte
 
     assert_eq!(row.status, "FAILED");
     assert_eq!(row.attempt_count, 1, "the failed attempt is counted");
-    // A reason is kept. It is `AppError`'s generic display, not the database's
-    // cause — the worker never logs the `Internal` source (finding reported
-    // with #519's closing verification), so this asserts presence only.
-    assert!(row.last_error.is_some(), "{:?}", row.last_error);
+    // **The cause, not the response's generic words.** `AppError`'s display
+    // for an internal error is `An unexpected error occurred`, which is right
+    // for a caller and useless on this row.
+    assert!(
+        row.last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("the log is unavailable")),
+        "{:?}",
+        row.last_error
+    );
 
     let due_in = row.due_in.expect("a retry time");
 
@@ -1133,4 +1142,79 @@ async fn another_tenant_s_open_breaker_does_not_hold_this_tenant_s_handler() {
     .expect("this tenant's runs");
 
     assert_eq!(own, vec!["CONTINUE".to_owned()]);
+}
+
+/// **A claimant that outlived its lease cannot settle the row a newer claim
+/// holds** (ADR-0041 §2's lease, fenced).
+///
+/// Worker A claims the event and stalls past its lease; worker B claims it
+/// again. Both see the row `PROCESSING`, so a status guard cannot tell them
+/// apart. A's late settle must match nothing, and B's must land.
+///
+/// Seen red, 2026-09-24: `AND next_attempt_at = $7` dropped from
+/// `outbox::repository::settle` — A's stale `FAILED` overwrote the row B was
+/// delivering, and B's own settle then matched nothing.
+#[tokio::test]
+async fn a_stale_claimant_cannot_settle_a_row_another_worker_reclaimed() {
+    use kelir_backend::modules::outbox::domain::Settlement;
+    use kelir_backend::modules::outbox::repository as outbox_repo;
+
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+    let token = approver(&app, "outbox.fence").await;
+
+    let workflow =
+        publish_workflow(&app, &admin, one_step_workflow("outbox_fence", json!([]))).await;
+    let type_id = document_type(&app, &admin, "OUTBOX_FENCE", workflow).await;
+    let document = approved_document(&app, &token, type_id).await;
+
+    let stale = outbox_repo::claim(&app.pool, 10, 300.0)
+        .await
+        .expect("worker A claims")
+        .pop()
+        .expect("the event");
+
+    // A stalls; its lease runs out.
+    make_due(&app).await;
+
+    let fresh = outbox_repo::claim(&app.pool, 10, 300.0)
+        .await
+        .expect("worker B claims")
+        .pop()
+        .expect("the same event, reclaimed");
+
+    assert_eq!(fresh.id, stale.id);
+    assert_ne!(fresh.lease, stale.lease, "each claim sets its own lease");
+
+    let late = outbox_repo::settle(
+        &app.pool,
+        stale.tenant_id,
+        &stale,
+        1,
+        Settlement::Failed(std::time::Duration::from_secs(30)),
+        Some("worker A's stale failure"),
+    )
+    .await
+    .expect("A's settle runs");
+
+    assert!(!late, "a stale claim must not settle the row");
+
+    let row = event_of(&app, document).await;
+
+    assert_eq!(row.status, "PROCESSING", "B still holds it");
+    assert!(row.last_error.is_none(), "{:?}", row.last_error);
+
+    let current = outbox_repo::settle(
+        &app.pool,
+        fresh.tenant_id,
+        &fresh,
+        1,
+        Settlement::Processed,
+        None,
+    )
+    .await
+    .expect("B's settle runs");
+
+    assert!(current, "the current claimant settles");
+    assert_eq!(event_of(&app, document).await.status, "PROCESSED");
 }

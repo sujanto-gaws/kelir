@@ -1,6 +1,7 @@
 //! `outbox_events`: the insert, the claim, and the settlement (Database Schema
 //! §12.8; ADR-0041).
 
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::{PgExecutor, PgPool};
 use uuid::Uuid;
@@ -55,6 +56,12 @@ pub struct Claimed {
     pub payload_json: Value,
     /// Attempts made before this one.
     pub attempt_count: i32,
+    /// The lease this claim set — `next_attempt_at` as the claim wrote it.
+    ///
+    /// **It is the claim's fencing token.** [`settle`] matches on it, so a
+    /// worker that outlived its lease and was overtaken by a second claim
+    /// cannot settle the row the second claimant now holds.
+    pub lease: DateTime<Utc>,
 }
 
 /// Claims up to `limit` due rows, oldest first, under a lease.
@@ -99,7 +106,8 @@ pub async fn claim(
             FOR UPDATE SKIP LOCKED
         ) due
         WHERE o.id = due.id
-        RETURNING o.id, o.tenant_id, o.event_type, o.payload_json, o.attempt_count
+        RETURNING o.id, o.tenant_id, o.event_type, o.payload_json, o.attempt_count,
+                  o.next_attempt_at AS "lease!"
         "#,
         limit,
         lease_seconds,
@@ -115,6 +123,7 @@ pub async fn claim(
             event_type: row.event_type,
             payload_json: row.payload_json,
             attempt_count: row.attempt_count,
+            lease: row.lease,
         })
         .collect();
 
@@ -131,16 +140,24 @@ pub async fn claim(
 /// row says how many it took. `last_error` keeps the latest reason while the row
 /// is failing and is cleared by a success.
 ///
-/// Guarded on `PROCESSING`: a row this worker held past its lease, which
-/// another worker then claimed and settled, is not settled twice.
+/// # Fenced on the lease, not only on the status
+///
+/// **Returns whether this claim still held the row.** The statement matches
+/// `status = 'PROCESSING'` *and* `next_attempt_at` equal to the lease this
+/// claim set. A status guard alone is not enough: a worker that outlived its
+/// five minutes finds the row `PROCESSING` still — because a second worker
+/// re-claimed it and is delivering it now — and would settle the second
+/// worker's attempt out from under it. The lease is different for every claim,
+/// so it tells the two apart, and `false` means *a newer claimant owns this
+/// row*: the caller drops its result rather than writing it.
 pub async fn settle<'e, E: PgExecutor<'e>>(
     executor: E,
     tenant_id: Uuid,
-    id: Uuid,
+    claim: &Claimed,
     attempt: i32,
     settlement: Settlement,
     last_error: Option<&str>,
-) -> Result<(), sqlx::Error> {
+) -> Result<bool, sqlx::Error> {
     let retry_in = match settlement {
         Settlement::Failed(delay) => Some(delay.as_secs_f64()),
         Settlement::Processed | Settlement::DeadLetter => None,
@@ -154,16 +171,17 @@ pub async fn settle<'e, E: PgExecutor<'e>>(
             next_attempt_at = now() + make_interval(secs => $5),
             processed_at = CASE WHEN $3::text = 'PROCESSED' THEN now() END,
             last_error = $6
-        WHERE tenant_id = $1 AND id = $2 AND status = 'PROCESSING'
+        WHERE tenant_id = $1 AND id = $2 AND status = 'PROCESSING' AND next_attempt_at = $7
         "#,
         tenant_id,
-        id,
+        claim.id,
         settlement.as_db(),
         attempt,
         retry_in,
         last_error,
+        claim.lease,
     )
     .execute(executor)
     .await
-    .map(|_| ())
+    .map(|result| result.rows_affected() == 1)
 }

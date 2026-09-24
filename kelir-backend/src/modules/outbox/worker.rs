@@ -120,17 +120,27 @@ async fn deliver_one(state: &AppState, event: &Claimed) -> Result<(), sqlx::Erro
                 Delivery::Retry(reason) => Some(reason.as_str()),
             };
 
-            log_settlement(event, attempt, settlement, reason);
-
-            repo::settle(
+            let held = repo::settle(
                 &mut *transaction,
                 event.tenant_id,
-                event.id,
+                event,
                 attempt,
                 settlement,
                 reason,
             )
             .await?;
+
+            if !held {
+                // Overtaken: this pass outlived its lease and another claimed
+                // the row. Its runs are discarded with the transaction, because
+                // the newer claimant is delivering the same event and will log
+                // its own.
+                overtaken(event);
+
+                return transaction.rollback().await;
+            }
+
+            log_settlement(event, attempt, settlement, reason);
 
             transaction.commit().await
         }
@@ -142,22 +152,54 @@ async fn deliver_one(state: &AppState, event: &Claimed) -> Result<(), sqlx::Erro
             // cycling on its lease for ever.
             transaction.rollback().await?;
 
-            let reason = error.to_string();
+            let reason = cause_of(&error);
             let settlement = Settlement::after(attempt, &Delivery::Retry(reason.clone()));
 
-            log_settlement(event, attempt, settlement, Some(&reason));
-
-            repo::settle(
+            let held = repo::settle(
                 &state.pool,
                 event.tenant_id,
-                event.id,
+                event,
                 attempt,
                 settlement,
                 Some(&reason),
             )
-            .await
+            .await?;
+
+            if held {
+                log_settlement(event, attempt, settlement, Some(&reason));
+            } else {
+                overtaken(event);
+            }
+
+            Ok(())
         }
     }
+}
+
+/// What went wrong, in words an operator can act on.
+///
+/// **Not `AppError`'s `Display`**, which is the response a *caller* would see:
+/// for `Internal` that is `INTERNAL_ERROR: An unexpected error occurred`, by
+/// design, and on this row it would say nothing about why the attempt failed.
+/// The worker has no caller to shield, so it records the source — the chain
+/// `anyhow` carries, which for a database failure is the driver's message.
+///
+/// **Nothing here is a secret.** The source is an `sqlx` or application error:
+/// a statement's failure, never a credential or a payload. Form data does not
+/// reach an error message on this path — the consumer builds none from it.
+fn cause_of(error: &AppError) -> String {
+    match error {
+        AppError::Internal { source } => format!("{source:#}"),
+        other => other.to_string(),
+    }
+}
+
+fn overtaken(event: &Claimed) {
+    tracing::warn!(
+        event = %event.id,
+        "an outbox delivery outlived its lease and another worker has claimed the event; \
+         this attempt's result is dropped"
+    );
 }
 
 /// The dispatch table: an event type to its consumer (ADR-0041 §4).
