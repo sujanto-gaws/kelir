@@ -1103,3 +1103,235 @@ async fn a_disabled_registration_does_not_run() {
     assert_eq!(approve(&app, &token, document).await.status, StatusCode::OK);
     assert!(hook_runs(&app, document).await.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// The outbox event every transition writes (ADR-0041, #519)
+// ---------------------------------------------------------------------------
+
+/// The `Workflow.Transitioned` events one document's instance has written, in
+/// the order they were written.
+async fn events_of(app: &TestApp, document_id: Uuid) -> Vec<(String, Uuid, String, Value)> {
+    sqlx::query_as(
+        "SELECT o.event_type, o.aggregate_id, o.status, o.payload_json
+         FROM outbox_events o
+         JOIN workflow_instances i ON i.id = o.aggregate_id
+         WHERE i.document_id = $1
+         ORDER BY o.id",
+    )
+    .bind(document_id)
+    .fetch_all(&app.pool)
+    .await
+    .expect("read the outbox")
+}
+
+/// **A decided and an automatic transition each write one event**, and each
+/// envelope validates against the EES meta-schema (ADR-0041 §2, §5; AC-2,
+/// AC-4).
+///
+/// One approval here is two transitions — `SUBMITTED` to `STAMPING` decided,
+/// `STAMPING` to `COMPLETED` taken by the engine — so the two writes are told
+/// apart by their action and their actor, and the count of two is what rules
+/// out *one event per decision*.
+///
+/// Seen red, 2026-09-24: the `publish_transition` call removed from
+/// `engine::advance_automatically` — one event, not two.
+#[tokio::test]
+async fn a_decided_and_an_automatic_transition_each_write_one_valid_event() {
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+    let token = approver(&app, "systask.events").await;
+    let approver_id: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE username = $1")
+        .bind("systask.events")
+        .fetch_one(&app.pool)
+        .await
+        .expect("the approver");
+
+    let workflow = publish_workflow(
+        &app,
+        &admin,
+        workflow_with_a_service_state("stamped_events", json!([]), None),
+    )
+    .await;
+    let type_id = document_type(&app, &admin, "STAMPED_EVENTS", workflow).await;
+    let document = draft(&app, &token, type_id, 100).await;
+
+    submit(&app, &token, document).await;
+
+    // The start is not a transition: its history row has no action and no
+    // `from_state`, and it writes no event.
+    assert!(events_of(&app, document).await.is_empty());
+
+    assert_eq!(approve(&app, &token, document).await.status, StatusCode::OK);
+
+    let events = events_of(&app, document).await;
+    let instance: Uuid = sqlx::query_scalar(
+        "SELECT id FROM workflow_instances WHERE document_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(document)
+    .fetch_one(&app.pool)
+    .await
+    .expect("the instance");
+
+    assert_eq!(events.len(), 2, "{events:?}");
+
+    let validator = common::ees_validator();
+
+    for (event_type, aggregate_id, status, envelope) in &events {
+        let errors: Vec<String> = validator
+            .iter_errors(envelope)
+            .map(|error| format!("{} at {}", error, error.instance_path()))
+            .collect();
+
+        assert!(errors.is_empty(), "EES S1: {errors:?}\n{envelope:#}");
+        assert_eq!(event_type, "Workflow.Transitioned");
+        assert_eq!(envelope["eventType"], "Workflow.Transitioned");
+        assert_eq!(envelope["aggregateType"], "WORKFLOW_INSTANCE");
+        assert_eq!(*aggregate_id, instance);
+        assert_eq!(envelope["aggregateId"], instance.to_string());
+        assert_eq!(status, "PENDING");
+
+        // EES §4.1's `Workflow.*` profile, and the two this event adds.
+        let payload = &envelope["payload"];
+
+        for field in [
+            "instanceId",
+            "workflowKey",
+            "workflowRevision",
+            "documentId",
+            "state",
+            "taskId",
+            "assigneeUserId",
+            "action",
+            "fromState",
+            "toState",
+        ] {
+            assert!(
+                payload.get(field).is_some(),
+                "`{field}` is missing: {payload}"
+            );
+        }
+
+        assert_eq!(payload["documentId"], document.to_string());
+        assert_eq!(payload["workflowKey"], "stamped_events");
+        // **No form data** (EES §4.2): the amount is on the document and not
+        // in the event.
+        assert!(!payload.to_string().contains("amount"), "{payload}");
+    }
+
+    let (decided, automatic) = (&events[0].3, &events[1].3);
+
+    assert_eq!(decided["payload"]["action"], "APPROVE");
+    assert_eq!(decided["payload"]["fromState"], "SUBMITTED");
+    assert_eq!(decided["payload"]["toState"], "STAMPING");
+    assert_eq!(decided["actor"]["actorType"], "USER");
+    assert_eq!(decided["actor"]["actorId"], approver_id.to_string());
+
+    assert_eq!(automatic["payload"]["action"], "AUTO");
+    assert_eq!(automatic["payload"]["fromState"], "STAMPING");
+    assert_eq!(automatic["payload"]["toState"], "COMPLETED");
+    assert_eq!(automatic["actor"]["actorType"], "WORKFLOW_ENGINE");
+    assert!(automatic["actor"]["actorId"].is_null());
+
+    // `sequence` is the transition's place in the instance's history: the
+    // start is 1, so the two transitions are 2 and 3.
+    assert_eq!(decided["sequence"], 2);
+    assert_eq!(automatic["sequence"], 3);
+}
+
+/// **A transition that rolls back writes no event** (AC-3): the guard refuses,
+/// the whole advance is undone, and the decided transition before it takes its
+/// event with it.
+///
+/// The second subject is the same workflow with an amount the guard allows,
+/// which writes both — so the empty outbox is the rollback and not a producer
+/// that never wrote.
+///
+/// Seen red, 2026-09-24: `outbox::repository::insert` executed on a connection
+/// of its own, opened to the transaction's `current_database()`, instead of on
+/// the caller's transaction — the refused approval left its event behind.
+#[tokio::test]
+async fn a_transition_that_rolls_back_writes_no_event() {
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+    let token = approver(&app, "systask.rollback").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &admin,
+        workflow_with_a_service_state(
+            "stamped_rollback",
+            json!([{
+                "handler": "core:reject_when",
+                "config": { "condition": { ">": [{ "var": "formData.amount" }, 50] } }
+            }]),
+            None,
+        ),
+    )
+    .await;
+    let type_id = document_type(&app, &admin, "STAMPED_ROLLBACK", workflow).await;
+
+    let refused = draft(&app, &token, type_id, 100).await;
+
+    submit(&app, &token, refused).await;
+
+    assert_eq!(
+        approve(&app, &token, refused).await.status,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert!(events_of(&app, refused).await.is_empty());
+    // Nor any execution row: the guard's own log went with the transaction.
+    assert!(hook_runs(&app, refused).await.is_empty());
+
+    let allowed = draft(&app, &token, type_id, 10).await;
+
+    submit(&app, &token, allowed).await;
+
+    assert_eq!(approve(&app, &token, allowed).await.status, StatusCode::OK);
+    assert_eq!(events_of(&app, allowed).await.len(), 2);
+}
+
+/// **ADR-0041 §2**: `actions` naming a before-only handler is refused where the
+/// author is, with `HANDLER_KIND_MISMATCH`.
+///
+/// Seen red, 2026-09-24: `let serves = true;` in place of the kind check in
+/// `hook::service::check_entry` — the definition was created.
+#[tokio::test]
+async fn an_actions_entry_naming_a_before_only_handler_is_refused_at_save() {
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+
+    let mut definition = workflow_with_a_service_state("kind_mismatch", json!([]), None);
+
+    definition["transitions"][0]["actions"] = json!([
+        { "handler": "core:set_form_field", "config": { "field": "stamped", "value": true } }
+    ]);
+
+    let created = create_definition(&app, &admin, definition).await;
+
+    assert_eq!(
+        created.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        created.body
+    );
+
+    let detail = created.body["error"]["details"]
+        .as_array()
+        .expect("details")
+        .iter()
+        .find(|detail| detail["code"] == "HANDLER_KIND_MISMATCH")
+        .cloned()
+        .unwrap_or_else(|| panic!("{}", created.body));
+
+    assert_eq!(detail["path"], "definition.transitions.0.actions.0.handler");
+
+    // The handler that serves after commit is accepted in the same position.
+    let mut definition = workflow_with_a_service_state("kind_match", json!([]), None);
+
+    definition["transitions"][0]["actions"] = json!([{ "handler": "core:continue_always" }]);
+
+    assert_eq!(
+        create_definition(&app, &admin, definition).await.status,
+        StatusCode::CREATED
+    );
+}

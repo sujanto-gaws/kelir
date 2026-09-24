@@ -22,6 +22,9 @@ pub enum NotificationType {
     TaskAssigned,
     /// A document you raised was decided.
     DocumentDecided,
+    /// An after-hook failed enough times in a row that its circuit breaker
+    /// opened (ADR-0041 §2). Sent to the tenant's administrators.
+    HookCircuitOpened,
     /// A type this build does not know, read from a row a later release wrote.
     Other,
 }
@@ -31,6 +34,7 @@ impl NotificationType {
         match self {
             Self::TaskAssigned => "TASK_ASSIGNED",
             Self::DocumentDecided => "DOCUMENT_DECIDED",
+            Self::HookCircuitOpened => "HOOK_CIRCUIT_OPENED",
             Self::Other => "OTHER",
         }
     }
@@ -47,6 +51,7 @@ impl NotificationType {
         match value {
             "TASK_ASSIGNED" => Self::TaskAssigned,
             "DOCUMENT_DECIDED" => Self::DocumentDecided,
+            "HOOK_CIRCUIT_OPENED" => Self::HookCircuitOpened,
             _ => Self::Other,
         }
     }

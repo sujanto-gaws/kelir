@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE outbox_events\n        SET status = $3::text,\n            attempt_count = $4,\n            next_attempt_at = now() + make_interval(secs => $5),\n            processed_at = CASE WHEN $3::text = 'PROCESSED' THEN now() END,\n            last_error = $6\n        WHERE tenant_id = $1 AND id = $2 AND status = 'PROCESSING' AND next_attempt_at = $7\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Int4",
+        "Float8",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "00351433144d7513339496ed9156e880802d18df9e588ab77fde6dbe8b4bdb4a"
+}

@@ -58,23 +58,27 @@
 //! through a decision the task's own assignment had already gated. The return
 //! action is what would have made it live, and this landed first.
 //!
-//! # `guards` run on an automatic transition; `actions` are still stored only
+//! # `guards` run on an automatic transition; `actions` run from the outbox
 //!
 //! JWSS §7 declares them as hook registration entries merged into the
-//! `before_workflow_transition` / `after_workflow_transition` chains. **The
-//! before-chain now exists** — [`crate::modules::hook`], built with [#339] —
-//! and [`advance_automatically`] runs a transition's `guards` through it.
+//! `before_workflow_transition` / `after_workflow_transition` chains.
+//! [`advance_automatically`] runs a transition's `guards` through the
+//! before-chain ([`crate::modules::hook`], built with [#339]).
 //!
-//! Two narrowings, stated here because a stored handler must not read as
-//! evidence that it runs:
+//! **`guards` run on an `AUTO` transition and on no other.** A decision-driven
+//! transition does not yet invoke them. The chain is the same one; what is
+//! missing is the call, and it goes beside `fire`'s own authorization check.
 //!
-//! - **`guards` run on an `AUTO` transition and on no other.** A decision-driven
-//!   transition does not yet invoke them. The chain is the same one; what is
-//!   missing is the call, and it goes beside `fire`'s own authorization check.
-//! - **`actions` never run.** They are `after_workflow_transition`, and
-//!   architectures/01 §12.5 delivers an after-hook through the outbox — which
-//!   this product does not have until Phase 9. [`crate::modules::hook`]'s
-//!   module doc is where that is argued.
+//! **`actions` are not run here at all, and that is the design rather than a
+//! gap.** An after-hook runs after the commit, so nothing inside this
+//! transaction can run one. What this module does instead is write one
+//! `Workflow.Transitioned` event through [`crate::modules::outbox::write`] beside
+//! every history row a transition appends — in [`fire`] and in
+//! [`advance_automatically`] alike, whether or not any chain is registered to
+//! read it (ADR-0041). The outbox worker delivers the event and resolves the
+//! chain then: the edge's `actions` from the revision the instance runs, and
+//! the registry's after entries. A transition that rolls back takes its event
+//! with it, which is why the event is written here and not by a caller.
 //!
 //! # `AUTO` transitions fire from a service task, and from nothing else
 //!
@@ -118,6 +122,7 @@ use crate::modules::document::domain::DocumentStatus;
 use crate::modules::document::service::status as document_status_service;
 use crate::modules::hook;
 use crate::modules::notification;
+use crate::modules::outbox;
 use crate::modules::rad::evaluator::RuleEvaluator;
 
 /// What a caller supplies to start a process.
@@ -597,6 +602,23 @@ pub async fn fire(
     )
     .await?;
 
+    // Beside the history row and in its transaction (ADR-0041): the event
+    // exists exactly when the transition does.
+    publish_transition(
+        transaction,
+        &Moved {
+            tenant_id,
+            instance_id,
+            document_id,
+            graph,
+            from: from_state,
+            to: &chosen.to,
+            action,
+            actor: outbox::Actor::user_or_system(actor),
+        },
+    )
+    .await?;
+
     let document_status = enter(
         transaction,
         tenant_id,
@@ -879,7 +901,92 @@ async fn advance_automatically<'g>(
     )
     .await?;
 
+    // **The engine's, not the person's.** The history row carries the actor
+    // whose decision reached this state, so the trail explains the step; the
+    // event says who performed it, and nobody did (EES §2's `WORKFLOW_ENGINE`).
+    publish_transition(
+        transaction,
+        &Moved {
+            tenant_id,
+            instance_id,
+            document_id,
+            graph,
+            from: &state.code,
+            to: &chosen.to,
+            action: TransitionAction::Auto,
+            actor: outbox::Actor::WorkflowEngine,
+        },
+    )
+    .await?;
+
     Ok(Some(target))
+}
+
+/// One committed move, as [`publish_transition`] records it.
+struct Moved<'a> {
+    tenant_id: Uuid,
+    instance_id: Uuid,
+    document_id: Uuid,
+    graph: &'a Graph,
+    from: &'a str,
+    to: &'a str,
+    action: TransitionAction,
+    actor: outbox::Actor,
+}
+
+/// Writes the `Workflow.Transitioned` event for a move just recorded in the
+/// history (ADR-0041 §2).
+///
+/// **Called after `history::record`, in the same transaction**, and only from
+/// the two places a transition happens. The start is not a transition — its
+/// history row has no `from_state` and no action — and writes no event.
+///
+/// - `aggregateType` `WORKFLOW_INSTANCE`, `aggregateId` the instance: the event
+///   is about the process, and the document is in the payload.
+/// - `sequence` is the history row's position in the instance's history, which
+///   is monotonic per instance by construction and 1-based as EES requires.
+/// - The payload is EES §4.1's `Workflow.*` profile — `action` is the profile's
+///   own field, set — plus `fromState` and `toState`. **No form data** (§4.2):
+///   a consumer that needs it calls back with its own authorization.
+/// - `correlationId` is the instance. Nothing upstream of the engine carries a
+///   request id to propagate, and the instance is the id the before-chain
+///   already hands handlers as theirs, so a guard's run and the after-chain's
+///   runs on the same process read the same value.
+async fn publish_transition(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    moved: &Moved<'_>,
+) -> Result<(), AppError> {
+    let sequence =
+        history::position_of_latest(transaction, moved.tenant_id, moved.instance_id).await?;
+
+    outbox::write(
+        transaction,
+        &outbox::NewEvent {
+            tenant_id: moved.tenant_id,
+            aggregate_type: outbox::AggregateType::WorkflowInstance,
+            aggregate_id: moved.instance_id,
+            event_type: outbox::WORKFLOW_TRANSITIONED,
+            sequence: Some(sequence),
+            correlation_id: moved.instance_id.to_string(),
+            causation_id: None,
+            actor: moved.actor,
+            payload: json!({
+                "instanceId": moved.instance_id,
+                "workflowKey": moved.graph.workflow_key,
+                "workflowRevision": moved.graph.revision,
+                "documentId": moved.document_id,
+                "state": moved.to,
+                "taskId": null,
+                "assigneeUserId": null,
+                "action": moved.action.as_db(),
+                "fromState": moved.from,
+                "toState": moved.to,
+            }),
+        },
+    )
+    .await?;
+
+    Ok(())
 }
 
 /// One transition's `guards`, run as `before_workflow_transition`.

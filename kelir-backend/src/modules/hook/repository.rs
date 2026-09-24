@@ -10,7 +10,7 @@
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::domain::{HandlerReference, Registration, Source};
+use super::domain::{HandlerReference, RecentExecution, Registration, Source};
 
 /// Every enabled registry entry for one hook, on one document type.
 ///
@@ -149,4 +149,113 @@ pub async fn metadata_of(
             .map(|row| (row.metadata_key, Value::String(row.metadata_value)))
             .collect(),
     ))
+}
+
+/// One handler's most recent executions of one hook, newest first — what the
+/// circuit breaker is derived from (ADR-0041 §2).
+///
+/// **Keyed by tenant, hook and handler reference, not by document or
+/// definition.** A handler failing on every transition fails for a reason that
+/// is not the document's, and a breaker counted per document would need five
+/// documents to fail before it noticed one handler.
+///
+/// `cooled` is decided here, on the database's clock, because `executed_at` was
+/// written by that clock: comparing it with this process's would make the
+/// cool-down as long as the skew between two machines says.
+///
+/// Read through `idx_document_hook_executions_breaker` (`0045_outbox.sql`).
+pub async fn recent_executions(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    hook_name: &str,
+    handler_reference: &str,
+    cool_down_seconds: f64,
+    limit: i64,
+) -> Result<Vec<RecentExecution>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT result = 'ERROR' AS "is_error!",
+               executed_at <= now() - make_interval(secs => $4) AS "cooled!"
+        FROM document_hook_executions
+        WHERE tenant_id = $1 AND hook_name = $2 AND handler_reference = $3
+        ORDER BY executed_at DESC, id DESC
+        LIMIT $5
+        "#,
+        tenant_id,
+        hook_name,
+        handler_reference,
+        cool_down_seconds,
+        limit,
+    )
+    .fetch_all(&mut **transaction)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| RecentExecution {
+            is_error: row.is_error,
+            cooled: row.cooled,
+        })
+        .collect())
+}
+
+/// The tenant's own `ROLE-ADMIN`, the role a breaker reports to.
+///
+/// **By code within the tenant**: every tenant has its own row (D-18), so the
+/// system tenant's id would name the wrong people everywhere else.
+pub async fn administrator_role(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    sqlx::query_scalar!(
+        r#"
+        SELECT id
+        FROM roles
+        WHERE tenant_id = $1 AND role_code = $2 AND deleted_at IS NULL
+        "#,
+        tenant_id,
+        crate::modules::identity::service::TENANT_ADMIN_ROLE_CODE,
+    )
+    .fetch_optional(&mut **transaction)
+    .await
+}
+
+/// The document as a handler sees it at delivery (LHCS §4).
+pub struct HookSubject {
+    pub status: String,
+    pub form_data: Value,
+    pub document_type_id: Uuid,
+    pub document_type_key: String,
+}
+
+/// Reads the document an after-chain runs on, **as it is now** — ADR-0041 §2:
+/// the chain is invoked with the document at delivery, not at commit, because
+/// the envelope may not carry form data (EES §4.2).
+///
+/// `None` for a document deleted since, which leaves the chain nothing to run
+/// on.
+pub async fn hook_subject(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    document_id: Uuid,
+) -> Result<Option<HookSubject>, sqlx::Error> {
+    let row = sqlx::query!(
+        r#"
+        SELECT d.status, d.form_data_json, d.document_type_id, t.type_code
+        FROM documents d
+        JOIN document_types t ON t.id = d.document_type_id AND t.tenant_id = d.tenant_id
+        WHERE d.tenant_id = $1 AND d.id = $2 AND d.deleted_at IS NULL
+        "#,
+        tenant_id,
+        document_id,
+    )
+    .fetch_optional(&mut **transaction)
+    .await?;
+
+    Ok(row.map(|row| HookSubject {
+        status: row.status,
+        form_data: row.form_data_json,
+        document_type_id: row.document_type_id,
+        document_type_key: row.type_code,
+    }))
 }

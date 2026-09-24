@@ -11,6 +11,7 @@ pub mod integration;
 pub mod master_data;
 pub mod notification;
 pub mod organization;
+pub mod outbox;
 pub mod plugin;
 pub mod rad;
 pub mod reporting;

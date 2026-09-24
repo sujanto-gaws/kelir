@@ -121,6 +121,31 @@ pub async fn record<'e, E: PgExecutor<'e>>(
     .map(|_| ())
 }
 
+/// How many rows an instance's history holds — the position of the newest.
+///
+/// **The `sequence` of a `Workflow.Transitioned` event** (EES §2; ADR-0041 §2):
+/// read in the transaction that has just appended the row, under the instance
+/// lock every transition holds, so two transitions of one instance cannot read
+/// the same count. 1-based because the history is: the start is row one, and
+/// the first transition is two.
+pub async fn position_of_latest(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    workflow_instance_id: Uuid,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar!(
+        r#"
+        SELECT count(*) AS "count!"
+        FROM workflow_history
+        WHERE tenant_id = $1 AND workflow_instance_id = $2
+        "#,
+        tenant_id,
+        workflow_instance_id
+    )
+    .fetch_one(&mut **transaction)
+    .await
+}
+
 /// One document's history, oldest first.
 ///
 /// **Ordered by `created_at` and then by `id`**, not by `created_at` alone. Two

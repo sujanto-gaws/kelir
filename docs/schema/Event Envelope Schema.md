@@ -2,7 +2,7 @@
 **Version:** 1.0.0
 **Status:** Draft Standard
 **Target Stack:** Rust (Outbox Worker / Webhook Dispatcher), External Consumers, Plugin Runtimes
-**Last updated:** 2026-08-11
+**Last updated:** 2026-09-24
 
 ---
 
@@ -67,6 +67,14 @@ The envelope is exactly what is stored in `outbox_events.payload_json` at publis
 - A prefix wildcard `<Entity>.*` is valid **only in subscriptions** (webhook `event_types_json`, PMS `events[].event`), never in an envelope.
 - The authoritative catalogue is the activity event vocabulary (concepts/02 §15) plus the lifecycle events of architectures/01 §12.3. Core families: `Document.*`, `Attachment.*`, `Comment.*`, `Workflow.*`, `Security.*`, master-data entities (`Supplier.*`, `Customer.*`, `Employee.*`, `Facility.*`, `Product.*`, `Service.*`), `Plugin.*`.
 - New event types MAY be introduced by minor platform versions and by plugins (namespaced by their subject entity). Consumers MUST ignore event types they do not know.
+
+### 3.1 Event Types Kelir Writes
+
+The catalogue above names every event type a producer MAY write. This table names the ones Kelir **does** write to `outbox_events` today, with their payload:
+
+| `eventType` | `aggregateType` / `aggregateId` | `sequence` | Payload | Written |
+| :--- | :--- | :--- | :--- | :--- |
+| `Workflow.Transitioned` | `WORKFLOW_INSTANCE` / the instance | The transition's position in the instance's `workflow_history` | The `Workflow.*` profile (§4.1) plus `fromState` (`string`) and `toState` (`string`), with the profile's `action` set to the transition's action (`string`). No form data (§4.2) | For **every committed workflow transition**, decided or automatic, in the transition's own transaction ([ADR-0041](../architectures/adr/0041.%20Every%20Workflow%20Transition%20Writes%20an%20Outbox%20Event,%20and%20After-Hooks%20Are%20Its%20First%20Consumer.md)). A rolled-back transition writes none. Its first consumer is the `after_workflow_transition` chain ([LHCS](Lifecycle%20Hook%20Contract.md) §5.2) |
 
 ---
 
@@ -202,6 +210,16 @@ Consumer obligations:
 | [Lifecycle Hook Contract](Lifecycle%20Hook%20Contract.md) | `after_*` hooks dispatched from the same outbox |
 | [architectures/03 §2.5–2.6](../architectures/03.%20Kelir%20Modules%20for%20Interfacing%20with%20External%20Systems.md) | Webhook and event bus modules |
 | [Database Schema §12.7–12.9](../design/02.%20Database%20Schema.md) | `webhook_events`, `outbox_events`, `inbox_events` storage |
+
+---
+
+## 9. Revision History
+
+This specification is a **`Draft Standard`** ([naming convention](../standards/02.%20Naming%20Convention.md) §10.1), so a change is recorded here rather than by moving the version, as [JWSS](JSON%20Workflow%20Schema.md) §12 does. The envelope's own `version` field stays `"1.0.0"`.
+
+| Revision | Date | Change |
+| :--- | :--- | :--- |
+| **R-1** | 2026-09-24 | **§3.1 names the first event type Kelir writes, `Workflow.Transitioned`, with its payload** — [#519](https://github.com/sujanto-gaws/kelir/issues/519), [ADR-0041](../architectures/adr/0041.%20Every%20Workflow%20Transition%20Writes%20an%20Outbox%20Event,%20and%20After-Hooks%20Are%20Its%20First%20Consumer.md). **No change to the shape**: the envelope, the profiles and the meta-schema are untouched. The name was already in the catalogue §3 points at (architectures/01 §12.3), §3 already permits new types without a specification change, `fromState` and `toState` are producer additions on the `Workflow.*` profile, legal under §4.3, and `action` is the profile's own field. **§5.1 is read, not amended**: while the outbox has one consumer, an `outbox_events` row is the event plus the state of its in-process dispatch, and `DEAD_LETTER` marks the dispatch as exhausted while keeping the envelope ([Database Schema](../design/02.%20Database%20Schema.md) §12.8). |
 
 ---
 
