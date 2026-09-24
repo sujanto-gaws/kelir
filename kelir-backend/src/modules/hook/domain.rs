@@ -144,6 +144,30 @@ fn is_kebab(value: &str) -> bool {
         })
 }
 
+/// Which half of a chain a handler serves (ADR-0041 §2).
+///
+/// **Declared by the handler, not inferred from where it is registered.** A
+/// `REJECT` after commit looks like a veto and is not one, and a `MODIFY` after
+/// commit looks like a write and is not one — so a handler whose only results
+/// are those is before-only, and naming it in `actions` is refused at publish
+/// rather than run to no effect (ADR-0016's failure, one layer out).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandlerKind {
+    Before,
+    After,
+    Both,
+}
+
+impl HandlerKind {
+    pub fn serves_before(self) -> bool {
+        matches!(self, Self::Before | Self::Both)
+    }
+
+    pub fn serves_after(self) -> bool {
+        matches!(self, Self::After | Self::Both)
+    }
+}
+
 /// One entry of a chain (LHCS §3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Registration {
@@ -265,6 +289,55 @@ impl Rejection {
             details: Vec::new(),
         }
     }
+}
+
+/// One recent execution of a handler, as the circuit breaker reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecentExecution {
+    pub is_error: bool,
+    /// Whether the cool-down has passed since this execution — measured on the
+    /// database's clock, which is the clock `executed_at` was written by.
+    pub cooled: bool,
+}
+
+/// How many consecutive `ERROR`s open a handler's breaker (ADR-0041 §2).
+pub const BREAKER_THRESHOLD: usize = 5;
+
+/// How long an open breaker waits after the handler's last `ERROR` before it
+/// allows one trial (ADR-0041 §2).
+pub const BREAKER_COOL_DOWN: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Whether a handler's breaker is open, from its most recent executions,
+/// newest first (ADR-0041 §2).
+///
+/// **Open means the last five are all `ERROR` and the newest of them has not
+/// cooled.** Once ten minutes have passed since that last `ERROR` the handler
+/// gets one trial: a success is a non-`ERROR` row, and the breaker is closed
+/// because the last five are no longer all errors; a failure is a fresh `ERROR`,
+/// which restarts the cool-down from itself. Nothing is stored but the log.
+pub fn breaker_is_open(recent: &[RecentExecution]) -> bool {
+    recent.len() >= BREAKER_THRESHOLD
+        && recent[..BREAKER_THRESHOLD]
+            .iter()
+            .all(|execution| execution.is_error)
+        && !recent[0].cooled
+}
+
+/// Whether the newest execution is the one that opened the breaker, and so
+/// the one that reports it (ADR-0041 §2: *notified once, by the execution that
+/// opened it*).
+///
+/// Given up to six executions, newest first. The newest five are all `ERROR`
+/// and the sixth is not — or there is no sixth. A failed trial is a sixth
+/// consecutive `ERROR`, so it reopens nothing and tells nobody twice.
+pub fn breaker_opened_by_latest(recent: &[RecentExecution]) -> bool {
+    recent.len() >= BREAKER_THRESHOLD
+        && recent[..BREAKER_THRESHOLD]
+            .iter()
+            .all(|execution| execution.is_error)
+        && recent
+            .get(BREAKER_THRESHOLD)
+            .is_none_or(|older| !older.is_error)
 }
 
 /// A handler's own configuration, read the way every core handler reads it.
@@ -409,6 +482,52 @@ mod tests {
         // have broken without failing the check above.
         assert!(payload["currentStatus"].is_null());
         assert!(payload["subject"].is_null());
+    }
+
+    fn run(is_error: bool, cooled: bool) -> RecentExecution {
+        RecentExecution { is_error, cooled }
+    }
+
+    /// ADR-0041 §2: five `ERROR`s in a row, the newest not yet ten minutes old.
+    #[test]
+    fn five_recent_errors_open_the_breaker_and_four_do_not() {
+        let error = run(true, false);
+
+        assert!(breaker_is_open(&[error; 5]));
+        assert!(!breaker_is_open(&[error; 4]));
+        // One success among the five closes it.
+        assert!(!breaker_is_open(&[
+            error,
+            error,
+            run(false, false),
+            error,
+            error
+        ]));
+    }
+
+    /// The cool-down is measured from the **newest** `ERROR`: once it has
+    /// passed, one trial runs; a failed trial is a fresh `ERROR` and the
+    /// breaker is open again.
+    #[test]
+    fn the_cool_down_allows_a_trial_and_a_failed_trial_restarts_it() {
+        let old = run(true, true);
+
+        assert!(!breaker_is_open(&[old; 5]), "cooled: the trial runs");
+        assert!(breaker_is_open(&[run(true, false), old, old, old, old]));
+    }
+
+    /// Told once: by the fifth consecutive `ERROR`, and not by a sixth.
+    #[test]
+    fn only_the_execution_that_opens_the_breaker_reports_it() {
+        let error = run(true, false);
+        let success = run(false, true);
+
+        assert!(breaker_opened_by_latest(&[error; 5]));
+        assert!(breaker_opened_by_latest(&[
+            error, error, error, error, error, success
+        ]));
+        assert!(!breaker_opened_by_latest(&[error; 6]), "already open");
+        assert!(!breaker_opened_by_latest(&[error; 4]));
     }
 
     #[test]

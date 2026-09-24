@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT result = 'ERROR' AS \"is_error!\",\n               executed_at <= now() - make_interval(secs => $4) AS \"cooled!\"\n        FROM document_hook_executions\n        WHERE tenant_id = $1 AND hook_name = $2 AND handler_reference = $3\n        ORDER BY executed_at DESC, id DESC\n        LIMIT $5\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "is_error!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 1,
+        "name": "cooled!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Float8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "987d5fc8ac57e6baa3a75790d939b6fa434462bd2bd9b8c03443de88a32bc105"
+}

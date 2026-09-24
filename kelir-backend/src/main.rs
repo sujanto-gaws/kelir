@@ -79,6 +79,11 @@ async fn run() -> anyhow::Result<()> {
     // a match in it: they poll different tables at different rates and one is
     // bound by a virus scanner while the other is bound by a mail relay.
     tokio::spawn(modules::notification::worker::run(state.clone()));
+    // The third, over `outbox_events` (ADR-0041): what a committed transition
+    // left for its after-hooks. Detached for the scanner's reason — a delivery
+    // interrupted by a restart is a `PROCESSING` row whose lease expires, and
+    // the next process claims it again.
+    tokio::spawn(modules::outbox::worker::run(state.clone()));
 
     let app = router::create_router(state);
 

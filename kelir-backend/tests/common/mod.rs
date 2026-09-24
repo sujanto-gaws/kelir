@@ -623,6 +623,17 @@ impl TestApp {
             .expect("the delivery pass");
     }
 
+    /// Runs one pass of the outbox worker (ADR-0041), and returns how many
+    /// events it claimed.
+    ///
+    /// The seam [`Self::deliver_notifications`] uses, for the same reason: the
+    /// worker's loop sleeps, and a test asserts what a delivery did.
+    pub async fn deliver_outbox(&self) -> usize {
+        kelir_backend::modules::outbox::worker::pass(&self.state)
+            .await
+            .expect("the outbox pass")
+    }
+
     /// What the captured mailer holds right now.
     ///
     /// No waiting: [`Self::deliver_notifications`] has already returned, so a
@@ -1077,4 +1088,38 @@ fn harness_failure(step: &str, cause: &str, context: &str) -> ! {
          ==========================================================================\n",
         redact(context)
     )
+}
+
+/// The EES v1.0.0 meta-schema, read from the specification itself.
+///
+/// **From the document, not from a copy**: EES says the fenced block under
+/// *EES v1.0.0 Meta-Schema* is the normative artefact until it is extracted to
+/// its own file, so a test validating envelopes against anything else would be
+/// validating them against a second opinion. When the file exists, this reads
+/// it instead.
+///
+/// Compiled with format assertions on, so `eventId`'s `uuid` and `occurredAt`'s
+/// `date-time` are checked rather than annotated.
+pub fn ees_validator() -> jsonschema::Validator {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../docs/schema/Event Envelope Schema.md");
+    let document = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{} is readable: {error}", path.display()));
+
+    let after_heading = document
+        .split("# EES v1.0.0 Meta-Schema")
+        .nth(1)
+        .expect("the EES carries its meta-schema heading");
+    let block = after_heading
+        .split("```json")
+        .nth(1)
+        .and_then(|rest| rest.split("```").next())
+        .expect("the meta-schema is a fenced json block");
+
+    let schema: Value = serde_json::from_str(block).expect("the EES meta-schema parses");
+
+    jsonschema::options()
+        .should_validate_formats(true)
+        .build(&schema)
+        .expect("the EES meta-schema compiles")
 }

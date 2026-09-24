@@ -2,7 +2,7 @@
 **Version:** 1.0.0
 **Status:** Draft Standard
 **Target Stack:** Rust (Workflow Engine), Vue.js (Workflow Designer)
-**Last updated:** 2026-09-17
+**Last updated:** 2026-09-24
 
 ---
 
@@ -88,7 +88,7 @@ Every string property this document declares that an engine stores in a column c
 
 `dueInHours` is **relative and not absolute** because a definition outlives every instance that runs it: an absolute date in one would be wrong for every instance after the first. An engine MUST stamp `workflow_tasks.due_at` when the task is generated and MUST NOT recompute it afterwards — a deadline that moved when the definition was revised is a deadline nobody agreed to. Kelir computes the stamp in the database, so it shares a clock with every later comparison against it ([#185](https://github.com/sujanto-gaws/kelir/issues/185)).
 
-`escalation` is **stored and not executed**, for the reason §7's `guards` and `actions` are: FR-WF-010 is unscheduled and there is no scheduler. A definition may declare one and nothing will act on it. Lateness is made *visible* — `workflow_tasks.due_at` and the inbox's overdue indicator — and nothing acts on it automatically.
+`escalation` is **stored and not executed**, ~~for the reason §7's `guards` and `actions` are~~ because FR-WF-010 is unscheduled and there is no scheduler. *(Corrected 2026-09-24, R-6: `guards` and `actions` both run now, §5.3.)* A definition may declare one and nothing will act on it. Lateness is made *visible* — `workflow_tasks.due_at` and the inbox's overdue indicator — and nothing acts on it automatically.
 | `priority` | `string` | No (default `NORMAL`) | Enum: `LOW`, `NORMAL`, `HIGH`, `URGENT`. |
 
 ---
@@ -175,7 +175,14 @@ Validators MUST accept both forms; the engine normalizes to the object form befo
 
 Refused at **save** rather than at run time, for the reason JFSS gives about a stored definition generally: a definition is written once and executed many times, and the execution path has no good failure. A workflow that publishes cleanly and then cannot assign its first task is a stalled instance nobody is told about.
 
-The same applies to `guards` and `actions`: they are **stored and not executed** as of `v0.5.0`, because there is no hook chain to merge them into (architectures/01 §12.4.2 is unbuilt). They are accepted rather than refused so that definitions authored now do not have to be rewritten when the chain lands, and the workflow engine states in one place that it does not invoke them — a stored handler must not be read as evidence that it runs.
+~~The same applies to `guards` and `actions`: they are **stored and not executed** as of `v0.5.0`, because there is no hook chain to merge them into (architectures/01 §12.4.2 is unbuilt).~~ **`guards` and `actions` were stored and not executed as of `v0.5.0`**, when there was no hook chain to merge them into. **Both run in Kelir now** (corrected 2026-09-24, R-6):
+
+| Entry | Kelir runs it | Since |
+| :--- | :--- | :--- |
+| `guards` | In the `before_workflow_transition` chain, **on an `AUTO` transition taken from a `SERVICE_TASK` state only**; a decided transition does not yet invoke them. A guard returning `MODIFY` is refused at the workflow call site | Sprint 14, [ADR-0036](../architectures/adr/0036.%20The%20Hook%20Chain%20Ships%20Its%20Before%20Half%20First.md) |
+| `actions` | In the `after_workflow_transition` chain, after every committed transition, decided or automatic, delivered through the outbox with retries | Sprint 20, [ADR-0041](../architectures/adr/0041.%20Every%20Workflow%20Transition%20Writes%20an%20Outbox%20Event,%20and%20After-Hooks%20Are%20Its%20First%20Consumer.md) |
+
+They were accepted rather than refused while unexecuted so that definitions authored then did not have to be rewritten when the chain landed, and the engine said so in one place — a stored handler must not be read as evidence that it runs. [SDD](../design/01.%20System%20Design%20Document.md) §8.5.4 is where Kelir's chain is described.
 
 **`allowedBy` is enforced**, and this sentence exists because for one release it was not. It was parsed, validated here at save, projected to `workflow_transitions.allowed_by_json` and read by nothing ([#226](https://github.com/sujanto-gaws/kelir/issues/226)) — a control that looked like the one beside it and was the one above it. The engine now checks the chosen transition's rule against the actor before it moves the instance, using the same resolver a task's `assignment` uses, so the four resolvable assignee types mean the same thing on an edge as on a task.
 
@@ -230,10 +237,11 @@ Because the failure depends on the data, it cannot be caught by §8's S10 at sav
 
 ## 7. Guards and Actions
 
-`guards` and `actions` entries follow the Hook Registration Entry of the [Lifecycle Hook Contract](Lifecycle%20Hook%20Contract.md) §3, with two JWSS-specific constraints:
+`guards` and `actions` entries follow the Hook Registration Entry of the [Lifecycle Hook Contract](Lifecycle%20Hook%20Contract.md) §3, with ~~two~~ three JWSS-specific constraints:
 
 1. Priorities SHOULD lie in the workflow band **300–499** (architectures/01 §12.4.3). Values outside the band are accepted but WARN at publish.
 2. A guard result of `REJECT` aborts the transition and surfaces the standard `HOOK_REJECTED` error (Lifecycle Hook Contract §6); the instance stays in `from` state.
+3. A handler named in `actions` MUST be of after or both kind (Lifecycle Hook Contract §5.3). A before-only handler there is refused at publish with `HANDLER_KIND_MISMATCH`: after commit, a `MODIFY` is not a write and a `REJECT` is not a veto. *(Added 2026-09-24, R-6.)*
 
 Guards run inside the transition's transaction via `before_workflow_transition`; actions run post-commit via `after_workflow_transition`. Handlers declared here run **only** for their own transition, in the definition revision the instance started with.
 
@@ -373,6 +381,7 @@ This specification is a **`Draft Standard`** ([naming convention](../standards/0
 | **R-3** | 2026-08-29 | **§3.1 says what an engine must do with `dueInHours`, and what it must not do with `escalation`**, for FR-WF-011 and FR-TASK-007 — [#185](https://github.com/sujanto-gaws/kelir/issues/185). **No change to the shape**: `dueInHours` was already declared and already constrained by the meta-schema (`exclusiveMinimum: 0`), and nothing is added, removed or re-typed. What changes is the specification stating that the stamp happens at generation and is never recomputed — otherwise two engines could both claim conformance while one let a republished revision shorten a deadline somebody was working to — and that `escalation` is stored and not executed, which a reader could not tell from a table that describes it as *consumed by the escalation scheduler*. |
 | **R-4** | 2026-08-29 | **§6.2 gains the one-evaluator rule, §6.4 says what an engine does when a condition cannot be evaluated, and S7 gains the no-match case**, for FR-WF-015 — [#186](https://github.com/sujanto-gaws/kelir/issues/186). **No change to the shape**: no property is added, removed or re-typed, and the meta-schema is untouched. §6.4 is new text rather than a clarification, and it settles a question two conforming engines could previously answer opposite ways — Kelir itself answered it the other way until this revision, treating an evaluation failure as `false` and falling through to the fallback. S7's addition is the matching obligation at the other end: a definition may leave a gap, and an engine must not paper over it silently. |
 | **R-5** | 2026-08-30 | **§4.2 says a self-transition is legal, §9.1 requires every stored string to be bounded where it is declared, and the meta-schema gains five `maxLength` keywords** — [#259](https://github.com/sujanto-gaws/kelir/issues/259), finding 1 of the Sprint 11 independent pass. **A narrowing, and the first one on this line**: R-1 was a strict widening and R-2 to R-4 changed no shape at all. `version` (40), `states[].name` (200), `states[].task.taskDefinitionKey` (64), `states[].task.taskName` (200) and `variables[].key` (64) are bounds a document already had to respect to be storable, so **no document that could ever have run is refused by them** — what changes is that one which could not is refused at save instead of at run time. §4.2 settles the other half the opposite way: Kelir's own `CHECK` forbade a construct this specification permits, and the constraint was dropped rather than the construct. |
+| **R-6** | 2026-09-24 | **§5.3 stops saying `guards` and `actions` are stored and not executed, §3.1 stops borrowing that reason for `escalation`, and §7 gains a third constraint: a handler in `actions` is after- or both-kind** — [#519](https://github.com/sujanto-gaws/kelir/issues/519), [ADR-0041](../architectures/adr/0041.%20Every%20Workflow%20Transition%20Writes%20an%20Outbox%20Event,%20and%20After-Hooks%20Are%20Its%20First%20Consumer.md). **No change to the shape**: no property is added, removed or re-typed, and the meta-schema is untouched. §5.3's sentence had been false for `guards` since [ADR-0036](../architectures/adr/0036.%20The%20Hook%20Chain%20Ships%20Its%20Before%20Half%20First.md) (Sprint 14) and is struck in place rather than deleted. §7's constraint is **a narrowing at publish**, the second on this line after R-5: `actions` naming `core:set_form_field` or `core:reject_when` saved and published before, and is now refused with `HANDLER_KIND_MISMATCH`. A definition already published with one logs an `ERROR` for that handler on each transition it covers (Lifecycle Hook Contract §5.3), rather than doing nothing silently. |
 
 ---
 

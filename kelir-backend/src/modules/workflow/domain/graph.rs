@@ -283,6 +283,13 @@ pub struct Transition {
     /// from — and so a registration that does not parse is absent once rather
     /// than differently absent per caller.
     pub guards: Vec<Registration>,
+    /// The `after_workflow_transition` chain this edge declares (JWSS §7,
+    /// LHCS §3), parsed for `guards`' reason.
+    ///
+    /// **Not run by the engine.** The engine writes a `Workflow.Transitioned`
+    /// event in the transition's transaction, and the outbox worker reads these
+    /// from the revision the instance runs when it delivers it (ADR-0041).
+    pub actions: Vec<Registration>,
 }
 
 /// A workflow variable's declaration (JWSS §6.3).
@@ -405,6 +412,7 @@ fn parse_transition(value: &Value) -> Option<Transition> {
         allowed_by: value.get("allowedBy").and_then(AssignmentRule::parse),
         condition: value.get("condition").cloned(),
         guards: crate::modules::hook::service::guards_of(value),
+        actions: crate::modules::hook::service::actions_of(value),
         requires_comment: value
             .get("requiresComment")
             .and_then(Value::as_bool)
@@ -531,6 +539,26 @@ mod tests {
             "the conditioned transition comes first"
         );
         assert_eq!(candidates[1].to, "B", "the fallback is evaluated last");
+    }
+
+    /// `actions` reach the graph as `guards` do, each on its own chain — the
+    /// worker reads them from here at delivery (ADR-0041), and an edge that
+    /// dropped them would deliver every event to an empty chain and report
+    /// success.
+    #[test]
+    fn a_transition_carries_its_actions_apart_from_its_guards() {
+        let mut definition = definition();
+        definition["transitions"][0]["actions"] = json!([{ "handler": "core:continue_always" }]);
+        definition["transitions"][0]["guards"] = json!([{ "handler": "core:reject_when" }]);
+
+        let graph = Graph::parse(&definition, 1);
+        let edge = &graph.transitions[0];
+
+        assert_eq!(edge.actions.len(), 1);
+        assert_eq!(edge.actions[0].hook, "after_workflow_transition");
+        assert_eq!(edge.guards.len(), 1);
+        assert_eq!(edge.guards[0].hook, "before_workflow_transition");
+        assert!(graph.transitions[1].actions.is_empty());
     }
 
     #[test]

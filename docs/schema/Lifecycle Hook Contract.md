@@ -2,7 +2,7 @@
 **Version:** 1.0.0
 **Status:** Draft Standard
 **Target Stack:** Rust (Hook Resolver / Engine), Plugin Runtimes
-**Last updated:** 2026-08-11
+**Last updated:** 2026-09-24
 
 ---
 
@@ -83,7 +83,7 @@ Lower runs first; ties resolve by registration order. Entries outside their sour
 
 ### 3.2 Kind Constraint
 
-A `before_*` hook name MUST NOT be registered with an after-only semantic expectation and vice versa; the validator rejects a registration whose hook name is not in the catalogue for the entry's position (e.g. an `after_*` name inside JWSS `guards`).
+A `before_*` hook name MUST NOT be registered with an after-only semantic expectation and vice versa; the validator rejects a registration whose hook name is not in the catalogue for the entry's position (e.g. an `after_*` name inside JWSS `guards`). The same constraint applies to the **handler** as well as the hook name: a handler declares the kind it serves, and one that cannot serve the entry's position is rejected (§5.3).
 
 ---
 
@@ -139,6 +139,25 @@ Semantics:
 
 An `after_*` handler returns nothing meaningful to the chain — the action is already committed. It MUST be **idempotent** (delivery is at-least-once via the outbox) and reports only success/failure; failure triggers the outbox retry schedule and, on repeated failure, the circuit breaker (architectures/01 §12.5).
 
+- **Success** is recorded in the execution log (§7) as `CONTINUE`.
+- **Failure or timeout** is recorded as `ERROR`, with the error message. A timeout is a retryable failure, not a `REJECT` (architectures/01 §12.5).
+- `MODIFY` and `REJECT` are never recorded for an after-hook. Nothing it returns can change or veto what has committed.
+
+The retry schedule, the dead letter and the circuit breaker are the outbox worker's, not the handler's; Kelir's are in [SDD](../design/01.%20System%20Design%20Document.md) §8.5.4.
+
+### 5.3 Handler Kind
+
+Every handler declares the kind of position it serves: **before**, **after**, or **both**. A handler whose only meaningful results are `MODIFY` or `REJECT` is before-only, because after commit a write is not a write and a veto is not a veto.
+
+- A registration placing a before-only handler in an `after_*` position (including JWSS `actions`) MUST be rejected at registration time with `HANDLER_KIND_MISMATCH`.
+- A before-only handler reached in an after position anyway — by an entry accepted before this rule — MUST be recorded as `ERROR` and MUST NOT make the delivery retryable: the failure is permanent, and the rest of the chain runs.
+
+| Kelir `core:` handler | Kind |
+| :--- | :--- |
+| `core:continue_always` | both |
+| `core:set_form_field` | before |
+| `core:reject_when` | before |
+
 ---
 
 ## 6. Rejection Error Mapping
@@ -167,7 +186,9 @@ A `REJECT` from any before-handler surfaces as the standard error envelope (SDD 
 
 ## 7. Execution Log Shape
 
-Every execution — any source, any result — is recorded in `document_hook_executions` ([Database Schema](../design/02.%20Database%20Schema.md) §6.12) with the handler's `source`, `hook_name`, `handler_reference`, `result` (`CONTINUE` / `MODIFY` / `REJECT` / `ERROR`), `duration_ms`, and for workflow-sourced handlers the `workflow_transition_ref` (`<workflowKey>@<revision>:<from>-><to>`). `GET /documents/{id}/hooks/resolved` exposes the merged chain for debugging (architectures/01 §12.7).
+Every execution — any source, any result — is recorded in `document_hook_executions` ([Database Schema](../design/02.%20Database%20Schema.md) §6.12) with the handler's `source`, `hook_name`, `handler_reference`, `result` (`CONTINUE` / `MODIFY` / `REJECT` / `ERROR`; an after-hook is only ever `CONTINUE` or `ERROR`, §5.2), `duration_ms`, `error_message` when the result is `ERROR`, and for workflow-sourced handlers the `workflow_transition_ref` (`<workflowKey>@<revision>:<from>-><to>`). `GET /documents/{id}/hooks/resolved` exposes the merged chain for debugging (architectures/01 §12.7).
+
+The log is also the **circuit breaker's input**: consecutive failures are counted from it for every source, not from a plugin-only table ([Database Schema](../design/02.%20Database%20Schema.md) §13.7).
 
 ---
 
@@ -179,6 +200,16 @@ Every execution — any source, any result — is recorded in `document_hook_exe
 | [JSON Workflow Schema](JSON%20Workflow%20Schema.md) | `guards`/`actions` authoring surface embedding the Registration Entry |
 | [architectures/04 §4.6](../architectures/04.%20Kelir%20Plugin%20and%20Extension%20Management%20Concept.md) | Plugin hook subscription and sandboxing |
 | [Database Schema §6.11–6.12](../design/02.%20Database%20Schema.md) | Registry and execution log tables |
+
+---
+
+## 9. Revision History
+
+This specification is a **`Draft Standard`** ([naming convention](../standards/02.%20Naming%20Convention.md) §10.1), so a change is recorded here rather than by moving the version, as [JWSS](JSON%20Workflow%20Schema.md) §12 does. The version starts carrying that signal when the specification becomes an `Active Standard`.
+
+| Revision | Date | Change |
+| :--- | :--- | :--- |
+| **R-1** | 2026-09-24 | **§5.2 says how an after-hook's success and failure are logged, §5.3 gives a handler a kind, and §7 says the log feeds the circuit breaker** — [#519](https://github.com/sujanto-gaws/kelir/issues/519), [ADR-0041](../architectures/adr/0041.%20Every%20Workflow%20Transition%20Writes%20an%20Outbox%20Event,%20and%20After-Hooks%20Are%20Its%20First%20Consumer.md). **No change to the shape**: no property is added, removed or re-typed, and the meta-schema is untouched. §5.2 settles a mapping `document_hook_executions.result` could not express before (success is `CONTINUE`, failure `ERROR`). §5.3 is a **narrowing at registration**: `actions` naming a before-only handler was accepted and is now refused, and one stored before the rule logs `ERROR` rather than doing nothing silently. |
 
 ---
 
@@ -293,4 +324,4 @@ Every execution — any source, any result — is recorded in `document_hook_exe
 }
 ```
 
-The meta-schema will be extracted to `docs/schema/lhcs-meta-v1.0.0.json` when the registration validator is implemented; until then, this block is the normative artifact. Handler-reference resolution (§2), band warnings (§3.1), and kind constraints (§3.2) require registry state and MUST be enforced by the registration validator in code.
+The meta-schema will be extracted to `docs/schema/lhcs-meta-v1.0.0.json` when the registration validator is implemented; until then, this block is the normative artifact. Handler-reference resolution (§2), band warnings (§3.1), and kind constraints (§3.2, §5.3) require registry state and MUST be enforced by the registration validator in code.

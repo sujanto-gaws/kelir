@@ -34,24 +34,41 @@
 
 use serde_json::Value;
 
-use super::domain::{form_data_of, setting, HookResult, Rejection};
+use super::domain::{form_data_of, setting, HandlerKind, HookResult, Rejection};
 use crate::modules::rad::evaluator::RuleEvaluator;
 
 /// A core handler: the payload in, a result out.
 pub type Handler = fn(&Value, &RuleEvaluator) -> HookResult;
 
+/// A core handler and the half of a chain it serves (ADR-0041 §2).
+#[derive(Clone, Copy)]
+pub struct CoreHandler {
+    pub run: Handler,
+    pub kind: HandlerKind,
+}
+
 /// Every `core:` handler this build performs, by name.
 ///
 /// A `match` rather than a map, for the reason
 /// `rad::domain::validation::registry_rule` gives about the same shape: adding
-/// a name without writing what it does does not compile.
-pub fn resolve(handler: &str) -> Option<Handler> {
-    Some(match handler {
-        "continue_always" => continue_always,
-        "set_form_field" => set_form_field,
-        "reject_when" => reject_when,
+/// a name without writing what it does does not compile — **and nor does adding
+/// one without saying which half of a chain it serves**, which is what the kind
+/// beside each is.
+///
+/// - `continue_always` serves both: `CONTINUE` means the same thing before a
+///   transition commits and after it has.
+/// - `set_form_field` and `reject_when` are before-only. Their results are
+///   `MODIFY` and `REJECT`, and after commit there is nothing left to modify
+///   and nothing left to refuse.
+pub fn resolve(handler: &str) -> Option<CoreHandler> {
+    let (run, kind): (Handler, HandlerKind) = match handler {
+        "continue_always" => (continue_always, HandlerKind::Both),
+        "set_form_field" => (set_form_field, HandlerKind::Before),
+        "reject_when" => (reject_when, HandlerKind::Before),
         _ => return None,
-    })
+    };
+
+    Some(CoreHandler { run, kind })
 }
 
 /// The names, for a refusal that says what *is* available.
@@ -62,8 +79,22 @@ pub const NAMES: [&str; 3] = ["continue_always", "set_form_field", "reject_when"
 
 /// The names as a message lists them.
 pub fn available() -> String {
-    NAMES
-        .iter()
+    listed(NAMES.iter().copied())
+}
+
+/// The names whose kind passes `serves`, as a message lists them — what a
+/// `HANDLER_KIND_MISMATCH` offers instead.
+pub fn available_for(serves: fn(HandlerKind) -> bool) -> String {
+    listed(
+        NAMES
+            .iter()
+            .copied()
+            .filter(|name| resolve(name).is_some_and(|handler| serves(handler.kind))),
+    )
+}
+
+fn listed<'a>(names: impl Iterator<Item = &'a str>) -> String {
+    names
         .map(|name| format!("`core:{name}`"))
         .collect::<Vec<_>>()
         .join(", ")
@@ -169,7 +200,7 @@ mod tests {
     use super::*;
 
     fn run(handler: &str, payload: Value) -> HookResult {
-        resolve(handler).expect("the handler resolves")(&payload, &RuleEvaluator::new())
+        (resolve(handler).expect("the handler resolves").run)(&payload, &RuleEvaluator::new())
     }
 
     #[test]
@@ -184,6 +215,18 @@ mod tests {
     #[test]
     fn a_name_the_registry_does_not_hold_does_not_resolve() {
         assert!(resolve("reserve_bugdet").is_none());
+    }
+
+    /// ADR-0041 §2's three kinds, as the catalogue declares them. A kind that
+    /// drifted would let `actions` name a handler whose result means nothing
+    /// after commit — or refuse the one handler an after-chain can run.
+    #[test]
+    fn each_handler_declares_the_half_it_serves() {
+        let kind = |name| resolve(name).expect("resolves").kind;
+
+        assert_eq!(kind("continue_always"), HandlerKind::Both);
+        assert_eq!(kind("set_form_field"), HandlerKind::Before);
+        assert_eq!(kind("reject_when"), HandlerKind::Before);
     }
 
     #[test]

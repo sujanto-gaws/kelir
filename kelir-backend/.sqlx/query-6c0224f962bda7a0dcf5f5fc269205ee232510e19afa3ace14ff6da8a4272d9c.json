@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT d.status, d.form_data_json, d.document_type_id, t.type_code\n        FROM documents d\n        JOIN document_types t ON t.id = d.document_type_id AND t.tenant_id = d.tenant_id\n        WHERE d.tenant_id = $1 AND d.id = $2 AND d.deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "form_data_json",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 2,
+        "name": "document_type_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "type_code",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "6c0224f962bda7a0dcf5f5fc269205ee232510e19afa3ace14ff6da8a4272d9c"
+}
