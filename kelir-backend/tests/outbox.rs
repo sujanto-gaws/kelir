@@ -869,3 +869,268 @@ async fn a_before_only_handler_in_an_older_definition_is_an_error_that_does_not_
     );
     assert_eq!(event_of(&app, document).await.status, "PROCESSED");
 }
+
+// ---------------------------------------------------------------------------
+// Closing verification (test-engineer, #519): the seams the builder's suite
+// does not reach — concurrent claims, a delivery that errors part-way, and a
+// breaker read across tenants.
+// ---------------------------------------------------------------------------
+
+/// **A row another claimer holds is skipped, not waited on** (ADR-0041 §2;
+/// `FOR UPDATE SKIP LOCKED` in `outbox::repository::claim`).
+///
+/// A second transaction holds one event's row lock — what a concurrent
+/// worker's claim looks like mid-statement. A pass must return promptly with
+/// the other event, and leave the held one `PENDING` for a later pass.
+///
+/// Seen red, 2026-09-24, two mutations of `outbox::repository::claim`:
+/// `FOR UPDATE SKIP LOCKED` as `FOR UPDATE` (the pass blocked on the held row
+/// until the timeout), and the locking clause removed (the same).
+#[tokio::test]
+async fn a_row_another_worker_is_claiming_is_skipped_rather_than_waited_on() {
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+    let token = approver(&app, "outbox.skip").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &admin,
+        one_step_workflow(
+            "outbox_skip",
+            json!([{ "handler": "core:continue_always" }]),
+        ),
+    )
+    .await;
+    let type_id = document_type(&app, &admin, "OUTBOX_SKIP", workflow).await;
+    let held = approved_document(&app, &token, type_id).await;
+    let free = approved_document(&app, &token, type_id).await;
+    let held_row = event_of(&app, held).await.id;
+
+    let mut other_worker = app.pool.begin().await.expect("a second claimer");
+
+    sqlx::query("SELECT id FROM outbox_events WHERE id = $1 FOR UPDATE")
+        .bind(held_row)
+        .execute(&mut *other_worker)
+        .await
+        .expect("the row is locked");
+
+    let claimed = tokio::time::timeout(std::time::Duration::from_secs(15), app.deliver_outbox())
+        .await
+        .expect("a pass must skip a locked row, not block on it");
+
+    assert_eq!(claimed, 1);
+    assert_eq!(event_of(&app, free).await.status, "PROCESSED");
+    assert_eq!(event_of(&app, held).await.status, "PENDING");
+    assert!(runs_on(&app, held).await.is_empty());
+
+    other_worker.rollback().await.expect("release the lock");
+
+    assert_eq!(app.deliver_outbox().await, 1);
+    assert_eq!(event_of(&app, held).await.status, "PROCESSED");
+    assert_eq!(runs_on(&app, held).await.len(), 1);
+}
+
+/// **Concurrent passes never deliver one event twice** (AC-10; ADR-0041 §2).
+///
+/// Three passes race over twelve due events. Every event is claimed by exactly
+/// one of them: the claims sum to twelve, and each event has one run and one
+/// attempt.
+///
+/// Seen red, 2026-09-24: `FOR UPDATE SKIP LOCKED` removed from
+/// `outbox::repository::claim` — two passes each claimed all twelve
+/// (`claimed 12 + 12 + 0`).
+#[tokio::test]
+async fn concurrent_passes_deliver_each_event_exactly_once() {
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+    let token = approver(&app, "outbox.race").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &admin,
+        one_step_workflow(
+            "outbox_race",
+            json!([{ "handler": "core:continue_always" }]),
+        ),
+    )
+    .await;
+    let type_id = document_type(&app, &admin, "OUTBOX_RACE", workflow).await;
+
+    let mut documents = Vec::new();
+
+    for _ in 0..12 {
+        documents.push(approved_document(&app, &token, type_id).await);
+    }
+
+    let (a, b, c) = tokio::join!(
+        app.deliver_outbox(),
+        app.deliver_outbox(),
+        app.deliver_outbox()
+    );
+
+    assert_eq!(a + b + c, 12, "claimed {a} + {b} + {c}");
+
+    for document in documents {
+        let row = event_of(&app, document).await;
+
+        assert_eq!(row.status, "PROCESSED");
+        assert_eq!(row.attempt_count, 1, "{document} was attempted twice");
+        assert_eq!(
+            runs_on(&app, document).await.len(),
+            1,
+            "{document} was delivered twice"
+        );
+    }
+}
+
+/// **A delivery whose consumer errors part-way records nothing of the part,
+/// and still counts the attempt** (ADR-0041 §2; `outbox::worker::deliver_one`'s
+/// error branch).
+///
+/// The chain is a registry `continue_always` (priority 150, runs first and is
+/// logged) and the edge's own `continue_always` (WORKFLOW band). A trigger
+/// makes the second log insert fail, so `dispatch` returns an error after the
+/// first run was written in the delivery's transaction.
+///
+/// Seen red, 2026-09-24: the error branch of `outbox::worker::deliver_one`
+/// returning before its `settle` — the row stayed `PROCESSING`, uncounted.
+/// (`rollback` replaced by `commit` stays green, and is equivalent: the
+/// database error has already aborted the transaction, so the commit rolls
+/// back.)
+#[tokio::test]
+async fn a_delivery_that_errors_part_way_rolls_back_its_runs_and_counts_the_attempt() {
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+    let token = approver(&app, "outbox.midway").await;
+
+    register_after_hook(&app, "core:continue_always").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &admin,
+        one_step_workflow(
+            "outbox_midway",
+            json!([{ "handler": "core:continue_always" }]),
+        ),
+    )
+    .await;
+    let type_id = document_type(&app, &admin, "OUTBOX_MIDWAY", workflow).await;
+    let document = approved_document(&app, &token, type_id).await;
+
+    sqlx::query(
+        "CREATE FUNCTION fail_workflow_after_run() RETURNS trigger LANGUAGE plpgsql AS $body$
+         BEGIN
+             IF NEW.source = 'WORKFLOW' AND NEW.hook_name = 'after_workflow_transition' THEN
+                 RAISE EXCEPTION 'the log is unavailable';
+             END IF;
+             RETURN NEW;
+         END $body$",
+    )
+    .execute(&app.pool)
+    .await
+    .expect("the failing function");
+    sqlx::query(
+        "CREATE TRIGGER fail_workflow_after_run BEFORE INSERT ON document_hook_executions
+         FOR EACH ROW EXECUTE FUNCTION fail_workflow_after_run()",
+    )
+    .execute(&app.pool)
+    .await
+    .expect("the failing trigger");
+
+    assert_eq!(app.deliver_outbox().await, 1);
+
+    // The registry entry ran and was logged inside the delivery's transaction;
+    // the failure after it discarded that row with the rest of the attempt.
+    let left = runs_on(&app, document).await;
+
+    assert!(left.is_empty(), "the half-delivered attempt left {left:?}");
+
+    let row = event_of(&app, document).await;
+
+    assert_eq!(row.status, "FAILED");
+    assert_eq!(row.attempt_count, 1, "the failed attempt is counted");
+    // A reason is kept. It is `AppError`'s generic display, not the database's
+    // cause — the worker never logs the `Internal` source (finding reported
+    // with #519's closing verification), so this asserts presence only.
+    assert!(row.last_error.is_some(), "{:?}", row.last_error);
+
+    let due_in = row.due_in.expect("a retry time");
+
+    assert!(due_in > 25.0 && due_in <= 30.0, "retried in {due_in}s");
+
+    // The failure clears; the retry runs the whole chain once.
+    sqlx::query("DROP TRIGGER fail_workflow_after_run ON document_hook_executions")
+        .execute(&app.pool)
+        .await
+        .expect("drop the trigger");
+    make_due(&app).await;
+
+    assert_eq!(app.deliver_outbox().await, 1);
+
+    let row = event_of(&app, document).await;
+
+    assert_eq!(row.status, "PROCESSED");
+    assert_eq!(row.attempt_count, 2);
+    assert_eq!(runs_on(&app, document).await.len(), 2);
+}
+
+/// **One tenant's open breaker does not hold another tenant's handler**
+/// (ADR-0041 §2: the breaker is keyed by tenant, hook and handler).
+///
+/// A second tenant's log holds five fresh `ERROR`s for the very handler this
+/// tenant's edge runs. This tenant's event is delivered and the handler runs.
+///
+/// Seen red, 2026-09-24: `tenant_id = $1` dropped from
+/// `hook::repository::recent_executions` — the event was held `FAILED` by
+/// the other tenant's breaker.
+#[tokio::test]
+async fn another_tenant_s_open_breaker_does_not_hold_this_tenant_s_handler() {
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+    let token = approver(&app, "outbox.tenant").await;
+    let other_tenant = fixtures::create_tenant(&app.pool, "TNT-002", "Second tenant").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &admin,
+        one_step_workflow(
+            "outbox_tenant",
+            json!([{ "handler": "core:continue_always" }]),
+        ),
+    )
+    .await;
+    let type_id = document_type(&app, &admin, "OUTBOX_TENANT", workflow).await;
+    let document = approved_document(&app, &token, type_id).await;
+
+    // `document_id` must name a real document; the breaker does not key on it.
+    for _ in 0..5 {
+        sqlx::query(
+            "INSERT INTO document_hook_executions
+                 (id, tenant_id, source, document_id, hook_name, handler_reference, result,
+                  error_message, executed_at)
+             VALUES ($1, $2, 'WORKFLOW', $3, $4, 'core:continue_always', 'ERROR',
+                     'another tenant', now() - interval '1 minute')",
+        )
+        .bind(Uuid::now_v7())
+        .bind(other_tenant)
+        .bind(document)
+        .bind(AFTER)
+        .execute(&app.pool)
+        .await
+        .expect("the other tenant's failure");
+    }
+
+    assert_eq!(app.deliver_outbox().await, 1);
+    assert_eq!(event_of(&app, document).await.status, "PROCESSED");
+
+    let own: Vec<String> = sqlx::query_scalar(
+        "SELECT result FROM document_hook_executions WHERE document_id = $1 AND tenant_id = $2",
+    )
+    .bind(document)
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .fetch_all(&app.pool)
+    .await
+    .expect("this tenant's runs");
+
+    assert_eq!(own, vec!["CONTINUE".to_owned()]);
+}
