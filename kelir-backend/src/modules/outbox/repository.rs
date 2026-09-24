@@ -68,6 +68,11 @@ pub struct Claimed {
 ///   rather than lost: at-least-once, which LHCS §5.2 makes the handler's
 ///   problem by requiring it to be idempotent.
 ///
+/// **The predicate names all three statuses first**, and then the time test.
+/// Written as `PENDING OR (FAILED/PROCESSING AND due)`, the planner scanned
+/// `idx_outbox_events_pending` once per disjunct. The index's own predicate
+/// is those three statuses, so stating it outright gets a single scan.
+///
 /// **`FOR UPDATE SKIP LOCKED`**, so two workers — two replicas of this process
 /// — each take different rows rather than queueing behind one another's.
 ///
@@ -87,8 +92,8 @@ pub async fn claim(
         FROM (
             SELECT id
             FROM outbox_events
-            WHERE status = 'PENDING'
-               OR (status IN ('FAILED', 'PROCESSING') AND next_attempt_at <= now())
+            WHERE status IN ('PENDING', 'PROCESSING', 'FAILED')
+              AND (status = 'PENDING' OR next_attempt_at <= now())
             ORDER BY created_at, id
             LIMIT $1
             FOR UPDATE SKIP LOCKED
