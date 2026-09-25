@@ -1218,3 +1218,553 @@ async fn a_stale_claimant_cannot_settle_a_row_another_worker_reclaimed() {
     assert!(current, "the current claimant settles");
     assert_eq!(event_of(&app, document).await.status, "PROCESSED");
 }
+
+// ---------------------------------------------------------------------------
+// Sprint 20 mutation campaign (test-engineer, plan 16 §7 step 7): each test
+// below holds a predicate that a mutation of #537 left green.
+// ---------------------------------------------------------------------------
+
+/// Seeds `count` `ERROR`s for `handler` in `tenant`'s log, `age` ago.
+///
+/// `document` must name a real document; the breaker does not key on it.
+async fn seed_errors(
+    app: &TestApp,
+    tenant: Uuid,
+    document: Uuid,
+    handler: &str,
+    count: usize,
+    age: &str,
+) {
+    for _ in 0..count {
+        sqlx::query(&format!(
+            "INSERT INTO document_hook_executions
+                 (id, tenant_id, source, document_id, hook_name, handler_reference, result,
+                  error_message, executed_at)
+             VALUES ($1, $2, 'WORKFLOW', $3, $4, $5, 'ERROR', 'seeded',
+                     now() - interval '{age}')"
+        ))
+        .bind(Uuid::now_v7())
+        .bind(tenant)
+        .bind(document)
+        .bind(AFTER)
+        .bind(handler)
+        .execute(&app.pool)
+        .await
+        .expect("the seeded failure");
+    }
+}
+
+/// **A breaker that opens in a second tenant tells that tenant's
+/// administrators** (ADR-0041 §2; D-18: every tenant has its own
+/// `ROLE-ADMIN`).
+///
+/// Every other breaker test fails in the system tenant, whose `ROLE-ADMIN` is
+/// the first such row, so a lookup that forgot the tenant found the right role
+/// by accident. Here the failing tenant is created second. The chain is run
+/// directly, because a fixture tenant has no workflow to deliver through; the
+/// breaker and its report are the same code either way.
+///
+/// Seen red, 2026-09-25: `tenant_id = $1` dropped from
+/// `hook::repository::administrator_role` (the system tenant's role was
+/// returned, and the second tenant's administrator was told nothing).
+#[tokio::test]
+async fn a_breaker_opening_in_a_second_tenant_tells_that_tenant_s_administrators() {
+    use kelir_backend::modules::hook::{self, HandlerReference, Registration, Source};
+    use kelir_backend::modules::rad::evaluator::RuleEvaluator;
+
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+    let token = approver(&app, "outbox.second").await;
+    let system_administrator = user_id(&app, common::ADMIN_USERNAME).await;
+
+    let workflow =
+        publish_workflow(&app, &admin, one_step_workflow("outbox_second", json!([]))).await;
+    let type_id = document_type(&app, &admin, "OUTBOX_SECOND", workflow).await;
+    let document = approved_document(&app, &token, type_id).await;
+
+    let tenant = fixtures::create_tenant(&app.pool, "TNT-002", "Second tenant").await;
+    let role = fixtures::create_role_with_permissions(&app.pool, tenant, "ROLE-ADMIN", &[]).await;
+    let administrator = fixtures::create_user(
+        &app.pool,
+        tenant,
+        "second.admin",
+        "second.admin@kelir.test",
+        common::ADMIN_PASSWORD,
+        &[role],
+    )
+    .await;
+
+    // Four failures already; the run below is the fifth, and opens it.
+    seed_errors(&app, tenant, document, ABSENT_PLUGIN, 4, "1 minute").await;
+
+    let chain = [Registration {
+        hook: AFTER.to_owned(),
+        handler: HandlerReference::parse(ABSENT_PLUGIN).expect("a handler reference"),
+        priority: 150,
+        config: json!({}),
+        source: Source::Core,
+    }];
+    let mut invocation = hook::Invocation {
+        hook_name: AFTER,
+        stage: hook::Stage::Transition,
+        source: Source::Core,
+        tenant_id: tenant,
+        document_id: document,
+        document_type_key: "OUTBOX_SECOND",
+        current_status: Some("COMPLETED"),
+        target_status: Some("COMPLETED"),
+        actor_user_id: None,
+        form_data: json!({}),
+        metadata: json!({}),
+        workflow_context: json!({}),
+        subject: Value::Null,
+        config: json!({}),
+        correlation_id: Uuid::now_v7(),
+    };
+
+    let mut transaction = app.pool.begin().await.expect("a transaction");
+    let outcome = hook::service::run_after_chain(
+        &mut transaction,
+        &RuleEvaluator::new(),
+        &chain,
+        &mut invocation,
+        None,
+    )
+    .await
+    .expect("the chain runs");
+    transaction.commit().await.expect("commit");
+
+    assert_eq!(outcome.failures.len(), 1, "{:?}", outcome.failures);
+    assert_eq!(breaker_notifications(&app, administrator).await, 1);
+    assert_eq!(breaker_notifications(&app, system_administrator).await, 0);
+}
+
+/// **A delivery whose claim was overtaken commits none of its runs**
+/// (ADR-0041 §2's fenced settle, as the worker uses it).
+///
+/// `a_stale_claimant_cannot_settle_a_row_another_worker_reclaimed` holds
+/// `settle`'s fence by calling it directly, so it cannot see what the worker
+/// does with a `false`. Here a trigger on the execution log moves the row's
+/// lease part-way through the delivery — what a second worker's claim does —
+/// so the worker's own settle matches nothing. Its transaction must roll back:
+/// the newer claimant is delivering the same event and logs its own runs.
+///
+/// Seen red, 2026-09-25: `if !held` disabled in `outbox::worker::deliver_one`
+/// (the stale delivery committed its `CONTINUE` row and the moved lease).
+#[tokio::test]
+async fn a_delivery_whose_claim_was_overtaken_commits_none_of_its_runs() {
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+    let token = approver(&app, "outbox.overtaken").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &admin,
+        one_step_workflow(
+            "outbox_overtaken",
+            json!([{ "handler": "core:continue_always" }]),
+        ),
+    )
+    .await;
+    let type_id = document_type(&app, &admin, "OUTBOX_OVERTAKEN", workflow).await;
+    let document = approved_document(&app, &token, type_id).await;
+
+    sqlx::query(
+        "CREATE FUNCTION overtake_the_claim() RETURNS trigger LANGUAGE plpgsql AS $body$
+         BEGIN
+             UPDATE outbox_events SET next_attempt_at = next_attempt_at + interval '1 second'
+             WHERE status = 'PROCESSING';
+             RETURN NEW;
+         END $body$",
+    )
+    .execute(&app.pool)
+    .await
+    .expect("the overtaking function");
+    sqlx::query(
+        "CREATE TRIGGER overtake_the_claim BEFORE INSERT ON document_hook_executions
+         FOR EACH ROW EXECUTE FUNCTION overtake_the_claim()",
+    )
+    .execute(&app.pool)
+    .await
+    .expect("the overtaking trigger");
+
+    assert_eq!(app.deliver_outbox().await, 1);
+
+    let left = runs_on(&app, document).await;
+
+    assert!(left.is_empty(), "the overtaken delivery left {left:?}");
+
+    let row = event_of(&app, document).await;
+
+    assert_eq!(
+        row.status, "PROCESSING",
+        "the newer claimant still holds it"
+    );
+    assert_eq!(
+        row.attempt_count, 0,
+        "the overtaken attempt is not recorded"
+    );
+}
+
+/// **The breaker is keyed by handler** (ADR-0041 §2: tenant, hook and
+/// handler). Five fresh `ERROR`s of another handler in the same tenant and
+/// hook do not hold this one.
+///
+/// Seen red, 2026-09-25: `handler_reference = $3` dropped from
+/// `hook::repository::recent_executions` (the event was held `FAILED` by the
+/// other handler's breaker).
+#[tokio::test]
+async fn another_handler_s_open_breaker_does_not_hold_this_handler() {
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+    let token = approver(&app, "outbox.handler").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &admin,
+        one_step_workflow(
+            "outbox_handler",
+            json!([{ "handler": "core:continue_always" }]),
+        ),
+    )
+    .await;
+    let type_id = document_type(&app, &admin, "OUTBOX_HANDLER", workflow).await;
+    let document = approved_document(&app, &token, type_id).await;
+
+    seed_errors(
+        &app,
+        fixtures::SYSTEM_TENANT_ID,
+        document,
+        ABSENT_PLUGIN,
+        5,
+        "1 minute",
+    )
+    .await;
+
+    assert_eq!(app.deliver_outbox().await, 1);
+    assert_eq!(event_of(&app, document).await.status, "PROCESSED");
+}
+
+/// **The cool-down is ten minutes, not less** (ADR-0041 §2). Five `ERROR`s
+/// nine and a half minutes old still hold the handler. The trial tests move
+/// the clock by exactly ten minutes, which any shorter cool-down also passes.
+///
+/// Seen red, 2026-09-25: `BREAKER_COOL_DOWN` at `9 * 60` in `hook::domain`
+/// (the handler ran and the event was `PROCESSED`).
+#[tokio::test]
+async fn a_breaker_nine_and_a_half_minutes_after_its_last_error_is_still_open() {
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+    let token = approver(&app, "outbox.cool").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &admin,
+        one_step_workflow(
+            "outbox_cool",
+            json!([{ "handler": "core:continue_always" }]),
+        ),
+    )
+    .await;
+    let type_id = document_type(&app, &admin, "OUTBOX_COOL", workflow).await;
+    let document = approved_document(&app, &token, type_id).await;
+
+    seed_errors(
+        &app,
+        fixtures::SYSTEM_TENANT_ID,
+        document,
+        "core:continue_always",
+        5,
+        "9 minutes 30 seconds",
+    )
+    .await;
+
+    app.deliver_outbox().await;
+
+    assert_eq!(event_of(&app, document).await.status, "FAILED");
+    assert!(
+        runs_on(&app, document)
+            .await
+            .iter()
+            .all(|(_, _, result)| result == "ERROR"),
+        "the handler must not have run"
+    );
+}
+
+/// **Five permanent kind errors open the breaker too, and it is reported
+/// once** (ADR-0041 §2). A before-only handler reached through an older
+/// definition is logged `ERROR` without being run; those rows count toward
+/// the breaker like any other, and the administrators hear of it.
+///
+/// Seen red, 2026-09-25: the kind branch's `report_if_opened` removed from
+/// `hook::service::run_after_chain` (five `ERROR`s, and nobody told).
+#[tokio::test]
+async fn five_kind_errors_open_the_breaker_and_tell_the_administrators_once() {
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+    let token = approver(&app, "outbox.kinds").await;
+    let administrator = user_id(&app, common::ADMIN_USERNAME).await;
+
+    let workflow = publish_workflow(
+        &app,
+        &admin,
+        one_step_workflow(
+            "outbox_kinds",
+            json!([{ "handler": "core:continue_always" }]),
+        ),
+    )
+    .await;
+
+    sqlx::query(
+        "UPDATE workflow_definitions
+         SET definition_json = jsonb_set(definition_json, '{transitions,0,actions}', $1)
+         WHERE id = $2",
+    )
+    .bind(json!([
+        { "handler": "core:reject_when", "config": { "condition": { "==": [1, 1] } } }
+    ]))
+    .bind(workflow)
+    .execute(&app.pool)
+    .await
+    .expect("the definition as an older release stored it");
+
+    let type_id = document_type(&app, &admin, "OUTBOX_KINDS", workflow).await;
+
+    for delivered in 1..=6 {
+        approved_document(&app, &token, type_id).await;
+        app.deliver_outbox().await;
+
+        let expected = if delivered < 5 { 0 } else { 1 };
+
+        assert_eq!(
+            breaker_notifications(&app, administrator).await,
+            expected,
+            "after {delivered} kind errors"
+        );
+    }
+}
+
+/// **The edge is found by its action as well as its states** (JWSS §7). Two
+/// edges leave `SUBMITTED` for `CLOSED`, one on `REJECT` with an action and
+/// one on `APPROVE` with none. Approving runs nothing.
+///
+/// Seen red, 2026-09-25: the `action` conjunct dropped from the edge lookup
+/// in `workflow::service::after_hooks::deliver` (the `REJECT` edge's action
+/// ran on an approval).
+#[tokio::test]
+async fn an_approval_runs_its_own_edge_s_actions_and_not_a_sibling_s() {
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+    let token = approver(&app, "outbox.sibling").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &admin,
+        json!({
+            "workflowKey": "outbox_sibling",
+            "version": "1.0.0",
+            "name": "Two ways to close",
+            "initialState": "SUBMITTED",
+            "states": [
+                { "code": "SUBMITTED", "name": "Awaiting approval",
+                  "mapsToDocumentStatus": "PENDING_APPROVAL",
+                  "task": { "taskDefinitionKey": "approve", "taskName": "Approve the request",
+                            "assignment": { "assigneeType": "ROLE", "roleCode": APPROVER_ROLE } } },
+                { "code": "CLOSED", "name": "Closed", "mapsToDocumentStatus": "COMPLETED",
+                  "isFinal": true }
+            ],
+            "transitions": [
+                { "from": "SUBMITTED", "to": "CLOSED", "action": "REJECT",
+                  "allowedBy": format!("ROLE:{APPROVER_ROLE}"),
+                  "actions": [{ "handler": "core:continue_always" }] },
+                { "from": "SUBMITTED", "to": "CLOSED", "action": "APPROVE",
+                  "allowedBy": format!("ROLE:{APPROVER_ROLE}"),
+                  "actions": [] }
+            ]
+        }),
+    )
+    .await;
+    let type_id = document_type(&app, &admin, "OUTBOX_SIBLING", workflow).await;
+    let document = approved_document(&app, &token, type_id).await;
+
+    assert_eq!(app.deliver_outbox().await, 1);
+    assert_eq!(event_of(&app, document).await.status, "PROCESSED");
+
+    let runs = runs_on(&app, document).await;
+
+    assert!(runs.is_empty(), "the REJECT edge's action ran: {runs:?}");
+}
+
+/// **A document deleted before delivery runs no after-hook** (ADR-0041 §2:
+/// the chain runs on the document as it is at delivery, and a deleted one
+/// leaves it nothing to run on).
+///
+/// Seen red, 2026-09-25: `d.deleted_at IS NULL` dropped from
+/// `hook::repository::hook_subject` (the action ran on the deleted document).
+#[tokio::test]
+async fn an_event_for_a_document_deleted_before_delivery_runs_nothing() {
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+    let token = approver(&app, "outbox.deleted").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &admin,
+        one_step_workflow(
+            "outbox_deleted",
+            json!([{ "handler": "core:continue_always" }]),
+        ),
+    )
+    .await;
+    let type_id = document_type(&app, &admin, "OUTBOX_DELETED", workflow).await;
+    let document = approved_document(&app, &token, type_id).await;
+
+    sqlx::query("UPDATE documents SET deleted_at = now() WHERE id = $1")
+        .bind(document)
+        .execute(&app.pool)
+        .await
+        .expect("the document is deleted");
+
+    assert_eq!(app.deliver_outbox().await, 1);
+    assert_eq!(event_of(&app, document).await.status, "PROCESSED");
+    assert!(runs_on(&app, document).await.is_empty());
+}
+
+/// **`sequence` counts one instance's history, not the tenant's** (EES §2:
+/// monotonic per aggregate). Two documents, one approval each: both events
+/// are the second row of their own instance's history.
+///
+/// Seen red, 2026-09-25: `workflow_instance_id = $2` dropped from
+/// `workflow::repository::history::position_of_latest` (the second event
+/// carried `sequence` 4).
+#[tokio::test]
+async fn each_instance_s_events_are_sequenced_on_its_own_history() {
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+    let token = approver(&app, "outbox.sequence").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &admin,
+        one_step_workflow("outbox_sequence", json!([])),
+    )
+    .await;
+    let type_id = document_type(&app, &admin, "OUTBOX_SEQUENCE", workflow).await;
+    let first = approved_document(&app, &token, type_id).await;
+    let second = approved_document(&app, &token, type_id).await;
+
+    for document in [first, second] {
+        assert_eq!(event_of(&app, document).await.payload_json["sequence"], 2);
+    }
+}
+
+/// **A worker's claim holds its row for five minutes** (ADR-0041 §2's
+/// lease). A trigger on the execution log reads the lease the pass's own
+/// claim wrote, part-way through the delivery.
+///
+/// Seen red, 2026-09-25: `LEASE` at `4 * 60` in `outbox::domain` (the lease
+/// read 240 s).
+#[tokio::test]
+async fn a_worker_s_claim_leases_its_row_for_five_minutes() {
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+    let token = approver(&app, "outbox.lease").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &admin,
+        one_step_workflow(
+            "outbox_lease",
+            json!([{ "handler": "core:continue_always" }]),
+        ),
+    )
+    .await;
+    let type_id = document_type(&app, &admin, "OUTBOX_LEASE", workflow).await;
+    let document = approved_document(&app, &token, type_id).await;
+
+    sqlx::query("CREATE TABLE lease_seen (seconds float8 NOT NULL)")
+        .execute(&app.pool)
+        .await
+        .expect("the lease table");
+    sqlx::query(
+        "CREATE FUNCTION record_the_lease() RETURNS trigger LANGUAGE plpgsql AS $body$
+         BEGIN
+             INSERT INTO lease_seen
+             SELECT EXTRACT(EPOCH FROM next_attempt_at - now())::float8
+             FROM outbox_events WHERE status = 'PROCESSING';
+             RETURN NEW;
+         END $body$",
+    )
+    .execute(&app.pool)
+    .await
+    .expect("the recording function");
+    sqlx::query(
+        "CREATE TRIGGER record_the_lease BEFORE INSERT ON document_hook_executions
+         FOR EACH ROW EXECUTE FUNCTION record_the_lease()",
+    )
+    .execute(&app.pool)
+    .await
+    .expect("the recording trigger");
+
+    assert_eq!(app.deliver_outbox().await, 1);
+    assert_eq!(event_of(&app, document).await.status, "PROCESSED");
+
+    let seen: Vec<f64> = sqlx::query_scalar("SELECT seconds FROM lease_seen")
+        .fetch_all(&app.pool)
+        .await
+        .expect("the lease seen");
+
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert!(
+        seen[0] > 290.0 && seen[0] <= 300.0,
+        "leased for {}s",
+        seen[0]
+    );
+}
+
+/// **A claim takes the oldest due rows first** (ADR-0041 §2). Forty rows are
+/// due, written newest first, and one claim of thirty-two takes the oldest
+/// thirty-two — which only the ordering gives, not the table's physical order.
+///
+/// Seen red, 2026-09-25: `ORDER BY created_at, id` dropped from
+/// `outbox::repository::claim` (the newest rows were claimed).
+#[tokio::test]
+async fn a_claim_takes_the_oldest_due_rows_first() {
+    use kelir_backend::modules::outbox::repository as outbox_repo;
+
+    let app = TestApp::spawn().await;
+    let mut by_age = Vec::new();
+
+    for minutes_ago in 0..40 {
+        let id = Uuid::now_v7();
+
+        sqlx::query(&format!(
+            "INSERT INTO outbox_events
+                 (id, tenant_id, aggregate_type, aggregate_id, event_type, payload_json,
+                  created_at)
+             VALUES ($1, $2, 'WORKFLOW_INSTANCE', $3, 'Test.Ordered', '{{}}',
+                     now() - interval '{minutes_ago} minutes')"
+        ))
+        .bind(id)
+        .bind(fixtures::SYSTEM_TENANT_ID)
+        .bind(Uuid::now_v7())
+        .execute(&app.pool)
+        .await
+        .expect("a due row");
+
+        by_age.push(id);
+    }
+
+    let mut claimed: Vec<Uuid> = outbox_repo::claim(&app.pool, 32, 300.0)
+        .await
+        .expect("the claim")
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    let mut oldest: Vec<Uuid> = by_age[8..].to_vec();
+
+    claimed.sort();
+    oldest.sort();
+
+    assert_eq!(claimed, oldest);
+}
