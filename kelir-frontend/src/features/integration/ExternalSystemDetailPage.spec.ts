@@ -296,6 +296,16 @@ describe('ExternalSystemDetailPage', () => {
     expect(wrapper.find('input[type="password"]').exists()).toBe(false)
   })
 
+  it('tells the user what to enter and does not say a secret cannot be stored', async () => {
+    // #552 (record 19, D-88): only a reference's shape is checked, and
+    // `vault://sk_live_…` has the shape, so the section says what to do.
+    const wrapper = await render([...SYSTEM_ALL, ...CREDENTIAL_ALL])
+    const section = wrapper.get('[data-testid="credentials-section"]').text()
+
+    expect(section).toMatch(/not the secret itself/)
+    expect(section).not.toMatch(/never the secret/i)
+  })
+
   it('shows a refused reference against its input', async () => {
     const wrapper = await render([...SYSTEM_ALL, ...CREDENTIAL_ALL])
 

@@ -130,6 +130,97 @@ async fn a_tenants_own_administrator_administers_its_tenant_and_not_tenants() {
     assert_eq!(refused.status, StatusCode::FORBIDDEN);
 }
 
+/// The `integration:*` codes a caller's `/auth/me` reports, sorted.
+async fn integration_permissions(app: &TestApp, token: &str) -> Vec<String> {
+    let profile = app.get("/api/v1/auth/me", Some(token)).await;
+    assert_eq!(profile.status, StatusCode::OK, "{}", profile.body);
+
+    let mut codes: Vec<String> = profile.data()["permissions"]
+        .as_array()
+        .expect("permissions is an array")
+        .iter()
+        .filter_map(|value| value.as_str())
+        .filter(|code| code.starts_with("integration:"))
+        .map(str::to_owned)
+        .collect();
+    codes.sort();
+    codes
+}
+
+#[tokio::test]
+async fn a_created_tenants_administrator_sees_systems_and_not_where_secrets_are_kept() {
+    // **#551, and D-18's amendment of 2026-09-25.** Provisioning withholds
+    // `integration:credential:*` as it withholds `organization:tenant:*`, so a
+    // new tenant's administrator can register and read external systems but
+    // cannot read the references that say where their secrets live until
+    // somebody grants that deliberately. Record 19's probe found all eight
+    // `integration:*` codes on a tenant created through this route.
+    let app = multi_tenant_app().await;
+    let token = administering_token(&app).await;
+
+    let created = app
+        .post(TENANTS, Some(&token), create_body("ACME", "acme.admin"))
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+    let tenant_token = app
+        .sign_in_to("ACME", "acme.admin", "a-sufficiently-long-password")
+        .await;
+
+    assert_eq!(
+        integration_permissions(&app, &tenant_token).await,
+        [
+            "integration:external-system:create",
+            "integration:external-system:deactivate",
+            "integration:external-system:read",
+            "integration:external-system:update",
+        ],
+        "a created tenant's ROLE-ADMIN holds exactly the four external-system codes"
+    );
+
+    // The routes agree with the grant: that administrator registers a system,
+    // and is refused its credential list.
+    let system = app
+        .post(
+            "/api/v1/integration/external-systems",
+            Some(&tenant_token),
+            json!({ "systemCode": "ERP", "systemName": "ERP system" }),
+        )
+        .await;
+    assert_eq!(system.status, StatusCode::CREATED, "{}", system.body);
+    let system_id = system.data()["id"].as_str().expect("an id").to_owned();
+
+    let credentials = app
+        .get(
+            &format!("/api/v1/integration/external-systems/{system_id}/credentials"),
+            Some(&tenant_token),
+        )
+        .await;
+    assert_eq!(
+        credentials.status,
+        StatusCode::FORBIDDEN,
+        "{}",
+        credentials.body
+    );
+
+    // Control: the system tenant's administrator, whose grants `0046` made
+    // and provisioning never touches, still holds all eight.
+    assert_eq!(
+        integration_permissions(&app, &token).await,
+        [
+            "integration:credential:create",
+            "integration:credential:delete",
+            "integration:credential:read",
+            "integration:credential:update",
+            "integration:external-system:create",
+            "integration:external-system:deactivate",
+            "integration:external-system:read",
+            "integration:external-system:update",
+        ],
+        "the system tenant's administrator lost an integration grant"
+    );
+}
+
 #[tokio::test]
 async fn holding_the_permission_is_not_enough_outside_the_administering_tenant() {
     // The boundary that does the real work, isolated from the one above. The

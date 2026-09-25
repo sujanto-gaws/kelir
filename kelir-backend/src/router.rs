@@ -398,7 +398,7 @@ use crate::state::AppState;
         ),
         (
             name = "integration",
-            description = "The external system registry — systems, their endpoints, and references to where their secrets live. No route carries a secret value"
+            description = "The external system registry — systems, their endpoints, and references to where their secrets live. A reference is checked for its shape only, and no route resolves one"
         )
     ),
     info(

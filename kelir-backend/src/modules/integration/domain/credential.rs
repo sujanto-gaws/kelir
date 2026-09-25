@@ -66,7 +66,9 @@ pub struct IntegrationCredential {
     pub id: Uuid,
     pub external_system_id: Uuid,
     pub credential_type: AuthType,
-    /// Where the secret lives — `vault://kelir/erp/api-key`. Never the secret.
+    /// A reference to where the secret is kept — `vault://kelir/erp/api-key`.
+    /// Its shape was checked when it was written, and nothing more: a secret
+    /// typed as a path segment has the right shape (#552).
     pub secret_reference: String,
     pub valid_from: Option<NaiveDate>,
     pub valid_to: Option<NaiveDate>,

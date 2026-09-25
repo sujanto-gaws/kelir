@@ -303,7 +303,7 @@ pub async fn update_endpoint(
     get, path = "/api/v1/integration/external-systems/{id}/credentials", tag = "integration",
     params(Pagination),
     responses(
-        (status = 200, description = "One page of the system's credential references, inactive ones included. References only — never a secret", body = [IntegrationCredential]),
+        (status = 200, description = "One page of the system's credential references, inactive ones included. Each is returned as it was stored; what was checked at write is its shape", body = [IntegrationCredential]),
         (status = 403, description = "Missing integration:credential:read"),
         (status = 404, description = "No such external system in this tenant")
     ),
@@ -324,7 +324,7 @@ pub async fn list_credentials(
 #[utoipa::path(
     get, path = "/api/v1/integration/external-systems/{id}/credentials/{credentialId}", tag = "integration",
     responses(
-        (status = 200, description = "The credential reference — never the secret", body = IntegrationCredential),
+        (status = 200, description = "The credential reference, as it was stored", body = IntegrationCredential),
         (status = 403, description = "Missing integration:credential:read"),
         (status = 404, description = "No such external system in this tenant, or no such credential on it")
     ),

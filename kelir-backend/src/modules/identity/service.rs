@@ -625,10 +625,12 @@ pub struct ProvisionedIdentity {
 /// check the wrong thing: the permission that governs this work is about
 /// tenants, which identity knows nothing about. Nothing else may call it.
 ///
-/// `withheld_permission_prefix` is the one policy the caller supplies, because
-/// it is the caller's: a tenant's own administrator holds every permission in
-/// the catalogue *except* the family that administers tenants (**D-18**).
-/// Identity has no opinion on which family that is.
+/// `withheld_permission_prefixes` is the one policy the caller supplies,
+/// because it is the caller's: a tenant's own administrator holds every
+/// permission in the catalogue *except* the families **D-18** withholds — the
+/// one that administers tenants and, since 2026-09-25 (#551), the one that
+/// shows where secrets are kept. Identity has no opinion on which families
+/// those are.
 ///
 /// Password hashing runs on the blocking pool, so a transaction is held open
 /// across an `await` on another thread for the ~100 ms Argon2id takes. That is
@@ -639,7 +641,7 @@ pub async fn provision_tenant_identity(
     transaction: &mut sqlx::PgConnection,
     tenant_id: Uuid,
     administrator: FirstAdministrator<'_>,
-    withheld_permission_prefix: &str,
+    withheld_permission_prefixes: &[&str],
 ) -> Result<ProvisionedIdentity, AppError> {
     validate_first_administrator(&administrator)?;
 
@@ -667,7 +669,7 @@ pub async fn provision_tenant_identity(
     .await?;
 
     let permission_ids =
-        repo::permission_ids_excluding_prefix(&mut *transaction, withheld_permission_prefix)
+        repo::permission_ids_excluding_prefixes(&mut *transaction, withheld_permission_prefixes)
             .await?;
 
     repo::replace_role_permissions(&mut *transaction, tenant_id, role_id, &permission_ids).await?;

@@ -1857,6 +1857,82 @@ async fn every_route_is_in_the_document_and_no_schema_can_carry_a_secret() {
         seen, 3,
         "secretReference appears on the credential and its two requests, and nowhere else"
     );
+
+    // #552 (record 19 finding 2, D-88): a reference is checked for its shape,
+    // and `vault://sk_live_…` has the shape. So the published document says
+    // *reference* and never that a value cannot be a secret. Seen red,
+    // 2026-09-25, with the tag's `No route carries a secret value` put back.
+    let credential_texts = [
+        document.body["tags"]
+            .as_array()
+            .expect("tags")
+            .iter()
+            .find(|tag| tag["name"] == "integration")
+            .expect("the integration tag")["description"]
+            .to_string(),
+        paths[format!("{BASE}/{{id}}/credentials")]["get"]["responses"]["200"]["description"]
+            .to_string(),
+        paths[format!("{BASE}/{{id}}/credentials/{{credentialId}}")]["get"]["responses"]["200"]
+            ["description"]
+            .to_string(),
+        schemas["IntegrationCredential"]["properties"]["secretReference"]["description"]
+            .to_string(),
+    ];
+    for text in &credential_texts {
+        assert_ne!(
+            text, "null",
+            "a description is missing: {credential_texts:?}"
+        );
+        let lower = text.to_lowercase();
+        for claim in ["never a secret", "never the secret", "carries a secret"] {
+            assert!(
+                !lower.contains(claim),
+                "the document claims `{claim}`: {text}"
+            );
+        }
+    }
+}
+
+/// **#552 in the database**: `0047_credential_reference_texts.sql` rewrites the
+/// two texts `0046` seeded saying *never the secret*, the column comment and
+/// the `integration:credential:read` description. Seen red, 2026-09-25, with
+/// `0047` moved out of the migrations directory.
+#[tokio::test]
+async fn the_database_texts_say_reference_and_not_never_the_secret() {
+    let app = TestApp::spawn().await;
+
+    let comment: Option<String> = sqlx::query_scalar(
+        "SELECT col_description('integration_credentials'::regclass, attnum)
+         FROM pg_attribute
+         WHERE attrelid = 'integration_credentials'::regclass
+           AND attname = 'secret_reference'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .expect("the column comment");
+
+    let descriptions: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT permission_code, description FROM permissions
+         WHERE permission_code LIKE 'integration:%' AND deleted_at IS NULL",
+    )
+    .fetch_all(&app.pool)
+    .await
+    .expect("the catalogue rows");
+    assert_eq!(descriptions.len(), 8, "{descriptions:?}");
+
+    let comment = comment.expect("secret_reference has a comment");
+    assert!(comment.contains("shape"), "{comment}");
+
+    for text in std::iter::once(&comment).chain(descriptions.iter().filter_map(|(_, d)| d.as_ref()))
+    {
+        let lower = text.to_lowercase();
+        for claim in ["never the secret", "never a secret"] {
+            assert!(
+                !lower.contains(claim),
+                "the database says `{claim}`: {text}"
+            );
+        }
+    }
 }
 
 // ===========================================================================
