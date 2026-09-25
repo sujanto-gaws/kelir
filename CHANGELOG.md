@@ -81,7 +81,10 @@ While the major version is `0`, the public API may change in any release.
   closed #519, and `adr_records_are_current.rs` accepted it because it named a
   blocker. It now also fails when every issue a `Draft` record's `Blocked by:`
   names is cited in this section: named in the parenthesis right after an
-  entry's bold headline. An issue mentioned anywhere else does not count.
+  entry's bold headline. An issue mentioned anywhere else does not count, and
+  neither does one under `### Known limitations`, which cites open issues. A
+  `Draft` whose `Blocked by:` names no issue, such as a template copy with the
+  commented `#NNN` left in, is refused too; it used to pass.
 
 - **MinIO and `mc` are fetched from `ghcr.io/sujanto-gaws`** (decision **D-92**).
   `quay.io/minio/*`, where D-80 moved them, closed to anonymous pulls on

@@ -34,10 +34,15 @@
 //! 4. **A `Draft` record names what is holding it** — `**Blocked by:** #NNN`,
 //!    standard §5.1. This is the rule that catches the recurrence: without it a
 //!    merged record can sit at `Draft` indefinitely and look exactly like one
-//!    written yesterday. **And the blocker is not one this tree delivers**
+//!    written yesterday. The field must **name an issue**, outside an HTML
+//!    comment: a record copied from the template with its commented
+//!    `**Blocked by:** #NNN` left in names nothing. **And the blocker is not
+//!    one this tree delivers**
 //!    ([#545](https://github.com/sujanto-gaws/kelir/issues/545)): a `Draft`
-//!    is refused when every issue its `Blocked by:` names is **cited** in
-//!    `CHANGELOG.md`'s `[Unreleased]` section.
+//!    is refused when every blocker it names is **cited** in `CHANGELOG.md`'s
+//!    `[Unreleased]` section. The blockers are the issues before the field's
+//!    first ` — ` (space, em dash, space); with any other separator the whole
+//!    value is read, and the description's issues count as blockers too.
 //!
 //! # Rule 4's second half: what "cited" means
 //!
@@ -49,9 +54,16 @@
 //! **Cited is narrower than named.** An issue is cited when it appears — as
 //! `#519`, `/issues/519` or `/pull/519` — in an entry's **reference**: the
 //! balanced parenthesis right after the entry's bold headline, where the house
-//! style says what the entry delivers. Anywhere else it is *mentioned*: a
-//! follow-up at the end of a body (`[Unreleased]` gives #511 that shape
-//! today), a nested item, the reason a record stays `Draft`.
+//! style says what the entry delivers. A nested item with its own bold
+//! headline and parenthesis is an entry of its own, since a sub-item can
+//! deliver too. Anywhere else the issue is *mentioned*: a follow-up at the end
+//! of a body (`[Unreleased]` gives #511 that shape today), a nested item's
+//! body, the reason a record stays `Draft`.
+//!
+//! **`### Known limitations` delivers nothing.** Its entries cite the open
+//! issue that tracks each limitation (`[0.3.0]`'s *The audit hash chain does
+//! not cover …* (#145)), and the subsection has stood under `[Unreleased]`
+//! before, so it is skipped.
 //!
 //! **The narrow reading is not a nicety.** #372 merged ADR-0037 `Draft`
 //! behind #371 in a tree whose `[Unreleased]` named #371 twice, and #371 is
@@ -127,6 +139,31 @@
 //! | M4 — the `Blocked by:` description's issues are blockers | *the readers* |
 //! | M5 — a `#` after a letter is read | *the readers*, once `z.md#525)` was added; green before it |
 //! | M6 — the second half removed | *as #537 left it*, *held by two issues* |
+//!
+//! ## The probe gate's findings, 2026-09-25 (PR #560)
+//!
+//! **D2, fails open**: the first half read `header.contains("**Blocked by:**")`,
+//! so a `Draft` naming no issue passed, a template copy with its commented
+//! `#NNN` among them. **D1, fails closed**: a `### Known limitations` entry
+//! citing its open issue read as a delivery. Each fix seen red by putting the
+//! old code back:
+//!
+//! | Mutation | Reddened |
+//! |---|---|
+//! | The first half as #560 shipped it (the `contains` check, comments kept) | *a template copy … names nothing* |
+//! | Comments kept, an issue required | *a template copy … names nothing* (the filled-in, commented `#519`) |
+//! | Comments stripped, the `contains` check | *a template copy … names nothing* (`#NNN` uncommented) |
+//! | `### Known limitations` read | *a known limitation citing its open issue is not a delivery* |
+//!
+//! **Historic sweep**: `docs/architectures/adr`, `docs/README.md` and
+//! `CHANGELOG.md` from each of the 46 first-parent `main` commits that touched
+//! them, `91d562b` (#352) to `5791681` (#543), run through the fixed file: all
+//! 46 green, so neither fix refuses a tree `main` has held.
+//!
+//! On disk, then: a `9999` record and index row copied from the template,
+//! `Draft`, its commented field left in, reddens *a Draft record names what is
+//! holding it* only; the positive control, run last, is the `9999` record
+//! `Draft` behind #520, which reddens the second half only.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -183,12 +220,15 @@ fn first_field(source: &str, field: &str) -> Option<String> {
 /// judged from text held in this file (the fixtures under *Rule 4, second
 /// half*), by the same code that judges the folder.
 fn parse_record(name: String, source: &str) -> Record {
-    // The metadata block is everything before the first section heading.
-    let header = source
-        .split("\n## ")
-        .next()
-        .expect("a split yields one part")
-        .to_owned();
+    // The metadata block is everything before the first section heading,
+    // without its HTML comments: the template's commented `**Blocked by:**`
+    // is the form to copy, not a field.
+    let header = without_comments(
+        source
+            .split("\n## ")
+            .next()
+            .expect("a split yields one part"),
+    );
 
     Record {
         number: name.chars().take(4).collect(),
@@ -198,6 +238,22 @@ fn parse_record(name: String, source: &str) -> Record {
         header,
         name,
     }
+}
+
+/// `text` with every `<!-- … -->` removed. An unclosed comment runs to the end.
+fn without_comments(text: &str) -> String {
+    let mut kept = String::new();
+    let mut rest = text;
+
+    while let Some(open) = rest.find("<!--") {
+        kept.push_str(&rest[..open]);
+        rest = rest[open..]
+            .find("-->")
+            .map_or("", |close| &rest[open + close + 3..]);
+    }
+
+    kept.push_str(rest);
+    kept
 }
 
 fn records() -> Vec<Record> {
@@ -360,8 +416,7 @@ fn an_adopted_record_carries_its_decision_date() {
 fn a_draft_record_names_what_is_holding_it() {
     let silent: Vec<_> = records()
         .into_iter()
-        .filter(|record| record.status == "Draft")
-        .filter(|record| !record.header.contains("**Blocked by:**"))
+        .filter(names_no_blocker)
         .map(|record| record.name)
         .collect();
 
@@ -372,6 +427,12 @@ fn a_draft_record_names_what_is_holding_it() {
          rather than looking like one written yesterday:\n  {}",
         silent.join("\n  ")
     );
+}
+
+/// Rule 4's first half, for one record: a `Draft` whose `**Blocked by:**`
+/// names no issue — absent, commented out, or still the template's `#NNN`.
+fn names_no_blocker(record: &Record) -> bool {
+    record.status == "Draft" && blockers(&record.header).is_empty()
 }
 
 // ---------------------------------------------------------------------------
@@ -457,8 +518,11 @@ fn issue_numbers(text: &str) -> Vec<u32> {
 
 /// The issues a record's `**Blocked by:**` field names, in order, once each.
 ///
-/// Read up to the field's first ` — `: what follows describes what is
-/// unfinished, and it may mention other issues without being held by them.
+/// Read up to the field's first ` — ` (space, em dash, space): what follows
+/// describes what is unfinished, and it may mention other issues without being
+/// held by them. **Only that separator.** With `-`, `–` or `:` the whole value
+/// is read, so the description's issues are blockers too, which errs towards
+/// passing a record whose own blocker is delivered.
 fn blockers(header: &str) -> Vec<u32> {
     let Some(value) = first_field(header, "Blocked by") else {
         return Vec::new();
@@ -477,7 +541,8 @@ fn blockers(header: &str) -> Vec<u32> {
 
 /// A changelog section's list items, each with its wrapped lines joined by a
 /// space and its marker removed. An item ends at the next item, a blank line
-/// or a heading, so a nested item is an entry of its own.
+/// or a heading, so a nested item is an entry of its own: its reference is
+/// read, and its body is a mention like any other.
 fn entries(section: &str) -> Vec<String> {
     let mut entries = Vec::new();
     let mut current: Option<String> = None;
@@ -538,10 +603,31 @@ fn reference_of(entry: &str) -> Option<&str> {
     None
 }
 
+/// `section` without its `### Known limitations` subsections, each of which
+/// runs to the next heading of level 2 or 3.
+fn without_known_limitations(section: &str) -> String {
+    let mut kept = String::new();
+    let mut skipping = false;
+
+    for line in section.lines() {
+        if line.starts_with("## ") || line.starts_with("### ") {
+            skipping = line.trim_end() == "### Known limitations";
+        }
+
+        if !skipping {
+            kept.push_str(line);
+            kept.push('\n');
+        }
+    }
+
+    kept
+}
+
 /// The issues a changelog section **cites**: those named in an entry's
-/// reference (see [`reference_of`]).
+/// reference (see [`reference_of`]), outside `### Known limitations`, whose
+/// entries cite the open issue that tracks each limitation.
 fn cited_issues(section: &str) -> BTreeSet<u32> {
-    entries(section)
+    entries(&without_known_limitations(section))
         .iter()
         .filter_map(|entry| reference_of(entry))
         .flat_map(issue_numbers)
@@ -966,4 +1052,84 @@ fn a_citation_is_read_wherever_the_reference_holds_it() {
         let changelog = changelog_adding(body);
         assert_eq!(cited_issues(unreleased_of(&changelog)), cited, "{body}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// The gate's findings D1 and D2 (PR #560)
+// ---------------------------------------------------------------------------
+
+/// **D2.** A record copied from the template, `Draft`, with the template's
+/// commented `**Blocked by:** #NNN` left in, names nothing. The check before
+/// this one read `header.contains("**Blocked by:**")` and passed it.
+#[test]
+fn a_template_copy_with_its_commented_blocker_names_nothing() {
+    let copied = fixture(
+        "0042. Copied From the Template.md",
+        "# ADR-0042 — Copied From the Template\n\n\
+         **Status:** Draft · **Last updated:** 2026-09-25\n\n\
+         <!-- A record that is still Draft after its PR merges carries this line and\n     \
+         names the issue holding it (standard §5.1). An issue this PR's changelog\n     \
+         entry delivers holds nothing. Delete the line on adoption.\n\
+         **Blocked by:** #NNN — <what is unfinished> -->\n\n\
+         **Decision date:** — · **Deciders:** Product owner · **Related:** issue #600\n\n\
+         ## 1. Context\n",
+    );
+
+    assert!(
+        names_no_blocker(&copied),
+        "the commented field is not a field"
+    );
+
+    // Filled in and still commented out: a number inside the comment is not
+    // a blocker either.
+    let filled = fixture(
+        "0042. Filled but Commented.md",
+        "# ADR-0042 — X\n\n**Status:** Draft · **Last updated:** 2026-09-25\n\n\
+         <!-- **Blocked by:** #519 — waits -->\n\n## 1. Context\n",
+    );
+    assert!(names_no_blocker(&filled));
+    assert!(names_no_blocker(&draft_blocked_by(
+        "#NNN — <what is unfinished>"
+    )));
+    assert!(names_no_blocker(&draft_blocked_by("— the ERP decision")));
+    assert!(!names_no_blocker(&draft_blocked_by("#519 — waits")));
+    assert!(!names_no_blocker(&fixture(
+        "0037. on 46d78c5.md",
+        ADR_0037_ON_46D78C5
+    )));
+    assert_eq!(without_comments("a<!-- b -->c<!-- d"), "ac");
+}
+
+/// **D1.** A known limitation cites the open issue that tracks it; that is
+/// not a delivery.
+#[test]
+fn a_known_limitation_citing_its_open_issue_is_not_a_delivery() {
+    let record = draft_blocked_by("#145 — x");
+    let changelog = "# Changelog\n\n## [Unreleased]\n\n### Known limitations\n\n\
+                     - **The audit hash chain does not cover the values a record reports** (#145).\n\n\
+                     ## [0.8.0]\n";
+
+    assert_eq!(delivered_blockers(&record, unreleased_of(changelog)), None);
+
+    // The subsection ends at the next `###`: what follows it still delivers.
+    let then_added = changelog.replace(
+        "## [0.8.0]",
+        "### Added\n\n- **The chain covers them** (#145).\n\n## [0.8.0]",
+    );
+    assert_eq!(
+        delivered_blockers(&record, unreleased_of(&then_added)),
+        Some(vec![145])
+    );
+}
+
+/// A nested item's reference is a citation; its body is a mention.
+#[test]
+fn a_nested_items_reference_cites_and_its_body_mentions() {
+    let changelog =
+        changelog_adding("- **The parent** (#1).\n  - **A sub-delivery** (#2). It waits on #3.");
+
+    assert_eq!(
+        cited_issues(unreleased_of(&changelog)),
+        BTreeSet::from([1, 2])
+    );
 }
