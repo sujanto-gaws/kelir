@@ -197,3 +197,45 @@ pub async fn deliver(
         Ok(Delivery::Retry(outcome.failures.join("; ")))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn envelope(actor: Value) -> Value {
+        json!({
+            "correlationId": Uuid::nil().to_string(),
+            "actor": actor,
+            "payload": {
+                "instanceId": Uuid::nil().to_string(),
+                "documentId": Uuid::nil().to_string(),
+                "fromState": "SUBMITTED",
+                "toState": "APPROVED",
+                "action": "APPROVE",
+            },
+        })
+    }
+
+    /// **LHCS §4's `actorUserId` is the person who decided**, and `null` for
+    /// the engine's own step: the after-chain hands a handler who acted.
+    ///
+    /// Seen red, 2026-09-25 (Sprint 20 mutation campaign): the `actorType`
+    /// test inverted in `Transitioned::read`, which gave the person's step no
+    /// actor.
+    #[test]
+    fn a_decided_transition_carries_its_person_and_an_automatic_one_none() {
+        let person = Uuid::now_v7();
+
+        let decided = envelope(json!({ "actorType": "USER", "actorId": person.to_string() }));
+        let automatic = envelope(json!({ "actorType": "WORKFLOW_ENGINE", "actorId": null }));
+
+        assert_eq!(
+            Transitioned::read(&decided).expect("reads").actor_user_id,
+            Some(person)
+        );
+        assert_eq!(
+            Transitioned::read(&automatic).expect("reads").actor_user_id,
+            None
+        );
+    }
+}

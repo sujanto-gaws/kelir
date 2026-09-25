@@ -81,6 +81,18 @@ ${CLAUDE}"
 probe refused "the nil UUID" "Claude-Session: 00000000-0000-0000-0000-000000000000
 ${CLAUDE}"
 
+# The Sprint 20 mutation campaign: each shape below held nothing, so a
+# loosened rule stayed green. Seen red, 2026-09-25: the fence regex without
+# its leading [[:space:]]* (the indented fence's line counted), the co-author
+# pattern without its ^ anchor (the sentence was governed), and the address
+# loosened to `anthropic` (the fan site was governed).
+probe refused "another session's line inside an indented fence" "- the range record 17 read:
+  ${FENCE}text
+Claude-Session: ${UUID}
+  ${FENCE}
+
+${CLAUDE}"
+
 # Controls, last: each shape above has a correct neighbour that still passes.
 probe accepted "a UUID in the trailer block" "Claude-Session: ${UUID}
 ${CLAUDE}"
@@ -101,6 +113,10 @@ probe accepted "a human commit quoting a Claude trailer in a fence" "The trailer
 ~~~
 ${CLAUDE}
 ~~~"
+probe accepted "a human commit naming the trailer mid-sentence" \
+  "Whether Co-authored-by: Claude belongs on a human commit was asked and answered."
+probe accepted "a human co-author whose address only contains anthropic" \
+  "Co-authored-by: Jane Doe <jane@anthropicfans.org>"
 
 if (( failures > 0 )); then
   echo
