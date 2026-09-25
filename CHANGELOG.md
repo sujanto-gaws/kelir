@@ -61,7 +61,8 @@ While the major version is `0`, the public API may change in any release.
   - **A credential is a reference, never a secret.** Only `env://NAME` and
     `vault://path[#field]` are accepted. No route resolves a reference, and no
     response carries a secret. A `baseUrl` containing a user name or password
-    is refused as `CREDENTIALS_IN_URL`.
+    is refused as `CREDENTIALS_IN_URL`, and one with any query string as
+    `QUERY_IN_BASE_URL`, so a key cannot ride in `?api_key=`.
   - **Credentials have their own permissions.** They are under
     `integration:credential:*`, and the detail page does not show the section
     without `integration:credential:read`. Endpoints use the system's

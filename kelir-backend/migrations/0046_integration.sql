@@ -23,7 +23,7 @@
 -- return one. What the API checks about the shape of a reference is
 -- `integration::domain::credential`'s to say, and it says it there.
 --
--- # Deviations from §12's DDL, each for a reason already settled elsewhere
+-- # Deviations from §12's DDL
 --
 -- 1. **Every reference to `external_systems` carries `tenant_id` with it**, and
 --    `webhook_events`' reference to `webhook_subscriptions` does too. §12 writes
@@ -46,9 +46,21 @@
 -- 3. The foreign keys are **named** (`fk_<table>_<column>_tenant_id`, the
 --    `0017` form), where §12's inline `REFERENCES` would have taken
 --    PostgreSQL's generated names — naming convention §4.3.
+-- 4. **`integration_credentials` is indexed by `(tenant_id,
+--    external_system_id)`, not §12.3's `(external_system_id) WHERE is_active`.**
+--    Every query the credential routes run — the list, its count and the
+--    single read — filters `tenant_id` and `external_system_id` and **none
+--    filters `is_active`**, because an administrator is shown inactive
+--    references too. A partial index on `is_active` serves none of them, so
+--    all three were sequential scans of every tenant's credentials; found by
+--    `migration-author` at review. The replacement leads with the tenant, as
+--    every query does, and also serves an active-only lookup, which is only a
+--    narrower filter over the same prefix. It is non-partial for the same
+--    reason `deleted_at` is left out of it: a key a query filters on is an
+--    index column, and a predicate the index does not share is a scan.
 --
 -- Column types, defaults, `CHECK`s, `ON DELETE CASCADE` on the pure child rows
--- and every index are §12's as written. Two things §12 leaves open are left open
+-- and every other index are §12's as written. Two things §12 leaves open are left open
 -- here rather than decided in DDL: `external_systems.system_type` has a
 -- vocabulary in a comment and no `CHECK` (the API holds it to that list), and
 -- several bounded values sit in `TEXT` columns (`system_name`, `base_url`,
@@ -178,8 +190,9 @@ CREATE TABLE integration_credentials (
         REFERENCES external_systems (id, tenant_id) ON DELETE CASCADE
 );
 
-CREATE INDEX idx_integration_credentials_external_system_id
-    ON integration_credentials (external_system_id) WHERE is_active;
+-- Deviation 4: the credential routes' predicate, not §12.3's `WHERE is_active`.
+CREATE INDEX idx_integration_credentials_tenant_id_external_system_id
+    ON integration_credentials (tenant_id, external_system_id);
 
 COMMENT ON COLUMN integration_credentials.secret_reference IS
     'Where the secret lives (vault://..., env://...), never the secret. Readable under integration:credential:read.';

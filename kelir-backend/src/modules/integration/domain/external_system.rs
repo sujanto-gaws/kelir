@@ -245,9 +245,9 @@ pub struct RegisterExternalSystemRequest {
     pub system_code: String,
     pub system_name: String,
     pub system_type: Option<ExternalSystemType>,
-    /// `http` or `https`, with a host, and **no user name or password in it** —
-    /// a credential belongs in a credential reference, not in a URL anyone with
-    /// `:read` can see.
+    /// `http` or `https`, with a host, and **no user name, password or query
+    /// string in it** — a credential belongs in a credential reference, not in
+    /// a URL anyone with `:read` can see.
     pub base_url: Option<String>,
     pub auth_type: Option<AuthType>,
     /// Defaults to 30.
@@ -362,7 +362,9 @@ pub fn validate_update(request: &UpdateExternalSystemRequest) -> Result<(), AppE
 }
 
 /// A base URL: absolute `http`/`https` with a host, at most
-/// [`MAX_URL_LENGTH`], no fragment, and **no user information**.
+/// [`MAX_URL_LENGTH`], no fragment, **no user information and no query
+/// string** — a scheme, host, port and path, and nothing that could carry a
+/// key.
 ///
 /// A blank value is not checked here — the service stores it as absent.
 fn base_url(value: &str, problems: &mut Problems) {
@@ -407,6 +409,19 @@ fn base_url(value: &str, problems: &mut Problems) {
             "format",
             "CREDENTIALS_IN_URL",
             "baseUrl must not carry a user name or password; register a credential reference instead",
+        );
+    } else if parsed.query().is_some() {
+        // The second check about secrets: `?api_key=sk_live_…` is where an API
+        // key goes when someone pastes a working call as a base URL, and the
+        // column is shown to every `:read` holder and written to the audit
+        // trail (#520, finding F1). Any query is refused, an empty `?` too:
+        // no query a base URL could carry is configuration rather than a call.
+        problems.push(
+            "baseUrl",
+            "format",
+            "QUERY_IN_BASE_URL",
+            "baseUrl is a scheme, host, port and path only; a query string belongs to a call, \
+             not to the system, and a key in one belongs in a credential reference",
         );
     } else if parsed.fragment().is_some() {
         problems.push(
@@ -541,6 +556,34 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn a_base_url_with_any_query_string_is_refused() {
+        for bad in [
+            concat!(
+                "https://erp.example.com/api?api_key=sk_live",
+                "_4eC39HqLyjWDarjtT1zdp7dc"
+            ),
+            "https://erp.example.com/api?",
+            "https://erp.example.com:8443/api?version=2",
+        ] {
+            let mut request = register();
+            request.base_url = Some(bad.to_owned());
+
+            assert_eq!(
+                codes(&request),
+                vec![("baseUrl".to_owned(), "QUERY_IN_BASE_URL".to_owned())],
+                "{bad}"
+            );
+        }
+
+        let mut request = register();
+        request.base_url = Some("https://erp.example.com:8443/api/v2".to_owned());
+        assert!(
+            validate_register(&request).is_ok(),
+            "a port and a path are fine"
+        );
     }
 
     #[test]

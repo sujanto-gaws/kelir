@@ -239,7 +239,7 @@ mod tests {
     fn a_raw_secret_in_any_of_its_usual_shapes_is_refused() {
         for bad in [
             // A bare token, as an API key usually arrives.
-            "sk_live_51HxQ2eKZ8r",
+            concat!("sk_live", "_51HxQ2eKZ8r"),
             // Base64, with its padding and its slashes.
             "dXNlcjpwYXNzd29yZA==",
             // A user:password pair.

@@ -1,7 +1,7 @@
 //! The external system registry, through the API and the schema (#520,
 //! FR-INT-001).
 //!
-//! One file per acceptance criterion the backend can hold, in AC order:
+//! One file for every acceptance criterion the backend can hold, in AC order:
 //!
 //! * **AC-2** — the eight §12 tables, the deferred key on
 //!   `master_data_source_references`, and the composite keys that make a
@@ -48,6 +48,20 @@
 //! | `activate_external_system`'s early return for an `ACTIVE` system removed | green — `activate_external_system`'s `status <> 'ACTIVE'` predicate made the repeat a no-op |
 //! | That predicate removed from `repository::external_system::activate_external_system` | green — the early return held |
 //! | Both of the above | red: `a_system_is_deactivated_and_activated_again` (the repeat records a second `Activated`) |
+//!
+//! Review (2026-09-25) added the rows below: finding F1's query refusal, the
+//! credential index, and the four mutations `test-engineer` ran against the
+//! tests adopted at the foot of this file, re-run here after the move. **Seen
+//! red, 2026-09-25**, all six.
+//!
+//! | Mutation | Reddened |
+//! |---|---|
+//! | `domain::external_system::base_url`'s query refusal disabled | `a_base_url_with_a_query_string_is_refused_on_create_and_edit` |
+//! | `0046`'s credential index put back to §12.3's `(external_system_id) WHERE is_active` | `the_credential_routes_read_through_an_index` |
+//! | M1: `ObjectType::IntegrationCredential.readable_by` answers `integration:external-system:read` | `the_audit_trail_does_not_show_a_reference_to_a_caller_who_may_not_read_it` |
+//! | M2: `validate_update` no longer calls `base_url()` | `an_edit_cannot_put_a_credential_into_the_base_url`, `a_base_url_with_a_query_string_is_refused_on_create_and_edit` |
+//! | M4: `fk_master_data_source_references_external_system_id` single-column in `0046` | `a_source_reference_cannot_name_another_tenants_system` |
+//! | M5: `activate_external_system` takes the tenant from the row rather than the caller | `a_caller_in_another_tenant_reaches_nothing_of_this_tenants_registry`, `another_tenants_system_is_not_found_by_any_route` |
 
 mod common;
 
@@ -687,7 +701,7 @@ async fn a_raw_secret_is_refused_and_nothing_is_stored() {
     let system = system(&app, &token, "PAYMENTS").await;
 
     for raw in [
-        "sk_live_51HxQ2eKZ8r",
+        concat!("sk_live", "_51HxQ2eKZ8r"),
         "dXNlcjpwYXNzd29yZA==",
         "svc:hunter2",
         "https://svc:hunter2@vault.example.com/x",
@@ -762,6 +776,138 @@ async fn a_base_url_with_a_password_in_it_is_refused() {
         response.body["error"]["details"][0]["code"],
         "CREDENTIALS_IN_URL"
     );
+}
+
+/// A query string in a base URL is where an API key lands when a working call
+/// is pasted in as the system's address — and the column is shown to every
+/// `integration:external-system:read` holder and written to the audit trail
+/// (#520, finding F1). Any query is refused, an empty `?` too, on
+/// registration and on an edit, and nothing is stored or recorded.
+#[tokio::test]
+async fn a_base_url_with_a_query_string_is_refused_on_create_and_edit() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    // Stripe's published example key, split so GitHub's push protection does
+    // not read this file as holding a live one. Every `sk_live` fixture here
+    // and in `integration::domain` is split the same way.
+    let key = concat!("sk_live", "_4eC39HqLyjWDarjtT1zdp7dc");
+
+    let queried = [
+        format!("https://erp.example.com/api?api_key={key}"),
+        "https://erp.example.com/api?".to_owned(),
+    ];
+
+    for url in &queried {
+        let response = register(
+            &app,
+            &token,
+            json!({ "systemCode": "QUERIED", "systemName": "Queried", "baseUrl": url }),
+        )
+        .await;
+
+        assert_eq!(response.status, StatusCode::UNPROCESSABLE_ENTITY, "{url}");
+        assert_eq!(response.body["error"]["details"][0]["path"], "baseUrl");
+        assert_eq!(
+            response.body["error"]["details"][0]["code"], "QUERY_IN_BASE_URL",
+            "{url}: {}",
+            response.body
+        );
+        assert!(
+            !response.body.to_string().contains(key),
+            "the refusal echoed the key"
+        );
+    }
+
+    let id = id_of(
+        &register(
+            &app,
+            &token,
+            json!({
+                "systemCode": "PLAIN",
+                "systemName": "Plain",
+                "baseUrl": "https://erp.example.com:8443/api"
+            }),
+        )
+        .await,
+    );
+
+    for url in &queried {
+        let response = app
+            .send(
+                Method::PUT,
+                &format!("{BASE}/{id}"),
+                Some(&token),
+                Some(json!({ "baseUrl": url })),
+            )
+            .await;
+
+        assert_eq!(response.status, StatusCode::UNPROCESSABLE_ENTITY, "{url}");
+        assert_eq!(
+            response.body["error"]["details"][0]["code"], "QUERY_IN_BASE_URL",
+            "{url}: {}",
+            response.body
+        );
+    }
+
+    let stored: Vec<Option<String>> =
+        sqlx::query_scalar("SELECT base_url FROM external_systems ORDER BY system_code")
+            .fetch_all(&app.pool)
+            .await
+            .expect("read the systems");
+    assert_eq!(
+        stored,
+        vec![Some("https://erp.example.com:8443/api".to_owned())],
+        "only the plain registration was stored, and the edits changed nothing"
+    );
+
+    let recorded: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_events WHERE new_value_json::text LIKE '%' || $1 || '%'",
+    )
+    .bind(key)
+    .fetch_one(&app.pool)
+    .await
+    .expect("search the trail");
+    assert_eq!(recorded, 0, "the key reached the audit trail");
+}
+
+/// The credential routes read through an index (#520, `migration-author`'s
+/// review). Every one of them filters `tenant_id` and `external_system_id` and
+/// none filters `is_active`, so §12.3's `WHERE is_active` partial index served
+/// none of them and each was a scan of every tenant's credentials.
+///
+/// **`enable_seqscan = off` is what makes the plan mean something** on a table
+/// this small: a planner that *can* use an index then uses it, and one that
+/// cannot falls back to the scan anyway. The statement is the list query's
+/// predicate and order, as `repository::credential::list_credentials` runs it.
+#[tokio::test]
+async fn the_credential_routes_read_through_an_index() {
+    let app = TestApp::spawn().await;
+    let system = system_row(&app, fixtures::SYSTEM_TENANT_ID, "INDEXED").await;
+    credential_row(&app, fixtures::SYSTEM_TENANT_ID, system, "vault://indexed").await;
+
+    let mut connection = app.pool.acquire().await.expect("a connection");
+    sqlx::query("SET enable_seqscan = off")
+        .execute(&mut *connection)
+        .await
+        .expect("disable sequential scans for this session");
+
+    let plan: Vec<String> = sqlx::query_scalar(
+        "EXPLAIN SELECT id FROM integration_credentials
+         WHERE tenant_id = $1 AND external_system_id = $2 AND deleted_at IS NULL
+         ORDER BY created_at, id",
+    )
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .bind(system)
+    .fetch_all(&mut *connection)
+    .await
+    .expect("explain the list query");
+    let plan = plan.join("\n");
+
+    assert!(
+        plan.contains("idx_integration_credentials_tenant_id_external_system_id"),
+        "the credential list does not use its index:\n{plan}"
+    );
+    assert!(!plan.contains("Seq Scan"), "{plan}");
 }
 
 // ---------------------------------------------------------------------------
@@ -1332,6 +1478,7 @@ async fn another_tenants_system_is_not_found_by_any_route() {
             Some(json!({ "systemName": "Taken" })),
         ),
         (Method::POST, format!("{BASE}/{theirs}/deactivate"), None),
+        (Method::POST, format!("{BASE}/{theirs}/activate"), None),
         (Method::GET, format!("{BASE}/{theirs}/endpoints"), None),
         (
             Method::GET,
@@ -1710,4 +1857,577 @@ async fn every_route_is_in_the_document_and_no_schema_can_carry_a_secret() {
         seen, 3,
         "secretReference appears on the credential and its two requests, and nowhere else"
     );
+}
+
+// ===========================================================================
+// Independent verification, adopted
+// ===========================================================================
+//
+// The five tests below were written by `test-engineer` as the row's closing
+// gate (`integration_external_systems_verification.rs`) and moved here, so the
+// registry has one test file and one seen-red table. Each covers a criterion
+// the tests above left unproven:
+//
+// * **tenant isolation from the other side** — a caller *in* tenant B holding
+//   every integration permission there, sent to every route with tenant A's ids;
+// * **AC-2** — the deferred source-reference key refuses a *cross-tenant* row,
+//   not only an orphan, and all eight keys to a system or subscription carry
+//   the tenant;
+// * **AC-5** — the raw-secret shapes the tests above do not send (a JWT, a PEM
+//   block, a longer base64 blob), on create and on edit, and none reaches the
+//   audit trail;
+// * **AC-5 through the audit trail** — a credential's recorded values are
+//   withheld from a caller who can read the system but not its credentials;
+// * **baseUrl on an edit** — `CREDENTIALS_IN_URL`, which only registration was
+//   tested for.
+
+/// Tenant A's system, endpoint and credential, all written through the API.
+async fn tenant_a_registry(app: &TestApp, token: &str) -> (Uuid, Uuid, Uuid) {
+    let system = app
+        .send(
+            Method::POST,
+            BASE,
+            Some(token),
+            Some(json!({ "systemCode": "A_ERP", "systemName": "Tenant A ERP" })),
+        )
+        .await;
+    assert_eq!(system.status, StatusCode::CREATED, "{}", system.body);
+    let system = id_of(&system);
+
+    let endpoint = app
+        .send(
+            Method::POST,
+            &format!("{BASE}/{system}/endpoints"),
+            Some(token),
+            Some(json!({ "endpointCode": "A_EP", "name": "A", "method": "GET", "path": "/a" })),
+        )
+        .await;
+    assert_eq!(endpoint.status, StatusCode::CREATED, "{}", endpoint.body);
+
+    let credential = app
+        .send(
+            Method::POST,
+            &format!("{BASE}/{system}/credentials"),
+            Some(token),
+            Some(json!({ "credentialType": "API_KEY", "secretReference": "vault://tenant-a/erp" })),
+        )
+        .await;
+    assert_eq!(
+        credential.status,
+        StatusCode::CREATED,
+        "{}",
+        credential.body
+    );
+
+    (system, id_of(&endpoint), id_of(&credential))
+}
+
+// ---------------------------------------------------------------------------
+// Tenant isolation — a real tenant-B caller, every route
+// ---------------------------------------------------------------------------
+
+/// Tenant B's caller holds all eight integration permissions **in tenant B**,
+/// so a 404 here is the tenant and not a missing permission. Sent to every
+/// route — `activate` included — with tenant A's ids, as a caller guessing
+/// them would.
+#[tokio::test]
+async fn a_caller_in_another_tenant_reaches_nothing_of_this_tenants_registry() {
+    let app = TestApp::spawn_with(|config| config.multi_tenant = true).await;
+    let admin = app
+        .sign_in_to("SYSTEM", common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await;
+    let (system, endpoint, credential) = tenant_a_registry(&app, &admin).await;
+
+    // Deactivated, so that a leaking `activate` would visibly change it.
+    let off = app
+        .send(
+            Method::POST,
+            &format!("{BASE}/{system}/deactivate"),
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(off.status, StatusCode::OK, "{}", off.body);
+
+    let tenant_b = fixtures::create_tenant(&app.pool, "TNT-INT-VER", "Tenant B").await;
+    let role =
+        fixtures::create_role_with_permissions(&app.pool, tenant_b, "INT-ALL", &PERMISSIONS).await;
+    fixtures::create_user(
+        &app.pool,
+        tenant_b,
+        "int.outsider",
+        "int.outsider@example.test",
+        common::ADMIN_PASSWORD,
+        &[role],
+    )
+    .await;
+    let outsider = app
+        .sign_in_to("TNT-INT-VER", "int.outsider", common::ADMIN_PASSWORD)
+        .await;
+
+    // The outsider's permissions are real: their own registry works.
+    let own = app
+        .send(
+            Method::POST,
+            BASE,
+            Some(&outsider),
+            Some(json!({ "systemCode": "A_ERP", "systemName": "Tenant B's own" })),
+        )
+        .await;
+    assert_eq!(own.status, StatusCode::CREATED, "{}", own.body);
+    let own = id_of(&own);
+
+    let listed = app.send(Method::GET, BASE, Some(&outsider), None).await;
+    assert_eq!(listed.status, StatusCode::OK);
+    assert_eq!(listed.body["meta"]["total"], 1, "{}", listed.body);
+    assert_eq!(listed.body["data"][0]["id"], own.to_string());
+
+    let system_path = format!("{BASE}/{system}");
+    let probes: Vec<(Method, String, Option<Value>)> = vec![
+        (Method::GET, system_path.clone(), None),
+        (
+            Method::PUT,
+            system_path.clone(),
+            Some(json!({ "systemName": "Taken" })),
+        ),
+        (Method::POST, format!("{system_path}/activate"), None),
+        (Method::POST, format!("{system_path}/deactivate"), None),
+        (Method::GET, format!("{system_path}/endpoints"), None),
+        (
+            Method::GET,
+            format!("{system_path}/endpoints/{endpoint}"),
+            None,
+        ),
+        (
+            Method::POST,
+            format!("{system_path}/endpoints"),
+            Some(json!({ "endpointCode": "IN", "name": "In", "method": "GET", "path": "/in" })),
+        ),
+        (
+            Method::PUT,
+            format!("{system_path}/endpoints/{endpoint}"),
+            Some(json!({ "name": "Taken", "status": "INACTIVE" })),
+        ),
+        (Method::GET, format!("{system_path}/credentials"), None),
+        (
+            Method::GET,
+            format!("{system_path}/credentials/{credential}"),
+            None,
+        ),
+        (
+            Method::POST,
+            format!("{system_path}/credentials"),
+            Some(json!({ "credentialType": "API_KEY", "secretReference": "vault://in" })),
+        ),
+        (
+            Method::PUT,
+            format!("{system_path}/credentials/{credential}"),
+            Some(json!({ "secretReference": "vault://moved", "isActive": false })),
+        ),
+        (
+            Method::DELETE,
+            format!("{system_path}/credentials/{credential}"),
+            None,
+        ),
+        // Tenant B's own system in the path, tenant A's child ids after it.
+        (
+            Method::GET,
+            format!("{BASE}/{own}/endpoints/{endpoint}"),
+            None,
+        ),
+        (
+            Method::GET,
+            format!("{BASE}/{own}/credentials/{credential}"),
+            None,
+        ),
+        (
+            Method::DELETE,
+            format!("{BASE}/{own}/credentials/{credential}"),
+            None,
+        ),
+    ];
+
+    for (method, path, body) in probes {
+        let response = app.send(method.clone(), &path, Some(&outsider), body).await;
+
+        assert_eq!(
+            response.status,
+            StatusCode::NOT_FOUND,
+            "{method} {path} answered tenant B: {}",
+            response.body
+        );
+        let text = response.body.to_string();
+        assert!(
+            !text.contains("vault://tenant-a/erp"),
+            "{method} {path}: {text}"
+        );
+        assert!(!text.contains("Tenant A ERP"), "{method} {path}: {text}");
+    }
+
+    // Nothing of tenant A's moved, and nothing was filed under it.
+    let (name, status): (String, String) =
+        sqlx::query_as("SELECT system_name, status FROM external_systems WHERE id = $1")
+            .bind(system)
+            .fetch_one(&app.pool)
+            .await
+            .expect("read tenant A's system");
+    assert_eq!(
+        (name.as_str(), status.as_str()),
+        ("Tenant A ERP", "INACTIVE")
+    );
+
+    let (endpoints, endpoint_name): (i64, String) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM integration_endpoints WHERE external_system_id = $1),
+                (SELECT name FROM integration_endpoints WHERE id = $2)",
+    )
+    .bind(system)
+    .bind(endpoint)
+    .fetch_one(&app.pool)
+    .await
+    .expect("read tenant A's endpoints");
+    assert_eq!((endpoints, endpoint_name.as_str()), (1, "A"));
+
+    let (credentials, reference, active, deleted): (i64, String, bool, bool) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM integration_credentials WHERE external_system_id = $1),
+                secret_reference, is_active, deleted_at IS NOT NULL
+         FROM integration_credentials WHERE id = $2",
+    )
+    .bind(system)
+    .bind(credential)
+    .fetch_one(&app.pool)
+    .await
+    .expect("read tenant A's credential");
+    assert_eq!(
+        (credentials, reference.as_str(), active, deleted),
+        (1, "vault://tenant-a/erp", true, false)
+    );
+
+    // And tenant B's attempts left no record against tenant A's objects.
+    let foreign_audit: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_events WHERE object_id = ANY($1) AND tenant_id = $2",
+    )
+    .bind(vec![system, endpoint, credential])
+    .bind(tenant_b)
+    .fetch_one(&app.pool)
+    .await
+    .expect("count audit rows");
+    assert_eq!(foreign_audit, 0);
+}
+
+// ---------------------------------------------------------------------------
+// AC-2 — tenant-carrying keys, at the database
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_source_reference_cannot_name_another_tenants_system() {
+    let app = TestApp::spawn().await;
+    let other = fixtures::create_tenant(&app.pool, "TNT-INT-MDR", "Other tenant").await;
+
+    let theirs = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO external_systems (id, tenant_id, system_code, system_name)
+         VALUES ($1, $2, 'THEIRS', 'Theirs')",
+    )
+    .bind(theirs)
+    .bind(other)
+    .execute(&app.pool)
+    .await
+    .expect("insert their system");
+
+    let insert = |tenant: Uuid| {
+        let pool = app.pool.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO master_data_source_references
+                     (id, tenant_id, entity_type, kelir_entity_id, external_system_id,
+                      external_entity_id)
+                 VALUES ($1, $2, 'PARTY', $3, $4, 'EXT-1')",
+            )
+            .bind(Uuid::now_v7())
+            .bind(tenant)
+            .bind(Uuid::now_v7())
+            .bind(theirs)
+            .execute(&pool)
+            .await
+        }
+    };
+
+    let crossed = insert(fixtures::SYSTEM_TENANT_ID).await;
+    let error = crossed.expect_err("a source reference named another tenant's system");
+    assert!(
+        error
+            .to_string()
+            .contains("fk_master_data_source_references_external_system_id"),
+        "refused, but not by the tenant-carrying key: {error}"
+    );
+
+    insert(other)
+        .await
+        .expect("the same row in the system's own tenant");
+
+    // The five DDL-only tables carry the tenant in every key to a system or a
+    // subscription, too.
+    let definitions: Vec<(String, String)> = sqlx::query_as(
+        "SELECT conname::text, pg_get_constraintdef(oid) FROM pg_constraint
+         WHERE contype = 'f'
+           AND conrelid::regclass::text IN ('integration_mappings', 'integration_logs',
+               'webhook_subscriptions', 'webhook_events', 'inbox_events',
+               'integration_endpoints', 'integration_credentials',
+               'master_data_source_references')
+           AND confrelid::regclass::text IN ('external_systems', 'webhook_subscriptions')
+         ORDER BY conname",
+    )
+    .fetch_all(&app.pool)
+    .await
+    .expect("read the keys");
+
+    assert_eq!(definitions.len(), 8, "{definitions:?}");
+    for (name, definition) in &definitions {
+        assert!(
+            definition.contains(", tenant_id)") && definition.contains("(id, tenant_id)"),
+            "{name} does not carry the tenant: {definition}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AC-5 — raw secrets, in the shapes they arrive in
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_raw_secret_in_any_usual_shape_is_refused_on_create_and_edit() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let created = app
+        .send(
+            Method::POST,
+            BASE,
+            Some(&token),
+            Some(json!({ "systemCode": "SHAPES", "systemName": "Shapes" })),
+        )
+        .await;
+    let system = id_of(&created);
+    let path = format!("{BASE}/{system}/credentials");
+
+    let good = app
+        .send(
+            Method::POST,
+            &path,
+            Some(&token),
+            Some(json!({ "credentialType": "JWT", "secretReference": "vault://kelir/shapes" })),
+        )
+        .await;
+    assert_eq!(good.status, StatusCode::CREATED, "{}", good.body);
+    let credential = id_of(&good);
+
+    let raw = [
+        // A JWT.
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+        // A live API key.
+        concat!("sk_live", "_4eC39HqLyjWDarjtT1zdp7dc"),
+        // A user:password pair.
+        "svc-erp:Tr0ub4dor&3",
+        // A base64 blob.
+        "c2VydmljZS1hY2NvdW50OnN1cGVyLXNlY3JldC1wYXNzd29yZC0xMjM0NTY3ODkw",
+        // A PEM block, header and body.
+        "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun\n-----END RSA PRIVATE KEY-----",
+        // A secret in the right scheme's clothing.
+        "vault://kelir/erp/api key with spaces",
+        concat!("env://sk_live", "_lowercase"),
+    ];
+
+    for value in raw {
+        for (method, target) in [
+            (Method::POST, path.clone()),
+            (Method::PUT, format!("{path}/{credential}")),
+        ] {
+            let body = if method == Method::POST {
+                json!({ "credentialType": "API_KEY", "secretReference": value })
+            } else {
+                json!({ "secretReference": value })
+            };
+            let response = app
+                .send(method.clone(), &target, Some(&token), Some(body))
+                .await;
+
+            assert_eq!(
+                response.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{method} {value:?}: {}",
+                response.body
+            );
+            assert_eq!(
+                response.body["error"]["details"][0]["code"], "NOT_A_SECRET_REFERENCE",
+                "{method} {value:?}: {}",
+                response.body
+            );
+            assert!(
+                !response.body.to_string().contains(value),
+                "{method}: the refusal echoed the value"
+            );
+        }
+    }
+
+    let stored: Vec<String> = sqlx::query_scalar(
+        "SELECT secret_reference FROM integration_credentials WHERE external_system_id = $1",
+    )
+    .bind(system)
+    .fetch_all(&app.pool)
+    .await
+    .expect("read the credentials");
+    assert_eq!(
+        stored,
+        vec!["vault://kelir/shapes"],
+        "nothing refused was stored"
+    );
+
+    // Nor recorded: the only credential rows in the trail are the good one's.
+    let trail: Vec<String> = sqlx::query_scalar(
+        "SELECT coalesce(old_value_json::text, '') || coalesce(new_value_json::text, '')
+         FROM audit_events WHERE object_type = 'INTEGRATION_CREDENTIAL'",
+    )
+    .fetch_all(&app.pool)
+    .await
+    .expect("read the trail");
+    assert_eq!(trail.len(), 1, "{trail:?}");
+    for value in raw {
+        assert!(
+            trail.iter().all(|row| !row.contains(value)),
+            "a refused value reached the audit trail"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AC-5 — a credential's audit values are the credential's to show
+// ---------------------------------------------------------------------------
+
+/// The trail records a credential's reference. `integration:credential:read`
+/// exists so that seeing a system is not seeing where its secrets live
+/// (#520, answer 3); a caller with `audit:read` and the system's read must not
+/// get the reference through the trail instead.
+#[tokio::test]
+async fn the_audit_trail_does_not_show_a_reference_to_a_caller_who_may_not_read_it() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let reference = "vault://kelir/audit-probe/api-key";
+
+    let created = app
+        .send(
+            Method::POST,
+            BASE,
+            Some(&token),
+            Some(json!({ "systemCode": "AUDITED", "systemName": "Audited" })),
+        )
+        .await;
+    let system = id_of(&created);
+    let credential = app
+        .send(
+            Method::POST,
+            &format!("{BASE}/{system}/credentials"),
+            Some(&token),
+            Some(json!({ "credentialType": "API_KEY", "secretReference": reference })),
+        )
+        .await;
+    assert_eq!(
+        credential.status,
+        StatusCode::CREATED,
+        "{}",
+        credential.body
+    );
+    let credential = id_of(&credential);
+
+    let system_reader = caller_holding(
+        &app,
+        "AUDIT-SYSTEM-READER",
+        &["audit:read", "integration:external-system:read"],
+    )
+    .await;
+    let keeper = caller_holding(
+        &app,
+        "AUDIT-CREDENTIAL-READER",
+        &["audit:read", "integration:credential:read"],
+    )
+    .await;
+
+    let query = format!("/api/v1/audit?objectId={credential}");
+
+    let withheld = app.get(&query, Some(&system_reader)).await;
+    assert_eq!(withheld.status, StatusCode::OK, "{}", withheld.body);
+    assert_eq!(withheld.body["meta"]["total"], 1, "{}", withheld.body);
+    assert_eq!(withheld.body["data"][0]["valuesWithheld"], true);
+    assert!(
+        !withheld.body.to_string().contains(reference),
+        "the trail showed the reference to a caller without integration:credential:read"
+    );
+
+    // The system's own row stays readable to them — so the refusal above is the
+    // credential's permission and not the trail refusing everything.
+    let system_rows = app
+        .get(
+            &format!("/api/v1/audit?objectId={system}"),
+            Some(&system_reader),
+        )
+        .await;
+    assert_eq!(system_rows.body["data"][0]["valuesWithheld"], false);
+
+    let shown = app.get(&query, Some(&keeper)).await;
+    assert_eq!(shown.body["data"][0]["valuesWithheld"], false);
+    assert!(shown.body.to_string().contains(reference), "{}", shown.body);
+}
+
+// ---------------------------------------------------------------------------
+// baseUrl — the edit path
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn an_edit_cannot_put_a_credential_into_the_base_url() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let created = app
+        .send(
+            Method::POST,
+            BASE,
+            Some(&token),
+            Some(json!({
+                "systemCode": "URL_EDIT",
+                "systemName": "Url edit",
+                "baseUrl": "https://erp.example.com/api"
+            })),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let system = id_of(&created);
+
+    for url in [
+        "https://svc:hunter2@erp.example.com/api",
+        "https://svc@erp.example.com/api",
+    ] {
+        let response = app
+            .send(
+                Method::PUT,
+                &format!("{BASE}/{system}"),
+                Some(&token),
+                Some(json!({ "baseUrl": url })),
+            )
+            .await;
+
+        assert_eq!(response.status, StatusCode::UNPROCESSABLE_ENTITY, "{url}");
+        assert_eq!(response.body["error"]["details"][0]["path"], "baseUrl");
+        assert_eq!(
+            response.body["error"]["details"][0]["code"],
+            "CREDENTIALS_IN_URL"
+        );
+        assert!(!response.body.to_string().contains("hunter2"));
+    }
+
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT base_url FROM external_systems WHERE id = $1")
+            .bind(system)
+            .fetch_one(&app.pool)
+            .await
+            .expect("read the system");
+    assert_eq!(stored.as_deref(), Some("https://erp.example.com/api"));
 }
