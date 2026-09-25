@@ -458,9 +458,11 @@ pub async fn delete_role(
     }
 
     // **D-89** (#487): a role an open task still needs is not deleted. Deleting
-    // it would leave the task open, holding its document, and decidable by
-    // nobody: offered to a role nobody holds, or with every decision refused as
-    // `ASSIGNMENT_UNRESOLVED`. The count says which tasks need a role.
+    // it would leave the task open and holding its document, and either offered
+    // to a role nobody holds (an unclaimed task) or with a decision refused as
+    // `ASSIGNMENT_UNRESOLVED` (an edge `allowedBy` the role). A claimed task
+    // offered to the role is its assignee's to decide, and is not counted
+    // (#529). The count says which tasks need a role.
     //
     // Counted under the row lock above, which a transition raising a task that
     // needs this role waits on, whether the task is offered to the role or its
@@ -472,15 +474,19 @@ pub async fn delete_role(
     let open = workflow_task::open_tasks_needing_role(&mut transaction, tenant_id, id).await?;
 
     if open > 0 {
-        let tasks = if open == 1 {
-            "task needs"
+        let (tasks, them, they) = if open == 1 {
+            ("task needs", "it", "It needs")
         } else {
-            "tasks need"
+            ("tasks need", "them", "They need")
         };
 
+        // True of both ways a task needs a role: an unclaimed task offered to
+        // it is left offered to nobody, and a task with an edge `allowedBy` it
+        // is left with a decision nobody can make (#529).
         return Err(AppError::conflict(format!(
-            "{open} open {tasks} this role to be decided, and deleting it would leave nobody \
-             able to decide them. They need to be decided first"
+            "{open} open {tasks} this role to be decided. Deleting the role would leave \
+             {them} offered to nobody, or with a decision nobody could make. {they} to be \
+             decided first"
         )));
     }
 
