@@ -847,3 +847,123 @@ fn the_readers_under_the_rule_read_what_they_say() {
     );
     assert!(unreleased_section("# Changelog\n\n## [0.8.0]\n").is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Rule 4, second half: test-engineer's probes (plan 17 §7's gate for #545)
+// ---------------------------------------------------------------------------
+
+/// A synthetic `Draft` record whose `**Blocked by:**` value is `blocked`, laid
+/// out as the template lays it out: the field between the status line and the
+/// decision-date line, whose `Related:` names an issue of its own.
+fn draft_blocked_by(blocked: &str) -> Record {
+    fixture(
+        "9999. Probe.md",
+        &format!(
+            "# ADR-9999 — Probe\n\n**Status:** Draft · **Last updated:** 2026-09-25\n\n\
+             **Blocked by:** {blocked}\n\n\
+             **Decision date:** — · **Deciders:** Product owner · **Related:** issue #600\n\n\
+             ## 1. Context\n"
+        ),
+    )
+}
+
+/// A changelog whose `[Unreleased]` holds `body` under `### Added`, followed by
+/// a released section that cites #700.
+fn changelog_adding(body: &str) -> String {
+    format!(
+        "# Changelog\n\n## [Unreleased]\n\n### Added\n\n{body}\n\n\
+         ## [0.8.0] — 2026-09-17\n\n### Added\n\n- **Released** (#700).\n"
+    )
+}
+
+/// Two blockers are two blockers however the field separates them, and a
+/// field with no ` — ` is read whole — the decision-date line after it names
+/// no issue before its first ` · `.
+#[test]
+fn blockers_are_read_however_the_field_separates_them() {
+    for value in [
+        "#1, #2 — waits",
+        "#1 and #2 — waits",
+        "#1/#2 — waits",
+        "[#1](https://github.com/sujanto-gaws/kelir/issues/1) and \
+         [#2](https://github.com/sujanto-gaws/kelir/pull/2) — waits",
+        "https://github.com/sujanto-gaws/kelir/issues/1, \
+         https://github.com/sujanto-gaws/kelir/issues/2 — waits",
+    ] {
+        assert_eq!(
+            blockers(&draft_blocked_by(value).header),
+            vec![1, 2],
+            "{value}"
+        );
+    }
+
+    assert_eq!(blockers(&draft_blocked_by("#519").header), vec![519]);
+}
+
+/// `.gitattributes` checks out LF, but a CRLF tree must not change the verdict:
+/// ADR-0041 as #537 left it is still refused against #543's changelog, and the
+/// section still ends at the next release.
+#[test]
+fn a_crlf_tree_reads_as_an_lf_one() {
+    let record = fixture("0041. crlf.md", &ADR_0041_AT_4C4E6A3.replace('\n', "\r\n"));
+    let changelog = CHANGELOG_AT_5791681.replace('\n', "\r\n");
+    let unreleased = unreleased_of(&changelog);
+
+    assert_eq!(record.status, "Draft");
+    assert!(!unreleased.contains("[0.8.0]"));
+    assert_eq!(delivered_blockers(&record, unreleased), Some(vec![519]));
+}
+
+/// `[Unreleased]` is found wherever it stands, an empty one cites nothing, and
+/// a changelog without one is `None` — which the tree test turns into a
+/// refusal naming the heading rather than a silent pass.
+#[test]
+fn the_unreleased_section_is_found_wherever_it_stands() {
+    let record = draft_blocked_by("#519 — waits");
+
+    let empty = "# Changelog\n\n## [Unreleased]\n\n## [0.8.0]\n\n- **Released** (#519).\n";
+    assert_eq!(delivered_blockers(&record, unreleased_of(empty)), None);
+
+    let second = "# Changelog\n\n## [0.8.0]\n\n- **Released** (#1).\n\n\
+                  ## [Unreleased]\n\n- **Unreleased** (#519).\n";
+    assert_eq!(cited_issues(unreleased_of(second)), BTreeSet::from([519]));
+
+    for missing in [
+        "# Changelog\n\n## [0.8.0]\n\n- **Released** (#519).\n",
+        "# Changelog\n\n## Unreleased\n\n- **Unreleased** (#519).\n",
+    ] {
+        assert!(unreleased_section(missing).is_none(), "{missing}");
+    }
+}
+
+/// A citation is a citation in any `###` subsection — `Removed` delivers as
+/// much as `Added` — through a headline wrapped across lines, inside a code
+/// span, and as `/pull/N`, which GitHub numbers from the issues' sequence. Only
+/// the first parenthesis after the headline is the reference.
+#[test]
+fn a_citation_is_read_wherever_the_reference_holds_it() {
+    let record = draft_blocked_by("#519 — waits");
+
+    let removed =
+        "# Changelog\n\n## [Unreleased]\n\n### Removed\n\n- **The legacy route** (#519).\n";
+    assert_eq!(
+        delivered_blockers(&record, unreleased_of(removed)),
+        Some(vec![519])
+    );
+
+    for (body, cited) in [
+        (
+            "- **A headline that\n  wraps** ([#519](x/issues/519),\n  ADR-0041).",
+            BTreeSet::from([519]),
+        ),
+        ("- **A** (`#519`).", BTreeSet::from([519])),
+        (
+            "- **A** ([the PR](https://github.com/sujanto-gaws/kelir/pull/519)).",
+            BTreeSet::from([519]),
+        ),
+        ("- **A** (#1) (#519).", BTreeSet::from([1])),
+    ] {
+        let changelog = changelog_adding(body);
+        assert_eq!(cited_issues(unreleased_of(&changelog)), cited, "{body}");
+    }
+}
