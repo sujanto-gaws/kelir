@@ -272,6 +272,30 @@ export const routes: RouteRecordRaw[] = [
         meta: { requiresAuth: true, permission: 'rad:menu:read', title: 'Navigation' },
       },
       {
+        // The external system registry (FR-INT-001, #520; architectures/03
+        // §3.1's two pages). The read permission opens both; register, edit,
+        // activate/deactivate and the credential references are gated per
+        // button and per section on the pages themselves.
+        path: 'admin/external-systems',
+        name: 'admin-external-systems',
+        component: () => import('@/features/integration/ExternalSystemListPage.vue'),
+        meta: {
+          requiresAuth: true,
+          permission: 'integration:external-system:read',
+          title: 'External systems',
+        },
+      },
+      {
+        path: 'admin/external-systems/:id',
+        name: 'admin-external-system',
+        component: () => import('@/features/integration/ExternalSystemDetailPage.vue'),
+        meta: {
+          requiresAuth: true,
+          permission: 'integration:external-system:read',
+          title: 'External system',
+        },
+      },
+      {
         path: 'forbidden',
         name: 'forbidden',
         component: () => import('@/pages/ForbiddenPage.vue'),

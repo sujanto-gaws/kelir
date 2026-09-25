@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE external_systems\n        SET system_name = COALESCE($3, system_name),\n            system_type = CASE WHEN $4 THEN $5 ELSE system_type END,\n            base_url = CASE WHEN $6 THEN $7 ELSE base_url END,\n            auth_type = CASE WHEN $8 THEN $9 ELSE auth_type END,\n            timeout_seconds = COALESCE($10, timeout_seconds),\n            retry_policy_json = COALESCE($11, retry_policy_json),\n            description = CASE WHEN $12 THEN $13 ELSE description END,\n            status = COALESCE($14, status),\n            updated_by = $15,\n            updated_at = now()\n        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL\n          AND ($14::text IS NULL OR status <> 'INACTIVE')\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Bool",
+        "Text",
+        "Bool",
+        "Text",
+        "Bool",
+        "Text",
+        "Int4",
+        "Jsonb",
+        "Bool",
+        "Text",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4b2fd64dfca4dd3926ce135795afc9b6eb13bcd1531695ccb5b8609f676d0440"
+}

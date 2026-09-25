@@ -103,6 +103,12 @@ tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 utoipa = { version = "5", features = ["axum_extras", "uuid", "chrono"] }
 uuid = { version = "1", features = ["v7", "serde"] }
+# Parsing an external system's base URL (FR-INT-001, #520): scheme, host, and
+# whether a user name or password is embedded in it, which is a plaintext
+# credential in a column every reader is shown. Already in the tree through
+# `object_store` and `jsonschema`, so it adds nothing to the build; a
+# hand-written URL parser is the thing this avoids owning.
+url = "2"
 # JSON Schema validation of stored JFSS form definitions (FR-RAD-002, #156).
 # All references in the meta-schema are internal (`#/$defs/...`), so no
 # resolver feature is enabled: a validator that can fetch a remote schema is a

@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE integration_credentials\n        SET deleted_at = now(), updated_by = $4, updated_at = now()\n        WHERE tenant_id = $1 AND external_system_id = $2 AND id = $3 AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "049843a63b98f8fd501fd0d7d0ae9383ca3aa1a6486ca6ecf9c6c38047e165c2"
+}

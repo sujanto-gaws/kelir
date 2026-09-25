@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE integration_endpoints\n        SET name = COALESCE($4, name),\n            method = COALESCE($5, method),\n            path = COALESCE($6, path),\n            description = CASE WHEN $7 THEN $8 ELSE description END,\n            status = COALESCE($9, status),\n            updated_by = $10,\n            updated_at = now()\n        WHERE tenant_id = $1 AND external_system_id = $2 AND id = $3 AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Text",
+        "Text",
+        "Bool",
+        "Text",
+        "Varchar",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "034a172b05d9cda05054bff83209fb109856e33280a55f6e486ca501e4c1f5be"
+}

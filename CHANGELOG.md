@@ -9,6 +9,69 @@ While the major version is `0`, the public API may change in any release.
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- **Only the system tenant's administrators can see external systems until a
+  role is granted the `integration:*` permissions.** `0046_integration.sql`
+  adds eight permissions and grants them to the system tenant's `ROLE-ADMIN`
+  alone, as `0010` and `0043` did. An administrator of any **other** tenant
+  does not get them, including a tenant created before this release. **Grant
+  them to that tenant's administrator role**, and to any role that should
+  manage integrations. `integration:credential:read` shows where secrets are
+  kept, so grant it separately and deliberately
+  ([User Manual](docs/operations/03.%20User%20Manual.md) §11.5).
+- **`0046` creates eight tables and alters one table nobody writes.** It adds a
+  foreign key to `master_data_source_references`, which is empty on every
+  deployment, so the key validates instantly. Nothing existing changes in a way
+  a reader can observe, and `v0.8.0` runs against the migrated schema
+  (release process §6).
+
+### Added
+
+- **JWSS `actions` run, delivered after the transition commits**
+  ([#519](https://github.com/sujanto-gaws/kelir/issues/519),
+  [ADR-0041](docs/architectures/adr/0041.%20Every%20Workflow%20Transition%20Writes%20an%20Outbox%20Event,%20and%20After-Hooks%20Are%20Its%20First%20Consumer.md)).
+  Every committed workflow transition writes one `Workflow.Transitioned` event
+  to a new `outbox_events` table (migration `0045_outbox.sql`). A worker
+  delivers it to the `after_workflow_transition` chain. A failure is retried
+  at 30 s, 1, 2, 4 and 8 minutes, and dead-lettered on the sixth. A handler
+  that fails five times in a row is paused, the tenant's administrators are
+  told once, and it is tried again after ten minutes.
+  - **A definition naming `core:set_form_field` or `core:reject_when` in
+    `actions` is now refused at publish** (`HANDLER_KIND_MISMATCH`), because
+    neither means anything after a commit. A definition already published
+    with one keeps its other actions running and logs an error for that
+    handler on every transition.
+  - **Dead letters have no screen yet.** Query `outbox_events` where
+    `status = 'DEAD_LETTER'`.
+- **The external system registry** (FR-INT-001;
+  [#520](https://github.com/sujanto-gaws/kelir/issues/520)). **Admin →
+  External Systems** registers the systems Kelir integrates with, such as an
+  ERP, an HR system or an e-signature provider. Each system has a code, name,
+  type, base URL, authentication type, timeout and retry policy. Its detail
+  page manages the system's endpoints and credential references. It is served
+  by 15 operations under `/api/v1/integration/external-systems`
+  ([SDD](docs/design/01.%20System%20Design%20Document.md) §9.3).
+  - **Deactivate, never delete.** `POST …/deactivate` and `POST …/activate`
+    are both under `integration:external-system:deactivate`, so turning a
+    system off and back on is one permission. An edit cannot move a system
+    into or out of `INACTIVE`. `ACTIVE` ↔ `MAINTENANCE` is still an edit. An
+    endpoint is retired with `status: INACTIVE`, and neither a system nor an
+    endpoint can be deleted.
+  - **A credential is a reference, never a secret.** Only `env://NAME` and
+    `vault://path[#field]` are accepted. No route resolves a reference, and no
+    response carries a secret. A `baseUrl` containing a user name or password
+    is refused as `CREDENTIALS_IN_URL`, and one with any query string as
+    `QUERY_IN_BASE_URL`, so a key cannot ride in `?api_key=`.
+  - **Credentials have their own permissions.** They are under
+    `integration:credential:*`, and the detail page does not show the section
+    without `integration:credential:read`. Endpoints use the system's
+    permissions.
+  - Every change is written to the audit trail.
+  - **Configuration only.** Nothing calls out, receives, logs or tests a
+    connection yet. That work is FR-INT-002 onward. Five of the eight new
+    tables have no writer yet.
+
 ### Changed
 
 - **MinIO and `mc` are fetched from `ghcr.io/sujanto-gaws`** (decision **D-92**).

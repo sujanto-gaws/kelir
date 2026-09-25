@@ -1,0 +1,89 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, system_code, system_name, system_type, base_url, auth_type,\n               timeout_seconds, retry_policy_json, description, status,\n               created_at, updated_at\n        FROM external_systems\n        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "system_code",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "system_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "system_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "base_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "auth_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "timeout_seconds",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "retry_policy_json",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 8,
+        "name": "description",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 10,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 11,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "11abf8e463af0b85e8f4c3214b7793061010d918cdda5a3a0e7b98f0bac3c71b"
+}

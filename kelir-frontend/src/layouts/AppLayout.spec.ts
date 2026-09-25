@@ -73,6 +73,7 @@ describe('AppLayout', () => {
         },
         { path: '/admin/users', name: 'admin-users', component: blank },
         { path: '/admin/roles', name: 'admin-roles', component: blank },
+        { path: '/admin/external-systems', name: 'admin-external-systems', component: blank },
       ],
     })
   })
@@ -119,6 +120,15 @@ describe('AppLayout', () => {
 
     expect(wrapper.find('a[href="/admin/users"]').exists()).toBe(true)
     expect(wrapper.find('a[href="/admin/roles"]').exists()).toBe(false)
+  })
+
+  it('links to the external system registry only with its read permission', async () => {
+    // #520. Hidden without the grant; the route guard and the API are what refuse.
+    expect((await renderSignedIn()).find('a[href="/admin/external-systems"]').exists()).toBe(false)
+
+    permissions = ['integration:external-system:read']
+
+    expect((await renderSignedIn()).find('a[href="/admin/external-systems"]').exists()).toBe(true)
   })
 
   it('names the signed-in user', async () => {

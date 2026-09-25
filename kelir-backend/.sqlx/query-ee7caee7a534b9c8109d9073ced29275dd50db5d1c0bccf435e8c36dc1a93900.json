@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT count(*)\n        FROM external_systems\n        WHERE tenant_id = $1\n          AND deleted_at IS NULL\n          AND ($2::text IS NULL OR system_code ILIKE $2 OR system_name ILIKE $2)\n          AND ($3::text IS NULL OR status = $3)\n          AND ($4::text IS NULL OR system_type = $4)\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "ee7caee7a534b9c8109d9073ced29275dd50db5d1c0bccf435e8c36dc1a93900"
+}

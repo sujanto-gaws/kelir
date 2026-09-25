@@ -6,8 +6,8 @@ use crate::error::ValidationDetail;
 use crate::health;
 use crate::middleware::cors::cors_layer;
 use crate::modules::{
-    activity, attachment, audit, auth, comment, document, document_type, identity, master_data,
-    notification, organization, rad, reporting, task_inbox, workflow,
+    activity, attachment, audit, auth, comment, document, document_type, identity, integration,
+    master_data, notification, organization, rad, reporting, task_inbox, workflow,
 };
 use crate::response::{ErrorBody, ErrorEnvelope, PageMeta};
 use crate::state::AppState;
@@ -161,6 +161,21 @@ use crate::state::AppState;
         organization::handlers::create_tenant,
         organization::handlers::update_tenant,
         organization::handlers::delete_tenant,
+        integration::handlers::list_external_systems,
+        integration::handlers::get_external_system,
+        integration::handlers::register_external_system,
+        integration::handlers::update_external_system,
+        integration::handlers::deactivate_external_system,
+        integration::handlers::activate_external_system,
+        integration::handlers::list_endpoints,
+        integration::handlers::get_endpoint,
+        integration::handlers::create_endpoint,
+        integration::handlers::update_endpoint,
+        integration::handlers::list_credentials,
+        integration::handlers::get_credential,
+        integration::handlers::create_credential,
+        integration::handlers::update_credential,
+        integration::handlers::delete_credential,
     ),
     components(schemas(
         attachment::domain::Attachment,
@@ -329,6 +344,21 @@ use crate::state::AppState;
         organization::domain::CreateTenantRequest,
         organization::domain::TenantAdministratorInput,
         organization::domain::UpdateTenantRequest,
+        integration::domain::ExternalSystem,
+        integration::domain::ExternalSystemStatus,
+        integration::domain::ExternalSystemType,
+        integration::domain::AuthType,
+        integration::domain::RetryPolicy,
+        integration::domain::RegisterExternalSystemRequest,
+        integration::domain::UpdateExternalSystemRequest,
+        integration::domain::IntegrationEndpoint,
+        integration::domain::HttpMethod,
+        integration::domain::EndpointStatus,
+        integration::domain::CreateIntegrationEndpointRequest,
+        integration::domain::UpdateIntegrationEndpointRequest,
+        integration::domain::IntegrationCredential,
+        integration::domain::CreateIntegrationCredentialRequest,
+        integration::domain::UpdateIntegrationCredentialRequest,
         ErrorEnvelope,
         ErrorBody,
         ValidationDetail,
@@ -365,6 +395,10 @@ use crate::state::AppState;
         (
             name = "master-data",
             description = "Parties, facilities, their governance lifecycle and their change history"
+        ),
+        (
+            name = "integration",
+            description = "The external system registry — systems, their endpoints, and references to where their secrets live. No route carries a secret value"
         )
     ),
     info(
@@ -459,6 +493,7 @@ fn api_v1_router(state: AppState) -> Router<AppState> {
         // history under a party deliberately does not answer (#252).
         .nest("/audit", audit::handlers::routes())
         .nest("/organization", organization::handlers::routes())
+        .nest("/integration", integration::handlers::routes())
 }
 
 async fn openapi_document() -> Json<utoipa::openapi::OpenApi> {

@@ -1,0 +1,93 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, system_code, system_name, system_type, base_url, auth_type,\n               timeout_seconds, retry_policy_json, description, status,\n               created_at, updated_at\n        FROM external_systems\n        WHERE tenant_id = $1\n          AND deleted_at IS NULL\n          AND ($2::text IS NULL OR system_code ILIKE $2 OR system_name ILIKE $2)\n          AND ($3::text IS NULL OR status = $3)\n          AND ($4::text IS NULL OR system_type = $4)\n        ORDER BY system_code, id\n        LIMIT $5 OFFSET $6\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "system_code",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "system_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "system_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "base_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "auth_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "timeout_seconds",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "retry_policy_json",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 8,
+        "name": "description",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 10,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 11,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "14e54e231215d70c8f014c15cec422a73c0573d45eb5b273fcc2850b7713d65e"
+}
