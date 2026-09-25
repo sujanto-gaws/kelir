@@ -80,6 +80,19 @@ describe('the shipped route table', () => {
     })
   })
 
+  it('has both external system pages behind the registry read permission', () => {
+    // #520. The detail page is where edit, activate/deactivate and the
+    // credential references live, each gated on the page; the door is `:read`.
+    const byName = new Map(all.map((route) => [route.name, route]))
+
+    for (const name of ['admin-external-systems', 'admin-external-system']) {
+      expect(byName.get(name)?.meta).toMatchObject({
+        requiresAuth: true,
+        permission: 'integration:external-system:read',
+      })
+    }
+  })
+
   it('protects every route that is not deliberately public', () => {
     const unprotected = all
       .filter((route) => !PUBLIC_ROUTES.has(route.name))

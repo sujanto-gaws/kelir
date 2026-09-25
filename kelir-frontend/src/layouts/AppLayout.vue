@@ -14,6 +14,7 @@ import {
   LogOut,
   Menu,
   Moon,
+  Plug,
   ShieldCheck,
   Sun,
   UserRoundCheck,
@@ -151,6 +152,15 @@ const navigation = [
     enabled: true,
     permission: 'rad:menu:read',
     sortOrder: 100,
+  },
+  {
+    // #520. The integration registry, after the configuration screens.
+    name: 'admin-external-systems',
+    label: 'External Systems',
+    icon: Plug,
+    enabled: true,
+    permission: 'integration:external-system:read',
+    sortOrder: 110,
   },
 ] as const
 
