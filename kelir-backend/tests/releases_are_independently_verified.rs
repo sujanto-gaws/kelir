@@ -85,7 +85,10 @@
 //!     above, because the section shape is younger than most of the records.
 //!     **Hardened by [#467](https://github.com/sujanto-gaws/kelir/issues/467)**
 //!     (Sprint 19 item 2b): `none` is the whole answer, and the walk reads every
-//!     row in the block — see *Rule 10, hardened 2026-09-16* below.
+//!     row in the block — see *Rule 10, hardened 2026-09-16* below. **And by
+//!     [#486](https://github.com/sujanto-gaws/kelir/issues/486)** (Sprint 21
+//!     row 2): a row starts at any CommonMark list marker, not only `- ` — see
+//!     *Rule 10, every list marker, 2026-09-26* below.
 //!
 //! # The floor, and why it is not the next release
 //!
@@ -284,6 +287,70 @@
 //! written and not tested. Both inputs are now sent, and both mutations were
 //! re-run red. Mutation 10 is the pre-#467 rule, and its reds are the four
 //! shapes above going back to passing.
+//!
+//! # Rule 10, every list marker, 2026-09-26 (#486)
+//!
+//! [Record 17](../../projects/verifications/17.%20Sprint%2019%20and%20Sprint%2017%20Independent%20Pass.md)
+//! finding 5: [`follow_up_block`] started a row only at an indented `- ` or
+//! `~~`, and joined every other indented line to the row above it. Under
+//! `two:`, record 07's filed row and then its unfiled row written under `* `,
+//! `+ `, `2. ` or `-` and a tab — four list items to CommonMark — **passed**,
+//! while the same row under `- ` was refused. None of the four was among rule
+//! 10's stated limits.
+//!
+//! **The fix is [`after_list_marker`]**: `-`, `*` or `+`, or one to nine
+//! digits and `.` or `)`, followed by a space or a tab, starts a row, and
+//! [`row_opens_with_issue_link`] strips any such marker before looking for the
+//! link — without the second half, a filed row under `* ` would be refused.
+//!
+//! **Probes, committed** in `a_follow_up_under_any_list_marker_is_a_row`: the
+//! unfiled row after a filed one under each of `- ` (the control the old rule
+//! already refused), `* `, `+ `, `2. `, `2) `, `-`+tab, `*`+tab, `1. `, `10) `
+//! and `3.`+tab — every one refused, quoting the row — and a filed row under
+//! each, every one accepted; plus a `~~` row followed by a `* ` row, read as
+//! two rows. **The false positives, committed** in
+//! `a_line_that_only_looks_like_a_marker_continues_the_row`: a filed row's
+//! wrapped line opening `**bold**`, `*emphasis*`, `2026-09-17`, `2.5`, `404 `,
+//! a ten-digit `1234567890.`, `-1`, `--force` or `+1`, or carrying markers
+//! later in the line, is joined to the row and the record passes. **A marker
+//! with a space and nothing after it**, committed in
+//! `a_marker_with_only_a_space_after_it_starts_a_row`: `* `, `- `, `2. ` or
+//! `+`+tab ending its line starts a row, and the line below is its text — record
+//! 07's unfiled row there is refused, a filed row accepted. Added after the
+//! row's gate found this file's first account of that shape untrue.
+//!
+//! **Seen red.** Baseline before the change: 21 passed. After: 24. Seven
+//! mutations, each applied alone to this file, the suite run, and the file
+//! restored — every one red on the test it names and nothing else:
+//!
+//! | # | Mutation | Red |
+//! |---|---|---|
+//! | 1 | The start-of-row predicate back to `starts_with("- ")` — the rule as #479 left it | `a_follow_up_under_any_list_marker_is_a_row` (the `* ` row, joined and unread) |
+//! | 2 | The row's marker stripped by `trim_start_matches("- ")` again | the same test (a filed row under `* ` refused) |
+//! | 3 | No space or tab required after the marker | `a_line_that_only_looks_like_a_marker_continues_the_row` (`**bold**` read as a row) |
+//! | 4 | A space after the marker, not a tab | `a_follow_up_under_any_list_marker_is_a_row` (`-`+tab) |
+//! | 5 | Any number of digits | `a_line_that_only_looks_like_a_marker_continues_the_row` (`1234567890.`) |
+//! | 6 | Bullet markers only | `a_follow_up_under_any_list_marker_is_a_row` (`2. `) |
+//! | 7 | [`follow_up_block`] hands [`after_list_marker`] the trimmed line | `a_marker_with_only_a_space_after_it_starts_a_row` (`* ` then the unfiled row, unread) |
+//!
+//! Mutations 1 and 2 together are the pre-#486 rule entire, and redden the
+//! same test.
+//!
+//! **Historic sweep.** `projects/releases/` and `projects/verifications/` were
+//! restored from each of the 62 first-parent `main` commits that touched them,
+//! and this file's suite run over each tree with the test binary before the
+//! change and after it. **No test's verdict differed on any of the 62.** The
+//! twelve trees since `f455986` are green under both; older trees are red under
+//! both, for rules and fixtures younger than the tree — record 07 read from
+//! disk, and at `879d497` and `00a27b4` record 07's own `not yet filed` row,
+//! the defect rule 10 was written for.
+//!
+//! **Positive control, last.** A row `* **A probe follow-up …** · **reproduced**
+//! · **not yet filed**` written under record 08's filed `#503` row on disk:
+//! `a_final_record_names_an_issue_for_every_follow_up` red, quoting the row,
+//! and the other 22 of the 23 then written green. The binary before the change
+//! passed the same tree, 21 of 21 — finding 5 on the real walk, not only on a
+//! string. Record 08 was restored byte-exact.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -672,13 +739,19 @@ fn citations(body: &str) -> BTreeSet<String> {
 /// C as one loose list and D as one wrapped item, so **the break a reader never
 /// sees was the break the walk stopped at.**
 ///
-/// - An indented line opening `- ` or `~~` starts a row. **A nested item under
-///   a row is a row too**, and must open with its own issue link: the strict
-///   reading, because an unfiled follow-up tucked under a filed one is the
-///   shape C and D were.
+/// - An indented line opening with a list marker ([`after_list_marker`]) or
+///   `~~` starts a row. **A nested item under a row is a row too**, and must
+///   open with its own issue link: the strict reading, because an unfiled
+///   follow-up tucked under a filed one is the shape C and D were.
 /// - Any other indented line continues whatever came before it — the previous
 ///   row, or the answer when no row has started yet — so a wrapped answer is
 ///   judged whole, `none` and the words after it together.
+///
+/// **Until [#486](https://github.com/sujanto-gaws/kelir/issues/486) the only
+/// marker was `- `.** [Record 17](../../projects/verifications/17.%20Sprint%2019%20and%20Sprint%2017%20Independent%20Pass.md)
+/// finding 5 wrote record 07's unfiled row under `* `, `+ `, `2. ` and `-` with
+/// a tab, and each was joined to the filed row above it as a wrapped line and
+/// passed — four list items to a reader, one row to the walk.
 fn follow_up_block(body: &str) -> Option<(String, Vec<String>)> {
     let after_heading = body.split_once(AFTERMATH_HEADING)?.1;
 
@@ -709,7 +782,7 @@ fn follow_up_block(body: &str) -> Option<(String, Vec<String>)> {
             break;
         }
 
-        if trimmed.starts_with("- ") || trimmed.starts_with("~~") {
+        if after_list_marker(line).is_some() || trimmed.starts_with("~~") {
             rows.push(trimmed.to_owned());
         } else {
             // Shape D: a wrapped line belongs to the item above it.
@@ -720,6 +793,44 @@ fn follow_up_block(body: &str) -> Option<(String, Vec<String>)> {
     }
 
     Some((answer, rows))
+}
+
+/// The text after the CommonMark list marker `line` opens with, if it opens
+/// with one ([#486](https://github.com/sujanto-gaws/kelir/issues/486)).
+///
+/// A marker is `-`, `*` or `+`, or one to nine digits and then `.` or `)` —
+/// CommonMark's bullet and ordered markers — **followed by a space or a tab**.
+/// The character after the marker is what keeps a wrapped line from being read
+/// as a row: `**bold**` is not a `*` marker, `2026-09-17` and `2.5 hours` are
+/// not ordered ones, and a marker later in the line is not at its start.
+///
+/// # What it does not do
+///
+/// - **It does not track indentation.** CommonMark lets an ordered item start
+///   inside a paragraph only when its number is `1`, so a row's wrapped line
+///   indented to its text and opening `2. ` is paragraph text to a reader and a
+///   row here. **That costs a refusal, not a pass**: the walk quotes the line,
+///   and rewrapping it ends the refusal.
+/// - **It does not read a bare marker ending its line**, an empty item whose
+///   text starts on the line below, because nothing follows the marker. A
+///   marker followed by a space or a tab and then nothing *is* read:
+///   [`follow_up_block`] hands this the untrimmed line, so `  * ` starts a row
+///   and the line below joins it as the row's text.
+fn after_list_marker(line: &str) -> Option<&str> {
+    let line = line.trim_start();
+
+    let rest = match line.strip_prefix(['-', '*', '+']) {
+        Some(rest) => rest,
+        None => {
+            let digits = line.bytes().take_while(u8::is_ascii_digit).count();
+            if !(1..=9).contains(&digits) {
+                return None;
+            }
+            line[digits..].strip_prefix(['.', ')'])?
+        }
+    };
+
+    rest.strip_prefix([' ', '\t'])
 }
 
 /// Whether a follow-up row **opens with** a link to an issue.
@@ -746,7 +857,13 @@ fn follow_up_block(body: &str) -> Option<(String, Vec<String>)> {
 /// §7 defeated three earlier probes with one-character edits precisely because
 /// they attacked the half that was not carrying anything.
 fn row_opens_with_issue_link(row: &str) -> bool {
-    let row = row.trim_start().trim_start_matches("- ").trim_start();
+    // Every leading marker, as `trim_start_matches("- ")` stripped every `- `
+    // before #486 — a row reaching its link through an empty nested item is
+    // read as it was.
+    let mut row = row.trim_start();
+    while let Some(rest) = after_list_marker(row) {
+        row = rest.trim_start();
+    }
 
     // The row may open with a struck-through link, which is how a withdrawn
     // follow-up is written. The strike is cosmetic and the link beneath it is
@@ -1439,6 +1556,21 @@ fn the_pre_rule_releases_are_named_rather_than_silently_skipped() {
 /// - **A row that opens with an issue and then describes a second follow-up
 ///   that has none.** The row's subject is filed; what else the row says is
 ///   prose, and judging prose is what the pass is for.
+///
+/// Two more, drawn 2026-09-26 when [#486](https://github.com/sujanto-gaws/kelir/issues/486)
+/// let a row start at any list marker:
+///
+/// - **A bare list marker ending its line**, with no space or tab after it and
+///   the follow-up's text on the line below. CommonMark renders an item there;
+///   the walk reads the marker as a wrapped line of the row above, and the text
+///   too. A marker followed by a space or a tab and then nothing *is* a row,
+///   and the line below joins it. [`after_list_marker`] says so. The cost the
+///   other way is stated there as well: a wrapped line opening `2. ` is read as
+///   a row, and refused, where CommonMark would keep it in the paragraph.
+/// - **A fenced code block inside the follow-up block** is not recognised as
+///   one: its indented lines opening `-`, `*`, `+` or `N.` are read as rows.
+///   Before #486 only its `- ` lines were. That costs a refusal, not a pass, and
+///   no record `main` has held carries one.
 #[test]
 fn a_final_record_names_an_issue_for_every_follow_up() {
     let mut unfiled: Vec<String> = Vec::new();
@@ -1475,10 +1607,11 @@ fn a_final_record_names_an_issue_for_every_follow_up() {
 
     assert!(
         unfiled.is_empty(),
-        "a `Final` release record carries a follow-up with no issue (#445, #467):\n  {}\n\n\
+        "a `Final` release record carries a follow-up with no issue (#445, #467, #486):\n  {}\n\n\
          Every row under `{FOLLOW_UPS_LABEL}` opens with a link to {ISSUE_URL}<number> — \
          including rows after a blank line, rows after a wrapped line, rows nested under \
-         another row, and rows under an answer of `none`. **Opening with it, not merely \
+         another row, rows under any list marker (`-`, `*`, `+`, `2.`, `2)`), and rows under \
+         an answer of `none`. **Opening with it, not merely \
          containing it**: record 07's own bad row cited \
          the guard that was bypassed, and the row above it cited somebody else's issue for \
          context, so a rule asking whether the row mentioned an issue anywhere would have \
@@ -1682,6 +1815,137 @@ fn a_wrapped_line_does_not_hide_the_rows_after_it() {
         refuses_the_unfiled_row(&nested),
         "an unfiled row nested under a filed one is a row, and it opens with no issue"
     );
+}
+
+/// The CommonMark list markers a row can open with, each followed by the
+/// space or tab that makes it one. `- ` is the control: the one marker the walk
+/// read before [#486](https://github.com/sujanto-gaws/kelir/issues/486).
+const LIST_MARKERS: [&str; 10] = [
+    "- ", "* ", "+ ", "2. ", "2) ", "-\t", "*\t", "1. ", "10) ", "3.\t",
+];
+
+/// `row`, a record 07 row opening `  - `, written under `marker` instead.
+fn under_marker(row: &str, marker: &str) -> String {
+    let text = row
+        .strip_prefix("  - ")
+        .expect("record 07's rows open `  - `");
+    format!("  {marker}{text}")
+}
+
+/// **A follow-up under any list marker is a row**
+/// ([#486](https://github.com/sujanto-gaws/kelir/issues/486)).
+///
+/// [Record 17](../../projects/verifications/17.%20Sprint%2019%20and%20Sprint%2017%20Independent%20Pass.md)
+/// finding 5: under `two:`, record 07's filed row and then its unfiled row
+/// written with `* `, `+ `, `2. ` or `-` and a tab. The walk started a row only
+/// at `- `, joined the unfiled row to the filed one as a wrapped line, and
+/// passed all four. CommonMark renders each as a list item of its own.
+#[test]
+fn a_follow_up_under_any_list_marker_is_a_row() {
+    for marker in LIST_MARKERS {
+        let unfiled = record_with_follow_ups(&format!(
+            "- **Follow-ups filed:** two:\n{RECORD_07_FILED_ROW}\n{}",
+            under_marker(RECORD_07_UNFILED_ROW, marker)
+        ));
+        assert!(
+            refuses_the_unfiled_row(&unfiled),
+            "record 07's unfiled row under {marker:?}, after a filed row, was joined to it and \
+             went unread: {:?}",
+            read_aftermath(&unfiled)
+        );
+
+        let filed = record_with_follow_ups(&format!(
+            "- **Follow-ups filed:** two:\n{RECORD_07_FILED_ROW}\n{}",
+            under_marker(RECORD_07_FILED_ROW, marker)
+        ));
+        assert!(
+            accepted(&filed),
+            "a row under {marker:?} opening with its issue link is a filed follow-up: {:?}",
+            read_aftermath(&filed)
+        );
+    }
+
+    // The struck-through row still starts a row with no marker at all.
+    let struck = record_with_follow_ups(&format!(
+        "- **Follow-ups filed:** two:\n{RECORD_07_FILED_ROW}\n  \
+         ~~[#999](https://github.com/sujanto-gaws/kelir/issues/999) — a duplicate~~\n{}",
+        under_marker(RECORD_07_UNFILED_ROW, "* ")
+    ));
+    assert!(
+        refuses_the_unfiled_row(&struck),
+        "a `~~` row and a `* ` row under it are two rows, and only the second is unfiled: {:?}",
+        read_aftermath(&struck)
+    );
+}
+
+/// **A marker with a space and nothing after it starts a row, and the line
+/// below is its text** ([#486](https://github.com/sujanto-gaws/kelir/issues/486)).
+///
+/// [`follow_up_block`] hands [`after_list_marker`] the untrimmed line, so the
+/// trailing space is still there to make `  * ` a marker. Only a bare marker
+/// ending its line is rule 10's stated limit.
+#[test]
+fn a_marker_with_only_a_space_after_it_starts_a_row() {
+    for marker in ["* ", "- ", "2. ", "+\t"] {
+        let unfiled = record_with_follow_ups(&format!(
+            "- **Follow-ups filed:** two:\n{RECORD_07_FILED_ROW}\n  {marker}\n    {}",
+            RECORD_07_UNFILED_ROW.trim_start_matches("  - ")
+        ));
+        assert!(
+            refuses_the_unfiled_row(&unfiled),
+            "{marker:?} and nothing else, with record 07's unfiled row on the line below, is \
+             one unfiled row: {:?}",
+            read_aftermath(&unfiled)
+        );
+
+        let filed = record_with_follow_ups(&format!(
+            "- **Follow-ups filed:** two:\n{RECORD_07_FILED_ROW}\n  {marker}\n    {}",
+            RECORD_07_FILED_ROW.trim_start_matches("  - ")
+        ));
+        assert!(
+            accepted(&filed),
+            "{marker:?} and nothing else, with a filed row's text on the line below, is one \
+             filed row: {:?}",
+            read_aftermath(&filed)
+        );
+    }
+}
+
+/// **A wrapped line that only looks like a marker is still a wrapped line**
+/// ([#486](https://github.com/sujanto-gaws/kelir/issues/486)).
+///
+/// The other side of [`a_follow_up_under_any_list_marker_is_a_row`]: a marker
+/// is one only with a space or a tab after it, and only at the line's start.
+/// Each line here is joined to the filed row above it, so the row stays filed.
+#[test]
+fn a_line_that_only_looks_like_a_marker_continues_the_row() {
+    for wrapped in [
+        "**bold**, which opens with `*` and is not a `*` marker",
+        "*emphasis* opens with `*` too",
+        "2026-09-17, a date",
+        "2.5 hours, a number and a stop",
+        "404 is an issue number, not an ordered marker",
+        "1234567890. ten digits, one more than CommonMark allows",
+        "-1 is the exit code",
+        "--force is a flag",
+        "+1 from the pass",
+        "and a marker later in the line: - * + 2. 2)",
+    ] {
+        let body = record_with_follow_ups(&format!(
+            "- **Follow-ups filed:** one:\n{RECORD_07_FILED_ROW}\n    {wrapped}"
+        ));
+        let (_, rows) = follow_up_block(&body).expect("the block is readable");
+        assert_eq!(
+            rows.len(),
+            1,
+            "{wrapped:?} is a wrapped line of the row above, not a row: {rows:?}"
+        );
+        assert!(
+            accepted(&body),
+            "{wrapped:?} under a filed row: {:?}",
+            read_aftermath(&body)
+        );
+    }
 }
 
 /// **An answer of `none` does not excuse the rows under it**

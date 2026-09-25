@@ -103,6 +103,14 @@ While the major version is `0`, the public API may change in any release.
   `Draft` whose `Blocked by:` names no issue, such as a template copy with the
   commented `#NNN` left in, is refused too; it used to pass.
 
+- **A release record's follow-up without an issue is refused under any list
+  marker** ([#486](https://github.com/sujanto-gaws/kelir/issues/486)). Rule 10
+  of `releases_are_independently_verified.rs` started a follow-up row only at
+  `- `, and read a row written with `*`, `+`, `2.`, `2)` or a tab after the
+  marker as a wrapped line of the row above. So an unfiled follow-up under a
+  filed one passed. Every CommonMark list marker now starts a row. No release
+  record on `main`, now or at any earlier commit, changes verdict.
+
 - **MinIO and `mc` are fetched from `ghcr.io/sujanto-gaws`** (decision **D-92**).
   `quay.io/minio/*`, where D-80 moved them, closed to anonymous pulls on
   2026-09-24. The copies are MinIO's own linux/amd64 filesystems, rebuilt
