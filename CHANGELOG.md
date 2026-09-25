@@ -74,6 +74,15 @@ While the major version is `0`, the public API may change in any release.
 
 ### Changed
 
+- **A `Draft` ADR whose blocker this same tree delivers is refused**
+  ([#545](https://github.com/sujanto-gaws/kelir/issues/545),
+  [standards/06](docs/standards/06.%20Architecture%20Decision%20Records.md)
+  §5.1). ADR-0041 merged `Draft`, blocked by #519, in the pull request that
+  closed #519, and `adr_records_are_current.rs` accepted it because it named a
+  blocker. It now also fails when every issue a `Draft` record's `Blocked by:`
+  names is cited in this section: named in the parenthesis right after an
+  entry's bold headline. An issue mentioned anywhere else does not count.
+
 - **MinIO and `mc` are fetched from `ghcr.io/sujanto-gaws`** (decision **D-92**).
   `quay.io/minio/*`, where D-80 moved them, closed to anonymous pulls on
   2026-09-24. The copies are MinIO's own linux/amd64 filesystems, rebuilt
