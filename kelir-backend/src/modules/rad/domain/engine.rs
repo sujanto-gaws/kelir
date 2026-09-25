@@ -1503,6 +1503,21 @@ mod tests {
             assert!(!not_digits.contains(claim), "{claim}: {not_digits}");
         }
 
+        // The `\W` and `\S` remedies are negated too, and say the same (#531).
+        // Seen red, 2026-09-25 (Sprint 20 mutation campaign): the limit
+        // dropped from the `\W` reason, and separately from the `\S` one.
+        let (_, not_word_limit) = refused_beside(r"^\W+$", "^[^A-Za-z0-9_]+$");
+        let (_, not_space_limit) = refused_beside(r"^\S$", r"^[^ \t\r\n]$");
+        for negated in [&not_word_limit, &not_space_limit] {
+            assert!(
+                negated.contains("is not a claim that the browser and this server agree"),
+                "the negated remedy disclaims agreement: {negated}"
+            );
+            for claim in ["settles", "outside the BMP"] {
+                assert!(!negated.contains(claim), "{claim}: {negated}");
+            }
+        }
+
         let (code, not_word) = refused_beside(r"^\W+$", "^[^A-Za-z0-9_]+$");
         assert_eq!(code, PATTERN_CLASS_NOT_PINNED);
         assert!(not_word.contains("[^A-Za-z0-9_]"), "{not_word}");

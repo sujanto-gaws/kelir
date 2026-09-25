@@ -974,6 +974,16 @@ mod tests {
             "{}",
             details[0].message
         );
+        // **And nothing else**: a before-only handler offered as the remedy
+        // would send the author from one refusal to the next. Seen red,
+        // 2026-09-25 (Sprint 20 mutation campaign): `available_for`'s filter
+        // made always true, which offered all three.
+        let offered = details[0]
+            .message
+            .split("the handlers that can are ")
+            .nth(1)
+            .expect("the message offers a remedy");
+        assert_eq!(offered, "`core:continue_always`");
     }
 
     /// The other side of the kind check: a handler serving both halves is
