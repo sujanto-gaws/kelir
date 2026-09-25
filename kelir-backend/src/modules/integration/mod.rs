@@ -9,7 +9,7 @@
 //! tables those will write were created by `0046_integration.sql` beside the
 //! three this module reads, and no route here touches them (#520 AC-3).
 //!
-//! # A secret is never a value in this module
+//! # No function in this module resolves a reference
 //!
 //! `integration_credentials.secret_reference` is a pointer —
 //! `vault://kelir/erp/api-key`, `env://KELIR_ERP_API_KEY` — and **no function
@@ -62,8 +62,7 @@ pub const EXTERNAL_SYSTEM_UPDATE: &str = "integration:external-system:update";
 pub const EXTERNAL_SYSTEM_DEACTIVATE: &str = "integration:external-system:deactivate";
 
 pub const CREDENTIAL_CREATE: &str = "integration:credential:create";
-/// Read credential references — **where** a system's secrets live, never the
-/// secrets.
+/// Read credential references — **where** a system's secrets live.
 pub const CREDENTIAL_READ: &str = "integration:credential:read";
 pub const CREDENTIAL_UPDATE: &str = "integration:credential:update";
 pub const CREDENTIAL_DELETE: &str = "integration:credential:delete";

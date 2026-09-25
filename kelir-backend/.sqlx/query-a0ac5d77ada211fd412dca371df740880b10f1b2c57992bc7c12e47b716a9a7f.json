@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id\n        FROM permissions\n        WHERE deleted_at IS NULL\n          AND NOT EXISTS (\n              SELECT 1\n              FROM unnest($1::text[]) AS withheld (prefix)\n              WHERE permission_code LIKE withheld.prefix || '%'\n          )\n        ORDER BY permission_code\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a0ac5d77ada211fd412dca371df740880b10f1b2c57992bc7c12e47b716a9a7f"
+}

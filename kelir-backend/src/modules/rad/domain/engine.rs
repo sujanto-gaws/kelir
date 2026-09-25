@@ -769,14 +769,22 @@ fn refuse(
 /// nothing a probe can refute. It says the remedy is not a claim of
 /// agreement, and it points at the registry's measurement.
 ///
+/// **Nor does the `\w` remedy**
+/// ([#553](https://github.com/sujanto-gaws/kelir/issues/553), record 19
+/// finding 3). The `\w` and `\W` reasons both called their remedy *what the
+/// browser was already doing*, and #538 left that clause beside the `\W`
+/// disclaimer, so the reason said both. Under `i` the `\w` remedy splits at the
+/// same `ſ` and `K`. D-88's rule struck the clause from both, and the `\w`
+/// reason now carries the same limit as the negated ones.
+///
 /// **`\p{…}` is refused whatever the flags, and the reason depends on them.**
 /// Without `u` the browser reads a literal letter. With `u` it reads a property
 /// too, but the two accept different spellings — `\p{nd}` and `\pN` compile
 /// here and throw there — so this backend refuses the construct rather than
 /// decide which spellings both sides share.
 fn divergence_reason(construct: &DivergentConstruct, flags: &str) -> (&'static str, String) {
-    /// What a negated remedy does not promise, said once.
-    const NEGATED_REMEDY_LIMIT: &str = "This remedy is not a claim that the browser and this \
+    /// What a written-out remedy does not promise, said once.
+    const REMEDY_LIMIT: &str = "This remedy is not a claim that the browser and this \
          server agree about every character it admits; the Validation Rule Registry's `regex` \
          warning has what was measured to split";
 
@@ -792,23 +800,23 @@ fn divergence_reason(construct: &DivergentConstruct, flags: &str) -> (&'static s
             format!(
                 "ECMA-262 reads `\\D` as anything but ASCII `0-9`; this crate reads it as anything \
                  but Unicode `Nd`, so `١٢٣` passes `^\\D+$` in the browser and fails here. Write \
-                 the class out: `[^0-9]`. {NEGATED_REMEDY_LIMIT}"
+                 the class out: `[^0-9]`. {REMEDY_LIMIT}"
             ),
         ),
         DivergentConstruct::Class('w') => (
             PATTERN_CLASS_NOT_PINNED,
-            "ECMA-262 reads `\\w` as `[A-Za-z0-9_]`; this crate reads it as Unicode word \
-             characters, so `café` fails in the browser and passes here. Write the class out: \
-             `[A-Za-z0-9_]`, which is what the browser was already doing"
-                .to_owned(),
+            format!(
+                "ECMA-262 reads `\\w` as `[A-Za-z0-9_]`; this crate reads it as Unicode word \
+                 characters, so `café` fails in the browser and passes here. Write the class out: \
+                 `[A-Za-z0-9_]`. {REMEDY_LIMIT}"
+            ),
         ),
         DivergentConstruct::Class('W') => (
             PATTERN_CLASS_NOT_PINNED,
             format!(
                 "ECMA-262 reads `\\W` as anything but `[A-Za-z0-9_]`; this crate reads it as \
                  anything but a Unicode word character, so `é` passes `^\\W$` in the browser and \
-                 fails here. Write the class out: `[^A-Za-z0-9_]`, which is what the browser was \
-                 already doing. {NEGATED_REMEDY_LIMIT}"
+                 fails here. Write the class out: `[^A-Za-z0-9_]`. {REMEDY_LIMIT}"
             ),
         ),
         DivergentConstruct::Class('S') => (
@@ -819,7 +827,7 @@ fn divergence_reason(construct: &DivergentConstruct, flags: &str) -> (&'static s
                  in the browser, and U+FEFF BYTE ORDER MARK passes it only here. Write out the \
                  characters this field should not treat as space, such as `[^ \\t\\r\\n]` — and \
                  note that is wider than either side's `\\S` rather than equal to it: it admits a \
-                 no-break space, which neither does. {NEGATED_REMEDY_LIMIT}"
+                 no-break space, which neither does. {REMEDY_LIMIT}"
             ),
         ),
         DivergentConstruct::Class(class) => (
@@ -1547,6 +1555,53 @@ mod tests {
             !not_boundary.contains("(^|[^A-Za-z0-9_])"),
             "{not_boundary}"
         );
+    }
+
+    /// **[#553]: no class arm says its remedy makes the two sides match.**
+    ///
+    /// #531's *Done when* asked that no reason text say a remedy *settles*,
+    /// *agrees* or makes the sides match, and #538 tested the negated arms
+    /// only. The `\w` arm kept *which is what the browser was already doing*,
+    /// and under `i` its remedy splits at `ſ` and `K` (record 19 finding 3).
+    /// So this reads **every** class arm, under every flag set that changes
+    /// what a class matches, and allows the word *agree* only inside the
+    /// disclaimer that denies it. `\w` and `\W` must carry that disclaimer.
+    ///
+    /// **Seen red, 2026-09-25**: with `, which is what the browser was already
+    /// doing` put back after the `\w` remedy, at the `\w` arm.
+    ///
+    /// [#553]: https://github.com/sujanto-gaws/kelir/issues/553
+    #[test]
+    fn no_class_remedy_claims_the_browser_and_server_agree() {
+        const DISCLAIMER: &str =
+            "This remedy is not a claim that the browser and this server agree";
+
+        for flags in ["", "i", "u", "iu"] {
+            for class in ['d', 'D', 'w', 'W', 's', 'S'] {
+                let (_, reason) = divergence_reason(&DivergentConstruct::Class(class), flags);
+                let without_disclaimer = reason.replace(DISCLAIMER, "");
+
+                for claim in [
+                    "what the browser was already doing",
+                    "already doing",
+                    "settles",
+                    "agree",
+                    "the same as the browser",
+                ] {
+                    assert!(
+                        !without_disclaimer.contains(claim),
+                        "`\\{class}` under `{flags}` claims `{claim}`: {reason}"
+                    );
+                }
+
+                if matches!(class, 'w' | 'W') {
+                    assert!(
+                        reason.contains(DISCLAIMER),
+                        "`\\{class}`'s remedy disclaims agreement: {reason}"
+                    );
+                }
+            }
+        }
     }
 
     /// **[#466]: `\p{…}` under the `u` flag was refused for lacking the flag.**

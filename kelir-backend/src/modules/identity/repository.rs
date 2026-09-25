@@ -840,29 +840,38 @@ pub async fn set_password_hash(
     .await
     .map(|result| result.rows_affected())
 }
-/// Permission ids in the catalogue, minus a family the caller must not hold.
+/// Permission ids in the catalogue, minus the families the caller must not hold.
 ///
 /// Used when a tenant is provisioned: its own administrator holds everything
-/// except tenant administration, which belongs to the deployment's default
-/// tenant alone (decision **D-18**). The exclusion is by code prefix rather
-/// than by an id list, so a permission added to that family by a later
+/// except the families decision **D-18** withholds — tenant administration,
+/// which belongs to the deployment's default tenant alone, and (since the
+/// product owner's decision of 2026-09-25, #551) the credential references
+/// that say where secrets are kept. The exclusion is by code prefix rather
+/// than by an id list, so a permission added to a withheld family by a later
 /// migration is withheld without this code being told about it.
 ///
-/// The prefix is a `LIKE` pattern operand, so a caller passing one containing
+/// Each prefix is a `LIKE` pattern operand, so a caller passing one containing
 /// `%` or `_` would widen it. Every caller passes a literal module prefix; a
 /// caller-supplied value would need escaping first.
-pub async fn permission_ids_excluding_prefix(
+pub async fn permission_ids_excluding_prefixes(
     executor: impl PgExecutor<'_>,
-    prefix: &str,
+    prefixes: &[&str],
 ) -> Result<Vec<Uuid>, sqlx::Error> {
+    let prefixes: Vec<String> = prefixes.iter().map(|prefix| (*prefix).to_owned()).collect();
+
     sqlx::query_scalar!(
         r#"
         SELECT id
         FROM permissions
-        WHERE deleted_at IS NULL AND permission_code NOT LIKE $1 || '%'
+        WHERE deleted_at IS NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM unnest($1::text[]) AS withheld (prefix)
+              WHERE permission_code LIKE withheld.prefix || '%'
+          )
         ORDER BY permission_code
         "#,
-        prefix
+        &prefixes
     )
     .fetch_all(executor)
     .await

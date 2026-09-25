@@ -11,15 +11,22 @@ While the major version is `0`, the public API may change in any release.
 
 ### Upgrade notes
 
-- **Only the system tenant's administrators can see external systems until a
-  role is granted the `integration:*` permissions.** `0046_integration.sql`
-  adds eight permissions and grants them to the system tenant's `ROLE-ADMIN`
-  alone, as `0010` and `0043` did. An administrator of any **other** tenant
-  does not get them, including a tenant created before this release. **Grant
-  them to that tenant's administrator role**, and to any role that should
-  manage integrations. `integration:credential:read` shows where secrets are
-  kept, so grant it separately and deliberately
-  ([User Manual](docs/operations/03.%20User%20Manual.md) §11.5).
+- **Which administrators get the eight `integration:*` permissions depends on
+  when their tenant was created.** `0046_integration.sql` adds eight
+  permissions and grants all eight to the system tenant's `ROLE-ADMIN`, as
+  `0010` and `0043` did.
+  - **A tenant created after the upgrade** gets the four
+    `integration:external-system:*` permissions on its `ROLE-ADMIN`, and **not**
+    the four `integration:credential:*` ones. Tenant provisioning withholds
+    them as it withholds `organization:tenant:*` (decision **D-18**, amended
+    2026-09-25, [#551](https://github.com/sujanto-gaws/kelir/issues/551)).
+  - **A tenant created before the upgrade** gets none of the eight. Grant the
+    external-system permissions to that tenant's administrator role, and to
+    any role that should manage integrations.
+  - **`integration:credential:read` shows where secrets are kept**, so no
+    tenant but the system tenant starts with it. Grant the
+    `integration:credential:*` permissions separately and deliberately
+    ([User Manual](docs/operations/03.%20User%20Manual.md) §11.5).
 - **`0046` creates eight tables and alters one table nobody writes.** It adds a
   foreign key to `master_data_source_references`, which is empty on every
   deployment, so the key validates instantly. Nothing existing changes in a way
@@ -58,15 +65,19 @@ While the major version is `0`, the public API may change in any release.
     into or out of `INACTIVE`. `ACTIVE` ↔ `MAINTENANCE` is still an edit. An
     endpoint is retired with `status: INACTIVE`, and neither a system nor an
     endpoint can be deleted.
-  - **A credential is a reference, never a secret.** Only `env://NAME` and
-    `vault://path[#field]` are accepted. No route resolves a reference, and no
-    response carries a secret. A `baseUrl` containing a user name or password
+  - **A credential is stored as a reference to where its secret is kept.**
+    Only the shapes `env://NAME` and `vault://path[#field]` are accepted, and
+    only the shape is checked. A secret typed as a path segment, such as
+    `vault://sk_live_…`, has the right shape, and it is stored and returned as
+    sent. Put the secret in the store first, then enter its reference. No
+    route resolves a reference. A `baseUrl` containing a user name or password
     is refused as `CREDENTIALS_IN_URL`, and one with any query string as
     `QUERY_IN_BASE_URL`, so a key cannot ride in `?api_key=`.
   - **Credentials have their own permissions.** They are under
     `integration:credential:*`, and the detail page does not show the section
     without `integration:credential:read`. Endpoints use the system's
-    permissions.
+    permissions. A new tenant's administrator does not start with the
+    credential permissions (see *Upgrade notes*).
   - Every change is written to the audit trail.
   - **Configuration only.** Nothing calls out, receives, logs or tests a
     connection yet. That work is FR-INT-002 onward. Five of the eight new
@@ -172,7 +183,11 @@ While the major version is `0`, the public API may change in any release.
   `[^ \t\r\n]`, and the characters next to the non-boundary). A negated
   remedy claims no agreement between the engines. It first said it *settled
   the class*, which splits under `i`, and the claim was struck under D-88
-  ([#531](https://github.com/sujanto-gaws/kelir/issues/531)). **`\p{…}` under the `u` flag** was
+  ([#531](https://github.com/sujanto-gaws/kelir/issues/531)). The `\w` and
+  `\W` reasons also called their remedy *what the browser was already doing*.
+  Under `i` the `\w` remedy splits at the same two characters, so that clause
+  is struck from both, and the `\w` remedy claims no agreement either
+  ([#553](https://github.com/sujanto-gaws/kelir/issues/553)). **`\p{…}` under the `u` flag** was
   refused for lacking the flag. It is still refused, now for a reason that
   holds: the browser and the server accept different spellings of a property.
   **Nothing that was refused is now stored, and nothing stored is now

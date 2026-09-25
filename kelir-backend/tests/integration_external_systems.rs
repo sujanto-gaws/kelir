@@ -1857,6 +1857,40 @@ async fn every_route_is_in_the_document_and_no_schema_can_carry_a_secret() {
         seen, 3,
         "secretReference appears on the credential and its two requests, and nowhere else"
     );
+
+    // #552 (record 19 finding 2, D-88): a reference is checked for its shape,
+    // and `vault://sk_live_…` has the shape. So the published document says
+    // *reference* and never that a value cannot be a secret. Seen red,
+    // 2026-09-25, with the tag's `No route carries a secret value` put back.
+    let credential_texts = [
+        document.body["tags"]
+            .as_array()
+            .expect("tags")
+            .iter()
+            .find(|tag| tag["name"] == "integration")
+            .expect("the integration tag")["description"]
+            .to_string(),
+        paths[format!("{BASE}/{{id}}/credentials")]["get"]["responses"]["200"]["description"]
+            .to_string(),
+        paths[format!("{BASE}/{{id}}/credentials/{{credentialId}}")]["get"]["responses"]["200"]
+            ["description"]
+            .to_string(),
+        schemas["IntegrationCredential"]["properties"]["secretReference"]["description"]
+            .to_string(),
+    ];
+    for text in &credential_texts {
+        assert_ne!(
+            text, "null",
+            "a description is missing: {credential_texts:?}"
+        );
+        let lower = text.to_lowercase();
+        for claim in ["never a secret", "never the secret", "carries a secret"] {
+            assert!(
+                !lower.contains(claim),
+                "the document claims `{claim}`: {text}"
+            );
+        }
+    }
 }
 
 // ===========================================================================

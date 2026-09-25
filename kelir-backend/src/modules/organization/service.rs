@@ -218,6 +218,24 @@ async fn find_live(
 /// deployment's administering tenant.
 pub const TENANT_ADMINISTRATION_PREFIX: &str = "organization:tenant:";
 
+/// The credential-reference family, which a tenant's own administrator does not
+/// hold either.
+///
+/// **The product owner's decision of 2026-09-25 (#551, D-18's amendment).**
+/// `integration:credential:read` shows where an external system's secrets are
+/// kept, so seeing it stays a grant somebody makes deliberately rather than one
+/// a new tenant is born with. The `integration:external-system:*` family is not
+/// withheld: a new tenant's administrator can register and see systems.
+///
+/// Like [`TENANT_ADMINISTRATION_PREFIX`], withholding it is not a boundary:
+/// that administrator holds `identity:role:update` and can grant these codes to
+/// their own role. What it changes is who has to decide to.
+pub const INTEGRATION_CREDENTIAL_PREFIX: &str = "integration:credential:";
+
+/// Every family a provisioned tenant's `ROLE-ADMIN` is created without.
+pub const WITHHELD_FROM_A_PROVISIONED_TENANT: [&str; 2] =
+    [TENANT_ADMINISTRATION_PREFIX, INTEGRATION_CREDENTIAL_PREFIX];
+
 /// Confirms the caller may administer tenants, and answers with the tenant they
 /// must be in.
 ///
@@ -349,7 +367,7 @@ pub async fn create_tenant(
             display_name: &request.administrator.display_name,
             password: &request.administrator.password,
         },
-        TENANT_ADMINISTRATION_PREFIX,
+        &WITHHELD_FROM_A_PROVISIONED_TENANT,
     )
     .await?;
 
