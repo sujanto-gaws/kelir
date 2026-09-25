@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE integration_credentials\n        SET credential_type = COALESCE($4, credential_type),\n            secret_reference = COALESCE($5, secret_reference),\n            valid_from = CASE WHEN $6 THEN $7 ELSE valid_from END,\n            valid_to = CASE WHEN $8 THEN $9 ELSE valid_to END,\n            is_active = COALESCE($10, is_active),\n            updated_by = $11,\n            updated_at = now()\n        WHERE tenant_id = $1 AND external_system_id = $2 AND id = $3 AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Bool",
+        "Date",
+        "Bool",
+        "Date",
+        "Bool",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1955e82deca4699902fd1ddfb578418633616127a10321b0bfda295f2c02e3b5"
+}

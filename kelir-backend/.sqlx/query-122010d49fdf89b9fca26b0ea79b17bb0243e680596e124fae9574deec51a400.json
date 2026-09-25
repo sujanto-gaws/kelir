@@ -1,0 +1,73 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, external_system_id, credential_type, secret_reference, valid_from,\n               valid_to, is_active, created_at, updated_at\n        FROM integration_credentials\n        WHERE tenant_id = $1 AND external_system_id = $2 AND deleted_at IS NULL\n        ORDER BY created_at, id\n        LIMIT $3 OFFSET $4\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "external_system_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "credential_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "secret_reference",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "valid_from",
+        "type_info": "Date"
+      },
+      {
+        "ordinal": 5,
+        "name": "valid_to",
+        "type_info": "Date"
+      },
+      {
+        "ordinal": 6,
+        "name": "is_active",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "122010d49fdf89b9fca26b0ea79b17bb0243e680596e124fae9574deec51a400"
+}

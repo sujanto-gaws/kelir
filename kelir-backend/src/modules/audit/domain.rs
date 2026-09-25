@@ -114,6 +114,12 @@ pub enum ObjectType {
     Delegation,
     Department,
     Tenant,
+
+    // Integration (#520). Three types for three resources, each placed under
+    // the permission that shows the resource itself.
+    ExternalSystem,
+    IntegrationEndpoint,
+    IntegrationCredential,
 }
 
 impl ObjectType {
@@ -144,6 +150,9 @@ impl ObjectType {
         Self::Delegation,
         Self::Department,
         Self::Tenant,
+        Self::ExternalSystem,
+        Self::IntegrationEndpoint,
+        Self::IntegrationCredential,
     ];
 
     /// What the column holds and the hash chain covers (naming convention §7).
@@ -168,6 +177,9 @@ impl ObjectType {
             Self::Delegation => "DELEGATION",
             Self::Department => "DEPARTMENT",
             Self::Tenant => "TENANT",
+            Self::ExternalSystem => "EXTERNAL_SYSTEM",
+            Self::IntegrationEndpoint => "INTEGRATION_ENDPOINT",
+            Self::IntegrationCredential => "INTEGRATION_CREDENTIAL",
         }
     }
 
@@ -219,6 +231,15 @@ impl ObjectType {
             Self::Delegation => "identity:delegation:read",
             Self::Department => "organization:department:read",
             Self::Tenant => "organization:tenant:read",
+
+            // An endpoint is part of its system's configuration and is read
+            // under the system's permission (#520, answer 1). A credential's
+            // values name where its secret lives, which is exactly what
+            // `integration:credential:read` exists to gate apart from the
+            // system's read (#520, answer 3) — so its recorded values need that
+            // permission and not the system's.
+            Self::ExternalSystem | Self::IntegrationEndpoint => "integration:external-system:read",
+            Self::IntegrationCredential => "integration:credential:read",
         }
     }
 
@@ -452,7 +473,7 @@ mod tests {
     fn all_names_every_variant() {
         assert_eq!(
             ObjectType::ALL.len(),
-            19,
+            22,
             "a variant was added to `ObjectType` and not to `ObjectType::ALL`, or the other way \
              around — `from_db` reads `ALL`, so a variant missing from it is written and never \
              read back"
