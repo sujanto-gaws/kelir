@@ -1893,6 +1893,48 @@ async fn every_route_is_in_the_document_and_no_schema_can_carry_a_secret() {
     }
 }
 
+/// **#552 in the database**: `0047_credential_reference_texts.sql` rewrites the
+/// two texts `0046` seeded saying *never the secret*, the column comment and
+/// the `integration:credential:read` description. Seen red, 2026-09-25, with
+/// `0047` moved out of the migrations directory.
+#[tokio::test]
+async fn the_database_texts_say_reference_and_not_never_the_secret() {
+    let app = TestApp::spawn().await;
+
+    let comment: Option<String> = sqlx::query_scalar(
+        "SELECT col_description('integration_credentials'::regclass, attnum)
+         FROM pg_attribute
+         WHERE attrelid = 'integration_credentials'::regclass
+           AND attname = 'secret_reference'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .expect("the column comment");
+
+    let descriptions: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT permission_code, description FROM permissions
+         WHERE permission_code LIKE 'integration:%' AND deleted_at IS NULL",
+    )
+    .fetch_all(&app.pool)
+    .await
+    .expect("the catalogue rows");
+    assert_eq!(descriptions.len(), 8, "{descriptions:?}");
+
+    let comment = comment.expect("secret_reference has a comment");
+    assert!(comment.contains("shape"), "{comment}");
+
+    for text in std::iter::once(&comment).chain(descriptions.iter().filter_map(|(_, d)| d.as_ref()))
+    {
+        let lower = text.to_lowercase();
+        for claim in ["never the secret", "never a secret"] {
+            assert!(
+                !lower.contains(claim),
+                "the database says `{claim}`: {text}"
+            );
+        }
+    }
+}
+
 // ===========================================================================
 // Independent verification, adopted
 // ===========================================================================

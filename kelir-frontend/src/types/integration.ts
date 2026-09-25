@@ -3,9 +3,10 @@
  * FR-INT-001, #520).
  *
  * The wire shape is the backend's `modules/integration`, serialized
- * `camelCase`. **There is no secret anywhere in it**: a credential carries a
- * `secretReference` — a pointer such as `vault://kelir/erp/api-key` — and never
- * the value it points at (AC-5). Nothing on the client models a secret either.
+ * `camelCase`. **No field in it holds a resolved secret**: a credential carries
+ * a `secretReference`, a reference such as `vault://kelir/erp/api-key` (AC-5).
+ * The API checks the reference's shape only, so it is returned as it was
+ * entered (#552). Nothing on the client resolves a reference either.
  */
 
 /** Whether a system may be called. `INACTIVE` is reached only through the deactivate verb. */
@@ -131,12 +132,12 @@ export interface UpdateIntegrationEndpointRequest {
   status?: EndpointStatus
 }
 
-/** Exactly the nine keys the API returns — and no secret among them. */
+/** Exactly the nine keys the API returns, none of them a resolved secret. */
 export interface IntegrationCredential {
   id: string
   externalSystemId: string
   credentialType: AuthType
-  /** Where the secret lives (`vault://…`, `env://NAME`), never the secret. */
+  /** A reference to where the secret lives (`vault://…`, `env://NAME`), as entered; only its shape is checked. */
   secretReference: string
   /** ISO date, `YYYY-MM-DD`. */
   validFrom: string | null

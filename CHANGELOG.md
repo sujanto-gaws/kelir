@@ -32,6 +32,12 @@ While the major version is `0`, the public API may change in any release.
   deployment, so the key validates instantly. Nothing existing changes in a way
   a reader can observe, and `v0.8.0` runs against the migrated schema
   (release process §6).
+- **`0047` changes two texts and nothing else.** It rewrites the column
+  comment on `integration_credentials.secret_reference` and the
+  `integration:credential:read` permission's description, which `0046` seeded
+  saying *never the secret*. Both now say *reference*, and that only its shape
+  is checked ([#552](https://github.com/sujanto-gaws/kelir/issues/552)). No
+  schema, grant or behaviour changes.
 
 ### Added
 

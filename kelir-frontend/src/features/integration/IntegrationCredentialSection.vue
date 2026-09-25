@@ -31,8 +31,10 @@ import IntegrationCredentialFormDialog from './IntegrationCredentialFormDialog.v
  * could read but the server refused (a grant revoked since sign-in) gets the
  * same: the 403 means *not yours*, not *broken*.
  *
- * **Only the reference is ever rendered.** The API carries no secret, and this
- * table shows `secretReference` as the pointer it is.
+ * **The reference is rendered as it was stored.** No field carries a resolved
+ * secret, and this table shows `secretReference` as it was entered. The API
+ * checks only its shape, so a secret typed as a path segment would be shown
+ * here too (#552); the text above tells the user what to enter instead.
  */
 const props = defineProps<{ systemId: string }>()
 
@@ -133,7 +135,9 @@ onMounted(() => {
       <div>
         <h3 id="credentials-heading" class="text-lg font-semibold">Credential references</h3>
         <p class="text-sm text-muted-foreground">
-          Where this system's secrets are kept. Kelir stores the reference, never the secret.
+          Where this system's secrets are kept. Put each secret in the vault or the environment
+          first, then enter where it is, such as <code>vault://…</code> or <code>env://NAME</code>,
+          not the secret itself.
         </p>
       </div>
       <Button v-if="canCreate" data-testid="add-credential" @click="startAdding">

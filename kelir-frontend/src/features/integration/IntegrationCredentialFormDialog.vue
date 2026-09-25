@@ -22,13 +22,14 @@ import { blankToNull, unplacedErrors } from './form-errors'
 /**
  * Adding and editing a credential *reference* (FR-INT-001 AC-5, #520).
  *
- * **Nothing here takes a secret.** Kelir stores where a secret lives — a vault
- * path or an environment variable's name — and never the value. So the input
+ * **This form asks for where a secret lives**, a vault path or an environment
+ * variable's name, not the value. So the input
  * is a plain text box, not a password field: a masked input says *type your
  * secret here*, and the one thing this form must never invite is someone
  * pasting an API key into it. The label, placeholder and hint all say
- * *reference*, and the backend refuses anything that is not `vault://…` or
- * `env://NAME` with `NOT_A_SECRET_REFERENCE`.
+ * *reference*, and the backend refuses anything without the shape of
+ * `vault://…` or `env://NAME` with `NOT_A_SECRET_REFERENCE`. It checks shape
+ * only: a secret typed as a path segment has the right shape (#552).
  */
 const props = defineProps<{ systemId: string; editing: IntegrationCredential | null }>()
 const emit = defineEmits<{ saved: [credential: IntegrationCredential] }>()
