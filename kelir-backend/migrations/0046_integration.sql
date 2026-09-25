@@ -345,7 +345,7 @@ INSERT INTO permissions (id, tenant_id, permission_code, module, description) VA
     ('00000000-0000-0000-0001-000000000069', '00000000-0000-0000-0000-000000000001',
      'integration:external-system:update', 'integration', 'Edit an external system and manage its endpoints'),
     ('00000000-0000-0000-0001-000000000070', '00000000-0000-0000-0000-000000000001',
-     'integration:external-system:deactivate', 'integration', 'Deactivate an external system'),
+     'integration:external-system:deactivate', 'integration', 'Activate or deactivate an external system'),
     ('00000000-0000-0000-0001-000000000071', '00000000-0000-0000-0000-000000000001',
      'integration:credential:create', 'integration', 'Add a credential reference to an external system'),
     ('00000000-0000-0000-0001-000000000072', '00000000-0000-0000-0000-000000000001',
