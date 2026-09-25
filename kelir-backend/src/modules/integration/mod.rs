@@ -22,7 +22,8 @@
 //! # Three resources and eight permissions (#520, the product owner's answers)
 //!
 //! * **External systems** — `:create`, `:read`, `:update`, and `:deactivate`
-//!   gated apart from `:update`. **There is no delete**: a delete would have to
+//!   gated apart from `:update`; `:deactivate` opens both `deactivate` and
+//!   `activate`. **There is no delete**: a delete would have to
 //!   decide what happens to the `master_data_source_references` rows whose key
 //!   points at the system, and that is its own decision.
 //! * **Endpoints** are part of a system's configuration and have **no
@@ -46,13 +47,18 @@ pub const EXTERNAL_SYSTEM_CREATE: &str = "integration:external-system:create";
 pub const EXTERNAL_SYSTEM_READ: &str = "integration:external-system:read";
 /// Edit an external system **and create or edit its endpoints**.
 pub const EXTERNAL_SYSTEM_UPDATE: &str = "integration:external-system:update";
-/// Take an external system out of service.
+/// Take an external system out of service, **and put it back**.
+///
+/// Read as *change whether it is active*: turning a system on and turning it
+/// off are one permission (#520, the product owner's decision of 2026-09-25),
+/// so it gates `POST {id}/deactivate` and `POST {id}/activate` both.
 ///
 /// Gated apart from [`EXTERNAL_SYSTEM_UPDATE`] on `workflow:definition:publish`'s
 /// precedent: who may correct a base URL and who may stop every integration
 /// that runs through a system are different questions. For the same reason an
-/// edit cannot set `status` to `INACTIVE` — that would be this permission
-/// reached through the other one.
+/// edit cannot move `status` into or out of `INACTIVE` — that would be this
+/// permission reached through the other one. `ACTIVE` ↔ `MAINTENANCE` stays an
+/// edit: it says the system is being worked on, not whether it is in service.
 pub const EXTERNAL_SYSTEM_DEACTIVATE: &str = "integration:external-system:deactivate";
 
 pub const CREDENTIAL_CREATE: &str = "integration:credential:create";

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE external_systems\n        SET status = 'ACTIVE', updated_by = $3, updated_at = now()\n        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL AND status <> 'ACTIVE'\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "84391a7c05d2dff838ffe0d5f5bc6dd5fcc0b5427ee139ce1ce0b4c0ab7eaad0"
+}

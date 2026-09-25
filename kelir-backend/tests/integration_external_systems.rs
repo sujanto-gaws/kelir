@@ -31,6 +31,23 @@
 //! | `domain::credential::is_secret_reference` returns `true` | `a_raw_secret_is_refused_and_nothing_is_stored` |
 //! | `fk_integration_endpoints_external_system_id_tenant_id` written as `REFERENCES external_systems (id)` in `0046` | `a_cross_tenant_child_row_is_unwritable` |
 //! | `pub note: Option<String>` added to `IntegrationCredential` | `a_credential_response_is_the_reference_and_nothing_else` |
+//!
+//! Activation (#520, the product owner's decision of 2026-09-25) added the
+//! rows below, **run 2026-09-25**. Two guards are layered — a service check
+//! over a repository predicate — and each layer alone came back **green**,
+//! because the other held; that is recorded as run rather than dropped, and
+//! the pair removed together is the red run.
+//!
+//! | Mutation | Result |
+//! |---|---|
+//! | `service::external_system::activate_external_system` requires `EXTERNAL_SYSTEM_UPDATE` instead of `EXTERNAL_SYSTEM_DEACTIVATE` | red: `each_route_requires_its_own_permission` |
+//! | `integration::handlers::activate_external_system` removed from the router's `paths(...)` | red: `every_route_is_in_the_document_and_no_schema_can_carry_a_secret` |
+//! | The `before.status == Inactive` refusal removed from `update_external_system` | green — `update_external_system`'s `status <> 'INACTIVE'` predicate refused it |
+//! | That predicate removed from `repository::external_system::update_external_system` | green — the service's refusal held |
+//! | Both of the above | red: `an_updater_cannot_reactivate_through_an_edit` |
+//! | `activate_external_system`'s early return for an `ACTIVE` system removed | green — `activate_external_system`'s `status <> 'ACTIVE'` predicate made the repeat a no-op |
+//! | That predicate removed from `repository::external_system::activate_external_system` | green — the early return held |
+//! | Both of the above | red: `a_system_is_deactivated_and_activated_again` (the repeat records a second `Activated`) |
 
 mod common;
 
@@ -398,6 +415,15 @@ fn routes(system: Uuid, endpoint: Uuid, credential: Uuid, nonce: usize) -> Vec<R
         Route {
             method: Method::POST,
             path: format!("{system_path}/deactivate"),
+            permission: "integration:external-system:deactivate",
+            body: None,
+        },
+        // After the deactivation above, so for the one caller it opens it does
+        // real work rather than returning an active system unchanged. Turning a
+        // system on is the same permission as turning it off (#520, 2026-09-25).
+        Route {
+            method: Method::POST,
+            path: format!("{system_path}/activate"),
             permission: "integration:external-system:deactivate",
             body: None,
         },
@@ -895,6 +921,185 @@ async fn an_edit_cannot_do_what_deactivate_is_gated_for() {
         .await
         .expect("read the system");
     assert_eq!(status, "ACTIVE");
+}
+
+/// The other half of the side door: an updater cannot switch an inactive
+/// system back on through a `PUT` — neither to `ACTIVE` nor to `MAINTENANCE`,
+/// which would put it back in play just the same (#520, 2026-09-25). The rest
+/// of the edit is still theirs, so an inactive system can be corrected.
+#[tokio::test]
+async fn an_updater_cannot_reactivate_through_an_edit() {
+    let app = TestApp::spawn().await;
+    let system = system_row(&app, fixtures::SYSTEM_TENANT_ID, "SWITCHED_OFF").await;
+    sqlx::query("UPDATE external_systems SET status = 'INACTIVE' WHERE id = $1")
+        .bind(system)
+        .execute(&app.pool)
+        .await
+        .expect("switch the system off");
+
+    let editor = caller_holding(&app, "REVIVER", &["integration:external-system:update"]).await;
+
+    for status in ["ACTIVE", "MAINTENANCE"] {
+        let response = app
+            .send(
+                Method::PUT,
+                &format!("{BASE}/{system}"),
+                Some(&editor),
+                Some(json!({ "systemName": "Revived", "status": status })),
+            )
+            .await;
+
+        assert_eq!(
+            response.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{status}: {}",
+            response.body
+        );
+        assert_eq!(response.body["error"]["details"][0]["path"], "status");
+        assert_eq!(response.body["error"]["details"][0]["code"], "NOT_ALLOWED");
+        assert!(
+            response.body["error"]["details"][0]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("/activate")),
+            "the refusal names the route that does it: {}",
+            response.body
+        );
+    }
+
+    let (name, status): (String, String) =
+        sqlx::query_as("SELECT system_name, status FROM external_systems WHERE id = $1")
+            .bind(system)
+            .fetch_one(&app.pool)
+            .await
+            .expect("read the system");
+    assert_eq!(
+        (name.as_str(), status.as_str()),
+        ("SWITCHED_OFF", "INACTIVE"),
+        "a refused edit wrote nothing"
+    );
+
+    // An edit that leaves status alone is still an edit.
+    let renamed = app
+        .send(
+            Method::PUT,
+            &format!("{BASE}/{system}"),
+            Some(&editor),
+            Some(json!({ "systemName": "Corrected" })),
+        )
+        .await;
+    assert_eq!(renamed.status, StatusCode::OK, "{}", renamed.body);
+    assert_eq!(renamed.data()["status"], "INACTIVE");
+}
+
+/// Maintenance is not activation: `ACTIVE` ↔ `MAINTENANCE` on a system that is
+/// in service stays an edit under `:update`.
+#[tokio::test]
+async fn maintenance_is_an_edit_not_an_activation() {
+    let app = TestApp::spawn().await;
+    let system = system_row(&app, fixtures::SYSTEM_TENANT_ID, "SERVICED").await;
+    let editor = caller_holding(&app, "SERVICER", &["integration:external-system:update"]).await;
+
+    for status in ["MAINTENANCE", "ACTIVE"] {
+        let response = app
+            .send(
+                Method::PUT,
+                &format!("{BASE}/{system}"),
+                Some(&editor),
+                Some(json!({ "status": status })),
+            )
+            .await;
+
+        assert_eq!(
+            response.status,
+            StatusCode::OK,
+            "{status}: {}",
+            response.body
+        );
+        assert_eq!(response.data()["status"], status);
+    }
+}
+
+/// Off, on, on again: activation undoes deactivation, is idempotent, and is
+/// recorded once.
+#[tokio::test]
+async fn a_system_is_deactivated_and_activated_again() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let id = system(&app, &token, "ROUND_TRIP").await;
+
+    let off = app
+        .send(
+            Method::POST,
+            &format!("{BASE}/{id}/deactivate"),
+            Some(&token),
+            None,
+        )
+        .await;
+    assert_eq!(off.data()["status"], "INACTIVE");
+
+    for attempt in 0..2 {
+        let on = app
+            .send(
+                Method::POST,
+                &format!("{BASE}/{id}/activate"),
+                Some(&token),
+                None,
+            )
+            .await;
+
+        assert_eq!(on.status, StatusCode::OK, "attempt {attempt}: {}", on.body);
+        assert_eq!(on.data()["status"], "ACTIVE", "attempt {attempt}");
+    }
+
+    // From maintenance, too: activate means in service, whatever it was.
+    let maintained = app
+        .send(
+            Method::PUT,
+            &format!("{BASE}/{id}"),
+            Some(&token),
+            Some(json!({ "status": "MAINTENANCE" })),
+        )
+        .await;
+    assert_eq!(maintained.data()["status"], "MAINTENANCE");
+    let on = app
+        .send(
+            Method::POST,
+            &format!("{BASE}/{id}/activate"),
+            Some(&token),
+            None,
+        )
+        .await;
+    assert_eq!(on.data()["status"], "ACTIVE");
+
+    let events: Vec<String> = sqlx::query_scalar(
+        "SELECT event_type FROM audit_events WHERE object_id = $1 ORDER BY created_at, id",
+    )
+    .bind(id)
+    .fetch_all(&app.pool)
+    .await
+    .expect("read the audit trail");
+
+    assert_eq!(
+        events,
+        vec![
+            "ExternalSystem.Registered",
+            "ExternalSystem.Deactivated",
+            "ExternalSystem.Activated",
+            "ExternalSystem.Updated",
+            "ExternalSystem.Activated"
+        ],
+        "the repeat activation recorded nothing"
+    );
+
+    let missing = app
+        .send(
+            Method::POST,
+            &format!("{BASE}/{}/activate", Uuid::now_v7()),
+            Some(&token),
+            None,
+        )
+        .await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -1425,6 +1630,7 @@ async fn every_route_is_in_the_document_and_no_schema_can_carry_a_secret() {
         (format!("{BASE}/{{id}}"), "get"),
         (format!("{BASE}/{{id}}"), "put"),
         (format!("{BASE}/{{id}}/deactivate"), "post"),
+        (format!("{BASE}/{{id}}/activate"), "post"),
         (format!("{BASE}/{{id}}/endpoints"), "get"),
         (format!("{BASE}/{{id}}/endpoints"), "post"),
         (format!("{BASE}/{{id}}/endpoints/{{endpointId}}"), "get"),
@@ -1447,6 +1653,24 @@ async fn every_route_is_in_the_document_and_no_schema_can_carry_a_secret() {
     assert!(
         paths[format!("{BASE}/{{id}}")]["delete"].is_null(),
         "a system has no delete (#520, answer 2)"
+    );
+
+    // Fifteen operations, and no more: the list above is the whole surface.
+    let operations: usize = paths
+        .as_object()
+        .expect("paths")
+        .iter()
+        .filter(|(path, _)| path.starts_with(BASE))
+        .map(|(_, item)| {
+            ["get", "put", "post", "delete", "patch"]
+                .iter()
+                .filter(|method| item[**method].is_object())
+                .count()
+        })
+        .sum();
+    assert_eq!(
+        operations, 15,
+        "the integration surface has {operations} operations"
     );
 
     // Every property of every integration schema whose name mentions a secret

@@ -7,7 +7,9 @@ use super::{duplicate_to_conflict, search_term, system_not_found};
 use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
 use crate::modules::audit::{self, domain::ObjectType, AuditEntry, ChangeSet};
-use crate::modules::integration::domain::external_system::{validate_register, validate_update};
+use crate::modules::integration::domain::external_system::{
+    activation_is_not_an_edit, validate_register, validate_update,
+};
 use crate::modules::integration::domain::{
     trimmed, ExternalSystem, ExternalSystemQuery, ExternalSystemStatus,
     RegisterExternalSystemRequest, RetryPolicy, UpdateExternalSystemRequest,
@@ -150,6 +152,12 @@ pub async fn update_external_system(
         .await?
         .ok_or_else(system_not_found)?;
 
+    // Out of `INACTIVE` is activation, which is `:deactivate`'s — even into
+    // `MAINTENANCE`, which would put a switched-off system back in play.
+    if request.status.is_some() && before.status == ExternalSystemStatus::Inactive {
+        return Err(activation_is_not_an_edit());
+    }
+
     // A blank string clears a nullable text field, the same as `null` does.
     let base_url = request
         .base_url
@@ -183,7 +191,15 @@ pub async fn update_external_system(
     .await?;
 
     if affected == 0 {
-        return Err(system_not_found());
+        // Deactivated between the read above and the write: the repository's
+        // predicate refused the status change, and the answer is the refusal
+        // the read would have given.
+        return Err(
+            match repo::find_external_system(&state.pool, tenant_id, id).await? {
+                Some(_) => activation_is_not_an_edit(),
+                None => system_not_found(),
+            },
+        );
     }
 
     let after = load(state, tenant_id, id).await?;
@@ -264,6 +280,59 @@ pub async fn deactivate_external_system(
         AuditEntry {
             tenant_id,
             event_type: "ExternalSystem.Deactivated",
+            action: "STATUS_CHANGE",
+            object_type: ObjectType::ExternalSystem,
+            object_id: id,
+            actor_user_id: actor,
+            ip_address: caller.ip_address(),
+            reason: None,
+            old_value: Some(json!({ "status": before.status })),
+            new_value: Some(json!({ "status": after.status })),
+        },
+    )
+    .await;
+
+    Ok(after)
+}
+
+/// Puts a system back in service: `status` becomes `ACTIVE`, from `INACTIVE`
+/// or from `MAINTENANCE`.
+///
+/// **Under `integration:external-system:deactivate`**, because turning a
+/// system on and turning it off are one permission (#520, the product owner's
+/// decision of 2026-09-25): the string is read as *change whether it is
+/// active*. **Idempotent** as deactivation is — an active system is returned
+/// unchanged and nothing is recorded.
+pub async fn activate_external_system(
+    state: &AppState,
+    caller: &Authenticated,
+    id: Uuid,
+) -> Result<ExternalSystem, AppError> {
+    caller.require(EXTERNAL_SYSTEM_DEACTIVATE)?;
+
+    let tenant_id = caller.tenant_id();
+    let actor = Some(caller.user_id());
+
+    let before = repo::find_external_system(&state.pool, tenant_id, id)
+        .await?
+        .ok_or_else(system_not_found)?;
+
+    if before.status == ExternalSystemStatus::Active {
+        return Ok(before);
+    }
+
+    if repo::activate_external_system(&state.pool, tenant_id, id, actor).await? == 0 {
+        // A concurrent activation won; the system is in the state asked for.
+        return load(state, tenant_id, id).await;
+    }
+
+    let after = load(state, tenant_id, id).await?;
+
+    audit::record_or_warn(
+        &state.pool,
+        AuditEntry {
+            tenant_id,
+            event_type: "ExternalSystem.Activated",
             action: "STATUS_CHANGE",
             object_type: ObjectType::ExternalSystem,
             object_id: id,

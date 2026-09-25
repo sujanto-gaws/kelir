@@ -224,6 +224,20 @@ pub async fn insert_external_system<'e, E: PgExecutor<'e>>(
     .map(|_| ())
 }
 
+/// Applies an edit.
+///
+/// **`AND ($14 IS NULL OR status <> 'INACTIVE')`** refuses a `status` change
+/// on a system that is inactive, which is activation (#520, 2026-09-25). The
+/// service reads the row first and refuses there, so in production this
+/// predicate is reached only by a deactivation landing between that read and
+/// this write. The service re-reads a zero count and answers it with the same
+/// refusal.
+///
+/// **Each layer holds without the other**, and that was measured rather than
+/// argued (Seen red, 2026-09-25): with the service's check removed,
+/// `an_updater_cannot_reactivate_through_an_edit` stays green through this
+/// predicate; with this predicate removed it stays green through the check;
+/// with both removed it goes red.
 pub async fn update_external_system<'e, E: PgExecutor<'e>>(
     executor: E,
     tenant_id: Uuid,
@@ -250,6 +264,7 @@ pub async fn update_external_system<'e, E: PgExecutor<'e>>(
             updated_by = $15,
             updated_at = now()
         WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+          AND ($14::text IS NULL OR status <> 'INACTIVE')
         "#,
         tenant_id,
         id,
@@ -290,6 +305,40 @@ pub async fn deactivate_external_system<'e, E: PgExecutor<'e>>(
         UPDATE external_systems
         SET status = 'INACTIVE', updated_by = $3, updated_at = now()
         WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL AND status <> 'INACTIVE'
+        "#,
+        tenant_id,
+        id,
+        updated_by,
+    )
+    .execute(executor)
+    .await
+    .map(|result| result.rows_affected())
+}
+
+/// Puts a system back in service: `status` becomes `ACTIVE`.
+///
+/// **`AND status <> 'ACTIVE'` makes a repeat a no-op**, as
+/// [`deactivate_external_system`]'s predicate does: the service returns early
+/// for an active system, so in production this is reached by a second
+/// activation racing the first.
+///
+/// **Each layer holds without the other** (Seen red, 2026-09-25): with the
+/// service's early return removed, `a_system_is_deactivated_and_activated_again`
+/// stays green because this predicate turns the repeat into a zero count and no
+/// audit row; with this predicate removed it stays green through the early
+/// return; with both removed the repeat records a second `Activated` and the
+/// test goes red.
+pub async fn activate_external_system<'e, E: PgExecutor<'e>>(
+    executor: E,
+    tenant_id: Uuid,
+    id: Uuid,
+    updated_by: Option<Uuid>,
+) -> Result<u64, sqlx::Error> {
+    sqlx::query!(
+        r#"
+        UPDATE external_systems
+        SET status = 'ACTIVE', updated_by = $3, updated_at = now()
+        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL AND status <> 'ACTIVE'
         "#,
         tenant_id,
         id,

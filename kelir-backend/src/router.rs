@@ -166,6 +166,7 @@ use crate::state::AppState;
         integration::handlers::register_external_system,
         integration::handlers::update_external_system,
         integration::handlers::deactivate_external_system,
+        integration::handlers::activate_external_system,
         integration::handlers::list_endpoints,
         integration::handlers::get_endpoint,
         integration::handlers::create_endpoint,

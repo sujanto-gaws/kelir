@@ -28,6 +28,29 @@ pub const MAX_INITIAL_DELAY_SECONDS: u32 = 86_400;
 pub const MAX_BACKOFF_MULTIPLIER: f64 = 10.0;
 pub const MAX_DEAD_LETTER_AFTER_ATTEMPTS: u32 = 50;
 
+/// Why an edit may not move a system into or out of `INACTIVE`.
+///
+/// **Turning a system on or off is one permission** — the product owner's
+/// decision on #520, 2026-09-25 — and it is `integration:external-system:deactivate`,
+/// read as *change whether it is active*. An edit is `:update`'s, so letting a
+/// `PUT` set `INACTIVE`, or set any status on a system that is `INACTIVE`,
+/// would be that permission reached through the other one. `ACTIVE` ↔
+/// `MAINTENANCE` on a system that is not `INACTIVE` stays an edit: it says
+/// whether the system is being worked on, not whether it is in service.
+pub const ACTIVATION_IS_NOT_AN_EDIT: &str = "Whether a system is active is changed through \
+     POST /external-systems/{id}/deactivate and POST /external-systems/{id}/activate, \
+     not by an edit";
+
+/// The refusal an edit gets for touching `status` on an `INACTIVE` system.
+pub fn activation_is_not_an_edit() -> AppError {
+    AppError::validation(vec![crate::error::ValidationDetail::new(
+        "status",
+        "enum",
+        "NOT_ALLOWED",
+        ACTIVATION_IS_NOT_AN_EDIT,
+    )])
+}
+
 /// `external_systems.status` (§12.1's `CHECK`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -237,8 +260,10 @@ pub struct RegisterExternalSystemRequest {
 /// `null` clears it.
 ///
 /// `systemCode` is absent because it may not change: it is what configuration
-/// names a system by. `status` accepts `ACTIVE` and `MAINTENANCE` only —
-/// **`INACTIVE` is `POST {id}/deactivate`'s**, under its own permission.
+/// names a system by. `status` accepts `ACTIVE` and `MAINTENANCE` only, and
+/// only on a system that is not `INACTIVE` — **into and out of `INACTIVE` is
+/// `POST {id}/deactivate` and `POST {id}/activate`**, under their own
+/// permission ([`ACTIVATION_IS_NOT_AN_EDIT`]).
 #[derive(Debug, Clone, Default, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateExternalSystemRequest {
@@ -330,12 +355,7 @@ pub fn validate_update(request: &UpdateExternalSystemRequest) -> Result<(), AppE
         retry_policy(policy, &mut problems);
     }
     if request.status == Some(ExternalSystemStatus::Inactive) {
-        problems.push(
-            "status",
-            "enum",
-            "NOT_ALLOWED",
-            "A system is deactivated through POST /external-systems/{id}/deactivate, not by an edit",
-        );
+        problems.push("status", "enum", "NOT_ALLOWED", ACTIVATION_IS_NOT_AN_EDIT);
     }
 
     problems.finish()

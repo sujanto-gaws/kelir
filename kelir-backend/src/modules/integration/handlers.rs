@@ -1,7 +1,8 @@
 //! Routes under `/api/v1/integration/external-systems` (FR-INT-001, #520).
 //!
 //! **No `DELETE` on a system** — `POST {id}/deactivate` instead (#520, the
-//! product owner's answer 2). **No `DELETE` on an endpoint** either: an
+//! product owner's answer 2), and `POST {id}/activate` to undo it, both under
+//! `:deactivate`. **No `DELETE` on an endpoint** either: an
 //! endpoint is retired by a `PUT` setting `status` to `INACTIVE`, under the
 //! system's `:update`. **A credential reference can be deleted**, under its own
 //! `integration:credential:delete`; what it pointed at is untouched.
@@ -38,6 +39,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/external-systems/{id}/deactivate",
             post(deactivate_external_system),
+        )
+        .route(
+            "/external-systems/{id}/activate",
+            post(activate_external_system),
         )
         .route(
             "/external-systems/{id}/endpoints",
@@ -126,9 +131,10 @@ pub async fn register_external_system(
 
 /// Edit an external system.
 ///
-/// `systemCode` may not change. `status` may be set to `ACTIVE` or
-/// `MAINTENANCE`; `INACTIVE` is refused with `NOT_ALLOWED`, because
-/// deactivation is `POST {id}/deactivate` under its own permission.
+/// `systemCode` may not change. `status` may move between `ACTIVE` and
+/// `MAINTENANCE`; `INACTIVE` is refused with `NOT_ALLOWED`, and so is any
+/// `status` on a system that is `INACTIVE` — turning a system off and on is
+/// `POST {id}/deactivate` and `POST {id}/activate`, under their own permission.
 #[utoipa::path(
     put, path = "/api/v1/integration/external-systems/{id}", tag = "integration",
     request_body = UpdateExternalSystemRequest,
@@ -136,7 +142,7 @@ pub async fn register_external_system(
         (status = 200, description = "Updated", body = ExternalSystem),
         (status = 403, description = "Missing integration:external-system:update"),
         (status = 404, description = "No such external system in this tenant"),
-        (status = 422, description = "Validation failed")
+        (status = 422, description = "Validation failed — NOT_ALLOWED on status when the edit would move the system into or out of INACTIVE")
     ),
     security(("bearer" = []))
 )]
@@ -171,6 +177,30 @@ pub async fn deactivate_external_system(
 ) -> Result<Json<ItemEnvelope<ExternalSystem>>, AppError> {
     Ok(Json(ItemEnvelope::new(
         external_system::deactivate_external_system(&state, &caller, id).await?,
+    )))
+}
+
+/// Put an external system back in service — `status` becomes `ACTIVE`.
+///
+/// Under `integration:external-system:deactivate`: turning a system on and off
+/// is one permission. Idempotent: a system already active is returned
+/// unchanged.
+#[utoipa::path(
+    post, path = "/api/v1/integration/external-systems/{id}/activate", tag = "integration",
+    responses(
+        (status = 200, description = "Activated, or already active", body = ExternalSystem),
+        (status = 403, description = "Missing integration:external-system:deactivate"),
+        (status = 404, description = "No such external system in this tenant")
+    ),
+    security(("bearer" = []))
+)]
+pub async fn activate_external_system(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    PathParam(id): PathParam<Uuid>,
+) -> Result<Json<ItemEnvelope<ExternalSystem>>, AppError> {
+    Ok(Json(ItemEnvelope::new(
+        external_system::activate_external_system(&state, &caller, id).await?,
     )))
 }
 
