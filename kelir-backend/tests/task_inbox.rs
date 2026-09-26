@@ -1932,6 +1932,337 @@ async fn a_role_is_released_when_the_revisions_naming_it_are_retired() {
     );
 }
 
+/// An approval the approver can send back to its author: `RETURN` moves it to
+/// `RETURNED`, a state with **no task**, and only `resubmitter` may take its
+/// `RESUBMIT` (JWSS §8's shape, with a role where §8 has `OWNER`).
+fn sent_back(key: &str, approver: &str, resubmitter: &str) -> Value {
+    json!({
+        "workflowKey": key,
+        "version": "1.0.0",
+        "name": "Approval that can send back",
+        "initialState": "MANAGER_APPROVAL",
+        "states": [
+            { "code": "MANAGER_APPROVAL", "name": "Manager approval",
+              "mapsToDocumentStatus": "PENDING_APPROVAL",
+              "task": { "taskDefinitionKey": "manager_approval", "taskName": "Decide",
+                        "assignment": { "assigneeType": "ROLE", "roleCode": approver } } },
+            { "code": "RETURNED", "name": "Sent back", "mapsToDocumentStatus": "RETURNED" },
+            { "code": "COMPLETED", "name": "Completed", "mapsToDocumentStatus": "COMPLETED",
+              "isFinal": true },
+            { "code": "REJECTED", "name": "Rejected", "mapsToDocumentStatus": "REJECTED",
+              "isFinal": true }
+        ],
+        "transitions": [
+            { "from": "MANAGER_APPROVAL", "to": "COMPLETED", "action": "APPROVE",
+              "allowedBy": format!("ROLE:{approver}") },
+            { "from": "MANAGER_APPROVAL", "to": "REJECTED", "action": "REJECT",
+              "allowedBy": format!("ROLE:{approver}"), "requiresComment": true },
+            { "from": "MANAGER_APPROVAL", "to": "RETURNED", "action": "RETURN",
+              "allowedBy": format!("ROLE:{approver}"), "requiresComment": true },
+            { "from": "RETURNED", "to": "MANAGER_APPROVAL", "action": "RESUBMIT",
+              "allowedBy": format!("ROLE:{resubmitter}") }
+        ]
+    })
+}
+
+/// **A document sent back, with no open task, holds the role its `RESUBMIT`
+/// names** (**D-91** (3), [#510]'s second case).
+///
+/// The document waits in `RETURNED`, which declares no task, so D-89's count
+/// finds nothing; only the edge out of it needs `TI-SENT-RESUB`. The revision
+/// holds the role while it is `ACTIVE`; deprecated, it still does while the
+/// instance runs, `SUSPENDED` included, because a suspended instance can be
+/// resumed onto that edge. Once the instance is `CANCELLED`, nothing runs on
+/// the revision and the role deletes.
+///
+/// **Seen red** against `definitions_naming_role` with `'SUSPENDED'` dropped
+/// from the instance statuses: the third delete answers 204.
+///
+/// [#510]: https://github.com/sujanto-gaws/kelir/issues/510
+#[tokio::test]
+async fn a_document_sent_back_holds_the_role_its_resubmit_names() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let (_, approver) = holder(&app, "TI-SENT-APPROVER", "ti.sent.approver").await;
+    let resubmitter = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "TI-SENT-RESUB",
+        &[],
+    )
+    .await;
+
+    let workflow = publish_workflow_definition(
+        &app,
+        &token,
+        "ti_sent",
+        sent_back("ti_sent", "TI-SENT-APPROVER", "TI-SENT-RESUB"),
+    )
+    .await;
+    let type_id = document_type(&app, &token, "TI_SENT", workflow).await;
+    let document = submitted_document(&app, &token, type_id, "Sent back to its author").await;
+    let task = open_task_of(&app, document).await;
+
+    let returned = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&approver),
+            json!({ "action": "RETURN", "comment": "Sent back." }),
+        )
+        .await;
+    assert_eq!(returned.status, StatusCode::OK, "{}", returned.body);
+    assert_eq!(
+        returned.body["data"]["currentState"], "RETURNED",
+        "{}",
+        returned.body
+    );
+
+    let open: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM workflow_tasks
+         WHERE document_id = $1 AND status IN ('CREATED','ASSIGNED','IN_PROGRESS')",
+    )
+    .bind(document)
+    .fetch_one(&app.pool)
+    .await
+    .expect("count the open tasks");
+    assert_eq!(open, 0, "the document waits with no open task");
+
+    let active = delete_role(&app, &token, resubmitter).await;
+    assert_named_by(
+        &active,
+        "ti_sent (\"Standard approval\", revision 1)",
+        "an ACTIVE revision did not hold the role its waiting edge names",
+    );
+
+    sqlx::query("UPDATE workflow_definitions SET status = 'DEPRECATED' WHERE id = $1")
+        .bind(workflow)
+        .execute(&app.pool)
+        .await
+        .expect("deprecate the revision");
+
+    let deprecated = delete_role(&app, &token, resubmitter).await;
+    assert_named_by(
+        &deprecated,
+        "ti_sent (\"Standard approval\", revision 1, deprecated)",
+        "a deprecated revision did not hold the role its running instance waits on",
+    );
+
+    set_instance_status(&app, document, "SUSPENDED").await;
+    let suspended = delete_role(&app, &token, resubmitter).await;
+    assert_named_by(
+        &suspended,
+        "ti_sent (\"Standard approval\", revision 1, deprecated)",
+        "a suspended instance did not keep its deprecated revision's role",
+    );
+
+    set_instance_status(&app, document, "CANCELLED").await;
+    let deleted = delete_role(&app, &token, resubmitter).await;
+    assert_eq!(
+        deleted.status,
+        StatusCode::NO_CONTENT,
+        "a deprecated revision whose only instance is cancelled held its role: {}",
+        deleted.body
+    );
+}
+
+/// **A deprecated revision is held only by its own running instances**
+/// (**D-91** (3), [#510]).
+///
+/// Revision `ti_idle` names the role and is deprecated with nothing ever run
+/// on it. Another definition, which names another role, has an approval
+/// running. That instance is not `ti_idle`'s, so the role deletes.
+///
+/// **Seen red** against `definitions_naming_role` with
+/// `i.workflow_definition_id = d.id` dropped from the instance clause: the
+/// delete answers 409, the other definition's instance holding `ti_idle`.
+///
+/// [#510]: https://github.com/sujanto-gaws/kelir/issues/510
+#[tokio::test]
+async fn a_deprecated_revision_is_held_only_by_its_own_running_instances() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    holder(&app, "TI-IDLE-OTHER", "ti.idle.other").await;
+    let role = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "TI-IDLE-NAMED",
+        &[],
+    )
+    .await;
+
+    let idle = publish_workflow(&app, &token, "ti_idle", "TI-IDLE-NAMED").await;
+    sqlx::query("UPDATE workflow_definitions SET status = 'DEPRECATED' WHERE id = $1")
+        .bind(idle)
+        .execute(&app.pool)
+        .await
+        .expect("deprecate the idle revision");
+
+    let running = publish_workflow(&app, &token, "ti_idle_running", "TI-IDLE-OTHER").await;
+    let type_id = document_type(&app, &token, "TI_IDLE_RUNNING", running).await;
+    let document = submitted_document(&app, &token, type_id, "Running elsewhere").await;
+    open_task_of(&app, document).await;
+
+    let deleted = delete_role(&app, &token, role).await;
+    assert_eq!(
+        deleted.status,
+        StatusCode::NO_CONTENT,
+        "another definition's running instance kept a deprecated revision's role: {}",
+        deleted.body
+    );
+}
+
+/// **An edge's role code is matched exactly, case included** (**D-91** (3),
+/// [#510]).
+///
+/// The edges are `allowedBy` `"ROLE:TI-CASE-EDGE"` and the task is offered to
+/// another role, so only the `workflow_transitions` clause can hold a role.
+/// `TI-CASE-EDGE` is held; `ti-case-edge`, a different role that
+/// `assignment::permits` would never resolve for that edge, deletes.
+///
+/// **Seen red** against `definitions_naming_role` with the edge clause
+/// comparing `lower(…)` of both codes: `ti-case-edge` is refused.
+///
+/// [#510]: https://github.com/sujanto-gaws/kelir/issues/510
+#[tokio::test]
+async fn an_edge_holds_the_role_of_its_exact_code_only() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "TI-CASE-TASK",
+        &[],
+    )
+    .await;
+    let exact = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "TI-CASE-EDGE",
+        &[],
+    )
+    .await;
+    let other_case = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "ti-case-edge",
+        &[],
+    )
+    .await;
+
+    let mut definition = workflow_for("ti_case", "TI-CASE-TASK");
+    for transition in definition["transitions"]
+        .as_array_mut()
+        .expect("transitions")
+    {
+        transition["allowedBy"] = json!("ROLE:TI-CASE-EDGE");
+    }
+    publish_workflow_definition(&app, &token, "ti_case", definition).await;
+
+    let deleted = delete_role(&app, &token, other_case).await;
+    assert_eq!(
+        deleted.status,
+        StatusCode::NO_CONTENT,
+        "an edge naming TI-CASE-EDGE held ti-case-edge: {}",
+        deleted.body
+    );
+
+    let refused = delete_role(&app, &token, exact).await;
+    assert_named_by(
+        &refused,
+        "ti_case (\"Standard approval\", revision 1)",
+        "the edge did not hold the role it names",
+    );
+}
+
+/// **Several definitions are named by key, then by revision** (**D-91** (3),
+/// [#510]).
+///
+/// They are published in another order, `ti_order_b` revision 1 and then
+/// `ti_order_a` revisions 1 and 2, so that the order written is not the order
+/// expected. The refusal carries no `details`.
+///
+/// **Seen red** against `definitions_naming_role` ordering by
+/// `d.workflow_key DESC`: the message lists `ti_order_b` first. **Not red**
+/// with the `ORDER BY` dropped: the rows still came back by key and revision,
+/// most likely because the plan reads them through
+/// `uq_workflow_definitions_tenant_id_workflow_key_version`. A test cannot fix
+/// the plan, so the `ORDER BY` is what guarantees the order, and this test
+/// catches a wrong one rather than a missing one.
+///
+/// [#510]: https://github.com/sujanto-gaws/kelir/issues/510
+#[tokio::test]
+async fn several_definitions_are_named_in_key_then_revision_order() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let role = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "TI-ORDER",
+        &[],
+    )
+    .await;
+
+    publish_workflow(&app, &token, "ti_order_b", "TI-ORDER").await;
+    let first = publish_workflow(&app, &token, "ti_order_a", "TI-ORDER").await;
+    let revision = app
+        .post(
+            &format!("/api/v1/workflow/definitions/{first}/revisions"),
+            Some(&token),
+            json!({ "definition": workflow_for("ti_order_a", "TI-ORDER") }),
+        )
+        .await;
+    assert_eq!(revision.status, StatusCode::CREATED, "{}", revision.body);
+    let second = id_of(&revision.body["data"]);
+    let published = app
+        .post(
+            &format!("/api/v1/workflow/definitions/{second}/publication"),
+            Some(&token),
+            json!({}),
+        )
+        .await;
+    assert_eq!(published.status, StatusCode::OK, "{}", published.body);
+
+    let refused = delete_role(&app, &token, role).await;
+    assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.body);
+    assert_eq!(
+        refused.body["error"]["code"], "ROLE_NAMED_BY_PUBLISHED_DEFINITION",
+        "{}",
+        refused.body
+    );
+    assert_eq!(
+        refused.body["error"]["message"],
+        "This role is named by 3 published workflow definitions: ti_order_a (\"Standard \
+         approval\", revision 1), ti_order_a (\"Standard approval\", revision 2), ti_order_b \
+         (\"Standard approval\", revision 1). Deleting the role would leave them unable to \
+         raise their tasks. Publish revisions that do not name the role, bind their document \
+         types to those revisions, and delete these once their running approvals are finished",
+        "{}",
+        refused.body
+    );
+    assert!(
+        refused.body["error"]["details"]
+            .as_array()
+            .is_some_and(|details| details.is_empty()),
+        "the refusal carries no details: {}",
+        refused.body
+    );
+}
+
+/// Sets the status of `document`'s instance directly, as the test's shortest
+/// way to a `SUSPENDED` or `CANCELLED` instance.
+async fn set_instance_status(app: &TestApp, document: Uuid, status: &str) {
+    sqlx::query("UPDATE workflow_instances SET status = $2 WHERE document_id = $1")
+        .bind(document)
+        .bind(status)
+        .execute(&app.pool)
+        .await
+        .expect("set the instance's status");
+}
+
 async fn decide(app: &TestApp, token: &str, task: Uuid) {
     let decided = app
         .post(
