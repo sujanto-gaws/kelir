@@ -77,6 +77,23 @@ impl WorkflowDefinitionStatus {
     }
 }
 
+/// A published revision that names a role, which is what refuses that role's
+/// delete (**D-91** (3), [#510]).
+///
+/// Enough for an administrator to find it: the key and revision say which row,
+/// and the name says which workflow a person would recognize. `status` tells a
+/// revision still published apart from a deprecated one held by its running
+/// approvals.
+///
+/// [#510]: https://github.com/sujanto-gaws/kelir/issues/510
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefinitionNamingRole {
+    pub workflow_key: String,
+    pub name: String,
+    pub version: i32,
+    pub status: WorkflowDefinitionStatus,
+}
+
 /// A workflow definition as the API returns it.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]

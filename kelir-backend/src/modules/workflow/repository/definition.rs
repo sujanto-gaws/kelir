@@ -10,7 +10,7 @@ use sqlx::{PgExecutor, PgPool};
 use uuid::Uuid;
 
 use crate::modules::workflow::domain::{
-    WorkflowDefinition, WorkflowDefinitionStatus, WorkflowDefinitionSummary,
+    DefinitionNamingRole, WorkflowDefinition, WorkflowDefinitionStatus, WorkflowDefinitionSummary,
 };
 
 /// The columns a create writes.
@@ -303,6 +303,73 @@ pub async fn soft_delete<'e, E: PgExecutor<'e>>(
     .rows_affected();
 
     Ok(affected)
+}
+
+/// The published revisions that name `role_id` where the engine will resolve
+/// it (**D-91** (3), [#510]), by key and revision.
+///
+/// **Which revisions.** `ACTIVE` ones, because every submission of a type
+/// bound to one starts an instance on it. `DEPRECATED` ones **while an instance
+/// is still running on them**: an instance pins its revision, `engine::start`
+/// refuses a revision that is not `ACTIVE` but a decision does not, so a
+/// running approval keeps raising that revision's tasks. A `DRAFT` is not
+/// counted, because nothing runs it and its author can still change it.
+///
+/// **Where a revision names a role.** A state's `task.assignment`, read from
+/// `definition_json`, since `workflow_states` does not project it; and a
+/// transition's `allowedBy`, read from the `workflow_transitions` projection,
+/// whose `allowed_by_json` is the **normalized** rule, so the `"ROLE:X"`
+/// shorthand arrives as a `roleCode` too. Either with `assigneeType` `ROLE` or
+/// `DEPARTMENT_ROLE`, matched by exact code, as `assignment::direct` resolves
+/// it. A task's `escalation.assignment` is **not** counted: JWSS §3.1 says it
+/// is stored and not executed, so nothing would be refused if its role were
+/// gone. Whatever schedules escalations must add it here.
+///
+/// [#510]: https://github.com/sujanto-gaws/kelir/issues/510
+pub async fn definitions_naming_role<'e, E: PgExecutor<'e>>(
+    executor: E,
+    tenant_id: Uuid,
+    role_id: Uuid,
+) -> Result<Vec<DefinitionNamingRole>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT d.workflow_key, d.name, d.version, d.status
+        FROM workflow_definitions d
+        JOIN roles r ON r.id = $2 AND r.tenant_id = $1
+        WHERE d.tenant_id = $1 AND d.deleted_at IS NULL
+          AND (d.status = 'ACTIVE'
+               OR (d.status = 'DEPRECATED'
+                   AND EXISTS (SELECT 1 FROM workflow_instances i
+                               WHERE i.tenant_id = d.tenant_id
+                                 AND i.workflow_definition_id = d.id
+                                 AND i.deleted_at IS NULL
+                                 AND i.status IN ('STARTED', 'RUNNING', 'SUSPENDED'))))
+          AND (jsonb_path_exists(
+                   d.definition_json,
+                   '$.states[*].task.assignment ? ((@.assigneeType == "ROLE"
+                        || @.assigneeType == "DEPARTMENT_ROLE") && @.roleCode == $code)',
+                   jsonb_build_object('code', r.role_code))
+               OR EXISTS (SELECT 1 FROM workflow_transitions tr
+                          WHERE tr.workflow_definition_id = d.id
+                            AND tr.allowed_by_json->>'assigneeType' IN ('ROLE', 'DEPARTMENT_ROLE')
+                            AND tr.allowed_by_json->>'roleCode' = r.role_code))
+        ORDER BY d.workflow_key, d.version
+        "#,
+        tenant_id,
+        role_id
+    )
+    .fetch_all(executor)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| DefinitionNamingRole {
+            workflow_key: row.workflow_key,
+            name: row.name,
+            version: row.version,
+            status: WorkflowDefinitionStatus::from_db(&row.status),
+        })
+        .collect())
 }
 
 /// Whether any instance is still running against this revision.

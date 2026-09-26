@@ -230,7 +230,13 @@ async fn update_role(
     responses(
         (status = 204, description = "Deleted"),
         (status = 404, description = "No live role by that id in this tenant"),
-        (status = 409, description = "A system role, or a role that open tasks still need (D-89)")
+        (status = 409, description = "Refused, one reason at a time, checked in this order:\n\n\
+            - `CONFLICT`: a system role.\n\
+            - `CONFLICT`: a role that open tasks still need (D-89). The message says how many.\n\
+            - `ROLE_NAMED_BY_PUBLISHED_DEFINITION`: no open task needs the role, but a published \
+            workflow definition names it in a task's assignment or a transition's allowedBy \
+            (D-91 (3)). That is an ACTIVE revision, or a DEPRECATED one with approvals still \
+            running on it. The message names each by key, name and revision.")
     ),
     security(("bearer" = []))
 )]

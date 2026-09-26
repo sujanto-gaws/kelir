@@ -69,6 +69,12 @@ pub enum AppError {
     Conflict {
         message: String,
     },
+    /// A 409 with a code of its own, for a refusal a client branches on
+    /// (coding standard §2.3: callers branch on `code`, never on the message).
+    CodedConflict {
+        code: &'static str,
+        message: String,
+    },
     /// Rate limited. Carries the wait so a legitimate client can back off
     /// rather than retry blindly.
     TooManyRequests {
@@ -96,6 +102,14 @@ impl AppError {
         }
     }
 
+    /// A 409 whose `error.code` is `code` rather than `CONFLICT`.
+    pub fn conflict_with_code(code: &'static str, message: impl Into<String>) -> Self {
+        Self::CodedConflict {
+            code,
+            message: message.into(),
+        }
+    }
+
     pub fn validation(details: Vec<ValidationDetail>) -> Self {
         Self::Validation { details }
     }
@@ -110,6 +124,7 @@ impl AppError {
             Self::Unauthorized => "UNAUTHORIZED",
             Self::Forbidden => "FORBIDDEN",
             Self::Conflict { .. } => "CONFLICT",
+            Self::CodedConflict { code, .. } => code,
             Self::TooManyRequests { .. } => "TOO_MANY_REQUESTS",
             Self::Internal { .. } => "INTERNAL_ERROR",
         }
@@ -123,7 +138,7 @@ impl AppError {
             Self::UnsupportedMediaType => StatusCode::UNSUPPORTED_MEDIA_TYPE,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Forbidden => StatusCode::FORBIDDEN,
-            Self::Conflict { .. } => StatusCode::CONFLICT,
+            Self::Conflict { .. } | Self::CodedConflict { .. } => StatusCode::CONFLICT,
             Self::TooManyRequests { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -135,7 +150,9 @@ impl AppError {
         match self {
             Self::NotFound { resource } => format!("{resource} not found"),
             Self::Validation { .. } => "Validation failed".to_owned(),
-            Self::BadRequest { message } | Self::Conflict { message } => message.clone(),
+            Self::BadRequest { message }
+            | Self::Conflict { message }
+            | Self::CodedConflict { message, .. } => message.clone(),
             Self::TooManyRequests {
                 retry_after_seconds,
             } => format!("Too many attempts. Try again in {retry_after_seconds} seconds."),
@@ -238,6 +255,22 @@ mod tests {
             .as_array()
             .expect("array")
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_coded_conflict_is_a_409_with_its_own_code() {
+        let (status, body) = body_of(AppError::conflict_with_code(
+            "SOME_REFUSAL",
+            "Refused, and why",
+        ))
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "SOME_REFUSAL");
+        assert_eq!(body["error"]["message"], "Refused, and why");
+
+        let (_, plain) = body_of(AppError::conflict("Refused")).await;
+        assert_eq!(plain["error"]["code"], "CONFLICT");
     }
 
     #[tokio::test]
