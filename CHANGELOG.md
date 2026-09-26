@@ -48,7 +48,7 @@ While the major version is `0`, the public API may change in any release.
   `CONFLICT`, and `GET /api/v1/identity/roles/{id}/open-tasks` lists those
   tasks, paginated, which the Roles page shows in a dialog in place of the
   delete's confirmation: each task's reference, its document's number and title,
-  its instance's current state, its status, its holder when it is claimed,
+  its instance's current state, its holder when it is claimed,
   and why it needs the role. The list and the delete's count are one SQL
   statement, so they name the same tasks. The route needs
   `identity:role:delete` and nothing else, and it shows no form data and no
