@@ -111,6 +111,18 @@ While the major version is `0`, the public API may change in any release.
   filed one passed. Every CommonMark list marker now starts a row. No release
   record on `main`, now or at any earlier commit, changes verdict.
 
+- **A release record's citation is compared by the record it opens, not by
+  its spelling** ([#483](https://github.com/sujanto-gaws/kelir/issues/483)).
+  Rules 2 and 7 of `releases_are_independently_verified.rs` compared the text
+  of a link. So `../verifications/./15…` and `../verifications/%31%35…`, both
+  record 15, counted as a record no release had cited, and
+  `../verifications/../releases/07…` counted as a verification record. A
+  citation is now decoded and resolved before any rule compares it, and one
+  that does not land directly in `projects/verifications/` is refused. A
+  release that cites something but no numbered record is refused, where it
+  used to be skipped. No release record on `main`, now or at any earlier
+  commit, changes verdict.
+
 - **MinIO and `mc` are fetched from `ghcr.io/sujanto-gaws`** (decision **D-92**).
   `quay.io/minio/*`, where D-80 moved them, closed to anonymous pulls on
   2026-09-24. The copies are MinIO's own linux/amd64 filesystems, rebuilt

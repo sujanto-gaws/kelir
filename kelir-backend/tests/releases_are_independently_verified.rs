@@ -48,7 +48,9 @@
 //! 1. **A governed release record cites at least one verification record.**
 //! 2. **At least one record it cites is cited by no earlier release.** Rule 1
 //!    alone is satisfied by pointing at a pass from three phases ago; this is
-//!    what makes each release bring a reading of its own.
+//!    what makes each release bring a reading of its own. A citation is the
+//!    record it points at, not its spelling — see *Rules 2, 6 and 7, where a
+//!    citation points, 2026-09-26* below.
 //! 3. **The walk finds what exists and governs something**, because a walk over
 //!    nothing passes every assertion above it.
 //! 4. **Every release record states a status in its header**, so the gate
@@ -56,13 +58,17 @@
 //! 5. **Every file in `projects/releases/` is the template or a record in the
 //!    house shape.** Door B: a name the walk cannot parse is governed by
 //!    nothing *and nothing notices it is ungoverned*.
-//! 6. **Every verification record a release cites exists on disk.** Door A: the
-//!    citations are hand-typed percent-encoded relative paths, and a typo in
-//!    one used to read as a new pass.
+//! 6. **Every verification record a release cites exists on disk**, directly
+//!    inside `projects/verifications/`. Door A: the citations are hand-typed
+//!    percent-encoded relative paths, and a typo in one used to read as a new
+//!    pass. Since [#483](https://github.com/sujanto-gaws/kelir/issues/483), a
+//!    path that reaches a file somewhere else is refused too.
 //! 7. **A governed release cites a record written after every record cited
 //!    before it.** Finding 7: rule 2's pool of never-cited records grows with
 //!    every sprint, and eight of them were old enough to have read nothing in
-//!    the release naming them.
+//!    the release naming them. Since [#483](https://github.com/sujanto-gaws/kelir/issues/483),
+//!    a release that cites something and points at no numbered record is
+//!    refused rather than skipped.
 //! 8. **A release record's header status is a word the process defines.** Door
 //!    C: a status the detector could not parse left the record ungoverned
 //!    rather than red.
@@ -129,7 +135,24 @@
 //!   `NN.` prefix, so `08. Release v0.7.1.md` landing before `07.` changes no
 //!   answer. Rule 5 requires the prefix to be two digits; it does not require
 //!   the series to be dense or ordered.
-//!
+//! - **Cite a record by a link this file does not read as a citation.** A
+//!   citation is a path containing `verifications/` in lower case, bounded by
+//!   `(`, `)`, a space, a tab or a line end, or a `:` before it, whose path
+//!   part, before any `?query` or `#fragment`, ends `.md`. So
+//!   `../Verifications/…`, `..\verifications\…`, a path in a code span and one
+//!   ending `/` are not citations, as they were not before
+//!   [#483](https://github.com/sujanto-gaws/kelir/issues/483). Nor are an HTML
+//!   `href="…"`, an angle-bracket destination `(<…>)`, or any citation on a
+//!   line ending CRLF, where the `\r` stays on the path. **That can only
+//!   cost a release**: a citation not read cannot be rule 2's new record or
+//!   rule 7's high one, and a release left citing nothing is refused by rule 1.
+//! - **Point a symbolic link at an old record.** Rule 6 refuses a record that
+//!   is itself a link, by the directory entry's own type, and [`normalised_citation`]
+//!   resolves `..` lexically, so a linked folder on the path is not followed.
+//!   **On this project's Windows checkouts the question does not arise**:
+//!   `core.symlinks` is `false`, so git writes a link as a plain file holding
+//!   its target, which rule 6 accepts as a file — and judging what a record
+//!   holds is the record's job, not this file's. No link is tracked today.
 //! # Seen to fail (coding standard §2.9)
 //!
 //! Three mutations, run 2026-09-09, all three red — recorded in the pull
@@ -351,6 +374,117 @@
 //! and the other 22 of the 23 then written green. The binary before the change
 //! passed the same tree, 21 of 21 — finding 5 on the real walk, not only on a
 //! string. Record 08 was restored byte-exact.
+//!
+//! # Rules 2, 6 and 7, where a citation points, 2026-09-26 (#483)
+//!
+//! [Record 17](../../projects/verifications/17.%20Sprint%2019%20and%20Sprint%2017%20Independent%20Pass.md)
+//! finding 2: rules 2 and 7 compared the text after `verifications/` as a raw
+//! string and read the record number off it, while rule 6 decoded and resolved
+//! it. So `../verifications/./15…`, `../verifications/%31%35…` and
+//! `../verifications/../releases/07.%20Release%20v0.7.0.md`, each planted as a
+//! `Final` `v0.8.0` when record 07 already cited record 15, **passed all 21
+//! tests**. Rule 2 read each as a string no release had cited; rule 7's
+//! [`record_number`] read no number from any of them, and the release was
+//! skipped by a `continue`; rule 6 found each file on disk.
+//!
+//! **The fix is [`normalised_citation`], one reading of a citation that rules
+//! 2, 3, 6 and 7 all take.** [`citations`] now keeps the whole path, since a
+//! path cannot be resolved without its prefix, and starts it after a `:` too,
+//! so a reference definition written `[r]:../verifications/…` is read. The
+//! normaliser cuts at the first `?` or `#`, as a browser does, percent-decodes once with rule 6's own [`percent_decoded`],
+//! resolves `.` and `..` from `projects/releases/`, and answers the file name
+//! only when the result is directly inside `projects/verifications/`. Rule 6
+//! matches that name against [`verification_files`], the folder's listing.
+//! Rule 7 refuses a release that cites something and points at no numbered
+//! record. **Compared byte for byte, as CI's Linux does**: `Verifications/`
+//! and `15. sprint 16 …` are refused here, though Windows would open both.
+//!
+//! **Probes, committed.** In `a_citation_is_read_as_the_record_it_points_at`,
+//! finding 2's `./15` and `%31%35`, plus `..%2F…`, `..%2f…`, `../../projects/…`,
+//! `..//…`, a `#fragment`, a `?plain=1` query, a query shaped like a path to
+//! record 19 and no encoding, all read as record 15. In
+//! `a_citation_outside_the_verifications_folder_is_refused`, finding 2's
+//! `../releases/07`, the same with `%2F`, a subfolder, `Verifications/`, above
+//! the root, an absolute path, one with its `/` encoded, a URL, a drive and an
+//! encoded backslash are all refused, `%2531%2535` decodes once to a name that
+//! is not on disk, and rule 6 refuses a lower-case name.
+//! `rules_2_and_7_refuse_a_record_already_cited_under_another_spelling` plants
+//! each shape after a `v0.7.0` citing record 15, and a fourth,
+//! `99.%20A%20Pass/../15…`: the old reading took 99 from it and the path
+//! opens record 15. A fifth, `15…md?/../../verifications/19…md`, is record 15
+//! with a query and is refused. Record 16, and record 16 beside `./15`, are
+//! accepted. `a_citation_is_read_whole_from_the_link` reads `…md?plain=1` and
+//! a reference definition `[r]:../verifications/19…` without its `[r]:`.
+//! `a_release_with_no_numbered_citation_is_refused` sends a release whose only
+//! citation is `../releases/07`, an unnumbered name, `%2531%2535` or a
+//! subfolder: all four are red on rule 7, and the two outside the folder on
+//! rule 2. A release citing nothing is left to rule 1.
+//!
+//! **Seen red.** Baseline before the change: 24 passed. After: 29. Twelve
+//! mutations, each applied to this file, the suite run, and the file restored.
+//! Every one was red, and only on this change's tests:
+//!
+//! | # | Mutation | Red |
+//! |---|---|---|
+//! | 1 | Rule 2 compares the raw strings | `rules_2_and_7_refuse_…_under_another_spelling`, `a_release_with_no_numbered_citation_is_refused` |
+//! | 2 | Rule 7 reads [`record_number`] off the raw text after `verifications/` | `rules_2_and_7_refuse_…_under_another_spelling` (`99.%20A%20Pass/../15`) |
+//! | 3 | The `continue` on no number, back | the same two as 1 |
+//! | 4 | A path outside the folder answers its last component | `a_citation_outside_…_is_refused`, and the same two as 1 |
+//! | 5 | The `#fragment` kept | `a_citation_is_read_as_the_record_it_points_at`, `a_citation_is_read_whole_from_the_link` |
+//! | 6 | Decoded twice | `a_citation_outside_…_is_refused`, `a_release_with_no_numbered_citation_is_refused` (`%2531%2535` read as 15) |
+//! | 7 | Rule 6 by `is_file()` rather than the listing | `a_citation_outside_…_is_refused` (the lower-case name). **Red only on a case-insensitive filesystem**, which this Windows checkout is; on Linux the two answers agree |
+//! | 8 | A backslash not refused | `a_citation_outside_…_is_refused` |
+//! | 9 | An absolute path, URL or drive not refused | `a_citation_outside_…_is_refused` |
+//! | 10 | 1, 2 and 3 together: the comparisons as #412 shipped them | the same two as 1 |
+//! | 11 | The path cut at `#` only, not at `?` | `rules_2_and_7_refuse_…_under_another_spelling` (the query read as record 19), `a_citation_is_read_as_the_record_it_points_at`, `a_citation_is_read_whole_from_the_link` |
+//! | 12 | The start bound back to `(`, `)`, space and line end | `a_citation_is_read_whole_from_the_link` (`[r]:` kept on the path, which is then refused) |
+//!
+//! **Mutation 2 came back green on the first run and was closed, not
+//! replaced.** Each of finding 2's shapes read no number under the old
+//! reading, so the new refusal of a release with no number caught every one of
+//! them, whatever rule 7 read. The fourth shape is one where the old reading
+//! finds a *higher* number than the target's, and it is red. **So was mutation
+//! 7**, because rule 6 walks the disk and no test reached its lookup;
+//! [`unresolved`] is now rule 6's judgement of one citation, and the test sends
+//! it the lower-case name.
+//!
+//! **Mutations 11 and 12 came from the row's gate**, which found both defects
+//! in the first version of this change: a `?` query shaped like a path was
+//! resolved as one, so `15…md?/../../verifications/19…md` read as record 19,
+//! which a browser does not open; and `[r]:../verifications/19…`, valid
+//! CommonMark that the reading before #483 accepted, kept `[r]:` on the path
+//! and was refused by rules 2, 6 and 7. Both are fixed and both probes are
+//! committed. The fix touches only the path cut and the start bound, and the
+//! sweep below was re-run over it, with the same result.
+//!
+//! **Historic sweep.** `projects/releases/` and `projects/verifications/` were
+//! restored from each of the 63 first-parent `main` commits that touched them,
+//! up to `cb5ed37`, and the suite run over each tree with the test binary from
+//! before the change and after it. **No test the two share changed verdict on
+//! any of the 63.** The first sweep found seven: on the trees from `9d67e37`
+//! back there is no `projects/verifications/`, and [`verification_files`]
+//! panicked where the old rule 6 never opened the folder. A missing folder now
+//! holds nothing, and the rerun is the one recorded. The thirteen trees since
+//! `f455986` are green under both binaries, and older trees are red under both,
+//! as #486's sweep found. Of the new tests,
+//! `a_citation_outside_the_verifications_folder_is_refused` is red on the 43
+//! trees before `42b5122`, which added record 15, because it reads that record
+//! from disk.
+//!
+//! **Positive control, last.** Record 08 cites records 16 and 17, so the
+//! high-water mark is 17. A `Final` `09. Release v0.9.0.md` was planted with an
+//! Aftermath of `none` and one citation, run against both binaries, and
+//! removed. First, the accepted control, record 19 in the house spelling: 24
+//! of 24 before, 29 of 29 after. Then finding 2's shapes, pointed at record 17
+//! and record 08:
+//!
+//! | Citation | Before | After |
+//! |---|---|---|
+//! | `../verifications/./17.%20…` | 24 of 24 | red: `each_release_brings_a_pass_no_earlier_release_cited`, `each_release_cites_a_record_written_after_every_earlier_citation` |
+//! | `../verifications/%31%37.%20…` | 24 of 24 | red: the same two |
+//! | `../verifications/../releases/08.%20Release%20v0.8.0.md` | 24 of 24 | red: the same two, and `a_cited_verification_record_exists` |
+//!
+//! Nothing else was red. The file was removed, and the tree was left as it was.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -466,6 +600,10 @@ const RELEASE_TEMPLATE: &str = "00. Release Checklist Template.md";
 /// Where the records a release cites are looked for.
 const VERIFICATIONS: &str = "projects/verifications";
 
+/// Where the release records live, and so what their relative links start
+/// from.
+const RELEASES: &str = "projects/releases";
+
 /// A release as the walks below carry it: version, file name, and the
 /// verification records it cites.
 type Release = ((u32, u32, u32), String, BTreeSet<String>);
@@ -521,10 +659,12 @@ fn release_version(name: &str) -> Option<(u32, u32, u32)> {
 /// The `NN` a numbered record's file name opens with.
 ///
 /// Both folders number their records in the order they are written, which is
-/// what rule 7 compares. The citation is percent-encoded and the number is in
-/// front of the first encoded space, so this reads the same answer off
+/// what rule 7 compares. It reads the same answer off
 /// `15.%20Sprint%2016%20Independent%20Pass.md` and
-/// `15. Sprint 16 Independent Pass.md`.
+/// `15. Sprint 16 Independent Pass.md`, and since
+/// [#483](https://github.com/sujanto-gaws/kelir/issues/483) rule 7 hands it
+/// the second: the name [`normalised_citation`] resolved, not the text of the
+/// link, which read nothing off `./15…` or `%31%35…`.
 fn record_number(name: &str) -> Option<u32> {
     let (number, _) = name.split_once('.')?;
 
@@ -682,12 +822,29 @@ fn release_records() -> Vec<((u32, u32, u32), String, String)> {
     records
 }
 
-/// Every `projects/verifications/…` path a record links to.
+/// Every `projects/verifications/…` path a record links to, **as written**.
 ///
-/// The links are percent-encoded relative paths (`../verifications/13.%20Sprint%2013%20Independent%20Pass.md`),
-/// so the file name is taken verbatim as the identity rather than decoded — two
-/// spellings of one path would be two citations, and there is only ever one
-/// spelling because the links are written by copying.
+/// A citation is the whole path around a `verifications/` — from the `(`,
+/// `)`, `:`, space, tab or line start before it to the `(`, `)`, space, tab or
+/// line end after it — whose path part, before any `?query` or `#fragment`,
+/// ends `.md`. The links are percent-encoded
+/// relative paths (`../verifications/13.%20Sprint%2013%20Independent%20Pass.md`).
+///
+/// # The spelling is not the identity
+///
+/// Until [#483](https://github.com/sujanto-gaws/kelir/issues/483) this kept
+/// only the text after `verifications/`, and rules 2 and 7 compared that text
+/// as the record's identity, on the reasoning that *there is only ever one
+/// spelling because the links are written by copying*. [Record 17](../../projects/verifications/17.%20Sprint%2019%20and%20Sprint%2017%20Independent%20Pass.md)
+/// finding 2 wrote three others — `./15…`, `%31%35…` and `../releases/07…` —
+/// and each was a new record to rule 2 and no record to rule 7. **What a
+/// citation is, is where it points**: [`normalised_citation`] says where, and
+/// every rule that compares citations compares that.
+///
+/// So the prefix is kept now, because a path cannot be resolved without it.
+/// **A token this does not keep can only cost a release**: it is not a
+/// citation, so it cannot be the new one rule 2 wants or the high one rule 7
+/// wants, and a release left citing nothing is refused by rule 1.
 ///
 /// # Why this still does not check that the file exists
 ///
@@ -701,19 +858,145 @@ fn release_records() -> Vec<((u32, u32, u32), String, String)> {
 /// that names the record and the path it could not find.
 fn citations(body: &str) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
-    let marker = "verifications/";
+    let bounds = ['(', ')', ' ', '\t', '\n'];
+    // A reference definition may put its destination straight after the
+    // colon, `[r]:../verifications/…`, and a colon is never part of a relative
+    // path; a URL's `https:` then leaves `//…`, which is still refused.
+    let start_bounds = ['(', ')', ' ', '\t', '\n', ':'];
 
-    for (at, _) in body.match_indices(marker) {
-        let rest = &body[at + marker.len()..];
-        let end = rest.find([')', ' ', '\n']).unwrap_or(rest.len());
-        let cited = &rest[..end];
+    for (at, _) in body.match_indices("verifications/") {
+        let start = body[..at].rfind(start_bounds).map_or(0, |bound| bound + 1);
+        let end = body[at..].find(bounds).map_or(body.len(), |len| at + len);
+        let cited = &body[start..end];
 
-        if cited.ends_with(".md") {
+        if path_part(cited).ends_with(".md") {
             found.insert(cited.to_owned());
         }
     }
 
     found
+}
+
+/// A link target without its `?query` or `#fragment`, cut at the first of
+/// either, as a browser cuts it.
+///
+/// `15.%20…%20Pass.md#7-findings` and `15.%20…%20Pass.md?plain=1` cite record
+/// 15 as surely as the bare path does; before
+/// [#483](https://github.com/sujanto-gaws/kelir/issues/483) neither was a
+/// citation, because neither ended `.md`. **And the cut is what the link
+/// opens**: `15…md?/../../verifications/19…md` is record 15 with a query, not
+/// record 19.
+fn path_part(cited: &str) -> &str {
+    cited.split(['?', '#']).next().unwrap_or(cited)
+}
+
+/// Why a citation names no record in `projects/verifications/`, whatever file
+/// it reaches on disk.
+#[derive(Debug, PartialEq)]
+enum Refusal {
+    /// An absolute path, a URL or a drive: not a path from the record.
+    NotRelative,
+    /// A backslash, which Windows reads as a separator and Linux as a character
+    /// of the name — so the citation would name two different files.
+    Backslash,
+    /// It resolves somewhere other than directly inside
+    /// `projects/verifications/`: another folder, a subfolder, or above the
+    /// repository.
+    OutsideVerifications,
+}
+
+/// The record a citation points at: the file name, directly inside
+/// `projects/verifications/`, that the link resolves to from
+/// `projects/releases/`, where every record it is read from lives
+/// ([#483](https://github.com/sujanto-gaws/kelir/issues/483)).
+///
+/// **This is the one reading of a citation**, and rules 2, 3, 6 and 7 all take
+/// it. The fragment comes off, the path is percent-decoded **once**, and `.`
+/// and `..` are resolved against the path's own components — so `./15…`,
+/// `%31%35…` and `..%2Fverifications%2F15…` are all record 15, and
+/// `../verifications/../releases/07…` is refused rather than counted.
+///
+/// # What it decides, and what it leaves to rule 6
+///
+/// - **Once, not until it stops changing.** A browser decodes a link once, so
+///   `%2531` is the name `%31…`, which exists nowhere, has no number, and is
+///   refused by rules 6 and 7 rather than read as `15`.
+/// - **Byte for byte.** `projects` and `verifications` are matched exactly and
+///   the name is returned as spelt, because CI reads the tree on Linux, where
+///   `Verifications/` is a different folder; Windows would open it. Rule 6
+///   matches the name against the folder's listing for the same reason.
+/// - **Lexically.** `..` removes the component before it, whether or not that
+///   is a symbolic link on disk, which is what a Markdown renderer does too.
+///   Rule 6 refuses a record that is itself a link.
+/// - **Not whether it exists.** A well-formed name that is not there is rule
+///   6's, so door A still reddens the rule that names it.
+fn normalised_citation(cited: &str) -> Result<String, Refusal> {
+    let decoded = percent_decoded(path_part(cited));
+
+    if decoded.starts_with('/') || decoded.contains(':') {
+        return Err(Refusal::NotRelative);
+    }
+    if decoded.contains('\\') {
+        return Err(Refusal::Backslash);
+    }
+
+    let mut resolved: Vec<&str> = RELEASES.split('/').collect();
+
+    for component in decoded.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                resolved.pop().ok_or(Refusal::OutsideVerifications)?;
+            }
+            name => resolved.push(name),
+        }
+    }
+
+    match resolved.as_slice() {
+        [projects, verifications, name]
+            if [*projects, *verifications] == ["projects", "verifications"] =>
+        {
+            Ok((*name).to_owned())
+        }
+        _ => Err(Refusal::OutsideVerifications),
+    }
+}
+
+/// Every regular file directly inside `projects/verifications/`, by exact name.
+///
+/// A listing rather than `is_file()`, because Windows answers `is_file()` for
+/// `15. sprint 16 independent pass.md` and Linux, where CI runs, does not. And
+/// the entry's own type rather than its target's, so a symbolic link named as
+/// a new record and pointing at an old one is not a record.
+///
+/// **A folder that is not there holds nothing**, rather than panicking: rule 6
+/// then names every citation as missing, and a tree that cites nothing — every
+/// tree before the folder existed — passes it, as it did before
+/// [#483](https://github.com/sujanto-gaws/kelir/issues/483).
+fn verification_files() -> BTreeSet<String> {
+    let directory = match fs::read_dir(repository_root().join(VERIFICATIONS)) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return BTreeSet::new(),
+        Err(error) => panic!("the verifications directory is unreadable: {error}"),
+    };
+
+    directory
+        .map(|entry| entry.expect("a directory entry"))
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+/// Rule 6's judgement of one citation against the folder's listing: `None`
+/// when it names a record there, and otherwise why it does not.
+fn unresolved(cited: &str, on_disk: &BTreeSet<String>) -> Option<String> {
+    match normalised_citation(cited) {
+        Ok(record) if on_disk.contains(&record) => None,
+        Ok(_) => Some(format!("which is not in {VERIFICATIONS}/")),
+        Err(refusal) => Some(format!(
+            "which names no record in {VERIFICATIONS}/ ({refusal:?})"
+        )),
+    }
 }
 
 /// The Aftermath's follow-up block: the answer on the `- **Follow-ups filed:**`
@@ -975,6 +1258,89 @@ fn governed() -> Vec<Release> {
         .collect()
 }
 
+/// The records a release's citations point at — each one [`normalised_citation`]
+/// accepts.
+fn cited_records(cited: &BTreeSet<String>) -> BTreeSet<String> {
+    cited
+        .iter()
+        .filter_map(|record| normalised_citation(record).ok())
+        .collect()
+}
+
+/// Rule 2's judgement over releases oldest first, apart from the walk that
+/// finds them — so the shapes [#483](https://github.com/sujanto-gaws/kelir/issues/483)
+/// names are sent to it as committed text.
+///
+/// A release that cites something is refused unless one record it points at
+/// was pointed at by no earlier release.
+fn recycled(releases: &[Release]) -> Vec<String> {
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut recycled = Vec::new();
+
+    for (_, name, cited) in releases {
+        let records = cited_records(cited);
+
+        if !cited.is_empty() && records.iter().all(|record| seen.contains(record)) {
+            recycled.push(format!(
+                "{name} — cites only {}",
+                cited.iter().cloned().collect::<Vec<_>>().join(", ")
+            ));
+        }
+
+        seen.extend(records);
+    }
+
+    recycled
+}
+
+/// Rule 7's judgement over releases oldest first, apart from the walk that
+/// finds them.
+///
+/// A release that cites something is refused unless the highest-numbered
+/// record it points at is above every record an earlier release pointed at —
+/// **and refused when it points at no numbered record at all**, which until
+/// [#483](https://github.com/sujanto-gaws/kelir/issues/483) was a `continue`:
+/// a release whose citations were all spelt so [`record_number`] read nothing
+/// was not checked.
+fn backward(releases: &[Release]) -> Vec<String> {
+    let mut high_water: Option<u32> = None;
+    let mut backward = Vec::new();
+
+    for (_, name, cited) in releases {
+        // Citing nothing at all is rule 1's, so this stays silent about it
+        // rather than reporting the same record twice with two remedies.
+        if cited.is_empty() {
+            continue;
+        }
+
+        let highest = cited_records(cited)
+            .iter()
+            .filter_map(|record| record_number(record))
+            .max();
+
+        let Some(highest) = highest else {
+            backward.push(format!(
+                "{name} — cites {}, and none of it is a numbered record in {VERIFICATIONS}/",
+                cited.iter().cloned().collect::<Vec<_>>().join(", ")
+            ));
+            continue;
+        };
+
+        if let Some(floor) = high_water {
+            if highest <= floor {
+                backward.push(format!(
+                    "{name} — its highest citation is record {highest:02}, and releases before \
+                     it had already read up to record {floor:02}"
+                ));
+            }
+        }
+
+        high_water = Some(high_water.map_or(highest, |floor| floor.max(highest)));
+    }
+
+    backward
+}
+
 /// Rule 1. **A release that shipped says which pass read it.**
 #[test]
 fn a_governed_release_cites_a_verification_record() {
@@ -1005,21 +1371,14 @@ fn a_governed_release_cites_a_verification_record() {
 /// records an earlier release cited* is what a copied Pre-flight row does;
 /// *cites a record older than the high-water mark* is what reaching into the
 /// uncited pool does. A reader who trips the first should be told the first.
+///
+/// **Compared by where a citation points, since [#483](https://github.com/sujanto-gaws/kelir/issues/483)**:
+/// through [`normalised_citation`], so `./15…` is record 15 and not a new
+/// string, and a citation that points outside `projects/verifications/` is not
+/// a new record either. A release whose every citation is refused is red here.
 #[test]
 fn each_release_brings_a_pass_no_earlier_release_cited() {
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    let mut recycled = Vec::new();
-
-    for (_, name, cited) in governed() {
-        if !cited.is_empty() && cited.iter().all(|record| seen.contains(record)) {
-            recycled.push(format!(
-                "{name} — cites only {}",
-                cited.iter().cloned().collect::<Vec<_>>().join(", ")
-            ));
-        }
-
-        seen.extend(cited);
-    }
+    let recycled = recycled(&governed());
 
     assert!(
         recycled.is_empty(),
@@ -1062,7 +1421,7 @@ fn the_walk_finds_what_exists_and_governs_something() {
 
     let cited: BTreeSet<_> = governed
         .iter()
-        .flat_map(|(.., records)| records.iter().cloned())
+        .flat_map(|(.., cited)| cited_records(cited))
         .collect();
 
     assert!(
@@ -1151,19 +1510,22 @@ fn every_file_in_the_releases_directory_is_a_record_or_the_template() {
 /// Every record is checked rather than only the governed ones. A broken link in
 /// a `Draft` record is the same defect one day earlier, and catching it while
 /// the run is still open is the whole value.
+///
+/// **And it names one inside `projects/verifications/`**, since
+/// [#483](https://github.com/sujanto-gaws/kelir/issues/483): record 17 finding 2
+/// cited `../verifications/../releases/07.%20Release%20v0.7.0.md`, which is on
+/// disk and is not a verification record. The path is read through
+/// [`normalised_citation`] and the name matched against
+/// [`verification_files`], byte for byte, as CI's filesystem would.
 #[test]
 fn a_cited_verification_record_exists() {
-    let verifications = repository_root().join(VERIFICATIONS);
+    let on_disk = verification_files();
     let mut missing = Vec::new();
 
     for (_, name, body) in release_records() {
         for cited in citations(&body) {
-            let path = verifications.join(percent_decoded(&cited));
-
-            if !path.is_file() {
-                missing.push(format!(
-                    "{name} — cites {cited}, which is not in {VERIFICATIONS}/"
-                ));
+            if let Some(why) = unresolved(&cited, &on_disk) {
+                missing.push(format!("{name} — cites {cited}, {why}"));
             }
         }
     }
@@ -1200,33 +1562,12 @@ fn a_cited_verification_record_exists() {
 ///
 /// A release citing nothing at all is rule 1's, not this one's, so this stays
 /// silent about it rather than reporting the same record twice with two
-/// remedies.
+/// remedies. **A release that cites something and points at no numbered
+/// record is this one's**, since [#483](https://github.com/sujanto-gaws/kelir/issues/483)
+/// — see [`backward`].
 #[test]
 fn each_release_cites_a_record_written_after_every_earlier_citation() {
-    let mut high_water: Option<u32> = None;
-    let mut backward = Vec::new();
-
-    for (_, name, cited) in governed() {
-        let highest = cited
-            .iter()
-            .filter_map(|record| record_number(record))
-            .max();
-
-        let Some(highest) = highest else {
-            continue;
-        };
-
-        if let Some(floor) = high_water {
-            if highest <= floor {
-                backward.push(format!(
-                    "{name} — its highest citation is record {highest:02}, and releases before \
-                     it had already read up to record {floor:02}"
-                ));
-            }
-        }
-
-        high_water = Some(high_water.map_or(highest, |floor| floor.max(highest)));
-    }
+    let backward = backward(&governed());
 
     assert!(
         backward.is_empty(),
@@ -1441,7 +1782,7 @@ fn the_parsers_refuse_the_shapes_the_walk_must_not_skip() {
     assert_eq!(
         record_number("15.%20Sprint%2016%20Independent%20Pass.md"),
         Some(15),
-        "rule 7 reads the number off the citation as it is written, percent-encoded"
+        "the number reads the same off a percent-encoded name"
     );
     assert_eq!(
         record_number("15. Sprint 16 Independent Pass.md"),
@@ -2116,5 +2457,324 @@ fn record_07_at_00a27b4_and_the_earlier_probes_are_still_refused() {
         read_aftermath(&promised),
         Aftermath::Unreadable,
         "an answer that promises a follow-up with no row under it"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Where a citation points (#483)
+// ---------------------------------------------------------------------------
+
+/// Record 15, as record 07 cites it.
+const RECORD_15_CITED: &str = "../verifications/15.%20Sprint%2016%20Independent%20Pass.md";
+
+/// Record 15, as it is named on disk.
+const RECORD_15: &str = "15. Sprint 16 Independent Pass.md";
+
+/// Record 16, which no release before `v0.8.0` cited.
+const RECORD_16_CITED: &str = "../verifications/16.%20Sprint%2018%20Independent%20Pass.md";
+
+/// Record 19, which no release has cited.
+const RECORD_19_CITED: &str = "../verifications/19.%20Sprint%2020%20Independent%20Pass.md";
+
+/// Record 15 with a query that reads like a path to record 19. A browser opens
+/// record 15.
+const QUERY_OVER_15: &str = "../verifications/15.%20Sprint%2016%20Independent%20Pass.md?/../../verifications/19.%20Sprint%2020%20Independent%20Pass.md";
+
+/// Record 17 finding 2's three shapes: record 15 spelt twice more, and a path
+/// through `verifications/` to a file that is not a verification record.
+const FINDING_2_SHAPES: [&str; 3] = [
+    "../verifications/./15.%20Sprint%2016%20Independent%20Pass.md",
+    "../verifications/%31%35.%20Sprint%2016%20Independent%20Pass.md",
+    "../verifications/../releases/07.%20Release%20v0.7.0.md",
+];
+
+/// A governed release, as the rules carry it.
+fn release(version: (u32, u32, u32), name: &str, cited: &[&str]) -> Release {
+    (
+        version,
+        name.to_owned(),
+        cited.iter().map(|&record| record.to_owned()).collect(),
+    )
+}
+
+/// `v0.7.0` citing record 15, then `v0.8.0` citing `cited` — the history
+/// record 17 finding 2 planted its probes into.
+fn after_v0_7_0(cited: &[&str]) -> Vec<Release> {
+    vec![
+        release((0, 7, 0), "07. Release v0.7.0.md", &[RECORD_15_CITED]),
+        release((0, 8, 0), "08. Release v0.8.0.md", cited),
+    ]
+}
+
+/// **Every spelling of record 15 is record 15.** The accepted shapes, each
+/// sent through the one function rules 2, 3, 6 and 7 read a citation by.
+#[test]
+fn a_citation_is_read_as_the_record_it_points_at() {
+    let record_15 = Ok(RECORD_15.to_owned());
+
+    for (cited, how) in [
+        (RECORD_15_CITED, "the house spelling"),
+        (FINDING_2_SHAPES[0], "finding 2: a `./` in the path"),
+        (FINDING_2_SHAPES[1], "finding 2: the number percent-encoded"),
+        (
+            "../verifications/..%2Fverifications%2F15.%20Sprint%2016%20Independent%20Pass.md",
+            "an encoded `%2F`",
+        ),
+        (
+            "../verifications/..%2fverifications%2f15.%20Sprint%2016%20Independent%20Pass.md",
+            "an encoded `%2f`, lower case",
+        ),
+        (
+            "../../projects/verifications/15.%20Sprint%2016%20Independent%20Pass.md",
+            "the long way round, through the repository root",
+        ),
+        (
+            "..//verifications/15.%20Sprint%2016%20Independent%20Pass.md",
+            "a doubled `/`",
+        ),
+        (
+            "../verifications/15.%20Sprint%2016%20Independent%20Pass.md#7-findings",
+            "a `#fragment`",
+        ),
+        (
+            "../verifications/15.%20Sprint%2016%20Independent%20Pass.md?plain=1",
+            "a `?query`",
+        ),
+        (
+            QUERY_OVER_15,
+            "a `?query` shaped like a path to record 19, which a browser does not follow",
+        ),
+        (
+            "../verifications/15. Sprint 16 Independent Pass.md",
+            "no encoding at all",
+        ),
+    ] {
+        assert_eq!(normalised_citation(cited), record_15, "{how}: {cited}");
+    }
+}
+
+/// **A citation that points anywhere but directly into
+/// `projects/verifications/` names no record**, whatever it reaches on disk.
+#[test]
+fn a_citation_outside_the_verifications_folder_is_refused() {
+    for (cited, refusal, how) in [
+        (
+            FINDING_2_SHAPES[2],
+            Refusal::OutsideVerifications,
+            "finding 2: through `verifications/` to a release record",
+        ),
+        (
+            "../verifications/..%2Freleases%2F07.%20Release%20v0.7.0.md",
+            Refusal::OutsideVerifications,
+            "the same, with the separators encoded",
+        ),
+        (
+            "../verifications/sub/15.%20Sprint%2016%20Independent%20Pass.md",
+            Refusal::OutsideVerifications,
+            "a subfolder",
+        ),
+        (
+            "../verifications/../../projects/Verifications/15.%20Sprint%2016%20Independent%20Pass.md",
+            Refusal::OutsideVerifications,
+            "`Verifications/`, which Windows opens and Linux does not",
+        ),
+        (
+            "../../../../verifications/15.%20Sprint%2016%20Independent%20Pass.md",
+            Refusal::OutsideVerifications,
+            "above the repository root",
+        ),
+        (
+            "/projects/verifications/15.%20Sprint%2016%20Independent%20Pass.md",
+            Refusal::NotRelative,
+            "an absolute path",
+        ),
+        (
+            "%2Fprojects/verifications/15.%20Sprint%2016%20Independent%20Pass.md",
+            Refusal::NotRelative,
+            "an absolute path, its `/` encoded",
+        ),
+        (
+            "https://github.com/sujanto-gaws/kelir/blob/main/projects/verifications/15.%20Sprint%2016%20Independent%20Pass.md",
+            Refusal::NotRelative,
+            "a URL",
+        ),
+        (
+            "C:/kelir/projects/verifications/15.%20Sprint%2016%20Independent%20Pass.md",
+            Refusal::NotRelative,
+            "a drive",
+        ),
+        (
+            "../verifications/..%5Creleases%5C07.%20Release%20v0.7.0.md",
+            Refusal::Backslash,
+            "an encoded backslash",
+        ),
+    ] {
+        assert_eq!(normalised_citation(cited), Err(refusal), "{how}: {cited}");
+    }
+
+    assert_eq!(
+        normalised_citation("../verifications/%2531%2535.%20Sprint%2016%20Independent%20Pass.md"),
+        Ok("%31%35. Sprint 16 Independent Pass.md".to_owned()),
+        "a double-encoded number is decoded once, as a browser does — to a name with no \
+         number, which is on no disk"
+    );
+
+    let on_disk = verification_files();
+    assert!(
+        unresolved(
+            "../verifications/%2531%2535.%20Sprint%2016%20Independent%20Pass.md",
+            &on_disk
+        )
+        .is_some(),
+        "so rule 6 refuses it"
+    );
+    assert!(
+        unresolved(
+            "../verifications/15.%20sprint%2016%20independent%20pass.md",
+            &on_disk
+        )
+        .is_some(),
+        "rule 6 matches a name against the listing byte for byte, as CI's Linux would, \
+         even where this filesystem would open it"
+    );
+    assert!(
+        unresolved(FINDING_2_SHAPES[2], &on_disk).is_some(),
+        "rule 6 refuses finding 2's release record, which is on disk"
+    );
+    assert!(
+        unresolved(RECORD_15_CITED, &on_disk).is_none()
+            && unresolved(FINDING_2_SHAPES[0], &on_disk).is_none(),
+        "and accepts record 15 in the house spelling and another, so the refusals above are \
+         about where the citations point"
+    );
+}
+
+/// **The whole path is the citation, and a `?query` or `#fragment` does not
+/// stop it being one.**
+#[test]
+fn a_citation_is_read_whole_from_the_link() {
+    let body = format!(
+        "[a]({}) [b]({}#7) [c](../verifications/) `{}` [d]({}/) [e]({}?plain=1)\n\
+         [r]:{}\n",
+        FINDING_2_SHAPES[0],
+        FINDING_2_SHAPES[2],
+        RECORD_16_CITED,
+        RECORD_15_CITED,
+        RECORD_15_CITED,
+        RECORD_19_CITED
+    );
+
+    assert_eq!(
+        citations(&body),
+        BTreeSet::from([
+            FINDING_2_SHAPES[0].to_owned(),
+            format!("{}#7", FINDING_2_SHAPES[2]),
+            format!("{RECORD_15_CITED}?plain=1"),
+            RECORD_19_CITED.to_owned(),
+        ]),
+        "the prefix is kept so the path can be resolved, a query or fragment is allowed, and a \
+         reference definition with no space after its colon is read without the `[r]:`; the \
+         folder link, a code span and a trailing `/` are not citations, as they were not \
+         before #483"
+    );
+}
+
+/// **Rules 2 and 7 refuse each of finding 2's shapes**, planted after
+/// `v0.7.0` exactly as record 17 planted them, and accept the control.
+#[test]
+fn rules_2_and_7_refuse_a_record_already_cited_under_another_spelling() {
+    for shape in FINDING_2_SHAPES {
+        let releases = after_v0_7_0(&[shape]);
+
+        assert_eq!(
+            recycled(&releases).len(),
+            1,
+            "rule 2 counted {shape} as a record no earlier release cited"
+        );
+        assert_eq!(
+            backward(&releases).len(),
+            1,
+            "rule 7 did not refuse {shape}"
+        );
+    }
+
+    let control = after_v0_7_0(&[RECORD_15_CITED]);
+    assert_eq!(
+        recycled(&control).len(),
+        1,
+        "the house spelling of record 15"
+    );
+    assert_eq!(
+        backward(&control).len(),
+        1,
+        "the house spelling of record 15"
+    );
+
+    // A number the path passes through and leaves: the text after the last
+    // `verifications/` reads 99, and the link opens record 15. Windows opens
+    // it even though no folder `99. A Pass` exists, because it resolves `..`
+    // before looking.
+    let passes_through_99 =
+        "../verifications/99.%20A%20Pass/../15.%20Sprint%2016%20Independent%20Pass.md";
+    let releases = after_v0_7_0(&[passes_through_99]);
+    assert_eq!(
+        recycled(&releases).len(),
+        1,
+        "rule 2 counted {passes_through_99} as a new record"
+    );
+    assert_eq!(
+        backward(&releases).len(),
+        1,
+        "rule 7 read 99 off {passes_through_99}, which is record 15"
+    );
+
+    let releases = after_v0_7_0(&[QUERY_OVER_15]);
+    assert!(
+        recycled(&releases).len() == 1 && backward(&releases).len() == 1,
+        "rules 2 and 7 read {QUERY_OVER_15} as record 19; a browser opens record 15"
+    );
+
+    let new = after_v0_7_0(&[RECORD_16_CITED]);
+    assert!(
+        recycled(&new).is_empty() && backward(&new).is_empty(),
+        "record 16, which v0.7.0 did not cite, is a new reading"
+    );
+
+    let new_and_old = after_v0_7_0(&[RECORD_16_CITED, FINDING_2_SHAPES[0]]);
+    assert!(
+        recycled(&new_and_old).is_empty() && backward(&new_and_old).is_empty(),
+        "an old record cited beside a new one takes nothing away"
+    );
+}
+
+/// **A governed release that points at no numbered record is red, not
+/// skipped** — the `continue` that let all three of finding 2's shapes past
+/// rule 7 under the old reading.
+#[test]
+fn a_release_with_no_numbered_citation_is_refused() {
+    for cited in [
+        FINDING_2_SHAPES[2],
+        "../verifications/A%20Pass%20With%20No%20Number.md",
+        "../verifications/%2531%2535.%20Sprint%2016%20Independent%20Pass.md",
+        "../verifications/sub/16.%20Sprint%2018%20Independent%20Pass.md",
+    ] {
+        let alone = vec![release((0, 8, 0), "08. Release v0.8.0.md", &[cited])];
+
+        assert_eq!(
+            backward(&alone).len(),
+            1,
+            "rule 7 skipped a release whose only citation is {cited}"
+        );
+        assert_eq!(
+            recycled(&alone).len(),
+            usize::from(normalised_citation(cited).is_err()),
+            "rule 2 refuses {cited} exactly when it points outside the folder: a name inside              it is new to rule 2 whether or not it has a number, and rule 6 decides whether it              is there"
+        );
+    }
+
+    let silent = vec![release((0, 8, 0), "08. Release v0.8.0.md", &[])];
+    assert!(
+        backward(&silent).is_empty() && recycled(&silent).is_empty(),
+        "a release citing nothing is rule 1's alone"
     );
 }
