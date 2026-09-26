@@ -189,8 +189,10 @@ While the major version is `0`, the public API may change in any release.
     answers D-89's refusal, unchanged. The definitions are checked only once
     no open task needs the role.
   - **Publishing a new revision does not free the role.** The old revision
-    stays `ACTIVE`, and no route deprecates one. Bind the document types to
-    the new revision, then delete the old one with
+    stays `ACTIVE`, and no route deprecates one yet
+    ([#573](https://github.com/sujanto-gaws/kelir/issues/573)), so it keeps
+    the role held until it is removed. Bind the document types to the new
+    revision, then delete the old one with
     `DELETE /api/v1/workflow/definitions/{id}`, which is refused while
     approvals still run on it.
   - **Publishing still does not check that a definition's roles exist**, so a
