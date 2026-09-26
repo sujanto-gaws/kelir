@@ -173,6 +173,33 @@ While the major version is `0`, the public API may change in any release.
   between them and strand the task. **Upgrade:** a published definition
   whose edge names a role that no longer exists now refuses at submit rather
   than at decision. Publish a revision naming a live role.
+- **A role that a published workflow definition names cannot be deleted**
+  ([#510](https://github.com/sujanto-gaws/kelir/issues/510), decision
+  **D-91** (3)). `DELETE /api/v1/identity/roles/{id}` answered 204 for a role
+  that a published definition named in a task's `assignment` or an edge's
+  `allowedBy`. After that, every submission routed to the definition was
+  refused as `ASSIGNMENT_UNRESOLVED` until a new revision was published. The
+  delete now answers **409 `ROLE_NAMED_BY_PUBLISHED_DEFINITION`**, a code of
+  its own, and names each such definition by key, name and revision.
+  - **What counts:** an `ACTIVE` revision, and a `DEPRECATED` one while an
+    approval still runs on it, since that approval can still reach a step
+    naming the role. A draft does not count, and nor does a task's
+    `escalation`, which nothing runs yet.
+  - **One reason at a time:** while open tasks need the role, the delete
+    answers D-89's refusal, unchanged. The definitions are checked only once
+    no open task needs the role.
+  - **Publishing a new revision does not free the role.** The old revision
+    stays `ACTIVE`, and no route deprecates one. Bind the document types to
+    the new revision, then delete the old one with
+    `DELETE /api/v1/workflow/definitions/{id}`, which is refused while
+    approvals still run on it.
+  - **Publishing still does not check that a definition's roles exist**, so a
+    definition naming a deleted role can still be published afterwards
+    ([#572](https://github.com/sujanto-gaws/kelir/issues/572)).
+  - **`AppError::conflict_with_code`** answers a 409 with a code other than
+    `CONFLICT`. Every other 409 keeps `CONFLICT`.
+  - **Upgrade:** a role whose tasks have all been decided no longer deletes
+    while a published definition names it.
 
 ### Fixed
 

@@ -4,8 +4,9 @@
 use uuid::Uuid;
 
 use super::domain::{
-    validate_create_user, validate_distinct_ids, validate_password_value, CreateRoleRequest,
-    CreateUserRequest, Permission, Role, UpdateRoleRequest, UpdateUserRequest, User, UserStatus,
+    open_tasks_refusal, published_definitions_refusal, validate_create_user, validate_distinct_ids,
+    validate_password_value, CreateRoleRequest, CreateUserRequest, Permission, Role,
+    UpdateRoleRequest, UpdateUserRequest, User, UserStatus, ROLE_NAMED_BY_PUBLISHED_DEFINITION,
 };
 use super::repository as repo;
 use crate::error::{AppError, ValidationDetail};
@@ -13,6 +14,7 @@ use crate::middleware::auth::Authenticated;
 use crate::modules::audit::{self, domain::ObjectType, AuditEntry};
 use crate::modules::auth::password::hash_password;
 use crate::modules::organization::department_repository as department_repo;
+use crate::modules::workflow::service::definition as workflow_definition;
 use crate::modules::workflow::service::task as workflow_task;
 use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
@@ -473,21 +475,32 @@ pub async fn delete_role(
     // role gone and is refused as `ASSIGNMENT_UNRESOLVED`.
     let open = workflow_task::open_tasks_needing_role(&mut transaction, tenant_id, id).await?;
 
-    if open > 0 {
-        let (tasks, them, they) = if open == 1 {
-            ("task needs", "it", "It needs")
-        } else {
-            ("tasks need", "them", "They need")
-        };
+    if let Some(refusal) = open_tasks_refusal(open) {
+        return Err(AppError::conflict(refusal));
+    }
 
-        // True of both ways a task needs a role: an unclaimed task offered to
-        // it is left offered to nobody, and a task with an edge `allowedBy` it
-        // is left with a decision nobody can make (#529).
-        return Err(AppError::conflict(format!(
-            "{open} open {tasks} this role to be decided. Deleting the role would leave \
-             {them} offered to nobody, or with a decision nobody could make. {they} to be \
-             decided first"
-        )));
+    // **D-91** (3) (#510): nor is a role a published workflow revision names,
+    // which is D-89 applied to the revision that raises the *next* task. With
+    // the role gone, every submission routed to that revision, and every
+    // approval running on it that reaches a step naming the role, would be
+    // refused as `ASSIGNMENT_UNRESOLVED` until somebody published another.
+    // Asked only once no open task needs the role, so each refusal has one
+    // reason and its own code.
+    //
+    // This refuses the delete while a published revision names the role; it
+    // does not stop a later publish naming the deleted role, because
+    // publishing checks that a definition's roles are well-formed, not that
+    // they exist (JWSS §5.3; #572). So no lock holds this list against a
+    // publish in flight: one racing the delete reaches the state that one
+    // arriving after it does.
+    let definitions =
+        workflow_definition::definitions_naming_role(&mut transaction, tenant_id, id).await?;
+
+    if let Some(refusal) = published_definitions_refusal(&definitions) {
+        return Err(AppError::conflict_with_code(
+            ROLE_NAMED_BY_PUBLISHED_DEFINITION,
+            refusal,
+        ));
     }
 
     repo::soft_delete_role(&mut *transaction, tenant_id, id, Some(caller.user_id())).await?;

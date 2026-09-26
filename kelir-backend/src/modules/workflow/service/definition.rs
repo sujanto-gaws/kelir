@@ -32,8 +32,8 @@ use uuid::Uuid;
 use super::super::domain::jwss;
 use super::super::domain::{
     definition::{initial_state, jwss_version},
-    validate_create, validate_update, CreateWorkflowRequest, Graph, UpdateWorkflowRequest,
-    WorkflowDefinition, WorkflowDefinitionStatus, WorkflowDefinitionSummary,
+    validate_create, validate_update, CreateWorkflowRequest, DefinitionNamingRole, Graph,
+    UpdateWorkflowRequest, WorkflowDefinition, WorkflowDefinitionStatus, WorkflowDefinitionSummary,
 };
 use super::super::repository::{definition as repo, projection};
 use super::super::{
@@ -464,6 +464,31 @@ pub async fn delete_definition(
     .await;
 
     Ok(())
+}
+
+/// The published revisions that would be left naming `role_id` if it were
+/// deleted (**D-91** (3), [#510]). `repository::definition::definitions_naming_role`
+/// says which revisions count and where a revision names a role.
+///
+/// `identity::service::delete_role` asks, under its `FOR UPDATE` on the role
+/// row, once `task::open_tasks_needing_role` has answered zero, and refuses as
+/// `ROLE_NAMED_BY_PUBLISHED_DEFINITION` while the answer is not empty. A
+/// revision naming the role would have every submission of a type bound to it,
+/// or the next step of an approval running on it, refused as
+/// `ASSIGNMENT_UNRESOLVED` until somebody published another.
+///
+/// **This refuses the delete while a published revision names the role; it does
+/// not stop a later publish from naming the deleted role** ([#572]), because
+/// [`publish_definition`] does not check that the roles a definition names exist.
+///
+/// [#510]: https://github.com/sujanto-gaws/kelir/issues/510
+/// [#572]: https://github.com/sujanto-gaws/kelir/issues/572
+pub async fn definitions_naming_role(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    role_id: Uuid,
+) -> Result<Vec<DefinitionNamingRole>, AppError> {
+    Ok(repo::definitions_naming_role(&mut **transaction, tenant_id, role_id).await?)
 }
 
 /// A stable stand-in for the definition in an audit record.

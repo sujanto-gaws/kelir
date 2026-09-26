@@ -1110,19 +1110,25 @@ async fn the_count_the_page_and_the_gate_agree_when_a_document_is_gone() {
 // ---------------------------------------------------------------------------
 
 /// **A role with an open task is not deleted, and is once the task is decided**
-/// (**D-89**, [#487]).
+/// (**D-89**, [#487]) **and its workflow retired** (**D-91** (3), [#510]).
 ///
 /// Deleting a role used to answer 204 whatever was waiting on it, leaving its
 /// open tasks offered to nobody and their documents in `PENDING_APPROVAL`. The
 /// refusal is a 409 that says how many, and **nothing changes**: the role is
-/// still live and its holder is still offered the task. The last step is the
-/// other half: the same delete succeeds once the task has been decided, so the
-/// refusal is about the open task and not about the role.
+/// still live and its holder is still offered the task.
+///
+/// **Both reasons hold the role here, and the refusals come one at a time.**
+/// The open task is asked about first, and its refusal is D-89's `CONFLICT`.
+/// Once the task is decided, the published definition that names the role is
+/// all that holds it, and the refusal is **D-91** (3)'s own code,
+/// `ROLE_NAMED_BY_PUBLISHED_DEFINITION`. Deleting that revision, which nothing
+/// is running on any more, lets the role go.
 ///
 /// **Seen red** against `identity::service::delete_role` with the count's
-/// refusal removed: the first delete answers 204.
+/// refusal removed: the first refusal is the definition's.
 ///
 /// [#487]: https://github.com/sujanto-gaws/kelir/issues/487
+/// [#510]: https://github.com/sujanto-gaws/kelir/issues/510
 #[tokio::test]
 async fn a_role_with_an_open_task_is_not_deleted_until_the_task_is_decided() {
     let app = TestApp::spawn().await;
@@ -1148,10 +1154,8 @@ async fn a_role_with_an_open_task_is_not_deleted_until_the_task_is_decided() {
         "{}",
         refused.body
     );
-    assert!(
-        refused.body["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.starts_with("1 open task needs")),
+    assert_eq!(
+        refused.body["error"]["message"], ONE_OPEN_TASK,
         "the refusal says how many tasks: {}",
         refused.body
     );
@@ -1176,11 +1180,20 @@ async fn a_role_with_an_open_task_is_not_deleted_until_the_task_is_decided() {
 
     decide(&app, &approver, task).await;
 
+    let named = delete_role(&app, &token, role).await;
+    assert_named_by(
+        &named,
+        "ti_d89_open (\"Standard approval\", revision 1)",
+        "with the task decided, only the definition holds the role",
+    );
+
+    retire_definition(&app, &token, workflow).await;
+
     let deleted = delete_role(&app, &token, role).await;
     assert_eq!(
         deleted.status,
         StatusCode::NO_CONTENT,
-        "with nothing open, the role deletes: {}",
+        "with nothing open and nothing published naming it, the role deletes: {}",
         deleted.body
     );
 }
@@ -1201,18 +1214,24 @@ async fn a_role_with_an_open_task_is_not_deleted_until_the_task_is_decided() {
 /// `workflow:task:execute` through `edge` once `queue` is gone, as P2's did.
 ///
 /// The fixture raises **two** tasks and claims one. While the other is
-/// unclaimed, `queue` is refused, because an unclaimed task is offered through
-/// its role and nothing else. Once that one is decided, `queue` deletes, and
-/// the claimed task is still decided with 200. **An unrelated role deletes**
-/// throughout: a refusal of every delete while anything is open would pass the
-/// 409s.
+/// unclaimed, `queue` is refused for it, because an unclaimed task is offered
+/// through its role and nothing else. Once that one is decided, no task needs
+/// `queue`, and the claimed task is still decided with 200. **An unrelated role
+/// deletes** throughout: a refusal of every delete while anything is open would
+/// pass the 409s.
+///
+/// The published definition names both roles, so since **D-91** (3) ([#510])
+/// a role no open task needs is still refused, for the definition, with
+/// `ROLE_NAMED_BY_PUBLISHED_DEFINITION`, and neither deletes until the
+/// definition is retired. Each refusal is asserted whole, code and message.
 ///
 /// **Seen red** three times against `count_open_tasks_needing_role`: with
 /// #513's `candidate_role_id` clause (claimed or not) the first `queue` refusal
 /// counts both tasks; without the `candidate_role_id` clause the first `queue`
-/// delete answers 204; without the `workflow_transitions` clause the first
-/// `edge` delete does.
+/// refusal is the definition's; without the `workflow_transitions` clause the
+/// first `edge` refusal counts one task.
 ///
+/// [#510]: https://github.com/sujanto-gaws/kelir/issues/510
 /// [#529]: https://github.com/sujanto-gaws/kelir/issues/529
 #[tokio::test]
 async fn a_claimed_task_needs_only_the_role_its_transitions_name() {
@@ -1293,9 +1312,7 @@ async fn a_claimed_task_needs_only_the_role_its_transitions_name() {
     // The whole sentence, in both numbers: it is what an administrator reads,
     // and each branch has its own pronouns.
     assert_eq!(
-        queue_refused.body["error"]["message"],
-        "1 open task needs this role to be decided. Deleting the role would leave it offered \
-         to nobody, or with a decision nobody could make. It needs to be decided first",
+        queue_refused.body["error"]["message"], ONE_OPEN_TASK,
         "only the unclaimed task needs the queue: {}",
         queue_refused.body
     );
@@ -1326,31 +1343,51 @@ async fn a_claimed_task_needs_only_the_role_its_transitions_name() {
 
     decide(&app, &approver, unclaimed).await;
 
-    let queue_deleted = delete_role(&app, &token, queue).await;
-    assert_eq!(
-        queue_deleted.status,
-        StatusCode::NO_CONTENT,
-        "a claimed task held the role it was offered to, which its assignee does not need: {}",
-        queue_deleted.body
+    let queue_named = delete_role(&app, &token, queue).await;
+    assert_named_by(
+        &queue_named,
+        EDGE_DEFINITION,
+        "a claimed task held the role it was offered to, which its assignee does not need",
     );
 
     let edge_still_refused = delete_role(&app, &token, edge).await;
     assert_eq!(
         edge_still_refused.status,
         StatusCode::CONFLICT,
+        "{}",
+        edge_still_refused.body
+    );
+    assert_eq!(
+        edge_still_refused.body["error"]["message"], ONE_OPEN_TASK,
         "the claimed task stopped holding the role its allowedBy names: {}",
         edge_still_refused.body
     );
 
     // Record 18's P2: the assignee decides, with the role the task was offered
-    // to gone, and holding the permissions through `edge`.
+    // to gone, and holding the permissions through `edge`. The definition keeps
+    // `queue` from the route, so it goes the way a release before D-91 (3)
+    // would have let it.
+    sqlx::query("UPDATE roles SET deleted_at = now() WHERE id = $1")
+        .bind(queue)
+        .execute(&app.pool)
+        .await
+        .expect("delete the queue as a release before D-91 (3) did");
     decide(&app, &approver, claimed).await;
+
+    let edge_named = delete_role(&app, &token, edge).await;
+    assert_named_by(
+        &edge_named,
+        EDGE_DEFINITION,
+        "with the tasks decided, only the definition holds the role",
+    );
+
+    retire_definition(&app, &token, workflow).await;
 
     let edge_deleted = delete_role(&app, &token, edge).await;
     assert_eq!(
         edge_deleted.status,
         StatusCode::NO_CONTENT,
-        "with the tasks decided, the role deletes: {}",
+        "with the tasks decided and the definition retired, the role deletes: {}",
         edge_deleted.body
     );
 }
@@ -1400,9 +1437,17 @@ fn two_stage(key: &str, manager: &str, finance: &str) -> Value {
 /// and it deletes. The edge clause matches by **code**, and codes repeat across
 /// tenants, so only the tenant filters keep B's task out of A's count.
 ///
+/// Nor does another tenant's **published definition** naming the same code
+/// (**D-91** (3), [#510]): B's definition names `TI-XT` in its task and its
+/// edges, and the system tenant has none.
+///
 /// **Seen red** against `count_open_tasks_needing_role` with both tenant
 /// predicates dropped (`t.tenant_id = $1` and `r.tenant_id = t.tenant_id`): the
-/// delete answers 409, counting B's task.
+/// delete answers 409, counting B's task. And against
+/// `repository::definition::definitions_naming_role` with `d.tenant_id = $1`
+/// dropped: the delete answers 409, naming B's definition.
+///
+/// [#510]: https://github.com/sujanto-gaws/kelir/issues/510
 #[tokio::test]
 async fn a_role_is_not_held_by_another_tenants_task() {
     let app = TestApp::spawn_with(|config| config.multi_tenant = true).await;
@@ -1434,20 +1479,26 @@ async fn a_role_is_not_held_by_another_tenants_task() {
 ///
 /// Two definitions of two approvals share a manager role, `M`, and each has
 /// its own finance role. Document A waits at the manager, so its finance role
-/// `FA` is named only by a **later** state's edges and deletes. That is
-/// deliberate: when the manager approves, `assignment::hold_deciding_roles`
-/// refuses the transition into a state whose role is gone (#509). A third,
-/// unrelated definition names `Z` in edges out of a state with the **same
-/// code** as A's current one, and has no task; `Z` deletes too.
+/// `FA` is named only by a **later** state's edges and no open task needs it.
+/// A third, unrelated definition names `Z` in edges out of a state with the
+/// **same code** as A's current one, and has no task; no open task needs `Z`
+/// either.
 ///
 /// Document B is approved by the manager and waits at finance. Its finance role
 /// `FB` is refused for exactly **one** task: the manager's task is completed,
 /// although its instance now sits in the state whose edges name `FB`.
 ///
+/// Each role is also named by its published definition, so since **D-91** (3)
+/// ([#510]) `FA` and `Z` are refused too, with the definition's own code. That
+/// is the point of D-91 (3) for `FA`: document A's next step needs it. A task
+/// counted wrongly would turn either refusal into D-89's `CONFLICT`.
+///
 /// **Seen red** against `count_open_tasks_needing_role`: without
-/// `tr.from_state = i.current_state` the `FA` delete answers 409; without
-/// `tr.workflow_definition_id = i.workflow_definition_id` the `Z` delete does;
+/// `tr.from_state = i.current_state` the `FA` refusal counts a task; without
+/// `tr.workflow_definition_id = i.workflow_definition_id` the `Z` refusal does;
 /// without the status filter the `FB` refusal counts 2 tasks.
+///
+/// [#510]: https://github.com/sujanto-gaws/kelir/issues/510
 #[tokio::test]
 async fn a_role_is_held_by_the_current_states_edges_and_by_open_tasks_only() {
     let app = TestApp::spawn().await;
@@ -1482,22 +1533,18 @@ async fn a_role_is_held_by_the_current_states_edges_and_by_open_tasks_only() {
 
     publish_workflow(&app, &token, "ti_stage_z", "TI-STAGE-Z").await;
 
-    // `Z` first: without the definition match, `FA` is held too, by document
-    // B's instance, which sits in a state whose edges in A's definition name it.
     let elsewhere = delete_role(&app, &token, unrelated).await;
-    assert_eq!(
-        elsewhere.status,
-        StatusCode::NO_CONTENT,
-        "a role named only by another definition's edges was held: {}",
-        elsewhere.body
+    assert_named_by(
+        &elsewhere,
+        "ti_stage_z (\"Standard approval\", revision 1)",
+        "an open task held a role named only by another definition's edges",
     );
 
     let downstream = delete_role(&app, &token, finance_a).await;
-    assert_eq!(
-        downstream.status,
-        StatusCode::NO_CONTENT,
-        "a role named only by a later state's edges was held: {}",
-        downstream.body
+    assert_named_by(
+        &downstream,
+        "ti_stage_a (\"Standard approval\", revision 1)",
+        "an open task held a role named only by a later state's edges",
     );
 
     let current = delete_role(&app, &token, finance_b).await;
@@ -1508,9 +1555,7 @@ async fn a_role_is_held_by_the_current_states_edges_and_by_open_tasks_only() {
         current.body
     );
     assert_eq!(
-        current.body["error"]["message"],
-        "1 open task needs this role to be decided. Deleting the role would leave it offered \
-         to nobody, or with a decision nobody could make. It needs to be decided first",
+        current.body["error"]["message"], ONE_OPEN_TASK,
         "the completed manager task was counted: {}",
         current.body
     );
@@ -1525,7 +1570,9 @@ async fn a_role_is_held_by_the_current_states_edges_and_by_open_tasks_only() {
 ///
 /// **Seen red** against `count_open_tasks_needing_role` with the edge clause
 /// narrowed to `tr.allowed_by_json->>'assigneeType' = 'ROLE'`: the delete
-/// answers 204.
+/// answers 204. Since **D-91** (3) the published definition names `D` too and
+/// refuses the delete anyway, so the code and message are asserted: under the
+/// same mutation the refusal is the definition's (seen red again for #510).
 #[tokio::test]
 async fn a_department_role_edge_holds_its_role() {
     let app = TestApp::spawn().await;
@@ -1573,11 +1620,316 @@ async fn a_department_role_edge_holds_its_role() {
         "a DEPARTMENT_ROLE edge did not hold its role: {}",
         refused.body
     );
+    assert_eq!(
+        refused.body["error"]["code"], "CONFLICT",
+        "{}",
+        refused.body
+    );
+    assert_eq!(
+        refused.body["error"]["message"], ONE_OPEN_TASK,
+        "the open task did not hold the role its DEPARTMENT_ROLE edge names: {}",
+        refused.body
+    );
 }
 
 async fn delete_role(app: &TestApp, token: &str, role: Uuid) -> common::TestResponse {
     app.delete(&format!("/api/v1/identity/roles/{role}"), Some(token))
         .await
+}
+
+/// D-89's refusal for one open task. It is asked about first, and answers
+/// `CONFLICT`.
+const ONE_OPEN_TASK: &str = "1 open task needs this role to be decided. Deleting the role would \
+                             leave it offered to nobody, or with a decision nobody could make. \
+                             It needs to be decided first";
+
+/// `a_claimed_task_needs_only_the_role_its_transitions_name`'s definition, as
+/// a refusal names it.
+const EDGE_DEFINITION: &str = "ti_d89_edge (\"Standard approval\", revision 1)";
+
+/// The **D-91** (3) refusal for a role one published definition names, given
+/// that definition as the refusal names it.
+fn named_by(definition: &str) -> String {
+    format!(
+        "This role is named by 1 published workflow definition: {definition}. Deleting the \
+         role would leave it unable to raise its tasks. Publish a revision that does not name \
+         the role, bind its document types to that revision, and delete this one once its \
+         running approvals are finished"
+    )
+}
+
+/// Asserts `response` is **D-91** (3)'s refusal naming exactly one definition.
+fn assert_named_by(response: &common::TestResponse, definition: &str, why: &str) {
+    assert_eq!(
+        response.status,
+        StatusCode::CONFLICT,
+        "{why}: {}",
+        response.body
+    );
+    assert_eq!(
+        response.body["error"]["code"], "ROLE_NAMED_BY_PUBLISHED_DEFINITION",
+        "{why}: {}",
+        response.body
+    );
+    assert_eq!(
+        response.body["error"]["message"],
+        named_by(definition),
+        "{why}: {}",
+        response.body
+    );
+}
+
+/// Deletes a workflow revision through the route an administrator uses, which
+/// answers 204 once nothing is running on it.
+async fn retire_definition(app: &TestApp, token: &str, definition: Uuid) {
+    let retired = app
+        .delete(
+            &format!("/api/v1/workflow/definitions/{definition}"),
+            Some(token),
+        )
+        .await;
+    assert_eq!(retired.status, StatusCode::NO_CONTENT, "{}", retired.body);
+}
+
+// ---------------------------------------------------------------------------
+// D-91 (3) — a role a published definition names is not deleted (#510)
+// ---------------------------------------------------------------------------
+
+/// A definition naming a role in each place the engine resolves one, and one
+/// place it does not: the first state's task is offered to `task` and
+/// escalates to `escalation`; its `APPROVE` is `allowedBy` `object` in the
+/// object form and its `REJECT` `short` in the `"ROLE:X"` shorthand. The second
+/// state's task is offered to `department` as a `DEPARTMENT_ROLE`, and its
+/// `REJECT` is `allowedBy` `department_edge` the same way. Its `APPROVE` is the
+/// owner's, which names no role.
+fn naming_everywhere(key: &str) -> Value {
+    json!({
+        "workflowKey": key,
+        "version": "1.0.0",
+        "name": "Named everywhere",
+        "initialState": "MANAGER_APPROVAL",
+        "states": [
+            { "code": "MANAGER_APPROVAL", "name": "Manager approval",
+              "mapsToDocumentStatus": "PENDING_APPROVAL",
+              "task": { "taskDefinitionKey": "manager_approval",
+                        "taskName": "Approve the request",
+                        "assignment": { "assigneeType": "ROLE", "roleCode": "TI-NAMED-TASK" },
+                        "escalation": {
+                            "afterHours": 24,
+                            "assignment": { "assigneeType": "ROLE",
+                                            "roleCode": "TI-NAMED-ESCALATION" } } } },
+            { "code": "DEPARTMENT_APPROVAL", "name": "Department approval",
+              "mapsToDocumentStatus": "PENDING_APPROVAL",
+              "task": { "taskDefinitionKey": "department_approval",
+                        "taskName": "Approve for the department",
+                        "assignment": { "assigneeType": "DEPARTMENT_ROLE",
+                                        "roleCode": "TI-NAMED-DEPARTMENT",
+                                        "departmentScope": "REQUESTED_DEPARTMENT" } } },
+            { "code": "COMPLETED", "name": "Completed", "mapsToDocumentStatus": "COMPLETED",
+              "isFinal": true },
+            { "code": "REJECTED", "name": "Rejected", "mapsToDocumentStatus": "REJECTED",
+              "isFinal": true }
+        ],
+        "transitions": [
+            { "from": "MANAGER_APPROVAL", "to": "DEPARTMENT_APPROVAL", "action": "APPROVE",
+              "allowedBy": { "assigneeType": "ROLE", "roleCode": "TI-NAMED-OBJECT" } },
+            { "from": "MANAGER_APPROVAL", "to": "REJECTED", "action": "REJECT",
+              "allowedBy": "ROLE:TI-NAMED-SHORT" },
+            { "from": "DEPARTMENT_APPROVAL", "to": "COMPLETED", "action": "APPROVE",
+              "allowedBy": "OWNER" },
+            { "from": "DEPARTMENT_APPROVAL", "to": "REJECTED", "action": "REJECT",
+              "allowedBy": { "assigneeType": "DEPARTMENT_ROLE",
+                             "roleCode": "TI-NAMED-DEPARTMENT-EDGE",
+                             "departmentScope": "REQUESTED_DEPARTMENT" } }
+        ]
+    })
+}
+
+/// **A published definition holds every role it names where the engine
+/// resolves one, and nothing else** (**D-91** (3), [#510]).
+///
+/// No document is ever submitted: nothing is open, so each refusal is the
+/// definition's alone. The roles a task's `assignment` names, as `ROLE` and as
+/// `DEPARTMENT_ROLE`, and the roles an edge's `allowedBy` names, in the object
+/// form and the `"ROLE:X"` shorthand and as `DEPARTMENT_ROLE`, are each refused
+/// with a message naming the definition by key, name and revision.
+///
+/// Five roles delete: one only an `escalation.assignment` names, which nothing
+/// executes (JWSS §3.1); one only a **draft** names; one of a code nothing
+/// names; one whose code differs from a named one only in case, because the
+/// engine resolves codes exactly; and, once the definition is retired, `task`.
+///
+/// **Seen red** against `definitions_naming_role`: without the status filter,
+/// the draft's role is refused; with the `workflow_transitions` clause reading
+/// `allowedBy` from `definition_json` rather than the normalized projection,
+/// the shorthand's role deletes; with `DEPARTMENT_ROLE` dropped from either
+/// clause, that clause's department role deletes; with an
+/// `escalation.assignment` path added, the escalation's role is refused.
+///
+/// [#510]: https://github.com/sujanto-gaws/kelir/issues/510
+#[tokio::test]
+async fn a_published_definition_holds_every_role_it_names_and_nothing_else() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let mut roles = std::collections::BTreeMap::new();
+    for code in [
+        "TI-NAMED-TASK",
+        "TI-NAMED-DEPARTMENT",
+        "TI-NAMED-OBJECT",
+        "TI-NAMED-SHORT",
+        "TI-NAMED-DEPARTMENT-EDGE",
+        "TI-NAMED-ESCALATION",
+        "TI-NAMED-DRAFT",
+        "TI-NAMED-NOBODY",
+        "ti-named-task",
+    ] {
+        let role = fixtures::create_role_with_permissions(
+            &app.pool,
+            fixtures::SYSTEM_TENANT_ID,
+            code,
+            &[],
+        )
+        .await;
+        roles.insert(code, role);
+    }
+
+    let workflow =
+        publish_workflow_definition(&app, &token, "ti_named", naming_everywhere("ti_named")).await;
+
+    let draft = app
+        .post(
+            "/api/v1/workflow/definitions",
+            Some(&token),
+            json!({
+                "workflowKey": "ti_named_draft",
+                "name": "Never published",
+                "definition": workflow_for("ti_named_draft", "TI-NAMED-DRAFT"),
+            }),
+        )
+        .await;
+    assert_eq!(draft.status, StatusCode::CREATED, "{}", draft.body);
+
+    for code in [
+        "TI-NAMED-TASK",
+        "TI-NAMED-DEPARTMENT",
+        "TI-NAMED-OBJECT",
+        "TI-NAMED-SHORT",
+        "TI-NAMED-DEPARTMENT-EDGE",
+    ] {
+        let refused = delete_role(&app, &token, roles[code]).await;
+        assert_named_by(
+            &refused,
+            "ti_named (\"Standard approval\", revision 1)",
+            &format!("the published definition did not hold {code}"),
+        );
+    }
+
+    for code in [
+        "TI-NAMED-ESCALATION",
+        "TI-NAMED-DRAFT",
+        "TI-NAMED-NOBODY",
+        "ti-named-task",
+    ] {
+        let deleted = delete_role(&app, &token, roles[code]).await;
+        assert_eq!(
+            deleted.status,
+            StatusCode::NO_CONTENT,
+            "{code} was held by something that does not need it: {}",
+            deleted.body
+        );
+    }
+
+    retire_definition(&app, &token, workflow).await;
+
+    let deleted = delete_role(&app, &token, roles["TI-NAMED-TASK"]).await;
+    assert_eq!(
+        deleted.status,
+        StatusCode::NO_CONTENT,
+        "a retired definition still held its role: {}",
+        deleted.body
+    );
+}
+
+/// **A new revision does not release a role the old one names; retiring the
+/// old one does, once nothing runs on it** (**D-91** (3), [#510]).
+///
+/// Revision 1 is two approvals, the manager's then finance's, and a document
+/// waits at the manager. Revision 2 drops finance. Publishing it leaves
+/// revision 1 `ACTIVE` (no route deprecates a revision), so finance is refused
+/// for revision 1, and **revision 1 only**.
+///
+/// Revision 1 is then deprecated, and finance is still refused, now for a
+/// deprecated revision: document A's approval runs on it and will reach
+/// finance next. That is #510's second case, an open instance whose next step
+/// needs the role, although no open task does. Once the approval finishes,
+/// nothing runs on revision 1, and finance deletes.
+///
+/// **Seen red** against `definitions_naming_role` without its `DEPRECATED`
+/// clause: the second delete answers 204.
+///
+/// [#510]: https://github.com/sujanto-gaws/kelir/issues/510
+#[tokio::test]
+async fn a_role_is_released_when_the_revisions_naming_it_are_retired() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let (_, manager) = holder(&app, "TI-RETIRE-M", "ti.retire.manager").await;
+    let (finance, finance_holder) = holder(&app, "TI-RETIRE-F", "ti.retire.finance").await;
+
+    let first = two_stage("ti_retire", "TI-RETIRE-M", "TI-RETIRE-F");
+    let first = publish_workflow_definition(&app, &token, "ti_retire", first).await;
+    let type_id = document_type(&app, &token, "TI_RETIRE", first).await;
+    let document = submitted_document(&app, &token, type_id, "Approved on revision 1").await;
+
+    let revision = app
+        .post(
+            &format!("/api/v1/workflow/definitions/{first}/revisions"),
+            Some(&token),
+            json!({ "definition": two_stage("ti_retire", "TI-RETIRE-M", "TI-RETIRE-M") }),
+        )
+        .await;
+    assert_eq!(revision.status, StatusCode::CREATED, "{}", revision.body);
+    let second = id_of(&revision.body["data"]);
+    let published = app
+        .post(
+            &format!("/api/v1/workflow/definitions/{second}/publication"),
+            Some(&token),
+            json!({}),
+        )
+        .await;
+    assert_eq!(published.status, StatusCode::OK, "{}", published.body);
+
+    let active = delete_role(&app, &token, finance).await;
+    assert_named_by(
+        &active,
+        "ti_retire (\"Standard approval\", revision 1)",
+        "publishing revision 2 released the role revision 1 names",
+    );
+
+    sqlx::query("UPDATE workflow_definitions SET status = 'DEPRECATED' WHERE id = $1")
+        .bind(first)
+        .execute(&app.pool)
+        .await
+        .expect("deprecate revision 1");
+
+    let deprecated = delete_role(&app, &token, finance).await;
+    assert_named_by(
+        &deprecated,
+        "ti_retire (\"Standard approval\", revision 1, deprecated)",
+        "a deprecated revision with an approval running on it did not hold its role",
+    );
+
+    decide(&app, &manager, open_task_of(&app, document).await).await;
+    decide(&app, &finance_holder, open_task_of(&app, document).await).await;
+
+    let deleted = delete_role(&app, &token, finance).await;
+    assert_eq!(
+        deleted.status,
+        StatusCode::NO_CONTENT,
+        "a deprecated revision nothing runs on held its role: {}",
+        deleted.body
+    );
 }
 
 async fn decide(app: &TestApp, token: &str, task: Uuid) {
@@ -1710,8 +2062,13 @@ async fn a_submission_racing_a_role_delete_waits_and_then_finds_the_role_gone() 
 /// `FOR NO KEY UPDATE`, which does not conflict with `FOR KEY SHARE`, the
 /// delete never waits and answers 204 beside the task; and with the open-task
 /// count moved above the lock in `delete_role`, the delete waits, but counts
-/// before the task commits and answers 204.
+/// before the task commits and answers 204. Since **D-91** (3) ([#510]) the
+/// definition that raised the task would refuse both deletes anyway, and both
+/// mutations are still red (seen again for #510): the first delete answers 409
+/// without waiting, and the second answers the definition's
+/// `ROLE_NAMED_BY_PUBLISHED_DEFINITION`, not the task's refusal.
 ///
+/// [#510]: https://github.com/sujanto-gaws/kelir/issues/510
 /// [#528]: https://github.com/sujanto-gaws/kelir/issues/528
 #[tokio::test]
 async fn a_role_delete_arriving_during_a_transition_waits_for_it_and_refuses() {

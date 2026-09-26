@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT d.workflow_key, d.name, d.version, d.status\n        FROM workflow_definitions d\n        JOIN roles r ON r.id = $2 AND r.tenant_id = $1\n        WHERE d.tenant_id = $1 AND d.deleted_at IS NULL\n          AND (d.status = 'ACTIVE'\n               OR (d.status = 'DEPRECATED'\n                   AND EXISTS (SELECT 1 FROM workflow_instances i\n                               WHERE i.tenant_id = d.tenant_id\n                                 AND i.workflow_definition_id = d.id\n                                 AND i.deleted_at IS NULL\n                                 AND i.status IN ('STARTED', 'RUNNING', 'SUSPENDED'))))\n          AND (jsonb_path_exists(\n                   d.definition_json,\n                   '$.states[*].task.assignment ? ((@.assigneeType == \"ROLE\"\n                        || @.assigneeType == \"DEPARTMENT_ROLE\") && @.roleCode == $code)',\n                   jsonb_build_object('code', r.role_code))\n               OR EXISTS (SELECT 1 FROM workflow_transitions tr\n                          WHERE tr.workflow_definition_id = d.id\n                            AND tr.allowed_by_json->>'assigneeType' IN ('ROLE', 'DEPARTMENT_ROLE')\n                            AND tr.allowed_by_json->>'roleCode' = r.role_code))\n        ORDER BY d.workflow_key, d.version\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "workflow_key",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "version",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "e9c76f3ee885ab0b68ef7689fcc3fe236bdd721b9e46b38a8429cafe51a8c715"
+}

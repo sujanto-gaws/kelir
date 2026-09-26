@@ -4,6 +4,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::error::{AppError, ValidationDetail};
+use crate::modules::workflow::domain::{DefinitionNamingRole, WorkflowDefinitionStatus};
 use crate::utils::serde::present_or_absent;
 
 /// Account lifecycle (SRS FR-IDM-007).
@@ -277,9 +278,159 @@ fn validate_password(password: &str, details: &mut Vec<ValidationDetail>) {
     }
 }
 
+/// The code a role delete is refused with while a published workflow
+/// definition names the role (**D-91** (3), [#510]). A client branches on it,
+/// not on the message.
+///
+/// [#510]: https://github.com/sujanto-gaws/kelir/issues/510
+pub const ROLE_NAMED_BY_PUBLISHED_DEFINITION: &str = "ROLE_NAMED_BY_PUBLISHED_DEFINITION";
+
+/// Why a role open tasks still need cannot be deleted (**D-89**, [#487]), or
+/// `None` when none does. `open_tasks` is
+/// `workflow::service::task::open_tasks_needing_role`'s count.
+///
+/// [#487]: https://github.com/sujanto-gaws/kelir/issues/487
+pub fn open_tasks_refusal(open_tasks: i64) -> Option<String> {
+    if open_tasks <= 0 {
+        return None;
+    }
+
+    let (tasks, them, they) = if open_tasks == 1 {
+        ("task needs", "it", "It needs")
+    } else {
+        ("tasks need", "them", "They need")
+    };
+
+    // True of both ways a task needs a role: an unclaimed task offered to it is
+    // left offered to nobody, and a task with an edge `allowedBy` it is left
+    // with a decision nobody can make (#529).
+    Some(format!(
+        "{open_tasks} open {tasks} this role to be decided. Deleting the role would leave \
+         {them} offered to nobody, or with a decision nobody could make. {they} to be \
+         decided first"
+    ))
+}
+
+/// Why a role published workflow revisions name cannot be deleted (**D-91**
+/// (3), [#510]), or `None` when none does. `definitions` is
+/// `workflow::service::definition::definitions_naming_role`'s list.
+///
+/// Deleting the role would have every submission routed to one of them, or the
+/// next step of an approval running on one, refused as `ASSIGNMENT_UNRESOLVED`.
+/// Each is named by key, name and revision, so an administrator knows which to
+/// revise. A `Conflict` carries no `details` (`AppError::details` is for
+/// validation only), so the list is prose.
+///
+/// [#510]: https://github.com/sujanto-gaws/kelir/issues/510
+pub fn published_definitions_refusal(definitions: &[DefinitionNamingRole]) -> Option<String> {
+    if definitions.is_empty() {
+        return None;
+    }
+
+    let named = definitions
+        .iter()
+        .map(|definition| {
+            let deprecated = match definition.status {
+                WorkflowDefinitionStatus::Deprecated => ", deprecated",
+                WorkflowDefinitionStatus::Active | WorkflowDefinitionStatus::Draft => "",
+            };
+
+            format!(
+                "{} (\"{}\", revision {}{deprecated})",
+                definition.workflow_key, definition.name, definition.version
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    Some(if definitions.len() == 1 {
+        format!(
+            "This role is named by 1 published workflow definition: {named}. Deleting the \
+             role would leave it unable to raise its tasks. Publish a revision that does \
+             not name the role, bind its document types to that revision, and delete this \
+             one once its running approvals are finished"
+        )
+    } else {
+        format!(
+            "This role is named by {} published workflow definitions: {named}. Deleting \
+             the role would leave them unable to raise their tasks. Publish revisions that \
+             do not name the role, bind their document types to those revisions, and \
+             delete these once their running approvals are finished",
+            definitions.len()
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn naming(key: &str, version: i32, status: WorkflowDefinitionStatus) -> DefinitionNamingRole {
+        DefinitionNamingRole {
+            workflow_key: key.to_owned(),
+            name: "Standard approval".to_owned(),
+            version,
+            status,
+        }
+    }
+
+    #[test]
+    fn nothing_open_and_nothing_published_is_not_refused() {
+        assert_eq!(open_tasks_refusal(0), None);
+        assert_eq!(published_definitions_refusal(&[]), None);
+    }
+
+    #[test]
+    fn the_open_task_refusal_is_d_89s_sentence() {
+        assert_eq!(
+            open_tasks_refusal(2).as_deref(),
+            Some(
+                "2 open tasks need this role to be decided. Deleting the role would leave them \
+                 offered to nobody, or with a decision nobody could make. They need to be \
+                 decided first"
+            )
+        );
+    }
+
+    #[test]
+    fn the_definition_refusal_names_one_revision() {
+        let definitions = [naming(
+            "purchase_requisition",
+            1,
+            WorkflowDefinitionStatus::Active,
+        )];
+
+        assert_eq!(
+            published_definitions_refusal(&definitions).as_deref(),
+            Some(
+                "This role is named by 1 published workflow definition: purchase_requisition \
+                 (\"Standard approval\", revision 1). Deleting the role would leave it unable \
+                 to raise its tasks. Publish a revision that does not name the role, bind its \
+                 document types to that revision, and delete this one once its running \
+                 approvals are finished"
+            )
+        );
+    }
+
+    #[test]
+    fn the_definition_refusal_names_each_revision_and_marks_a_deprecated_one() {
+        let definitions = [
+            naming("purchase_requisition", 3, WorkflowDefinitionStatus::Active),
+            naming("travel_request", 1, WorkflowDefinitionStatus::Deprecated),
+        ];
+
+        assert_eq!(
+            published_definitions_refusal(&definitions).as_deref(),
+            Some(
+                "This role is named by 2 published workflow definitions: purchase_requisition \
+                 (\"Standard approval\", revision 3), travel_request (\"Standard approval\", \
+                 revision 1, deprecated). Deleting the role would leave them unable to raise \
+                 their tasks. Publish revisions that do not name the role, bind their document \
+                 types to those revisions, and delete these once their running approvals are \
+                 finished"
+            )
+        );
+    }
 
     fn request() -> CreateUserRequest {
         CreateUserRequest {
