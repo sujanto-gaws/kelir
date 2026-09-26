@@ -282,15 +282,27 @@ While the major version is `0`, the public API may change in any release.
   passed. Each now suffixes the title and checks the saved type names its own
   form. All five were red against a stack padded past 20 rows, and green
   after.
-- **A task offered to a deleted role is no longer *waiting for you***
-  ([#487](https://github.com/sujanto-gaws/kelir/issues/487)). Deleting a role
-  left its grants live, and the inbox read only the grant. So the task stayed
-  on the inbox, the dashboard's waiting count and its pending-task card, and
-  its page opened and could be claimed, while deciding it failed with
-  `ASSIGNMENT_UNRESOLVED`. A grant of a deleted role is no longer read as a
-  grant anywhere the inbox or a claim asks who holds a task. Such a task
-  stays open and is offered to nobody, and a role can no longer be deleted
-  into that state (see *Changed*, **D-89**).
+- **A task whose decision is certain to be refused, because a deleted role
+  stands in its way, is no longer *waiting for you***
+  ([#487](https://github.com/sujanto-gaws/kelir/issues/487),
+  [#530](https://github.com/sujanto-gaws/kelir/issues/530)). Deleting a role
+  left its grants live, and the inbox read only the grant. So an unclaimed
+  task offered to the role stayed on the inbox, the dashboard's waiting count
+  and its pending-task card, and its page opened and could be claimed, while
+  deciding it failed with `ASSIGNMENT_UNRESOLVED`. A grant of a deleted role
+  is no longer read as a grant anywhere the inbox or a claim asks who holds a
+  task. **A claimed task** reached its assignee whatever became of any role.
+  One whose decision is certain to be refused, because its state has
+  `APPROVE`, `REJECT` or `RETURN` edges and every one of them names a role
+  that is no longer live, stayed on the assignee's list, its count, both
+  dashboard cards and its page. It is now filtered there too, and its page
+  answers 404. A claimed task that can still be decided through a live edge
+  is unaffected, even if the role it was offered through is gone, and so is
+  one whose state has no such edge at all, such as a returned document's
+  correction task, which is resubmitted rather than decided. The filtered
+  tasks stay open, and no inbox shows them. Installation and Deployment §9's
+  query finds them, and a role can no longer be deleted into that state (see
+  *Changed*, **D-89**).
 - **A role or user that lists one id twice is refused with a 422, not a 500**
   ([#469](https://github.com/sujanto-gaws/kelir/issues/469)). A repeated id in
   a role's `permissionIds` or a user's `roleIds` reached a unique constraint

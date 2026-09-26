@@ -66,6 +66,74 @@
 //!
 //! [#487]: https://github.com/sujanto-gaws/kelir/issues/487
 //!
+//! # A claimed task nobody can decide is not waiting either
+//!
+//! That clause covers the **unclaimed** arm only. A claimed task reaches its
+//! assignee through `assignee_user_id` whatever became of any role, and
+//! [#530] found one still waiting on every surface while its decision refused
+//! as `ASSIGNMENT_UNRESOLVED`. So each copy of the rule carries a second clause
+//! for the claimed arm, and it asks a different question from the first.
+//!
+//! **Not whether the task's own role is live.** A claimed task's decision never
+//! reads `candidate_role_id`: `service::task::refuse_unless_theirs` passes on
+//! the assignee, and the only liveness check left is `engine::fire` resolving
+//! the chosen edge's `allowedBy` through `assignment::permits`, whose `direct`
+//! refuses a role code no live role holds. A task offered to a deleted role
+//! whose edges name a live one is decidable, and stays.
+//!
+//! **Not whether some edge names a deleted role** either, which is what
+//! `repository::task::count_open_tasks_needing_role` asks before a role may be
+//! deleted. That count protects a role any edge still needs; this clause asks
+//! whether any edge can still be taken.
+//!
+//! **Whether its decision is certain to be refused.** Only **decision edges**
+//! count: those out of the instance's current state whose action is `APPROVE`,
+//! `REJECT` or `RETURN`, the three `DecisionAction` can fire. An edge
+//! **resolves** when its `allowedBy` is `USER` or `OWNER`, or when it is `ROLE`
+//! or `DEPARTMENT_ROLE` and a live role in the tenant has its `roleCode`. An
+//! open task claimed by the caller is hidden when the state has at least one
+//! decision edge and none of them resolves. Matching by **code** is `direct`'s
+//! own match, so a live role that took a deleted one's code resolves the edge
+//! here as it does there.
+//!
+//! The list of kinds is positive, and it is complete. `MANAGER_OF_OWNER` and
+//! `EXPRESSION` are refused when a definition is saved (**D-37**,
+//! `domain::jwss`). JWSS S5 gives every non-`AUTO` edge an `allowedBy`, so a
+//! decision edge always carries one of the four kinds.
+//!
+//! **A state with no decision edge keeps its task, deliberately.** It is not an
+//! anomaly: a `RETURNED` state carries an `OWNER` correction task, created
+//! already assigned, and only `RESUBMIT` leaves it, through the document's
+//! submission rather than `decide()`. With no decision edge to judge, the
+//! clause leaves the task where it is. Hiding it would take every returned
+//! document's correction off its owner's inbox, whatever became of any role.
+//!
+//! The edges are read from the `workflow_transitions` projection, as
+//! `count_open_tasks_needing_role` reads them. The engine reads
+//! `definition_json`, and the projection is regenerated from it whole in the
+//! publish transaction, so for a published revision the two carry the same
+//! edges with the rule in its normalized form.
+//!
+//! **It errs toward visible, and it is not the engine.** It judges every
+//! decision edge out of the state, but a decision takes one: the edge its
+//! action and `condition` choose. So it does not re-derive `condition_json`,
+//! and it checks nothing `direct` checks beyond the role. A `DEPARTMENT_ROLE`
+//! edge whose department code names no live department, a `USER` edge naming a
+//! deleted user, and an `OWNER` edge on a document with no creator all refuse
+//! at the decision and still count as resolving here. Each of those keeps a
+//! task on the inbox that the engine would refuse, and none of them hides one
+//! the engine would accept. It applies to open tasks only, because a finished
+//! task is a record of what was done, and its instance's later edges say
+//! nothing about it.
+//!
+//! **A hidden task is not lost.** It is residue from a role deleted before
+//! **D-89**'s refusal shipped, and an administrator finds it with the stranded
+//! task query in Installation and Deployment §9. That query is its only finder:
+//! a refused role delete lists the tasks of a role that is still live, and
+//! this role is already gone.
+//!
+//! [#530]: https://github.com/sujanto-gaws/kelir/issues/530
+//!
 //! # This lives in `workflow` and is called from `task_inbox`
 //!
 //! Coding standard §2.2 keeps a repository private to its module, with
@@ -356,6 +424,33 @@ pub async fn list_for_caller(
                            OR ur.department_id = t.candidate_department_id)
                 ))
           )
+          -- A claimed task nobody can decide is not waiting for its holder
+          -- (#530). The same clause is in `list_for_caller`, `count_for_caller`
+          -- and `is_visible_to`, and the three must stay identical. It is not
+          -- `count_open_tasks_needing_role`'s clause, which asks whether *some*
+          -- edge names a role: this asks whether *no* decision edge resolves.
+          -- See "A claimed task nobody can decide" at the top of the file.
+          AND (t.assignee_user_id IS DISTINCT FROM $2
+               OR t.status NOT IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')
+               -- No decision edge at all, as on a RETURNED correction task that
+               -- only RESUBMIT leaves: nothing to judge by, so it stays.
+               OR NOT EXISTS (SELECT 1 FROM workflow_transitions tr
+                              WHERE tr.tenant_id = t.tenant_id
+                                AND tr.workflow_definition_id = i.workflow_definition_id
+                                AND tr.from_state = i.current_state
+                                AND tr.action IN ('APPROVE', 'REJECT', 'RETURN'))
+               OR EXISTS (SELECT 1 FROM workflow_transitions tr
+                          WHERE tr.tenant_id = t.tenant_id
+                            AND tr.workflow_definition_id = i.workflow_definition_id
+                            AND tr.from_state = i.current_state
+                            AND tr.action IN ('APPROVE', 'REJECT', 'RETURN')
+                            AND (tr.allowed_by_json->>'assigneeType' IN ('USER', 'OWNER')
+                                 OR (tr.allowed_by_json->>'assigneeType'
+                                         IN ('ROLE', 'DEPARTMENT_ROLE')
+                                     AND EXISTS (SELECT 1 FROM roles live
+                                                 WHERE live.tenant_id = t.tenant_id
+                                                   AND live.role_code = tr.allowed_by_json->>'roleCode'
+                                                   AND live.deleted_at IS NULL)))))
           AND ($3 = false OR t.status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS'))
           -- Late, and still open. Spelled out rather than left to `NULL < now()`
           -- being unknown, because the other spelling of an undated task is one
@@ -477,6 +572,9 @@ pub async fn count_for_caller(
         -- page, so removing the join stops the crate compiling rather than
         -- changing an answer. The test guards the semantics — a task whose
         -- document is gone — and the compiler now guards the join itself.
+        --
+        -- The instance, for the state whose edges #530's clause reads.
+        JOIN workflow_instances i ON i.id = t.workflow_instance_id
         WHERE t.tenant_id = $1 AND t.deleted_at IS NULL
           AND (
                 t.assignee_user_id = $2
@@ -494,6 +592,33 @@ pub async fn count_for_caller(
                            OR ur.department_id = t.candidate_department_id)
                 ))
           )
+          -- A claimed task nobody can decide is not waiting for its holder
+          -- (#530). The same clause is in `list_for_caller`, `count_for_caller`
+          -- and `is_visible_to`, and the three must stay identical. It is not
+          -- `count_open_tasks_needing_role`'s clause, which asks whether *some*
+          -- edge names a role: this asks whether *no* decision edge resolves.
+          -- See "A claimed task nobody can decide" at the top of the file.
+          AND (t.assignee_user_id IS DISTINCT FROM $2
+               OR t.status NOT IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')
+               -- No decision edge at all, as on a RETURNED correction task that
+               -- only RESUBMIT leaves: nothing to judge by, so it stays.
+               OR NOT EXISTS (SELECT 1 FROM workflow_transitions tr
+                              WHERE tr.tenant_id = t.tenant_id
+                                AND tr.workflow_definition_id = i.workflow_definition_id
+                                AND tr.from_state = i.current_state
+                                AND tr.action IN ('APPROVE', 'REJECT', 'RETURN'))
+               OR EXISTS (SELECT 1 FROM workflow_transitions tr
+                          WHERE tr.tenant_id = t.tenant_id
+                            AND tr.workflow_definition_id = i.workflow_definition_id
+                            AND tr.from_state = i.current_state
+                            AND tr.action IN ('APPROVE', 'REJECT', 'RETURN')
+                            AND (tr.allowed_by_json->>'assigneeType' IN ('USER', 'OWNER')
+                                 OR (tr.allowed_by_json->>'assigneeType'
+                                         IN ('ROLE', 'DEPARTMENT_ROLE')
+                                     AND EXISTS (SELECT 1 FROM roles live
+                                                 WHERE live.tenant_id = t.tenant_id
+                                                   AND live.role_code = tr.allowed_by_json->>'roleCode'
+                                                   AND live.deleted_at IS NULL)))))
           AND ($3 = false OR t.status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS'))
           -- Late, and still open. Spelled out rather than left to `NULL < now()`
           -- being unknown, because the other spelling of an undated task is one
@@ -543,6 +668,8 @@ pub async fn is_visible_to(
         -- count is: this gate answered *visible* for a task the read behind it
         -- then answered 404 for.
         JOIN documents d ON d.id = t.document_id AND d.deleted_at IS NULL
+        -- The instance, for the state whose edges #530's clause reads.
+        JOIN workflow_instances i ON i.id = t.workflow_instance_id
         WHERE t.tenant_id = $1 AND t.id = $3 AND t.deleted_at IS NULL
           AND (
                 t.assignee_user_id = $2
@@ -560,6 +687,33 @@ pub async fn is_visible_to(
                            OR ur.department_id = t.candidate_department_id)
                 ))
           )
+          -- A claimed task nobody can decide is not waiting for its holder
+          -- (#530). The same clause is in `list_for_caller`, `count_for_caller`
+          -- and `is_visible_to`, and the three must stay identical. It is not
+          -- `count_open_tasks_needing_role`'s clause, which asks whether *some*
+          -- edge names a role: this asks whether *no* decision edge resolves.
+          -- See "A claimed task nobody can decide" at the top of the file.
+          AND (t.assignee_user_id IS DISTINCT FROM $2
+               OR t.status NOT IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')
+               -- No decision edge at all, as on a RETURNED correction task that
+               -- only RESUBMIT leaves: nothing to judge by, so it stays.
+               OR NOT EXISTS (SELECT 1 FROM workflow_transitions tr
+                              WHERE tr.tenant_id = t.tenant_id
+                                AND tr.workflow_definition_id = i.workflow_definition_id
+                                AND tr.from_state = i.current_state
+                                AND tr.action IN ('APPROVE', 'REJECT', 'RETURN'))
+               OR EXISTS (SELECT 1 FROM workflow_transitions tr
+                          WHERE tr.tenant_id = t.tenant_id
+                            AND tr.workflow_definition_id = i.workflow_definition_id
+                            AND tr.from_state = i.current_state
+                            AND tr.action IN ('APPROVE', 'REJECT', 'RETURN')
+                            AND (tr.allowed_by_json->>'assigneeType' IN ('USER', 'OWNER')
+                                 OR (tr.allowed_by_json->>'assigneeType'
+                                         IN ('ROLE', 'DEPARTMENT_ROLE')
+                                     AND EXISTS (SELECT 1 FROM roles live
+                                                 WHERE live.tenant_id = t.tenant_id
+                                                   AND live.role_code = tr.allowed_by_json->>'roleCode'
+                                                   AND live.deleted_at IS NULL)))))
         "#,
         tenant_id,
         user_id,
