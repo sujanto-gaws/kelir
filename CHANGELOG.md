@@ -91,6 +91,18 @@ While the major version is `0`, the public API may change in any release.
 
 ### Changed
 
+- **The coding standard says hand-built forms are validated by the server**
+  ([#541](https://github.com/sujanto-gaws/kelir/issues/541)). [Coding
+  standard](docs/standards/01.%20Coding%20Standard.md) §3.4 and the
+  [SDD](docs/design/01.%20System%20Design%20Document.md)'s stack table said
+  hand-built forms use VeeValidate and Zod. Neither is a dependency, and no
+  form uses them. Every hand-built dialog submits and places a 422's
+  `details` under each field by path (`useFormErrors`). The product owner
+  chose, on 2026-09-25, to amend the documents rather than adopt the two
+  libraries, so the standard, the SDD and architectures/01 now say that. No
+  code changes. The dynamic form renderer's client-side JFSS rules are not
+  affected.
+
 - **A `Draft` ADR whose blocker this same tree delivers is refused**
   ([#545](https://github.com/sujanto-gaws/kelir/issues/545),
   [standards/06](docs/standards/06.%20Architecture%20Decision%20Records.md)
