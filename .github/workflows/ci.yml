@@ -96,6 +96,11 @@ jobs:
           # removing this line turns the job red rather than quietly weaker.
           # 275 commits and 5.4 MiB of pack on 2026-09-14.
           fetch-depth: 0
+          # **And every tag** (#484). `releases_are_independently_verified.rs`
+          # reads each release tag's tree, and is red when it finds fewer than
+          # two. `fetch-depth: 0` already fetches tags; this says so, so that
+          # nobody narrowing the fetch drops them without seeing why.
+          fetch-tags: true
 
       # Attachments put bytes in object storage and the integration tests read
       # them back out of it (#244). The harness's rule is that nothing is mocked

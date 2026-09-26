@@ -1,0 +1,54 @@
+name: Release tag gate
+
+# **The release gate, run on the tag push itself** (#484).
+#
+# `releases_are_independently_verified.rs` rules 11 and 12 ask whether a
+# release tag's commit already carries its release record, citing a new
+# verification record. `ci.yml` asks that on the next pull request or push to
+# `main`; this asks it the moment the tag lands. **It detects and does not
+# prevent**: nothing here can stop `git push --tags`, so a red run here means
+# the tag is wrong and must be moved before anything is built from it.
+#
+# `workflow_dispatch` runs it by hand on any branch, so the gate can be
+# dry-run before the real tag is pushed: it reads every release tag the
+# checkout fetched, which is the same question the tag push will ask.
+#
+# No service containers: the test reads files and `git`, and compiles against
+# the committed `.sqlx` cache.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Release tag gate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: kelir-backend
+    steps:
+      # The test refuses a shallow clone and reads every release tag's tree.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Cache cargo registry and build output
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            kelir-backend/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('kelir-backend/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: The tag carries its record
+        env:
+          SQLX_OFFLINE: "true"
+        run: cargo test --test releases_are_independently_verified
