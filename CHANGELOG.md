@@ -123,15 +123,17 @@ While the major version is `0`, the public API may change in any release.
   `DELETE /api/v1/identity/roles/{id}` used to answer 204 whatever was
   waiting on the role. It now answers **409 `CONFLICT`**, says how many
   open tasks need the role, and changes nothing. A task needs a role when it
-  is offered to it, **claimed or not**, or when a decision it offers is
-  `allowedBy` that role. Once those tasks are decided the delete goes
-  through. **No route reassigns or cancels a task yet**, so deciding them is
+  is offered to it **and unclaimed**, or when a decision it offers is
+  `allowedBy` that role, claimed or not. A claimed task does not need the
+  role it was offered to, because its assignee can decide it without that
+  role ([#529](https://github.com/sujanto-gaws/kelir/issues/529)). Once those
+  tasks are decided the delete goes through. **No route reassigns or cancels a task yet**, so deciding them is
   the one way to clear the way. A document submitted while a role is being
   deleted waits for the delete, then is refused as `ASSIGNMENT_UNRESOLVED`
   if the delete went through, with nothing written.
   **Upgrade:** a role deleted before this release, with tasks still open,
-  stays as it was: those tasks are offered to nobody, and no screen lists
-  them. Nothing repairs them automatically, because the obvious repair —
+  stays as it was: those tasks are offered to nobody or refuse their
+  decision, and no screen lists them. Nothing repairs them automatically, because the obvious repair —
   making the role live again — would silently re-grant its permissions to
   everybody who held it. [Installation and Deployment
   §9](docs/operations/01.%20Installation%20and%20Deployment.md#9-troubleshooting)
@@ -151,6 +153,16 @@ While the major version is `0`, the public API may change in any release.
   than at decision. Publish a revision naming a live role.
 
 ### Fixed
+
+- **The stranded-task query in Installation and Deployment §9 says which
+  tenant and which role** ([#533](https://github.com/sujanto-gaws/kelir/issues/533)),
+  **and no longer lists a task its assignee can decide**
+  ([#529](https://github.com/sujanto-gaws/kelir/issues/529)). It spans every
+  tenant, and document numbers are unique only within one, so it now returns
+  `tenant_code`; and it returns the deleted role's `role_id`, which the
+  repair's first step needs and `role_code` does not name. A claimed task
+  offered to a deleted role is no longer listed, matching the delete's own
+  count. A backend test now runs the query as the document prints it.
 
 - **The browser harness's `build-a-list` passes on a database with more than
   20 document types** ([#503](https://github.com/sujanto-gaws/kelir/issues/503)).

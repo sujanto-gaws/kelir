@@ -583,14 +583,19 @@ pub async fn holds_role<'e, E: PgExecutor<'e>>(
 /// **Two ways a task needs a role**, and a delete strands the task through
 /// either one:
 ///
-/// * **It is offered to the role**, `candidate_role_id`, **claimed or not.** An
-///   unclaimed one is offered through the role and nothing else. A claimed one
-///   looks safe, since it names its assignee, and is not: see the second point.
+/// * **It is offered to the role**, `candidate_role_id`, **and nobody has
+///   claimed it.** It is offered through the role and nothing else, so with the
+///   role gone nobody can claim or decide it. **A claimed task does not need its
+///   candidate role** ([#529]): a decision checks the caller against
+///   `assignee_user_id` first (`domain::task::refuse_unless_theirs`), and reads
+///   the candidate role only while there is no assignee. Nothing in this release
+///   clears an assignee once set, so a claimed task stays its assignee's to decide.
 /// * **A transition out of the instance's current state names the role in
-///   `allowedBy`.** A decision resolves that rule again (`engine::fire`, through
-///   `assignment::permits`), and a role that is gone refuses it as
-///   `ASSIGNMENT_UNRESOLVED`. That is the usual shape, where the task and its
-///   edges name one role, and the shape where they differ (JWSS §5).
+///   `allowedBy`**, claimed or not. A decision resolves that rule again
+///   (`engine::fire`, through `assignment::permits`), and a role that is gone
+///   refuses it as `ASSIGNMENT_UNRESOLVED`. That is the usual shape, where the
+///   task and its edges name one role, and the shape where they differ (JWSS
+///   §5). This clause is what keeps a claimed task of the usual shape counted.
 ///
 /// Read from the `workflow_transitions` projection, whose `allowed_by_json` is
 /// the **normalized** rule, so `"ROLE:X"` and `{ "assigneeType": "ROLE", … }`
@@ -599,6 +604,7 @@ pub async fn holds_role<'e, E: PgExecutor<'e>>(
 /// role, and however many of its edges do.
 ///
 /// [#487]: https://github.com/sujanto-gaws/kelir/issues/487
+/// [#529]: https://github.com/sujanto-gaws/kelir/issues/529
 pub async fn count_open_tasks_needing_role<'e, E: PgExecutor<'e>>(
     executor: E,
     tenant_id: Uuid,
@@ -612,7 +618,7 @@ pub async fn count_open_tasks_needing_role<'e, E: PgExecutor<'e>>(
         JOIN roles r ON r.id = $2 AND r.tenant_id = t.tenant_id
         WHERE t.tenant_id = $1 AND t.deleted_at IS NULL
           AND t.status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')
-          AND (t.candidate_role_id = r.id
+          AND ((t.candidate_role_id = r.id AND t.assignee_user_id IS NULL)
                OR EXISTS (SELECT 1 FROM workflow_transitions tr
                           WHERE tr.workflow_definition_id = i.workflow_definition_id
                             AND tr.from_state = i.current_state

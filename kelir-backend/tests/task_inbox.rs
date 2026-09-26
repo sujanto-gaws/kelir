@@ -1185,25 +1185,37 @@ async fn a_role_with_an_open_task_is_not_deleted_until_the_task_is_decided() {
     );
 }
 
-/// **A claimed task holds its role, and so does a transition that names it**
-/// (**D-89**).
+/// **A claimed task does not hold the role it was offered to, and a transition
+/// that names a role holds it, claimed or not** (**D-89**, [#529]).
 ///
-/// Both look safe and are not. A claimed task names its assignee, but a
-/// decision resolves the transition's `allowedBy` again, and `ROLE:X` with X
-/// gone refuses it as `ASSIGNMENT_UNRESOLVED`. The second is the same refusal
-/// reached from a role the task was never offered to: JWSS §5 lets a task's
-/// `assignment` and its edges' `allowedBy` name different roles.
+/// Record 18's probe P2. The task is offered to one role, `queue`, and its
+/// edges are `allowedBy` a second, `edge` (JWSS §5 lets the two differ). The
+/// approver holds both. A decision checks the caller against the assignee
+/// first and reads the candidate role only while there is none, so once the
+/// task is claimed `queue` is not needed, and deleting it leaves the task its
+/// assignee's to decide. `edge` is needed whoever holds the task: a decision
+/// resolves `allowedBy` again, and a deleted role refuses it as
+/// `ASSIGNMENT_UNRESOLVED`.
 ///
-/// So the fixture offers the task to one role, `queue`, and lets a second,
-/// `edge`, decide it, and the approver holds both and claims the task. **An
-/// unrelated role deletes**, which is the second subject: a refusal of every
-/// delete while anything is open would pass the two 409s.
+/// Both roles carry the inbox's permissions, so the approver keeps
+/// `workflow:task:execute` through `edge` once `queue` is gone, as P2's did.
 ///
-/// **Seen red** twice against `count_open_tasks_needing_role`: without its
-/// `candidate_role_id` clause the `queue` delete answers 204, and without its
-/// `workflow_transitions` clause the `edge` delete does.
+/// The fixture raises **two** tasks and claims one. While the other is
+/// unclaimed, `queue` is refused, because an unclaimed task is offered through
+/// its role and nothing else. Once that one is decided, `queue` deletes, and
+/// the claimed task is still decided with 200. **An unrelated role deletes**
+/// throughout: a refusal of every delete while anything is open would pass the
+/// 409s.
+///
+/// **Seen red** three times against `count_open_tasks_needing_role`: with
+/// #513's `candidate_role_id` clause (claimed or not) the first `queue` refusal
+/// counts both tasks; without the `candidate_role_id` clause the first `queue`
+/// delete answers 204; without the `workflow_transitions` clause the first
+/// `edge` delete does.
+///
+/// [#529]: https://github.com/sujanto-gaws/kelir/issues/529
 #[tokio::test]
-async fn a_claimed_task_and_a_transition_each_hold_the_role_they_need() {
+async fn a_claimed_task_needs_only_the_role_its_transitions_name() {
     let app = TestApp::spawn().await;
     let token = app.administrator_token().await;
 
@@ -1224,7 +1236,7 @@ async fn a_claimed_task_and_a_transition_each_hold_the_role_they_need() {
         &app.pool,
         fixtures::SYSTEM_TENANT_ID,
         "TI-D89-EDGE",
-        &[],
+        permissions,
     )
     .await;
     let unrelated = fixtures::create_role_with_permissions(
@@ -1254,13 +1266,17 @@ async fn a_claimed_task_and_a_transition_each_hold_the_role_they_need() {
     }
     let workflow = publish_workflow_definition(&app, &token, "ti_d89_edge", definition).await;
     let type_id = document_type(&app, &token, "TI_D89_EDGE", workflow).await;
-    let document =
+
+    let claimed_document =
         submitted_document(&app, &token, type_id, "Claimed, decided by another role").await;
-    let task = open_task_of(&app, document).await;
+    let claimed = open_task_of(&app, claimed_document).await;
+    let unclaimed_document =
+        submitted_document(&app, &token, type_id, "Unclaimed, offered to the queue").await;
+    let unclaimed = open_task_of(&app, unclaimed_document).await;
 
     let claim = app
         .post(
-            &format!("/api/v1/workflow/tasks/{task}/claim"),
+            &format!("/api/v1/workflow/tasks/{claimed}/claim"),
             Some(&approver),
             json!({}),
         )
@@ -1271,7 +1287,16 @@ async fn a_claimed_task_and_a_transition_each_hold_the_role_they_need() {
     assert_eq!(
         queue_refused.status,
         StatusCode::CONFLICT,
-        "a claimed task did not hold the role it was offered to: {}",
+        "an unclaimed task did not hold the role it is offered to: {}",
+        queue_refused.body
+    );
+    // The whole sentence, in both numbers: it is what an administrator reads,
+    // and each branch has its own pronouns.
+    assert_eq!(
+        queue_refused.body["error"]["message"],
+        "1 open task needs this role to be decided. Deleting the role would leave it offered \
+         to nobody, or with a decision nobody could make. It needs to be decided first",
+        "only the unclaimed task needs the queue: {}",
         queue_refused.body
     );
 
@@ -1280,6 +1305,14 @@ async fn a_claimed_task_and_a_transition_each_hold_the_role_they_need() {
         edge_refused.status,
         StatusCode::CONFLICT,
         "a transition did not hold the role its allowedBy names: {}",
+        edge_refused.body
+    );
+    assert_eq!(
+        edge_refused.body["error"]["message"],
+        "2 open tasks need this role to be decided. Deleting the role would leave them \
+         offered to nobody, or with a decision nobody could make. They need to be decided \
+         first",
+        "both tasks, claimed or not, need the edge's role: {}",
         edge_refused.body
     );
 
@@ -1291,17 +1324,255 @@ async fn a_claimed_task_and_a_transition_each_hold_the_role_they_need() {
         unrelated_deleted.body
     );
 
-    decide(&app, &approver, task).await;
+    decide(&app, &approver, unclaimed).await;
 
-    for role in [queue, edge] {
-        let deleted = delete_role(&app, &token, role).await;
-        assert_eq!(
-            deleted.status,
-            StatusCode::NO_CONTENT,
-            "with the task decided, the role deletes: {}",
-            deleted.body
+    let queue_deleted = delete_role(&app, &token, queue).await;
+    assert_eq!(
+        queue_deleted.status,
+        StatusCode::NO_CONTENT,
+        "a claimed task held the role it was offered to, which its assignee does not need: {}",
+        queue_deleted.body
+    );
+
+    let edge_still_refused = delete_role(&app, &token, edge).await;
+    assert_eq!(
+        edge_still_refused.status,
+        StatusCode::CONFLICT,
+        "the claimed task stopped holding the role its allowedBy names: {}",
+        edge_still_refused.body
+    );
+
+    // Record 18's P2: the assignee decides, with the role the task was offered
+    // to gone, and holding the permissions through `edge`.
+    decide(&app, &approver, claimed).await;
+
+    let edge_deleted = delete_role(&app, &token, edge).await;
+    assert_eq!(
+        edge_deleted.status,
+        StatusCode::NO_CONTENT,
+        "with the tasks decided, the role deletes: {}",
+        edge_deleted.body
+    );
+}
+
+/// A workflow of two approvals: the manager's, offered to `manager`, then
+/// finance's, offered to `finance`. Each state's edges are `allowedBy` its own
+/// role, so a role is named by the edges of one state only.
+fn two_stage(key: &str, manager: &str, finance: &str) -> Value {
+    json!({
+        "workflowKey": key,
+        "version": "1.0.0",
+        "name": "Two approvals",
+        "initialState": "MANAGER_APPROVAL",
+        "states": [
+            { "code": "MANAGER_APPROVAL", "name": "Manager approval",
+              "mapsToDocumentStatus": "PENDING_APPROVAL",
+              "task": { "taskDefinitionKey": "manager_approval",
+                        "taskName": "Approve the request",
+                        "assignment": { "assigneeType": "ROLE", "roleCode": manager } } },
+            { "code": "FINANCE_APPROVAL", "name": "Finance approval",
+              "mapsToDocumentStatus": "PENDING_APPROVAL",
+              "task": { "taskDefinitionKey": "finance_approval",
+                        "taskName": "Approve the spend",
+                        "assignment": { "assigneeType": "ROLE", "roleCode": finance } } },
+            { "code": "COMPLETED", "name": "Completed", "mapsToDocumentStatus": "COMPLETED",
+              "isFinal": true },
+            { "code": "REJECTED", "name": "Rejected", "mapsToDocumentStatus": "REJECTED",
+              "isFinal": true }
+        ],
+        "transitions": [
+            { "from": "MANAGER_APPROVAL", "to": "FINANCE_APPROVAL", "action": "APPROVE",
+              "allowedBy": format!("ROLE:{manager}") },
+            { "from": "MANAGER_APPROVAL", "to": "REJECTED", "action": "REJECT",
+              "allowedBy": format!("ROLE:{manager}") },
+            { "from": "FINANCE_APPROVAL", "to": "COMPLETED", "action": "APPROVE",
+              "allowedBy": format!("ROLE:{finance}") },
+            { "from": "FINANCE_APPROVAL", "to": "REJECTED", "action": "REJECT",
+              "allowedBy": format!("ROLE:{finance}") }
+        ]
+    })
+}
+
+/// **Another tenant's task does not hold a role of the same code** (**D-89**).
+///
+/// Tenant B has an open task offered to its own `TI-XT` and `allowedBy` it. The
+/// system tenant's `TI-XT` is a different role that nothing of its own needs,
+/// and it deletes. The edge clause matches by **code**, and codes repeat across
+/// tenants, so only the tenant filters keep B's task out of A's count.
+///
+/// **Seen red** against `count_open_tasks_needing_role` with both tenant
+/// predicates dropped (`t.tenant_id = $1` and `r.tenant_id = t.tenant_id`): the
+/// delete answers 409, counting B's task.
+#[tokio::test]
+async fn a_role_is_not_held_by_another_tenants_task() {
+    let app = TestApp::spawn_with(|config| config.multi_tenant = true).await;
+    let token = app
+        .sign_in_to("SYSTEM", common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await;
+
+    let (other, other_token) = tenant_administrator(&app, "TNT-XT", "ti.xt.other").await;
+    fixtures::create_role_with_permissions(&app.pool, other, "TI-XT", &[]).await;
+    let workflow = publish_workflow(&app, &other_token, "ti_xt", "TI-XT").await;
+    let type_id = document_type(&app, &other_token, "TI_XT", workflow).await;
+    submitted_document(&app, &other_token, type_id, "Open in another tenant").await;
+
+    let ours =
+        fixtures::create_role_with_permissions(&app.pool, fixtures::SYSTEM_TENANT_ID, "TI-XT", &[])
+            .await;
+
+    let deleted = delete_role(&app, &token, ours).await;
+    assert_eq!(
+        deleted.status,
+        StatusCode::NO_CONTENT,
+        "another tenant's task held a role of the same code: {}",
+        deleted.body
+    );
+}
+
+/// **Only the edges out of the task's current state, in its own definition,
+/// hold a role**, and a completed task holds nothing (**D-89**).
+///
+/// Two definitions of two approvals share a manager role, `M`, and each has
+/// its own finance role. Document A waits at the manager, so its finance role
+/// `FA` is named only by a **later** state's edges and deletes. That is
+/// deliberate: when the manager approves, `assignment::hold_deciding_roles`
+/// refuses the transition into a state whose role is gone (#509). A third,
+/// unrelated definition names `Z` in edges out of a state with the **same
+/// code** as A's current one, and has no task; `Z` deletes too.
+///
+/// Document B is approved by the manager and waits at finance. Its finance role
+/// `FB` is refused for exactly **one** task: the manager's task is completed,
+/// although its instance now sits in the state whose edges name `FB`.
+///
+/// **Seen red** against `count_open_tasks_needing_role`: without
+/// `tr.from_state = i.current_state` the `FA` delete answers 409; without
+/// `tr.workflow_definition_id = i.workflow_definition_id` the `Z` delete does;
+/// without the status filter the `FB` refusal counts 2 tasks.
+#[tokio::test]
+async fn a_role_is_held_by_the_current_states_edges_and_by_open_tasks_only() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let (_, approver) = holder(&app, "TI-STAGE-M", "ti.stage.manager").await;
+    let mut roles = Vec::new();
+    for code in ["TI-STAGE-FA", "TI-STAGE-FB", "TI-STAGE-Z"] {
+        roles.push(
+            fixtures::create_role_with_permissions(
+                &app.pool,
+                fixtures::SYSTEM_TENANT_ID,
+                code,
+                &[],
+            )
+            .await,
         );
     }
+    let (finance_a, finance_b, unrelated) = (roles[0], roles[1], roles[2]);
+
+    let a = two_stage("ti_stage_a", "TI-STAGE-M", "TI-STAGE-FA");
+    let a = publish_workflow_definition(&app, &token, "ti_stage_a", a).await;
+    let a = document_type(&app, &token, "TI_STAGE_A", a).await;
+    submitted_document(&app, &token, a, "Waiting at the manager").await;
+
+    let b = two_stage("ti_stage_b", "TI-STAGE-M", "TI-STAGE-FB");
+    let b = publish_workflow_definition(&app, &token, "ti_stage_b", b).await;
+    let b = document_type(&app, &token, "TI_STAGE_B", b).await;
+    let b = submitted_document(&app, &token, b, "Waiting at finance").await;
+    let manager_task = open_task_of(&app, b).await;
+    decide(&app, &approver, manager_task).await;
+
+    publish_workflow(&app, &token, "ti_stage_z", "TI-STAGE-Z").await;
+
+    // `Z` first: without the definition match, `FA` is held too, by document
+    // B's instance, which sits in a state whose edges in A's definition name it.
+    let elsewhere = delete_role(&app, &token, unrelated).await;
+    assert_eq!(
+        elsewhere.status,
+        StatusCode::NO_CONTENT,
+        "a role named only by another definition's edges was held: {}",
+        elsewhere.body
+    );
+
+    let downstream = delete_role(&app, &token, finance_a).await;
+    assert_eq!(
+        downstream.status,
+        StatusCode::NO_CONTENT,
+        "a role named only by a later state's edges was held: {}",
+        downstream.body
+    );
+
+    let current = delete_role(&app, &token, finance_b).await;
+    assert_eq!(
+        current.status,
+        StatusCode::CONFLICT,
+        "the finance task did not hold its role: {}",
+        current.body
+    );
+    assert_eq!(
+        current.body["error"]["message"],
+        "1 open task needs this role to be decided. Deleting the role would leave it offered \
+         to nobody, or with a decision nobody could make. It needs to be decided first",
+        "the completed manager task was counted: {}",
+        current.body
+    );
+}
+
+/// **A `DEPARTMENT_ROLE` edge holds its role as a `ROLE` edge does**
+/// (**D-89**).
+///
+/// A decision resolves the edge through `assignment::permits` by its
+/// `roleCode`, so a deleted role refuses it as a deleted `ROLE:` one would. The
+/// task is offered to another role, `Q`, so only the edge can hold `D`.
+///
+/// **Seen red** against `count_open_tasks_needing_role` with the edge clause
+/// narrowed to `tr.allowed_by_json->>'assigneeType' = 'ROLE'`: the delete
+/// answers 204.
+#[tokio::test]
+async fn a_department_role_edge_holds_its_role() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    sqlx::query(
+        "INSERT INTO departments (id, tenant_id, department_code, name)
+         VALUES ($1, $2, 'TI-DEPT', 'Procurement')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .execute(&app.pool)
+    .await
+    .expect("insert the department");
+
+    fixtures::create_role_with_permissions(&app.pool, fixtures::SYSTEM_TENANT_ID, "TI-DEPT-Q", &[])
+        .await;
+    let department_role = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "TI-DEPT-D",
+        &[],
+    )
+    .await;
+
+    let mut definition = workflow_for("ti_dept", "TI-DEPT-Q");
+    for transition in definition["transitions"]
+        .as_array_mut()
+        .expect("transitions")
+    {
+        transition["allowedBy"] = json!({
+            "assigneeType": "DEPARTMENT_ROLE",
+            "roleCode": "TI-DEPT-D",
+            "departmentScope": "TI-DEPT",
+        });
+    }
+    let workflow = publish_workflow_definition(&app, &token, "ti_dept", definition).await;
+    let type_id = document_type(&app, &token, "TI_DEPT", workflow).await;
+    submitted_document(&app, &token, type_id, "Decided by a department's role").await;
+
+    let refused = delete_role(&app, &token, department_role).await;
+    assert_eq!(
+        refused.status,
+        StatusCode::CONFLICT,
+        "a DEPARTMENT_ROLE edge did not hold its role: {}",
+        refused.body
+    );
 }
 
 async fn delete_role(app: &TestApp, token: &str, role: Uuid) -> common::TestResponse {
@@ -1710,4 +1981,334 @@ async fn assert_refused_for_one_open_task(
     .await
     .expect("count the open tasks");
     assert_eq!(open, 1, "the submission's task is open");
+}
+
+// ---------------------------------------------------------------------------
+// #511, #529, #533 — the stranded-task query in Installation and Deployment §9
+// ---------------------------------------------------------------------------
+
+/// The query Installation and Deployment §9 prints for tasks stranded on a
+/// role deleted before **D-89**, read from the document itself, so the test
+/// runs what an operator would paste.
+fn stranded_task_query() -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../docs/operations/01. Installation and Deployment.md");
+    let document = std::fs::read_to_string(&path).expect("Installation and Deployment reads");
+
+    let entry = document
+        .find("**A document sits in `PENDING_APPROVAL`")
+        .expect("§9 still has the stranded-task entry");
+    let rest = &document[entry..];
+    let fence = rest.find("```sql").expect("the entry prints a query");
+    let body = &rest[fence..];
+    let start = body.find('\n').expect("the fence ends its line") + 1;
+    let end = body[start..].find("```").expect("the query's fence closes");
+
+    body[start..start + end].to_string()
+}
+
+/// A tenant's administrator, holding every permission in the catalogue in
+/// that tenant, signed in there.
+async fn tenant_administrator(app: &TestApp, tenant_code: &str, username: &str) -> (Uuid, String) {
+    let tenant = fixtures::create_tenant(&app.pool, tenant_code, "Another Customer").await;
+
+    let codes: Vec<String> =
+        sqlx::query_scalar("SELECT permission_code FROM permissions WHERE deleted_at IS NULL")
+            .fetch_all(&app.pool)
+            .await
+            .expect("read the permission catalogue");
+    let codes: Vec<&str> = codes.iter().map(String::as_str).collect();
+    let role = fixtures::create_role_with_permissions(&app.pool, tenant, "TI-ALL", &codes).await;
+
+    fixtures::create_user(
+        &app.pool,
+        tenant,
+        username,
+        &format!("{username}@example.test"),
+        common::ADMIN_PASSWORD,
+        &[role],
+    )
+    .await;
+
+    let token = app
+        .sign_in_to(tenant_code, username, common::ADMIN_PASSWORD)
+        .await;
+
+    (tenant, token)
+}
+
+async fn claim(app: &TestApp, token: &str, task: Uuid) {
+    let claimed = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/claim"),
+            Some(token),
+            json!({}),
+        )
+        .await;
+    assert_eq!(claimed.status, StatusCode::OK, "{}", claimed.body);
+}
+
+/// **The stranded-task query lists what nobody can decide, and says whose it
+/// is** ([#529], [#533]).
+///
+/// The query spans every tenant, so it is run on a multi-tenant deployment with
+/// a second tenant. Each row names the tenant and the deleted role's **id**,
+/// which the repair's first step needs. Seven documents in the system tenant,
+/// each with one open task. Their roles are soft-deleted in SQL, as a role was
+/// deleted before D-89, except where a row says the role is live:
+///
+/// * **P2** (record 18): offered to `Q`, edges `allowedBy` `E`, claimed; `Q`
+///   deleted. **Not listed**, and its assignee decides it with 200.
+/// * **Claimed, one role**: offered to `R` and `allowedBy` `R`, claimed; `R`
+///   deleted. **Listed**, through the edge, and its decision is refused as
+///   `ASSIGNMENT_UNRESOLVED`, which is the P2 control. The second tenant has a
+///   **live** `R` of its own, which must not rescue it.
+/// * **Unclaimed**: offered to `S` and `allowedBy` `S`; `S` deleted. **Listed**,
+///   as offered to the role.
+/// * **Live**: offered to `L` and `allowedBy` `L`, unclaimed; `L` live. **Not
+///   listed.**
+/// * **Recreated**: offered to `T` and `allowedBy` `T`, claimed; `T` deleted
+///   and a live role created with its code. **Not listed**: the edge resolves
+///   by code, to the new role.
+/// * **Two approvals** on one definition, manager `M` (live) then finance `F`,
+///   `F` deleted. One document waits at the manager: **not listed**, since only
+///   a later state's edges name `F`. The other was approved by the manager and
+///   waits at finance: **listed once**, and not again for the completed manager
+///   task.
+///
+/// The second tenant has its own `S`, deleted, and an unclaimed task on a type
+/// of the same code, so its document carries **the same number** as the system
+/// tenant's. Both rows are listed, told apart by `tenant_code` and `role_id`.
+///
+/// **Seen red** against the query in the document:
+/// * as #517 printed it, which has neither column;
+/// * with the new columns and #517's predicate (`candidate_role_id` claimed or
+///   not), which lists the P2 task;
+/// * without `r.deleted_at IS NOT NULL`, which lists the tasks on live roles;
+/// * without the anti-join, which lists the recreated one;
+/// * without `live.tenant_id = r.tenant_id`, which drops the claimed-one-role
+///   row;
+/// * without `tr.from_state = i.current_state`, which lists the document at the
+///   manager;
+/// * without the status filter, which lists the finance document twice.
+///
+/// [#529]: https://github.com/sujanto-gaws/kelir/issues/529
+/// [#533]: https://github.com/sujanto-gaws/kelir/issues/533
+#[tokio::test]
+async fn the_stranded_task_query_lists_what_nobody_can_decide_and_says_whose() {
+    let app = TestApp::spawn_with(|config| config.multi_tenant = true).await;
+    let token = app
+        .sign_in_to("SYSTEM", common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await;
+
+    let permissions = &[
+        "workflow:task:read",
+        "workflow:task:execute",
+        "workflow:instance:read",
+        "document:read",
+    ];
+    let mut roles = Vec::new();
+    for code in ["TI-STRAND-Q", "TI-STRAND-E", "TI-STRAND-R", "TI-STRAND-S"] {
+        roles.push(
+            fixtures::create_role_with_permissions(
+                &app.pool,
+                fixtures::SYSTEM_TENANT_ID,
+                code,
+                permissions,
+            )
+            .await,
+        );
+    }
+    let (q, e, r, s) = (roles[0], roles[1], roles[2], roles[3]);
+    let mut more = Vec::new();
+    for code in ["TI-STRAND-L", "TI-STRAND-T", "TI-STRAND-M", "TI-STRAND-F"] {
+        more.push(
+            fixtures::create_role_with_permissions(
+                &app.pool,
+                fixtures::SYSTEM_TENANT_ID,
+                code,
+                permissions,
+            )
+            .await,
+        );
+    }
+    let (t, m, f) = (more[1], more[2], more[3]);
+    fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "ti.strand.approver",
+        "ti.strand.approver@example.test",
+        common::ADMIN_PASSWORD,
+        &[q, e, r, t, m],
+    )
+    .await;
+    let approver = app
+        .sign_in_to("SYSTEM", "ti.strand.approver", common::ADMIN_PASSWORD)
+        .await;
+
+    let mut p2 = workflow_for("ti_strand_p2", "TI-STRAND-Q");
+    for transition in p2["transitions"].as_array_mut().expect("transitions") {
+        transition["allowedBy"] = json!("ROLE:TI-STRAND-E");
+    }
+    let p2 = publish_workflow_definition(&app, &token, "ti_strand_p2", p2).await;
+    let p2 = document_type(&app, &token, "TI_STRAND_P2", p2).await;
+    let p2 = submitted_document(&app, &token, p2, "P2: claimed, offered role deleted").await;
+    let p2 = open_task_of(&app, p2).await;
+    claim(&app, &approver, p2).await;
+
+    let one = publish_workflow(&app, &token, "ti_strand_one", "TI-STRAND-R").await;
+    let one = document_type(&app, &token, "TI_STRAND_ONE", one).await;
+    let one = submitted_document(&app, &token, one, "Claimed: its edge role deleted").await;
+    let one = open_task_of(&app, one).await;
+    claim(&app, &approver, one).await;
+
+    let queue = publish_workflow(&app, &token, "ti_strand_queue", "TI-STRAND-S").await;
+    let queue = document_type(&app, &token, "TI_STRAND", queue).await;
+    submitted_document(&app, &token, queue, "Unclaimed: its role deleted").await;
+
+    let live = publish_workflow(&app, &token, "ti_strand_live", "TI-STRAND-L").await;
+    let live = document_type(&app, &token, "TI_STRAND_LIVE", live).await;
+    submitted_document(&app, &token, live, "Unclaimed: its role live").await;
+
+    let recreated = publish_workflow(&app, &token, "ti_strand_again", "TI-STRAND-T").await;
+    let recreated = document_type(&app, &token, "TI_STRAND_AGAIN", recreated).await;
+    let recreated =
+        submitted_document(&app, &token, recreated, "Claimed: its edge role recreated").await;
+    let recreated = open_task_of(&app, recreated).await;
+    claim(&app, &approver, recreated).await;
+
+    let stages = two_stage("ti_strand_stages", "TI-STRAND-M", "TI-STRAND-F");
+    let stages = publish_workflow_definition(&app, &token, "ti_strand_stages", stages).await;
+    let stages = document_type(&app, &token, "TI_STRAND_STAGES", stages).await;
+    submitted_document(&app, &token, stages, "At the manager: finance deleted").await;
+    let at_finance = submitted_document(&app, &token, stages, "At finance: finance deleted").await;
+    let manager_task = open_task_of(&app, at_finance).await;
+    decide(&app, &approver, manager_task).await;
+
+    let (other, other_token) = tenant_administrator(&app, "TNT-STRAND", "ti.strand.other").await;
+    let other_s =
+        fixtures::create_role_with_permissions(&app.pool, other, "TI-STRAND-S", &[]).await;
+    let other_queue = publish_workflow(&app, &other_token, "ti_strand_queue", "TI-STRAND-S").await;
+    let other_queue = document_type(&app, &other_token, "TI_STRAND", other_queue).await;
+    submitted_document(
+        &app,
+        &other_token,
+        other_queue,
+        "Unclaimed in another tenant",
+    )
+    .await;
+    fixtures::create_role_with_permissions(&app.pool, other, "TI-STRAND-R", &[]).await;
+
+    sqlx::query("UPDATE roles SET deleted_at = now() WHERE id = ANY($1)")
+        .bind(vec![q, r, s, t, f, other_s])
+        .execute(&app.pool)
+        .await
+        .expect("delete the roles as a release before D-89 did");
+    fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "TI-STRAND-T",
+        &[],
+    )
+    .await;
+
+    let rows = sqlx::query(&stranded_task_query())
+        .fetch_all(&app.pool)
+        .await
+        .expect("the query as printed runs");
+
+    use sqlx::Row;
+    let listed: Vec<(String, String, String, Uuid, String)> = rows
+        .iter()
+        .map(|row| {
+            (
+                row.get("tenant_code"),
+                row.get::<Option<String>, _>("document_number")
+                    .expect("a submitted document has a number"),
+                row.get("title"),
+                row.get("role_id"),
+                row.get("why"),
+            )
+        })
+        .collect();
+
+    assert!(
+        !listed
+            .iter()
+            .any(|(_, _, title, _, _)| title.starts_with("P2")),
+        "a claimed task offered to a deleted role was listed as stranded, and its assignee can \
+         decide it: {listed:#?}"
+    );
+
+    let mut found: Vec<(&str, &str, Uuid, &str)> = listed
+        .iter()
+        .map(|(tenant, _, title, role, why)| (tenant.as_str(), title.as_str(), *role, why.as_str()))
+        .collect();
+    found.sort();
+    assert_eq!(
+        found,
+        vec![
+            (
+                "SYSTEM",
+                "At finance: finance deleted",
+                f,
+                "offered to the role, and unclaimed"
+            ),
+            (
+                "SYSTEM",
+                "Claimed: its edge role deleted",
+                r,
+                "a decision out of MANAGER_APPROVAL is allowedBy the role"
+            ),
+            (
+                "SYSTEM",
+                "Unclaimed: its role deleted",
+                s,
+                "offered to the role, and unclaimed"
+            ),
+            (
+                "TNT-STRAND",
+                "Unclaimed in another tenant",
+                other_s,
+                "offered to the role, and unclaimed"
+            ),
+        ],
+        "{listed:#?}"
+    );
+
+    let number_of = |tenant: &str| {
+        listed
+            .iter()
+            .find(|(t, _, title, _, _)| t == tenant && title.starts_with("Unclaimed"))
+            .map(|(_, number, _, _, _)| number.clone())
+            .expect("listed")
+    };
+    assert_eq!(
+        number_of("SYSTEM"),
+        number_of("TNT-STRAND"),
+        "the fixture meant two tenants' rows to share a document number"
+    );
+
+    // What the list claims, checked against the engine. The P2 task's assignee
+    // decides it; the claimed task whose edge role is gone is refused.
+    decide(&app, &approver, p2).await;
+
+    let refused = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{one}/decision"),
+            Some(&approver),
+            json!({ "action": "APPROVE" }),
+        )
+        .await;
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a listed task was decidable: {}",
+        refused.body
+    );
+    assert!(
+        refused.body.to_string().contains("ASSIGNMENT_UNRESOLVED"),
+        "{}",
+        refused.body
+    );
 }
