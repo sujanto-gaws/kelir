@@ -14,6 +14,9 @@
 //!   `POST /tasks/{id}/delegation` — taking a task, deciding it, and handing it
 //!   to somebody else. Each has its own preconditions, which is why none of them
 //!   is a `PUT` of a field.
+//! * `POST /tasks/{id}/reassign` — an administrator moving an open task to a
+//!   user or a role (FR-WF-017, #512). A verb, as naming convention §5 spells a
+//!   non-CRUD action and as #512 named the route.
 //!
 //! # Why the delegation route is here and not at `/tasks/{id}/delegate`
 //!
@@ -34,8 +37,8 @@ use axum::{Json, Router};
 use uuid::Uuid;
 
 use super::domain::{
-    CreateWorkflowRequest, DecisionRequest, DelegateRequest, UpdateWorkflowRequest,
-    WorkflowDefinition, WorkflowDefinitionSummary, WorkflowTask,
+    CreateWorkflowRequest, DecisionRequest, DelegateRequest, ReassignTaskRequest,
+    UpdateWorkflowRequest, WorkflowDefinition, WorkflowDefinitionSummary, WorkflowTask,
 };
 use super::service::instance::DocumentWorkflow;
 use super::service::task::DecisionResult;
@@ -66,6 +69,7 @@ pub fn routes() -> Router<AppState> {
         .route("/tasks/{id}/claim", post(claim_task))
         .route("/tasks/{id}/decision", post(decide_task))
         .route("/tasks/{id}/delegation", post(delegate_task))
+        .route("/tasks/{id}/reassign", post(reassign_task))
 }
 
 #[utoipa::path(
@@ -297,5 +301,33 @@ async fn delegate_task(
 ) -> Result<Json<ItemEnvelope<WorkflowTask>>, AppError> {
     Ok(Json(ItemEnvelope::new(
         task_service::delegate(&state, &caller, id, request).await?,
+    )))
+}
+
+#[utoipa::path(
+    post, path = "/api/v1/workflow/tasks/{id}/reassign", tag = "workflow",
+    request_body = ReassignTaskRequest,
+    responses(
+        (status = 200, description = "Reassigned: held by the user named, or offered unclaimed to the role \
+                                      named. The process has not moved", body = WorkflowTask),
+        (status = 403, description = "Missing workflow:task:reassign"),
+        (status = 404, description = "No such task in the caller's tenant"),
+        (status = 409, description = "The task is no longer open"),
+        (status = 422, description = "The request names both a user and a role, or neither; the user or \
+                                      role is not live in this tenant (ASSIGNMENT_UNRESOLVED); the user \
+                                      satisfies none of the APPROVE, REJECT or RETURN edges out of the \
+                                      current state, or the role is named by none of them \
+                                      (TARGET_CANNOT_DECIDE); or the comment is too long")
+    ),
+    security(("bearer" = []))
+)]
+async fn reassign_task(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    PathParam(id): PathParam<Uuid>,
+    JsonBody(request): JsonBody<ReassignTaskRequest>,
+) -> Result<Json<ItemEnvelope<WorkflowTask>>, AppError> {
+    Ok(Json(ItemEnvelope::new(
+        task_service::reassign(&state, &caller, id, request).await?,
     )))
 }

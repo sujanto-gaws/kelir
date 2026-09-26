@@ -38,6 +38,11 @@ While the major version is `0`, the public API may change in any release.
   saying *never the secret*. Both now say *reference*, and that only its shape
   is checked ([#552](https://github.com/sujanto-gaws/kelir/issues/552)). No
   schema, grant or behaviour changes.
+- **`0048` adds one permission, `workflow:task:reassign`**, and grants it to
+  the system tenant's `ROLE-ADMIN`. A tenant created after the upgrade gets it
+  on its `ROLE-ADMIN`. A tenant created before the upgrade does not: grant it
+  to that tenant's administrator role. No schema changes, and `v0.8.0` runs
+  against the migrated schema.
 
 ### Added
 
@@ -71,6 +76,22 @@ While the major version is `0`, the public API may change in any release.
     handler on every transition.
   - **Dead letters have no screen yet.** Query `outbox_events` where
     `status = 'DEAD_LETTER'`.
+- **An administrator reassigns an open task** (FR-WF-017;
+  [#512](https://github.com/sujanto-gaws/kelir/issues/512),
+  [ADR-0042](docs/architectures/adr/0042.%20An%20Administrator%20Reassigns%20an%20Open%20Task%20and%20Nothing%20Cancels%20One.md)).
+  `POST /api/v1/workflow/tasks/{id}/reassign`, under the new
+  `workflow:task:reassign`, moves an open task to one live user, who then
+  holds it, or one live role, whose holders are offered it unclaimed. Name
+  exactly one of `userId` and `roleCode`; both, neither, or a deleted user or
+  role is a 422, and a closed task is a 409. **The target must be able to
+  decide the task**: a user must satisfy at least one of the task's approve,
+  reject or return rules, checked as the decision checks them, and a role must
+  be named by one. Otherwise it is a 422 `TARGET_CANNOT_DECIDE` naming what the
+  decisions need. A task with no such decision, such as the owner's correction
+  after a return, can be reassigned to anybody. The process does not move. The
+  task's history records `REASSIGN` with any comment, and the audit trail
+  records the change. **No route cancels a task** (decision **D-91**). The
+  screen arrives with the list of tasks a refused role delete names.
 - **The external system registry** (FR-INT-001;
   [#520](https://github.com/sujanto-gaws/kelir/issues/520)). **Admin →
   External Systems** registers the systems Kelir integrates with, such as an
@@ -195,8 +216,9 @@ While the major version is `0`, the public API may change in any release.
   `allowedBy` that role, claimed or not. A claimed task does not need the
   role it was offered to, because its assignee can decide it without that
   role ([#529](https://github.com/sujanto-gaws/kelir/issues/529)). Once those
-  tasks are decided that refusal goes away, though a published workflow definition naming the role still refuses it ([#510](https://github.com/sujanto-gaws/kelir/issues/510)). **No route reassigns or cancels a task yet**, so deciding them is
-  the one way to clear the way. A document submitted while a role is being
+  tasks are decided or reassigned that refusal goes away, though a published workflow definition naming the role still refuses it ([#510](https://github.com/sujanto-gaws/kelir/issues/510)). Deciding them or reassigning them clears the way (see *Added*,
+  [#512](https://github.com/sujanto-gaws/kelir/issues/512)); the 409 now ends
+  *decided or reassigned first*. No route cancels a task. A document submitted while a role is being
   deleted waits for the delete, then is refused as `ASSIGNMENT_UNRESOLVED`
   if the delete went through, with nothing written.
   **Upgrade:** a role deleted before this release, with tasks still open,

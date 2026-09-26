@@ -1,6 +1,6 @@
 # Kelir Software Requirements Specification
 
-**Status:** Draft · **Last updated:** 2026-08-25
+**Status:** Draft · **Last updated:** 2026-09-26
 
 The companion Solution Blueprint formerly bundled in this file now lives in the System Design Document: `docs/design/01. System Design Document.md`.
 
@@ -14,7 +14,7 @@ The companion Solution Blueprint formerly bundled in this file now lives in the 
 |---|---|
 | Document Name | Kelir Software Requirements Specification |
 | Framework Name | Kelir |
-| Version | 0.8 |
+| Version | 0.9 |
 | Status | Initial Draft |
 | Date | 2026-08-05 |
 | Document Type | SRS |
@@ -34,6 +34,7 @@ Revision history:
 0.6 (2026-08-20): narrowed FR-IDM-004 from "manage permissions" to maintaining the permission catalogue, which is system-defined rather than administrator-editable; the administrative surface is role–permission mapping (FR-IDM-005). No requirement added or removed, and MVP scope is unchanged — §9 names neither. Recorded as decision D-6 in projects/planning/02. Product Backlog.md.
 0.7 (2026-08-20): re-scoped FR-IDM-008 to department assignment, leaving department management to FR-ORG-002 and positions to FR-ORG-003, which the three requirements had been claiming between them; recorded that multi-tenant mode (FR-IDM-009) is not exercised before 1.0 and that a deployment serves one tenant, added to §10. No requirement added or removed, and MVP scope is unchanged — §9 names neither departments nor tenants. Recorded as decisions D-7 and D-8 in projects/planning/02. Product Backlog.md.
 0.8 (2026-08-25): reversed the v0.7 tenancy entry. Multi-tenant mode is exercised: FR-IDM-009 is delivered in full and FR-ORG-001 with it, so the §10 line deferring multiple tenants past 1.0 is removed and the §4.2 and §4.3 notes are rewritten to say what was built rather than what was deferred. §2 gains the answer FR-IDM-009 had left open — roles are tenant-scoped, the permission catalogue is global. No requirement added or removed, and MVP scope is unchanged — §9 still names no tenant criterion, which is why this could be `Should` work at all. Recorded as decision D-18 in projects/planning/02. Product Backlog.md, superseding D-7.
+0.9 (2026-09-26): added FR-WF-017 (Should), an administrator's reassign of an open task to a live role or user under a dedicated permission. No existing requirement covered it: FR-WF-009 and FR-TASK-008 are delegation by the task's holder, and FR-WF-010 is escalation by the system. 164 FRs become 165. Not named by §9, so MVP scope is unchanged. Recorded as decision D-91, amended by the product owner on 2026-09-25, in projects/planning/02. Product Backlog.md; delivered by #512 and ADR-0042.
 ```
 
 > **Note:** As of v0.4 this file contains only the SRS. The Solution Blueprint has been split out into the System Design Document (`docs/design/01. System Design Document.md`), which is versioned independently.
@@ -404,6 +405,7 @@ Note: supplier, customer, and employee master data follow the OFBiz-style Party 
 | FR-WF-014 | The system shall support workflow variables | Must |
 | FR-WF-015 | The system shall support conditional routing | Should |
 | FR-WF-016 | The system should support parallel approval | Could |
+| FR-WF-017 | The system shall allow an administrator to reassign an open task to a live role or user, under a dedicated permission | Should |
 
 Note: FR-WF-016 is planned for a later phase.
 

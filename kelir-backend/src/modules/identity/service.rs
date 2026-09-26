@@ -509,7 +509,7 @@ pub async fn delete_role(
     // to a role nobody holds (an unclaimed task) or with a decision refused as
     // `ASSIGNMENT_UNRESOLVED` (an edge `allowedBy` the role). A claimed task
     // offered to the role is its assignee's to decide, and is not counted
-    // (#529). The count says which tasks need a role.
+    // (#529), until a reassign to the role unclaims it (#512). The count says which tasks need a role.
     //
     // Counted under the row lock above, which a transition raising a task that
     // needs this role waits on, whether the task is offered to the role or its

@@ -303,11 +303,15 @@ pub fn open_tasks_refusal(open_tasks: i64) -> Option<String> {
 
     // True of both ways a task needs a role: an unclaimed task offered to it is
     // left offered to nobody, and a task with an edge `allowedBy` it is left
-    // with a decision nobody can make (#529).
+    // with a decision nobody can make (#529). The way through is named: decide
+    // the task, or reassign it (`POST /api/v1/workflow/tasks/{id}/reassign`,
+    // #512, D-91). A reassign elsewhere releases this role from a task offered
+    // to it. A task whose edge names it holds it until decided, and a reassign
+    // moves that task to somebody who can decide it.
     Some(format!(
         "{open_tasks} open {tasks} this role to be decided. Deleting the role would leave \
          {them} offered to nobody, or with a decision nobody could make. {they} to be \
-         decided first"
+         decided or reassigned first"
     ))
 }
 
@@ -394,7 +398,7 @@ mod tests {
             Some(
                 "2 open tasks need this role to be decided. Deleting the role would leave them \
                  offered to nobody, or with a decision nobody could make. They need to be \
-                 decided first"
+                 decided or reassigned first"
             )
         );
     }
