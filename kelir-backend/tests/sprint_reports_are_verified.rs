@@ -112,11 +112,15 @@
 //! 4. **The sprint gained a browser spec, or the report's Scope Status says
 //!    `verified by inspection only`.** *Gained* is read from git rather than
 //!    from the report: a spec counts when the commit that added it is a squash
-//!    merge whose subject ends in `(#N)`, the spec is still in `e2e/tests/`,
-//!    and `#N` is a pull request the report's Scope Status cites — as a link
-//!    to `https://github.com/sujanto-gaws/kelir/pull/N`, or as `PR #N`. The
-//!    report is read as it renders: an HTML comment says nothing, neither the
-//!    phrase nor a citation ([#468](https://github.com/sujanto-gaws/kelir/issues/468)).
+//!    merge whose subject ends in `(#N)`, the spec is still in `e2e/tests/` at
+//!    `HEAD` under that name or one it was renamed to, and `#N` is a pull
+//!    request the report's Scope Status cites — as a link whose target is
+//!    `https://github.com/sujanto-gaws/kelir/pull/N`, or as `PR #N` in prose.
+//!    **The report is read as it renders**
+//!    ([#468](https://github.com/sujanto-gaws/kelir/issues/468)): what a
+//!    reader cannot see — an HTML comment, a link reference definition, a
+//!    link's title or destination, an image, a tag — says nothing, and a
+//!    link's label is not where it points.
 //! 5. **The history is there to ask, and the walk found what exists.** A
 //!    depth-1 clone does not fail to answer rule 4 — it answers it wrongly,
 //!    because its single grafted commit *adds* every file in the tree. So a
@@ -170,14 +174,38 @@
 //!   rather than guessing its wording now.
 //! - **`PR #N` in prose is read as Kelir's.** Text has no repository in it, so
 //!   *unovis PR #457* cites Kelir's #457. Only a link says where it points,
-//!   and only a link to this repository counts.
-//! - **A spec replaced at the same path.** Presence is asked of the path, so a
-//!   spec deleted and later re-added under the same name, by another pull
-//!   request, still credits the first. The path has a flow again, which is
-//!   the question rule 4 asks of the tree.
-//! - **The working tree, not a commit.** A spec is present when the file is
-//!   there, as the reports are read from disk. In CI the two are the same
-//!   checkout; locally, an untracked file at a deleted spec's path counts.
+//!   and only a link whose target is this repository counts. A reference
+//!   definition that puts its target on the line after the label is not read
+//!   as one, so `[PR #457][u]` over it is left as prose and counts the same
+//!   way.
+//! - **Text a stylesheet hides.** Tags are dropped and the text between them
+//!   is kept, so `<span hidden>verified by inspection only</span>` counts. No
+//!   report uses HTML, on `main` or in any tree it has held; the first one
+//!   that needs a tag is the time to read attributes.
+//! - **`HEAD`, not the working tree, for specs.** Presence is asked of the
+//!   commit the log reads, so an uncommitted deletion is not seen until it is
+//!   committed, and an uncommitted move is not mistaken for one. The reports
+//!   themselves are read from disk, so an edit is checked before it is
+//!   committed.
+//! - **A move git does not recognise as one.** Renames are followed as
+//!   `git log --find-renames` finds them: at least half the file unchanged.
+//!   A pull request that moves a spec *and* rewrites most of it squashes to a
+//!   deletion and an addition, and a settled report citing the pull request
+//!   that first added it goes red. Move in one pull request and rewrite in
+//!   another.
+//!
+//! **Fails safe, and named rather than fixed.** Each refuses a report that
+//! does render the phrase or a citation, so its author sees a red test rather
+//! than a quiet pass:
+//!
+//! - **Code is read as Markdown.** A code span is not set apart, so
+//!   `` `<!--` `` in inline code starts a comment that runs to its `-->` or to
+//!   the end, and `` `[x](y)` `` loses its brackets. No report has either.
+//! - **The phrase is matched in plain words.** `verified by *inspection* only`
+//!   renders the phrase and does not match it. Sprint plan §5 asks for it *in
+//!   those words*.
+//! - **An HTML link.** `<a href>` is a tag, and is dropped with its target.
+//!   Write the link in Markdown, as every report does.
 //!
 //! # Rules 4–6, seen red 2026-09-14 (#453)
 //!
@@ -230,63 +258,96 @@
 //! [Verification record 16](../../projects/verifications/16.%20Sprint%2018%20Independent%20Pass.md)'s
 //! finding 5 found rule 4 satisfiable three ways without a flow:
 //!
-//! - **A.** The phrase inside `<!-- … -->`, which renders as nothing. HTML
-//!   comments are now removed before Scope Status is found, an unclosed one
-//!   running to the end, as `adr_records_are_current.rs` does since #561.
+//! - **A.** The phrase inside `<!-- … -->`, which renders as nothing.
 //! - **B.** `https://github.com/f5/unovis/pull/457`, which `/pull/(\d+)` read
-//!   as Kelir's #457. Only a link into this repository counts now.
-//! - **C.** A spec added under `(#9999)` and deleted by a later commit.
-//!   `--diff-filter=A` finds every spec ever added, so the pull request went on
-//!   counting. A spec now counts while its path is in the tree.
+//!   as Kelir's #457.
+//! - **C.** A spec added under `(#9999)` and deleted by a later commit, which
+//!   `--diff-filter=A` went on counting.
 //!
-//! **Each fix seen red.** Each old predicate was put back alone and the file
-//! run, then restored byte-exact:
+//! **The first fix was sent back by its gate**, which found each shape had a
+//! neighbour: a link reference definition, a link title and a `<…>`
+//! destination hid the phrase as a comment does; `[PR #457](…f5/unovis…)`
+//! passed because the label was read as prose; and asking whether a spec's
+//! path still existed turned [status report 20](../../projects/status/20.%20Sprint%2019%20Status.md)
+//! red when #481's spec was moved into a subdirectory — a settled report
+//! failing for a move, which D-71 does not allow to be fixed by editing it.
+//! **So the rule now reads what renders, where a link points, and where a
+//! spec went:**
 //!
-//! | Old predicate put back | Red |
+//! - **A.** HTML comments are removed before Scope Status is found, an
+//!   unclosed one running to the end, as `adr_records_are_current.rs` does
+//!   since #561. [`rendered`] then drops what shows nothing else.
+//! - **B.** A link counts by its target, which must *be* a Kelir pull request
+//!   URL — any scheme, `www.` or case. Its label is not prose. `PR #N` and
+//!   `PR#N` count in prose outside a label.
+//! - **C.** Each spec is followed oldest first through its renames to where
+//!   it is now; a deletion ends it, and a path added again starts afresh.
+//!   What survives counts while its path is in `HEAD`.
+//!
+//! **Each fix seen red.** Each predicate below was put back alone against the
+//! final file and the file run, then restored byte-exact:
+//!
+//! | Put back | Red |
 //! |---|---|
 //! | The raw body read, comments kept | *a phrase inside an HTML comment*, *a commented-out heading*, and *a pull request in another repository* — its commented-out citation |
-//! | `/pull/(\d+)` in any URL | *a pull request in another repository* alone |
-//! | Every spec ever added counted | *a spec no longer in the tree* alone |
+//! | The phrase matched in the raw section, not [`rendered`] | *a phrase that renders as nothing* alone |
+//! | `/pull/(\d+)` anywhere in a link's target | *a pull request in another repository* alone |
+//! | `PR #N` read in labels as well as prose | *a pull request in another repository* alone |
+//! | Every spec ever added counted | *a spec no longer in the tree* and *a moved spec* |
+//! | Renames not followed — the first fix's presence check | *a moved spec* alone |
 //!
-//! **No report main has held is refused.** The file before and after this
-//! change was run against `projects/status/` and `projects/verifications/` as
-//! each of the 66 first-parent commits that touched them left them, from the
-//! first report to `13e1e76`. **Both gave the same result on every tree**:
-//! green on the 14 from `b3127de` (#443, the first to hold a Sprint 17
-//! report) on, and red on the same tests under both on the 52 before it, which
+//! **No report main has held is refused.** Main's file and this one were run
+//! against `projects/status/` and `projects/verifications/` as each of the 66
+//! first-parent commits that touched them left them, from the first report to
+//! `13e1e76`, each folder restored where that commit had it. **Both gave the
+//! same result on every tree, and rule 4 was green on all 66**: every test
+//! green on the 14 from `b3127de` (#443, the first to hold a Sprint 17 report)
+//! on, and the same other tests red under both on the 52 before it, which
 //! predate the reports this file's floors and constants were written against.
-//! No status report in any of the 66 contains `<!--` or a `/pull/` link
-//! outside this repository.
+//! No status report in any of the 66 contains `<!--`, a reference definition,
+//! an image, an HTML tag, a `/pull/` link outside this repository, or a
+//! `PR #N` label on one.
 //!
 //! **C is swept by its history rather than by tree.** The sweep reads today's
-//! log, so the spec set is today's. That is faithful for C because **no commit
-//! on main has ever deleted a file from `e2e/tests/`** (`git log --diff-filter=D
-//! -- e2e/tests` is empty): at every commit, every spec added before it was
-//! still there, and C's fix counts exactly what the old predicate counted.
+//! log. That is faithful for C because **no commit on main has deleted or
+//! renamed a file in `e2e/tests/`**, and none that touched it is a merge: at
+//! every commit, every spec added before it was still there under its first
+//! name, and C's fix counts exactly what the old predicate counted.
 //!
-//! **Positive controls last.** A synthetic `99. Sprint 99 Status.md`, carrying
-//! `author-verified` and one Scope Status row, run against the old and the
-//! fixed file, then deleted:
+//! **Positive controls last**, run against main's file, the first fix and
+//! this one. The first seven are a synthetic `99. Sprint 99 Status.md`
+//! carrying `author-verified` and one Scope Status row; the rest change
+//! `e2e/tests/` in local commits and add no report. Each was undone before the
+//! next:
 //!
-//! | The row | Before #468 | After |
-//! |---|---|---|
-//! | `Done`, citing nothing — the issue's control | refused | **refused** |
-//! | `Done <!-- verified by inspection only -->` | accepted | **refused** |
-//! | `Done — verified by inspection only` | accepted | accepted |
-//! | `Done — https://github.com/f5/unovis/pull/457` | accepted | **refused** |
-//! | `Done — https://github.com/sujanto-gaws/kelir/pull/457` | accepted | accepted |
-//! | `Done — PR #9999`, local commits having added `zz-r468-probe.spec.ts` under `(#9999)` and deleted it | accepted | **refused** |
-//! | The same, after those two commits were reset away | refused | refused |
+//! | The probe | Main | First fix | Now |
+//! |---|---|---|---|
+//! | `Done`, citing nothing — the issue's control | refused | refused | **refused** |
+//! | `Done`, then `[//]: # (verified by inspection only)` | accepted | accepted | **refused** |
+//! | `Done [x](https://example.com "verified by inspection only")` | accepted | accepted | **refused** |
+//! | `[Done](<verified by inspection only>)` | accepted | accepted | **refused** |
+//! | `Done - verified by inspection only` | accepted | accepted | accepted |
+//! | `Done - [PR #481](https://github.com/f5/unovis/pull/481)` | accepted | accepted | **refused** |
+//! | `Done - [#481](https://github.com/sujanto-gaws/kelir/pull/481)` | accepted | accepted | accepted |
+//! | #481's spec moved into `e2e/tests/dashboard/` and committed | green | Sprint 19 red | **green** |
+//! | The same move, staged and not committed | green | Sprint 19 red | **green** |
+//! | The moved spec then deleted and committed | green | Sprint 19 red | **Sprint 19 red** |
+//! | A spec at `e2e/tests/zz-é.spec.ts` under `(#9998)`, cited as `PR #9998` | refused | refused | **accepted** |
+//! | `PR #9999`, its spec added under `(#9999)` and deleted | accepted | refused | **refused** |
+//! | The tree as it stands | green | green | green |
 //!
-//! **Each refusal reddened rule 4 and nothing else.** #457's spec is still in
-//! the tree, so its row is also the still-present counterpart to C.
+//! **Each red reddened rule 4 and nothing else.** The three rows for #481's
+//! spec are the ones that decide C: a moved flow is the same flow, and a
+//! deleted one is not.
+//! The non-ASCII row was refused before because git quotes such a path, and
+//! the log is now read with `core.quotePath=false`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use regex::Regex;
+use regex::{Captures, Regex};
 
 /// The first sprint governed by [sprint plan](../../projects/planning/01.%20Sprint%20Plan.md)
 /// §2's label rule.
@@ -545,22 +606,127 @@ fn without_comments(text: &str) -> String {
     kept
 }
 
+/// Wrapped around a link's label while a section is rendered, so the label can
+/// be kept for the phrase and dropped for a citation.
+const LABEL_OPEN: char = '\u{1}';
+const LABEL_CLOSE: char = '\u{2}';
+
+/// What a Scope Status shows a reader, as far as rule 4 asks.
+struct Rendered {
+    /// The text a reader sees, link labels included.
+    visible: String,
+    /// The same without link labels: where `PR #N` in prose may cite.
+    unlabelled: String,
+    /// Where each link points.
+    targets: Vec<String>,
+}
+
+/// `section`, with its HTML comments already removed, reduced to what
+/// renders ([#468](https://github.com/sujanto-gaws/kelir/issues/468) A and B).
+///
+/// **What renders as nothing is dropped**: a link reference definition, such
+/// as `[//]: # (…)`; an image; a link's title and destination; an HTML tag and
+/// its attributes. **A link's label is visible but is not where it points**,
+/// so `[PR #457](https://github.com/f5/unovis/pull/457)` shows `PR #457` and
+/// cites another repository.
+///
+/// A reduction, not a parser: [`Rendered`] is what these patterns leave, and
+/// the module doc names what they do not see.
+fn rendered(section: &str) -> Rendered {
+    let definition = Regex::new(r"(?m)^ {0,3}\[([^\]\n]+)\]:[ \t]*(?:<([^>\n]*)>|(\S+))[^\n]*$")
+        .expect("the definition pattern compiles");
+    let image = Regex::new(r"!\[[^\]\n]*\]\([^)\n]*\)").expect("the image pattern compiles");
+    let inline = Regex::new(
+        r#"\[([^\]\n]*)\]\(\s*(?:<([^>\n]*)>|([^\s)]*))(?:\s+(?:"[^"\n]*"|'[^'\n]*'|\([^)\n]*\)))?\s*\)"#,
+    )
+    .expect("the inline link pattern compiles");
+    let reference =
+        Regex::new(r"\[([^\]\n]*)\](?:\[([^\]\n]*)\])?").expect("the reference pattern compiles");
+    let autolink = Regex::new(r"<((?i:https?)://[^>\s]+)>").expect("the autolink pattern compiles");
+    let tag = Regex::new(r"</?[A-Za-z][^>]*>").expect("the tag pattern compiles");
+    let label = Regex::new("\u{1}[^\u{2}]*\u{2}").expect("the label pattern compiles");
+
+    let mut definitions = BTreeMap::new();
+    for found in definition.captures_iter(section) {
+        let target = found
+            .get(2)
+            .or_else(|| found.get(3))
+            .map_or("", |m| m.as_str());
+        definitions
+            .entry(found[1].to_lowercase())
+            .or_insert_with(|| target.to_owned());
+    }
+
+    let mut targets = Vec::new();
+    let text = definition.replace_all(section, "");
+    let text = image.replace_all(&text, "");
+    let text = inline.replace_all(&text, |found: &Captures| {
+        let target = found
+            .get(2)
+            .or_else(|| found.get(3))
+            .map_or("", |m| m.as_str());
+        targets.push(target.to_owned());
+        format!("{LABEL_OPEN}{}{LABEL_CLOSE}", &found[1])
+    });
+    let text = reference.replace_all(&text, |found: &Captures| {
+        let key = found
+            .get(2)
+            .filter(|m| !m.as_str().is_empty())
+            .unwrap_or_else(|| found.get(1).expect("group 1 always takes part"));
+
+        match definitions.get(&key.as_str().to_lowercase()) {
+            Some(target) => {
+                targets.push(target.clone());
+                format!("{LABEL_OPEN}{}{LABEL_CLOSE}", &found[1])
+            }
+            None => found[0].to_owned(),
+        }
+    });
+    let text = autolink.replace_all(&text, |found: &Captures| {
+        targets.push(found[1].to_owned());
+        format!("{LABEL_OPEN}{}{LABEL_CLOSE}", &found[1])
+    });
+    let text = tag.replace_all(&text, "");
+
+    Rendered {
+        visible: text.replace([LABEL_OPEN, LABEL_CLOSE], ""),
+        unlabelled: label.replace_all(&text, "").into_owned(),
+        targets,
+    }
+}
+
 /// The pull requests a Scope Status cites: as a link to one of Kelir's,
 /// `https://github.com/sujanto-gaws/kelir/pull/436`, or as text, `PR #212`,
 /// which is how the Sprint 8 report wrote them.
 ///
-/// **Only this repository's links.** `/pull/N` anywhere in a URL once counted,
-/// so `https://github.com/f5/unovis/pull/457` cited Kelir's #457
-/// ([#468](https://github.com/sujanto-gaws/kelir/issues/468) B).
-fn cited_pull_requests(section: &str) -> BTreeSet<u32> {
-    let citation = Regex::new(r"https://github\.com/sujanto-gaws/kelir/pull/(\d+)|PR #(\d+)")
-        .expect("the citation pattern compiles");
+/// **Only this repository's pull requests, read from where a link points.**
+/// `/pull/N` anywhere in a URL once counted, so
+/// `https://github.com/f5/unovis/pull/457` cited Kelir's #457, and a label
+/// reading `PR #457` counted whatever it linked to
+/// ([#468](https://github.com/sujanto-gaws/kelir/issues/468) B). A link's
+/// target must *be* a Kelir pull request URL; `PR #N` and a bare Kelir URL
+/// count in prose outside a label.
+fn cited_pull_requests(section: &Rendered) -> BTreeSet<u32> {
+    let kelir_link = Regex::new(
+        r"^(?i:(?:https?://)?(?:www\.)?github\.com/sujanto-gaws/kelir/pull/)(\d+)(?:[/?#]|$)",
+    )
+    .expect("the link pattern compiles");
+    let in_prose = Regex::new(
+        r"(?m)(?:^|[\s(|])(?i:(?:https?://)?(?:www\.)?github\.com/sujanto-gaws/kelir/pull/)(\d+)|PR ?#(\d+)",
+    )
+    .expect("the prose pattern compiles");
 
-    citation
-        .captures_iter(section)
+    let linked = section
+        .targets
+        .iter()
+        .filter_map(|target| kelir_link.captures(target.trim()))
+        .filter_map(|found| found[1].parse().ok());
+    let written = in_prose
+        .captures_iter(&section.unlabelled)
         .filter_map(|found| found.get(1).or_else(|| found.get(2)))
-        .filter_map(|number| number.as_str().parse().ok())
-        .collect()
+        .filter_map(|number| number.as_str().parse().ok());
+
+    linked.chain(written).collect()
 }
 
 /// `git`, run at the repository root, with its standard output as text.
@@ -581,18 +747,21 @@ fn git(arguments: &[&str]) -> String {
     String::from_utf8(output.stdout).expect("git prints UTF-8")
 }
 
-/// Every spec file added to `e2e/tests/` that is still there, with the pull
-/// request whose squash merge added it — `None` when the subject names none,
-/// which is what a pull request's own unsquashed commits look like while CI
-/// tests it.
+/// Every spec file added to `e2e/tests/` whose flow is still there, under
+/// whatever name, with the pull request whose squash merge added it — `None`
+/// when the subject names none, which is what a pull request's own unsquashed
+/// commits look like while CI tests it.
 ///
 /// **Refuses a shallow clone rather than answering from it.** A depth-1
 /// checkout holds one grafted commit that adds every file in the tree, so the
 /// log would credit all of `e2e/tests/` to whichever pull request is under
 /// test — and rule 4 would be wrong in both directions while staying green.
 ///
-/// `--no-renames`, so a renamed spec is an addition under its new name rather
-/// than a rename that nothing attributes.
+/// **Oldest first, renames followed.** A renamed spec keeps the pull request
+/// that added it and also credits the one that moved it, which is what
+/// `--no-renames` credited before #468. **Presence is asked of `HEAD`**, the
+/// same commits the log reads, so an uncommitted move is not a deletion.
+/// `core.quotePath=false`, so a path outside ASCII is printed as it is.
 fn specs_added() -> Vec<(Option<u32>, String)> {
     assert_eq!(
         git(&["rev-parse", "--is-shallow-repository"]).trim(),
@@ -604,28 +773,51 @@ fn specs_added() -> Vec<(Option<u32>, String)> {
     );
 
     let log = git(&[
+        "-c",
+        "core.quotePath=false",
         "log",
-        "--no-renames",
-        "--diff-filter=A",
-        "--name-only",
+        "--reverse",
+        "--topo-order",
+        "--find-renames",
+        "--name-status",
         "--format=%x00%s",
         "--",
         "e2e/tests",
     ]);
+    let tree: BTreeSet<String> = git(&[
+        "-c",
+        "core.quotePath=false",
+        "ls-tree",
+        "-r",
+        "--name-only",
+        "HEAD",
+        "--",
+        "e2e/tests",
+    ])
+    .lines()
+    .map(str::to_owned)
+    .collect();
 
-    attributed_specs(&log, |path| repository_root().join(path).is_file())
+    attributed_specs(&log, |path| tree.contains(path))
 }
 
-/// [`specs_added`]'s reading of `git log --format=%x00%s --name-only`, apart
-/// from git so the rule can be tested without writing history.
+/// [`specs_added`]'s reading of `git log --reverse --find-renames
+/// --name-status --format=%x00%s`, apart from git so the rule can be tested
+/// without writing history.
 ///
-/// **A spec counts only while `still_there` says it exists.** `--diff-filter=A`
-/// finds every spec ever added, so a pull request whose spec a later commit
-/// deleted went on driving a screen that no flow reaches any more
-/// ([#468](https://github.com/sujanto-gaws/kelir/issues/468) C).
+/// **Each spec is followed from its addition to where it is now.** A rename
+/// carries its additions to the new path; a deletion ends them; a path added
+/// again after a deletion starts afresh. What survives counts only while
+/// `still_there` says its path exists.
+///
+/// `--diff-filter=A` alone found every spec ever added, so a pull request
+/// whose spec a later commit deleted went on driving a screen that no flow
+/// reaches any more ([#468](https://github.com/sujanto-gaws/kelir/issues/468)
+/// C) — and presence alone would refuse a spec that was only moved.
 fn attributed_specs(log: &str, still_there: impl Fn(&str) -> bool) -> Vec<(Option<u32>, String)> {
     let squash = Regex::new(r"\(#(\d+)\)\s*$").expect("the squash pattern compiles");
-    let mut added = Vec::new();
+    let is_spec = |path: &str| path.starts_with("e2e/tests/") && path.ends_with(".spec.ts");
+    let mut lineages: BTreeMap<String, Vec<(Option<u32>, String)>> = BTreeMap::new();
 
     for commit in log.split('\0').skip(1) {
         let mut lines = commit.lines();
@@ -634,14 +826,34 @@ fn attributed_specs(log: &str, still_there: impl Fn(&str) -> bool) -> Vec<(Optio
             .captures(subject)
             .and_then(|found| found[1].parse().ok());
 
-        for path in lines.map(str::trim) {
-            if path.starts_with("e2e/tests/") && path.ends_with(".spec.ts") && still_there(path) {
-                added.push((pull_request, path.to_owned()));
+        for line in lines {
+            let fields: Vec<&str> = line.trim_end().split('\t').collect();
+
+            match fields.as_slice() {
+                [status, path] if status.starts_with('A') && is_spec(path) => {
+                    lineages.insert((*path).to_owned(), vec![(pull_request, (*path).to_owned())]);
+                }
+                [status, path] if status.starts_with('D') => {
+                    lineages.remove(*path);
+                }
+                [status, from, to] if status.starts_with('R') => {
+                    let mut lineage = lineages.remove(*from).unwrap_or_default();
+
+                    if is_spec(to) {
+                        lineage.push((pull_request, (*to).to_owned()));
+                        lineages.insert((*to).to_owned(), lineage);
+                    }
+                }
+                _ => {}
             }
         }
     }
 
-    added
+    lineages
+        .into_iter()
+        .filter(|(path, _)| still_there(path))
+        .flat_map(|(_, lineage)| lineage)
+        .collect()
 }
 
 /// The pull requests whose squash merge added at least one spec.
@@ -657,10 +869,10 @@ fn pull_requests_that_added_a_spec() -> BTreeSet<u32> {
 /// Read with its HTML comments removed **before** the section is found, so a
 /// commented-out heading neither starts nor ends it.
 fn drives_a_screen_or_says_it_did_not(body: &str, driven: &BTreeSet<u32>) -> bool {
-    let rendered = without_comments(body);
-    let section = scope_status(&rendered);
+    let uncommented = without_comments(body);
+    let section = rendered(scope_status(&uncommented));
 
-    section.contains(INSPECTION_ONLY) || !cited_pull_requests(section).is_disjoint(driven)
+    section.visible.contains(INSPECTION_ONLY) || !cited_pull_requests(&section).is_disjoint(driven)
 }
 
 /// Rule 4, and the point of #453: **a sprint that added no browser flow says
@@ -783,6 +995,48 @@ fn a_phrase_inside_an_html_comment_is_not_said() {
     );
 }
 
+/// #468 A, the gate's second round. **A comment is not the only Markdown that
+/// renders as nothing**: a link reference definition, a link's title or
+/// destination, an image, and an HTML tag's attributes all hide the phrase.
+#[test]
+fn a_phrase_that_renders_as_nothing_is_not_said() {
+    let nothing_driven = BTreeSet::new();
+
+    for hidden in [
+        "| 1 | The screen | Done |\n\n[//]: # (verified by inspection only)",
+        "| 1 | The screen | Done |\n\n[note]: https://example.com \"verified by inspection only\"",
+        "| 1 | The screen | [Done](https://example.com \"verified by inspection only\") |",
+        "| 1 | The screen | [Done](https://example.com 'verified by inspection only') |",
+        "| 1 | The screen | [Done](<verified by inspection only>) |",
+        "| 1 | The screen | ![verified by inspection only](shot.png) |",
+        "| 1 | The screen | <span title=\"verified by inspection only\">Done</span> |",
+        "| 1 | The screen | Done <verified by inspection only> |",
+    ] {
+        assert!(
+            !drives_a_screen_or_says_it_did_not(
+                &report_whose_scope_status_says(hidden),
+                &nothing_driven
+            ),
+            "a phrase that renders as nothing satisfied rule 4:\n{hidden}"
+        );
+    }
+
+    for shown in [
+        "| 1 | The screen | [verified by inspection only](https://example.com) |",
+        "| 1 | The screen | `verified by inspection only` |",
+        "| 1 | The screen | <b>verified by inspection only</b> |",
+        "| 1 | The screen | Done — verified by inspection only |\n\n[//]: # (a note)",
+    ] {
+        assert!(
+            drives_a_screen_or_says_it_did_not(
+                &report_whose_scope_status_says(shown),
+                &nothing_driven
+            ),
+            "a phrase a reader sees did not satisfy rule 4:\n{shown}"
+        );
+    }
+}
+
 /// #468 A, the other way round: a commented-out heading neither ends Scope
 /// Status early nor starts it.
 #[test]
@@ -815,6 +1069,12 @@ fn a_pull_request_in_another_repository_is_not_cited() {
         "| 1 | The chart | Done — https://github.com/f5/unovis/pull/457 |",
         "| 1 | The chart | Done — [upstream](https://github.com/sujanto-gaws/kelir-fork/pull/457) |",
         "| 1 | The chart | Done — [relative](../../pull/457) |",
+        "| 1 | The chart | Done — [PR #457](https://github.com/f5/unovis/pull/457) |",
+        "| 1 | The chart | Done — [https://github.com/sujanto-gaws/kelir/pull/457](https://github.com/f5/unovis/pull/457) |",
+        "| 1 | The chart | Done — [PR #457][u] |\n\n[u]: https://github.com/f5/unovis/pull/457",
+        "| 1 | The chart | Done — [PR #457] |\n\n[PR #457]: https://github.com/f5/unovis/pull/457",
+        "| 1 | The chart | Done — [x](https://example.com/?u=https://github.com/sujanto-gaws/kelir/pull/457) |",
+        "| 1 | The chart | Done — https://example.com/github.com/sujanto-gaws/kelir/pull/457 |",
     ] {
         assert!(
             !drives_a_screen_or_says_it_did_not(&report_whose_scope_status_says(foreign), &driven),
@@ -825,6 +1085,15 @@ fn a_pull_request_in_another_repository_is_not_cited() {
     for kelir in [
         "| 1 | The chart | Done — [#457](https://github.com/sujanto-gaws/kelir/pull/457) |",
         "| 1 | The chart | Done — PR #457 |",
+        "| 1 | The chart | Done — PR#457 |",
+        "| 1 | The chart | Done — https://github.com/sujanto-gaws/kelir/pull/457 |",
+        "| 1 | The chart | Done — [files](https://github.com/sujanto-gaws/kelir/pull/457/files) |",
+        "| 1 | The chart | Done — [#457](http://github.com/sujanto-gaws/kelir/pull/457) |",
+        "| 1 | The chart | Done — [#457](https://www.github.com/sujanto-gaws/kelir/pull/457) |",
+        "| 1 | The chart | Done — [#457](https://github.com/Sujanto-Gaws/Kelir/pull/457) |",
+        "| 1 | The chart | Done — [#457](<https://github.com/sujanto-gaws/kelir/pull/457> \"the pull\") |",
+        "| 1 | The chart | Done — <https://github.com/sujanto-gaws/kelir/pull/457> |",
+        "| 1 | The chart | Done — [#457][k] |\n\n[k]: https://github.com/sujanto-gaws/kelir/pull/457",
     ] {
         assert!(
             drives_a_screen_or_says_it_did_not(&report_whose_scope_status_says(kelir), &driven),
@@ -847,9 +1116,11 @@ fn a_pull_request_in_another_repository_is_not_cited() {
 /// request that added it is not credited with a flow that no longer exists.
 #[test]
 fn a_spec_no_longer_in_the_tree_is_not_counted() {
-    let log = "\0test: probe the rule (#9999)\n\ne2e/tests/zz-gone.spec.ts\n\
-               \0feat: a screen (#457)\n\ne2e/tests/a-screen.spec.ts\ne2e/tests/fixtures.ts\n\
-               \0wip: unsquashed\n\ne2e/tests/a-draft.spec.ts\n";
+    let log =
+        "\0feat: a screen (#457)\n\nA\te2e/tests/a-screen.spec.ts\nA\te2e/tests/fixtures.ts\n\
+               \0test: probe the rule (#9999)\n\nA\te2e/tests/zz-gone.spec.ts\n\
+               \0wip: unsquashed\n\nA\te2e/tests/a-draft.spec.ts\n\
+               \0test: the probe goes\n\nD\te2e/tests/zz-gone.spec.ts\n";
     let tree = ["e2e/tests/a-screen.spec.ts", "e2e/tests/a-draft.spec.ts"];
 
     let attributed = attributed_specs(log, |path| tree.contains(&path));
@@ -857,10 +1128,18 @@ fn a_spec_no_longer_in_the_tree_is_not_counted() {
     assert_eq!(
         attributed,
         vec![
-            (Some(457), "e2e/tests/a-screen.spec.ts".to_owned()),
             (None, "e2e/tests/a-draft.spec.ts".to_owned()),
+            (Some(457), "e2e/tests/a-screen.spec.ts".to_owned()),
         ],
         "only a spec still in the tree is attributed, and a non-spec file never is"
+    );
+
+    // Presence is also asked of the tree, so a deletion the log does not show,
+    // such as one made while resolving a merge, cannot keep a spec alive.
+    assert!(
+        attributed_specs(log, |path| path == "e2e/tests/a-draft.spec.ts")
+            .iter()
+            .all(|(pull_request, _)| pull_request.is_none())
     );
 
     let driven: BTreeSet<u32> = attributed
@@ -876,6 +1155,52 @@ fn a_spec_no_longer_in_the_tree_is_not_counted() {
         &report_whose_scope_status_says("| 1 | The screen | Done — PR #457 |"),
         &driven
     ));
+}
+
+/// #468 C, the gate's second round. **A moved spec is the same flow**, so the
+/// pull request that added it keeps its credit and a settled report that cites
+/// it stays green (D-71). Moved and then deleted, it is gone; added again
+/// after a deletion, it belongs to whoever added it again.
+#[test]
+fn a_moved_spec_is_still_counted() {
+    let added = "\0feat: sign out (#481)\n\nA\te2e/tests/sign-out.spec.ts\n";
+    let moved = "\0refactor: group the specs (#600)\n\n\
+                 R100\te2e/tests/sign-out.spec.ts\te2e/tests/roles/sign-out.spec.ts\n";
+    let deleted = "\0test: drop the roles flow (#601)\n\nD\te2e/tests/roles/sign-out.spec.ts\n";
+    let added_again = "\0test: a new roles flow (#700)\n\nA\te2e/tests/roles/sign-out.spec.ts\n";
+    let moved_tree = |path: &str| path == "e2e/tests/roles/sign-out.spec.ts";
+
+    assert_eq!(
+        attributed_specs(&format!("{added}{moved}"), moved_tree),
+        vec![
+            (Some(481), "e2e/tests/sign-out.spec.ts".to_owned()),
+            (Some(600), "e2e/tests/roles/sign-out.spec.ts".to_owned()),
+        ],
+        "a moved spec keeps the pull request that added it"
+    );
+
+    assert!(
+        attributed_specs(&format!("{added}{moved}{deleted}"), moved_tree).is_empty(),
+        "a spec moved and then deleted drives nothing"
+    );
+
+    assert_eq!(
+        attributed_specs(&format!("{added}{moved}{deleted}{added_again}"), moved_tree),
+        vec![(Some(700), "e2e/tests/roles/sign-out.spec.ts".to_owned())],
+        "a path added again after a deletion does not revive the first pull request"
+    );
+
+    assert!(
+        attributed_specs(
+            &format!(
+                "{added}\0refactor: not a spec any more (#602)\n\n\
+                 R090\te2e/tests/sign-out.spec.ts\te2e/tests/sign-out.ts\n"
+            ),
+            |_| true
+        )
+        .is_empty(),
+        "a spec renamed to something that is not a spec drives nothing"
+    );
 }
 
 #[test]

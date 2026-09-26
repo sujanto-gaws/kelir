@@ -147,13 +147,19 @@ While the major version is `0`, the public API may change in any release.
 
 - **A status report's browser-flow check no longer accepts three things it
   used to** ([#468](https://github.com/sujanto-gaws/kelir/issues/468),
+
+- **A status report's browser-flow check reads the report as it renders**
+  ([#468](https://github.com/sujanto-gaws/kelir/issues/468),
   [status report template](projects/status/00.%20Status%20Report%20Template.md)).
   From Sprint 17 on, `sprint_reports_are_verified.rs` rule 4 asks a report's
   Scope Status to cite a pull request that added a browser spec, or to say
-  `verified by inspection only`. It now refuses the phrase or a citation
-  inside an HTML comment, which renders as nothing; a link to a pull request
-  in another repository whose number matches a Kelir one; and a pull request
-  whose spec a later commit deleted. No status report `main` has held is
+  `verified by inspection only`. It now refuses the phrase or a citation that
+  a reader cannot see: in an HTML comment, a link reference definition, a
+  link's title or destination, an image, or a tag's attributes. A link counts
+  by where it points, not by its label, so a link to another repository's
+  pull request cites nothing, even when its number or label matches a Kelir
+  one. A pull request whose spec a later commit deleted no longer counts, and
+  one whose spec was moved still does. No status report `main` has held is
   affected.
 
 - **MinIO and `mc` are fetched from `ghcr.io/sujanto-gaws`** (decision **D-92**).
