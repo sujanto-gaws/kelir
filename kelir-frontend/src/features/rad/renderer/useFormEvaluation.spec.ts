@@ -1,5 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import purchaseRequisition from '../__fixtures__/purchase-requisition.json'
 import JfssForm from '../JfssForm.vue'
@@ -642,6 +642,61 @@ describe('a rule the registry defines and this side does not decide', () => {
     const wrapper = await render(definition)
 
     expect(wrapper.find('[data-testid="form-undecided"]').exists()).toBe(false)
+  })
+})
+
+describe('a pattern the browser gives up on (#496)', () => {
+  // Firefox throws *too much recursion* here and V8 does not, so the throw is
+  // simulated for this one pattern. The e2e spec
+  // `a-pattern-the-browser-gives-up-on.spec.ts` is the real Firefox.
+  const slow = '(?:[a-z]|[a-z0-9])*$'
+
+  const definition: JfssDefinition = {
+    formId: 'give-up',
+    version: '2.0.1',
+    components: [
+      {
+        id: 'handle',
+        role: 'data',
+        type: 'textfield',
+        key: 'handle',
+        label: 'Handle',
+        validation: { type: 'string', required: true },
+        rules: [{ rule: 'regex', scope: 'both', params: { pattern: slow }, message: 'No.' }],
+      },
+      { id: 's', role: 'action', type: 'button', label: 'Submit', action: 'submit' },
+    ],
+  }
+
+  beforeEach(() => {
+    const original = RegExp.prototype.test
+
+    vi.spyOn(RegExp.prototype, 'test').mockImplementation(function (this: RegExp, input) {
+      if (this.source === slow) {
+        throw new Error('too much recursion')
+      }
+
+      return original.call(this, input)
+    })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('submits, and says the server decides the rule', async () => {
+    const wrapper = await render(definition)
+
+    await type(wrapper, '#jfss-handle', `${'a'.repeat(28)}!`)
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === 'Submit')!
+      .trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="field-error"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="form-undecided"]').text()).toContain('regex')
+    expect(wrapper.emitted('action')![0][0]).toBe('submit')
   })
 })
 
