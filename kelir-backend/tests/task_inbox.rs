@@ -19,6 +19,7 @@ mod common;
 use axum::http::{Method, StatusCode};
 use common::{fixtures, TestApp};
 use serde_json::{json, Value};
+use std::sync::Arc;
 use uuid::Uuid;
 
 const TASKS: &str = "/api/v1/tasks";
@@ -1420,4 +1421,293 @@ async fn a_submission_racing_a_role_delete_waits_and_then_finds_the_role_gone() 
             .await
             .expect("count the tasks");
     assert_eq!(tasks, 0, "no task was written");
+}
+
+/// **A real role delete waits on a transition holding the role, then refuses**
+/// (**D-89**, [#528]).
+///
+/// The race test above holds the delete's half itself, so it proves that the
+/// transition waits on a `FOR UPDATE`. It does not prove that
+/// `identity::service::delete_role` takes one. This test takes the other order
+/// and drives the real route for the delete: a submission holds the role
+/// `FOR KEY SHARE` and has not committed its task, and
+/// `DELETE /api/v1/identity/roles/{id}` arrives. The delete must wait for the
+/// submission, then count its task and answer 409 with nothing deleted. How
+/// the order is forced is [`delete_during_a_held_submission`]'s.
+///
+/// **Seen red** twice: with `repository::lock_role_for_delete` at
+/// `FOR NO KEY UPDATE`, which does not conflict with `FOR KEY SHARE`, the
+/// delete never waits and answers 204 beside the task; and with the open-task
+/// count moved above the lock in `delete_role`, the delete waits, but counts
+/// before the task commits and answers 204.
+///
+/// [#528]: https://github.com/sujanto-gaws/kelir/issues/528
+#[tokio::test]
+async fn a_role_delete_arriving_during_a_transition_waits_for_it_and_refuses() {
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+
+    let (role, _) = holder(&app, "TI-D89-HELD", "ti.d89.held").await;
+
+    let workflow = publish_workflow(&app, &token, "ti_d89_held", "TI-D89-HELD").await;
+    let type_id = document_type(&app, &token, "TI_D89_HELD", workflow).await;
+    let document = draft_document(&app, &token, type_id, "Submitted before a delete").await;
+
+    let refused = delete_during_a_held_submission(&app, &token, document, role).await;
+
+    assert_refused_for_one_open_task(&app, &refused, role, document).await;
+}
+
+/// **The same, for a role the task is not offered to but its edges name**
+/// (**D-89**, [#509], [#528]).
+///
+/// The task is offered to a live role, and its `APPROVE` and `REJECT` are
+/// `allowedBy` another. Deleting that other role would leave a task nobody can
+/// decide, so the delete must wait for the submission as it does for the
+/// task's own role. Here the transition's lock is
+/// `assignment::hold_deciding_roles`'s `FOR KEY SHARE` ([#514]), not
+/// `direct`'s, and the delete's count finds the task by its edge.
+///
+/// **Seen red** under the same two mutations as the test above, at the same
+/// assertions.
+///
+/// [#509]: https://github.com/sujanto-gaws/kelir/issues/509
+/// [#514]: https://github.com/sujanto-gaws/kelir/pull/514
+/// [#528]: https://github.com/sujanto-gaws/kelir/issues/528
+#[tokio::test]
+async fn a_delete_of_an_edges_role_arriving_during_a_transition_waits_and_refuses() {
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+
+    holder(&app, "TI-D89-OFFERED", "ti.d89.offered").await;
+    let edge = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "TI-D89-DECIDES",
+        &[],
+    )
+    .await;
+
+    let mut definition = workflow_for("ti_d89_decides", "TI-D89-OFFERED");
+    for transition in definition["transitions"]
+        .as_array_mut()
+        .expect("transitions")
+    {
+        transition["allowedBy"] = json!("ROLE:TI-D89-DECIDES");
+    }
+    let workflow = publish_workflow_definition(&app, &token, "ti_d89_decides", definition).await;
+    let type_id = document_type(&app, &token, "TI_D89_DECIDES", workflow).await;
+    let document = draft_document(&app, &token, type_id, "Decided by a role being deleted").await;
+
+    let refused = delete_during_a_held_submission(&app, &token, document, edge).await;
+
+    assert_refused_for_one_open_task(&app, &refused, edge, document).await;
+}
+
+async fn draft_document(app: &TestApp, token: &str, type_id: Uuid, title: &str) -> Uuid {
+    let created = app
+        .post(
+            "/api/v1/documents",
+            Some(token),
+            json!({
+                "documentTypeId": type_id,
+                "title": title,
+                "formData": { "amount": 1_000 },
+            }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+    id_of(&created.body["data"])
+}
+
+/// Submits `document` and deletes `role` through the real routes, in that
+/// order, with the delete arriving while the submission holds its locks.
+/// Asserts the delete waited on the submission, and that the submission went
+/// through. Answers the delete's response.
+///
+/// **The interleave is forced, not timed.** A trigger on `workflow_tasks`, in
+/// this test's own database, makes the task `INSERT` take a shared advisory
+/// lock this helper holds exclusively on a connection of its own. So the
+/// submission stops inside its transaction, after `assignment` has locked the
+/// roles it resolves and before its task commits, for as long as the helper
+/// says. The helper sees it stopped in `pg_locks`, sends the delete, and sees
+/// the delete's `FOR UPDATE` on `roles` blocked by the submission's backend in
+/// `pg_blocking_pids` before it lets the submission go.
+async fn delete_during_a_held_submission(
+    app: &Arc<TestApp>,
+    token: &str,
+    document: Uuid,
+    role: Uuid,
+) -> common::TestResponse {
+    use sqlx::{Connection, PgConnection};
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    /// The advisory key the trigger waits on; the issue's number.
+    const GATE: i64 = 528;
+    const PATIENCE: Duration = Duration::from_secs(30);
+
+    sqlx::query(&format!(
+        "CREATE FUNCTION test_hold_task_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             PERFORM pg_advisory_xact_lock_shared({GATE});
+             RETURN NEW;
+         END
+         $$"
+    ))
+    .execute(&app.pool)
+    .await
+    .expect("the gate's function");
+    sqlx::query(
+        "CREATE TRIGGER test_hold_task_insert BEFORE INSERT ON workflow_tasks
+         FOR EACH ROW EXECUTE FUNCTION test_hold_task_insert()",
+    )
+    .execute(&app.pool)
+    .await
+    .expect("the gate's trigger");
+
+    // Off the pool, so the gate never competes with the requests for a
+    // connection.
+    let mut gate = PgConnection::connect_with(&app.pool.connect_options())
+        .await
+        .expect("the gate's connection");
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(GATE)
+        .execute(&mut gate)
+        .await
+        .expect("close the gate");
+
+    let submission = {
+        let app = Arc::clone(app);
+        let token = token.to_owned();
+        tokio::spawn(async move {
+            app.send(
+                Method::POST,
+                &format!("/api/v1/documents/{document}/submission"),
+                Some(&token),
+                None,
+            )
+            .await
+        })
+    };
+
+    // The submission's backend, stopped at the gate inside its task INSERT.
+    let deadline = Instant::now() + PATIENCE;
+    let transition: i32 = loop {
+        let waiting: Option<i32> = sqlx::query_scalar(
+            "SELECT pid FROM pg_locks
+             WHERE locktype = 'advisory' AND objid::text::bigint = $1 AND objsubid = 1
+               AND NOT granted
+               AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
+        )
+        .bind(GATE)
+        .fetch_optional(&app.pool)
+        .await
+        .expect("read pg_locks");
+        if let Some(pid) = waiting {
+            break pid;
+        }
+        assert!(
+            !submission.is_finished(),
+            "the submission finished without reaching its task INSERT"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "the submission never reached its task INSERT"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let delete = {
+        let app = Arc::clone(app);
+        let token = token.to_owned();
+        tokio::spawn(async move { delete_role(&app, &token, role).await })
+    };
+
+    // The delete's backend, in its lock on the role, blocked by the
+    // submission's.
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let waiting: Option<i32> = sqlx::query_scalar(
+            "SELECT pid FROM pg_stat_activity
+             WHERE datname = current_database() AND $1 = ANY(pg_blocking_pids(pid))
+               AND query LIKE '%FROM roles%' AND query LIKE '%FOR UPDATE%'",
+        )
+        .bind(transition)
+        .fetch_optional(&app.pool)
+        .await
+        .expect("read pg_stat_activity");
+        if waiting.is_some() {
+            break;
+        }
+        if delete.is_finished() {
+            let answered = delete.await.expect("the delete did not panic");
+            panic!(
+                "the delete did not wait for the transition holding the role: {} {}",
+                answered.status, answered.body
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the delete was never seen waiting on the transition in its lock on the role"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(GATE)
+        .execute(&mut gate)
+        .await
+        .expect("open the gate");
+
+    let submitted = tokio::time::timeout(PATIENCE, submission)
+        .await
+        .expect("the submission did not finish once the gate opened")
+        .expect("the submission did not panic");
+    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+
+    tokio::time::timeout(PATIENCE, delete)
+        .await
+        .expect("the delete did not finish once the submission committed")
+        .expect("the delete did not panic")
+}
+
+/// The delete was refused for the one task the submission raised, the role is
+/// live, and that task is open. Only the count and *open task* are asserted
+/// of the message, which #529 rewords.
+async fn assert_refused_for_one_open_task(
+    app: &TestApp,
+    refused: &common::TestResponse,
+    role: Uuid,
+    document: Uuid,
+) {
+    assert_eq!(
+        refused.status,
+        StatusCode::CONFLICT,
+        "the delete went through beside a task it did not count: {}",
+        refused.body
+    );
+    assert!(
+        refused.body.to_string().contains("1 open task"),
+        "{}",
+        refused.body
+    );
+
+    let live: bool = sqlx::query_scalar("SELECT deleted_at IS NULL FROM roles WHERE id = $1")
+        .bind(role)
+        .fetch_one(&app.pool)
+        .await
+        .expect("read the role");
+    assert!(live, "the refused delete deleted the role");
+
+    let open: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM workflow_tasks
+         WHERE document_id = $1 AND status IN ('CREATED','ASSIGNED','IN_PROGRESS')",
+    )
+    .bind(document)
+    .fetch_one(&app.pool)
+    .await
+    .expect("count the open tasks");
+    assert_eq!(open, 1, "the submission's task is open");
 }
