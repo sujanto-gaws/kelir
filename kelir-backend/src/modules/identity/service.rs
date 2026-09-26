@@ -6,7 +6,7 @@ use uuid::Uuid;
 use super::domain::{
     open_tasks_refusal, published_definitions_refusal, validate_create_user, validate_distinct_ids,
     validate_password_value, CreateRoleRequest, CreateUserRequest, Permission, Role,
-    UpdateRoleRequest, UpdateUserRequest, User, UserStatus, ROLE_NAMED_BY_PUBLISHED_DEFINITION,
+    UpdateRoleRequest, UpdateUserRequest, User, UserStatus, ROLE_HAS_OPEN_TASKS, ROLE_NAMED_BY_PUBLISHED_DEFINITION,
 };
 use super::repository as repo;
 use crate::error::{AppError, ValidationDetail};
@@ -15,6 +15,7 @@ use crate::modules::audit::{self, domain::ObjectType, AuditEntry};
 use crate::modules::auth::password::hash_password;
 use crate::modules::organization::department_repository as department_repo;
 use crate::modules::workflow::service::definition as workflow_definition;
+use crate::modules::workflow::domain::OpenTaskNeedingRole;
 use crate::modules::workflow::service::task as workflow_task;
 use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
@@ -330,6 +331,49 @@ pub async fn get_role(
         .ok_or_else(|| AppError::not_found("Role"))
 }
 
+/// The open tasks that keep `id` from being deleted (**D-89**, [#532]): the
+/// list behind `delete_role`'s `ROLE_HAS_OPEN_TASKS`.
+///
+/// **`identity:role:delete` alone**, not `workflow:task:read` and not
+/// `document:read`, although each row names a document by number and title.
+/// That is the product owner's decision of 2026-09-26: this is the least that
+/// explains one refused delete, and it is for whoever may make the delete.
+///
+/// **A soft-deleted role answers 404**, as `get_role` and `delete_role` do.
+/// Tasks stranded on a role deleted before D-89 are Installation and Deployment
+/// §9's query to find, and that query applies the live-namesake anti-join
+/// (#533) this route has no need of: the role here is live, so no other live
+/// role holds its code.
+///
+/// Read outside the delete's transaction and lock, so the list can differ from
+/// the count a delete takes a moment later. It is a diagnostic.
+///
+/// [#532]: https://github.com/sujanto-gaws/kelir/issues/532
+pub async fn list_open_tasks_of_role(
+    state: &AppState,
+    caller: &Authenticated,
+    id: Uuid,
+    pagination: &Pagination,
+) -> Result<(Vec<OpenTaskNeedingRole>, PageMeta), AppError> {
+    caller.require("identity:role:delete")?;
+
+    let tenant_id = caller.tenant_id();
+    repo::find_role(&state.pool, tenant_id, id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Role"))?;
+
+    let (tasks, total) = workflow_task::list_open_tasks_needing_role(
+        state,
+        tenant_id,
+        id,
+        pagination.limit(),
+        pagination.offset(),
+    )
+    .await?;
+
+    Ok((tasks, pagination.meta(total.max(0) as u64)))
+}
+
 pub async fn list_permissions(
     state: &AppState,
     caller: &Authenticated,
@@ -475,8 +519,10 @@ pub async fn delete_role(
     // role gone and is refused as `ASSIGNMENT_UNRESOLVED`.
     let open = workflow_task::open_tasks_needing_role(&mut transaction, tenant_id, id).await?;
 
+    // Its own code (#532): a client offers the list of those tasks,
+    // `GET /identity/roles/{id}/open-tasks`, on this refusal and no other.
     if let Some(refusal) = open_tasks_refusal(open) {
-        return Err(AppError::conflict(refusal));
+        return Err(AppError::conflict_with_code(ROLE_HAS_OPEN_TASKS, refusal));
     }
 
     // **D-91** (3) (#510): nor is a role a published workflow revision names,

@@ -237,6 +237,14 @@ async fn every_identity_route_refuses_a_caller_holding_no_permission() {
                 .await,
         ),
         (
+            "GET /identity/roles/{id}/open-tasks",
+            app.get(
+                &format!("/api/v1/identity/roles/{some_id}/open-tasks"),
+                Some(&token),
+            )
+            .await,
+        ),
+        (
             "GET /identity/permissions",
             app.get("/api/v1/identity/permissions", Some(&token)).await,
         ),

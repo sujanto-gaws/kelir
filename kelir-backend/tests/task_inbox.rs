@@ -1150,7 +1150,7 @@ async fn a_role_with_an_open_task_is_not_deleted_until_the_task_is_decided() {
         refused.body
     );
     assert_eq!(
-        refused.body["error"]["code"], "CONFLICT",
+        refused.body["error"]["code"], "ROLE_HAS_OPEN_TASKS",
         "{}",
         refused.body
     );
@@ -1630,6 +1630,424 @@ async fn a_department_role_edge_holds_its_role() {
         "the open task did not hold the role its DEPARTMENT_ROLE edge names: {}",
         refused.body
     );
+}
+
+// ---------------------------------------------------------------------------
+// #532 — the refusal names its tasks: GET /identity/roles/{id}/open-tasks
+// ---------------------------------------------------------------------------
+
+// # Seen to fail (coding standard §2.9)
+//
+// Mutations run 2026-09-26, each against the shared statement
+// `repository::task::open_tasks_needing_role` or its service, reverted after:
+//
+// | Mutation | Reddened |
+// |---|---|
+// | Both tenant predicates dropped (`t.tenant_id = $1` and `r.tenant_id = t.tenant_id`) | *another tenant's task is not listed*: the other tenant's task is listed, and counted |
+// | The clauses' `OR` turned into `AND` | *the list is exactly what the delete counts…*: `queue` lists nothing and its delete answers 204 |
+// | `t.assignee_user_id IS NULL` dropped from clause (a) | *the list is exactly what the delete counts…*: `queue` lists the claimed task too |
+// | `identity:role:delete` widened to `identity:role:read` | *only identity:role:delete reads the list*: 200 to a caller without it |
+// | `ROLE_HAS_OPEN_TASKS` put back to `CONFLICT` | *the list is exactly…* and *a role with an open task is not deleted…* |
+// | `meta.total` taken from the page's length | *the list pages and its total is every task*: page 1 says 2 |
+//
+// **Both predicates are dropped because either one alone holds the line**:
+// `r.tenant_id = t.tenant_id` with `r.id = $2` keeps the task in the role's
+// tenant, which the service has already checked is the caller's. So a
+// mutation of one would stay green by design, not by a gap. D-89's
+// *a role is not held by another tenant's task* was seen red the same way.
+//
+// **`meta.total` and the rows come from one `fetch_all`** of one statement,
+// `open_tasks_needing_role`; a total from a second query in the same snapshot
+// cannot be told apart by a test, so the page-length mutation stands in for it.
+
+/// The open tasks a delete of `role` waits on, one page of them.
+async fn open_tasks(app: &TestApp, token: &str, role: Uuid, query: &str) -> common::TestResponse {
+    app.get(
+        &format!("/api/v1/identity/roles/{role}/open-tasks?{query}"),
+        Some(token),
+    )
+    .await
+}
+
+/// The number a `ROLE_HAS_OPEN_TASKS` refusal leads its message with.
+fn refused_count(refused: &common::TestResponse) -> u64 {
+    assert_eq!(
+        refused.body["error"]["code"], "ROLE_HAS_OPEN_TASKS",
+        "{}",
+        refused.body
+    );
+    refused.body["error"]["message"]
+        .as_str()
+        .and_then(|message| message.split(' ').next())
+        .and_then(|count| count.parse().ok())
+        .unwrap_or_else(|| panic!("the refusal leads with its count: {}", refused.body))
+}
+
+async fn task_ref_of(app: &TestApp, task: Uuid) -> String {
+    sqlx::query_scalar("SELECT task_ref FROM workflow_tasks WHERE id = $1")
+        .bind(task)
+        .fetch_one(&app.pool)
+        .await
+        .expect("read the task_ref")
+}
+
+/// **The list is exactly what the delete counts**, row for row, through both
+/// clauses ([#532] AC3, AC4, AC7).
+///
+/// Record 18's P2 shape: tasks offered to `queue` with edges `allowedBy`
+/// `edge`. One is claimed, one is not.
+///
+/// * `queue` lists only the **unclaimed** task, through clause (a). The claimed
+///   one was offered to `queue` too and is absent (AC4).
+/// * `edge` lists **both**, through clause (b), the claimed one with its
+///   holder's id and name.
+///
+/// Each list's length and `meta.total` equal the count the delete's
+/// `ROLE_HAS_OPEN_TASKS` refusal reports, and each row's `why` is the §9
+/// query's wording.
+///
+/// [#532]: https://github.com/sujanto-gaws/kelir/issues/532
+#[tokio::test]
+async fn the_list_is_exactly_what_the_delete_counts_through_both_clauses() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let permissions = &[
+        "workflow:task:read",
+        "workflow:task:execute",
+        "workflow:instance:read",
+        "document:read",
+    ];
+    let queue = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "TI-532-QUEUE",
+        permissions,
+    )
+    .await;
+    let edge = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "TI-532-EDGE",
+        permissions,
+    )
+    .await;
+    let holder_id = fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "ti.532.both",
+        "ti.532.both@example.test",
+        common::ADMIN_PASSWORD,
+        &[queue, edge],
+    )
+    .await;
+    let approver = app.sign_in("ti.532.both", common::ADMIN_PASSWORD).await;
+
+    let mut definition = workflow_for("ti_532_edge", "TI-532-QUEUE");
+    for transition in definition["transitions"]
+        .as_array_mut()
+        .expect("transitions")
+    {
+        transition["allowedBy"] = json!("ROLE:TI-532-EDGE");
+    }
+    let workflow = publish_workflow_definition(&app, &token, "ti_532_edge", definition).await;
+    let type_id = document_type(&app, &token, "TI_532_EDGE", workflow).await;
+
+    let claimed_document = submitted_document(&app, &token, type_id, "Claimed").await;
+    let claimed = open_task_of(&app, claimed_document).await;
+    let unclaimed_document = submitted_document(&app, &token, type_id, "Unclaimed").await;
+    let unclaimed = open_task_of(&app, unclaimed_document).await;
+    claim(&app, &approver, claimed).await;
+
+    let claimed_ref = task_ref_of(&app, claimed).await;
+    let unclaimed_ref = task_ref_of(&app, unclaimed).await;
+
+    // `queue`: clause (a) only, and not the claimed task.
+    let listed = open_tasks(&app, &token, queue, "").await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    let rows = listed.body["data"].as_array().expect("a page");
+    let count = refused_count(&delete_role(&app, &token, queue).await);
+    assert_eq!(
+        rows.len() as u64,
+        count,
+        "the list and the count differ: {}",
+        listed.body
+    );
+    assert_eq!(listed.body["meta"]["total"], count, "{}", listed.body);
+    assert_eq!(count, 1, "{}", listed.body);
+
+    let row = &rows[0];
+    assert_eq!(row["taskRef"], unclaimed_ref.as_str(), "{}", listed.body);
+    assert_eq!(row["documentTitle"], "Unclaimed", "{}", listed.body);
+    assert!(row["documentNumber"].is_string(), "{}", listed.body);
+    assert_eq!(row["currentState"], "MANAGER_APPROVAL", "{}", listed.body);
+    assert_eq!(
+        row["why"], "offered to the role, and unclaimed",
+        "{}",
+        listed.body
+    );
+    assert!(row["assigneeUserId"].is_null(), "{}", listed.body);
+    assert!(row["assigneeDisplayName"].is_null(), "{}", listed.body);
+    // Nothing beyond the fields that explain the refusal.
+    let mut fields: Vec<&str> = row
+        .as_object()
+        .expect("a row")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    fields.sort_unstable();
+    assert_eq!(
+        fields,
+        [
+            "assigneeDisplayName",
+            "assigneeUserId",
+            "currentState",
+            "documentNumber",
+            "documentTitle",
+            "status",
+            "taskRef",
+            "why"
+        ],
+        "{}",
+        listed.body
+    );
+
+    // `edge`: clause (b), claimed or not.
+    let listed = open_tasks(&app, &token, edge, "").await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    let rows = listed.body["data"].as_array().expect("a page");
+    let count = refused_count(&delete_role(&app, &token, edge).await);
+    assert_eq!(
+        rows.len() as u64,
+        count,
+        "the list and the count differ: {}",
+        listed.body
+    );
+    assert_eq!(listed.body["meta"]["total"], count, "{}", listed.body);
+    assert_eq!(count, 2, "{}", listed.body);
+
+    let held = rows
+        .iter()
+        .find(|row| row["taskRef"] == claimed_ref.as_str())
+        .unwrap_or_else(|| {
+            panic!(
+                "the claimed task is not listed for its edge's role: {}",
+                listed.body
+            )
+        });
+    assert_eq!(
+        held["assigneeUserId"],
+        holder_id.to_string(),
+        "{}",
+        listed.body
+    );
+    assert_eq!(
+        held["assigneeDisplayName"], "ti.532.both",
+        "{}",
+        listed.body
+    );
+    assert_eq!(held["documentTitle"], "Claimed", "{}", listed.body);
+    assert_eq!(held["status"], "ASSIGNED", "{}", listed.body);
+    for row in rows {
+        assert_eq!(
+            row["why"], "a decision out of MANAGER_APPROVAL is allowedBy the role",
+            "{}",
+            listed.body
+        );
+    }
+}
+
+/// **Only `identity:role:delete` reads the list** ([#532] AC1, AC9).
+///
+/// A caller holding every other permission in the catalogue, including
+/// `workflow:task:read` and `identity:role:read`, is refused with 403. A caller
+/// holding `identity:role:delete` alone reads it.
+///
+/// [#532]: https://github.com/sujanto-gaws/kelir/issues/532
+#[tokio::test]
+async fn only_identity_role_delete_reads_the_list() {
+    let app = TestApp::spawn().await;
+
+    let target = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "TI-532-T",
+        &[],
+    )
+    .await;
+
+    let codes: Vec<String> = sqlx::query_scalar(
+        "SELECT permission_code FROM permissions
+         WHERE deleted_at IS NULL AND permission_code <> 'identity:role:delete'",
+    )
+    .fetch_all(&app.pool)
+    .await
+    .expect("read the permission catalogue");
+    assert!(codes.iter().any(|code| code == "workflow:task:read"));
+    assert!(codes.iter().any(|code| code == "identity:role:read"));
+    let codes: Vec<&str> = codes.iter().map(String::as_str).collect();
+
+    let everything_else = holder_of(&app, "TI-532-ELSE", "ti.532.else", &codes).await;
+    let refused = open_tasks(&app, &everything_else, target, "").await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+
+    let deleter = holder_of(&app, "TI-532-DEL", "ti.532.del", &["identity:role:delete"]).await;
+    let read = open_tasks(&app, &deleter, target, "").await;
+    assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+    assert_eq!(read.body["meta"]["total"], 0, "{}", read.body);
+}
+
+/// **An unknown role, another tenant's, or a deleted one answers 404** ([#532]
+/// AC2), in the shape `get_role` answers it.
+///
+/// A deleted role is 404 by decision: tasks stranded on a role deleted before
+/// D-89 are Installation and Deployment §9's query to find.
+///
+/// [#532]: https://github.com/sujanto-gaws/kelir/issues/532
+#[tokio::test]
+async fn an_unknown_a_foreign_or_a_deleted_role_is_not_found() {
+    let app = TestApp::spawn_with(|config| config.multi_tenant = true).await;
+    let token = app
+        .sign_in_to("SYSTEM", common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await;
+
+    let (other, _) = tenant_administrator(&app, "TNT-532", "ti.532.other").await;
+    let foreign = fixtures::create_role_with_permissions(&app.pool, other, "TI-532-F", &[]).await;
+
+    let deleted = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "TI-532-D",
+        &[],
+    )
+    .await;
+    let gone = delete_role(&app, &token, deleted).await;
+    assert_eq!(gone.status, StatusCode::NO_CONTENT, "{}", gone.body);
+
+    for (what, role) in [
+        ("an unknown role", Uuid::now_v7()),
+        ("another tenant's role", foreign),
+        ("a deleted role", deleted),
+    ] {
+        let listed = open_tasks(&app, &token, role, "").await;
+        let read = app
+            .get(&format!("/api/v1/identity/roles/{role}"), Some(&token))
+            .await;
+        assert_eq!(
+            listed.status,
+            StatusCode::NOT_FOUND,
+            "{what}: {}",
+            listed.body
+        );
+        assert_eq!(read.status, StatusCode::NOT_FOUND, "{what}: {}", read.body);
+        assert_eq!(
+            listed.body["error"], read.body["error"],
+            "{what}: the 404s differ"
+        );
+    }
+}
+
+/// **Another tenant's task is not listed**, though it names a role of the
+/// same code in its offer and its edges ([#532] AC6).
+///
+/// The system tenant's `TI-532-XT` is live, so the #533 anti-join has nothing
+/// to do here: a live role is its own live namesake.
+///
+/// [#532]: https://github.com/sujanto-gaws/kelir/issues/532
+#[tokio::test]
+async fn another_tenants_task_is_not_listed() {
+    let app = TestApp::spawn_with(|config| config.multi_tenant = true).await;
+    let token = app
+        .sign_in_to("SYSTEM", common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await;
+
+    let (other, other_token) = tenant_administrator(&app, "TNT-532X", "ti.532.xt").await;
+    fixtures::create_role_with_permissions(&app.pool, other, "TI-532-XT", &[]).await;
+    let workflow = publish_workflow(&app, &other_token, "ti_532_xt", "TI-532-XT").await;
+    let type_id = document_type(&app, &other_token, "TI_532_XT", workflow).await;
+    submitted_document(&app, &other_token, type_id, "Open in another tenant").await;
+
+    let ours = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "TI-532-XT",
+        &[],
+    )
+    .await;
+
+    let listed = open_tasks(&app, &token, ours, "").await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    assert_eq!(
+        listed.body["data"].as_array().expect("a page").len(),
+        0,
+        "another tenant's task was listed: {}",
+        listed.body
+    );
+    assert_eq!(listed.body["meta"]["total"], 0, "{}", listed.body);
+}
+
+/// **The list pages, and its total is every task** ([#532] AC5): three tasks,
+/// pages of two, `meta.total` 3 on each page, past the end included, and a
+/// page size over the limit clamped to 100.
+///
+/// [#532]: https://github.com/sujanto-gaws/kelir/issues/532
+#[tokio::test]
+async fn the_list_pages_and_its_total_is_every_task() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let (role, _) = holder(&app, "TI-532-PAGE", "ti.532.page").await;
+    let workflow = publish_workflow(&app, &token, "ti_532_page", "TI-532-PAGE").await;
+    let type_id = document_type(&app, &token, "TI_532_PAGE", workflow).await;
+    for title in ["First", "Second", "Third"] {
+        submitted_document(&app, &token, type_id, title).await;
+    }
+
+    let mut seen = Vec::new();
+    for (page, expected) in [(1, 2), (2, 1), (3, 0)] {
+        let listed = open_tasks(&app, &token, role, &format!("page={page}&pageSize=2")).await;
+        assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+        let rows = listed.body["data"].as_array().expect("a page");
+        assert_eq!(rows.len(), expected, "page {page}: {}", listed.body);
+        assert_eq!(
+            listed.body["meta"]["total"], 3,
+            "page {page}: {}",
+            listed.body
+        );
+        assert_eq!(listed.body["meta"]["pageSize"], 2, "{}", listed.body);
+        seen.extend(rows.iter().map(|row| row["documentTitle"].clone()));
+    }
+    assert_eq!(
+        seen,
+        [json!("First"), json!("Second"), json!("Third")],
+        "oldest first, each once"
+    );
+
+    let clamped = open_tasks(&app, &token, role, "pageSize=500").await;
+    assert_eq!(clamped.body["meta"]["pageSize"], 100, "{}", clamped.body);
+    assert_eq!(clamped.body["meta"]["total"], 3, "{}", clamped.body);
+}
+
+/// A user holding a role of `permissions`, signed in.
+async fn holder_of(app: &TestApp, role_code: &str, username: &str, permissions: &[&str]) -> String {
+    let role = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        role_code,
+        permissions,
+    )
+    .await;
+    fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        username,
+        &format!("{username}@example.test"),
+        common::ADMIN_PASSWORD,
+        &[role],
+    )
+    .await;
+
+    app.sign_in(username, common::ADMIN_PASSWORD).await
 }
 
 async fn delete_role(app: &TestApp, token: &str, role: Uuid) -> common::TestResponse {
@@ -2649,6 +3067,11 @@ async fn assert_refused_for_one_open_task(
     );
     assert!(
         refused.body.to_string().contains("1 open task"),
+        "{}",
+        refused.body
+    );
+    assert_eq!(
+        refused.body["error"]["code"], "ROLE_HAS_OPEN_TASKS",
         "{}",
         refused.body
     );
