@@ -212,8 +212,10 @@ While the major version is `0`, the public API may change in any release.
   could not be submitted. A match that throws is now left undecided: the
   form says the rule, or `validation.pattern`, is checked on submit, and the
   server decides. **A pattern the browser cannot compile still fails**, as
-  before. The renderer also stops running a `regex` rule once a keyword such
-  as `validation.maxLength` has failed on the field, which changes no verdict.
+  before. Once a keyword such as `validation.maxLength` has failed on the
+  field, the renderer also runs none of the rules it decides itself
+  (`matchesField`, `notMatchesField`, `oneOf`, `notOneOf` and `regex`), which
+  changes no verdict.
   This changes nothing for a browser that keeps matching without throwing.
   The browser harness gains its first Firefox flow, and CI installs Firefox
   for it. Validation Rule Registry 1.5.6, and ADR-0016 is amended.
