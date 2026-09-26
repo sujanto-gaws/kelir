@@ -123,6 +123,16 @@ While the major version is `0`, the public API may change in any release.
   used to be skipped. No release record on `main`, now or at any earlier
   commit, changes verdict.
 
+- **A release tag whose commit does not already carry its record is refused**
+  ([#484](https://github.com/sujanto-gaws/kelir/issues/484)).
+  `releases_are_independently_verified.rs` read only `Final` release records,
+  and a record goes `Final` after its tag, so the gate could turn red only
+  once the tag existed. It now reads each tag from `v0.7.0` on with `git`:
+  the tagged commit must hold that release's record, and the record there
+  must already cite a new verification record. `Draft` is expected there. A
+  new workflow runs the test when a `v*` tag is pushed. It detects a wrong
+  tag and cannot stop one being pushed. `v0.7.0` and `v0.8.0` pass.
+
 - **MinIO and `mc` are fetched from `ghcr.io/sujanto-gaws`** (decision **D-92**).
   `quay.io/minio/*`, where D-80 moved them, closed to anonymous pulls on
   2026-09-24. The copies are MinIO's own linux/amd64 filesystems, rebuilt

@@ -1,7 +1,10 @@
-//! A release does not tag without a pass that read the work in it
+//! A release tag whose commit does not already carry its record, citing a new
+//! pass, is red — on the next run, and on the tag push itself
 //! ([#392](https://github.com/sujanto-gaws/kelir/issues/392), Sprint 16 item 1;
 //! hardened by [#412](https://github.com/sujanto-gaws/kelir/issues/412), Sprint
-//! 17 item 2).
+//! 17 item 2; tied to the tag by [#484](https://github.com/sujanto-gaws/kelir/issues/484),
+//! Sprint 21 row 4). **This detects and does not prevent**: no test can stop
+//! `git tag` or `git push --tags`.
 //!
 //! [Sprint plan](../../projects/planning/01.%20Sprint%20Plan.md) §2 has said
 //! since 2026-09-04 that the project manager dispatches an independent pass at
@@ -96,6 +99,19 @@
 //!     row 2): a row starts at any CommonMark list marker, not only `- ` — see
 //!     *Rule 10, every list marker, 2026-09-26* below.
 //!
+//! Rules 11 and 12 are [#484](https://github.com/sujanto-gaws/kelir/issues/484),
+//! Sprint 21 row 4, and they are the first that read `git` rather than the
+//! working tree. **Rules 1–10 close the record, not the tag**: a record goes
+//! `Final` only after its tag is pushed, so they can turn red only once the tag
+//! exists. These two read the tag.
+//!
+//! 11. **Every release tag from [`FIRST_TAG_GOVERNED_RELEASE`] on carries its
+//!     release record in its own tree**, in the house shape.
+//! 12. **That record, as it stood at the tag, already cites its pass**: a
+//!     status the process defines (`Draft` is expected, `Final` is never
+//!     required), and a citation that resolves, is new and is above the
+//!     high-water mark. See *Rules 11 and 12, 2026-09-26* below.
+//!
 //! # The floor, and why it is not the next release
 //!
 //! [`FIRST_GOVERNED_RELEASE`] is `v0.3.0` rather than `v0.7.0`, and the
@@ -129,8 +145,15 @@
 //! - **Cite a verification record that is empty, or is about something else.**
 //!   Rule 6 resolves the path; judging the document is what the document is
 //!   for.
-//! - **Go `Final` without the tag ever being pushed.** The gate reads
-//!   `projects/releases/`, not `git tag`.
+//! - **Push a tag the gate has not seen.** Rules 11 and 12 read the tag after
+//!   it exists, in `release-tag-gate.yml` on the push and in CI on the next
+//!   run. A red there means the tag must be moved; nothing refuses the push.
+//! - **Go `Final` without the tag ever being pushed.** Rules 11 and 12 walk the
+//!   tags that exist, so a record whose tag is missing is read by rules 1–10
+//!   alone.
+//! - **Carry a tag the walk does not read as a release.** `v1.0.0-rc1`, `v1.2`
+//!   and `V1.0.0` are not `vX.Y.Z`, so they are skipped, and need no record.
+//!   See *Rules 11 and 12* below for the other stated limits.
 //! - **Renumber itself.** The walk sorts by the version in the name, not by the
 //!   `NN.` prefix, so `08. Release v0.7.1.md` landing before `07.` changes no
 //!   answer. Rule 5 requires the prefix to be two digits; it does not require
@@ -485,10 +508,67 @@
 //! | `../verifications/../releases/08.%20Release%20v0.8.0.md` | 24 of 24 | red: the same two, and `a_cited_verification_record_exists` |
 //!
 //! Nothing else was red. The file was removed, and the tree was left as it was.
+//!
+//! # Rules 11 and 12, the tag carries its record, 2026-09-26 (#484)
+//!
+//! [Record 17](../../projects/verifications/17.%20Sprint%2019%20and%20Sprint%2017%20Independent%20Pass.md)
+//! finding 3: this file opened *"A release does not tag without a pass that
+//! read the work in it"*, and read only `Final` records, which go `Final` after
+//! the tag. **A record is never `Final` at its own tag**: its Ship rows and
+//! Aftermath are written after it. So rules 11 and 12 read the tag's tree with
+//! `git ls-tree` and `git show`, and pass the record's body to the functions
+//! rules 1, 2, 4, 6, 7, 8 and 9 already use, through [`refused_at_tag`].
+//!
+//! **Everything rule 12 reads comes from the tag's own tree**: the record's
+//! name, its body, the earlier releases and the verification folder. The
+//! earlier releases are every record of a lower version there, **whatever its
+//! status**, because the previous record is often still `Draft` when the next
+//! tag is cut — record 07 went `Final` two days after `v0.7.0` — and counting
+//! only `Final` ones let a tag recycle that record's citations. The folder is
+//! the tag's `git ls-tree`, so a checkout older than the tag does not refuse a
+//! correct one. **Two guards**: a shallow clone is refused, and fewer than two
+//! tags from the floor on is red, since `git tag` answering nothing would
+//! otherwise pass both rules.
+//!
+//! **At the tags**, green: `v0.7.0`'s record 07, `Draft`, cites records 03, 06,
+//! 09, 10, 13, 14 and 15, and 15 is above the high-water mark of 14. `v0.8.0`'s
+//! record 08, `Draft`, cites records 16 and 17, above 15.
+//!
+//! **Seen red.** Baseline before the change: 29 passed. After: 36. Each
+//! mutation applied alone, the suite run, the file restored:
+//!
+//! | # | Mutation | Red |
+//! |---|---|---|
+//! | 1 | [`FIRST_TAG_GOVERNED_RELEASE`] lowered to `v0.6.0` | both rules, naming `v0.6.0`: *the tag's tree has no record* |
+//! | 2 | [`refused_at_tag`] accepts an empty citation set | `rule_12_judges_a_record_at_its_tag` (the body citing nothing) |
+//! | 3 | [`refused_at_tag`] requires `Final` | rule 12, naming `v0.7.0` and `v0.8.0`, both `Draft`; and the three fixtures' controls |
+//! | 4 | [`tags`] finds nothing | both rules, on the count guard |
+//! | 5 | 4, with the count guard removed | **none: 36 passed**, which is the vacuous pass the guard exists for |
+//! | 6 | [`earlier_releases`] counts only `Final` records | `rule_12_counts_an_earlier_release_whatever_its_status` |
+//! | 7 | Rule 12 resolves against HEAD's [`verification_files`], with a local probe tag `v0.9.0` | rule 12, naming `v0.9.0`'s citation of a record only its tree holds |
+//!
+//! **The probe for 7** was a commit never on a branch: HEAD's tree plus
+//! `20. A Probe Pass.md` and a `Draft` `09. Release v0.9.0.md` citing it,
+//! tagged `v0.9.0` locally and deleted after. Unmutated, the suite passed
+//! with it, though HEAD holds neither file. The same tag with the record
+//! citing only record 17 was red on rule 12, as it should be.
+//!
+//! **Stated limits.**
+//!
+//! - **A tag not in `vX.Y.Z` form is skipped** — `V0.9.0`, `v0.9.0-rc1`,
+//!   `v0.9` — and `release-tag-gate.yml`'s `v*` filter is case-sensitive, so
+//!   `V0.9.0` does not run it either.
+//! - **The count guard does not notice a missing newest tag.** It asks for
+//!   two, and a checkout holding `v0.7.0` and `v0.8.0` but not a later one
+//!   passes it.
+//! - **The shallow-clone refusal was not run.** It guards a depth-1 checkout,
+//!   where a tag's name can arrive without the tree it points at, and asks the
+//!   question `sprint_reports_are_verified.rs` already asks there.
 
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 
 /// The first release governed, as `(major, minor, patch)`.
 ///
@@ -536,6 +616,19 @@ const FIRST_GOVERNED_RELEASE: (u32, u32, u32) = (0, 3, 0);
 /// **Raising this is a claim that a settled record should be edited. Lowering
 /// it is the same claim about an older one.**
 const FIRST_AFTERMATH_GOVERNED_RELEASE: (u32, u32, u32) = (0, 7, 0);
+
+/// The first tag rules 11 and 12 read, as `(major, minor, patch)`.
+///
+/// **Higher than [`FIRST_GOVERNED_RELEASE`], because the order it checks was
+/// not kept before it.** `git ls-tree v0.6.0 projects/releases/` lists records
+/// 01–05: record 06 was written after its tag, so `v0.6.0`'s commit carries no
+/// record to read. `v0.7.0`'s carries record 07 as a `Draft` citing record 15,
+/// and `v0.8.0`'s carries record 08 as a `Draft` citing records 16 and 17.
+///
+/// **Lowering this is a claim that a settled tag should be moved.** Raising it
+/// is a claim that `v0.7.0` or `v0.8.0` did not cite its pass before it tagged,
+/// and both did.
+const FIRST_TAG_GOVERNED_RELEASE: (u32, u32, u32) = (0, 7, 0);
 
 /// The Aftermath heading rule 10 looks for.
 const AFTERMATH_HEADING: &str = "## Aftermath";
@@ -1339,6 +1432,239 @@ fn backward(releases: &[Release]) -> Vec<String> {
     }
 
     backward
+}
+
+/// `git`, run at the repository root, with its standard output as text.
+fn git(arguments: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(arguments)
+        .current_dir(repository_root())
+        .output()
+        .expect("git runs — rules 11 and 12 read tags and have no answer without it");
+
+    assert!(
+        output.status.success(),
+        "git {} failed:\n{}",
+        arguments.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    String::from_utf8(output.stdout).expect("git prints UTF-8")
+}
+
+/// Every tag named `v*`, **refusing a shallow clone rather than answering from
+/// it**: a depth-1 checkout can hold a tag's name without the tree it points
+/// at, and then no tag's record could be read.
+fn tags() -> Vec<String> {
+    assert_eq!(
+        git(&["rev-parse", "--is-shallow-repository"]).trim(),
+        "false",
+        "this clone is shallow, and rules 11 and 12 read each release tag's tree. Fetch full \
+         history and tags — CI checks out with `fetch-depth: 0` and `fetch-tags: true` for this \
+         (#484), and `git fetch --unshallow --tags` does the same locally."
+    );
+
+    git(&["tag", "-l", "v*"])
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The version a tag names, if it is a release tag `vX.Y.Z` — three parts,
+/// digits only. A pre-release or a two-part name is not a release, so it
+/// carries no record.
+fn tag_version(name: &str) -> Option<(u32, u32, u32)> {
+    let parts: Vec<&str> = name.strip_prefix('v')?.split('.').collect();
+
+    let [major, minor, patch] = parts.as_slice() else {
+        return None;
+    };
+    let number = |part: &str| {
+        (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| part.parse().ok())
+            .flatten()
+    };
+
+    Some((number(major)?, number(minor)?, number(patch)?))
+}
+
+/// The release tags rules 11 and 12 read, oldest first: every one at or above
+/// [`FIRST_TAG_GOVERNED_RELEASE`].
+///
+/// **At least two, or it is red**: `v0.7.0` and `v0.8.0` exist, so fewer means
+/// the tags were not fetched, and a walk over no tags passes both rules.
+fn governed_tags() -> Vec<(String, (u32, u32, u32))> {
+    let mut governed: Vec<_> = tags()
+        .into_iter()
+        .filter_map(|name| Some((tag_version(&name)?, name)))
+        .filter(|(version, _)| *version >= FIRST_TAG_GOVERNED_RELEASE)
+        .map(|(version, name)| (name, version))
+        .collect();
+    governed.sort_by_key(|(_, version)| *version);
+
+    assert!(
+        governed.len() >= 2,
+        "rules 11 and 12 found {} release tags from v{}.{}.{} on, and v0.7.0 and v0.8.0 exist — \
+         the tags were not fetched. CI checks out with `fetch-tags: true` (#484); locally, \
+         `git fetch --tags`.",
+        governed.len(),
+        FIRST_TAG_GOVERNED_RELEASE.0,
+        FIRST_TAG_GOVERNED_RELEASE.1,
+        FIRST_TAG_GOVERNED_RELEASE.2
+    );
+
+    governed
+}
+
+/// Every name `projects/releases/` holds in a tag's tree.
+fn release_directory_at_tag(tag: &str) -> Vec<String> {
+    let prefix = format!("{RELEASES}/");
+
+    git(&["ls-tree", "-z", "--name-only", tag, "--", &prefix])
+        .split('\0')
+        .filter_map(|path| path.strip_prefix(&prefix))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A file's body in a tag's tree — **an `Err` rather than a panic when the
+/// tree has no such file**, so rule 12 names the tag instead of this function.
+fn record_body_at_tag(tag: &str, path: &str) -> Result<String, String> {
+    let output = Command::new("git")
+        .args(["show", &format!("{tag}:{path}")])
+        .current_dir(repository_root())
+        .output()
+        .expect("git runs");
+
+    if !output.status.success() {
+        return Err(format!("the tag's tree has no record at {path}"));
+    }
+
+    Ok(String::from_utf8(output.stdout).expect("a record is UTF-8"))
+}
+
+/// Every regular file directly inside `projects/verifications/` in a tag's
+/// tree: [`verification_files`], read at the tag rather than at HEAD. A HEAD
+/// older than the tag lacks the record the tag cites, and rule 12 must not
+/// refuse a correct tag for that.
+fn verification_files_at_tag(tag: &str) -> BTreeSet<String> {
+    let prefix = format!("{VERIFICATIONS}/");
+
+    git(&["ls-tree", "-z", tag, "--", &prefix])
+        .split('\0')
+        .filter_map(|entry| {
+            let (meta, path) = entry.split_once('\t')?;
+            let mode = meta.split(' ').next()?;
+            if mode != "100644" && mode != "100755" {
+                return None;
+            }
+            path.strip_prefix(&prefix).map(str::to_owned)
+        })
+        .collect()
+}
+
+/// The releases before `version`, oldest first, **whatever their status**.
+///
+/// A record is `Draft` until after its tag, and the next release can tag
+/// before it goes `Final`: record 07 went `Final` two days after `v0.7.0`. So
+/// counting only `Final` records would let a tag recycle the citations of a
+/// release still in `Draft`.
+fn earlier_releases(
+    records: &[((u32, u32, u32), String, String)],
+    version: (u32, u32, u32),
+) -> Vec<Release> {
+    let mut earlier: Vec<Release> = records
+        .iter()
+        .filter(|(at, ..)| *at < version)
+        .map(|(at, name, body)| (*at, name.clone(), citations(body)))
+        .collect();
+    earlier.sort_by_key(|(at, ..)| *at);
+    earlier
+}
+
+/// Rule 11's judgement of one tag's `projects/releases/` listing: the name of
+/// the one record for `version`, in the house shape, or why there is none.
+///
+/// Rule 5's shape check, applied to the tree at the tag rather than at HEAD.
+fn record_at_tag(version: (u32, u32, u32), listing: &[String]) -> Result<String, String> {
+    let stray: Vec<_> = listing
+        .iter()
+        .filter(|name| *name != RELEASE_TEMPLATE && release_version(name).is_none())
+        .cloned()
+        .collect();
+    if !stray.is_empty() {
+        return Err(format!(
+            "its tree holds a file in {RELEASES}/ that is neither the template nor a record: {}",
+            stray.join(", ")
+        ));
+    }
+
+    let mut records = listing
+        .iter()
+        .filter(|name| release_version(name) == Some(version));
+
+    match (records.next(), records.next()) {
+        (Some(name), None) => Ok(name.clone()),
+        (None, _) => Err(format!(
+            "the tag's tree has no record for v{}.{}.{} in {RELEASES}/",
+            version.0, version.1, version.2
+        )),
+        (Some(_), Some(_)) => Err("its tree holds two records for the same version".to_owned()),
+    }
+}
+
+/// Rule 12's judgement of one record body as it stood at its tag, apart from
+/// git — so the shapes no real tag has can be sent as text.
+///
+/// `earlier` is the releases before this one, oldest first, from
+/// [`earlier_releases`], and `on_disk` the verification records a citation
+/// may name. The body must
+/// state a status the process defines, once — **`Draft` is the expected
+/// answer**, since the Ship rows are written after the tag — and must cite a
+/// record that resolves, is new against `earlier` and is above its high-water
+/// mark: rules 1, 2, 4, 6, 7, 8 and 9, through their own functions.
+fn refused_at_tag(
+    label: &str,
+    version: (u32, u32, u32),
+    body: &str,
+    earlier: &[Release],
+    on_disk: &BTreeSet<String>,
+) -> Vec<String> {
+    let mut refused = Vec::new();
+
+    let status = header_status(body);
+    let lines = header_status_lines(body);
+    if !status.is_some_and(|status| RECORD_STATUSES.contains(&status)) || lines != 1 {
+        refused.push(format!(
+            "{label} — its header states {status:?} on {lines} line(s)"
+        ));
+    }
+
+    let cited = citations(body);
+    if cited.is_empty() {
+        refused.push(format!("{label} — cites no verification record"));
+        return refused;
+    }
+
+    for record in &cited {
+        if let Some(why) = unresolved(record, on_disk) {
+            refused.push(format!("{label} — cites {record}, {why}"));
+        }
+    }
+
+    let mut releases = earlier.to_vec();
+    releases.push((version, label.to_owned(), cited));
+    let own = format!("{label} — ");
+    refused.extend(
+        recycled(&releases)
+            .into_iter()
+            .chain(backward(&releases))
+            .filter(|refusal| refusal.starts_with(&own)),
+    );
+
+    refused
 }
 
 /// Rule 1. **A release that shipped says which pass read it.**
@@ -2776,5 +3102,300 @@ fn a_release_with_no_numbered_citation_is_refused() {
     assert!(
         backward(&silent).is_empty() && recycled(&silent).is_empty(),
         "a release citing nothing is rule 1's alone"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The tag carries its record (#484)
+// ---------------------------------------------------------------------------
+
+/// Rule 11. **A release tag's commit already holds that release's record**, in
+/// the house shape.
+///
+/// The record is never `Final` at its own tag, since its Ship and Aftermath
+/// rows happen after it, so rules 1–10 can only close the record. This rule
+/// and the next are what read the tag.
+#[test]
+fn a_release_tag_carries_its_record() {
+    let refused: Vec<_> = governed_tags()
+        .into_iter()
+        .filter_map(|(tag, version)| {
+            record_at_tag(version, &release_directory_at_tag(&tag))
+                .err()
+                .map(|why| format!("{tag} — {why}"))
+        })
+        .collect();
+
+    assert!(
+        refused.is_empty(),
+        "a release tag's commit does not carry its release record (#484):\n  {}\n\n\
+         The record, with its Independent pass row citing a verification record, is \
+         committed before the tag (release process §4 step 5). A tag already pushed is \
+         settled; this is red until the tag is moved, or the floor is argued.",
+        refused.join("\n  ")
+    );
+}
+
+/// Rule 12. **The record at the tag already cites its pass**: a status the
+/// process defines, and a citation that resolves, is new, and is above the
+/// high-water mark — read from `git show <tag>:<record>`.
+///
+/// **Everything is read from the tag's own tree, nothing from HEAD**: the
+/// record's name, its body, the earlier release records (whatever their
+/// status, as they stood at the tag) and the verification records a citation
+/// may name. So the answer for a tag is the same from any checkout that has
+/// fetched it.
+#[test]
+fn a_release_tag_s_record_already_cites_its_pass() {
+    let mut missing = Vec::new();
+    let mut refused = Vec::new();
+
+    for (tag, version) in governed_tags() {
+        let listing = release_directory_at_tag(&tag);
+        let name = match record_at_tag(version, &listing) {
+            Ok(name) => name,
+            Err(why) => {
+                missing.push(format!("{tag} — {why}"));
+                continue;
+            }
+        };
+
+        let read = |name: &str| record_body_at_tag(&tag, &format!("{RELEASES}/{name}"));
+        let body = match read(&name) {
+            Ok(body) => body,
+            Err(why) => {
+                missing.push(format!("{tag} — {why}"));
+                continue;
+            }
+        };
+
+        let at_tag: Vec<_> = listing
+            .iter()
+            .filter_map(|other| {
+                let at = release_version(other)?;
+                let body = read(other).expect("a record the tag's tree lists is readable");
+                Some((at, other.clone(), body))
+            })
+            .collect();
+
+        refused.extend(refused_at_tag(
+            &format!("{name} at {tag}"),
+            version,
+            &body,
+            &earlier_releases(&at_tag, version),
+            &verification_files_at_tag(&tag),
+        ));
+    }
+
+    assert!(
+        missing.is_empty(),
+        "the tag's tree has no record for a release tag (#484):\n  {}\n\n\
+         The record is committed before the tag, so the tag can be checked against it.",
+        missing.join("\n  ")
+    );
+    assert!(
+        refused.is_empty(),
+        "a release record, as it stood at its tag, does not already cite a new pass (#484):\n  \
+         {}\n\n\
+         The Independent pass row is a Pre-flight row: it cites the verification record \
+         before the tag is created, in the commit the tag points at. `Draft` is the \
+         expected status there.",
+        refused.join("\n  ")
+    );
+}
+
+/// **The tag names the walk reads as releases, and the ones it does not.**
+#[test]
+fn the_tag_parser_accepts_only_a_release_tag() {
+    for (name, version) in [
+        ("v0.7.0", Some((0, 7, 0))),
+        ("v10.0.12", Some((10, 0, 12))),
+        ("v1.2", None),
+        ("1.2.3", None),
+        ("v1.2.3-rc1", None),
+        ("v1.2.3.4", None),
+        ("v1..3", None),
+        ("v+1.2.3", None),
+        ("V1.2.3", None),
+    ] {
+        assert_eq!(tag_version(name), version, "{name}");
+    }
+}
+
+/// **Rule 11 refuses a tree with no record**, `v0.6.0`'s listing verbatim,
+/// and accepts `v0.7.0`'s.
+#[test]
+fn rule_11_judges_a_tag_s_listing() {
+    let v0_6_0: Vec<String> = [
+        RELEASE_TEMPLATE,
+        "01. Release v0.1.0.md",
+        "02. Release v0.2.0.md",
+        "03. Release v0.3.0.md",
+        "04. Release v0.4.0.md",
+        "05. Release v0.5.0.md",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    assert!(
+        record_at_tag((0, 6, 0), &v0_6_0).is_err_and(|why| why.contains("has no record")),
+        "v0.6.0's tree has no record 06"
+    );
+
+    let mut v0_7_0 = v0_6_0.clone();
+    v0_7_0.extend(["06. Release v0.6.0.md", "07. Release v0.7.0.md"].map(str::to_owned));
+    assert_eq!(
+        record_at_tag((0, 7, 0), &v0_7_0),
+        Ok("07. Release v0.7.0.md".to_owned())
+    );
+
+    let mut stray = v0_7_0.clone();
+    stray.push("08. Release 0.8.0.md".to_owned());
+    assert!(
+        record_at_tag((0, 8, 0), &stray).is_err_and(|why| why.contains("neither")),
+        "rule 5's door B, at the tag"
+    );
+}
+
+/// A record body as it might stand at a tag: `status`, and `cited` in its
+/// Independent pass row.
+fn record_at_its_tag(status: &str, cited: &[&str]) -> String {
+    let links: Vec<String> = cited
+        .iter()
+        .map(|path| format!("[a pass]({path})"))
+        .collect();
+    format!(
+        "# Release v0.8.0 — 2099-01-01\n\
+         \n\
+         **Status:** {status} · **Last updated:** 2099-01-01\n\
+         \n\
+         | **Independent pass** | … | {} |\n",
+        links.join(" · ")
+    )
+}
+
+/// **Rule 12 accepts a `Draft` citing a new pass, and refuses each other
+/// shape** — none of which a real tag has, so they are sent as text.
+#[test]
+fn rule_12_judges_a_record_at_its_tag() {
+    let earlier = vec![release(
+        (0, 7, 0),
+        "07. Release v0.7.0.md",
+        &[RECORD_15_CITED],
+    )];
+    let on_disk = verification_files();
+    let judge = |body: &str| refused_at_tag("08 at v0.8.0", (0, 8, 0), body, &earlier, &on_disk);
+
+    assert_eq!(
+        judge(&record_at_its_tag("Draft", &[RECORD_16_CITED])),
+        Vec::<String>::new(),
+        "the control: a Draft citing record 16, which v0.7.0 did not"
+    );
+
+    for (body, how) in [
+        (record_at_its_tag("Draft", &[]), "citing nothing"),
+        (
+            record_at_its_tag("Draft", &[RECORD_15_CITED]),
+            "citing only what v0.7.0 cited",
+        ),
+        (
+            record_at_its_tag("Draft", &[FINDING_2_SHAPES[0]]),
+            "citing record 15 under another spelling",
+        ),
+        (
+            record_at_its_tag(
+                "Draft",
+                &["../verifications/99.%20A%20Pass%20That%20Was%20Never%20Written.md"],
+            ),
+            "citing a record that is not on disk",
+        ),
+        (
+            record_at_its_tag("In progress", &[RECORD_16_CITED]),
+            "a status the process does not define",
+        ),
+        (
+            format!(
+                "**Status:** Template\n{}",
+                record_at_its_tag("Draft", &[RECORD_16_CITED])
+            ),
+            "two header status lines",
+        ),
+    ] {
+        assert!(!judge(&body).is_empty(), "{how}");
+    }
+}
+
+/// A verification folder, as a tag's tree might list it.
+fn listed(names: &[&str]) -> BTreeSet<String> {
+    names.iter().map(|&name| name.to_owned()).collect()
+}
+
+/// **An earlier release still in `Draft` counts**: its citations are spent
+/// for the next tag, whether or not its record has gone `Final`.
+#[test]
+fn rule_12_counts_an_earlier_release_whatever_its_status() {
+    let on_disk = listed(&[RECORD_15, "17. Pass.md", "18. Pass.md"]);
+    let records = vec![
+        (
+            (0, 7, 0),
+            "07. Release v0.7.0.md".to_owned(),
+            record_at_its_tag("Final", &[RECORD_15_CITED]),
+        ),
+        (
+            (0, 8, 0),
+            "08. Release v0.8.0.md".to_owned(),
+            record_at_its_tag("Draft", &["../verifications/17.%20Pass.md"]),
+        ),
+    ];
+    let earlier = earlier_releases(&records, (0, 9, 0));
+    let judge = |cited: &str| {
+        refused_at_tag(
+            "09 at v0.9.0",
+            (0, 9, 0),
+            &record_at_its_tag("Draft", &[cited]),
+            &earlier,
+            &on_disk,
+        )
+    };
+
+    assert!(
+        !judge("../verifications/17.%20Pass.md").is_empty(),
+        "v0.8.0's record is Draft and cites 17, so v0.9.0 citing only 17 cites nothing new"
+    );
+    assert_eq!(
+        judge("../verifications/18.%20Pass.md"),
+        Vec::<String>::new(),
+        "the control: 18, above what the Draft cites"
+    );
+}
+
+/// **A citation resolves against the folder the tag's tree lists**, not
+/// whatever the checkout holds: a record the tag carries is found, and one
+/// only a later HEAD carries is not.
+#[test]
+fn rule_12_resolves_against_the_tag_s_own_listing() {
+    let earlier = vec![release(
+        (0, 7, 0),
+        "07. Release v0.7.0.md",
+        &[RECORD_15_CITED],
+    )];
+    let at_tag = listed(&[RECORD_15, "20. A Pass Only The Tag Holds.md"]);
+    let judge = |cited: &str| {
+        refused_at_tag(
+            "08 at v0.8.0",
+            (0, 8, 0),
+            &record_at_its_tag("Draft", &[cited]),
+            &earlier,
+            &at_tag,
+        )
+    };
+
+    assert_eq!(
+        judge("../verifications/20.%20A%20Pass%20Only%20The%20Tag%20Holds.md"),
+        Vec::<String>::new(),
+        "a record in the tag's tree resolves"
+    );
+    assert!(
+        !judge(RECORD_16_CITED).is_empty(),
+        "record 16 is on this checkout's disk and not in the tag's listing"
     );
 }
