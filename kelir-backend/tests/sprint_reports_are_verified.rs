@@ -301,6 +301,9 @@
 //! | `PR #N` read in labels as well as prose | *a pull request in another repository* alone |
 //! | Every spec ever added counted | *a spec no longer in the tree* and *a moved spec* |
 //! | Renames not followed — the first fix's presence check | *a moved spec* alone |
+//! | Hidden and styled elements kept | *a phrase that renders as nothing* and *a pull request in another repository* — its hidden link and hidden `PR #457` |
+//! | A bare URL after `(` anywhere, as round 2 had it | *a pull request in another repository* alone — `evil.example/(https://github.com/…)` |
+//! | Reference definitions kept in the text | *a phrase that renders as nothing* and *a pull request in another repository* — `[//]: # (PR #457)` |
 //!
 //! **No report main has held is refused.** Main's file and this one were run
 //! against `projects/status/` and `projects/verifications/` as each of the 66
@@ -312,7 +315,8 @@
 //! predate the reports this file's floors and constants were written against.
 //! No status report in any of the 66 contains `<!--`, a reference definition,
 //! an image, an HTML tag, a `/pull/` link outside this repository, or a
-//! `PR #N` label on one.
+//! `PR #N` label on one. The sweep was run again after the third round, with
+//! the same result.
 //!
 //! **C is swept by its history rather than by tree.** The sweep reads today's
 //! log. That is faithful for C because **no commit on main has deleted or
@@ -341,6 +345,22 @@
 //! | A spec at `e2e/tests/zz-é.spec.ts` under `(#9998)`, cited as `PR #9998` | refused | refused | **accepted** |
 //! | `PR #9999`, its spec added under `(#9999)` and deleted | accepted | refused | **refused** |
 //! | The tree as it stands | green | green | green |
+//!
+//! **The third round ran the whole table again** — main, the second round
+//! and this one — and every row above gave the same answer under the last two.
+//! Its own probes, in the same run:
+//!
+//! | The probe | Main | Second round | Now |
+//! |---|---|---|---|
+//! | `Done`, then `[//]: # (PR #481)` | accepted | refused | **refused** |
+//! | `Done - https://evil.example/?u=https://github.com/sujanto-gaws/kelir/pull/481` | accepted | refused | **refused** |
+//! | `Done <span hidden>verified by inspection only</span>` | accepted | accepted | **refused** |
+//! | `<span hidden>note</span> verified by inspection only` | accepted | accepted | accepted |
+//!
+//! The first two were already refused by the second round, by the dropped
+//! definition and by the bare-URL boundary; the third round adds their probes.
+//! `evil.example/(https://github.com/…)`, the one the second round let
+//! through, is refused in *a pull request in another repository*.
 //!
 //! **Each red reddened rule 4 and nothing else.** The three rows for #481's
 //! spec are the ones that decide C: a moved flow is the same flow, and a
