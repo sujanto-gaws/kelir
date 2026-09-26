@@ -155,7 +155,8 @@ While the major version is `0`, the public API may change in any release.
   Scope Status to cite a pull request that added a browser spec, or to say
   `verified by inspection only`. It now refuses the phrase or a citation that
   a reader cannot see: in an HTML comment, a link reference definition, a
-  link's title or destination, an image, or a tag's attributes. A link counts
+  link's title or destination, an image, a tag's attributes, or an element
+  marked `hidden` or given a `style`. A link counts
   by where it points, not by its label, so a link to another repository's
   pull request cites nothing, even when its number or label matches a Kelir
   one. A pull request whose spec a later commit deleted no longer counts, and

@@ -178,10 +178,11 @@
 //!   definition that puts its target on the line after the label is not read
 //!   as one, so `[PR #457][u]` over it is left as prose and counts the same
 //!   way.
-//! - **Text a stylesheet hides.** Tags are dropped and the text between them
-//!   is kept, so `<span hidden>verified by inspection only</span>` counts. No
-//!   report uses HTML, on `main` or in any tree it has held; the first one
-//!   that needs a tag is the time to read attributes.
+//! - **Text a class hides.** An element marked `hidden` or given a `style` is
+//!   dropped with its contents, whether or not GitHub keeps the attribute —
+//!   either answer is safe (see [`without_hidden_elements`]). An element
+//!   hidden only by a class the page's stylesheet defines is not, and its
+//!   text counts. No report uses HTML, on `main` or in any tree it has held.
 //! - **`HEAD`, not the working tree, for specs.** Presence is asked of the
 //!   commit the log reads, so an uncommitted deletion is not seen until it is
 //!   committed, and an uncommitted move is not mistaken for one. The reports
@@ -271,15 +272,20 @@
 //! path still existed turned [status report 20](../../projects/status/20.%20Sprint%2019%20Status.md)
 //! red when #481's spec was moved into a subdirectory — a settled report
 //! failing for a move, which D-71 does not allow to be fixed by editing it.
-//! **So the rule now reads what renders, where a link points, and where a
-//! spec went:**
+//! Its full table added three more: `[//]: # (PR #457)`, a citation that
+//! renders as nothing; a bare Kelir URL inside another,
+//! `https://evil.example/?u=https://github.com/sujanto-gaws/kelir/pull/457`;
+//! and `<span hidden>`, which nobody had checked GitHub keeps. **So the rule
+//! now reads what renders, where a link points, and where a spec went:**
 //!
 //! - **A.** HTML comments are removed before Scope Status is found, an
 //!   unclosed one running to the end, as `adr_records_are_current.rs` does
-//!   since #561. [`rendered`] then drops what shows nothing else.
+//!   since #561. [`rendered`] then drops what shows nothing else, citations
+//!   included, and an element marked `hidden` or styled with its contents.
 //! - **B.** A link counts by its target, which must *be* a Kelir pull request
-//!   URL — any scheme, `www.` or case. Its label is not prose. `PR #N` and
-//!   `PR#N` count in prose outside a label.
+//!   URL from its first character — any scheme, `www.` or case. Its label is
+//!   not prose. `PR #N`, `PR#N` and a bare Kelir URL count in prose outside a
+//!   label, the URL only where it starts a word.
 //! - **C.** Each spec is followed oldest first through its renames to where
 //!   it is now; a deletion ends it, and a path added again starts afresh.
 //!   What survives counts while its path is in `HEAD`.
@@ -621,12 +627,47 @@ struct Rendered {
     targets: Vec<String>,
 }
 
+/// `text` without any element whose opening tag carries `hidden` or `style`,
+/// contents and all, up to its closing tag — or to the end, if it has none.
+///
+/// **Whether GitHub keeps either attribute is not asked, because the answer
+/// does not change what this should do.** If GitHub keeps them, the contents
+/// are hidden and rightly dropped. If it strips them, the contents show and
+/// are dropped anyway, which refuses a report that did say the phrase: a red
+/// test, not a quiet pass. An element of the same name nested inside one
+/// ends it early, and the rest is left to the tag pattern, which keeps text.
+fn without_hidden_elements(text: &str) -> String {
+    let opening = Regex::new(r"(?i)<([a-z][a-z0-9-]*)\b[^>]*\b(?:hidden|style)\b[^>]*>")
+        .expect("the hidden element pattern compiles");
+    let mut kept = String::new();
+    let mut rest = text;
+
+    while let Some(found) = opening.captures(rest) {
+        let whole = found.get(0).expect("group 0 always takes part");
+        let closing = format!("</{}", found[1].to_ascii_lowercase());
+
+        kept.push_str(&rest[..whole.start()]);
+        rest = &rest[whole.end()..];
+        // ASCII lowercasing keeps every byte offset, so `at` indexes `rest`.
+        rest = rest
+            .to_ascii_lowercase()
+            .find(&closing)
+            .and_then(|at| rest[at..].find('>').map(|close| &rest[at + close + 1..]))
+            .unwrap_or("");
+    }
+
+    kept.push_str(rest);
+    kept
+}
+
 /// `section`, with its HTML comments already removed, reduced to what
 /// renders ([#468](https://github.com/sujanto-gaws/kelir/issues/468) A and B).
 ///
 /// **What renders as nothing is dropped**: a link reference definition, such
-/// as `[//]: # (…)`; an image; a link's title and destination; an HTML tag and
-/// its attributes. **A link's label is visible but is not where it points**,
+/// as `[//]: # (…)`; an element marked `hidden` or styled, with its contents;
+/// an image; a link's title and destination; an HTML tag and its attributes.
+/// Hidden elements go before links are read, so a link inside one cites
+/// nothing. **A link's label is visible but is not where it points**,
 /// so `[PR #457](https://github.com/f5/unovis/pull/457)` shows `PR #457` and
 /// cites another repository.
 ///
@@ -659,6 +700,7 @@ fn rendered(section: &str) -> Rendered {
 
     let mut targets = Vec::new();
     let text = definition.replace_all(section, "");
+    let text = without_hidden_elements(&text);
     let text = image.replace_all(&text, "");
     let text = inline.replace_all(&text, |found: &Captures| {
         let target = found
@@ -704,15 +746,19 @@ fn rendered(section: &str) -> Rendered {
 /// `https://github.com/f5/unovis/pull/457` cited Kelir's #457, and a label
 /// reading `PR #457` counted whatever it linked to
 /// ([#468](https://github.com/sujanto-gaws/kelir/issues/468) B). A link's
-/// target must *be* a Kelir pull request URL; `PR #N` and a bare Kelir URL
-/// count in prose outside a label.
+/// target must *be* a Kelir pull request URL, from its first character; `PR
+/// #N` and a bare Kelir URL count in prose outside a label. **A bare URL must
+/// start a word**, after a line start, a space, a table's `|` or an opening
+/// parenthesis that itself starts one, so one inside another URL, as in
+/// `https://evil.example/?u=https://github.com/sujanto-gaws/kelir/pull/457`,
+/// is part of that URL and cites nothing.
 fn cited_pull_requests(section: &Rendered) -> BTreeSet<u32> {
     let kelir_link = Regex::new(
         r"^(?i:(?:https?://)?(?:www\.)?github\.com/sujanto-gaws/kelir/pull/)(\d+)(?:[/?#]|$)",
     )
     .expect("the link pattern compiles");
     let in_prose = Regex::new(
-        r"(?m)(?:^|[\s(|])(?i:(?:https?://)?(?:www\.)?github\.com/sujanto-gaws/kelir/pull/)(\d+)|PR ?#(\d+)",
+        r"(?m)(?:^|[\s|])\(?(?i:(?:https?://)?(?:www\.)?github\.com/sujanto-gaws/kelir/pull/)(\d+)|PR ?#(\d+)",
     )
     .expect("the prose pattern compiles");
 
@@ -1011,6 +1057,10 @@ fn a_phrase_that_renders_as_nothing_is_not_said() {
         "| 1 | The screen | ![verified by inspection only](shot.png) |",
         "| 1 | The screen | <span title=\"verified by inspection only\">Done</span> |",
         "| 1 | The screen | Done <verified by inspection only> |",
+        "| 1 | The screen | Done <span hidden>verified by inspection only</span> |",
+        "| 1 | The screen | Done <SPAN HIDDEN>verified by inspection only</SPAN> |",
+        "| 1 | The screen | Done <div style=\"display:none\">verified by inspection only</div> |",
+        "| 1 | The screen | Done <span hidden>verified by inspection only",
     ] {
         assert!(
             !drives_a_screen_or_says_it_did_not(
@@ -1025,6 +1075,8 @@ fn a_phrase_that_renders_as_nothing_is_not_said() {
         "| 1 | The screen | [verified by inspection only](https://example.com) |",
         "| 1 | The screen | `verified by inspection only` |",
         "| 1 | The screen | <b>verified by inspection only</b> |",
+        "| 1 | The screen | <span class=\"note\">verified by inspection only</span> |",
+        "| 1 | The screen | <span hidden>a note</span> verified by inspection only |",
         "| 1 | The screen | Done — verified by inspection only |\n\n[//]: # (a note)",
     ] {
         assert!(
@@ -1075,6 +1127,12 @@ fn a_pull_request_in_another_repository_is_not_cited() {
         "| 1 | The chart | Done — [PR #457] |\n\n[PR #457]: https://github.com/f5/unovis/pull/457",
         "| 1 | The chart | Done — [x](https://example.com/?u=https://github.com/sujanto-gaws/kelir/pull/457) |",
         "| 1 | The chart | Done — https://example.com/github.com/sujanto-gaws/kelir/pull/457 |",
+        "| 1 | The chart | Done — https://evil.example/?u=https://github.com/sujanto-gaws/kelir/pull/457 |",
+        "| 1 | The chart | Done — https://evil.example/(https://github.com/sujanto-gaws/kelir/pull/457) |",
+        "| 1 | The chart | Done |\n\n[//]: # (PR #457)",
+        "| 1 | The chart | Done |\n\n[//]: # (https://github.com/sujanto-gaws/kelir/pull/457)",
+        "| 1 | The chart | Done <span hidden>[#457](https://github.com/sujanto-gaws/kelir/pull/457)</span> |",
+        "| 1 | The chart | Done <span hidden>PR #457</span> |",
     ] {
         assert!(
             !drives_a_screen_or_says_it_did_not(&report_whose_scope_status_says(foreign), &driven),
@@ -1087,6 +1145,8 @@ fn a_pull_request_in_another_repository_is_not_cited() {
         "| 1 | The chart | Done — PR #457 |",
         "| 1 | The chart | Done — PR#457 |",
         "| 1 | The chart | Done — https://github.com/sujanto-gaws/kelir/pull/457 |",
+        "| 1 | The chart | Done (https://github.com/sujanto-gaws/kelir/pull/457) |",
+        "|https://github.com/sujanto-gaws/kelir/pull/457|",
         "| 1 | The chart | Done — [files](https://github.com/sujanto-gaws/kelir/pull/457/files) |",
         "| 1 | The chart | Done — [#457](http://github.com/sujanto-gaws/kelir/pull/457) |",
         "| 1 | The chart | Done — [#457](https://www.github.com/sujanto-gaws/kelir/pull/457) |",
