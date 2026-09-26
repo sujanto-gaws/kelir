@@ -375,16 +375,21 @@ jobs:
         # image ever stop carrying one, this job says which package rather
         # than `Hash Sum mismatch` — and it says it on every run, not once at
         # the review that introduced the narrowing.
+        #
+        # **Firefox as well, for one flow** (#496):
+        # `a-pattern-the-browser-gives-up-on.spec.ts` is about a match Firefox
+        # throws on, and `playwright.config.ts` runs it there and nowhere else.
+        # Its dependencies are checked by the same dry run.
         run: |
           set -euo pipefail
 
           sudo "${GITHUB_WORKSPACE}/scripts/narrow-apt-to-ubuntu.sh"
           sudo apt-get update
 
-          npx playwright install --with-deps chromium
+          npx playwright install --with-deps chromium firefox
 
-          echo "::group::Every chromium dependency resolved from Ubuntu's sources"
-          npx playwright install-deps --dry-run chromium
+          echo "::group::Every chromium and firefox dependency resolved from Ubuntu's sources"
+          npx playwright install-deps --dry-run chromium firefox
           echo "::endgroup::"
 
       - name: Configure the deployment

@@ -106,10 +106,63 @@ interface RegistryRule {
    * whatever it declares, which is what makes this the field that answers.
    */
   scope: JfssScope
-  /** Decides the rule here. Absent exactly when `undecidable` is present. */
-  decide?: (context: RuleContext) => boolean
+  /**
+   * Decides the rule here. Absent exactly when `undecidable` is present.
+   *
+   * A verdict, or [`Undecided`] when this value could not be decided here
+   * although the rule usually can be — the `regex` rule's engine giving up.
+   */
+  decide?: (context: RuleContext) => boolean | Undecided
   /** Why this side does not decide it. Absent exactly when `decide` is. */
   undecidable?: string
+}
+
+/** A rule this side decides, left to the server for one value, and why. */
+export interface Undecided {
+  undecided: string
+}
+
+/**
+ * Why a pattern was left to the server, in the words the form shows.
+ *
+ * `JfssForm` prints it after *"… is checked when this form is submitted, not
+ * as you type."*, so it is the reason and not the whole sentence.
+ */
+const PATTERN_GAVE_UP =
+  'this browser gave up matching the value against the pattern, so the server decides it'
+
+/**
+ * Runs a pattern against a value, telling a pattern that does not compile from
+ * an engine that gives up on the match.
+ *
+ * **The two throws are different answers (#496)**, and they are told apart by
+ * where they are thrown rather than by what is thrown:
+ *
+ * - `new RegExp` throwing is a pattern this browser cannot build. That is
+ *   `false`, a violation: a check that could not be applied has not been met.
+ * - `.test()` throwing is an engine that gave up on this value, which Firefox
+ *   does with *too much recursion* on a long backtrack. That is `'gave-up'`:
+ *   the pattern compiled, the value was not decided here, and the server
+ *   decides it on submit.
+ *
+ * Only a throw is caught here. An engine that gives up without throwing, by
+ * running on or by answering *no match*, is not seen by this function, and
+ * this function does not claim otherwise.
+ */
+function testPattern(pattern: string, flags: string, value: string): boolean | 'gave-up' {
+  let compiled: RegExp
+
+  try {
+    compiled = new RegExp(pattern, flags)
+  } catch {
+    return false
+  }
+
+  try {
+    return compiled.test(value)
+  } catch {
+    return 'gave-up'
+  }
 }
 
 /** The values a rule compares against, when its params carry a list. */
@@ -172,16 +225,15 @@ export const VALIDATION_RULES: Readonly<Record<string, RegistryRule>> = {
    * one**, which is why `\p{…}` is refused rather than merely warned about:
    * without `u` the browser reads a literal `p`.
    *
-   * An uncompilable pattern is a violation rather than a pass: a rule that
-   * cannot be applied has not been satisfied.
+   * **A pattern that does not compile is a violation rather than a pass**: a
+   * rule that cannot be applied has not been satisfied.
    *
-   * **The same `catch` also receives an engine that gave up** (#493). A
-   * pattern that backtracks long enough makes Firefox throw *too much
-   * recursion* for a value the server's linear-time crate matches, so the form
-   * refuses what the server would accept. Chrome does not throw, it just keeps
-   * the tab busy. Registry 1.5.3 measures both. Nothing here tells a
-   * compile error from a give-up, and deciding what a give-up should mean is
-   * not done here.
+   * **A match that throws is undecided, not a violation** (#496). A pattern
+   * that backtracks long enough makes Firefox throw *too much recursion* for a
+   * value the server's linear-time crate matches, and a violation there refused
+   * what the server would accept. The rule is left to the server on submit
+   * instead, and `testPattern` is where the two throws are told apart. Chrome
+   * does not throw, it keeps the tab busy, and that is not changed here.
    */
   regex: {
     scope: 'both',
@@ -190,11 +242,9 @@ export const VALIDATION_RULES: Readonly<Record<string, RegistryRule>> = {
         return true
       }
 
-      try {
-        return new RegExp(String(params.pattern), String(params.flags ?? '')).test(String(value))
-      } catch {
-        return false
-      }
+      const verdict = testPattern(String(params.pattern), String(params.flags ?? ''), String(value))
+
+      return verdict === 'gave-up' ? { undecided: PATTERN_GAVE_UP } : verdict
     },
   },
 
@@ -257,8 +307,14 @@ export const VALIDATION_RULES: Readonly<Record<string, RegistryRule>> = {
   },
 }
 
-/** A rule the registry defines that this side does not decide, and why. */
+/**
+ * A rule the registry defines that this side does not decide, and why.
+ *
+ * Also a rule or the `pattern` keyword that this side usually decides and did
+ * not for this value, because the engine gave up on the match (#496).
+ */
 export interface UndecidedRule {
+  /** The rule's name, or `pattern` for the keyword. */
   rule: string
   /** The scope the registry gives it, which is why the reason reads as it does. */
   scope: JfssScope
@@ -295,8 +351,14 @@ export function applyRule(
     return { rule: rule.rule, scope: entry.scope, reason: entry.undecidable ?? '' }
   }
 
-  if (entry.decide({ ...context, params: rule.params ?? {} })) {
+  const decision = entry.decide({ ...context, params: rule.params ?? {} })
+
+  if (decision === true) {
     return undefined
+  }
+
+  if (decision !== false) {
+    return { rule: rule.rule, scope: entry.scope, reason: decision.undecided }
   }
 
   // §6.2 makes `message` required, so a definition that reaches here has one.
@@ -486,8 +548,15 @@ function repeatsAKey(rows: unknown[], keys: string[]): boolean {
  * **Every keyword after `required` is skipped for an empty value**, which is
  * JSON Schema's own semantics and is what keeps an optional field optional: a
  * blank `needed_by` is not a malformed date.
+ *
+ * A `pattern` the engine gave up on is pushed onto `undecided` and the keywords
+ * after it are still checked, because it has not failed.
  */
-function checkValidation(validation: JfssValidation, value: unknown): FieldViolation | undefined {
+function checkValidation(
+  validation: JfssValidation,
+  value: unknown,
+  undecided: UndecidedRule[],
+): FieldViolation | undefined {
   const fail = (keyword: string): FieldViolation => ({
     rule: keyword,
     message: validation.messages?.[keyword] ?? defaultMessage(keyword, validation),
@@ -510,8 +579,14 @@ function checkValidation(validation: JfssValidation, value: unknown): FieldViola
       return fail('maxLength')
     }
 
-    if (validation.pattern !== undefined && !matchesPattern(validation.pattern, value)) {
-      return fail('pattern')
+    if (validation.pattern !== undefined) {
+      const verdict = matchesPattern(validation.pattern, value)
+
+      if (verdict === 'gave-up') {
+        undecided.push({ rule: 'pattern', scope: 'both', reason: PATTERN_GAVE_UP })
+      } else if (!verdict) {
+        return fail('pattern')
+      }
     }
 
     if (validation.format !== undefined && !(FORMATS[validation.format]?.(value) ?? true)) {
@@ -557,23 +632,22 @@ function checkValidation(validation: JfssValidation, value: unknown): FieldViola
  *
  * A pattern the browser cannot compile is a violation and not a pass, for the
  * reason the rule gives: a check that could not be applied has not been met.
- * An engine that gives up on a long backtrack lands in the same `catch`, as
- * the rule's comment says (#493). `checkValidation` decides `maxLength` first,
- * so a value longer than that never reaches here.
+ * **A match that throws is `'gave-up'` instead** (#496), and the server decides
+ * the keyword on submit; `testPattern` tells the two apart. `checkValidation`
+ * decides `maxLength` first, so a value longer than that never reaches here.
  */
-function matchesPattern(pattern: string, value: string): boolean {
-  try {
-    return new RegExp(pattern).test(value)
-  } catch {
-    return false
-  }
+function matchesPattern(pattern: string, value: string): boolean | 'gave-up' {
+  return testPattern(pattern, '', value)
 }
 
 /** What a definition decides about one field, and what it leaves undecided. */
 export interface FieldOutcome {
   /** The single message shown under the field, or none. */
   violation?: FieldViolation
-  /** Rules the registry defines that this side did not decide. */
+  /**
+   * Rules the registry defines that this side did not decide, and any rule or
+   * `pattern` keyword whose match the engine gave up on for this value.
+   */
   undecided: UndecidedRule[]
 }
 
@@ -592,6 +666,12 @@ export interface FieldOutcome {
  * verdicts are discarded for the reason JSON Schema discards them — an optional
  * field left blank is not a field whose value is wrong.
  *
+ * **Once a keyword has failed, no rule is decided** (#496). The keyword's
+ * violation outranks every rule's, so no verdict a rule reaches can change the
+ * field's, and the one that costs something is `regex`: a value past
+ * `maxLength` would otherwise still be matched, however long it is. The name is
+ * still resolved, and a rule this side never decides is still named.
+ *
  * @throws UnknownValidationRuleError when a rule name is not in the catalogue.
  */
 export function validateField(
@@ -599,12 +679,18 @@ export function validateField(
   value: unknown,
   scope: Record<string, unknown>,
 ): FieldOutcome {
-  const basic = checkValidation(component.validation, value)
   const undecided: UndecidedRule[] = []
+  const basic = checkValidation(component.validation, value, undecided)
   const empty = isEmpty(value)
   let advanced: FieldViolation | undefined
 
   for (const rule of component.rules ?? []) {
+    // `?.decide` is falsy for a name nobody defines, so `applyRule` still
+    // raises on it.
+    if (basic !== undefined && VALIDATION_RULES[rule.rule]?.decide) {
+      continue
+    }
+
     const outcome = applyRule(rule, { value, scope })
 
     if (isViolation(outcome)) {

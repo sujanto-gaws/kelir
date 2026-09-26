@@ -217,6 +217,20 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **Firefox no longer refuses a value because it gave up matching a pattern**
+  ([#496](https://github.com/sujanto-gaws/kelir/issues/496)). On a pattern
+  that backtracks long enough, Firefox throws *too much recursion*, and the
+  form renderer counted that as a violation, so a value the server accepts
+  could not be submitted. A match that throws is now left undecided: the
+  form says the rule, or `validation.pattern`, is checked on submit, and the
+  server decides. **A pattern the browser cannot compile still fails**, as
+  before. Once a keyword such as `validation.maxLength` has failed on the
+  field, the renderer also runs none of the rules it decides itself
+  (`matchesField`, `notMatchesField`, `oneOf`, `notOneOf` and `regex`), which
+  changes no verdict.
+  This changes nothing for a browser that keeps matching without throwing.
+  The browser harness gains its first Firefox flow, and CI installs Firefox
+  for it. Validation Rule Registry 1.5.6, and ADR-0016 is amended.
 - **The stranded-task query in Installation and Deployment §9 says which
   tenant and which role** ([#533](https://github.com/sujanto-gaws/kelir/issues/533)),
   **and no longer lists a task its assignee can decide**

@@ -69,8 +69,10 @@ for (const name of engines) {
       browser = await pw[name].launch()
       continue
     }
-    const verdict = timed.r === 'E' ? '0 (renderer: throw is a violation)' : timed.r
-    const split = (timed.r === 'E' ? '0' : timed.r) !== c.crate ? 'SPLIT' : 'agree'
+    // Since #496 the renderer leaves a match that throws undecided, and the
+    // server decides it, so a throw is reported as that rather than as a split.
+    const verdict = timed.r === 'E' ? 'E (renderer: undecided, the server decides)' : timed.r
+    const split = timed.r === 'E' ? 'UNDECIDED' : timed.r !== c.crate ? 'SPLIT' : 'agree'
     console.log(`  ${split}  ${timed.ms.toFixed(0).padStart(6)} ms  n=${c.n}  ${c.label}  ${c.pattern}  browser=${verdict}${timed.err ? ' ' + timed.err : ''}  crate=${c.crate}`)
     await page.close().catch(() => {})
   }

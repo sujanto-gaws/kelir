@@ -2,6 +2,9 @@ import { defineConfig, devices } from '@playwright/test'
 
 import { baseUrl } from './support/env'
 
+/** The flows that run in Firefox and not in Chromium. */
+const FIREFOX_ONLY = /a-pattern-the-browser-gives-up-on\.spec\.ts$/
+
 /**
  * The browser-driving harness (decision **D-14**, issue #153).
  *
@@ -68,10 +71,25 @@ export default defineConfig({
     ignoreHTTPSErrors: true,
   },
 
+  /**
+   * Chromium runs every flow but one, and Firefox runs that one (#496).
+   *
+   * `a-pattern-the-browser-gives-up-on.spec.ts` is about a match Firefox
+   * throws on, so it needs Firefox. Chromium does not throw on the same match,
+   * it keeps matching, so the spec is kept out of it: there it would hold the
+   * tab until the test timed out. Every other flow stays Chromium-only, as it
+   * was.
+   */
   projects: [
     {
       name: 'chromium',
       use: { ...devices['Desktop Chrome'] },
+      testIgnore: FIREFOX_ONLY,
+    },
+    {
+      name: 'firefox',
+      use: { ...devices['Desktop Firefox'] },
+      testMatch: FIREFOX_ONLY,
     },
   ],
 })

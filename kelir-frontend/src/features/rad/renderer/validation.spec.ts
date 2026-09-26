@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   UnknownValidationRuleError,
@@ -255,6 +255,133 @@ describe('the Validation Rule Registry §3, the advanced rules', () => {
     // The same JSON Schema semantics §5's keywords get. An unfilled cost centre
     // is not a malformed one.
     expect(verdict(withRule('oneOf', 'both', { values: ['a'] }), '')).toBeUndefined()
+  })
+})
+
+/**
+ * #496: a pattern the browser gives up on is left to the server, and a rule is
+ * not matched once a keyword has already failed.
+ *
+ * **The give-up is simulated rather than provoked.** Only a throw is caught,
+ * and jsdom runs on V8, which does not throw on the pattern Firefox throws on.
+ * So `RegExp.prototype.test` throws for one pattern and runs for every other;
+ * `e2e/tests/a-pattern-the-browser-gives-up-on.spec.ts` is where Firefox
+ * throws for real.
+ */
+describe('a pattern the browser gives up on (#496)', () => {
+  const slow = '(?:[a-z]|[a-z0-9])*$'
+  const original = RegExp.prototype.test
+
+  /** Calls to `.test()` for the slow pattern, whatever they then did. */
+  let slowMatches = 0
+
+  beforeEach(() => {
+    slowMatches = 0
+    vi.spyOn(RegExp.prototype, 'test').mockImplementation(function (this: RegExp, input) {
+      if (this.source === slow) {
+        slowMatches += 1
+        throw new Error('too much recursion')
+      }
+
+      return original.call(this, input)
+    })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  const withRegex = (pattern: string, validation: Partial<JfssValidation> = {}) =>
+    field(
+      { type: 'string', ...validation },
+      { rules: [{ rule: 'regex', scope: 'both', params: { pattern }, message: 'No.' }] },
+    )
+
+  it('leaves a regex rule whose match throws undecided, and names it', () => {
+    const outcome = validateField(withRegex(slow), `${'a'.repeat(28)}!`, {})
+
+    expect(slowMatches).toBe(1)
+    expect(outcome.violation).toBeUndefined()
+    expect(outcome.undecided).toEqual([
+      { rule: 'regex', scope: 'both', reason: expect.stringContaining('gave up') },
+    ])
+  })
+
+  it('leaves a pattern keyword whose match throws undecided, and checks the keywords after it', () => {
+    const outcome = validateField(field({ type: 'string', pattern: slow }), 'aaaa!', {})
+
+    expect(outcome.violation).toBeUndefined()
+    expect(outcome.undecided.map((entry) => entry.rule)).toEqual(['pattern'])
+
+    // It has not failed, so `format` after it still decides.
+    const email = field({ type: 'string', pattern: slow, format: 'email' })
+
+    expect(verdict(email, 'not an address')?.rule).toBe('format')
+  })
+
+  it('still refuses a pattern that does not compile, on both paths', () => {
+    // ADR-0016: a check that could not be applied has not been met. Only a
+    // throw from `.test()` is a give-up; a throw from `new RegExp` is this.
+    expect(verdict(withRegex('(['), 'anything')?.rule).toBe('regex')
+    expect(verdict(field({ type: 'string', pattern: '([' }), 'anything')?.rule).toBe('pattern')
+
+    // A flag the engine does not know fails to compile in the same place.
+    const badFlag = field(
+      { type: 'string' },
+      { rules: [{ rule: 'regex', scope: 'both', params: { pattern: 'a', flags: 'Q' } }] },
+    )
+
+    expect(verdict(badFlag, 'a')?.rule).toBe('regex')
+  })
+
+  it('does not match a regex rule once maxLength has failed', () => {
+    const outcome = validateField(withRegex(slow, { maxLength: 10 }), 'a'.repeat(100), {})
+
+    expect(slowMatches).toBe(0)
+    expect(outcome.violation?.rule).toBe('maxLength')
+    expect(outcome.undecided).toEqual([])
+  })
+
+  it('keeps the verdict the keyword gave, whatever the rule would have said', () => {
+    // The pattern would pass, and would fail: the keyword decides both.
+    const digits = withRegex('^[0-9]+$', { maxLength: 3 })
+
+    expect(verdict(digits, '12345')?.rule).toBe('maxLength')
+    expect(verdict(digits, 'abcde')?.rule).toBe('maxLength')
+    expect(verdict(digits, 'abc')?.rule).toBe('regex')
+    expect(verdict(digits, '123')).toBeUndefined()
+
+    // `minLength`, `type` and `required` outrank the rule the same way.
+    expect(verdict(withRegex('^[0-9]+$', { minLength: 4 }), 'ab')?.rule).toBe('minLength')
+    expect(verdict(withRegex('^[0-9]+$'), 42)?.rule).toBe('type')
+    expect(verdict(withRegex('^[0-9]+$', { required: true }), '')?.rule).toBe('required')
+
+    // And so does a failed `pattern` keyword, over a rule that would also fail.
+    const both = withRegex('^[0-9]+$', { pattern: '^[a-z]+$' })
+
+    expect(verdict(both, 'ABC')?.rule).toBe('pattern')
+  })
+
+  it('still names a rule this side never decides, and still raises on one nobody defines', () => {
+    const named = field(
+      { type: 'string', maxLength: 1 },
+      {
+        rules: [
+          { rule: 'passwordStrength', scope: 'client', params: { minScore: 3 }, message: 'No.' },
+        ],
+      },
+    )
+
+    expect(validateField(named, 'too long', {}).undecided.map((entry) => entry.rule)).toEqual([
+      'passwordStrength',
+    ])
+
+    const mistyped = field(
+      { type: 'string', maxLength: 1 },
+      { rules: [{ rule: 'regexp', scope: 'both', params: { pattern: 'a' }, message: 'No.' }] },
+    )
+
+    expect(() => validateField(mistyped, 'too long', {})).toThrow(UnknownValidationRuleError)
   })
 })
 

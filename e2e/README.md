@@ -33,7 +33,7 @@ KELIR_BOOTSTRAP_ADMIN_PASSWORD='a-real-bootstrap-password' \
 
 cd ../../e2e
 npm ci
-npx playwright install --with-deps chromium
+npx playwright install --with-deps chromium firefox
 KELIR_E2E_BASE_URL=http://127.0.0.1:8080 \
 KELIR_E2E_USERNAME=admin \
 KELIR_E2E_PASSWORD='a-real-bootstrap-password' \
@@ -53,7 +53,7 @@ video are kept for failures only.
 
 ## What it covers
 
-Seventeen flows, each the criterion that decides whether an item is Done rather
+Eighteen flows, each the criterion that decides whether an item is Done rather
 than a broad sweep. **This table said six until 2026-09-14**, while eight more
 specs landed beside it; it is listed in the order the flows were added.
 
@@ -76,6 +76,9 @@ specs landed beside it; it is listed in the order the flows were added.
 | The dashboard counts the caller's documents by status as text, leaves out somebody else's, and draws the chart (`the-dashboard-counts-your-documents-by-status.spec.ts`) | #447 |
 | The dashboard says how long the caller's documents took to be decided — the approval and the rejection, not the one waiting or somebody else's (`the-dashboard-says-how-long-approval-takes.spec.ts`) | #461 |
 | An administrator registers an external system, edits it, adds an endpoint and a credential reference, deactivates it and activates it again — the reference shown as the reference and nothing else (`register-an-external-system.spec.ts`) | #520 AC-8 |
+| A value whose pattern match Firefox throws on is not refused by the form, and the server decides it — **in Firefox, the one flow that is** (`a-pattern-the-browser-gives-up-on.spec.ts`) | #496 |
+
+**Every flow runs in Chromium except `a-pattern-the-browser-gives-up-on.spec.ts`, which runs in Firefox and only there** ([#496](https://github.com/sujanto-gaws/kelir/issues/496)). It is about a match Firefox throws on. Chromium does not throw on the same match, it keeps matching, so the spec would hold its tab until the test timed out. `playwright.config.ts` holds the split, as two projects.
 
 The suites seed their rows over the API and assert only through the browser —
 arranging through HTTP is faster and fails where it is meant to, but an
@@ -137,7 +140,7 @@ runner the narrowing costs nothing, because the runner is destroyed with the
 job; on your machine it would disable repositories you rely on.
 
 **The premise that narrowing is safe is re-checked on every run rather than
-argued once.** `playwright install-deps --dry-run chromium` follows the
+argued once.** `playwright install-deps --dry-run chromium firefox` follows the
 install and exits non-zero naming any dependency still missing — so if an
-image ever stops carrying one of chromium's libraries, the job says which
+image ever stops carrying one of chromium's or firefox's libraries, the job says which
 package instead of `Hash Sum mismatch`.
