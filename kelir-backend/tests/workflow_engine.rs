@@ -701,11 +701,16 @@ async fn a_workflow_naming_a_role_nobody_holds_refuses_the_submit() {
         "a task assigned to nobody was created: {}",
         refused.body
     );
+    let detail = &refused.body["error"]["details"][0];
+    assert_eq!(detail["code"], "ASSIGNMENT_UNRESOLVED", "{detail}");
+
+    // The task path keeps its sentence (#534 changed only the decision's).
+    let message = detail["message"].as_str().expect("a message");
     assert!(
-        refused.body.to_string().contains("ASSIGNMENT_UNRESOLVED"),
-        "{}",
-        refused.body
+        message.contains("The task this transition would create would be assigned to nobody"),
+        "{message}"
     );
+    assert!(!message.contains("decision"), "{message}");
 
     assert_eq!(
         stored_status(&app, id).await,
@@ -1387,6 +1392,82 @@ async fn a_transition_is_taken_by_the_role_its_allowed_by_names() {
         approved.body
     );
     assert_eq!(stored_status(&app, id).await, "COMPLETED");
+}
+
+/// **A decision whose `allowedBy` names a role that is gone is told about the
+/// decision** ([#534]).
+///
+/// The APPROVE edge leads to `COMPLETED`, which raises no task, and its role is
+/// deleted in SQL after the task was raised — the state only a pre-**D-89**
+/// delete leaves, and verification record 18's probe P2. The refusal used to
+/// say *"The task this transition would create would be assigned to nobody"*,
+/// about a task that was never going to exist.
+///
+/// **Seen red** against `assignment::permits` asking `Question::Assignee`
+/// instead of `Question::Decider`: the message names a task.
+///
+/// [#534]: https://github.com/sujanto-gaws/kelir/issues/534
+#[tokio::test]
+async fn a_decision_allowed_by_a_role_that_is_gone_is_refused_for_the_decision() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let edge_role = given_bare_role(&app, "WF-EDGE-GONE").await;
+    let approver = approver(&app, "wf.edgegone").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &token,
+        split_control_workflow("wf_edge_gone_later", "WF-EDGE-GONE"),
+    )
+    .await;
+    let type_id = document_type(&app, &token, "PR_EDGE_GONE_LATER", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    sqlx::query("UPDATE roles SET deleted_at = now() WHERE id = $1")
+        .bind(edge_role)
+        .execute(&app.pool)
+        .await
+        .expect("delete the edge's role behind the API's back");
+
+    let task = open_task_of(&app, id).await;
+    let refused = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&approver),
+            json!({ "action": "APPROVE" }),
+        )
+        .await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+    let detail = &refused.body["error"]["details"][0];
+    assert_eq!(detail["code"], "ASSIGNMENT_UNRESOLVED", "{detail}");
+    assert_eq!(
+        detail["path"], "transitions.MANAGER_APPROVAL.APPROVE.allowedBy.roleCode",
+        "{detail}"
+    );
+
+    let message = detail["message"].as_str().expect("a message");
+    assert!(
+        message.contains("`WF-EDGE-GONE` is not a live role in this tenant"),
+        "{message}"
+    );
+    assert!(
+        message.contains("nobody may take this decision"),
+        "{message}"
+    );
+    assert!(
+        !message.contains("task"),
+        "a decision raising no task was told about one: {message}"
+    );
+
+    assert_eq!(stored_status(&app, id).await, "PENDING_APPROVAL");
 }
 
 // ---------------------------------------------------------------------------

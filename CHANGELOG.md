@@ -298,6 +298,15 @@ While the major version is `0`, the public API may change in any release.
   holds: the browser and the server accept different spellings of a property.
   **Nothing that was refused is now stored, and nothing stored is now
   refused**: only the messages changed.
+- **A decision refused by its edge's `allowedBy` is told about the decision,
+  not a task** ([#534](https://github.com/sujanto-gaws/kelir/issues/534)).
+  When the role, user or department an `allowedBy` names does not resolve,
+  the `ASSIGNMENT_UNRESOLVED` detail ended *"The task this transition would
+  create would be assigned to nobody"*, even for an `APPROVE` into a final
+  state, which creates no task. It now ends *"Nobody satisfies this edge's
+  `allowedBy`, so nobody may take this decision, and it is refused rather than
+  let through unchecked"*. A task's `assignment` that resolves to nobody keeps
+  its sentence. The code, the `422` and the detail's path are unchanged.
 
 ## [0.8.0] — 2026-09-17
 
