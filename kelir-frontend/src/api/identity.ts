@@ -5,6 +5,7 @@ import type {
   CreateRoleRequest,
   CreateUserRequest,
   Delegation,
+  OpenTaskNeedingRole,
   Permission,
   Role,
   SetPasswordRequest,
@@ -82,9 +83,30 @@ export function updateRole(id: string, request: UpdateRoleRequest): Promise<Role
   return putItem<Role>(`${ROLES}/${id}`, request)
 }
 
-/** 409 with the backend's own wording when the role is a system role. */
+/**
+ * 409 with the backend's own wording, for one of three reasons: `CONFLICT`
+ * when the role is a system role, `ROLE_HAS_OPEN_TASKS` while open tasks still
+ * need it (D-89), which `listOpenTasksOfRole` then lists, and
+ * `ROLE_NAMED_BY_PUBLISHED_DEFINITION` while a published workflow definition
+ * names it (D-91 (3)), whose message names each definition.
+ */
 export function deleteRole(id: string): Promise<void> {
   return deleteItem(`${ROLES}/${id}`)
+}
+
+/**
+ * The open tasks a delete of this role waits on, oldest first (#532).
+ * `meta.total` is the count the delete refuses on.
+ *
+ * Requires `identity:role:delete`, and nothing else. 404 once the role is
+ * deleted. Read outside the delete's lock, so a task decided in between can
+ * make the list shorter than the refusal said.
+ */
+export function listOpenTasksOfRole(
+  id: string,
+  query: PageQuery = {},
+): Promise<Page<OpenTaskNeedingRole>> {
+  return getPage<OpenTaskNeedingRole>(`${ROLES}/${id}/open-tasks`, query)
 }
 
 /**
