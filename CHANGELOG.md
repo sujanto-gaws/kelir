@@ -145,9 +145,6 @@ While the major version is `0`, the public API may change in any release.
   new workflow runs the test when a `v*` tag is pushed. It detects a wrong
   tag and cannot stop one being pushed. `v0.7.0` and `v0.8.0` pass.
 
-- **A status report's browser-flow check no longer accepts three things it
-  used to** ([#468](https://github.com/sujanto-gaws/kelir/issues/468),
-
 - **A status report's browser-flow check reads the report as it renders**
   ([#468](https://github.com/sujanto-gaws/kelir/issues/468),
   [status report template](projects/status/00.%20Status%20Report%20Template.md)).
