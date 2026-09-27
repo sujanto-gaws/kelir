@@ -654,25 +654,38 @@ pub async fn open_tasks_needing_role<'e, E: PgExecutor<'e>>(
 ) -> Result<OpenTasksPage, sqlx::Error> {
     let rows = sqlx::query!(
         r#"
-        WITH needing AS (
+        WITH open_task AS (
             SELECT t.id, t.task_ref, t.status, t.assignee_user_id, t.document_id,
                    t.created_at, i.current_state,
-                   -- The words of the stranded-task query, Installation and
-                   -- Deployment §9, so the screen and the runbook say the same.
-                   CASE WHEN t.candidate_role_id = r.id AND t.assignee_user_id IS NULL
-                        THEN 'offered to the role, and unclaimed'
-                        ELSE 'a decision out of ' || i.current_state || ' is allowedBy the role'
-                   END AS why
+                   -- Clause (a). NULL for a task offered to no role, which
+                   -- neither `WHERE` nor `CASE` below takes as true.
+                   (t.candidate_role_id = r.id AND t.assignee_user_id IS NULL) AS offered,
+                   -- Clause (b).
+                   EXISTS (SELECT 1 FROM workflow_transitions tr
+                           WHERE tr.workflow_definition_id = i.workflow_definition_id
+                             AND tr.from_state = i.current_state
+                             AND tr.allowed_by_json->>'roleCode' = r.role_code) AS named
             FROM workflow_tasks t
             JOIN workflow_instances i ON i.id = t.workflow_instance_id AND i.tenant_id = t.tenant_id
             JOIN roles r ON r.id = $2 AND r.tenant_id = t.tenant_id
             WHERE t.tenant_id = $1 AND t.deleted_at IS NULL
               AND t.status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')
-              AND ((t.candidate_role_id = r.id AND t.assignee_user_id IS NULL)
-                   OR EXISTS (SELECT 1 FROM workflow_transitions tr
-                              WHERE tr.workflow_definition_id = i.workflow_definition_id
-                                AND tr.from_state = i.current_state
-                                AND tr.allowed_by_json->>'roleCode' = r.role_code))
+        ),
+        needing AS (
+            SELECT id, task_ref, status, assignee_user_id, document_id, created_at,
+                   current_state,
+                   -- The single reasons are the words of the stranded-task
+                   -- query, Installation and Deployment §9. That query does not
+                   -- say *both*; the list does, for the usual shape (#532 AC4).
+                   CASE WHEN offered AND named
+                        THEN 'offered to the role, and unclaimed, and a decision out of '
+                             || current_state || ' is allowedBy the role'
+                        WHEN offered
+                        THEN 'offered to the role, and unclaimed'
+                        ELSE 'a decision out of ' || current_state || ' is allowedBy the role'
+                   END AS why
+            FROM open_task
+            WHERE offered OR named
         )
         SELECT counted.total AS "total!",
                page.id AS "id?", page.task_ref AS "task_ref?", page.status AS "status?",

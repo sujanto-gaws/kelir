@@ -315,10 +315,11 @@ pub struct OpenTaskNeedingRole {
     /// The holder, or `None` while the task is unclaimed.
     pub assignee_user_id: Option<Uuid>,
     pub assignee_display_name: Option<String>,
-    /// Which of the two ways the task needs the role, in the words of the
-    /// stranded-task query in Installation and Deployment §9: `offered to the
-    /// role, and unclaimed`, or `a decision out of {state} is allowedBy the
-    /// role`.
+    /// Which of the two ways the task needs the role, or both: `offered to the
+    /// role, and unclaimed`, `a decision out of {state} is allowedBy the role`,
+    /// or `offered to the role, and unclaimed, and a decision out of {state} is
+    /// allowedBy the role`. The first two are the words of the stranded-task
+    /// query in Installation and Deployment §9.
     pub why: String,
 }
 

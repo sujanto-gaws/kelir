@@ -1862,6 +1862,97 @@ async fn the_list_is_exactly_what_the_delete_counts_through_both_clauses() {
     }
 }
 
+/// **A task that needs the role both ways says both** ([#532] AC4).
+///
+/// The usual shape: the task is offered to the role, and its edges are
+/// `allowedBy` the same role. Unclaimed, it needs the role through clause (a)
+/// and clause (b) at once, and its `why` names the two. Claimed, clause (a)
+/// lets go (#529) and only the edge is left.
+///
+/// **Seen red** with the `CASE` in `open_tasks_needing_role` asking `named`
+/// first, so the edge's reason wins: the unclaimed task said only *a decision
+/// out of MANAGER_APPROVAL is allowedBy the role*.
+///
+/// [#532]: https://github.com/sujanto-gaws/kelir/issues/532
+#[tokio::test]
+async fn a_task_needing_the_role_both_ways_says_both() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let (role, approver) = holder(&app, "TI-532-BOTH", "ti.532.both.ways").await;
+    let workflow = publish_workflow(&app, &token, "ti_532_both", "TI-532-BOTH").await;
+    let type_id = document_type(&app, &token, "TI_532_BOTH", workflow).await;
+    let document = submitted_document(&app, &token, type_id, "Both ways").await;
+    let task = open_task_of(&app, document).await;
+
+    let listed = open_tasks(&app, &token, role, "").await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    assert_eq!(listed.body["meta"]["total"], 1, "{}", listed.body);
+    let row = &listed.body["data"][0];
+    assert_eq!(row["id"], task.to_string(), "{}", listed.body);
+    assert_eq!(
+        row["why"],
+        "offered to the role, and unclaimed, and a decision out of MANAGER_APPROVAL is \
+         allowedBy the role",
+        "an unclaimed task offered to the role its edges name did not say both: {}",
+        listed.body
+    );
+
+    claim(&app, &approver, task).await;
+
+    let listed = open_tasks(&app, &token, role, "").await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    assert_eq!(listed.body["meta"]["total"], 1, "{}", listed.body);
+    assert_eq!(
+        listed.body["data"][0]["why"], "a decision out of MANAGER_APPROVAL is allowedBy the role",
+        "a claimed task still said it was offered: {}",
+        listed.body
+    );
+}
+
+/// **A system role is refused as a system role, open tasks or not** ([#532]).
+///
+/// `ROLE-ADMIN` is offered a task, so the open-task refusal would apply too.
+/// The system role's refusal comes first and answers `CONFLICT`, not
+/// `ROLE_HAS_OPEN_TASKS`: a client must not offer the list of tasks for a role
+/// that cannot be deleted whatever happens to them.
+///
+/// **Seen red** with `delete_role`'s system-role check moved after the
+/// open-task count: the refusal was `ROLE_HAS_OPEN_TASKS`.
+///
+/// [#532]: https://github.com/sujanto-gaws/kelir/issues/532
+#[tokio::test]
+async fn a_system_role_open_tasks_need_is_refused_as_a_system_role() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let admin_role = fixtures::ADMIN_ROLE_ID;
+
+    let workflow = publish_workflow(&app, &token, "ti_532_system", "ROLE-ADMIN").await;
+    let type_id = document_type(&app, &token, "TI_532_SYSTEM", workflow).await;
+    submitted_document(&app, &token, type_id, "Waiting on the administrators").await;
+
+    // The open-task refusal would apply: the role is needed.
+    let listed = open_tasks(&app, &token, admin_role, "").await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    assert_eq!(listed.body["meta"]["total"], 1, "{}", listed.body);
+
+    let refused = delete_role(&app, &token, admin_role).await;
+    assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.body);
+    assert_eq!(
+        refused.body["error"]["code"], "CONFLICT",
+        "a system role was refused for its open tasks, not as a system role: {}",
+        refused.body
+    );
+
+    let still = app
+        .get(
+            &format!("/api/v1/identity/roles/{admin_role}"),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(still.status, StatusCode::OK, "{}", still.body);
+}
+
 /// **Only `identity:role:delete` reads the list** ([#532] AC1, AC9).
 ///
 /// A caller holding every other permission in the catalogue, including

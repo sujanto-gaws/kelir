@@ -76,6 +76,25 @@ function rowsOf(wrapper: VueWrapper) {
   return wrapper.findAll('[data-testid="role-open-task"]')
 }
 
+function buttonNamed(wrapper: VueWrapper, name: string) {
+  const button = wrapper.findAll('button').find((candidate) => candidate.text() === name)
+  if (button === undefined) {
+    throw new Error(`no ${name} button`)
+  }
+
+  return button
+}
+
+function isDisabled(wrapper: VueWrapper, name: string): boolean {
+  return (buttonNamed(wrapper, name).element as HTMLButtonElement).disabled
+}
+
+/** The two tasks, one to a page. */
+const pagedByOne: FakeHandler = (request) =>
+  request.params.page === 2
+    ? { status: 200, body: listBody([claimed], { page: 2, pageSize: 1, total: 2 }) }
+    : { status: 200, body: listBody([unclaimed], { page: 1, pageSize: 1, total: 2 }) }
+
 describe('RoleOpenTasksDialog', () => {
   let backend: FakeBackendHandle
   let handler: FakeHandler
@@ -153,29 +172,41 @@ describe('RoleOpenTasksDialog', () => {
   })
 
   it('pages when the tasks do not fit on one page', async () => {
-    handler = (request) =>
-      request.params.page === 2
-        ? {
-            status: 200,
-            body: listBody([claimed], { page: 2, pageSize: 1, total: 2 }),
-          }
-        : {
-            status: 200,
-            body: listBody([unclaimed], { page: 1, pageSize: 1, total: 2 }),
-          }
+    handler = pagedByOne
 
     const wrapper = await mountDialog()
 
     expect(wrapper.text()).toContain('Page 1 of 2')
     expect(wrapper.text()).toContain('2 open tasks')
+    // There is no page before the first.
+    expect(isDisabled(wrapper, 'Previous')).toBe(true)
 
-    const next = wrapper.findAll('button').find((button) => button.text() === 'Next')
-    await next?.trigger('click')
+    await buttonNamed(wrapper, 'Next').trigger('click')
     await flushPromises()
 
     expect(backend.requests[backend.requests.length - 1]?.params).toMatchObject({ page: 2 })
     expect(wrapper.text()).toContain('Page 2 of 2')
     expect(rowsOf(wrapper)[0].text()).toContain('TSK-0002')
+    expect(isDisabled(wrapper, 'Previous')).toBe(false)
+  })
+
+  it('reads the first page again each time it is opened', async () => {
+    handler = pagedByOne
+    const wrapper = await mountDialog()
+
+    await buttonNamed(wrapper, 'Next').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('Page 2 of 2')
+
+    await wrapper.setProps({ open: false })
+    await wrapper.setProps({ open: true })
+    await flushPromises()
+
+    // Left on page 2, the list would open there, on a page the next refusal
+    // may not have.
+    expect(backend.requests[backend.requests.length - 1]?.params).toMatchObject({ page: 1 })
+    expect(wrapper.text()).toContain('Page 1 of 2')
+    expect(rowsOf(wrapper)[0].text()).toContain('TSK-0001')
   })
 
   it('shows no paging for a single page', async () => {

@@ -103,7 +103,9 @@ export interface OpenTaskNeedingRole {
   assigneeDisplayName: string | null
   /**
    * Why the task needs the role, in the server's words: `offered to the role,
-   * and unclaimed`, or `a decision out of {state} is allowedBy the role`.
+   * and unclaimed`, `a decision out of {state} is allowedBy the role`, or both
+   * joined: `offered to the role, and unclaimed, and a decision out of {state}
+   * is allowedBy the role`.
    */
   why: string
 }
