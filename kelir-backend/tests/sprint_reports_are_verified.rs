@@ -120,7 +120,8 @@
 //!    ([#468](https://github.com/sujanto-gaws/kelir/issues/468)): what a
 //!    reader cannot see — an HTML comment, a link reference definition, a
 //!    link's title or destination, an image, a tag, a hidden element — says
-//!    nothing, and a link's label is not where it points.
+//!    nothing, a link's label is not where it points, and a link whose label
+//!    shows nothing, or whose path climbs out through `..`, cites nothing.
 //! 5. **The history is there to ask, and the walk found what exists.** A
 //!    depth-1 clone does not fail to answer rule 4 — it answers it wrongly,
 //!    because its single grafted commit *adds* every file in the tree. So a
@@ -210,14 +211,27 @@
 //! - **`PR #N` in prose is read as Kelir's.** Text has no repository in it, so
 //!   *unovis PR #457* cites Kelir's #457. Only a link says where it points,
 //!   and only a link whose target is this repository counts.
-//! - **Text a class hides.** An element marked `hidden` or given a `style`,
-//!   and a `script`, `style` or `template`, is dropped with its contents,
-//!   whether or not GitHub keeps the attribute — either answer is safe (see
-//!   [`Reader::html`]). An element hidden only by a class the page's
-//!   stylesheet defines is not, and its text counts. No report uses HTML, on
-//!   `main` or in any tree it has held.
-//! - **Struck-through text.** `~~verified by inspection only~~` renders the
-//!   phrase with a line through it, and counts: it is still on the page.
+//! - **Text a class hides, or makes hard to see.** An element marked `hidden`
+//!   or given a `style`, and a `script`, `style`, `template` or `rp`, is
+//!   dropped with its contents, whether or not GitHub keeps the attribute —
+//!   either answer is safe (see [`Reader::html`]). An element hidden only by a
+//!   class the page's stylesheet defines is not, and its text counts; so does
+//!   text shrunk by nested `<sub>` or `<sup>`, or coloured by an attribute
+//!   other than `style`. No report uses HTML, on `main` or in any tree it has
+//!   held.
+//! - **Struck-through and collapsed text.** `~~verified by inspection only~~`,
+//!   `<del>` and `<s>` render the phrase with a line through it, and count: it
+//!   is still on the page. So does the body of a `<details>` left closed,
+//!   which is one click from the reader.
+//! - **Every section headed `Scope Status` is read.** A level-1 or level-2
+//!   heading whose visible text *starts* `Scope Status` opens the section, so
+//!   `## Scope Status, continued` is read as well as the first, and so is a
+//!   heading such as `## Scope Status Appendix`. Each is on the page under
+//!   that name.
+//! - **A label of other invisible characters.** A label of only whitespace,
+//!   a soft hyphen or a zero-width space, joiner or non-joiner is empty and
+//!   cites nothing. One made of another blank-looking character, such as the
+//!   Braille blank `U+2800`, shows something here and cites.
 //! - **`HEAD`, not the working tree, for specs.** Presence is asked of the
 //!   commit the log reads, so an uncommitted deletion is not seen until it is
 //!   committed, and an uncommitted move is not mistaken for one. The reports
@@ -257,8 +271,24 @@
 //!   a URL in a code block is not a link. Every report cites outside code.
 //! - **The raw text of an HTML block is not read.** A phrase inside
 //!   `<div>…</div>` on its own lines shows on GitHub and is refused here; only
-//!   the block's tags are read. Inline tags keep the text between them, so
+//!   the block's tags are read, so an `<a href>` on a line of its own has no
+//!   label and cites nothing. Inline tags keep the text between them, so
 //!   `<b>verified by inspection only</b>` counts.
+//! - **An element is closed only by its own closing tag.** GitHub's HTML
+//!   parser closes an inline element left open at the end of its block; this
+//!   reading does not. So a `<span hidden>` never closed hides the rest of the
+//!   report, and an `<a href>` never closed cites nothing.
+//! - **`hidden` or `style` anywhere in a tag's attributes hides it**, so
+//!   `aria-hidden`, which hides nothing on screen, and `title="hidden"` drop
+//!   their text too.
+//! - **A dot segment is refused, not resolved.** `…/kelir/pull/481/./files`
+//!   lands on #481's files and cites nothing here, and an encoded `/` or `\`
+//!   counts as a separator, as a browser would not.
+//! - **A link whose label is only an image cites nothing.** It shows the image
+//!   and not a word, so `[![#481](shot.png)](…/kelir/pull/481)` is refused.
+//! - **A heading's own text never cites**, at levels 1 and 2: a Kelir link in
+//!   `## Scope Status` itself is not read. A `###` heading inside the section
+//!   is read like the rest of it.
 //!
 //! # Rules 4–6, seen red 2026-09-14 (#453)
 //!
@@ -350,10 +380,39 @@
 //!   it is now; a deletion ends it, and a path added again starts afresh.
 //!   What survives counts while its path is in `HEAD`.
 //!
+//! **The fourth round was sent back with five shapes the parser's reading
+//! still let through**, and the fifth fixes each:
+//!
+//! - **A comment an HTML block spreads over lines.** The parser hands an HTML
+//!   block over a line at a time, so `<!--`, `<a href>` and `-->` on three
+//!   lines were three pieces, and the middle one was read. A block is now read
+//!   whole, its comments gone.
+//! - **An element hidden before the heading.** `<div hidden>` opened above
+//!   `## Scope Status` and closed below the phrase hid it on GitHub and not
+//!   here, because only the section's tags were read. Every tag in the report
+//!   is now followed, and the section inherits what is open when it starts.
+//! - **A dot segment.** `…/kelir/pull/481/../../../../f5/unovis/pull/481`
+//!   lands on unovis. A target or bare URL whose path has a `.` or `..`
+//!   segment, raw or percent-encoded, is refused.
+//! - **An empty label**, `[](…/kelir/pull/481)` or `<a href="…"></a>`: a link
+//!   nobody can see to follow. A link cites only when its label shows
+//!   something.
+//! - **A hidden label**, `[<span hidden>#481</span>](…)`: the target was taken
+//!   when the link opened, before its label was read. It is now decided when
+//!   the link closes, from the label a reader sees.
+//!
+//! **Four smaller gaps the same gate named were closed with them**: a heading
+//! is Scope Status by its *visible* text, so `## <span hidden>Scope
+//! Status</span> Appendix` and an image's alt text no longer start the
+//! section; `rp` is dropped with `script`, `style` and `template`; and a
+//! `###` heading inside Scope Status is read, so `### PR #481` cites, where
+//! every heading had been skipped. What the gate named and this round did not
+//! fix is in *What rules 4–6 will not notice*.
+//!
 //! **Each fix seen red.** Each predicate below was put back alone against the
 //! file as its round left it, and the file run, then restored byte-exact. The
 //! first nine are the regular-expression rounds', whose code the parser has
-//! replaced; the fourth round's are after them:
+//! replaced; the fourth and fifth rounds' are after them:
 //!
 //! | Put back | Red |
 //! |---|---|
@@ -372,10 +431,23 @@
 //! | A definition read a line at a time, so a title on the next line is not its title | *a phrase that renders as nothing* and *a pull request in another repository* — `[//]: #` and an indented `(…)` below it |
 //! | Code read as prose | *a pull request in another repository* alone — `` `PR #457` `` |
 //! | Renames not followed, again under the parser | *a moved spec* alone |
+//! | An HTML block read a line at a time | *a Kelir link nobody sees* alone — the `<a href>` a comment holds, given its label by the paragraph after it |
+//! | Tags read only inside Scope Status | *what hides and what heads Scope Status* alone — `<div hidden>` opened above the heading, and the hidden heading |
+//! | Dot segments kept | *a Kelir link nobody sees* and *a dot segment is found* — `../` and `%2e%2e` in a link, `<a href>` and a bare URL |
+//! | A link cites whatever its label | *a Kelir link nobody sees* alone — the empty and the hidden labels |
+//! | A hidden label's text counted | *a Kelir link nobody sees* alone — the hidden labels only |
+//! | A heading read with its hidden text | *what hides and what heads Scope Status* alone |
+//! | `rp` rendered | *what hides and what heads Scope Status* alone |
+//! | Renames not followed, under the fifth round's reader | *a moved spec* alone |
 //!
-//! A probe of each shape, run beside the last six, flipped under its own
-//! mutation, and only one flipped under another's: the definition in another
-//! section, whose label `PR #457` is prose when labels are.
+//! A probe of each shape, run beside the fourth round's six, flipped under its
+//! own mutation, and only one flipped under another's: the definition in
+//! another section, whose label `PR #457` is prose when labels are. Beside the
+//! fifth round's, each probe flipped only under its own. **The first fifth-round
+//! shape is refused twice over**: an `<a href>` alone in an HTML block has only
+//! the block's raw text for a label, which is not read, so the empty-label fix
+//! refuses it too. Joining the block is seen red by a comment that holds only
+//! the `<a>` and leaves its label to the paragraph after it.
 //!
 //! **No report main has held is refused.** Main's file and this one were run
 //! against `projects/status/` and `projects/verifications/` as each of the 66
@@ -402,6 +474,12 @@
 //! green, it was green under both. **No report cited a pull request only in
 //! code**: this file with code read as prose gave every report on every tree
 //! the same citations.
+//!
+//! **The fifth round swept the same 67 trees**, `f8984ef` now the last, with
+//! the same result: every shared test the same under both files, rule 4 green
+//! on all, the added tests green on all, rule 6's set different by Sprint 6
+//! alone, and no citation only in code. So following tags over the whole
+//! report changed nothing on any tree: no report has held an HTML tag.
 //!
 //! **C is swept by its history rather than by tree.** The sweep reads today's
 //! log. That is faithful for C because **no commit on main has deleted or
@@ -453,8 +531,8 @@
 //! The non-ASCII row was refused before because git quotes such a path, and
 //! the log is now read with `core.quotePath=false`.
 //!
-//! **The fourth round's controls, last**: `Done`, citing nothing, reddened
-//! rule 4 and nothing else, and `Done - [#481](https://github.com/sujanto-gaws/kelir/pull/481)`
+//! **The fourth and fifth rounds' controls, last**: `Done`, citing nothing,
+//! reddened rule 4 and nothing else, and `Done - [#481](https://github.com/sujanto-gaws/kelir/pull/481)`
 //! was accepted, every test green.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -718,12 +796,14 @@ struct Rendered {
     /// Where `PR #N` or a bare Kelir URL may cite: text outside any link's
     /// label and outside code.
     prose: String,
-    /// Where each link points, Markdown or `<a href>`.
+    /// Where each link whose label shows something points, Markdown or
+    /// `<a href>`.
     targets: Vec<String>,
 }
 
-/// Elements whose contents never render, whatever their attributes.
-const UNRENDERED_ELEMENTS: [&str; 3] = ["script", "style", "template"];
+/// Elements whose contents never render, whatever their attributes. `rp` is
+/// ruby's fallback, drawn only by a browser that cannot draw ruby.
+const UNRENDERED_ELEMENTS: [&str; 4] = ["rp", "script", "style", "template"];
 
 /// Elements with no closing tag, which open nothing.
 const VOID_ELEMENTS: [&str; 14] = [
@@ -731,14 +811,40 @@ const VOID_ELEMENTS: [&str; 14] = [
     "track", "wbr",
 ];
 
-/// Walks the parser's events for one Scope Status and keeps what renders.
+/// Characters that take no room, so a label made only of them shows nothing.
+const INVISIBLE: [char; 6] = [
+    '\u{00ad}', '\u{200b}', '\u{200c}', '\u{200d}', '\u{2060}', '\u{feff}',
+];
+
+/// A link whose label is still being read.
+struct OpenLink {
+    /// An `<a>` rather than a Markdown link, so each closes only its own kind.
+    anchor: bool,
+    /// Where it points: `None` for an `<a>` with no `href`.
+    target: Option<String>,
+    /// What a reader sees of its label so far.
+    label: String,
+}
+
+/// Walks the parser's events for the whole report and keeps what renders in
+/// Scope Status.
+///
+/// **Every event is read, and only Scope Status's are kept.** What hides text
+/// — an element opened before the section and closed inside it — is followed
+/// from the first line, so the section inherits it.
 #[derive(Default)]
 struct Reader {
     rendered: Rendered,
-    /// Inside a Markdown link's label.
-    in_link: usize,
-    /// Inside an `<a href>`'s label.
-    in_anchor: usize,
+    /// Between a level-1 or level-2 heading that starts `Scope Status` and the
+    /// next heading at those levels.
+    in_scope: bool,
+    /// The visible text of the level-1 or level-2 heading being read.
+    heading: Option<String>,
+    /// An HTML block's raw text so far. The parser hands it over a line at a
+    /// time, and a comment can span the lines, so it is read whole at its end.
+    html_block: Option<String>,
+    /// The links open now, Markdown and `<a>`, innermost last.
+    links: Vec<OpenLink>,
     /// Inside an image, whose alt text shows only when it fails to load.
     in_image: usize,
     /// Inside code, which is shown but never linked.
@@ -759,9 +865,22 @@ impl Reader {
             return;
         }
 
+        if let Some(heading) = self.heading.as_mut() {
+            heading.push_str(text);
+            return;
+        }
+
+        for link in &mut self.links {
+            link.label.push_str(text);
+        }
+
+        if !self.in_scope {
+            return;
+        }
+
         self.rendered.visible.push_str(text);
 
-        if self.in_link > 0 || self.in_anchor > 0 || is_code || self.in_code_block > 0 {
+        if !self.links.is_empty() || is_code || self.in_code_block > 0 {
             self.rendered.prose.push(' ');
         } else {
             self.rendered.prose.push_str(text);
@@ -770,25 +889,50 @@ impl Reader {
 
     /// A break between blocks or cells, so words either side do not join.
     fn gap(&mut self) {
-        self.rendered.visible.push('\n');
-        self.rendered.prose.push('\n');
-    }
-
-    fn target(&mut self, target: &str) {
-        if !self.hiding() {
-            self.rendered.targets.push(target.to_owned());
+        if self.in_scope {
+            self.rendered.visible.push('\n');
+            self.rendered.prose.push('\n');
         }
     }
 
-    /// Raw HTML, which renders none of its own text: only its tags are read.
+    fn open_link(&mut self, anchor: bool, target: Option<String>) {
+        self.links.push(OpenLink {
+            anchor,
+            target,
+            label: String::new(),
+        });
+    }
+
+    /// Closes the innermost open link of its kind. **It cites only when its
+    /// label shows something**: an empty label, or one wholly hidden, is a
+    /// link nobody can see to follow. Decided here rather than when the link
+    /// opens, because only now is the whole label known.
+    fn close_link(&mut self, anchor: bool) {
+        let Some(at) = self.links.iter().rposition(|link| link.anchor == anchor) else {
+            return;
+        };
+        let link = self.links.remove(at);
+        let shows = link
+            .label
+            .chars()
+            .any(|shown| !shown.is_whitespace() && !INVISIBLE.contains(&shown));
+
+        if let (true, true, None, Some(target)) = (shows, self.in_scope, &self.heading, link.target)
+        {
+            self.rendered.targets.push(target);
+        }
+    }
+
+    /// Raw HTML, which renders none of its own text: only its tags are read,
+    /// once its comments are gone.
     ///
     /// **Everything from an element marked `hidden` or given a `style`, or a
-    /// `script`, `style` or `template`, to its closing tag is dropped**, and to
-    /// the end when it has none. Whether GitHub keeps those attributes is not
-    /// asked: kept, the contents are hidden and rightly dropped; stripped, they
-    /// show and are dropped anyway, a red test and not a quiet pass. An
-    /// `<a href>` is read as a Markdown link is: its `href` is a target and its
-    /// text a label.
+    /// `script`, `style`, `template` or `rp`, to its closing tag is dropped**,
+    /// and to the end of the report when it has none. Whether GitHub keeps
+    /// those attributes is not asked: kept, the contents are hidden and rightly
+    /// dropped; stripped, they show and are dropped anyway, a red test and not
+    /// a quiet pass. An `<a href>` is read as a Markdown link is: its `href` is
+    /// a target and its text a label.
     fn html(&mut self, html: &str) {
         let tag =
             Regex::new(r"<(/?)([A-Za-z][A-Za-z0-9-]*)([^>]*)>").expect("the tag pattern compiles");
@@ -808,7 +952,7 @@ impl Reader {
                 if let Some(at) = self.hidden.iter().rposition(|open| *open == name) {
                     self.hidden.truncate(at);
                 } else if name == "a" && self.hidden.is_empty() {
-                    self.in_anchor = self.in_anchor.saturating_sub(1);
+                    self.close_link(true);
                 }
             } else if !self.hidden.is_empty() {
                 if opens {
@@ -819,15 +963,15 @@ impl Reader {
             {
                 self.hidden.push(name);
             } else if name == "a" && opens {
-                if let Some(found) = href.captures(attributes) {
-                    let target = found
+                let target = href.captures(attributes).map(|found| {
+                    found
                         .get(1)
                         .or_else(|| found.get(2))
                         .or_else(|| found.get(3))
-                        .map_or("", |m| m.as_str());
-                    self.target(target);
-                }
-                self.in_anchor += 1;
+                        .map_or("", |value| value.as_str())
+                        .to_owned()
+                });
+                self.open_link(true, target);
             }
         }
     }
@@ -837,13 +981,15 @@ impl Reader {
 /// ([#468](https://github.com/sujanto-gaws/kelir/issues/468) A and B), read
 /// by `pulldown-cmark` — why a parser, and why that one, is in the module doc.
 ///
-/// **The whole report is parsed**, so a reference definition anywhere in it
-/// resolves a link in Scope Status, as GitHub resolves it; then only the
-/// events between a level-1 or level-2 heading that starts `Scope Status` and
-/// the next heading at those levels are read. `###` subsections stay inside,
-/// which is where status report 18 explains its three frontend rows. A report
-/// with no such heading renders nothing here, so it cites nothing and says
-/// nothing — rule 4 red, rather than the whole body searched.
+/// **The whole report is parsed and read**, so a reference definition
+/// anywhere in it resolves a link in Scope Status, as GitHub resolves it, and
+/// an element hidden before the section hides what it holds of it. Only the
+/// text between a level-1 or level-2 heading whose *visible* text starts
+/// `Scope Status` and the next heading at those levels is kept. `###`
+/// subsections stay inside, headings and all, which is where status report 18
+/// explains its three frontend rows. A report with no such heading renders
+/// nothing here, so it cites nothing and says nothing — rule 4 red, rather
+/// than the whole body searched.
 ///
 /// **What renders as nothing is dropped**: a comment, a reference definition,
 /// an image's alt text, a link's title and destination, a tag and its
@@ -855,46 +1001,36 @@ fn rendered(report: &str) -> Rendered {
     let options =
         Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     let mut reader = Reader::default();
-    let mut in_scope = false;
-    let mut heading: Option<(bool, String)> = None;
 
     for event in Parser::new_ext(report, options) {
-        if let Some((top_level, text)) = heading.as_mut() {
-            match event {
-                Event::Text(found) | Event::Code(found) => text.push_str(&found),
-                Event::End(TagEnd::Heading(_)) => {
-                    if *top_level {
-                        in_scope = text.trim().starts_with("Scope Status");
-                    }
-                    heading = None;
-                }
-                _ => {}
-            }
-            continue;
-        }
-
-        if let Event::Start(Tag::Heading { level, .. }) = event {
-            heading = Some((
-                matches!(level, HeadingLevel::H1 | HeadingLevel::H2),
-                String::new(),
-            ));
-            continue;
-        }
-
-        if !in_scope {
-            continue;
-        }
-
         match event {
+            Event::Start(Tag::Heading {
+                level: HeadingLevel::H1 | HeadingLevel::H2,
+                ..
+            }) => reader.heading = Some(String::new()),
+            Event::End(TagEnd::Heading(HeadingLevel::H1 | HeadingLevel::H2)) => {
+                if let Some(heading) = reader.heading.take() {
+                    reader.in_scope = heading.trim().starts_with("Scope Status");
+                }
+            }
             Event::Text(text) => reader.text(&text, false),
             Event::Code(code) => reader.text(&code, true),
-            Event::Html(html) | Event::InlineHtml(html) => reader.html(&html),
+            Event::Start(Tag::HtmlBlock) => reader.html_block = Some(String::new()),
+            Event::End(TagEnd::HtmlBlock) => {
+                if let Some(block) = reader.html_block.take() {
+                    reader.html(&block);
+                }
+            }
+            Event::Html(html) => match reader.html_block.as_mut() {
+                Some(block) => block.push_str(&html),
+                None => reader.html(&html),
+            },
+            Event::InlineHtml(html) => reader.html(&html),
             Event::SoftBreak | Event::HardBreak => reader.text(" ", false),
             Event::Start(Tag::Link { dest_url, .. }) => {
-                reader.target(&dest_url);
-                reader.in_link += 1;
+                reader.open_link(false, Some(dest_url.into_string()));
             }
-            Event::End(TagEnd::Link) => reader.in_link = reader.in_link.saturating_sub(1),
+            Event::End(TagEnd::Link) => reader.close_link(false),
             Event::Start(Tag::Image { .. }) => reader.in_image += 1,
             Event::End(TagEnd::Image) => reader.in_image = reader.in_image.saturating_sub(1),
             Event::Start(Tag::CodeBlock(_)) => reader.in_code_block += 1,
@@ -902,12 +1038,35 @@ fn rendered(report: &str) -> Rendered {
                 reader.in_code_block = reader.in_code_block.saturating_sub(1);
                 reader.gap();
             }
-            Event::End(TagEnd::Paragraph | TagEnd::TableCell | TagEnd::Item) => reader.gap(),
+            Event::End(
+                TagEnd::Paragraph | TagEnd::TableCell | TagEnd::Item | TagEnd::Heading(_),
+            ) => reader.gap(),
             _ => {}
         }
     }
 
     reader.rendered
+}
+
+/// Whether a URL's path has a `.` or `..` segment, raw or percent-encoded.
+///
+/// A browser resolves them before it asks, so
+/// `https://github.com/sujanto-gaws/kelir/pull/481/../../../../f5/unovis/pull/481`
+/// lands on unovis's #481. **Such a URL is refused rather than resolved**: no
+/// report has written one, and one that is not an attack is a typo. An encoded
+/// `/` or `\` is read as the separator it spells, which only refuses more.
+fn has_dot_segment(url: &str) -> bool {
+    let path = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .replace("%2e", ".")
+        .replace("%2f", "/")
+        .replace("%5c", "\\");
+
+    path.split(['/', '\\'])
+        .any(|segment| segment == "." || segment == "..")
 }
 
 /// The pull requests a Scope Status cites: as a link to one of Kelir's,
@@ -919,11 +1078,12 @@ fn rendered(report: &str) -> Rendered {
 /// `https://github.com/f5/unovis/pull/457` cited Kelir's #457, and a label
 /// reading `PR #457` counted whatever it linked to
 /// ([#468](https://github.com/sujanto-gaws/kelir/issues/468) B). A link's
-/// target must *be* a Kelir pull request URL, scheme first: one with no
-/// scheme is a relative link into this repository's files. `PR #N`, as a
-/// word, and a bare Kelir URL count in prose. **A bare URL must start a
-/// word**, after a line start, a space, a table's `|` or an opening
-/// parenthesis that itself starts one, so one inside another URL, as in
+/// target must *be* a Kelir pull request URL, scheme first, with no dot
+/// segment to climb out of it: one with no scheme is a relative link into this
+/// repository's files. `PR #N`, as a word, and a bare Kelir URL count in
+/// prose. **A bare URL must start a word**, after a line start, a space, a
+/// table's `|` or an opening parenthesis that itself starts one, so one inside
+/// another URL, as in
 /// `https://evil.example/?u=https://github.com/sujanto-gaws/kelir/pull/457`,
 /// is part of that URL and cites nothing.
 fn cited_pull_requests(section: &Rendered) -> BTreeSet<u32> {
@@ -932,18 +1092,24 @@ fn cited_pull_requests(section: &Rendered) -> BTreeSet<u32> {
     )
     .expect("the link pattern compiles");
     let in_prose = Regex::new(
-        r"(?m)(?:^|[\s|])\(?(?i:(?:https?://(?:www\.)?|www\.)github\.com/sujanto-gaws/kelir/pull/)(\d+)|\bPR ?#(\d+)",
+        r"(?m)(?:^|[\s|])\(?((?i:(?:https?://(?:www\.)?|www\.)github\.com/sujanto-gaws/kelir/pull/)(\d+)[^\s<>]*)|\bPR ?#(\d+)",
     )
     .expect("the prose pattern compiles");
 
     let linked = section
         .targets
         .iter()
-        .filter_map(|target| kelir_link.captures(target.trim()))
+        .map(|target| target.trim())
+        .filter(|target| !has_dot_segment(target))
+        .filter_map(|target| kelir_link.captures(target))
         .filter_map(|found| found[1].parse().ok());
     let written = in_prose
         .captures_iter(&section.prose)
-        .filter_map(|found| found.get(1).or_else(|| found.get(2)))
+        .filter_map(|found| match (found.get(1), found.get(2), found.get(3)) {
+            (Some(url), Some(number), _) if !has_dot_segment(url.as_str()) => Some(number),
+            (_, _, Some(number)) => Some(number),
+            _ => None,
+        })
         .filter_map(|number| number.as_str().parse().ok());
 
     linked.chain(written).collect()
@@ -1430,6 +1596,172 @@ fn a_reference_resolves_from_anywhere_in_the_report() {
         !drives_a_screen_or_says_it_did_not(heading_in_code, &BTreeSet::new()),
         "a heading inside a code block started Scope Status"
     );
+}
+
+/// #468 B, the fifth round. **A Kelir link cites only when a reader can see
+/// it and it lands on Kelir**: not inside a comment an HTML block spreads over
+/// lines, not with an empty or hidden label, and not when a dot segment climbs
+/// out of the repository.
+#[test]
+fn a_kelir_link_nobody_sees_or_that_climbs_out_cites_nothing() {
+    let driven = BTreeSet::from([481]);
+    let kelir = "https://github.com/sujanto-gaws/kelir/pull/481";
+
+    for unseen in [
+        // A comment an HTML block spreads over three lines.
+        format!("| 1 | The chart | Done |\n\n<!--\n<a href=\"{kelir}\">x</a>\n-->"),
+        format!("| 1 | The chart | Done |\n\n<!--\n[#481]({kelir})\n-->"),
+        // The `<a>` a comment holds, given a label by the paragraph after it.
+        format!("| 1 | The chart | Done |\n\n<!--\n<a href=\"{kelir}\">\n-->\n#481</a>"),
+        // Dot segments, raw and percent-encoded, in each kind of link.
+        format!("| 1 | The chart | Done [#481]({kelir}/../../../../f5/unovis/pull/481) |"),
+        format!("| 1 | The chart | Done {kelir}/../../../../f5/unovis/pull/481 |"),
+        format!("| 1 | The chart | Done [#481]({kelir}/%2e%2e/%2E%2E/%2e%2e/%2e%2e/f5/unovis/pull/481) |"),
+        format!("| 1 | The chart | Done [#481]({kelir}/.%2e/.%2e/.%2e/.%2e/f5/unovis/pull/481) |"),
+        format!("| 1 | The chart | Done {kelir}/%2e%2e/%2e%2e/%2e%2e/%2e%2e/f5/unovis/pull/481 |"),
+        format!(
+            "| 1 | The chart | Done <a href=\"{kelir}/../../../../f5/unovis/pull/481\">#481</a> |"
+        ),
+        // An empty label, and one only whitespace or zero-width characters.
+        format!("| 1 | The chart | Done [](<{kelir}>) |"),
+        format!("| 1 | The chart | Done []({kelir}) |"),
+        format!("| 1 | The chart | Done [ ]({kelir}) |"),
+        format!("| 1 | The chart | Done [\u{200b}]({kelir}) |"),
+        format!("| 1 | The chart | Done [&#8203;]({kelir}) |"),
+        format!("| 1 | The chart | Done <a href=\"{kelir}\"></a> |"),
+        format!("| 1 | The chart | Done <a href=\"{kelir}\"> </a> |"),
+        // A label that is there but hidden.
+        format!("| 1 | The chart | Done [<span hidden>#481</span>]({kelir}) |"),
+        format!("| 1 | The chart | Done <a href=\"{kelir}\"><span hidden>#481</span></a> |"),
+        format!("| 1 | The chart | Done [![#481](shot.png)]({kelir}) |"),
+    ] {
+        assert!(
+            !drives_a_screen_or_says_it_did_not(&report_whose_scope_status_says(&unseen), &driven),
+            "a Kelir link a reader cannot see or follow to Kelir cited #481:\n{unseen}"
+        );
+    }
+
+    for seen in [
+        format!("| 1 | The chart | Done <!-- a note --> <a href=\"{kelir}\">#481</a> |"),
+        format!("Done <!--\na note\n--> [#481]({kelir})"),
+        format!("| 1 | The chart | Done [#481]({kelir}/files) |"),
+        format!("| 1 | The chart | Done [#481]({kelir}?tab=../..) |"),
+        format!("| 1 | The chart | Done [#481]({kelir}#issuecomment-1) |"),
+        format!("Done, {kelir}."),
+        format!("| 1 | The chart | Done [`#481`]({kelir}) |"),
+        format!("| 1 | The chart | Done [<span hidden>a note</span>#481]({kelir}) |"),
+        format!("| 1 | The chart | Done <a href=\"{kelir}\"><b>#481</b></a> |"),
+    ] {
+        assert!(
+            drives_a_screen_or_says_it_did_not(&report_whose_scope_status_says(&seen), &driven),
+            "a Kelir link a reader sees did not cite #481:\n{seen}"
+        );
+    }
+}
+
+/// #468 A, the fifth round. **What hides text is followed over the whole
+/// report**, so an element hidden before Scope Status's heading and closed
+/// after its phrase hides the phrase; and **the heading that starts the section
+/// is the one a reader sees**.
+#[test]
+fn what_hides_and_what_heads_scope_status_is_read_over_the_whole_report() {
+    let nothing_driven = BTreeSet::new();
+    let driven = BTreeSet::from([481]);
+    let report = |before: &str, heading: &str, scope: &str| {
+        format!(
+            "# Sprint 99 Status\n\nauthor-verified\n\n{before}## {heading}\n\n{scope}\n\n\
+             ## Risks\n\nNone.\n"
+        )
+    };
+
+    for (before, heading, scope, cites) in [
+        (
+            "<div hidden>\n\n",
+            "Scope Status",
+            "verified by inspection only\n\n</div>",
+            &nothing_driven,
+        ),
+        (
+            "<div hidden>\n\n",
+            "Scope Status",
+            "PR #481\n\n</div>",
+            &driven,
+        ),
+        (
+            "",
+            "<span hidden>Scope Status</span> Appendix",
+            "verified by inspection only",
+            &nothing_driven,
+        ),
+        (
+            "",
+            "![Scope Status](shot.png) Appendix",
+            "verified by inspection only",
+            &nothing_driven,
+        ),
+        (
+            "",
+            "Scope Status",
+            "Done <rp>verified by inspection only</rp>",
+            &nothing_driven,
+        ),
+    ] {
+        assert!(
+            !drives_a_screen_or_says_it_did_not(&report(before, heading, scope), cites),
+            "hidden text, or a hidden heading, satisfied rule 4:\n{before}## {heading}\n\n{scope}"
+        );
+    }
+
+    for (before, heading, scope, cites) in [
+        (
+            "<div hidden>\n\na note\n\n</div>\n\n",
+            "Scope Status",
+            "verified by inspection only",
+            &nothing_driven,
+        ),
+        (
+            "",
+            "Scope Status <span hidden>a note</span>",
+            "verified by inspection only",
+            &nothing_driven,
+        ),
+        (
+            "",
+            "`Scope Status`",
+            "verified by inspection only",
+            &nothing_driven,
+        ),
+        ("", "Scope Status", "### PR #481\n\nThe chart.", &driven),
+    ] {
+        assert!(
+            drives_a_screen_or_says_it_did_not(&report(before, heading, scope), cites),
+            "visible text under a visible heading did not satisfy rule 4:\n{before}## {heading}\n\n{scope}"
+        );
+    }
+}
+
+#[test]
+fn a_dot_segment_is_found_raw_or_encoded_and_only_in_the_path() {
+    for climbs in [
+        "https://github.com/a/../b",
+        "https://github.com/a/./b",
+        "https://github.com/a/%2E%2e/b",
+        "https://github.com/a%2f..%2fb",
+        "https://github.com/a\\..\\b",
+        "https://github.com/a/..",
+    ] {
+        assert!(has_dot_segment(climbs), "{climbs}");
+    }
+
+    for stays in [
+        "https://github.com/a/b",
+        "https://github.com/a/b.c",
+        "https://github.com/a/...",
+        "https://github.com/a/b?c=../d",
+        "https://github.com/a/b#../d",
+    ] {
+        assert!(!has_dot_segment(stays), "{stays}");
+    }
 }
 
 /// #468 C. **A spec a later commit deleted drives nothing**, so the pull

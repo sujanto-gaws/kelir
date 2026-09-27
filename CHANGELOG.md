@@ -160,8 +160,9 @@ While the major version is `0`, the public API may change in any release.
   or destination, an image, a tag's attributes, or an element marked `hidden`
   or given a `style`. A link, Markdown or `<a href>`, counts by where it
   points and never by its label, so a link to another repository's pull
-  request cites nothing, even when its number or label matches a Kelir one. A
-  citation in code does not count. A pull request whose spec a later commit
+  request cites nothing, even when its number or label matches a Kelir one.
+  Nor does a link whose label is empty or hidden, or whose path has a `.` or
+  `..` segment. A citation in code does not count. A pull request whose spec a later commit
   deleted no longer counts, and one whose spec was moved still does. No status
   report `main` has held changes rule 4's answer. The Sprint 6 report, which
   writes the phrase in bold, now counts as saying it, so it leaves rule 6's
