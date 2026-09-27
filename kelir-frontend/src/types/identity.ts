@@ -90,6 +90,8 @@ export const ROLE_HAS_OPEN_TASKS = 'ROLE_HAS_OPEN_TASKS'
  * `document:read`.
  */
 export interface OpenTaskNeedingRole {
+  /** The task's id, which the task routes take, such as a reassign. */
+  id: string
   taskRef: string
   documentNumber: string | null
   documentTitle: string | null

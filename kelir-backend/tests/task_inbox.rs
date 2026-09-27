@@ -1118,7 +1118,8 @@ async fn the_count_the_page_and_the_gate_agree_when_a_document_is_gone() {
 /// still live and its holder is still offered the task.
 ///
 /// **Both reasons hold the role here, and the refusals come one at a time.**
-/// The open task is asked about first, and its refusal is D-89's `CONFLICT`.
+/// The open task is asked about first, and its refusal is D-89's
+/// `ROLE_HAS_OPEN_TASKS`.
 /// Once the task is decided, the published definition that names the role is
 /// all that holds it, and the refusal is **D-91** (3)'s own code,
 /// `ROLE_NAMED_BY_PUBLISHED_DEFINITION`. Deleting that revision, which nothing
@@ -1491,7 +1492,7 @@ async fn a_role_is_not_held_by_another_tenants_task() {
 /// Each role is also named by its published definition, so since **D-91** (3)
 /// ([#510]) `FA` and `Z` are refused too, with the definition's own code. That
 /// is the point of D-91 (3) for `FA`: document A's next step needs it. A task
-/// counted wrongly would turn either refusal into D-89's `CONFLICT`.
+/// counted wrongly would turn either refusal into D-89's `ROLE_HAS_OPEN_TASKS`.
 ///
 /// **Seen red** against `count_open_tasks_needing_role`: without
 /// `tr.from_state = i.current_state` the `FA` refusal counts a task; without
@@ -1621,7 +1622,7 @@ async fn a_department_role_edge_holds_its_role() {
         refused.body
     );
     assert_eq!(
-        refused.body["error"]["code"], "CONFLICT",
+        refused.body["error"]["code"], "ROLE_HAS_OPEN_TASKS",
         "{}",
         refused.body
     );
@@ -1778,6 +1779,8 @@ async fn the_list_is_exactly_what_the_delete_counts_through_both_clauses() {
 
     let row = &rows[0];
     assert_eq!(row["taskRef"], unclaimed_ref.as_str(), "{}", listed.body);
+    // The id the task routes take, such as row 10's reassign.
+    assert_eq!(row["id"], unclaimed.to_string(), "{}", listed.body);
     assert_eq!(row["documentTitle"], "Unclaimed", "{}", listed.body);
     assert!(row["documentNumber"].is_string(), "{}", listed.body);
     assert_eq!(row["currentState"], "MANAGER_APPROVAL", "{}", listed.body);
@@ -1804,6 +1807,7 @@ async fn the_list_is_exactly_what_the_delete_counts_through_both_clauses() {
             "currentState",
             "documentNumber",
             "documentTitle",
+            "id",
             "status",
             "taskRef",
             "why"
@@ -1846,6 +1850,7 @@ async fn the_list_is_exactly_what_the_delete_counts_through_both_clauses() {
         "{}",
         listed.body
     );
+    assert_eq!(held["id"], claimed.to_string(), "{}", listed.body);
     assert_eq!(held["documentTitle"], "Claimed", "{}", listed.body);
     assert_eq!(held["status"], "ASSIGNED", "{}", listed.body);
     for row in rows {
@@ -2056,7 +2061,7 @@ async fn delete_role(app: &TestApp, token: &str, role: Uuid) -> common::TestResp
 }
 
 /// D-89's refusal for one open task. It is asked about first, and answers
-/// `CONFLICT`.
+/// `ROLE_HAS_OPEN_TASKS`.
 const ONE_OPEN_TASK: &str = "1 open task needs this role to be decided. Deleting the role would \
                              leave it offered to nobody, or with a decision nobody could make. \
                              It needs to be decided first";

@@ -304,6 +304,8 @@ pub struct WorkflowTask {
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenTaskNeedingRole {
+    /// The task's id, which the task routes take, such as a reassign.
+    pub id: Uuid,
     pub task_ref: String,
     pub document_number: Option<String>,
     pub document_title: Option<String>,

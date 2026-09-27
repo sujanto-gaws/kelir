@@ -243,6 +243,7 @@ describe('RoleListPage', () => {
           status: 200,
           body: listBody([
             {
+              id: 't-1',
               taskRef: 'TSK-0001',
               documentNumber: 'PR-2026-0007',
               documentTitle: 'Printer paper',

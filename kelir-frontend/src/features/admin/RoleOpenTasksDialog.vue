@@ -116,11 +116,7 @@ watch(
           </TableHeader>
 
           <TableBody>
-            <TableRow
-              v-for="task in tasks.items.value"
-              :key="task.taskRef"
-              data-testid="role-open-task"
-            >
+            <TableRow v-for="task in tasks.items.value" :key="task.id" data-testid="role-open-task">
               <TableCell class="font-mono text-xs">{{ task.taskRef }}</TableCell>
               <TableCell>
                 <span v-if="task.documentNumber" class="block font-mono text-xs">

@@ -6,7 +6,8 @@ use uuid::Uuid;
 use super::domain::{
     open_tasks_refusal, published_definitions_refusal, validate_create_user, validate_distinct_ids,
     validate_password_value, CreateRoleRequest, CreateUserRequest, Permission, Role,
-    UpdateRoleRequest, UpdateUserRequest, User, UserStatus, ROLE_HAS_OPEN_TASKS, ROLE_NAMED_BY_PUBLISHED_DEFINITION,
+    UpdateRoleRequest, UpdateUserRequest, User, UserStatus, ROLE_HAS_OPEN_TASKS,
+    ROLE_NAMED_BY_PUBLISHED_DEFINITION,
 };
 use super::repository as repo;
 use crate::error::{AppError, ValidationDetail};
@@ -14,8 +15,8 @@ use crate::middleware::auth::Authenticated;
 use crate::modules::audit::{self, domain::ObjectType, AuditEntry};
 use crate::modules::auth::password::hash_password;
 use crate::modules::organization::department_repository as department_repo;
-use crate::modules::workflow::service::definition as workflow_definition;
 use crate::modules::workflow::domain::OpenTaskNeedingRole;
+use crate::modules::workflow::service::definition as workflow_definition;
 use crate::modules::workflow::service::task as workflow_task;
 use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;

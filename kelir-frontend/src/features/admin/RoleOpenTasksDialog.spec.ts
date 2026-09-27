@@ -28,6 +28,7 @@ const clerkRole: Role = {
 }
 
 const unclaimed: OpenTaskNeedingRole = {
+  id: 't-1',
   taskRef: 'TSK-0001',
   documentNumber: 'PR-2026-0007',
   documentTitle: 'Printer paper',
@@ -39,6 +40,7 @@ const unclaimed: OpenTaskNeedingRole = {
 }
 
 const claimed: OpenTaskNeedingRole = {
+  id: 't-2',
   taskRef: 'TSK-0002',
   documentNumber: null,
   documentTitle: null,
@@ -61,7 +63,7 @@ async function mountDialog(
     slots: options.withActions
       ? {
           'task-actions': ({ task }: { task: OpenTaskNeedingRole }) =>
-            h('button', { 'data-testid': 'row-action' }, `Act on ${task.taskRef}`),
+            h('button', { 'data-testid': 'row-action' }, `Act on ${task.taskRef} (${task.id})`),
         }
       : {},
   })
@@ -144,7 +146,10 @@ describe('RoleOpenTasksDialog', () => {
     const actions = wrapper.findAll('[data-testid="row-action"]')
 
     expect(wrapper.findAll('th').map((cell) => cell.text())).toContain('Actions')
-    expect(actions.map((action) => action.text())).toEqual(['Act on TSK-0001', 'Act on TSK-0002'])
+    expect(actions.map((action) => action.text())).toEqual([
+      'Act on TSK-0001 (t-1)',
+      'Act on TSK-0002 (t-2)',
+    ])
   })
 
   it('pages when the tasks do not fit on one page', async () => {

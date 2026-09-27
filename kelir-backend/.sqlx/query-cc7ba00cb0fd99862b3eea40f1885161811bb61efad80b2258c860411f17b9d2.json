@@ -1,0 +1,79 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH needing AS (\n            SELECT t.id, t.task_ref, t.status, t.assignee_user_id, t.document_id,\n                   t.created_at, i.current_state,\n                   -- The words of the stranded-task query, Installation and\n                   -- Deployment §9, so the screen and the runbook say the same.\n                   CASE WHEN t.candidate_role_id = r.id AND t.assignee_user_id IS NULL\n                        THEN 'offered to the role, and unclaimed'\n                        ELSE 'a decision out of ' || i.current_state || ' is allowedBy the role'\n                   END AS why\n            FROM workflow_tasks t\n            JOIN workflow_instances i ON i.id = t.workflow_instance_id AND i.tenant_id = t.tenant_id\n            JOIN roles r ON r.id = $2 AND r.tenant_id = t.tenant_id\n            WHERE t.tenant_id = $1 AND t.deleted_at IS NULL\n              AND t.status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')\n              AND ((t.candidate_role_id = r.id AND t.assignee_user_id IS NULL)\n                   OR EXISTS (SELECT 1 FROM workflow_transitions tr\n                              WHERE tr.workflow_definition_id = i.workflow_definition_id\n                                AND tr.from_state = i.current_state\n                                AND tr.allowed_by_json->>'roleCode' = r.role_code))\n        )\n        SELECT counted.total AS \"total!\",\n               page.id AS \"id?\", page.task_ref AS \"task_ref?\", page.status AS \"status?\",\n               page.current_state AS \"current_state?\", page.why AS \"why?\",\n               page.assignee_user_id AS \"assignee_user_id?\",\n               page.display_name AS \"assignee_display_name?\",\n               page.document_number AS \"document_number?\", page.title AS \"document_title?\"\n        FROM (SELECT COUNT(*) AS total FROM needing) counted\n        LEFT JOIN LATERAL (\n            SELECT n.task_ref, n.status, n.current_state, n.why, n.assignee_user_id,\n                   n.created_at, n.id, u.display_name, d.document_number, d.title\n            FROM needing n\n            LEFT JOIN documents d ON d.id = n.document_id AND d.tenant_id = $1\n            LEFT JOIN users u ON u.id = n.assignee_user_id AND u.tenant_id = $1\n            ORDER BY n.created_at, n.id\n            LIMIT $3 OFFSET $4\n        ) page ON true\n        ORDER BY page.created_at, page.id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "total!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "id?",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "task_ref?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "status?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "current_state?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "why?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "assignee_user_id?",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 7,
+        "name": "assignee_display_name?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "document_number?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 9,
+        "name": "document_title?",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      false,
+      false,
+      false,
+      false,
+      null,
+      true,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "cc7ba00cb0fd99862b3eea40f1885161811bb61efad80b2258c860411f17b9d2"
+}

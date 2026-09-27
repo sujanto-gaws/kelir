@@ -675,7 +675,7 @@ pub async fn open_tasks_needing_role<'e, E: PgExecutor<'e>>(
                                 AND tr.allowed_by_json->>'roleCode' = r.role_code))
         )
         SELECT counted.total AS "total!",
-               page.task_ref AS "task_ref?", page.status AS "status?",
+               page.id AS "id?", page.task_ref AS "task_ref?", page.status AS "status?",
                page.current_state AS "current_state?", page.why AS "why?",
                page.assignee_user_id AS "assignee_user_id?",
                page.display_name AS "assignee_display_name?",
@@ -707,6 +707,7 @@ pub async fn open_tasks_needing_role<'e, E: PgExecutor<'e>>(
         .into_iter()
         .filter_map(|row| {
             Some(OpenTaskNeedingRole {
+                id: row.id?,
                 task_ref: row.task_ref?,
                 document_number: row.document_number,
                 document_title: row.document_title,
