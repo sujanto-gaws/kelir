@@ -409,6 +409,12 @@
 //! every heading had been skipped. What the gate named and this round did not
 //! fix is in *What rules 4–6 will not notice*.
 //!
+//! **The fifth round's gate found one more**: `<span hidden/>` read as a tag
+//! that opens nothing. HTML honours `/>` only on a void element, so on any
+//! other it opens, and hides what follows. Only a void element is now closed
+//! by its slash. No report in any tree `main` has held contains `/>`, so the
+//! sweep was not run again for it.
+//!
 //! **Each fix seen red.** Each predicate below was put back alone against the
 //! file as its round left it, and the file run, then restored byte-exact. The
 //! first nine are the regular-expression rounds', whose code the parser has
@@ -439,6 +445,7 @@
 //! | A heading read with its hidden text | *what hides and what heads Scope Status* alone |
 //! | `rp` rendered | *what hides and what heads Scope Status* alone |
 //! | Renames not followed, under the fifth round's reader | *a moved spec* alone |
+//! | A trailing `/` closing any element, not only a void one | *a phrase that renders as nothing* alone — `<span hidden/>` and `<div hidden/>` accepted; `<br hidden/>` and `<hr hidden/>`, the controls, unchanged |
 //!
 //! A probe of each shape, run beside the fourth round's six, flipped under its
 //! own mutation, and only one flipped under another's: the definition in
@@ -806,6 +813,10 @@ struct Rendered {
 const UNRENDERED_ELEMENTS: [&str; 4] = ["rp", "script", "style", "template"];
 
 /// Elements with no closing tag, which open nothing.
+///
+/// **Only these are closed by a trailing `/`.** HTML ignores `/>` on any other
+/// element, so `<span hidden/>` opens a span and hides what follows it, as
+/// `<span hidden>` does.
 const VOID_ELEMENTS: [&str; 14] = [
     "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
     "track", "wbr",
@@ -944,9 +955,7 @@ impl Reader {
             let closing = !found[1].is_empty();
             let name = found[2].to_ascii_lowercase();
             let attributes = &found[3];
-            let opens = !closing
-                && !VOID_ELEMENTS.contains(&name.as_str())
-                && !attributes.trim_end().ends_with('/');
+            let opens = !closing && !VOID_ELEMENTS.contains(&name.as_str());
 
             if closing {
                 if let Some(at) = self.hidden.iter().rposition(|open| *open == name) {
@@ -1418,6 +1427,15 @@ fn a_phrase_that_renders_as_nothing_is_not_said() {
         "| 1 | The screen | Done <style>verified by inspection only</style> |",
         "| 1 | The screen | Done <template>verified by inspection only</template> |",
         "| 1 | The screen | Done <span hidden><b>x</b> verified by inspection only</span> |",
+        // HTML ignores `/>` on an element that is not void, so these open.
+        "| 1 | The screen | Done <span hidden/>verified by inspection only |",
+        "| 1 | The screen | Done |
+
+<div hidden/>
+
+verified by inspection only
+
+</div>",
     ] {
         assert!(
             !drives_a_screen_or_says_it_did_not(
@@ -1439,6 +1457,13 @@ fn a_phrase_that_renders_as_nothing_is_not_said() {
         "| 1 | The screen | Done — verified by\ninspection only |",
         "| 1 | The screen | Done |\n\n```\nverified by inspection only\n```",
         "| 1 | The screen | <span hidden>a</span><span hidden>b</span> verified by inspection only |",
+        // A void element opens nothing, however it is written.
+        "| 1 | The screen | Done <br hidden/>verified by inspection only |",
+        "| 1 | The screen | Done |
+
+<hr hidden/>
+
+verified by inspection only",
     ] {
         assert!(
             drives_a_screen_or_says_it_did_not(
