@@ -409,11 +409,16 @@ pub async fn delegate(
 ///    when this reads it, and refused, or counted by the delete once this
 ///    commits. Task, then role, is the order a decision takes too (`decide`
 ///    locks the task, and `engine::fire` resolves the edge's role after).
+///    **A closed task is refused with a 409 first**, under the task lock and
+///    before the target is read: a task whose instance has moved on would
+///    otherwise be judged against a state it is not in.
 /// 4. **Whether the target could decide it**, by
 ///    [`refuse_unless_target_can_decide`]: the instance and its pinned
 ///    definition are read after the task lock, and the target is measured
 ///    against the decision edges out of the current state.
 /// 5. **The write, carrying the open-status predicate.** Zero rows is a 409.
+///    Under the lock the task cannot have closed since step 2, so this is the
+///    backstop, not the check.
 /// 6. **One `workflow_task_history` row**, `REASSIGN`, in the same
 ///    transaction. No `workflow_history` row: the process did not move.
 ///
@@ -456,6 +461,14 @@ pub async fn reassign(
     let task = repo::lock_task(&mut transaction, tenant_id, id)
         .await?
         .ok_or_else(|| AppError::not_found("Task"))?;
+
+    // A closed task is a 409 before its target is looked at. The checks below
+    // judge the target against the instance's *current* state, which a closed
+    // task of a multi-stage workflow has left: judged there, its reassign
+    // would be a 422 about a decision it will never take.
+    if !task.status.is_open() {
+        return Err(reassign_closed(task.status));
+    }
 
     let assignment = assignment::reassign_to(&mut transaction, tenant_id, target.clone()).await?;
 

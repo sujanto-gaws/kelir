@@ -83,7 +83,7 @@ While the major version is `0`, the public API may change in any release.
   `workflow:task:reassign`, moves an open task to one live user, who then
   holds it, or one live role, whose holders are offered it unclaimed. Name
   exactly one of `userId` and `roleCode`; both, neither, or a deleted user or
-  role is a 422, and a closed task is a 409. **The target must be able to
+  role is a 422, and a closed task is a 409 whatever the target names. **The target must be able to
   decide the task**: a user must satisfy at least one of the task's approve,
   reject or return rules, checked as the decision checks them, and a role must
   be named by one. Otherwise it is a 422 `TARGET_CANNOT_DECIDE` naming what the
