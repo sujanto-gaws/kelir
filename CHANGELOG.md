@@ -145,6 +145,26 @@ While the major version is `0`, the public API may change in any release.
   new workflow runs the test when a `v*` tag is pushed. It detects a wrong
   tag and cannot stop one being pushed. `v0.7.0` and `v0.8.0` pass.
 
+- **A status report's browser-flow check reads the report as it renders**
+  ([#468](https://github.com/sujanto-gaws/kelir/issues/468),
+  [status report template](projects/status/00.%20Status%20Report%20Template.md)).
+  From Sprint 17 on, `sprint_reports_are_verified.rs` rule 4 asks a report's
+  Scope Status to cite a pull request that added a browser spec, or to say
+  `verified by inspection only`. It now reads the report with a CommonMark
+  parser, `pulldown-cmark`, added as a test-only dependency that the release
+  binary does not contain. It refuses the phrase or a citation that a reader
+  cannot see: in an HTML comment, a link reference definition, a link's title
+  or destination, an image, a tag's attributes, or an element marked `hidden`
+  or given a `style`. A link, Markdown or `<a href>`, counts by where it
+  points and never by its label, so a link to another repository's pull
+  request cites nothing, even when its number or label matches a Kelir one.
+  Nor does a link whose label is empty or hidden, or whose path has a `.` or
+  `..` segment. A citation in code does not count. A pull request whose spec a later commit
+  deleted no longer counts, and one whose spec was moved still does. No status
+  report `main` has held changes rule 4's answer. The Sprint 6 report, which
+  writes the phrase in bold, now counts as saying it, so it leaves rule 6's
+  list of pre-rule sprints that neither cite a spec nor say the phrase.
+
 - **MinIO and `mc` are fetched from `ghcr.io/sujanto-gaws`** (decision **D-92**).
   `quay.io/minio/*`, where D-80 moved them, closed to anonymous pulls on
   2026-09-24. The copies are MinIO's own linux/amd64 filesystems, rebuilt

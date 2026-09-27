@@ -136,6 +136,15 @@ lettre = { version = "0.11.23", default-features = false, features = [
 [dev-dependencies]
 # Drives the router in tests via ServiceExt::oneshot, without binding a port.
 tower = { version = "0.5", features = ["util"] }
+# Reads a status report the way GitHub renders it, for rule 4 of
+# `tests/sprint_reports_are_verified.rs` (#468): what a comment, a reference
+# definition, a link's destination or hidden HTML hides is not said, and a link
+# counts by where it points rather than by its label. Three rounds of a hand-made
+# regex reduction each let a new Markdown shape through, and the product owner
+# chose a CommonMark parser over a fourth. Tests only — nothing the server ships
+# parses Markdown. No default features: they are the command-line tool and the
+# HTML writer, and this reads events.
+pulldown-cmark = { version = "0.13", default-features = false }
 
 [profile.dev]
 # Line tables, not full symbol tables.
