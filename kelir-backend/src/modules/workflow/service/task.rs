@@ -73,7 +73,8 @@ use super::super::domain::task::{
     refuse_unless_held_by, refuse_unless_open, refuse_unless_theirs,
 };
 use super::super::domain::{
-    DecisionAction, DelegateRequest, Graph, TaskStatus, TransitionAction, WorkflowTask,
+    DecisionAction, DelegateRequest, Graph, OpenTaskNeedingRole, TaskStatus, TransitionAction,
+    WorkflowTask,
 };
 use super::super::repository::{
     definition as definition_repo, instance as instance_repo, task as repo,
@@ -783,4 +784,26 @@ pub async fn open_tasks_needing_role(
     role_id: Uuid,
 ) -> Result<i64, AppError> {
     Ok(repo::count_open_tasks_needing_role(&mut **transaction, tenant_id, role_id).await?)
+}
+
+/// The tasks [`open_tasks_needing_role`] counts, a page of them, and their
+/// number from the same statement ([#532]).
+///
+/// Read on the pool, **outside any delete's lock**: a diagnostic, not a
+/// promise, so a task decided or raised between this read and a delete can
+/// make the two answers differ. The caller has checked the permission and
+/// that the role is live.
+///
+/// [#532]: https://github.com/sujanto-gaws/kelir/issues/532
+pub async fn list_open_tasks_needing_role(
+    state: &AppState,
+    tenant_id: Uuid,
+    role_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> Result<(Vec<OpenTaskNeedingRole>, i64), AppError> {
+    let page =
+        repo::open_tasks_needing_role(&state.pool, tenant_id, role_id, limit, offset).await?;
+
+    Ok((page.rows, page.total))
 }

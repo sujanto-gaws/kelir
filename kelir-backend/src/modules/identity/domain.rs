@@ -361,6 +361,13 @@ pub fn published_definitions_refusal(definitions: &[DefinitionNamingRole]) -> Op
     })
 }
 
+/// The code a role delete is refused with while open tasks still need the role
+/// (**D-89**, [#532]). A client branches on it, not on the message, and offers
+/// `GET /api/v1/identity/roles/{id}/open-tasks`, which lists those tasks.
+///
+/// [#532]: https://github.com/sujanto-gaws/kelir/issues/532
+pub const ROLE_HAS_OPEN_TASKS: &str = "ROLE_HAS_OPEN_TASKS";
+
 #[cfg(test)]
 mod tests {
     use super::*;

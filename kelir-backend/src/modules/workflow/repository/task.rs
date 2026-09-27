@@ -5,7 +5,7 @@ use sqlx::{PgExecutor, PgPool};
 use uuid::Uuid;
 
 use crate::modules::workflow::domain::{
-    DecisionAction, TaskStatus, TransitionAction, WorkflowTask,
+    DecisionAction, OpenTaskNeedingRole, TaskStatus, TransitionAction, WorkflowTask,
 };
 
 /// The columns a transition writes when it generates a task.
@@ -610,25 +610,130 @@ pub async fn count_open_tasks_needing_role<'e, E: PgExecutor<'e>>(
     tenant_id: Uuid,
     role_id: Uuid,
 ) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar!(
+    // The list's statement with an empty page: its `total` is this count
+    // (#532). One statement is what keeps the two from drifting.
+    Ok(open_tasks_needing_role(executor, tenant_id, role_id, 0, 0)
+        .await?
+        .total)
+}
+
+/// A page of [`count_open_tasks_needing_role`]'s tasks, and how many there
+/// are.
+pub struct OpenTasksPage {
+    pub rows: Vec<OpenTaskNeedingRole>,
+    /// Every task the predicate matched, not the page's length.
+    pub total: i64,
+}
+
+/// The open tasks that need `role_id`, a page of them, and their number, in
+/// one statement ([#532]).
+///
+/// **The predicate is written once**, in the `needing` CTE, and
+/// [`count_open_tasks_needing_role`] is this statement with a page of none.
+/// So what `delete_role` counts and what
+/// `GET /api/v1/identity/roles/{id}/open-tasks` lists cannot differ in which
+/// tasks they mean.
+///
+/// **`total` rides on the one row the outer `SELECT` always returns**, rather
+/// than on each task as `count(*) OVER ()` would: the count is taken over the
+/// CTE and the page is joined to it laterally, so a page past the end, or of
+/// size 0, still carries the total. The inbox's `InboxPage::matching` is an
+/// `Option` for want of that row.
+///
+/// The document, and the holder's name, are joined **inside the page** and
+/// **`LEFT`**, after the predicate has chosen the tasks, so a join that found
+/// nothing would drop a column and never a task.
+///
+/// [#532]: https://github.com/sujanto-gaws/kelir/issues/532
+pub async fn open_tasks_needing_role<'e, E: PgExecutor<'e>>(
+    executor: E,
+    tenant_id: Uuid,
+    role_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> Result<OpenTasksPage, sqlx::Error> {
+    let rows = sqlx::query!(
         r#"
-        SELECT COUNT(*) AS "count!"
-        FROM workflow_tasks t
-        JOIN workflow_instances i ON i.id = t.workflow_instance_id AND i.tenant_id = t.tenant_id
-        JOIN roles r ON r.id = $2 AND r.tenant_id = t.tenant_id
-        WHERE t.tenant_id = $1 AND t.deleted_at IS NULL
-          AND t.status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')
-          AND ((t.candidate_role_id = r.id AND t.assignee_user_id IS NULL)
-               OR EXISTS (SELECT 1 FROM workflow_transitions tr
-                          WHERE tr.workflow_definition_id = i.workflow_definition_id
-                            AND tr.from_state = i.current_state
-                            AND tr.allowed_by_json->>'roleCode' = r.role_code))
+        WITH open_task AS (
+            SELECT t.id, t.task_ref, t.status, t.assignee_user_id, t.document_id,
+                   t.created_at, i.current_state,
+                   -- Clause (a). NULL for a task offered to no role, which
+                   -- neither `WHERE` nor `CASE` below takes as true.
+                   (t.candidate_role_id = r.id AND t.assignee_user_id IS NULL) AS offered,
+                   -- Clause (b).
+                   EXISTS (SELECT 1 FROM workflow_transitions tr
+                           WHERE tr.workflow_definition_id = i.workflow_definition_id
+                             AND tr.from_state = i.current_state
+                             AND tr.allowed_by_json->>'roleCode' = r.role_code) AS named
+            FROM workflow_tasks t
+            JOIN workflow_instances i ON i.id = t.workflow_instance_id AND i.tenant_id = t.tenant_id
+            JOIN roles r ON r.id = $2 AND r.tenant_id = t.tenant_id
+            WHERE t.tenant_id = $1 AND t.deleted_at IS NULL
+              AND t.status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')
+        ),
+        needing AS (
+            SELECT id, task_ref, status, assignee_user_id, document_id, created_at,
+                   current_state,
+                   -- The single reasons are the words of the stranded-task
+                   -- query, Installation and Deployment §9. That query does not
+                   -- say *both*; the list does, for the usual shape (#532 AC4).
+                   CASE WHEN offered AND named
+                        THEN 'offered to the role, and unclaimed, and a decision out of '
+                             || current_state || ' is allowedBy the role'
+                        WHEN offered
+                        THEN 'offered to the role, and unclaimed'
+                        ELSE 'a decision out of ' || current_state || ' is allowedBy the role'
+                   END AS why
+            FROM open_task
+            WHERE offered OR named
+        )
+        SELECT counted.total AS "total!",
+               page.id AS "id?", page.task_ref AS "task_ref?", page.status AS "status?",
+               page.current_state AS "current_state?", page.why AS "why?",
+               page.assignee_user_id AS "assignee_user_id?",
+               page.display_name AS "assignee_display_name?",
+               page.document_number AS "document_number?", page.title AS "document_title?"
+        FROM (SELECT COUNT(*) AS total FROM needing) counted
+        LEFT JOIN LATERAL (
+            SELECT n.task_ref, n.status, n.current_state, n.why, n.assignee_user_id,
+                   n.created_at, n.id, u.display_name, d.document_number, d.title
+            FROM needing n
+            LEFT JOIN documents d ON d.id = n.document_id AND d.tenant_id = $1
+            LEFT JOIN users u ON u.id = n.assignee_user_id AND u.tenant_id = $1
+            ORDER BY n.created_at, n.id
+            LIMIT $3 OFFSET $4
+        ) page ON true
+        ORDER BY page.created_at, page.id
         "#,
         tenant_id,
-        role_id
+        role_id,
+        limit,
+        offset
     )
-    .fetch_one(executor)
-    .await
+    .fetch_all(executor)
+    .await?;
+
+    let total = rows.first().map_or(0, |row| row.total);
+
+    // A page of none is still one row, carrying the total and no task.
+    let rows = rows
+        .into_iter()
+        .filter_map(|row| {
+            Some(OpenTaskNeedingRole {
+                id: row.id?,
+                task_ref: row.task_ref?,
+                document_number: row.document_number,
+                document_title: row.document_title,
+                current_state: row.current_state?,
+                status: TaskStatus::from_db(&row.status?),
+                assignee_user_id: row.assignee_user_id,
+                assignee_display_name: row.assignee_display_name,
+                why: row.why?,
+            })
+        })
+        .collect();
+
+    Ok(OpenTasksPage { rows, total })
 }
 
 /// Reads one task.

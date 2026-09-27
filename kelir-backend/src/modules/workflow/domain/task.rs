@@ -293,6 +293,36 @@ pub struct WorkflowTask {
     pub created_at: DateTime<Utc>,
 }
 
+/// One open task a role's delete waits on, as
+/// `GET /api/v1/identity/roles/{id}/open-tasks` lists it ([#532]).
+///
+/// **Only what explains the refusal**: which task, which document, where its
+/// instance stands, who holds it, and why it needs the role. No form data and
+/// no attachments.
+///
+/// [#532]: https://github.com/sujanto-gaws/kelir/issues/532
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenTaskNeedingRole {
+    /// The task's id, which the task routes take, such as a reassign.
+    pub id: Uuid,
+    pub task_ref: String,
+    pub document_number: Option<String>,
+    pub document_title: Option<String>,
+    /// The instance's current state, the one whose edges clause (b) reads.
+    pub current_state: String,
+    pub status: TaskStatus,
+    /// The holder, or `None` while the task is unclaimed.
+    pub assignee_user_id: Option<Uuid>,
+    pub assignee_display_name: Option<String>,
+    /// Which of the two ways the task needs the role, or both: `offered to the
+    /// role, and unclaimed`, `a decision out of {state} is allowedBy the role`,
+    /// or `offered to the role, and unclaimed, and a decision out of {state} is
+    /// allowedBy the role`. The first two are the words of the stranded-task
+    /// query in Installation and Deployment §9.
+    pub why: String,
+}
+
 /// The body of a delegation request (FR-WF-009, FR-TASK-008; [#184]).
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

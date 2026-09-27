@@ -228,6 +228,119 @@ describe('RoleListPage', () => {
     expect(wrapper.find('[role="dialog"]').exists()).toBe(true)
   })
 
+  it('lists the open tasks when a delete is refused for them, and keeps the role', async () => {
+    const refusal =
+      '1 open task needs this role to be decided. Deleting the role would leave it offered to ' +
+      'nobody, or with a decision nobody could make. It needs to be decided first'
+
+    handler = (request) => {
+      if (request.method === 'delete') {
+        return { status: 409, body: errorBody('ROLE_HAS_OPEN_TASKS', refusal) }
+      }
+
+      if (request.url === '/identity/roles/r-2/open-tasks') {
+        return {
+          status: 200,
+          body: listBody([
+            {
+              id: 't-1',
+              taskRef: 'TSK-0001',
+              documentNumber: 'PR-2026-0007',
+              documentTitle: 'Printer paper',
+              currentState: 'APPROVAL',
+              status: 'ASSIGNED',
+              assigneeUserId: 'u-9',
+              assigneeDisplayName: 'Budi Santoso',
+              why: 'a decision out of APPROVAL is allowedBy the role',
+            },
+          ]),
+        }
+      }
+
+      return request.url === '/identity/permissions'
+        ? permissionsReply([readUsers, createUsers])
+        : rolesReply([adminRole, clerkRole])
+    }
+
+    const wrapper = await mountPage(['identity:role:read', 'identity:role:delete'])
+
+    await buttonLabelled(rowsOf(wrapper)[1].findAll('button'), 'Delete')?.trigger('click')
+    await buttonLabelled(wrapper.find('[role="dialog"]').findAll('button'), 'Delete')?.trigger(
+      'click',
+    )
+    await flushPromises()
+
+    // The confirmation gives way to the list: one dialog, and it is the tasks.
+    const dialogs = wrapper.findAll('[role="dialog"]')
+    expect(dialogs).toHaveLength(1)
+    expect(dialogs[0].text()).toContain('Open tasks need Clerk')
+    expect(dialogs[0].find('[role="alert"]').text()).toBe(refusal)
+
+    const task = dialogs[0].find('[data-testid="role-open-task"]')
+    expect(task.text()).toContain('Printer paper')
+    expect(task.text()).toContain('APPROVAL')
+    expect(task.find('[data-testid="role-open-task-holder"]').text()).toBe('Budi Santoso')
+
+    // Nothing was deleted, so the roles were not re-read: the row is still there.
+    expect(backend.countOf('/identity/roles')).toBe(1)
+    expect(rowsOf(wrapper).some((row) => row.text().includes('ROLE-CLERK'))).toBe(true)
+  })
+
+  it('keeps a plain conflict in the confirmation and reads no task list', async () => {
+    handler = (request) => {
+      if (request.method === 'delete') {
+        return { status: 409, body: errorBody('CONFLICT', SYSTEM_ROLE_REFUSAL) }
+      }
+
+      return request.url === '/identity/permissions'
+        ? permissionsReply([readUsers, createUsers])
+        : rolesReply([adminRole, clerkRole])
+    }
+
+    const wrapper = await mountPage(['identity:role:read', 'identity:role:delete'])
+
+    await buttonLabelled(rowsOf(wrapper)[1].findAll('button'), 'Delete')?.trigger('click')
+    await buttonLabelled(wrapper.find('[role="dialog"]').findAll('button'), 'Delete')?.trigger(
+      'click',
+    )
+    await flushPromises()
+
+    // The status is the same 409; the code is what tells the two apart.
+    expect(wrapper.find('[role="dialog"]').text()).toContain('Delete role')
+    expect(wrapper.find('[role="dialog"] [role="alert"]').text()).toContain(SYSTEM_ROLE_REFUSAL)
+    expect(backend.requests.some((request) => request.url.endsWith('/open-tasks'))).toBe(false)
+  })
+
+  it("shows a published definition's refusal in the confirmation, as the server wrote it", async () => {
+    const refusal =
+      'The role is named by a published workflow definition: purchase_approval ' +
+      '(Purchase approval), revision 3'
+
+    handler = (request) => {
+      if (request.method === 'delete') {
+        return { status: 409, body: errorBody('ROLE_NAMED_BY_PUBLISHED_DEFINITION', refusal) }
+      }
+
+      return request.url === '/identity/permissions'
+        ? permissionsReply([readUsers, createUsers])
+        : rolesReply([adminRole, clerkRole])
+    }
+
+    const wrapper = await mountPage(['identity:role:read', 'identity:role:delete'])
+
+    await buttonLabelled(rowsOf(wrapper)[1].findAll('button'), 'Delete')?.trigger('click')
+    await buttonLabelled(wrapper.find('[role="dialog"]').findAll('button'), 'Delete')?.trigger(
+      'click',
+    )
+    await flushPromises()
+
+    // No open task needs the role, so there is no list to read: the refusal is
+    // the whole answer, and it stays beside the button that caused it.
+    expect(wrapper.find('[role="dialog"]').text()).toContain('Delete role')
+    expect(wrapper.find('[role="dialog"] [role="alert"]').text()).toBe(refusal)
+    expect(backend.requests.some((request) => request.url.endsWith('/open-tasks'))).toBe(false)
+  })
+
   it('still lists the roles when the permission catalogue cannot be loaded', async () => {
     handler = (request) =>
       request.url === '/identity/permissions'

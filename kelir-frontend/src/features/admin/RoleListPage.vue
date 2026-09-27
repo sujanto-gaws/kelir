@@ -16,9 +16,10 @@ import { deleteRole, listPermissions, listRoles } from '@/api/identity'
 import { toApiError } from '@/api/client'
 import { usePaginatedList } from '@/composables/usePaginatedList'
 import { useAuthStore } from '@/stores/auth'
-import type { Permission, Role } from '@/types/identity'
+import { ROLE_HAS_OPEN_TASKS, type Permission, type Role } from '@/types/identity'
 import ConfirmDialog from './ConfirmDialog.vue'
 import RoleFormDialog from './RoleFormDialog.vue'
+import RoleOpenTasksDialog from './RoleOpenTasksDialog.vue'
 
 /**
  * Role administration (FR-IDM-002, FR-IDM-004, FR-IDM-005).
@@ -54,6 +55,11 @@ const confirming = ref<Role | null>(null)
 const isConfirmOpen = ref(false)
 const isDeleting = ref(false)
 const deleteError = ref('')
+
+/** The role whose delete open tasks refused (#532), and the refusal's words. */
+const blocked = ref<Role | null>(null)
+const blockedRefusal = ref('')
+const isOpenTasksOpen = ref(false)
 
 async function loadPermissions(): Promise<void> {
   permissionsError.value = ''
@@ -103,10 +109,28 @@ async function confirmDelete(): Promise<void> {
     confirming.value = null
     await roles.refresh()
   } catch (error) {
-    // Includes the 409 for a system role, should one ever be reached, and the
-    // 409 for a role open tasks still need (D-89), which the list cannot
-    // predict. The server's exact wording, not ours.
-    deleteError.value = toApiError(error).message
+    const refusal = toApiError(error)
+
+    // A delete answers 409 for three reasons, one at a time and told apart by
+    // the code, none of which the list can predict but the first:
+    // - `CONFLICT`: a system role, should one ever be reached past the
+    //   disabled button.
+    // - `ROLE_HAS_OPEN_TASKS`: open tasks still need the role (D-89). This one
+    //   opens the list of those tasks (#532) in place of the confirmation.
+    // - `ROLE_NAMED_BY_PUBLISHED_DEFINITION`: no open task needs it, but a
+    //   published workflow definition names it (D-91 (3), #510). Its message
+    //   names each definition, so it is shown as it is.
+    // Everything but the second stays in the confirmation. The server's exact
+    // wording every time, not ours.
+    if (refusal.code === ROLE_HAS_OPEN_TASKS) {
+      blocked.value = target
+      blockedRefusal.value = refusal.message
+      isConfirmOpen.value = false
+      isOpenTasksOpen.value = true
+      return
+    }
+
+    deleteError.value = refusal.message
   } finally {
     isDeleting.value = false
   }
@@ -236,6 +260,13 @@ onMounted(async () => {
       :error="deleteError"
       :pending="isDeleting"
       @confirm="confirmDelete()"
+    />
+
+    <RoleOpenTasksDialog
+      v-if="canDelete"
+      v-model:open="isOpenTasksOpen"
+      :role="blocked"
+      :refusal="blockedRefusal"
     />
   </section>
 </template>

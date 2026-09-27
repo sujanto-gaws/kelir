@@ -15,6 +15,7 @@ use super::service;
 use crate::error::AppError;
 use crate::extract::{JsonBody, PathParam, QueryParams};
 use crate::middleware::auth::Authenticated;
+use crate::modules::workflow::domain::OpenTaskNeedingRole;
 use crate::response::{ItemEnvelope, ListEnvelope, Pagination};
 use crate::state::AppState;
 
@@ -35,6 +36,7 @@ pub fn routes() -> Router<AppState> {
         .route("/roles", get(list_roles).post(create_role))
         .route("/roles/{id}", get(get_role).put(update_role))
         .route("/roles/{id}", delete(delete_role))
+        .route("/roles/{id}/open-tasks", get(list_open_tasks_of_role))
         .route("/permissions", get(list_permissions))
         .route(
             "/delegations",
@@ -232,7 +234,8 @@ async fn update_role(
         (status = 404, description = "No live role by that id in this tenant"),
         (status = 409, description = "Refused, one reason at a time, checked in this order:\n\n\
             - `CONFLICT`: a system role.\n\
-            - `CONFLICT`: a role that open tasks still need (D-89). The message says how many.\n\
+            - `ROLE_HAS_OPEN_TASKS`: a role that open tasks still need (D-89). The message says \
+            how many; `GET /api/v1/identity/roles/{id}/open-tasks` lists them (#532).\n\
             - `ROLE_NAMED_BY_PUBLISHED_DEFINITION`: no open task needs the role, but a published \
             workflow definition names it in a task's assignment or a transition's allowedBy \
             (D-91 (3)). That is an ACTIVE revision, or a DEPRECATED one with approvals still \
@@ -248,6 +251,41 @@ async fn delete_role(
     service::delete_role(&state, &caller, id).await?;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// The open tasks a delete of this role waits on (**D-89**, [#532]): what
+/// `delete_role`'s `ROLE_HAS_OPEN_TASKS` counts, one row per task.
+///
+/// **Guarded by `identity:role:delete` alone.** Each row names its document by
+/// number and title without a `document:read` check: the product owner decided
+/// on 2026-09-26 that this is the minimum needed to explain one refused delete,
+/// and that whoever may make the delete may read it. No form data and no
+/// attachments are shown.
+///
+/// **A read outside the delete's transaction**: it does not take the role's
+/// lock, so by the time it is read it can differ from the count a delete takes.
+/// It is a diagnostic, and that is acceptable.
+///
+/// [#532]: https://github.com/sujanto-gaws/kelir/issues/532
+#[utoipa::path(
+    get, path = "/api/v1/identity/roles/{id}/open-tasks", tag = "identity",
+    params(Pagination),
+    responses(
+        (status = 200, description = "The open tasks that need the role, oldest first; `meta.total` is the count a delete refuses on", body = [OpenTaskNeedingRole]),
+        (status = 403, description = "Missing identity:role:delete"),
+        (status = 404, description = "No live role by that id in this tenant")
+    ),
+    security(("bearer" = []))
+)]
+async fn list_open_tasks_of_role(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    PathParam(id): PathParam<Uuid>,
+    QueryParams(pagination): QueryParams<Pagination>,
+) -> Result<Json<ListEnvelope<OpenTaskNeedingRole>>, AppError> {
+    let (tasks, meta) = service::list_open_tasks_of_role(&state, &caller, id, &pagination).await?;
+
+    Ok(Json(ListEnvelope::new(tasks, meta)))
 }
 
 #[utoipa::path(

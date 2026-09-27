@@ -41,6 +41,20 @@ While the major version is `0`, the public API may change in any release.
 
 ### Added
 
+- **A refused role delete lists the tasks it waits on**
+  ([#532](https://github.com/sujanto-gaws/kelir/issues/532), decision **D-89**).
+  The 409 said how many open tasks need the role, and nothing said which.
+  It now carries its own code, **`ROLE_HAS_OPEN_TASKS`**, in place of
+  `CONFLICT`, and `GET /api/v1/identity/roles/{id}/open-tasks` lists those
+  tasks, paginated, which the Roles page shows in a dialog in place of the
+  delete's confirmation: each task's reference, its document's number and title,
+  its instance's current state, its holder when it is claimed,
+  and why it needs the role. The list and the delete's count are one SQL
+  statement, so they name the same tasks. The route needs
+  `identity:role:delete` and nothing else, and it shows no form data and no
+  attachments. It is read outside the delete's lock, so a task decided in
+  between can make the two differ. A system role's refusal still answers
+  `CONFLICT`.
 - **JWSS `actions` run, delivered after the transition commits**
   ([#519](https://github.com/sujanto-gaws/kelir/issues/519),
   [ADR-0041](docs/architectures/adr/0041.%20Every%20Workflow%20Transition%20Writes%20an%20Outbox%20Event,%20and%20After-Hooks%20Are%20Its%20First%20Consumer.md)).
@@ -175,13 +189,13 @@ While the major version is `0`, the public API may change in any release.
 - **A role that an open task still needs cannot be deleted**
   ([#487](https://github.com/sujanto-gaws/kelir/issues/487), decision **D-89**).
   `DELETE /api/v1/identity/roles/{id}` used to answer 204 whatever was
-  waiting on the role. It now answers **409 `CONFLICT`**, says how many
+  waiting on the role. It now answers **409 `ROLE_HAS_OPEN_TASKS`**, says how many
   open tasks need the role, and changes nothing. A task needs a role when it
   is offered to it **and unclaimed**, or when a decision it offers is
   `allowedBy` that role, claimed or not. A claimed task does not need the
   role it was offered to, because its assignee can decide it without that
   role ([#529](https://github.com/sujanto-gaws/kelir/issues/529)). Once those
-  tasks are decided the delete goes through. **No route reassigns or cancels a task yet**, so deciding them is
+  tasks are decided that refusal goes away, though a published workflow definition naming the role still refuses it ([#510](https://github.com/sujanto-gaws/kelir/issues/510)). **No route reassigns or cancels a task yet**, so deciding them is
   the one way to clear the way. A document submitted while a role is being
   deleted waits for the delete, then is refused as `ASSIGNMENT_UNRESOLVED`
   if the delete went through, with nothing written.

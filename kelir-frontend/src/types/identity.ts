@@ -12,6 +12,8 @@
  * roles and no error.
  */
 
+import type { TaskStatus } from './workflow'
+
 /**
  * Account state. Only `ACTIVE` can sign in; setting anything else revokes the
  * account's refresh tokens server-side.
@@ -69,6 +71,43 @@ export interface Role {
    */
   isSystem: boolean
   permissions: Permission[]
+}
+
+/**
+ * The code a role delete is refused with while open tasks still need the role
+ * (**D-89**, #532; `identity::domain::ROLE_HAS_OPEN_TASKS`). A system role's
+ * refusal is a plain `CONFLICT`, so this code, and not the status, is what
+ * says the open tasks can be listed.
+ */
+export const ROLE_HAS_OPEN_TASKS = 'ROLE_HAS_OPEN_TASKS'
+
+/**
+ * One open task a role's delete waits on (#532), mirroring
+ * `workflow::domain::task::OpenTaskNeedingRole`.
+ *
+ * **Only what explains the refusal**: no form data and no attachments, because
+ * the route is guarded by `identity:role:delete` alone and not by
+ * `document:read`.
+ */
+export interface OpenTaskNeedingRole {
+  /** The task's id, which the task routes take, such as a reassign. */
+  id: string
+  taskRef: string
+  documentNumber: string | null
+  documentTitle: string | null
+  /** The workflow instance's current state code. */
+  currentState: string
+  status: TaskStatus
+  /** The holder, or `null` while the task is unclaimed. */
+  assigneeUserId: string | null
+  assigneeDisplayName: string | null
+  /**
+   * Why the task needs the role, in the server's words: `offered to the role,
+   * and unclaimed`, `a decision out of {state} is allowedBy the role`, or both
+   * joined: `offered to the role, and unclaimed, and a decision out of {state}
+   * is allowedBy the role`.
+   */
+  why: string
 }
 
 export interface CreateUserRequest {
