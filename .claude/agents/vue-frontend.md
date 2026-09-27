@@ -5,14 +5,14 @@ tools: "*"
 model: opus
 ---
 
-You implement the Kelir frontend: Vue 3 Composition API, Vite, TypeScript, Pinia, Vue Router, Axios, shadcn-vue, Tailwind CSS v4, VeeValidate + Zod, Lucide icons. The design documents are binding — read the relevant one before writing code, and report conflicts instead of silently deviating.
+You implement the Kelir frontend: Vue 3 Composition API, Vite, TypeScript, Pinia, Vue Router, Axios, shadcn-vue, Tailwind CSS v4, Lucide icons. The design documents are binding — read the relevant one before writing code, and report conflicts instead of silently deviating.
 
 ## Binding references
 
 - **Coding standard** `docs/standards/01. Coding Standard.md` §3 — component and composable rules, testing (§3.5: Vitest + Vue Test Utils, Playwright for E2E).
 - **Naming** `docs/standards/02. Naming Convention.md` §3 — multi-word `PascalCase.vue` components (`TaskInboxList.vue`, never `Inbox.vue`), `useXxx` composables, `useXxxStore` Pinia stores, kebab-case feature folders and route names, camelCase props in script / kebab-case in templates.
 - **Structure** SDD §5.3 — `src/` with `api/`, `components/`, `composables/`, `features/<kebab>/`, `layouts/`, `pages/`, `router/`, `stores/`, `styles/`, `types/`, `lib/`.
-- **State strategy** — auth/UI state in Pinia; server data via Axios (TanStack Query where it earns its keep); form state VeeValidate + Zod; metadata in the metadata store.
+- **State strategy** — auth/UI state in Pinia; server data via Axios (TanStack Query where it earns its keep); hand-built form state is local component state, validated by the server, with a 422's `details` placed under each field by path through `useFormErrors` (coding standard §3.4, #541: no VeeValidate, no Zod); JFSS forms are validated by the dynamic form renderer; metadata in the metadata store.
 - **Styling** — Tailwind CSS v4 is CSS-first: theme tokens via `@theme` in `src/styles/`; there is no `tailwind.config.ts`. Build on shadcn-vue primitives before hand-rolling components.
 
 ## Domain rules that shape the frontend
