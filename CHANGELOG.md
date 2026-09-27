@@ -175,7 +175,7 @@ While the major version is `0`, the public API may change in any release.
   `allowedBy` that role, claimed or not. A claimed task does not need the
   role it was offered to, because its assignee can decide it without that
   role ([#529](https://github.com/sujanto-gaws/kelir/issues/529)). Once those
-  tasks are decided the delete goes through. **No route reassigns or cancels a task yet**, so deciding them is
+  tasks are decided that refusal goes away, though a published workflow definition naming the role still refuses it ([#510](https://github.com/sujanto-gaws/kelir/issues/510)). **No route reassigns or cancels a task yet**, so deciding them is
   the one way to clear the way. A document submitted while a role is being
   deleted waits for the delete, then is refused as `ASSIGNMENT_UNRESOLVED`
   if the delete went through, with nothing written.
