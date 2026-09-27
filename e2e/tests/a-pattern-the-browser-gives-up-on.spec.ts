@@ -148,11 +148,24 @@ test('a value Firefox gives up matching is submitted, and the server decides it'
   // side would show here as a field error.
   await expect(page.getByTestId('field-error')).toHaveCount(0, busy)
 
-  // It says what it left undecided rather than passing it quietly: the keyword
-  // and the rule, each named. The names are read from their `code` elements,
-  // because the reason beside each one also says "pattern".
-  await expect(page.getByTestId('form-undecided').locator('code')).toHaveText(
-    ['pattern', 'regex'],
-    busy,
-  )
+  // It says what it left undecided rather than passing it quietly. The names
+  // are read from their `code` elements, because the reason beside each one
+  // also says "pattern".
+  //
+  // **Which of the two is undecided is Firefox's choice, not the form's.** The
+  // precondition above threw, but a later match of the same pattern on the
+  // same value does not always throw: on a CI run of 2026-09-27 the keyword's
+  // match finished and only the rule's threw. A match that finishes is a
+  // verdict, and the server's agrees with it, so the form may list one name or
+  // both. What it may not do is refuse (checked above) or list something else.
+  const undecided = page.getByTestId('form-undecided').locator('code')
+
+  await expect(undecided.first()).toBeVisible(busy)
+
+  const names = await undecided.allTextContents()
+
+  expect(names.length, 'at least one match was left to the server').toBeGreaterThan(0)
+  for (const name of names) {
+    expect(['pattern', 'regex'], `undecided ${name}`).toContain(name)
+  }
 })
