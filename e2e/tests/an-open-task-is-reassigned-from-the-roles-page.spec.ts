@@ -208,7 +208,7 @@ async function refuseDelete(
 async function openReassign(page: Page, tasks: Locator): Promise<Locator> {
   await tasks.getByRole("button", { name: "Reassign" }).click();
 
-  const reassign = page.getByRole("dialog", { name: /^Reassign TSK-/ });
+  const reassign = page.getByRole("dialog", { name: /^Reassign TASK-/ });
   await expect(reassign).toBeVisible();
 
   return reassign;
