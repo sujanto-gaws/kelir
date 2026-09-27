@@ -4690,7 +4690,7 @@ async fn workflow_history_rows(app: &TestApp, document: Uuid) -> i64 {
 }
 
 /// The task's holder columns and status, straight from the row.
-async fn holder_of(app: &TestApp, task: Uuid) -> (Option<Uuid>, Option<Uuid>, String) {
+async fn task_holder(app: &TestApp, task: Uuid) -> (Option<Uuid>, Option<Uuid>, String) {
     sqlx::query_as(
         "SELECT assignee_user_id, candidate_role_id, status FROM workflow_tasks WHERE id = $1",
     )
@@ -4772,7 +4772,7 @@ async fn an_administrator_reassigns_a_claimed_task_to_a_user_who_then_decides_it
     assert_eq!(data["status"], "ASSIGNED", "{data}");
     assert!(data["delegatedFromUserId"].is_null(), "{data}");
     assert_eq!(
-        holder_of(&app, task).await,
+        task_holder(&app, task).await,
         (Some(second_id), None, "ASSIGNED".to_owned())
     );
 
@@ -4815,9 +4815,14 @@ async fn an_administrator_reassigns_a_claimed_task_to_a_user_who_then_decides_it
 /// **Row 7's count, after the assignee is cleared.** Deleting `R` is refused:
 /// the task is offered to it unclaimed, and an edge names it. (A reassign to a
 /// role is only accepted to a role an edge names, so the edge alone would hold
-/// it; the first clause is asserted by the row, in `holder_of`.) `Q`, which
-/// neither offers the task any more nor names an edge, deletes. Once `B`
-/// decides it, `R` deletes too.
+/// it; the first clause is asserted by the row, in `task_holder`.) `Q`, which
+/// neither offers the task any more nor names an edge, is needed by no open
+/// task. Once `B` decides it, neither is `R`. Both are still named by the
+/// published definition, so since **D-91** (3) ([#510]) each delete is refused
+/// with that code instead, which is asked only once no open task needs the
+/// role.
+///
+/// [#510]: https://github.com/sujanto-gaws/kelir/issues/510
 ///
 /// [#512]: https://github.com/sujanto-gaws/kelir/issues/512
 /// [#529]: https://github.com/sujanto-gaws/kelir/issues/529
@@ -4857,7 +4862,7 @@ async fn an_administrator_reassigns_a_claimed_task_to_a_role_whose_holders_may_c
     assert_eq!(data["candidateRoleCode"], "TI-RA-R", "{data}");
     assert_eq!(data["status"], "CREATED", "{data}");
     assert_eq!(
-        holder_of(&app, task).await,
+        task_holder(&app, task).await,
         (None, Some(target), "CREATED".to_owned())
     );
     assert_eq!(
@@ -4896,6 +4901,11 @@ async fn an_administrator_reassigns_a_claimed_task_to_a_role_whose_holders_may_c
         "the role a task was reassigned to did not hold it: {}",
         target_refused.body
     );
+    assert_eq!(
+        target_refused.body["error"]["code"], "ROLE_HAS_OPEN_TASKS",
+        "{}",
+        target_refused.body
+    );
     assert!(
         target_refused.body["error"]["message"]
             .as_str()
@@ -4904,27 +4914,39 @@ async fn an_administrator_reassigns_a_claimed_task_to_a_role_whose_holders_may_c
         target_refused.body
     );
 
-    let queue_deleted = delete_role(&app, &token, queue).await;
-    assert_eq!(
-        queue_deleted.status,
-        StatusCode::NO_CONTENT,
-        "the role the task was reassigned away from still held it: {}",
-        queue_deleted.body
-    );
+    assert_needed_by_no_open_task(
+        &app,
+        &token,
+        queue,
+        "the role the task was reassigned away from still held it",
+    )
+    .await;
 
     claim(&app, &b, task).await;
     assert_eq!(
-        holder_of(&app, task).await,
+        task_holder(&app, task).await,
         (Some(b_id), Some(target), "ASSIGNED".to_owned())
     );
     decide(&app, &b, task).await;
 
-    let target_deleted = delete_role(&app, &token, target).await;
+    assert_needed_by_no_open_task(&app, &token, target, "the decided task still held its role")
+        .await;
+}
+
+/// No open task needs `role`: its list is empty, and its delete is refused, if
+/// at all, for the published definition that names it, **D-91** (3)'s refusal,
+/// which is asked only after the open-task count.
+async fn assert_needed_by_no_open_task(app: &TestApp, token: &str, role: Uuid, why: &str) {
+    let listed = open_tasks(app, token, role, "").await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    assert_eq!(listed.body["meta"]["total"], 0, "{why}: {}", listed.body);
+
+    let refused = delete_role(app, token, role).await;
+    assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.body);
     assert_eq!(
-        target_deleted.status,
-        StatusCode::NO_CONTENT,
-        "{}",
-        target_deleted.body
+        refused.body["error"]["code"], "ROLE_NAMED_BY_PUBLISHED_DEFINITION",
+        "{why}: {}",
+        refused.body
     );
 }
 
@@ -4994,7 +5016,7 @@ async fn a_reassign_names_one_live_target_or_changes_nothing() {
     }
 
     assert_eq!(
-        holder_of(&app, task).await,
+        task_holder(&app, task).await,
         (None, Some(queue), "CREATED".to_owned()),
         "a refused reassign changed the task"
     );
@@ -5039,7 +5061,7 @@ async fn a_decided_task_is_not_reassigned() {
         refused.body
     );
     assert_eq!(
-        holder_of(&app, task).await,
+        task_holder(&app, task).await,
         (Some(decider), Some(queue), "COMPLETED".to_owned())
     );
     assert!(reassign_history(&app, task).await.is_empty());
@@ -5074,7 +5096,7 @@ async fn a_reassign_requires_workflow_task_reassign() {
         refused.body
     );
     assert_eq!(
-        holder_of(&app, task).await,
+        task_holder(&app, task).await,
         (Some(holder_id), Some(queue), "ASSIGNED".to_owned())
     );
 
@@ -5181,7 +5203,7 @@ async fn a_reassign_stays_in_its_tenant() {
     );
 
     assert_eq!(
-        holder_of(&app, task).await,
+        task_holder(&app, task).await,
         (None, Some(queue), "CREATED".to_owned()),
         "a refused reassign changed the task"
     );
@@ -5234,7 +5256,7 @@ async fn a_role_delete_arriving_during_a_reassign_to_it_waits_and_refuses() {
     assert_eq!(reassigned.status, StatusCode::OK, "{}", reassigned.body);
     assert_refused_for_one_open_task(&app, &deleted, target, document).await;
     assert_eq!(
-        holder_of(&app, task).await,
+        task_holder(&app, task).await,
         (None, Some(target), "CREATED".to_owned())
     );
 }
@@ -5331,7 +5353,7 @@ async fn a_reassign_arriving_during_a_role_delete_waits_and_finds_the_role_gone(
         [("roleCode".to_owned(), "ASSIGNMENT_UNRESOLVED".to_owned())]
     );
     assert_eq!(
-        holder_of(&app, task).await,
+        task_holder(&app, task).await,
         (None, Some(queue), "CREATED".to_owned()),
         "the task moved to a deleted role"
     );
@@ -5484,7 +5506,7 @@ async fn a_user_target_must_satisfy_a_decision_edge() {
             refused.body
         );
         assert_eq!(
-            holder_of(&app, task).await,
+            task_holder(&app, task).await,
             (None, Some(queue), "CREATED".to_owned()),
             "{code}: a refused reassign changed the task"
         );
@@ -5549,7 +5571,7 @@ async fn a_role_target_must_be_named_by_a_decision_edge() {
         refused.body
     );
     assert_eq!(
-        holder_of(&app, owners).await,
+        task_holder(&app, owners).await,
         (None, Some(queue), "CREATED".to_owned())
     );
 
