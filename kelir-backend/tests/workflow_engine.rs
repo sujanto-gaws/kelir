@@ -701,10 +701,15 @@ async fn a_workflow_naming_a_role_nobody_holds_refuses_the_submit() {
         "a task assigned to nobody was created: {}",
         refused.body
     );
-    assert!(
-        refused.body.to_string().contains("ASSIGNMENT_UNRESOLVED"),
-        "{}",
-        refused.body
+    let detail = &refused.body["error"]["details"][0];
+    assert_eq!(detail["code"], "ASSIGNMENT_UNRESOLVED", "{detail}");
+
+    // The value, then the task path's sentence, which #534 left alone: it
+    // changed only the decision's.
+    assert_eq!(
+        detail["message"],
+        "`ROLE-THAT-IS-NOT-THERE` is not a live role in this tenant. The task this transition would create would be assigned to nobody, so the transition is refused rather than leaving an approval that has silently stopped",
+        "{detail}"
     );
 
     assert_eq!(
@@ -1387,6 +1392,304 @@ async fn a_transition_is_taken_by_the_role_its_allowed_by_names() {
         approved.body
     );
     assert_eq!(stored_status(&app, id).await, "COMPLETED");
+}
+
+// ---------------------------------------------------------------------------
+// A decision refused by `allowedBy` is told about the decision (#534)
+// ---------------------------------------------------------------------------
+//
+// `assignment::permits` asks each rule *who may take this edge*, and every
+// refusal it can raise on the way — a user, a role, a department code, a
+// scope the document cannot supply — used to end with the task sentence of
+// `resolve`. Each test below reaches one of those refusals from a decision into
+// a final state, which raises no task, and was seen red against that branch
+// hard-coded to `Question::Assignee`.
+
+/// Decides `action` on the document's open task and returns the refusal's
+/// message, having asserted everything that does not depend on which value
+/// failed to resolve: a 422, `ASSIGNMENT_UNRESOLVED` at the edge's own field,
+/// the decision sentence, no task mentioned, and the document where it was.
+async fn refused_decision(
+    app: &TestApp,
+    approver: &str,
+    document_id: Uuid,
+    action: &str,
+    path: &str,
+) -> String {
+    let task = open_task_of(app, document_id).await;
+    let refused = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(approver),
+            json!({ "action": action }),
+        )
+        .await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+    let detail = &refused.body["error"]["details"][0];
+    assert_eq!(detail["code"], "ASSIGNMENT_UNRESOLVED", "{detail}");
+    assert_eq!(detail["path"], path, "{detail}");
+
+    let message = detail["message"].as_str().expect("a message").to_owned();
+    assert!(
+        message
+            .contains("Nobody satisfies this edge's `allowedBy`, so nobody may take this decision"),
+        "{message}"
+    );
+    assert!(
+        !message.contains("task"),
+        "a decision raising no task was told about one: {message}"
+    );
+
+    assert_eq!(stored_status(app, document_id).await, "PENDING_APPROVAL");
+
+    message
+}
+
+/// Publishes `definition`, binds it to a new type, and submits a draft of it.
+async fn submitted(app: &TestApp, token: &str, definition: Value, type_code: &str) -> Uuid {
+    let workflow = publish_workflow(app, token, definition).await;
+    let type_id = document_type(app, token, type_code, Some(workflow)).await;
+    let id = draft(app, token, type_id).await;
+
+    let submitted = submit(app, token, id).await;
+    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+
+    id
+}
+
+/// **A `ROLE` edge whose role is gone** ([#534]).
+///
+/// The APPROVE edge leads to `COMPLETED`, which raises no task, and its role is
+/// deleted in SQL after the task was raised — the state only a pre-**D-89**
+/// delete leaves, and verification record 18's probe P2. The refusal used to
+/// say *"The task this transition would create would be assigned to nobody"*,
+/// about a task that was never going to exist.
+///
+/// **Seen red** against `assignment::permits` asking `Question::Assignee`
+/// instead of `Question::Decider`: the message names a task.
+///
+/// [#534]: https://github.com/sujanto-gaws/kelir/issues/534
+#[tokio::test]
+async fn a_decision_allowed_by_a_role_that_is_gone_is_refused_for_the_decision() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let edge_role = given_bare_role(&app, "WF-EDGE-GONE").await;
+    let approver = approver(&app, "wf.edgegone").await;
+
+    let id = submitted(
+        &app,
+        &token,
+        split_control_workflow("wf_edge_gone_later", "WF-EDGE-GONE"),
+        "PR_EDGE_GONE_LATER",
+    )
+    .await;
+
+    sqlx::query("UPDATE roles SET deleted_at = now() WHERE id = $1")
+        .bind(edge_role)
+        .execute(&app.pool)
+        .await
+        .expect("delete the edge's role behind the API's back");
+
+    let message = refused_decision(
+        &app,
+        &approver,
+        id,
+        "APPROVE",
+        "transitions.MANAGER_APPROVAL.APPROVE.allowedBy.roleCode",
+    )
+    .await;
+    assert!(
+        message.starts_with("`WF-EDGE-GONE` is not a live role in this tenant. "),
+        "{message}"
+    );
+}
+
+/// **A `USER` edge whose user is deactivated** ([#534]).
+///
+/// Reachable through the API, unlike the role case: `hold_deciding_roles` reads
+/// only `ROLE` and `DEPARTMENT_ROLE` edges, so the submit raises the task, and
+/// `DELETE /identity/users/{id}` counts no open work before it deactivates. The
+/// refusal is `direct`'s `User` branch.
+///
+/// **Seen red** against that branch's `unresolvable` hard-coded to
+/// `Question::Assignee`.
+///
+/// [#534]: https://github.com/sujanto-gaws/kelir/issues/534
+#[tokio::test]
+async fn a_decision_allowed_by_a_user_who_is_gone_is_refused_for_the_decision() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let approver = approver(&app, "wf.edgeuser.approver").await;
+    let edge_user = fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "wf.edgeuser",
+        "wf.edgeuser@example.test",
+        common::ADMIN_PASSWORD,
+        &[],
+    )
+    .await;
+
+    let mut definition = role_workflow("wf_edge_user_gone");
+    definition["transitions"][0]["allowedBy"] = json!(format!("USER:{edge_user}"));
+    let id = submitted(&app, &token, definition, "PR_EDGE_USER_GONE").await;
+
+    let deactivated = app
+        .delete(&format!("/api/v1/identity/users/{edge_user}"), Some(&token))
+        .await;
+    assert!(
+        deactivated.status.is_success(),
+        "the API refused to deactivate the edge's user: {}",
+        deactivated.body
+    );
+
+    let message = refused_decision(
+        &app,
+        &approver,
+        id,
+        "APPROVE",
+        "transitions.MANAGER_APPROVAL.APPROVE.allowedBy.userId",
+    )
+    .await;
+    assert!(
+        message.starts_with(&format!(
+            "user {edge_user} is not a live user in this tenant. "
+        )),
+        "{message}"
+    );
+}
+
+/// **A `DEPARTMENT_ROLE` edge whose department code is gone** ([#534]).
+///
+/// The role is live, so `hold_deciding_roles` lets the submit through; the
+/// department is looked up only when the edge is resolved. The refusal is
+/// `direct`'s department-code branch.
+///
+/// **Seen red** against that branch's `unresolvable` hard-coded to
+/// `Question::Assignee`.
+///
+/// [#534]: https://github.com/sujanto-gaws/kelir/issues/534
+#[tokio::test]
+async fn a_decision_allowed_by_a_department_that_is_gone_is_refused_for_the_decision() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let approver = approver(&app, "wf.edgedept").await;
+    let department = department(&app, "DEPT-EDGE-GONE", "Gone").await;
+
+    let mut definition = role_workflow("wf_edge_dept_gone");
+    definition["transitions"][0]["allowedBy"] = json!({
+        "assigneeType": "DEPARTMENT_ROLE",
+        "roleCode": APPROVER_ROLE,
+        "departmentScope": "DEPT-EDGE-GONE",
+    });
+    let id = submitted(&app, &token, definition, "PR_EDGE_DEPT_GONE").await;
+
+    sqlx::query("UPDATE departments SET deleted_at = now() WHERE id = $1")
+        .bind(department)
+        .execute(&app.pool)
+        .await
+        .expect("delete the edge's department");
+
+    let message = refused_decision(
+        &app,
+        &approver,
+        id,
+        "APPROVE",
+        "transitions.MANAGER_APPROVAL.APPROVE.allowedBy.departmentScope",
+    )
+    .await;
+    assert!(
+        message.starts_with("`DEPT-EDGE-GONE` is not a live department in this tenant. "),
+        "{message}"
+    );
+}
+
+/// **A `REQUESTED_DEPARTMENT` edge on a document that names none** ([#534]).
+///
+/// The draft sets no requested department, and nothing before the decision
+/// reads the edge's scope. The refusal is `normalize`'s, before any lookup.
+///
+/// **Seen red** against the `REQUESTED_DEPARTMENT` arm's `unresolvable`
+/// hard-coded to `Question::Assignee`.
+///
+/// [#534]: https://github.com/sujanto-gaws/kelir/issues/534
+#[tokio::test]
+async fn a_decision_allowed_by_a_requested_department_there_is_none_of_is_refused() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let approver = approver(&app, "wf.edgerequested").await;
+
+    let mut definition = role_workflow("wf_edge_requested");
+    definition["transitions"][0]["allowedBy"] = json!({
+        "assigneeType": "DEPARTMENT_ROLE",
+        "roleCode": APPROVER_ROLE,
+        "departmentScope": "REQUESTED_DEPARTMENT",
+    });
+    let id = submitted(&app, &token, definition, "PR_EDGE_REQUESTED").await;
+
+    let message = refused_decision(
+        &app,
+        &approver,
+        id,
+        "APPROVE",
+        "transitions.MANAGER_APPROVAL.APPROVE.allowedBy.departmentScope",
+    )
+    .await;
+    assert!(
+        message.starts_with(
+            "this document names no requested department, so REQUESTED_DEPARTMENT \
+             resolves to nothing. "
+        ),
+        "{message}"
+    );
+}
+
+/// **A `REJECT` edge whose role is gone** ([#534]): the sentence is the
+/// decision's whichever decision it is, and the path names the edge taken.
+///
+/// **Seen red** against `assignment::permits` asking `Question::Assignee`.
+///
+/// [#534]: https://github.com/sujanto-gaws/kelir/issues/534
+#[tokio::test]
+async fn a_rejection_allowed_by_a_role_that_is_gone_is_refused_for_the_decision() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let edge_role = given_bare_role(&app, "WF-REJECT-GONE").await;
+    let approver = approver(&app, "wf.rejectgone").await;
+
+    let mut definition = role_workflow("wf_reject_gone");
+    definition["transitions"][1]["allowedBy"] = json!("ROLE:WF-REJECT-GONE");
+    let id = submitted(&app, &token, definition, "PR_REJECT_GONE").await;
+
+    sqlx::query("UPDATE roles SET deleted_at = now() WHERE id = $1")
+        .bind(edge_role)
+        .execute(&app.pool)
+        .await
+        .expect("delete the edge's role behind the API's back");
+
+    let message = refused_decision(
+        &app,
+        &approver,
+        id,
+        "REJECT",
+        "transitions.MANAGER_APPROVAL.REJECT.allowedBy.roleCode",
+    )
+    .await;
+    assert!(
+        message.starts_with("`WF-REJECT-GONE` is not a live role in this tenant. "),
+        "{message}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -3294,6 +3597,14 @@ async fn an_edge_naming_a_role_that_is_gone_refuses_the_submit() {
     assert!(
         details.contains("transitions.MANAGER_APPROVAL.APPROVE.allowedBy.roleCode"),
         "the refusal names the edge: {details}"
+    );
+
+    // `hold_deciding_roles`'s own sentence, which is about the task it would
+    // raise. #534 gave `permits` a decision's sentence and left this one alone.
+    assert_eq!(
+        refused.body["error"]["details"][0]["message"],
+        "`WF-EDGE-NOT-THERE` is not a live role in this tenant. Every decision this edge offers on the task this transition would create would be refused, so the transition is refused rather than raising a task nobody can decide",
+        "{details}"
     );
 
     assert_eq!(stored_status(&app, id).await, "DRAFT");

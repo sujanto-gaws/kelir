@@ -207,8 +207,8 @@ pub async fn permits(
         return Ok(false);
     };
 
-    let principal = normalize(rule, context, path)?;
-    let resolved = direct(transaction, tenant_id, principal, path).await?;
+    let principal = normalize(rule, context, path, Question::Decider)?;
+    let resolved = direct(transaction, tenant_id, principal, path, Question::Decider).await?;
 
     // The actor first: the ordinary case is somebody deciding their own task,
     // and it costs no query at all when the rule named a user.
@@ -253,8 +253,8 @@ pub async fn resolve(
     context: AssignmentContext,
     path: &str,
 ) -> Result<ResolvedAssignment, AppError> {
-    let principal = normalize(rule, context, path)?;
-    let resolved = direct(transaction, tenant_id, principal, path).await?;
+    let principal = normalize(rule, context, path, Question::Assignee)?;
+    let resolved = direct(transaction, tenant_id, principal, path, Question::Assignee).await?;
 
     // JWSS §5.1: **after the rule resolves**, and not part of it.
     redirect(transaction, tenant_id, resolved, context).await
@@ -403,6 +403,7 @@ fn normalize(
     rule: &AssignmentRule,
     context: AssignmentContext,
     path: &str,
+    question: Question,
 ) -> Result<Principal, AppError> {
     match rule.assignee_type {
         AssigneeType::User => {
@@ -410,6 +411,7 @@ fn normalize(
 
             let id = raw.parse::<Uuid>().map_err(|_| {
                 unresolvable(
+                    question,
                     path,
                     "userId",
                     format!("`{raw}` is not a user id; a USER assignment names a user's id"),
@@ -420,6 +422,7 @@ fn normalize(
         }
         AssigneeType::Owner => context.owner_user_id.map(Principal::User).ok_or_else(|| {
             unresolvable(
+                question,
                 path,
                 "assigneeType",
                 "this document has no creator recorded, so OWNER resolves to nobody".to_owned(),
@@ -437,6 +440,7 @@ fn normalize(
                 Some("REQUESTED_DEPARTMENT") => {
                     DepartmentScope::Id(context.requested_department_id.ok_or_else(|| {
                         unresolvable(
+                            question,
                             path,
                             "departmentScope",
                             "this document names no requested department, so \
@@ -448,6 +452,7 @@ fn normalize(
                 Some("OWNER_DEPARTMENT") => {
                     DepartmentScope::Id(context.owner_department_id.ok_or_else(|| {
                         unresolvable(
+                            question,
                             path,
                             "departmentScope",
                             "the document's creator belongs to no department, so \
@@ -482,6 +487,7 @@ async fn direct(
     tenant_id: Uuid,
     principal: Principal,
     path: &str,
+    question: Question,
 ) -> Result<ResolvedAssignment, AppError> {
     match principal {
         Principal::User(id) => {
@@ -498,6 +504,7 @@ async fn direct(
 
             if exists.is_none() {
                 return Err(unresolvable(
+                    question,
                     path,
                     "userId",
                     format!("user {id} is not a live user in this tenant"),
@@ -531,6 +538,7 @@ async fn direct(
             .await?
             .ok_or_else(|| {
                 unresolvable(
+                    question,
                     path,
                     "roleCode",
                     format!("`{role_code}` is not a live role in this tenant"),
@@ -553,6 +561,7 @@ async fn direct(
                     .await?
                     .ok_or_else(|| {
                         unresolvable(
+                            question,
                             path,
                             "departmentScope",
                             format!("`{code}` is not a live department in this tenant"),
@@ -583,6 +592,19 @@ enum DepartmentScope {
     Code(String),
 }
 
+/// Which of the two questions a rule is being asked, which is what its refusal
+/// tells the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Question {
+    /// [`resolve`]: who a task being raised is for.
+    Assignee,
+    /// [`permits`]: who may take an edge. No task is necessarily being raised —
+    /// a decision into a final state raises none ([#534]).
+    ///
+    /// [#534]: https://github.com/sujanto-gaws/kelir/issues/534
+    Decider,
+}
+
 /// The one refusal shape this file raises.
 ///
 /// A 422 rather than a 409 or a 500: the definition names something that does
@@ -590,16 +612,28 @@ enum DepartmentScope {
 /// tenant's data. The path points at the *definition's* field so an
 /// administrator can find it, and the message names the value rather than saying
 /// "unresolvable", because "unresolvable" tells them nothing they can act on.
-fn unresolvable(path: &str, field: &str, message: String) -> AppError {
+///
+/// **One code, two reasons.** The value is unresolvable either way, but what it
+/// costs differs: an `assignment` would raise a task offered to nobody, and an
+/// `allowedBy` leaves a decision nobody may take. Telling the second caller
+/// about a task that was never going to exist sends them looking for it.
+fn unresolvable(question: Question, path: &str, field: &str, message: String) -> AppError {
+    let reason = match question {
+        Question::Assignee => {
+            "The task this transition would create would be assigned to nobody, so the \
+             transition is refused rather than leaving an approval that has silently stopped"
+        }
+        Question::Decider => {
+            "Nobody satisfies this edge's `allowedBy`, so nobody may take this decision, \
+             and it is refused rather than let through unchecked"
+        }
+    };
+
     AppError::validation(vec![ValidationDetail::new(
         format!("{path}.{field}"),
         "assignment",
         "ASSIGNMENT_UNRESOLVED",
-        format!(
-            "{message}. The task this transition would create would be assigned to \
-             nobody, so the transition is refused rather than leaving an approval \
-             that has silently stopped"
-        ),
+        format!("{message}. {reason}"),
     )])
 }
 
@@ -635,8 +669,13 @@ mod tests {
     #[test]
     fn owner_resolves_to_the_person_who_raised_the_document() {
         let context = context();
-        let principal =
-            normalize(&rule(AssigneeType::Owner), context, "task.assignment").expect("an owner");
+        let principal = normalize(
+            &rule(AssigneeType::Owner),
+            context,
+            "task.assignment",
+            Question::Assignee,
+        )
+        .expect("an owner");
 
         assert_eq!(
             principal,
@@ -653,8 +692,13 @@ mod tests {
             ..context()
         };
 
-        let error =
-            normalize(&rule(AssigneeType::Owner), context, "task.assignment").expect_err("refused");
+        let error = normalize(
+            &rule(AssigneeType::Owner),
+            context,
+            "task.assignment",
+            Question::Assignee,
+        )
+        .expect_err("refused");
 
         assert_eq!(code(error), "ASSIGNMENT_UNRESOLVED");
     }
@@ -666,8 +710,13 @@ mod tests {
         department_role.role_code = Some("FINANCE".to_owned());
         department_role.department_scope = Some("REQUESTED_DEPARTMENT".to_owned());
 
-        let principal =
-            normalize(&department_role, context, "task.assignment").expect("a scoped role");
+        let principal = normalize(
+            &department_role,
+            context,
+            "task.assignment",
+            Question::Assignee,
+        )
+        .expect("a scoped role");
 
         assert_eq!(
             principal,
@@ -690,7 +739,13 @@ mod tests {
         department_role.role_code = Some("FINANCE".to_owned());
         department_role.department_scope = Some("REQUESTED_DEPARTMENT".to_owned());
 
-        let error = normalize(&department_role, context, "task.assignment").expect_err("refused");
+        let error = normalize(
+            &department_role,
+            context,
+            "task.assignment",
+            Question::Assignee,
+        )
+        .expect_err("refused");
 
         assert_eq!(code(error), "ASSIGNMENT_UNRESOLVED");
     }
@@ -705,8 +760,13 @@ mod tests {
         department_role.role_code = Some("FINANCE".to_owned());
         department_role.department_scope = Some("DEPT-PROC".to_owned());
 
-        let principal =
-            normalize(&department_role, context(), "task.assignment").expect("a coded scope");
+        let principal = normalize(
+            &department_role,
+            context(),
+            "task.assignment",
+            Question::Assignee,
+        )
+        .expect("a coded scope");
 
         assert_eq!(
             principal,
@@ -722,9 +782,60 @@ mod tests {
         let mut user = rule(AssigneeType::User);
         user.user_id = Some("the finance manager".to_owned());
 
-        let error = normalize(&user, context(), "task.assignment").expect_err("refused");
+        let error = normalize(&user, context(), "task.assignment", Question::Assignee)
+            .expect_err("refused");
 
         assert_eq!(code(error), "ASSIGNMENT_UNRESOLVED");
+    }
+
+    /// `OWNER` on a document with no creator: the one refusal `normalize` can
+    /// raise without a database, asked as either question.
+    fn ownerless(question: Question, path: &str) -> (String, String) {
+        let context = AssignmentContext {
+            owner_user_id: None,
+            ..context()
+        };
+
+        match normalize(&rule(AssigneeType::Owner), context, path, question) {
+            Err(AppError::Validation { details }) => {
+                (details[0].code.clone(), details[0].message.clone())
+            }
+            other => panic!("expected a validation error, got {other:?}"),
+        }
+    }
+
+    /// **A task's assignment that resolves to nobody is told about the task**,
+    /// which is what it would have raised.
+    #[test]
+    fn an_unresolvable_assignment_is_refused_for_the_task_it_would_raise() {
+        let (code, message) = ownerless(Question::Assignee, "states.0.task.assignment");
+
+        assert_eq!(code, "ASSIGNMENT_UNRESOLVED");
+        assert!(
+            message.contains("The task this transition would create would be assigned to nobody"),
+            "{message}"
+        );
+        assert!(!message.contains("decision"), "{message}");
+    }
+
+    /// **An `allowedBy` that resolves to nobody is told about the decision**
+    /// ([#534]). A decision into a final state raises no task, and before this
+    /// it was told about one.
+    ///
+    /// [#534]: https://github.com/sujanto-gaws/kelir/issues/534
+    #[test]
+    fn an_unresolvable_allowed_by_is_refused_for_the_decision_not_a_task() {
+        let (code, message) = ownerless(
+            Question::Decider,
+            "transitions.MANAGER_APPROVAL.APPROVE.allowedBy",
+        );
+
+        assert_eq!(code, "ASSIGNMENT_UNRESOLVED");
+        assert!(
+            message.contains("nobody may take this decision"),
+            "{message}"
+        );
+        assert!(!message.contains("task"), "{message}");
     }
 
     #[test]
