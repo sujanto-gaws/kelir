@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT 1 AS \"found!\"\n        FROM workflow_tasks t\n        -- The third statement #279 found disagreeing, joined for the reason the\n        -- count is: this gate answered *visible* for a task the read behind it\n        -- then answered 404 for.\n        JOIN documents d ON d.id = t.document_id AND d.deleted_at IS NULL\n        -- The instance, for the state whose edges #530's clause reads.\n        JOIN workflow_instances i ON i.id = t.workflow_instance_id\n        WHERE t.tenant_id = $1 AND t.id = $3 AND t.deleted_at IS NULL\n          AND (\n                t.assignee_user_id = $2\n             OR (t.assignee_user_id IS NULL AND EXISTS (\n                    SELECT 1 FROM user_roles ur\n                    -- A grant of a deleted role is not a grant (#487).\n                    JOIN roles ro ON ro.id = ur.role_id AND ro.tenant_id = ur.tenant_id\n                                 AND ro.deleted_at IS NULL\n                    WHERE ur.tenant_id = $1 AND ur.user_id = $2 AND ur.deleted_at IS NULL\n                      AND ur.role_id = t.candidate_role_id\n                      AND (ur.valid_from IS NULL OR ur.valid_from <= current_date)\n                      AND (ur.valid_to   IS NULL OR ur.valid_to   >= current_date)\n                      AND (t.candidate_department_id IS NULL\n                           OR ur.department_id IS NULL\n                           OR ur.department_id = t.candidate_department_id)\n                ))\n          )\n          -- A claimed task nobody can decide is not waiting for its holder\n          -- (#530). The same clause is in `list_for_caller`, `count_for_caller`\n          -- and `is_visible_to`, and the three must stay identical. It is not\n          -- `count_open_tasks_needing_role`'s clause, which asks whether *some*\n          -- edge names a role: this asks whether *no* decision edge resolves.\n          -- See \"A claimed task nobody can decide\" at the top of the file.\n          AND (t.assignee_user_id IS DISTINCT FROM $2\n               OR t.status NOT IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')\n               -- No decision edge at all, as on a RETURNED correction task that\n               -- only RESUBMIT leaves: nothing to judge by, so it stays.\n               OR NOT EXISTS (SELECT 1 FROM workflow_transitions tr\n                              WHERE tr.tenant_id = t.tenant_id\n                                AND tr.workflow_definition_id = i.workflow_definition_id\n                                AND tr.from_state = i.current_state\n                                AND tr.action IN ('APPROVE', 'REJECT', 'RETURN'))\n               OR EXISTS (SELECT 1 FROM workflow_transitions tr\n                          WHERE tr.tenant_id = t.tenant_id\n                            AND tr.workflow_definition_id = i.workflow_definition_id\n                            AND tr.from_state = i.current_state\n                            AND tr.action IN ('APPROVE', 'REJECT', 'RETURN')\n                            AND (tr.allowed_by_json->>'assigneeType' IN ('USER', 'OWNER')\n                                 OR (tr.allowed_by_json->>'assigneeType'\n                                         IN ('ROLE', 'DEPARTMENT_ROLE')\n                                     AND EXISTS (SELECT 1 FROM roles live\n                                                 WHERE live.tenant_id = t.tenant_id\n                                                   AND live.role_code = tr.allowed_by_json->>'roleCode'\n                                                   AND live.deleted_at IS NULL)))))\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "found!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "9a25b6741026a0c2de50c16edd19e5a2ee1cf7cf0947b3b76c96a28b932c9cae"
+}

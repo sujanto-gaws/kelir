@@ -3000,3 +3000,979 @@ async fn the_stranded_task_query_lists_what_nobody_can_decide_and_says_whose() {
         refused.body
     );
 }
+
+// ---------------------------------------------------------------------------
+// #530 — a claimed task nobody can decide is not waiting for its holder
+// ---------------------------------------------------------------------------
+
+/// What the #530 holders need: the inbox, the dashboard, and a decision.
+const WAITING_PERMISSIONS: &[&str] = &[
+    "reporting:dashboard:read",
+    "workflow:task:read",
+    "workflow:task:execute",
+    "workflow:instance:read",
+    "document:read",
+];
+
+/// A role with no permissions, which a task is offered to or an edge names.
+async fn bare_role(app: &TestApp, role_code: &str) -> Uuid {
+    fixtures::create_role_with_permissions(&app.pool, fixtures::SYSTEM_TENANT_ID, role_code, &[])
+        .await
+}
+
+/// A holder of `WAITING_PERMISSIONS` and of `roles`, with their id and token.
+async fn waiting_holder(
+    app: &TestApp,
+    role_code: &str,
+    username: &str,
+    roles: &[Uuid],
+) -> (Uuid, String) {
+    let base = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        role_code,
+        WAITING_PERMISSIONS,
+    )
+    .await;
+
+    let mut granted = vec![base];
+    granted.extend_from_slice(roles);
+
+    let id = fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        username,
+        &format!("{username}@example.test"),
+        common::ADMIN_PASSWORD,
+        &granted,
+    )
+    .await;
+
+    (id, app.sign_in(username, common::ADMIN_PASSWORD).await)
+}
+
+/// A workflow whose task is offered to `queue`, with `APPROVE` and `REJECT`
+/// allowedBy the two rules given.
+fn two_edge_workflow(key: &str, queue: &str, approve: Value, reject: Value) -> Value {
+    let mut definition = workflow_for(key, queue);
+    let transitions = definition["transitions"]
+        .as_array_mut()
+        .expect("transitions");
+    transitions[0]["allowedBy"] = approve;
+    transitions[1]["allowedBy"] = reject;
+    definition
+}
+
+/// Submits a document of a new type on `definition`, claims its task as
+/// `holder`, and dates the task a day late. Returns the task.
+async fn claimed_late_task(
+    app: &TestApp,
+    admin: &str,
+    holder: &str,
+    key: &str,
+    definition: Value,
+) -> Uuid {
+    let workflow = publish_workflow_definition(app, admin, key, definition).await;
+    let type_id = document_type(app, admin, &key.to_uppercase(), workflow).await;
+    let document = submitted_document(app, admin, type_id, key).await;
+    let task = open_task_of(app, document).await;
+
+    let claim = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/claim"),
+            Some(holder),
+            json!({}),
+        )
+        .await;
+    assert_eq!(claim.status, StatusCode::OK, "{}", claim.body);
+
+    sqlx::query("UPDATE workflow_tasks SET due_at = now() - interval '1 day' WHERE id = $1")
+        .bind(task)
+        .execute(&app.pool)
+        .await
+        .expect("date the task a day late");
+
+    task
+}
+
+/// Soft-deleted in SQL, as `reporting_dashboard.rs`'s #487 test does: since
+/// **D-89** the API refuses to delete a role an open task needs, so the state
+/// is reachable only as a role deleted before that refusal shipped.
+async fn soft_delete_role(app: &TestApp, role: Uuid) {
+    sqlx::query("UPDATE roles SET deleted_at = now() WHERE id = $1")
+        .bind(role)
+        .execute(&app.pool)
+        .await
+        .expect("soft-delete the role");
+}
+
+/// The ids of a list of task rows, sorted.
+fn ids_in(rows: &Value) -> Vec<Uuid> {
+    let mut ids: Vec<Uuid> = rows
+        .as_array()
+        .unwrap_or_else(|| panic!("a list of tasks: {rows}"))
+        .iter()
+        .map(id_of)
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// Every list the holder predicate reaches, as the ids each one lists.
+///
+/// Each list's count is asserted equal to its rows as it is read, so no test
+/// can check one without the other: `meta.total` against the inbox page, as
+/// in `a_caller_sees_their_own_roles_tasks_and_no_others`, and `tasksWaiting`
+/// and `tasksOverdue` against the dashboard cards beside them.
+struct Surfaces {
+    open: Vec<Uuid>,
+    overdue: Vec<Uuid>,
+    waiting: Vec<Uuid>,
+    late: Vec<Uuid>,
+}
+
+async fn surfaces_of(app: &TestApp, token: &str) -> Surfaces {
+    let mut pages = Vec::new();
+
+    for scope in ["open", "overdue"] {
+        let page = inbox_of(app, token, &format!("scope={scope}")).await;
+        assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+
+        let ids = ids_in(&page.body["data"]);
+        assert_eq!(
+            page.body["meta"]["total"],
+            json!(ids.len()),
+            "?scope={scope}: the count and the page disagree: {}",
+            page.body
+        );
+        pages.push(ids);
+    }
+
+    let summary = app.get("/api/v1/dashboard/summary", Some(token)).await;
+    assert_eq!(summary.status, StatusCode::OK, "{}", summary.body);
+    let summary = &summary.body["data"];
+
+    let waiting = ids_in(&summary["pendingTasks"]);
+    assert_eq!(
+        summary["tasksWaiting"],
+        json!(waiting.len()),
+        "the waiting count and its card disagree: {summary}"
+    );
+    let late = ids_in(&summary["overdueTasks"]);
+    assert_eq!(
+        summary["tasksOverdue"],
+        json!(late.len()),
+        "the overdue count and its card disagree: {summary}"
+    );
+
+    let overdue = pages.pop().expect("the overdue page");
+    let open = pages.pop().expect("the open page");
+
+    Surfaces {
+        open,
+        overdue,
+        waiting,
+        late,
+    }
+}
+
+impl Surfaces {
+    /// Asserts that every list holds exactly `expected`.
+    fn assert_all(&self, expected: &[Uuid], context: &str) {
+        let mut expected = expected.to_vec();
+        expected.sort();
+
+        for (surface, ids) in [
+            ("GET /tasks?scope=open", &self.open),
+            ("GET /tasks?scope=overdue", &self.overdue),
+            ("pendingTasks", &self.waiting),
+            ("overdueTasks", &self.late),
+        ] {
+            assert_eq!(ids, &expected, "{context}: {surface}");
+        }
+    }
+}
+
+async fn decision(app: &TestApp, token: &str, task: Uuid, action: &str) -> common::TestResponse {
+    app.post(
+        &format!("/api/v1/workflow/tasks/{task}/decision"),
+        Some(token),
+        json!({ "action": action }),
+    )
+    .await
+}
+
+/// `repository::inbox::is_visible_to`, the detail page's gate, asked directly.
+async fn is_visible_to(app: &TestApp, user: Uuid, task: Uuid) -> bool {
+    kelir_backend::modules::workflow::repository::inbox::is_visible_to(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        user,
+        task,
+    )
+    .await
+    .expect("ask the gate")
+}
+
+/// Asserts that `APPROVE` and `REJECT`, the two decisions `workflow_for`'s
+/// edges offer, each answer `ASSIGNMENT_UNRESOLVED` on `task`.
+async fn assert_every_decision_refused(app: &TestApp, token: &str, task: Uuid) {
+    for action in ["APPROVE", "REJECT"] {
+        let refused = decision(app, token, task, action).await;
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{action}: {}",
+            refused.body
+        );
+        assert!(
+            refused.body.to_string().contains("ASSIGNMENT_UNRESOLVED"),
+            "{action} is refused by the engine, as before: {}",
+            refused.body
+        );
+    }
+}
+
+/// **A claimed task whose every decision edge names a deleted role stops
+/// waiting for its holder** ([#530]).
+///
+/// Record 18's probe P3. The task is offered to `gone`, both of its edges are
+/// allowedBy `gone`, the approver has claimed it, and it is late. #507 hid the
+/// **unclaimed** arm of such a task and left this one. It stayed on the inbox
+/// and its count, on both dashboard cards and their counts, and its page
+/// opened, while deciding it refused as `ASSIGNMENT_UNRESOLVED`.
+///
+/// Two more stranded tasks sit beside it:
+///
+/// * **One names the role as `DEPARTMENT_ROLE`**, which `direct` refuses on a
+///   deleted role exactly as it refuses `ROLE`.
+/// * **One also has a `CANCEL` edge allowedBy the approver.** That edge
+///   resolves, but `decide()` cannot fire it, so it must not keep the task.
+///
+/// **The second subject** is the same shape on a role that stays, claimed by
+/// the same approver and as late. A clause that hid every claimed task, or
+/// every late one, would pass the first half and fail on it.
+///
+/// **The decision is unchanged** (AC5). Each hidden task, decided by its
+/// assignee, still refuses `APPROVE` and `REJECT` with `ASSIGNMENT_UNRESOLVED`.
+/// The refusal comes from the engine and not from the gate, because nothing on
+/// the decision path reads the inbox.
+///
+/// **Seen red, 2026-09-26**, one mutation of `repository::inbox` at a time:
+///
+/// * #530's clause dropped from `list_for_caller`: the open page lists all four
+///   tasks over a `meta.total` of 1.
+/// * Dropped from `count_for_caller`: `meta.total` says 4 over a page of 1.
+/// * Dropped from `is_visible_to`: the gate admits the stranded tasks. The page
+///   still answers 404, because `get_task` reads the row through
+///   `list_for_caller` after the gate, which is why the gate is asked directly.
+/// * `live.deleted_at IS NULL` dropped: every list holds all four.
+/// * `IN ('ROLE', 'DEPARTMENT_ROLE')` narrowed to `= 'ROLE'`: the
+///   `DEPARTMENT_ROLE` task is missing before the delete.
+/// * The `APPROVE`/`REJECT`/`RETURN` filter dropped: the task beside a live
+///   `CANCEL` edge stays on every list.
+///
+/// [#530]: https://github.com/sujanto-gaws/kelir/issues/530
+#[tokio::test]
+async fn a_claimed_task_whose_every_decision_edge_names_a_deleted_role_stops_waiting() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let gone = bare_role(&app, "TI-530-GONE").await;
+    let kept = bare_role(&app, "TI-530-KEPT").await;
+    let (approver_id, approver) =
+        waiting_holder(&app, "TI-530-DASH", "ti.530", &[gone, kept]).await;
+
+    let by_role = claimed_late_task(
+        &app,
+        &token,
+        &approver,
+        "ti_530_gone",
+        workflow_for("ti_530_gone", "TI-530-GONE"),
+    )
+    .await;
+
+    let department_role = json!({ "assigneeType": "DEPARTMENT_ROLE", "roleCode": "TI-530-GONE" });
+    let by_department_role = claimed_late_task(
+        &app,
+        &token,
+        &approver,
+        "ti_530_dept",
+        two_edge_workflow(
+            "ti_530_dept",
+            "TI-530-GONE",
+            department_role.clone(),
+            department_role,
+        ),
+    )
+    .await;
+
+    let mut with_cancel = workflow_for("ti_530_cancel", "TI-530-GONE");
+    with_cancel["transitions"]
+        .as_array_mut()
+        .expect("transitions")
+        .push(json!({
+            "from": "MANAGER_APPROVAL", "to": "REJECTED", "action": "CANCEL",
+            "allowedBy": { "assigneeType": "USER", "userId": approver_id }
+        }));
+    let beside_a_live_cancel =
+        claimed_late_task(&app, &token, &approver, "ti_530_cancel", with_cancel).await;
+
+    let live = claimed_late_task(
+        &app,
+        &token,
+        &approver,
+        "ti_530_kept",
+        workflow_for("ti_530_kept", "TI-530-KEPT"),
+    )
+    .await;
+
+    let stranded = [by_role, by_department_role, beside_a_live_cancel];
+
+    surfaces_of(&app, &approver).await.assert_all(
+        &[by_role, by_department_role, beside_a_live_cancel, live],
+        "before the delete",
+    );
+
+    soft_delete_role(&app, gone).await;
+
+    surfaces_of(&app, &approver)
+        .await
+        .assert_all(&[live], "a claimed task nobody can decide is still waiting");
+
+    for task in stranded {
+        let page = app.get(&format!("{TASKS}/{task}"), Some(&approver)).await;
+        assert_eq!(
+            page.status,
+            StatusCode::NOT_FOUND,
+            "the page of a task nobody can decide still opens: {}",
+            page.body
+        );
+
+        // The gate itself, not only the page. `get_task` reads the row through
+        // `list_for_caller` after the gate, so the 404 above holds with the
+        // gate's clause gone; this does not.
+        assert!(
+            !is_visible_to(&app, approver_id, task).await,
+            "the detail gate still admits a task nobody can decide"
+        );
+
+        assert_every_decision_refused(&app, &approver, task).await;
+    }
+
+    let page = app.get(&format!("{TASKS}/{live}"), Some(&approver)).await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+    assert!(is_visible_to(&app, approver_id, live).await);
+
+    let decided = decision(&app, &approver, live, "APPROVE").await;
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+}
+
+/// **A claimed task stays waiting while a role-based decision edge can still
+/// resolve** ([#530]).
+///
+/// Four tasks, each claimed by the approver and late, and each with a deleted
+/// role in it. None is certain to be refused, so none moves, and each is then
+/// decided, which shows the edge that kept it was a real one:
+///
+/// * **Offered to a deleted role, decided by a live one** (record 18's P2),
+///   twice, so that `APPROVE` and `REJECT` are each decided. A claimed task's
+///   decision never reads `candidate_role_id`, so the delete of its own role
+///   changes nothing.
+/// * **Mixed edges.** `APPROVE` names a live role, and `REJECT` and a `CANCEL`
+///   edge name the deleted one. Approved. The dead `CANCEL` edge does not hide
+///   the task.
+/// * **A live `DEPARTMENT_ROLE` edge**, beside a dead `ROLE` one. Approved.
+///
+/// **Seen red, 2026-09-26**, one mutation of `repository::inbox` at a time.
+/// With `IN ('ROLE', 'DEPARTMENT_ROLE')` narrowed to `= 'ROLE'`, the live
+/// `DEPARTMENT_ROLE` task leaves every list. Gated on `candidate_role_id`'s
+/// role being live instead of on the edges, all four leave.
+///
+/// [#530]: https://github.com/sujanto-gaws/kelir/issues/530
+#[tokio::test]
+async fn a_claimed_task_stays_waiting_while_a_live_role_can_decide_it() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let queue = bare_role(&app, "TI-530-QUEUE").await;
+    let edge = bare_role(&app, "TI-530-EDGE").await;
+    let doomed = bare_role(&app, "TI-530-DOOMED").await;
+    let (_, approver) = waiting_holder(
+        &app,
+        "TI-530-HOLDER",
+        "ti.530.holder",
+        &[queue, edge, doomed],
+    )
+    .await;
+
+    let p2 = |key: &str| {
+        two_edge_workflow(
+            key,
+            "TI-530-QUEUE",
+            json!("ROLE:TI-530-EDGE"),
+            json!("ROLE:TI-530-EDGE"),
+        )
+    };
+    let to_approve =
+        claimed_late_task(&app, &token, &approver, "ti_530_p2a", p2("ti_530_p2a")).await;
+    let to_reject =
+        claimed_late_task(&app, &token, &approver, "ti_530_p2r", p2("ti_530_p2r")).await;
+
+    let mut mixed = two_edge_workflow(
+        "ti_530_mixed",
+        "TI-530-DOOMED",
+        json!("ROLE:TI-530-EDGE"),
+        json!("ROLE:TI-530-DOOMED"),
+    );
+    mixed["transitions"]
+        .as_array_mut()
+        .expect("transitions")
+        .push(json!({
+            "from": "MANAGER_APPROVAL", "to": "REJECTED", "action": "CANCEL",
+            "allowedBy": "ROLE:TI-530-DOOMED"
+        }));
+    let mixed = claimed_late_task(&app, &token, &approver, "ti_530_mixed", mixed).await;
+
+    let by_department_role = claimed_late_task(
+        &app,
+        &token,
+        &approver,
+        "ti_530_dlive",
+        two_edge_workflow(
+            "ti_530_dlive",
+            "TI-530-DOOMED",
+            json!({ "assigneeType": "DEPARTMENT_ROLE", "roleCode": "TI-530-EDGE" }),
+            json!("ROLE:TI-530-DOOMED"),
+        ),
+    )
+    .await;
+
+    let all = [to_approve, to_reject, mixed, by_department_role];
+
+    surfaces_of(&app, &approver)
+        .await
+        .assert_all(&all, "before the delete");
+
+    soft_delete_role(&app, queue).await;
+    soft_delete_role(&app, doomed).await;
+
+    surfaces_of(&app, &approver)
+        .await
+        .assert_all(&all, "a claimed task a live role can decide left");
+
+    for task in all {
+        let page = app.get(&format!("{TASKS}/{task}"), Some(&approver)).await;
+        assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+    }
+
+    for (task, action) in [
+        (to_approve, "APPROVE"),
+        (to_reject, "REJECT"),
+        (mixed, "APPROVE"),
+        (by_department_role, "APPROVE"),
+    ] {
+        let decided = decision(&app, &approver, task, action).await;
+        assert_eq!(
+            decided.status,
+            StatusCode::OK,
+            "{action} on a task a live role can decide: {}",
+            decided.body
+        );
+    }
+}
+
+/// **A claimed task stays waiting while a `USER` or `OWNER` decision edge can
+/// still resolve, and so does one with no decision edge at all** ([#530]).
+///
+/// * **A `USER` edge.** `APPROVE` names the deleted role and `REJECT` names the
+///   approver. Rejected.
+/// * **An `OWNER` edge.** `APPROVE` names the deleted role and `REJECT` names
+///   the document's owner, the administrator. The edge resolves, so the task
+///   stays on the approver's surfaces. It is not decided here, because the
+///   approver is not the owner.
+/// * **A `RETURNED` correction task.** A return sends the document to a state
+///   whose `OWNER` task is created already assigned, and whose only edge is
+///   `RESUBMIT`, which `decide()` never fires. With no decision edge there is
+///   nothing to judge, and the task stays on all five of the owner's
+///   surfaces. This is deliberate, not a gap in the clause.
+///
+/// **Seen red, 2026-09-26**, one mutation of `repository::inbox` at a time.
+/// With `IN ('USER', 'OWNER')` narrowed to `= 'USER'`, the `OWNER` task leaves
+/// every list. With the "no decision edge" branch dropped, the correction task
+/// leaves the owner's inbox. Gated on `candidate_role_id`, the `USER` and
+/// `OWNER` tasks both leave.
+///
+/// [#530]: https://github.com/sujanto-gaws/kelir/issues/530
+#[tokio::test]
+async fn a_claimed_task_stays_waiting_while_a_person_can_decide_it() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let doomed = bare_role(&app, "TI-530-PERSON").await;
+    let (approver_id, approver) =
+        waiting_holder(&app, "TI-530-PEOPLE", "ti.530.people", &[doomed]).await;
+
+    let by_user = claimed_late_task(
+        &app,
+        &token,
+        &approver,
+        "ti_530_user",
+        two_edge_workflow(
+            "ti_530_user",
+            "TI-530-PERSON",
+            json!("ROLE:TI-530-PERSON"),
+            json!({ "assigneeType": "USER", "userId": approver_id }),
+        ),
+    )
+    .await;
+    let by_owner = claimed_late_task(
+        &app,
+        &token,
+        &approver,
+        "ti_530_owner",
+        two_edge_workflow(
+            "ti_530_owner",
+            "TI-530-PERSON",
+            json!("ROLE:TI-530-PERSON"),
+            json!("OWNER"),
+        ),
+    )
+    .await;
+
+    let returning = json!({
+        "workflowKey": "ti_530_return",
+        "version": "1.0.0",
+        "name": "Standard approval",
+        "initialState": "MANAGER_APPROVAL",
+        "states": [
+            { "code": "MANAGER_APPROVAL", "name": "Manager approval",
+              "mapsToDocumentStatus": "PENDING_APPROVAL",
+              "task": { "taskDefinitionKey": "manager_approval", "taskName": "Decide",
+                        "assignment": { "assigneeType": "ROLE", "roleCode": "TI-530-PEOPLE" } } },
+            { "code": "RETURNED", "name": "Returned to the author",
+              "mapsToDocumentStatus": "RETURNED",
+              "task": { "taskDefinitionKey": "correct_it", "taskName": "Correct the request",
+                        "assignment": { "assigneeType": "OWNER" } } },
+            { "code": "COMPLETED", "name": "Completed", "mapsToDocumentStatus": "COMPLETED",
+              "isFinal": true }
+        ],
+        "transitions": [
+            { "from": "MANAGER_APPROVAL", "to": "COMPLETED", "action": "APPROVE",
+              "allowedBy": "ROLE:TI-530-PEOPLE" },
+            { "from": "MANAGER_APPROVAL", "to": "RETURNED", "action": "RETURN",
+              "allowedBy": "ROLE:TI-530-PEOPLE" },
+            { "from": "RETURNED", "to": "MANAGER_APPROVAL", "action": "RESUBMIT",
+              "allowedBy": "OWNER" }
+        ]
+    });
+    let to_return = claimed_late_task(&app, &token, &approver, "ti_530_return", returning).await;
+    let returned = decision(&app, &approver, to_return, "RETURN").await;
+    assert_eq!(returned.status, StatusCode::OK, "{}", returned.body);
+
+    let correction: Uuid = sqlx::query_scalar(
+        "SELECT id FROM workflow_tasks
+         WHERE workflow_instance_id = (SELECT workflow_instance_id FROM workflow_tasks WHERE id = $1)
+           AND status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')",
+    )
+    .bind(to_return)
+    .fetch_one(&app.pool)
+    .await
+    .expect("the correction task");
+
+    soft_delete_role(&app, doomed).await;
+
+    surfaces_of(&app, &approver).await.assert_all(
+        &[by_user, by_owner],
+        "a claimed task a person can decide left",
+    );
+
+    for task in [by_user, by_owner] {
+        let page = app.get(&format!("{TASKS}/{task}"), Some(&approver)).await;
+        assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+    }
+
+    // The owner's correction task, late like the others, on all five surfaces.
+    sqlx::query("UPDATE workflow_tasks SET due_at = now() - interval '1 day' WHERE id = $1")
+        .bind(correction)
+        .execute(&app.pool)
+        .await
+        .expect("date the correction task a day late");
+    let owner: Uuid =
+        sqlx::query_scalar("SELECT assignee_user_id FROM workflow_tasks WHERE id = $1")
+            .bind(correction)
+            .fetch_one(&app.pool)
+            .await
+            .expect("the correction task is assigned to the owner");
+
+    surfaces_of(&app, &token).await.assert_all(
+        &[correction],
+        "the owner's correction task, which no decision edge leaves, left",
+    );
+    let page = app
+        .get(&format!("{TASKS}/{correction}"), Some(&token))
+        .await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+    assert!(
+        is_visible_to(&app, owner, correction).await,
+        "the detail gate hides the owner's correction task"
+    );
+
+    let rejected = decision(&app, &approver, by_user, "REJECT").await;
+    assert_eq!(rejected.status, StatusCode::OK, "{}", rejected.body);
+}
+
+/// A decision state offered to `role_code`, for the #530 edge-shape tests.
+fn decision_state(code: &str, role_code: &str) -> Value {
+    json!({
+        "code": code, "name": code, "mapsToDocumentStatus": "PENDING_APPROVAL",
+        "task": { "taskDefinitionKey": code.to_lowercase(), "taskName": "Decide",
+                  "assignment": { "assigneeType": "ROLE", "roleCode": role_code } }
+    })
+}
+
+/// A workflow starting at `MANAGER_APPROVAL`, with `states` and the two final
+/// states `COMPLETED` and `REJECTED`.
+fn workflow_of(key: &str, mut states: Vec<Value>, transitions: Vec<Value>) -> Value {
+    states.push(json!({ "code": "COMPLETED", "name": "Completed",
+                        "mapsToDocumentStatus": "COMPLETED", "isFinal": true }));
+    states.push(json!({ "code": "REJECTED", "name": "Rejected",
+                        "mapsToDocumentStatus": "REJECTED", "isFinal": true }));
+
+    json!({
+        "workflowKey": key, "version": "1.0.0", "name": "Standard approval",
+        "initialState": "MANAGER_APPROVAL", "states": states, "transitions": transitions
+    })
+}
+
+/// An edge allowedBy `ROLE:<role_code>`.
+fn role_edge(from: &str, to: &str, action: &str, role_code: &str) -> Value {
+    json!({ "from": from, "to": to, "action": action, "allowedBy": format!("ROLE:{role_code}") })
+}
+
+/// **A live role of the same code in another tenant does not keep the task**
+/// ([#530]).
+///
+/// The clause asks whether a live role holds an edge's `roleCode` *in the
+/// task's tenant*. Here the system tenant's `TI-530-TWIN` is deleted while a
+/// second tenant's `TI-530-TWIN` lives, and the claimed task still stops
+/// waiting on every surface.
+///
+/// **Seen red, 2026-09-27**: with `live.tenant_id = t.tenant_id` dropped from
+/// the clause, the task stays on every list.
+///
+/// [#530]: https://github.com/sujanto-gaws/kelir/issues/530
+#[tokio::test]
+async fn a_live_role_of_the_same_code_in_another_tenant_does_not_keep_the_task() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let gone = bare_role(&app, "TI-530-TWIN").await;
+    let elsewhere = fixtures::create_tenant(&app.pool, "TNT-530", "Another tenant").await;
+    fixtures::create_role_with_permissions(&app.pool, elsewhere, "TI-530-TWIN", &[]).await;
+    let (_, approver) = waiting_holder(&app, "TI-530-TWINS", "ti.530.twin", &[gone]).await;
+
+    let task = claimed_late_task(
+        &app,
+        &token,
+        &approver,
+        "ti_530_twin",
+        workflow_for("ti_530_twin", "TI-530-TWIN"),
+    )
+    .await;
+
+    surfaces_of(&app, &approver)
+        .await
+        .assert_all(&[task], "before the delete");
+
+    soft_delete_role(&app, gone).await;
+
+    surfaces_of(&app, &approver).await.assert_all(
+        &[],
+        "another tenant's live role of the same code kept the task",
+    );
+}
+
+/// **A live `RETURN` edge keeps the task**, though `APPROVE` and `REJECT` name
+/// the deleted role ([#530]). `RETURN` is a decision, and `decide()` fires it,
+/// so the task stays on every surface and returning it answers 200.
+///
+/// **Seen red, 2026-09-27**: with `RETURN` dropped from the resolving edge's
+/// actions, the task leaves every list.
+///
+/// [#530]: https://github.com/sujanto-gaws/kelir/issues/530
+#[tokio::test]
+async fn a_live_return_edge_keeps_a_claimed_task_waiting() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let gone = bare_role(&app, "TI-530-RGONE").await;
+    let kept = bare_role(&app, "TI-530-RKEPT").await;
+    let (_, approver) =
+        waiting_holder(&app, "TI-530-RETURNER", "ti.530.returner", &[gone, kept]).await;
+
+    let mut definition = workflow_of(
+        "ti_530_rlive",
+        vec![decision_state("MANAGER_APPROVAL", "TI-530-RGONE")],
+        vec![
+            role_edge("MANAGER_APPROVAL", "COMPLETED", "APPROVE", "TI-530-RGONE"),
+            role_edge("MANAGER_APPROVAL", "REJECTED", "REJECT", "TI-530-RGONE"),
+            role_edge("MANAGER_APPROVAL", "RETURNED", "RETURN", "TI-530-RKEPT"),
+            json!({ "from": "RETURNED", "to": "MANAGER_APPROVAL", "action": "RESUBMIT",
+                    "allowedBy": "OWNER" }),
+        ],
+    );
+    definition["states"]
+        .as_array_mut()
+        .expect("states")
+        .push(json!({
+            "code": "RETURNED", "name": "Returned to the author",
+            "mapsToDocumentStatus": "RETURNED",
+            "task": { "taskDefinitionKey": "correct_it", "taskName": "Correct the request",
+                      "assignment": { "assigneeType": "OWNER" } }
+        }));
+    let task = claimed_late_task(&app, &token, &approver, "ti_530_rlive", definition).await;
+
+    soft_delete_role(&app, gone).await;
+
+    surfaces_of(&app, &approver)
+        .await
+        .assert_all(&[task], "a task a live RETURN edge can decide left");
+
+    let returned = decision(&app, &approver, task, "RETURN").await;
+    assert_eq!(returned.status, StatusCode::OK, "{}", returned.body);
+}
+
+/// **Only the current state's edges are judged** ([#530]). The task waits in
+/// `MANAGER_APPROVAL`, whose edges name the deleted role, while the next
+/// state's edges name a live one. It stops waiting on every surface, and the
+/// detail gate refuses it.
+///
+/// **Seen red, 2026-09-27**: with `tr.from_state = i.current_state` dropped
+/// from the resolving edge in all three copies, the task stays on every list;
+/// dropped from `is_visible_to`'s copy alone, the gate admits it while the
+/// lists agree.
+///
+/// [#530]: https://github.com/sujanto-gaws/kelir/issues/530
+#[tokio::test]
+async fn only_the_current_states_edges_decide_whether_a_claimed_task_waits() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let gone = bare_role(&app, "TI-530-NOW").await;
+    let kept = bare_role(&app, "TI-530-LATER").await;
+    let (approver_id, approver) =
+        waiting_holder(&app, "TI-530-STATES", "ti.530.states", &[gone, kept]).await;
+
+    let definition = workflow_of(
+        "ti_530_later",
+        vec![
+            decision_state("MANAGER_APPROVAL", "TI-530-NOW"),
+            decision_state("FINANCE_APPROVAL", "TI-530-LATER"),
+        ],
+        vec![
+            role_edge(
+                "MANAGER_APPROVAL",
+                "FINANCE_APPROVAL",
+                "APPROVE",
+                "TI-530-NOW",
+            ),
+            role_edge("MANAGER_APPROVAL", "REJECTED", "REJECT", "TI-530-NOW"),
+            role_edge("FINANCE_APPROVAL", "COMPLETED", "APPROVE", "TI-530-LATER"),
+            role_edge("FINANCE_APPROVAL", "REJECTED", "REJECT", "TI-530-LATER"),
+        ],
+    );
+    let task = claimed_late_task(&app, &token, &approver, "ti_530_later", definition).await;
+
+    soft_delete_role(&app, gone).await;
+
+    surfaces_of(&app, &approver)
+        .await
+        .assert_all(&[], "a later state's live edges kept the task");
+    assert!(
+        !is_visible_to(&app, approver_id, task).await,
+        "the detail gate admits a task only a later state's edges could decide"
+    );
+}
+
+/// **A finished task is not judged** ([#530]). The approver decides the task,
+/// the instance moves on to a state whose edges then name a deleted role, and
+/// the finished task stays in the approver's `scope=completed` list, its
+/// count, and the detail gate. The clause governs open tasks only.
+///
+/// **Seen red, 2026-09-27**: with the open-status condition dropped from all
+/// three copies, the completed list is empty; dropped from `is_visible_to`'s
+/// copy alone, the gate refuses the finished task.
+///
+/// [#530]: https://github.com/sujanto-gaws/kelir/issues/530
+#[tokio::test]
+async fn a_finished_task_stays_in_its_holders_completed_list() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let gone = bare_role(&app, "TI-530-FGONE").await;
+    let kept = bare_role(&app, "TI-530-FKEPT").await;
+    let (approver_id, approver) =
+        waiting_holder(&app, "TI-530-FINISHER", "ti.530.finisher", &[gone, kept]).await;
+
+    let definition = workflow_of(
+        "ti_530_done",
+        vec![
+            decision_state("MANAGER_APPROVAL", "TI-530-FKEPT"),
+            decision_state("FINANCE_APPROVAL", "TI-530-FKEPT"),
+        ],
+        vec![
+            role_edge(
+                "MANAGER_APPROVAL",
+                "FINANCE_APPROVAL",
+                "APPROVE",
+                "TI-530-FKEPT",
+            ),
+            role_edge("MANAGER_APPROVAL", "REJECTED", "REJECT", "TI-530-FKEPT"),
+            role_edge("FINANCE_APPROVAL", "COMPLETED", "APPROVE", "TI-530-FGONE"),
+            role_edge("FINANCE_APPROVAL", "REJECTED", "REJECT", "TI-530-FGONE"),
+        ],
+    );
+    let task = claimed_late_task(&app, &token, &approver, "ti_530_done", definition).await;
+
+    let decided = decision(&app, &approver, task, "APPROVE").await;
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+
+    soft_delete_role(&app, gone).await;
+
+    let completed = inbox_of(&app, &approver, "scope=completed").await;
+    assert_eq!(completed.status, StatusCode::OK, "{}", completed.body);
+    assert_eq!(
+        ids_in(&completed.body["data"]),
+        vec![task],
+        "the finished task left the completed list: {}",
+        completed.body
+    );
+    assert_eq!(
+        completed.body["meta"]["total"],
+        json!(1),
+        "{}",
+        completed.body
+    );
+    assert!(
+        is_visible_to(&app, approver_id, task).await,
+        "the detail gate refuses a finished task"
+    );
+}
+
+/// **A condition that picks a live edge keeps the task** ([#530]). `APPROVE`
+/// has two edges: one conditioned, on a live role, and a fallback on the
+/// deleted one. The live edge can resolve, so the task stays on every surface,
+/// and approving it answers 200.
+///
+/// The clause does not evaluate conditions. It asks whether *any* decision
+/// edge resolves, which errs toward visible, as the module doc says.
+///
+/// [#530]: https://github.com/sujanto-gaws/kelir/issues/530
+#[tokio::test]
+async fn a_conditioned_live_edge_keeps_a_claimed_task_waiting() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let gone = bare_role(&app, "TI-530-CGONE").await;
+    let kept = bare_role(&app, "TI-530-CKEPT").await;
+    let (_, approver) =
+        waiting_holder(&app, "TI-530-CHOOSER", "ti.530.chooser", &[gone, kept]).await;
+
+    let mut conditioned = role_edge(
+        "MANAGER_APPROVAL",
+        "FINANCE_APPROVAL",
+        "APPROVE",
+        "TI-530-CKEPT",
+    );
+    conditioned["condition"] = json!({ "==": [1, 1] });
+    let definition = workflow_of(
+        "ti_530_cond",
+        vec![
+            decision_state("MANAGER_APPROVAL", "TI-530-CGONE"),
+            decision_state("FINANCE_APPROVAL", "TI-530-CKEPT"),
+        ],
+        vec![
+            conditioned,
+            role_edge("MANAGER_APPROVAL", "COMPLETED", "APPROVE", "TI-530-CGONE"),
+            role_edge("MANAGER_APPROVAL", "REJECTED", "REJECT", "TI-530-CGONE"),
+            role_edge("FINANCE_APPROVAL", "COMPLETED", "APPROVE", "TI-530-CKEPT"),
+        ],
+    );
+    let task = claimed_late_task(&app, &token, &approver, "ti_530_cond", definition).await;
+
+    soft_delete_role(&app, gone).await;
+
+    surfaces_of(&app, &approver)
+        .await
+        .assert_all(&[task], "a task a conditioned live edge can decide left");
+
+    let approved = decision(&app, &approver, task, "APPROVE").await;
+    assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
+}
+
+/// **An unclaimed task follows #507's arm, not this clause** ([#530]). Two
+/// tasks on the same shape, offered to a live role whose edges name a deleted
+/// one: the claimed task stops waiting, and the unclaimed one stays on every
+/// surface of the role's holder and passes the detail gate. #507 judges an
+/// unclaimed task by its offered role, which lives, and #530's clause is for
+/// the claimed arm alone.
+///
+/// **Seen red, 2026-09-27**: with the claimed condition,
+/// `t.assignee_user_id IS DISTINCT FROM $2`, set to `false` in all three
+/// copies, the unclaimed task leaves every list too.
+///
+/// [#530]: https://github.com/sujanto-gaws/kelir/issues/530
+#[tokio::test]
+async fn an_unclaimed_task_is_judged_by_its_offered_role_and_not_by_the_clause() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let queue = bare_role(&app, "TI-530-OFFERED").await;
+    let gone = bare_role(&app, "TI-530-DECIDER").await;
+    let (approver_id, approver) =
+        waiting_holder(&app, "TI-530-QUEUER", "ti.530.queuer", &[queue, gone]).await;
+
+    let shape = |key: &str| {
+        two_edge_workflow(
+            key,
+            "TI-530-OFFERED",
+            json!("ROLE:TI-530-DECIDER"),
+            json!("ROLE:TI-530-DECIDER"),
+        )
+    };
+    let claimed = claimed_late_task(
+        &app,
+        &token,
+        &approver,
+        "ti_530_claimed",
+        shape("ti_530_claimed"),
+    )
+    .await;
+
+    let workflow =
+        publish_workflow_definition(&app, &token, "ti_530_open", shape("ti_530_open")).await;
+    let type_id = document_type(&app, &token, "TI_530_OPEN", workflow).await;
+    let document = submitted_document(&app, &token, type_id, "ti_530_open").await;
+    let unclaimed = open_task_of(&app, document).await;
+    sqlx::query("UPDATE workflow_tasks SET due_at = now() - interval '1 day' WHERE id = $1")
+        .bind(unclaimed)
+        .execute(&app.pool)
+        .await
+        .expect("date the unclaimed task a day late");
+
+    surfaces_of(&app, &approver)
+        .await
+        .assert_all(&[claimed, unclaimed], "before the delete");
+
+    soft_delete_role(&app, gone).await;
+
+    surfaces_of(&app, &approver)
+        .await
+        .assert_all(&[unclaimed], "the clause reached past the claimed arm");
+    assert!(
+        is_visible_to(&app, approver_id, unclaimed).await,
+        "the detail gate refuses an unclaimed task on a live offered role"
+    );
+    assert!(!is_visible_to(&app, approver_id, claimed).await);
+}
