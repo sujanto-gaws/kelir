@@ -234,12 +234,23 @@ export async function publishWorkflow(
  * widget's rule is that an undated task is never late, and a far-off date would
  * prove only that it has not arrived yet.
  *
+ * **`deciderRoleCode` splits who is offered the task from who decides it**
+ * ([#512]). Absent, the one role does both, as every flow but one needs. Given,
+ * the task is offered to `roleCode` and its decisions are `allowedBy` the
+ * decider, so a reassign to the decider's role is one that can decide it, and
+ * the offered role is then needed by nothing open.
+ *
  * [#446]: https://github.com/sujanto-gaws/kelir/issues/446
+ * [#512]: https://github.com/sujanto-gaws/kelir/issues/512
  */
 export async function publishSingleStepWorkflow(
   session: ApiSession,
   roleCode: string,
-  options: { readonly taskName: string; readonly dueInHours?: number },
+  options: {
+    readonly taskName: string
+    readonly dueInHours?: number
+    readonly deciderRoleCode?: string
+  },
 ): Promise<SeededWorkflow> {
   const workflowKey = `e2e_single_${runSuffix()}`.toLowerCase().replace(/[^a-z0-9_]/g, '_')
 
@@ -252,6 +263,8 @@ export async function publishSingleStepWorkflow(
   if (options.dueInHours !== undefined) {
     task.dueInHours = options.dueInHours
   }
+
+  const allowedBy = `ROLE:${options.deciderRoleCode ?? roleCode}`
 
   const definition = {
     workflowKey,
@@ -269,8 +282,8 @@ export async function publishSingleStepWorkflow(
       { code: 'REJECTED', name: 'Rejected', mapsToDocumentStatus: 'REJECTED', isFinal: true },
     ],
     transitions: [
-      { from: 'APPROVAL', to: 'COMPLETED', action: 'APPROVE', allowedBy: `ROLE:${roleCode}` },
-      { from: 'APPROVAL', to: 'REJECTED', action: 'REJECT', allowedBy: `ROLE:${roleCode}` },
+      { from: 'APPROVAL', to: 'COMPLETED', action: 'APPROVE', allowedBy },
+      { from: 'APPROVAL', to: 'REJECTED', action: 'REJECT', allowedBy },
     ],
   }
 

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, useTemplateRef } from 'vue'
 
 import { Alert } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -16,8 +16,14 @@ import { deleteRole, listPermissions, listRoles } from '@/api/identity'
 import { toApiError } from '@/api/client'
 import { usePaginatedList } from '@/composables/usePaginatedList'
 import { useAuthStore } from '@/stores/auth'
-import { ROLE_HAS_OPEN_TASKS, type Permission, type Role } from '@/types/identity'
+import {
+  ROLE_HAS_OPEN_TASKS,
+  type OpenTaskNeedingRole,
+  type Permission,
+  type Role,
+} from '@/types/identity'
 import ConfirmDialog from './ConfirmDialog.vue'
+import ReassignTaskDialog from './ReassignTaskDialog.vue'
 import RoleFormDialog from './RoleFormDialog.vue'
 import RoleOpenTasksDialog from './RoleOpenTasksDialog.vue'
 
@@ -29,6 +35,12 @@ const auth = useAuthStore()
 const canCreate = computed(() => auth.can('identity:role:create'))
 const canUpdate = computed(() => auth.can('identity:role:update'))
 const canDelete = computed(() => auth.can('identity:role:delete'))
+/**
+ * Reassigning is its own permission (#512, ADR-0042): the open tasks are listed
+ * to whoever may delete the role, and the action on each only to whoever may
+ * also reassign. The server checks it again.
+ */
+const canReassign = computed(() => auth.can('workflow:task:reassign'))
 
 /**
  * The backend's refusal, mirrored from
@@ -60,6 +72,11 @@ const deleteError = ref('')
 const blocked = ref<Role | null>(null)
 const blockedRefusal = ref('')
 const isOpenTasksOpen = ref(false)
+const openTasks = useTemplateRef<InstanceType<typeof RoleOpenTasksDialog>>('openTasks')
+
+/** The listed task being reassigned (#512). */
+const reassigning = ref<OpenTaskNeedingRole | null>(null)
+const isReassignOpen = ref(false)
 
 async function loadPermissions(): Promise<void> {
   permissionsError.value = ''
@@ -134,6 +151,21 @@ async function confirmDelete(): Promise<void> {
   } finally {
     isDeleting.value = false
   }
+}
+
+function openReassign(task: OpenTaskNeedingRole): void {
+  reassigning.value = task
+  isReassignOpen.value = true
+}
+
+/**
+ * The list is read again rather than the row dropped: a task reassigned to a
+ * user may still need the role, when a decision on it is reserved to it, and
+ * only the server says which.
+ */
+async function onReassigned(): Promise<void> {
+  reassigning.value = null
+  await openTasks.value?.refresh()
 }
 
 onMounted(async () => {
@@ -264,9 +296,24 @@ onMounted(async () => {
 
     <RoleOpenTasksDialog
       v-if="canDelete"
+      ref="openTasks"
       v-model:open="isOpenTasksOpen"
       :role="blocked"
       :refusal="blockedRefusal"
+    >
+      <template v-if="canReassign" #task-actions="{ task }">
+        <Button variant="outline" size="sm" @click="openReassign(task)">Reassign</Button>
+      </template>
+    </RoleOpenTasksDialog>
+
+    <!-- Beside the list rather than inside its slot: Escape in a dialog nested
+         in another's markup would close both. -->
+    <ReassignTaskDialog
+      v-if="canDelete && canReassign"
+      v-model:open="isReassignOpen"
+      :task="reassigning"
+      :from-role="blocked"
+      @reassigned="onReassigned()"
     />
   </section>
 </template>

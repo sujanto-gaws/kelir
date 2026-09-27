@@ -6,6 +6,7 @@ import type {
   DecisionResult,
   DocumentWorkflow,
   InboxTask,
+  ReassignTarget,
   TaskDetail,
   WorkflowHistoryEntry,
   WorkflowTask,
@@ -108,6 +109,33 @@ export function delegateTask(
 
   return postItem<WorkflowTask>(`/workflow/tasks/${id}/delegation`, {
     delegateUserId,
+    ...(trimmed ? { comment: trimmed } : {}),
+  })
+}
+
+/**
+ * Moves an open task to one user or one role (FR-WF-017, #512, ADR-0042).
+ *
+ * **An administrator's act, not a holder's**, under `workflow:task:reassign`:
+ * unlike a hand-off, the caller need not hold the task. A user then holds it; a
+ * role's holders are offered it unclaimed. The process does not move, and the
+ * response is the task, still open.
+ *
+ * `target` carries exactly one of `userId` and `roleCode`, which the type
+ * enforces; the server refuses both and neither anyway. A dead target is a 422
+ * `ASSIGNMENT_UNRESOLVED` on that field, one that could not decide the task a
+ * 422 `TARGET_CANNOT_DECIDE` on it, and a task no longer open a 409. The comment
+ * is omitted when blank, as `decideTask`'s is.
+ */
+export function reassignTask(
+  id: string,
+  target: ReassignTarget,
+  comment?: string,
+): Promise<WorkflowTask> {
+  const trimmed = comment?.trim()
+
+  return postItem<WorkflowTask>(`/workflow/tasks/${id}/reassign`, {
+    ...target,
     ...(trimmed ? { comment: trimmed } : {}),
   })
 }

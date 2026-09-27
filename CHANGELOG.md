@@ -90,8 +90,14 @@ While the major version is `0`, the public API may change in any release.
   decisions need. A task with no such decision, such as the owner's correction
   after a return, can be reassigned to anybody. The process does not move. The
   task's history records `REASSIGN` with any comment, and the audit trail
-  records the change. **No route cancels a task** (decision **D-91**). The
-  screen arrives with the list of tasks a refused role delete names.
+  records the change. **No route cancels a task** (decision **D-91**).
+  **The Roles page's open-tasks list reassigns**: when a delete is refused for
+  open tasks, an administrator who also holds `workflow:task:reassign` has a
+  **Reassign** action on each listed task. Its dialog takes a role or a user,
+  never both, and an optional reason; a refusal is shown under the field that
+  named the target, a task decided meanwhile on the dialog, and the list is
+  read again after a reassign, so an emptied list says the delete can be tried
+  again.
 - **The external system registry** (FR-INT-001;
   [#520](https://github.com/sujanto-gaws/kelir/issues/520)). **Admin →
   External Systems** registers the systems Kelir integrates with, such as an

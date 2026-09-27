@@ -117,6 +117,14 @@ export interface WorkflowTask {
   createdAt: string
 }
 
+/**
+ * Who a reassign names (FR-WF-017, #512), mirroring
+ * `workflow::domain::task::ReassignTaskRequest` without its comment: **one user,
+ * by id, or one role, by code**, and never both. A role by its code rather than
+ * its id, because the server resolves it as a JWSS rule names a role.
+ */
+export type ReassignTarget = { userId: string } | { roleCode: string }
+
 /** The process deciding a document, with every task it has generated. */
 export interface DocumentWorkflow {
   instance: WorkflowInstance
