@@ -1,0 +1,85 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH asked AS (\n            -- The roles asked about: one for a delete and its list, a page of\n            -- them for the Roles screen (#508). Not filtered on `deleted_at`,\n            -- as this statement never was, and not on the tenant: the join\n            -- below and `t.tenant_id = $1` each hold the task to it.\n            SELECT r.id, r.tenant_id, r.role_code FROM roles r WHERE r.id = ANY($2)\n        ),\n        open_task AS (\n            SELECT r.id AS role_id, t.id, t.task_ref, t.status, t.assignee_user_id,\n                   t.document_id, t.created_at, i.current_state,\n                   -- Clause (a). NULL for a task offered to no role, which\n                   -- neither `WHERE` nor `CASE` below takes as true.\n                   (t.candidate_role_id = r.id AND t.assignee_user_id IS NULL) AS offered,\n                   -- Clause (b).\n                   EXISTS (SELECT 1 FROM workflow_transitions tr\n                           WHERE tr.workflow_definition_id = i.workflow_definition_id\n                             AND tr.from_state = i.current_state\n                             AND tr.allowed_by_json->>'roleCode' = r.role_code) AS named\n            FROM workflow_tasks t\n            JOIN workflow_instances i ON i.id = t.workflow_instance_id AND i.tenant_id = t.tenant_id\n            JOIN asked r ON r.tenant_id = t.tenant_id\n            WHERE t.tenant_id = $1 AND t.deleted_at IS NULL\n              AND t.status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')\n        ),\n        needing AS (\n            SELECT role_id, id, task_ref, status, assignee_user_id, document_id, created_at,\n                   current_state,\n                   -- The single reasons are the words of the stranded-task\n                   -- query, Installation and Deployment §9. That query does not\n                   -- say *both*; the list does, for the usual shape (#532 AC4).\n                   CASE WHEN offered AND named\n                        THEN 'offered to the role, and unclaimed, and a decision out of '\n                             || current_state || ' is allowedBy the role'\n                        WHEN offered\n                        THEN 'offered to the role, and unclaimed'\n                        ELSE 'a decision out of ' || current_state || ' is allowedBy the role'\n                   END AS why\n            FROM open_task\n            WHERE offered OR named\n        )\n        SELECT r.id AS \"role_id!\", counted.total AS \"total!\",\n               page.id AS \"id?\", page.task_ref AS \"task_ref?\", page.status AS \"status?\",\n               page.current_state AS \"current_state?\", page.why AS \"why?\",\n               page.assignee_user_id AS \"assignee_user_id?\",\n               page.display_name AS \"assignee_display_name?\",\n               page.document_number AS \"document_number?\", page.title AS \"document_title?\"\n        FROM asked r\n        CROSS JOIN LATERAL (SELECT COUNT(*) AS total FROM needing n WHERE n.role_id = r.id) counted\n        LEFT JOIN LATERAL (\n            SELECT n.task_ref, n.status, n.current_state, n.why, n.assignee_user_id,\n                   n.created_at, n.id, u.display_name, d.document_number, d.title\n            FROM needing n\n            LEFT JOIN documents d ON d.id = n.document_id AND d.tenant_id = $1\n            LEFT JOIN users u ON u.id = n.assignee_user_id AND u.tenant_id = $1\n            WHERE n.role_id = r.id\n            ORDER BY n.created_at, n.id\n            LIMIT $3 OFFSET $4\n        ) page ON true\n        ORDER BY r.id, page.created_at, page.id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "role_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "total!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "id?",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "task_ref?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "status?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "current_state?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "why?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "assignee_user_id?",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 8,
+        "name": "assignee_display_name?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 9,
+        "name": "document_number?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 10,
+        "name": "document_title?",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      false,
+      false,
+      false,
+      false,
+      null,
+      true,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "d1a2499c45f2040be1f7d541e991ef7855e56ca9befd4174a27836e0b8154825"
+}

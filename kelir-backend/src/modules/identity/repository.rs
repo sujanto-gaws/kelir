@@ -5,6 +5,8 @@
 //! soft-deleted rows. [`any_user_exists`] is the one deliberate exception, and
 //! says why.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use sqlx::{PgExecutor, PgPool};
 use uuid::Uuid;
@@ -610,6 +612,8 @@ pub async fn list_roles(
             description: row.description,
             is_system: row.is_system,
             permissions: permissions_of_role(pool, row.id).await?,
+            live_holders: None,
+            open_tasks: None,
         });
     }
 
@@ -643,7 +647,63 @@ pub async fn find_role(
         description: row.description,
         is_system: row.is_system,
         permissions: permissions_of_role(pool, row.id).await?,
+        live_holders: None,
+        open_tasks: None,
     }))
+}
+
+/// How many users hold each of `role_ids` today, in one statement ([#508],
+/// **D-91** (2)). A role nobody holds is absent from the map.
+///
+/// **The grant's validity is `workflow::repository::task::holds_role`'s**:
+/// the grant not deleted, `valid_from` and `valid_to` against `current_date`,
+/// and the role itself live. `holds_role` asks about one caller who has just
+/// signed in, so it never needs to read `users`. **This count does**: a holder
+/// who has been deactivated keeps their `user_roles` rows, and would still be
+/// counted without the join. So the user must be not deleted and have one of
+/// `signing_in`, which the caller takes from
+/// [`UserStatus::signing_in_db_values`].
+///
+/// **The department is not read.** A grant scoped to a department holds the
+/// role there, and is a holder. Whether that holder can decide a particular
+/// department-scoped task is not what this count answers.
+///
+/// A user who holds the role through several grants, one per department,
+/// counts once.
+///
+/// [#508]: https://github.com/sujanto-gaws/kelir/issues/508
+pub async fn count_live_holders<'e, E: PgExecutor<'e>>(
+    executor: E,
+    tenant_id: Uuid,
+    role_ids: &[Uuid],
+    signing_in: &[&str],
+) -> Result<HashMap<Uuid, i64>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT ur.role_id, COUNT(DISTINCT ur.user_id) AS "holders!"
+        FROM user_roles ur
+        JOIN roles ro ON ro.id = ur.role_id AND ro.tenant_id = ur.tenant_id
+                     AND ro.deleted_at IS NULL
+        JOIN users u ON u.id = ur.user_id AND u.tenant_id = ur.tenant_id
+                    AND u.deleted_at IS NULL
+                    AND u.status = ANY($3::text[])
+        WHERE ur.tenant_id = $1 AND ur.role_id = ANY($2)
+          AND ur.deleted_at IS NULL
+          AND (ur.valid_from IS NULL OR ur.valid_from <= current_date)
+          AND (ur.valid_to   IS NULL OR ur.valid_to   >= current_date)
+        GROUP BY ur.role_id
+        "#,
+        tenant_id,
+        role_ids,
+        signing_in as &[&str]
+    )
+    .fetch_all(executor)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.role_id, row.holders))
+        .collect())
 }
 
 pub async fn permissions_of_role(

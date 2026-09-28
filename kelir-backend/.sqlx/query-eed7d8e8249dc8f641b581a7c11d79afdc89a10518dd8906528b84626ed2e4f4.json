@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT ur.role_id, COUNT(DISTINCT ur.user_id) AS \"holders!\"\n        FROM user_roles ur\n        JOIN roles ro ON ro.id = ur.role_id AND ro.tenant_id = ur.tenant_id\n                     AND ro.deleted_at IS NULL\n        JOIN users u ON u.id = ur.user_id AND u.tenant_id = ur.tenant_id\n                    AND u.deleted_at IS NULL\n                    AND u.status = ANY($3::text[])\n        WHERE ur.tenant_id = $1 AND ur.role_id = ANY($2)\n          AND ur.deleted_at IS NULL\n          AND (ur.valid_from IS NULL OR ur.valid_from <= current_date)\n          AND (ur.valid_to   IS NULL OR ur.valid_to   >= current_date)\n        GROUP BY ur.role_id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "role_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "holders!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray",
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "eed7d8e8249dc8f641b581a7c11d79afdc89a10518dd8906528b84626ed2e4f4"
+}

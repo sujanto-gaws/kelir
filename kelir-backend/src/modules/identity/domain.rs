@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -41,6 +43,31 @@ impl UserStatus {
     pub fn can_sign_in(self) -> bool {
         matches!(self, Self::Active)
     }
+
+    /// Every status. A test matches on each variant, so a fifth one that is
+    /// not added here fails to compile there.
+    pub const ALL: [Self; 4] = [
+        Self::Active,
+        Self::Inactive,
+        Self::Locked,
+        Self::PendingActivation,
+    ];
+
+    /// The `users.status` values [`can_sign_in`](Self::can_sign_in) accepts,
+    /// as the database spells them ([#508]).
+    ///
+    /// A role's live-holder count reads only users with one of these, so a
+    /// holder who has been deactivated no longer counts. The count is taken in
+    /// SQL, and this is how it asks the rule here rather than a copy of it.
+    ///
+    /// [#508]: https://github.com/sujanto-gaws/kelir/issues/508
+    pub fn signing_in_db_values() -> Vec<&'static str> {
+        Self::ALL
+            .into_iter()
+            .filter(|status| status.can_sign_in())
+            .map(Self::as_db)
+            .collect()
+    }
 }
 
 /// A user as returned by the API. Never carries the password hash.
@@ -82,6 +109,43 @@ pub struct Role {
     pub description: Option<String>,
     pub is_system: bool,
     pub permissions: Vec<Permission>,
+    /// How many users hold the role today ([#508], **D-91** (2)): a grant not
+    /// deleted and inside its `valid_from`/`valid_to` window, held by a user not
+    /// deleted whose status can sign in. A user holding the role in several
+    /// departments counts once.
+    ///
+    /// **Present only on a list or read by a caller holding
+    /// `workflow:task:reassign`**, the permission that can act on it, and
+    /// omitted otherwise. `0` beside a non-zero `openTasks` is a role whose
+    /// last holder has left while tasks still need it.
+    ///
+    /// [#508]: https://github.com/sujanto-gaws/kelir/issues/508
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_holders: Option<i64>,
+    /// How many open tasks need the role ([#508]): the count a delete of it is
+    /// refused on (`ROLE_HAS_OPEN_TASKS`, **D-89**), and the total of
+    /// `GET /api/v1/identity/roles/{id}/open-tasks`. Present and omitted with
+    /// `liveHolders`.
+    ///
+    /// [#508]: https://github.com/sujanto-gaws/kelir/issues/508
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_tasks: Option<i64>,
+}
+
+/// Fills each role's `liveHolders` and `openTasks` from the two counts, keyed
+/// by role id ([#508]). A role absent from a map has none, and reads `0`: each
+/// count leaves out a role it found nothing for.
+///
+/// [#508]: https://github.com/sujanto-gaws/kelir/issues/508
+pub fn with_staffing(
+    roles: &mut [Role],
+    live_holders: &HashMap<Uuid, i64>,
+    open_tasks: &HashMap<Uuid, i64>,
+) {
+    for role in roles {
+        role.live_holders = Some(live_holders.get(&role.id).copied().unwrap_or(0));
+        role.open_tasks = Some(open_tasks.get(&role.id).copied().unwrap_or(0));
+    }
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -564,6 +628,87 @@ mod tests {
         ] {
             assert!(!status.can_sign_in(), "{status:?} must not sign in");
         }
+    }
+
+    /// `ALL` is every variant: this match has no wildcard, so a new status
+    /// fails to compile here until it is placed, and the count below then
+    /// fails until `ALL` holds it.
+    #[test]
+    fn all_holds_every_status_once() {
+        let place = |status: UserStatus| match status {
+            UserStatus::Active => 0,
+            UserStatus::Inactive => 1,
+            UserStatus::Locked => 2,
+            UserStatus::PendingActivation => 3,
+        };
+
+        let mut placed: Vec<usize> = UserStatus::ALL.into_iter().map(place).collect();
+        placed.sort_unstable();
+        assert_eq!(placed, vec![0, 1, 2, 3]);
+    }
+
+    /// The live-holder count reads exactly the statuses that sign in (#508):
+    /// `ACTIVE`, and none of the three a deactivation leaves.
+    #[test]
+    fn only_a_status_that_signs_in_is_a_live_holders() {
+        assert_eq!(UserStatus::signing_in_db_values(), vec!["ACTIVE"]);
+
+        for status in UserStatus::ALL {
+            assert_eq!(
+                UserStatus::signing_in_db_values().contains(&status.as_db()),
+                status.can_sign_in(),
+                "{status:?}"
+            );
+        }
+    }
+
+    fn role(id: Uuid) -> Role {
+        Role {
+            id,
+            role_code: format!("R-{id}"),
+            name: "A role".to_owned(),
+            description: None,
+            is_system: false,
+            permissions: Vec::new(),
+            live_holders: None,
+            open_tasks: None,
+        }
+    }
+
+    /// Each role reads its own counts, and a role either count left out reads
+    /// zero rather than staying absent (#508).
+    #[test]
+    fn staffing_is_each_roles_own_and_absent_is_zero() {
+        let (stranded, staffed, idle) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let mut roles = vec![role(stranded), role(staffed), role(idle)];
+
+        let holders = HashMap::from([(staffed, 3)]);
+        let open = HashMap::from([(stranded, 2), (staffed, 1)]);
+        with_staffing(&mut roles, &holders, &open);
+
+        let read: Vec<(Option<i64>, Option<i64>)> = roles
+            .iter()
+            .map(|role| (role.live_holders, role.open_tasks))
+            .collect();
+        assert_eq!(
+            read,
+            vec![(Some(0), Some(2)), (Some(3), Some(1)), (Some(0), Some(0))]
+        );
+    }
+
+    /// Without the counts, the fields are not in the body at all: a caller
+    /// without `workflow:task:reassign` cannot read a `0` that means nothing.
+    #[test]
+    fn a_role_without_staffing_serializes_no_counts() {
+        let body = serde_json::to_value(role(Uuid::now_v7())).expect("serialize");
+        assert!(body.get("liveHolders").is_none(), "{body}");
+        assert!(body.get("openTasks").is_none(), "{body}");
+
+        let mut roles = vec![role(Uuid::now_v7())];
+        with_staffing(&mut roles, &HashMap::new(), &HashMap::new());
+        let body = serde_json::to_value(&roles[0]).expect("serialize");
+        assert_eq!(body["liveHolders"], 0, "{body}");
+        assert_eq!(body["openTasks"], 0, "{body}");
     }
 
     #[test]
