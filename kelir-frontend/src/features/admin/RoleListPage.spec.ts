@@ -509,6 +509,48 @@ describe('RoleListPage', () => {
       expect(wrapper.find('[data-testid="role-stranded-tasks-unlisted"]').exists()).toBe(true)
     })
 
+    it("drops an earlier delete's refusal when the list is opened from the notice", async () => {
+      const refusal =
+        '1 open task needs this role to be decided. Deleting the role would leave it offered ' +
+        'to nobody, or with a decision nobody could make. It needs to be decided or reassigned first'
+
+      strandedClerk()
+      const stranded = handler
+      handler = (request) =>
+        request.method === 'delete' && request.url === '/identity/roles/r-3'
+          ? { status: 409, body: errorBody('ROLE_HAS_OPEN_TASKS', refusal) }
+          : request.url === '/identity/roles/r-3/open-tasks'
+            ? { status: 200, body: listBody([{ ...openTask, id: 't-3', taskRef: 'TSK-0003' }]) }
+            : stranded(request)
+
+      const wrapper = await mountPage(REASSIGNER)
+
+      // A refused delete of Finance opens its list, under the refusal.
+      await buttonLabelled(rowsOf(wrapper)[2].findAll('button'), 'Delete')?.trigger('click')
+      await buttonLabelled(wrapper.find('[role="dialog"]').findAll('button'), 'Delete')?.trigger(
+        'click',
+      )
+      await flushPromises()
+
+      expect(wrapper.find('[role="dialog"] [role="alert"]').text()).toBe(refusal)
+
+      await buttonLabelled(wrapper.find('[role="dialog"]').findAll('button'), 'Close')?.trigger(
+        'click',
+      )
+      await flushPromises()
+      expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+
+      // Then Clerk's notice: nothing was refused for Clerk, so no refusal shows.
+      await wrapper.find('[data-testid="role-stranded-tasks-open"]').trigger('click')
+      await flushPromises()
+
+      const dialog = wrapper.find('[role="dialog"]')
+      expect(dialog.text()).toContain('Open tasks need Clerk')
+      expect(dialog.find('[role="alert"]').exists()).toBe(false)
+      expect(dialog.find('[data-testid="role-open-tasks-stranded"]').exists()).toBe(true)
+      expect(dialog.text()).not.toContain('decided or reassigned first')
+    })
+
     it('reads the roles again after a reassign, and the notice goes', async () => {
       strandedClerk()
 

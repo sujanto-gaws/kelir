@@ -736,7 +736,7 @@ pub async fn count_open_tasks_needing_roles<'e, E: PgExecutor<'e>>(
     role_ids: &[Uuid],
 ) -> Result<HashMap<Uuid, i64>, sqlx::Error> {
     Ok(
-        open_tasks_needing_roles(executor, tenant_id, role_ids, 0, 0)
+        open_tasks_needing_roles(executor, tenant_id, Asked::Counts(role_ids))
             .await?
             .into_iter()
             .filter(|(_, page)| page.total > 0)
@@ -770,7 +770,12 @@ pub async fn open_tasks_needing_role<'e, E: PgExecutor<'e>>(
     limit: i64,
     offset: i64,
 ) -> Result<OpenTasksPage, sqlx::Error> {
-    let page = open_tasks_needing_roles(executor, tenant_id, &[role_id], limit, offset)
+    let asked = Asked::Page {
+        role_id,
+        limit,
+        offset,
+    };
+    let page = open_tasks_needing_roles(executor, tenant_id, asked)
         .await?
         .into_iter()
         .find(|(asked, _)| *asked == role_id)
@@ -783,14 +788,35 @@ pub async fn open_tasks_needing_role<'e, E: PgExecutor<'e>>(
     }))
 }
 
-/// For each of `role_ids`, the open tasks that need it, a page of them, and
-/// their number, in one statement ([#532], [#508]).
+/// What [`open_tasks_needing_roles`] is asked: **several roles' counts, or one
+/// role's page, and never several roles' pages.**
+///
+/// The statement can take a page for each of several roles, and nothing asks
+/// for that. The shape is left out rather than supported untested: a test of
+/// one role, or of counts, cannot tell whether one role's page stays apart
+/// from another's, so a mistake there would go unseen until a caller asked.
+/// A caller that needs several roles' pages adds a variant here and the test
+/// that shows the pages kept apart.
+enum Asked<'a> {
+    /// Each role's total, and no tasks: a page of none.
+    Counts(&'a [Uuid]),
+    /// One role's total, and a page of its tasks.
+    Page {
+        role_id: Uuid,
+        limit: i64,
+        offset: i64,
+    },
+}
+
+/// The open tasks that need each role `asked` names, their number, and for
+/// [`Asked::Page`] a page of them, in one statement ([#532], [#508]).
 ///
 /// **This is the one definition of *needs the role*.** A delete's count and
-/// the list behind it ask about one role; the Roles screen's counts ask about a
-/// page of roles. Each role is answered as though it had been asked alone: the
-/// predicate reads a role's id and code and nothing about any other role, and
-/// the page is taken per role.
+/// the list behind it ask about one role, and the Roles screen's counts ask
+/// about a page of roles. Each role is answered as though it had been asked
+/// alone, because the predicate reads that role's id and code and nothing about
+/// any other role. The count and the page are each taken per role. The page
+/// half is only ever asked for one role ([`Asked`]).
 ///
 /// **`total` rides on the one row per role the outer `SELECT` always
 /// returns**, rather than on each task as `count(*) OVER ()` would: the count
@@ -807,10 +833,17 @@ pub async fn open_tasks_needing_role<'e, E: PgExecutor<'e>>(
 async fn open_tasks_needing_roles<'e, E: PgExecutor<'e>>(
     executor: E,
     tenant_id: Uuid,
-    role_ids: &[Uuid],
-    limit: i64,
-    offset: i64,
+    asked: Asked<'_>,
 ) -> Result<Vec<(Uuid, OpenTasksPage)>, sqlx::Error> {
+    let (role_ids, limit, offset) = match &asked {
+        Asked::Counts(role_ids) => (*role_ids, 0, 0),
+        Asked::Page {
+            role_id,
+            limit,
+            offset,
+        } => (std::slice::from_ref(role_id), *limit, *offset),
+    };
+
     let rows = sqlx::query!(
         r#"
         WITH asked AS (
