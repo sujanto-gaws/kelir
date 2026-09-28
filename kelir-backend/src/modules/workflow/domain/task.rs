@@ -339,6 +339,116 @@ pub struct DelegateRequest {
     pub comment: Option<String>,
 }
 
+/// The body of a reassign (FR-WF-017, [#512]).
+///
+/// **Exactly one of `userId` and `roleCode`.** Both would name two holders,
+/// which a task never has, and neither would leave the task held by nobody,
+/// which is the cancel **D-91** refused one layer down. [`Self::target`] turns
+/// the two optional fields into a [`ReassignTarget`] and refuses both other
+/// shapes as a 422, before anything is read.
+///
+/// `roleCode` rather than a role id, because `workflow::service::assignment`
+/// resolves a role by its code, as a JWSS rule names it, and a reassign goes
+/// through that resolution rather than beside it.
+///
+/// [#512]: https://github.com/sujanto-gaws/kelir/issues/512
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReassignTaskRequest {
+    /// A live user in this tenant, who then holds the task.
+    #[serde(default)]
+    pub user_id: Option<Uuid>,
+    /// A live role in this tenant, whose holders are then offered the task
+    /// unclaimed.
+    #[serde(default)]
+    pub role_code: Option<String>,
+    /// Why, if the administrator wants to say. Lands on the task's history row,
+    /// as a hand-off's does.
+    #[serde(default)]
+    pub comment: Option<String>,
+}
+
+/// Who a reassign names: a user or a role, and there is no third variant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReassignTarget {
+    User(Uuid),
+    /// A role, by its code.
+    Role(String),
+}
+
+impl ReassignTaskRequest {
+    /// The one holder the request names, or a 422 naming both fields.
+    ///
+    /// A blank `roleCode` is absent rather than a code, as a blank comment is
+    /// absent in [`normalize_comment`], so `{"userId": …, "roleCode": " "}`
+    /// names one target and `{"roleCode": ""}` names none.
+    pub fn target(&self) -> Result<ReassignTarget, AppError> {
+        let role_code = self
+            .role_code
+            .as_deref()
+            .map(str::trim)
+            .filter(|code| !code.is_empty());
+
+        match (self.user_id, role_code) {
+            (Some(user_id), None) => Ok(ReassignTarget::User(user_id)),
+            (None, Some(role_code)) => Ok(ReassignTarget::Role(role_code.to_owned())),
+            (Some(_), Some(_)) => Err(one_target(
+                "a task is held by a user or offered to a role, never both; \
+                 name one of `userId` and `roleCode`",
+            )),
+            (None, None) => Err(one_target(
+                "a reassign names who holds the task next, a user or a role; \
+                 there is no reassign to nobody",
+            )),
+        }
+    }
+}
+
+fn one_target(message: &str) -> AppError {
+    AppError::validation(
+        ["userId", "roleCode"]
+            .into_iter()
+            .map(|path| ValidationDetail::new(path, "oneOf", "ONE_TARGET_REQUIRED", message))
+            .collect(),
+    )
+}
+
+/// Refuses a reassign of a task that is no longer open ([#512]).
+///
+/// A 409 naming the status, as [`refuse_unless_open`] does for a decision, in
+/// words about a reassign: a decided or cancelled task has nobody left to hold
+/// it.
+///
+/// [#512]: https://github.com/sujanto-gaws/kelir/issues/512
+pub fn reassign_closed(status: TaskStatus) -> AppError {
+    AppError::conflict(format!(
+        "this task is {} and no longer open; only an open task is reassigned",
+        status.as_db()
+    ))
+}
+
+/// Refuses a reassign to a holder who could not decide the task ([#512], the
+/// product owner's decision of 2026-09-26).
+///
+/// A 422 on the field that named the target, `userId` or `roleCode`. The
+/// message names the state and what its decisions need, which is what the
+/// administrator has to choose from instead.
+///
+/// [#512]: https://github.com/sujanto-gaws/kelir/issues/512
+pub fn target_cannot_decide(field: &str, state: &str, needs: &[String]) -> AppError {
+    AppError::validation(vec![ValidationDetail::new(
+        field,
+        "canDecide",
+        "TARGET_CANNOT_DECIDE",
+        format!(
+            "a decision in `{state}` needs {}; the {} named could take none of them, \
+             so the task would be held by somebody who cannot decide it",
+            needs.join(" or "),
+            if field == "roleCode" { "role" } else { "user" },
+        ),
+    )])
+}
+
 /// Refuses a hand-off of a task the caller does not personally hold ([#184]).
 ///
 /// **Stricter than [`refuse_unless_theirs`], deliberately.** That one lets an
@@ -523,6 +633,71 @@ mod tests {
                 status.as_db()
             );
         }
+    }
+
+    fn reassign(user_id: Option<Uuid>, role_code: Option<&str>) -> ReassignTaskRequest {
+        ReassignTaskRequest {
+            user_id,
+            role_code: role_code.map(str::to_owned),
+            comment: None,
+        }
+    }
+
+    fn codes(error: AppError) -> Vec<String> {
+        match error {
+            AppError::Validation { details } => {
+                details.into_iter().map(|detail| detail.code).collect()
+            }
+            other => panic!("expected a validation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_reassign_names_a_user_or_a_role() {
+        let user = Uuid::now_v7();
+
+        assert_eq!(
+            reassign(Some(user), None).target().expect("a user"),
+            ReassignTarget::User(user)
+        );
+        assert_eq!(
+            reassign(None, Some(" FINANCE ")).target().expect("a role"),
+            ReassignTarget::Role("FINANCE".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_reassign_naming_both_or_neither_is_refused() {
+        // Both would be a task with two holders and neither a task with none,
+        // and the second is the cancel D-91 refused.
+        for request in [
+            reassign(Some(Uuid::now_v7()), Some("FINANCE")),
+            reassign(None, None),
+            reassign(None, Some("   ")),
+        ] {
+            let error = request.target().expect_err("refused");
+
+            assert_eq!(codes(error), ["ONE_TARGET_REQUIRED", "ONE_TARGET_REQUIRED"]);
+        }
+    }
+
+    #[test]
+    fn a_blank_role_code_beside_a_user_is_one_target() {
+        let user = Uuid::now_v7();
+
+        assert_eq!(
+            reassign(Some(user), Some("")).target().expect("the user"),
+            ReassignTarget::User(user)
+        );
+    }
+
+    #[test]
+    fn a_closed_task_is_not_reassigned() {
+        let AppError::Conflict { message } = reassign_closed(TaskStatus::Cancelled) else {
+            panic!("expected a conflict");
+        };
+
+        assert!(message.contains("CANCELLED"), "{message}");
     }
 
     #[test]

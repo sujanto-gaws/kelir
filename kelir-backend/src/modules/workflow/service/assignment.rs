@@ -64,6 +64,22 @@
 //!
 //! [#184]: https://github.com/sujanto-gaws/kelir/issues/184
 //!
+//! # A second way in, for a target a person named
+//!
+//! [`reassign_to`] (FR-WF-017, [#512]) is an administrator moving an open task
+//! to a user or a role they name. **It enters at [`direct`] and skips the other
+//! two steps.** There is no rule, so there is nothing to [`normalize`], and no
+//! document context to normalize against. There is no [`redirect`] either: a
+//! window redirects work a *rule* routes, and a reassign is a person choosing
+//! who, which [ADR-0042] records. What it shares is the question that must
+//! have one answer, *is this user or role live in this tenant*, and the lock
+//! that goes with it. Whether the target could then decide the task is asked
+//! of the same functions: [`permits`] for a user, and [`names_role`] for a
+//! role.
+//!
+//! [#512]: https://github.com/sujanto-gaws/kelir/issues/512
+//! [ADR-0042]: ../../../../../docs/architectures/adr/0042.%20An%20Administrator%20Reassigns%20an%20Open%20Task%20and%20Nothing%20Cancels%20One.md
+//!
 //! # A rule that resolves to nobody fails the transition
 //!
 //! Rather than storing a task with no assignee and no candidate role. An
@@ -76,7 +92,7 @@
 
 use uuid::Uuid;
 
-use super::super::domain::{AssigneeType, AssignmentRule};
+use super::super::domain::{AssigneeType, AssignmentRule, ReassignTarget};
 use super::super::repository::task as task_repo;
 use crate::error::{AppError, ValidationDetail};
 use crate::modules::identity::delegation_repository as delegation_repo;
@@ -208,7 +224,10 @@ pub async fn permits(
     };
 
     let principal = normalize(rule, context, path, Question::Decider)?;
-    let resolved = direct(transaction, tenant_id, principal, path, Question::Decider).await?;
+    let resolved = direct(transaction, tenant_id, principal, &|field, message| {
+        unresolvable(Question::Decider, path, field, message)
+    })
+    .await?;
 
     // The actor first: the ordinary case is somebody deciding their own task,
     // and it costs no query at all when the rule named a user.
@@ -254,10 +273,95 @@ pub async fn resolve(
     path: &str,
 ) -> Result<ResolvedAssignment, AppError> {
     let principal = normalize(rule, context, path, Question::Assignee)?;
-    let resolved = direct(transaction, tenant_id, principal, path, Question::Assignee).await?;
+    let resolved = direct(transaction, tenant_id, principal, &|field, message| {
+        unresolvable(Question::Assignee, path, field, message)
+    })
+    .await?;
 
     // JWSS §5.1: **after the rule resolves**, and not part of it.
     redirect(transaction, tenant_id, resolved, context).await
+}
+
+/// A reassign's target, resolved to the columns the task is rewritten with
+/// ([#512]).
+///
+/// **A role is named by its code**, as a JWSS rule names it, because [`direct`]
+/// resolves a code and a lookup by id beside it would be a second answer to
+/// *is this role live*. **No department**: a reassign to a role offers the task
+/// to every holder of the role, which [ADR-0042] records.
+///
+/// **[`direct`], and nothing else.** The target is a principal already, so
+/// [`normalize`] has nothing to do, and [`redirect`] is not applied: a window
+/// moves the work a rule routes, not a person an administrator chose. The
+/// resolution comes from the two constructors, so the task cannot be written
+/// naming both a user and a role, and `delegated_from_user_id` is `None`.
+///
+/// **A role is read `FOR KEY SHARE`**, [`direct`]'s lock, in the reassign's own
+/// transaction and before the task is written. `identity::service::delete_role`
+/// takes the role `FOR UPDATE` and then counts the open tasks that need it, so
+/// the reassign and the delete wait on each other in whichever order they
+/// arrive. A delete that commits first leaves the role unmatched, and the
+/// reassign is refused. A reassign that commits first is counted.
+///
+/// [#512]: https://github.com/sujanto-gaws/kelir/issues/512
+/// [ADR-0042]: ../../../../../docs/architectures/adr/0042.%20An%20Administrator%20Reassigns%20an%20Open%20Task%20and%20Nothing%20Cancels%20One.md
+pub async fn reassign_to(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    target: ReassignTarget,
+) -> Result<ResolvedAssignment, AppError> {
+    let principal = match target {
+        ReassignTarget::User(id) => Principal::User(id),
+        ReassignTarget::Role(role_code) => Principal::Role {
+            role_code,
+            department: None,
+        },
+    };
+
+    direct(transaction, tenant_id, principal, &not_reassignable).await
+}
+
+/// Whether a rule names `role_id`, so that the role's holders are who it
+/// admits ([#512], the product owner's decision of 2026-09-26).
+///
+/// **The role-target half of the reassign's decidability check.** A user
+/// target is measured with [`permits`], which needs a person. A role target is
+/// a set of people who may change after the reassign, so the question asked of
+/// it is whether the rule is *about* that role: a `ROLE` or `DEPARTMENT_ROLE`
+/// rule whose role resolves, through [`normalize`] and [`direct`], to this
+/// one. A `DEPARTMENT_ROLE` rule counts when its department resolves too; which
+/// holders are in the department is then a question about each holder, which
+/// the claim and the decision ask.
+///
+/// **`OWNER` and `USER` rules never name a role**, so a role target does not
+/// satisfy them: holding a role does not make anybody the document's creator
+/// or the user a rule names. [ADR-0042] records the rule.
+///
+/// [#512]: https://github.com/sujanto-gaws/kelir/issues/512
+/// [ADR-0042]: ../../../../../docs/architectures/adr/0042.%20An%20Administrator%20Reassigns%20an%20Open%20Task%20and%20Nothing%20Cancels%20One.md
+pub async fn names_role(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    rule: &AssignmentRule,
+    context: AssignmentContext,
+    role_id: Uuid,
+    path: &str,
+) -> Result<bool, AppError> {
+    if !matches!(
+        rule.assignee_type,
+        AssigneeType::Role | AssigneeType::DepartmentRole
+    ) {
+        return Ok(false);
+    }
+
+    // An edge's `allowedBy` is who may decide, so its refusal is a decider's.
+    let principal = normalize(rule, context, path, Question::Decider)?;
+    let resolved = direct(transaction, tenant_id, principal, &|field, message| {
+        unresolvable(Question::Decider, path, field, message)
+    })
+    .await?;
+
+    Ok(resolved.candidate_role_id == Some(role_id))
 }
 
 /// Holds every role that decides a task being raised, and refuses the task if
@@ -482,12 +586,16 @@ fn normalize(
 /// everything the rule said has already been turned into a principal, so
 /// [`redirect`] — which runs on the far side of it — needs to understand people
 /// and not JWSS.
+///
+/// `refuse` builds the refusal for a principal that does not resolve, given the
+/// field and what is wrong with it. The checks are this function's and the
+/// words are the caller's: a rule points at a definition's field and a
+/// transition, and [`reassign_to`] at a request's field and a task.
 async fn direct(
     transaction: &mut sqlx::PgTransaction<'_>,
     tenant_id: Uuid,
     principal: Principal,
-    path: &str,
-    question: Question,
+    refuse: &(dyn Fn(&str, String) -> AppError + Sync),
 ) -> Result<ResolvedAssignment, AppError> {
     match principal {
         Principal::User(id) => {
@@ -503,9 +611,7 @@ async fn direct(
             .await?;
 
             if exists.is_none() {
-                return Err(unresolvable(
-                    question,
-                    path,
+                return Err(refuse(
                     "userId",
                     format!("user {id} is not a live user in this tenant"),
                 ));
@@ -537,9 +643,7 @@ async fn direct(
             .fetch_optional(&mut **transaction)
             .await?
             .ok_or_else(|| {
-                unresolvable(
-                    question,
-                    path,
+                refuse(
                     "roleCode",
                     format!("`{role_code}` is not a live role in this tenant"),
                 )
@@ -560,9 +664,7 @@ async fn direct(
                     .fetch_optional(&mut **transaction)
                     .await?
                     .ok_or_else(|| {
-                        unresolvable(
-                            question,
-                            path,
+                        refuse(
                             "departmentScope",
                             format!("`{code}` is not a live department in this tenant"),
                         )
@@ -634,6 +736,23 @@ fn unresolvable(question: Question, path: &str, field: &str, message: String) ->
         "assignment",
         "ASSIGNMENT_UNRESOLVED",
         format!("{message}. {reason}"),
+    )])
+}
+
+/// [`unresolvable`]'s shape, for a reassign's target.
+///
+/// The same code, so a client handles one refusal. The path is the request's
+/// own field, `userId` or `roleCode`, and the message says the task keeps its
+/// holder, because nothing was written.
+fn not_reassignable(field: &str, message: String) -> AppError {
+    AppError::validation(vec![ValidationDetail::new(
+        field,
+        "assignment",
+        "ASSIGNMENT_UNRESOLVED",
+        format!(
+            "{message}. A task is reassigned only to somebody who can act on it, so it \
+             stays with whoever holds it now"
+        ),
     )])
 }
 

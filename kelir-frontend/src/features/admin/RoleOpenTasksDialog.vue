@@ -29,8 +29,10 @@ import type { OpenTaskNeedingRole, Role } from '@/types/identity'
  * delete's lock, so a task decided in between is simply not in it, and an
  * empty list means the delete can be tried again.
  *
- * Each row takes an action through the `task-actions` slot, which is where a
- * reassign will go (#512). The column is drawn only when the slot is given.
+ * Each row takes an action through the `task-actions` slot, which is where
+ * `RoleListPage` puts the reassign (#512). The column is drawn only when the
+ * slot is given. An action that changes a task calls `refresh`, exposed below,
+ * so a task reassigned away from the role leaves the list.
  */
 const props = defineProps<{
   role: Role | null
@@ -77,6 +79,11 @@ watch(
   },
   { immediate: true },
 )
+
+defineExpose({
+  /** Read the current page again, after a row's action changed a task. */
+  refresh: () => tasks.refresh(),
+})
 </script>
 
 <template>
@@ -97,8 +104,8 @@ watch(
       class="mt-4 text-sm text-muted-foreground"
       data-testid="role-open-tasks-empty"
     >
-      No open task needs this role any more. They were decided after the delete was refused, so it
-      can be tried again.
+      No open task needs this role any more. They were decided or reassigned after the delete was
+      refused, so it can be tried again.
     </p>
 
     <template v-else>

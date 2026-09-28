@@ -16,7 +16,7 @@ import type { OpenTaskNeedingRole, Role } from '@/types/identity'
 
 const REFUSAL =
   '2 open tasks need this role to be decided. Deleting the role would leave them offered to ' +
-  'nobody, or with a decision nobody could make. They need to be decided first'
+  'nobody, or with a decision nobody could make. They need to be decided or reassigned first'
 
 const clerkRole: Role = {
   id: 'r-2',

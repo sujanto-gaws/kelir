@@ -7,6 +7,7 @@ use uuid::Uuid;
 use crate::modules::workflow::domain::{
     DecisionAction, OpenTaskNeedingRole, TaskStatus, TransitionAction, WorkflowTask,
 };
+use crate::modules::workflow::service::assignment::ResolvedAssignment;
 
 /// The columns a transition writes when it generates a task.
 ///
@@ -375,6 +376,67 @@ pub async fn delegate(
     Ok(affected)
 }
 
+/// Moves an open task to the holder an administrator named, **conditionally on
+/// it still being open** (FR-WF-017,
+/// [#512](https://github.com/sujanto-gaws/kelir/issues/512)).
+///
+/// # Every holder column, from one resolution
+///
+/// `assignment` comes from `assignment::reassign_to`, so at most one of its
+/// user and role is set. **All four columns are written from it**, the one it
+/// names and the ones it clears: a reassign to a role clears the assignee, and
+/// a reassign to a user clears the role. Setting only the named column would
+/// leave the task naming both, which is the state `ResolvedAssignment` exists
+/// to make unwritable. `delegated_from_user_id` is cleared the same way,
+/// because a reassigned task is nobody's work being done on their behalf.
+///
+/// # The status follows the holder, as it does at creation
+///
+/// [`insert_task`]'s `CASE`, for its reason: `ASSIGNED` with an assignee,
+/// `CREATED` without one. A claimed task reassigned to a role is therefore
+/// unclaimed again and offered to the role, and [`claim`]'s predicate
+/// (`assignee_user_id IS NULL AND status = 'CREATED'`) lets its holders take
+/// it.
+///
+/// # The predicate is the guard
+///
+/// A task that is no longer open produces zero rows, and the service answers
+/// 409, as [`claim`], [`complete`] and [`delegate`] do.
+pub async fn reassign(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    id: Uuid,
+    assignment: &ResolvedAssignment,
+    actor: Uuid,
+) -> Result<u64, sqlx::Error> {
+    let affected = sqlx::query!(
+        r#"
+        UPDATE workflow_tasks SET
+            assignee_user_id        = $3,
+            candidate_role_id       = $4,
+            candidate_department_id = $5,
+            delegated_from_user_id  = $6,
+            status                  = CASE WHEN $3::uuid IS NULL THEN 'CREATED' ELSE 'ASSIGNED' END,
+            updated_by              = $7,
+            updated_at              = now()
+        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+          AND status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')
+        "#,
+        tenant_id,
+        id,
+        assignment.assignee_user_id,
+        assignment.candidate_role_id,
+        assignment.candidate_department_id,
+        assignment.delegated_from_user_id,
+        actor,
+    )
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+
+    Ok(affected)
+}
+
 /// Appends one row to `workflow_task_history` (§7.7).
 ///
 /// Append-only: the table has no `updated_at` and no `deleted_at`, so a history
@@ -402,7 +464,7 @@ pub async fn record_task_history(
         entry.document_id,
         entry.from.map(TaskStatus::as_db),
         entry.to.as_db(),
-        entry.action.map(TransitionAction::as_db),
+        entry.action.map(TaskHistoryAction::as_db),
         entry.comment,
         entry.actor,
     )
@@ -432,7 +494,11 @@ pub struct TaskHistoryEntry<'a> {
     /// type that `POST /decision` must refuse. §7.7's column is `VARCHAR(40)`
     /// and §7.3's vocabulary is the transition one, which is what this now
     /// spells.
-    pub action: Option<TransitionAction>,
+    ///
+    /// **And one verb that is not a transition's**, since
+    /// [#512](https://github.com/sujanto-gaws/kelir/issues/512): see
+    /// [`TaskHistoryAction`].
+    pub action: Option<TaskHistoryAction>,
     /// What the person said about it, where they said anything.
     ///
     /// Written by the hand-off (#184) and by nothing else so far: a decision's
@@ -443,6 +509,34 @@ pub struct TaskHistoryEntry<'a> {
     /// task's own history.
     pub comment: Option<&'a str>,
     pub actor: Option<Uuid>,
+}
+
+/// What a `workflow_task_history` row says was done to the task.
+///
+/// **A transition's verb, or `REASSIGN`.** A reassign (FR-WF-017, #512) is an
+/// administrator moving a task, and no JWSS definition can declare it, so it
+/// is not a [`TransitionAction`]: a variant there would be a verb a definition
+/// could name and nothing could fire. §7.7's `action` column has no `CHECK`,
+/// so the value needs no migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskHistoryAction {
+    Transition(TransitionAction),
+    Reassign,
+}
+
+impl TaskHistoryAction {
+    pub fn as_db(self) -> &'static str {
+        match self {
+            Self::Transition(action) => action.as_db(),
+            Self::Reassign => "REASSIGN",
+        }
+    }
+}
+
+impl From<TransitionAction> for TaskHistoryAction {
+    fn from(action: TransitionAction) -> Self {
+        Self::Transition(action)
+    }
 }
 
 /// Records the formal decision (§7.8).
@@ -588,8 +682,10 @@ pub async fn holds_role<'e, E: PgExecutor<'e>>(
 ///   role gone nobody can claim or decide it. **A claimed task does not need its
 ///   candidate role** ([#529]): a decision checks the caller against
 ///   `assignee_user_id` first (`domain::task::refuse_unless_theirs`), and reads
-///   the candidate role only while there is no assignee. Nothing in this release
-///   clears an assignee once set, so a claimed task stays its assignee's to decide.
+///   the candidate role only while there is no assignee. **A reassign to a role
+///   clears the assignee** ([#512]), and is the one path that does: the task is
+///   then offered to its new role and unclaimed, so this clause counts it
+///   against that role. It no longer counts against the role it had before.
 /// * **A transition out of the instance's current state names the role in
 ///   `allowedBy`**, claimed or not. A decision resolves that rule again
 ///   (`engine::fire`, through `assignment::permits`), and a role that is gone
@@ -604,6 +700,7 @@ pub async fn holds_role<'e, E: PgExecutor<'e>>(
 /// role, and however many of its edges do.
 ///
 /// [#487]: https://github.com/sujanto-gaws/kelir/issues/487
+/// [#512]: https://github.com/sujanto-gaws/kelir/issues/512
 /// [#529]: https://github.com/sujanto-gaws/kelir/issues/529
 pub async fn count_open_tasks_needing_role<'e, E: PgExecutor<'e>>(
     executor: E,

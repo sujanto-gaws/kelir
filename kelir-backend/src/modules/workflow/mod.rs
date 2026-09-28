@@ -178,3 +178,14 @@ pub const TASK_READ: &str = "workflow:task:read";
 /// [`domain::task::refuse_unless_theirs`] and, for a hand-off, by the stricter
 /// [`domain::task::refuse_unless_held_by`].
 pub const TASK_EXECUTE: &str = "workflow:task:execute";
+
+/// Moving an open task to another user or role, as an administrator (FR-WF-017,
+/// [#512](https://github.com/sujanto-gaws/kelir/issues/512); `0048`).
+///
+/// **Not `workflow:task:execute`**, and the argument above does not reach it.
+/// That permission is working one's own tasks: which task is the caller's is
+/// answered against the row. A reassign acts on a task that is somebody
+/// else's, or nobody's yet, so nothing about the row can answer it and the
+/// permission is the whole of the check. **D-91** asked for one of its own for
+/// that reason.
+pub const TASK_REASSIGN: &str = "workflow:task:reassign";

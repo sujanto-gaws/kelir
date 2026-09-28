@@ -20,7 +20,7 @@ pub use instance::{
     InstanceOutcome, InstanceStatus, WorkflowHistoryEntry, WorkflowInstance, WorkflowVariable,
 };
 pub use task::{
-    Assignment, DecisionAction, DecisionRequest, DelegateRequest, OpenTaskNeedingRole, TaskStatus,
-    WorkflowTask,
+    Assignment, DecisionAction, DecisionRequest, DelegateRequest, OpenTaskNeedingRole,
+    ReassignTarget, ReassignTaskRequest, TaskStatus, WorkflowTask,
 };
 pub use task_type::{TaskType, TaskTypeRefusal};

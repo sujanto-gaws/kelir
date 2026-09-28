@@ -231,7 +231,7 @@ describe('RoleListPage', () => {
   it('lists the open tasks when a delete is refused for them, and keeps the role', async () => {
     const refusal =
       '1 open task needs this role to be decided. Deleting the role would leave it offered to ' +
-      'nobody, or with a decision nobody could make. It needs to be decided first'
+      'nobody, or with a decision nobody could make. It needs to be decided or reassigned first'
 
     handler = (request) => {
       if (request.method === 'delete') {
@@ -284,6 +284,114 @@ describe('RoleListPage', () => {
     // Nothing was deleted, so the roles were not re-read: the row is still there.
     expect(backend.countOf('/identity/roles')).toBe(1)
     expect(rowsOf(wrapper).some((row) => row.text().includes('ROLE-CLERK'))).toBe(true)
+  })
+
+  describe('reassigning a listed task (#512)', () => {
+    const refusal =
+      '1 open task needs this role to be decided. Deleting the role would leave it offered to ' +
+      'nobody, or with a decision nobody could make. It needs to be decided or reassigned first'
+
+    const openTask = {
+      id: 't-1',
+      taskRef: 'TSK-0001',
+      documentNumber: 'PR-2026-0007',
+      documentTitle: 'Printer paper',
+      currentState: 'APPROVAL',
+      status: 'CREATED',
+      assigneeUserId: null,
+      assigneeDisplayName: null,
+      why: 'offered to the role, and unclaimed',
+    }
+
+    const financeRole: Role = { ...clerkRole, id: 'r-3', roleCode: 'ROLE-FINANCE', name: 'Finance' }
+
+    /** Refuses the delete, and lists the task until it has been reassigned. */
+    function blockedBy(): void {
+      let reassigned = false
+
+      handler = (request) => {
+        if (request.method === 'delete') {
+          return { status: 409, body: errorBody('ROLE_HAS_OPEN_TASKS', refusal) }
+        }
+
+        if (request.url === '/identity/roles/r-2/open-tasks') {
+          return { status: 200, body: listBody(reassigned ? [] : [openTask]) }
+        }
+
+        if (request.url === '/workflow/tasks/t-1/reassign') {
+          reassigned = true
+
+          return { status: 200, body: itemBody({ id: 't-1', candidateRoleCode: 'ROLE-FINANCE' }) }
+        }
+
+        if (request.url === '/identity/users') {
+          return { status: 200, body: listBody([]) }
+        }
+
+        return request.url === '/identity/permissions'
+          ? permissionsReply([readUsers, createUsers])
+          : rolesReply([adminRole, clerkRole, financeRole])
+      }
+    }
+
+    async function refuseDelete(permissions: string[]): Promise<VueWrapper> {
+      const wrapper = await mountPage(permissions)
+
+      await buttonLabelled(rowsOf(wrapper)[1].findAll('button'), 'Delete')?.trigger('click')
+      await buttonLabelled(wrapper.find('[role="dialog"]').findAll('button'), 'Delete')?.trigger(
+        'click',
+      )
+      await flushPromises()
+
+      return wrapper
+    }
+
+    it('offers no reassign without workflow:task:reassign', async () => {
+      blockedBy()
+
+      const wrapper = await refuseDelete(['identity:role:read', 'identity:role:delete'])
+      const dialog = wrapper.find('[role="dialog"]')
+
+      expect(dialog.find('[data-testid="role-open-task"]').exists()).toBe(true)
+      expect(dialog.findAll('th').map((cell) => cell.text())).not.toContain('Actions')
+      expect(buttonLabelled(dialog.findAll('button'), 'Reassign')).toBeUndefined()
+    })
+
+    it('reassigns a task from the list, and reads the list again', async () => {
+      blockedBy()
+
+      const wrapper = await refuseDelete([
+        'identity:role:read',
+        'identity:role:delete',
+        'workflow:task:reassign',
+      ])
+
+      const task = wrapper.find('[data-testid="role-open-task"]')
+      await buttonLabelled(task.findAll('button'), 'Reassign')?.trigger('click')
+      await flushPromises()
+
+      const reassign = wrapper
+        .findAll('[role="dialog"]')
+        .find((dialog) => dialog.text().includes('Reassign TSK-0001'))
+      expect(reassign).toBeDefined()
+
+      await reassign?.find('#reassign-task-role').setValue('ROLE-FINANCE')
+      await reassign?.find('form').trigger('submit')
+      await flushPromises()
+
+      expect(
+        backend.requests.find((request) => request.url === '/workflow/tasks/t-1/reassign')?.body,
+      ).toEqual({ roleCode: 'ROLE-FINANCE' })
+
+      // The reassign dialog closed, and the list was read again: now empty, it
+      // says the delete can be tried again.
+      const dialogs = wrapper.findAll('[role="dialog"]')
+      expect(dialogs).toHaveLength(1)
+      expect(backend.countOf('/identity/roles/r-2/open-tasks')).toBe(2)
+      expect(dialogs[0].find('[data-testid="role-open-tasks-empty"]').text()).toContain(
+        'can be tried again',
+      )
+    })
   })
 
   it('keeps a plain conflict in the confirmation and reads no task list', async () => {

@@ -61,26 +61,40 @@
 //! that the vocabulary in §7.3 does not read as evidence that this route drives
 //! it.
 //!
+//! # And a reassign is a fourth, taken by somebody who holds nothing
+//!
+//! [`reassign`] (FR-WF-017, [#512], **D-91**) moves an open task to a user or
+//! a role an administrator names. Like the hand-off it fires nothing and moves
+//! nothing, and writes one `workflow_task_history` row. Unlike it, the caller
+//! is not the task's holder, so the permission is the whole of the check, and
+//! the target is resolved by `assignment::reassign_to`, which is the engine's
+//! own answer to *is this user or role live*. [ADR-0042] records the rest.
+//!
+//! **There is no cancel.** A reassign never leaves a task held by nobody, and
+//! no route closes a single task (**D-91**).
+//!
 //! [#176]: https://github.com/sujanto-gaws/kelir/issues/176
 //! [#177]: https://github.com/sujanto-gaws/kelir/issues/177
 //! [#184]: https://github.com/sujanto-gaws/kelir/issues/184
+//! [#512]: https://github.com/sujanto-gaws/kelir/issues/512
+//! [ADR-0042]: ../../../../../docs/architectures/adr/0042.%20An%20Administrator%20Reassigns%20an%20Open%20Task%20and%20Nothing%20Cancels%20One.md
 
 use serde_json::json;
 use uuid::Uuid;
 
 use super::super::domain::task::{
-    claim_lost, delegate_unavailable, normalize_comment, refuse_self_delegation,
-    refuse_unless_held_by, refuse_unless_open, refuse_unless_theirs,
+    claim_lost, delegate_unavailable, normalize_comment, reassign_closed, refuse_self_delegation,
+    refuse_unless_held_by, refuse_unless_open, refuse_unless_theirs, target_cannot_decide,
 };
 use super::super::domain::{
-    DecisionAction, DelegateRequest, Graph, OpenTaskNeedingRole, TaskStatus, TransitionAction,
-    WorkflowTask,
+    AssigneeType, AssignmentRule, DecisionAction, DelegateRequest, Graph, OpenTaskNeedingRole,
+    ReassignTarget, ReassignTaskRequest, TaskStatus, TransitionAction, WorkflowTask,
 };
 use super::super::repository::{
     definition as definition_repo, instance as instance_repo, task as repo,
 };
-use super::super::TASK_EXECUTE;
-use super::assignment::AssignmentContext;
+use super::super::{TASK_EXECUTE, TASK_REASSIGN};
+use super::assignment::{self, AssignmentContext};
 use super::engine;
 use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
@@ -310,7 +324,7 @@ pub async fn delegate(
             // authority rather than who passed it on.
             from: Some(task.status),
             to: task.status,
-            action: Some(TransitionAction::Delegate),
+            action: Some(TransitionAction::Delegate.into()),
             comment: comment.as_deref(),
             actor: Some(user_id),
         },
@@ -377,6 +391,323 @@ pub async fn delegate(
     .await;
 
     Ok(delegated)
+}
+
+/// Moves an open task to a user or a role an administrator names (FR-WF-017,
+/// [#512], **D-91**).
+///
+/// # The order, and the lock each step takes
+///
+/// 1. **The permission**, then the request's shape: exactly one target, and a
+///    comment within bounds. Both refuse before anything is read.
+/// 2. **The task, `FOR UPDATE`.** One lock, as [`delegate`] takes: nothing
+///    here reads or moves the instance, so the engine's *instance first, then
+///    task* order is kept by taking only the second.
+/// 3. **The target, through `assignment::reassign_to`.** A role is read
+///    `FOR KEY SHARE`, which `identity::service::delete_role`'s `FOR UPDATE`
+///    waits on and which waits on it, so a role being deleted is either gone
+///    when this reads it, and refused, or counted by the delete once this
+///    commits. Task, then role, is the order a decision takes too (`decide`
+///    locks the task, and `engine::fire` resolves the edge's role after).
+///    **A closed task is refused with a 409 first**, under the task lock and
+///    before the target is read: a task whose instance has moved on would
+///    otherwise be judged against a state it is not in.
+/// 4. **Whether the target could decide it**, by
+///    [`refuse_unless_target_can_decide`]: the instance and its pinned
+///    definition are read after the task lock, and the target is measured
+///    against the decision edges out of the current state.
+/// 5. **The write, carrying the open-status predicate.** Zero rows is a 409.
+///    Under the lock the task cannot have closed since step 2, so this is the
+///    backstop, not the check.
+/// 6. **One `workflow_task_history` row**, `REASSIGN`, in the same
+///    transaction. No `workflow_history` row: the process did not move.
+///
+/// The audit record follows the commit, as every task action's does.
+///
+/// [#512]: https://github.com/sujanto-gaws/kelir/issues/512
+pub async fn reassign(
+    state: &AppState,
+    caller: &Authenticated,
+    id: Uuid,
+    request: ReassignTaskRequest,
+) -> Result<WorkflowTask, AppError> {
+    caller.require(TASK_REASSIGN)?;
+
+    let tenant_id = caller.tenant_id();
+    let user_id = caller.user_id();
+
+    let target = request.target()?;
+    let comment = normalize_comment(request.comment)?;
+
+    // The document's facts an `allowedBy` rule reads, resolved before the
+    // transaction as `decide` resolves them: a task's document never changes,
+    // and a submitted document's creator and requested department do not
+    // either.
+    let subject = repo::find_task(&state.pool, tenant_id, id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Task"))?;
+    let document = document_repo::find_document(&state.pool, tenant_id, subject.document_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Document"))?;
+    let context = AssignmentContext {
+        document_type_id: document.document_type_id,
+        owner_user_id: document.created_by,
+        requested_department_id: document.requested_for_department_id,
+        owner_department_id: None,
+    };
+
+    let mut transaction = state.pool.begin().await?;
+
+    let task = repo::lock_task(&mut transaction, tenant_id, id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Task"))?;
+
+    // A closed task is a 409 before its target is looked at. The checks below
+    // judge the target against the instance's *current* state, which a closed
+    // task of a multi-stage workflow has left: judged there, its reassign
+    // would be a 422 about a decision it will never take.
+    if !task.status.is_open() {
+        return Err(reassign_closed(task.status));
+    }
+
+    let assignment = assignment::reassign_to(&mut transaction, tenant_id, target.clone()).await?;
+
+    refuse_unless_target_can_decide(
+        &mut transaction,
+        tenant_id,
+        task.workflow_instance_id,
+        &target,
+        &assignment,
+        context,
+    )
+    .await?;
+
+    if repo::reassign(&mut transaction, tenant_id, id, &assignment, user_id).await? == 0 {
+        return Err(reassign_closed(task.status));
+    }
+
+    // The status the statement wrote, by the rule it wrote it with.
+    let status = if assignment.assignee_user_id.is_some() {
+        TaskStatus::Assigned
+    } else {
+        TaskStatus::Created
+    };
+
+    repo::record_task_history(
+        &mut transaction,
+        tenant_id,
+        &repo::TaskHistoryEntry {
+            task_id: id,
+            instance_id: task.workflow_instance_id,
+            document_id: task.document_id,
+            // Both ends, since a reassign to a role unclaims a claimed task
+            // and a reassign to a user assigns an unclaimed one.
+            from: Some(task.status),
+            to: status,
+            action: Some(repo::TaskHistoryAction::Reassign),
+            comment: comment.as_deref(),
+            actor: Some(user_id),
+        },
+    )
+    .await?;
+
+    transaction.commit().await?;
+
+    let reassigned = load(state, tenant_id, id).await?;
+
+    audit::record_or_warn(
+        &state.pool,
+        AuditEntry {
+            tenant_id,
+            event_type: "Workflow.TaskReassigned",
+            action: "REASSIGN",
+            object_type: ObjectType::WorkflowTask,
+            object_id: id,
+            actor_user_id: Some(user_id),
+            ip_address: caller.ip_address(),
+            // **Not the comment**, for `delegate`'s reason: the note is prose
+            // about somebody's document, and it lives on the task's history
+            // row behind `workflow:task:read` (**D-12**, **D-32**).
+            reason: None,
+            old_value: Some(json!({
+                "status": task.status,
+                "assigneeUserId": task.assignee_user_id,
+                "candidateRoleId": task.candidate_role_id,
+                "candidateDepartmentId": task.candidate_department_id,
+                "delegatedFromUserId": task.delegated_from_user_id,
+            })),
+            new_value: Some(json!({
+                "status": reassigned.status,
+                "assigneeUserId": reassigned.assignee_user_id,
+                "candidateRoleId": reassigned.candidate_role_id,
+                "candidateDepartmentId": reassigned.candidate_department_id,
+                "delegatedFromUserId": reassigned.delegated_from_user_id,
+                "documentId": task.document_id,
+                "workflowInstanceId": task.workflow_instance_id,
+                "commented": comment.is_some(),
+            })),
+        },
+    )
+    .await;
+
+    Ok(reassigned)
+}
+
+/// Refuses a reassign to a holder who could not decide the task ([#512], the
+/// product owner's decision of 2026-09-26).
+///
+/// # The rule
+///
+/// The **decision edges** are the `APPROVE`, `REJECT` and `RETURN` transitions
+/// out of the instance's current state, read from the published definition
+/// the instance is pinned to, as `decide` reads it. The target passes when it
+/// satisfies **at least one** of them, because one decision it can take is a
+/// decision the task can get:
+///
+/// * **A user** passes an edge `assignment::permits` accepts them on, with no
+///   one on whose behalf: a reassigned task names nobody it is delegated from.
+///   `permits` is the check the decision itself makes, so `USER`, `ROLE`,
+///   `OWNER` and `DEPARTMENT_ROLE`, department scope included, mean exactly
+///   what they will mean when the user decides.
+/// * **A role** passes an edge that names it, by `assignment::names_role`:
+///   `ROLE`, or `DEPARTMENT_ROLE` whose department resolves. `OWNER` and
+///   `USER` edges are not about a role, so a role target does not pass them.
+/// * **An edge with no `allowedBy`** admits anybody (the engine checks
+///   nothing on it), so it passes every target.
+///
+/// An edge whose own rule no longer resolves, such as one naming a deleted
+/// role, is refused at the decision too, so it counts as not passed rather
+/// than failing the reassign.
+///
+/// # A state with no decision edges is not judged
+///
+/// A `RETURNED` state whose task is the owner's correction leaves only by
+/// `RESUBMIT`, which is taken on the document, not decided on the task. There
+/// is no decision to strand, so the reassign is allowed.
+///
+/// # Locking
+///
+/// The instance is read, not locked, after the task lock: the engine takes
+/// the instance before the task, so locking it here would invert that order.
+/// It cannot move meanwhile, because the only thing that moves a state with an
+/// open task is a decision, which waits on the task this transaction holds.
+/// `permits` and `names_role` read each edge's role `FOR KEY SHARE`, as a
+/// decision does.
+///
+/// [#512]: https://github.com/sujanto-gaws/kelir/issues/512
+async fn refuse_unless_target_can_decide(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    instance_id: Uuid,
+    target: &ReassignTarget,
+    assignment: &assignment::ResolvedAssignment,
+    context: AssignmentContext,
+) -> Result<(), AppError> {
+    let instance = instance_repo::find_instance(&mut **transaction, tenant_id, instance_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Workflow instance"))?;
+
+    let definition = definition_repo::definition_of_instance(
+        &mut **transaction,
+        tenant_id,
+        instance.workflow_definition_id,
+    )
+    .await?
+    .ok_or_else(|| AppError::Internal {
+        source: anyhow::anyhow!(
+            "instance {} runs definition {} which does not exist",
+            instance.id,
+            instance.workflow_definition_id
+        ),
+    })?;
+
+    let graph = Graph::parse(&definition.definition_json, definition.version);
+    let state = &instance.current_state;
+
+    let decisions: Vec<_> = graph
+        .actions_from(state)
+        .into_iter()
+        .filter(|edge| {
+            matches!(
+                edge.action,
+                TransitionAction::Approve | TransitionAction::Reject | TransitionAction::Return
+            )
+        })
+        .collect();
+
+    if decisions.is_empty() {
+        return Ok(());
+    }
+
+    for edge in &decisions {
+        let Some(rule) = &edge.allowed_by else {
+            return Ok(());
+        };
+
+        let path = format!("transitions.{state}.{}.allowedBy", edge.action.as_db());
+
+        let passes = match target {
+            ReassignTarget::User(user) => {
+                assignment::permits(
+                    transaction,
+                    tenant_id,
+                    rule,
+                    context,
+                    Some(*user),
+                    None,
+                    &path,
+                )
+                .await
+            }
+            ReassignTarget::Role(_) => {
+                let role_id = assignment
+                    .candidate_role_id
+                    .ok_or_else(|| AppError::Internal {
+                        source: anyhow::anyhow!("a role target resolved to no role"),
+                    })?;
+
+                assignment::names_role(transaction, tenant_id, rule, context, role_id, &path).await
+            }
+        };
+
+        match passes {
+            Ok(true) => return Ok(()),
+            // Not passed, including an edge whose own rule no longer
+            // resolves: the decision would refuse that edge too.
+            Ok(false) | Err(AppError::Validation { .. }) => continue,
+            Err(other) => return Err(other),
+        }
+    }
+
+    let mut needs: Vec<String> = decisions
+        .iter()
+        .filter_map(|edge| edge.allowed_by.as_ref())
+        .map(describe_rule)
+        .collect();
+    needs.sort();
+    needs.dedup();
+
+    let field = match target {
+        ReassignTarget::User(_) => "userId",
+        ReassignTarget::Role(_) => "roleCode",
+    };
+
+    Err(target_cannot_decide(field, state, &needs))
+}
+
+/// An `allowedBy` rule as an administrator reads it in a refusal.
+fn describe_rule(rule: &AssignmentRule) -> String {
+    let role = rule.role_code.as_deref().unwrap_or_default();
+
+    match rule.assignee_type {
+        AssigneeType::User => format!("user {}", rule.user_id.as_deref().unwrap_or_default()),
+        AssigneeType::Role => format!("role `{role}`"),
+        AssigneeType::DepartmentRole => format!(
+            "role `{role}` in department `{}`",
+            rule.department_scope.as_deref().unwrap_or("any")
+        ),
+        AssigneeType::Owner => "the document's creator".to_owned(),
+    }
 }
 
 /// Records a decision, moves the process, and projects the document's status
@@ -531,7 +862,7 @@ pub async fn decide(
             document_id: task.document_id,
             from: Some(task.status),
             to: TaskStatus::Completed,
-            action: Some(action.transition()),
+            action: Some(action.transition().into()),
             comment: comment.as_deref(),
             actor: Some(user_id),
         },

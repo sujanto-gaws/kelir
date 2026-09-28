@@ -884,6 +884,7 @@ async fn the_new_routes_are_in_the_published_contract() {
         "/api/v1/workflow/instances/{id}",
         "/api/v1/workflow/tasks/{id}/claim",
         "/api/v1/workflow/tasks/{id}/decision",
+        "/api/v1/workflow/tasks/{id}/reassign",
         "/api/v1/documents/{id}/workflow",
         "/api/v1/tasks",
         "/api/v1/tasks/{id}",
@@ -1328,8 +1329,8 @@ async fn a_claimed_task_needs_only_the_role_its_transitions_name() {
     assert_eq!(
         edge_refused.body["error"]["message"],
         "2 open tasks need this role to be decided. Deleting the role would leave them \
-         offered to nobody, or with a decision nobody could make. They need to be decided \
-         first",
+         offered to nobody, or with a decision nobody could make. They need to be decided or \
+         reassigned first",
         "both tasks, claimed or not, need the edge's role: {}",
         edge_refused.body
     );
@@ -2155,7 +2156,7 @@ async fn delete_role(app: &TestApp, token: &str, role: Uuid) -> common::TestResp
 /// `ROLE_HAS_OPEN_TASKS`.
 const ONE_OPEN_TASK: &str = "1 open task needs this role to be decided. Deleting the role would \
                              leave it offered to nobody, or with a decision nobody could make. \
-                             It needs to be decided first";
+                             It needs to be decided or reassigned first";
 
 /// `a_claimed_task_needs_only_the_role_its_transitions_name`'s definition, as
 /// a refusal names it.
@@ -2999,20 +3000,63 @@ async fn draft_document(app: &TestApp, token: &str, type_id: Uuid, title: &str) 
 /// Asserts the delete waited on the submission, and that the submission went
 /// through. Answers the delete's response.
 ///
-/// **The interleave is forced, not timed.** A trigger on `workflow_tasks`, in
-/// this test's own database, makes the task `INSERT` take a shared advisory
-/// lock this helper holds exclusively on a connection of its own. So the
-/// submission stops inside its transaction, after `assignment` has locked the
-/// roles it resolves and before its task commits, for as long as the helper
-/// says. The helper sees it stopped in `pg_locks`, sends the delete, and sees
-/// the delete's `FOR UPDATE` on `roles` blocked by the submission's backend in
-/// `pg_blocking_pids` before it lets the submission go.
+/// [`second_waits_on_first`] forces the order: the submission stops at its
+/// task `INSERT`, after `assignment` has locked the roles it resolves and
+/// before its task commits, and the delete is seen blocked in its
+/// `FOR UPDATE` on `roles`.
 async fn delete_during_a_held_submission(
     app: &Arc<TestApp>,
     token: &str,
     document: Uuid,
     role: Uuid,
 ) -> common::TestResponse {
+    let (submitted, deleted) = second_waits_on_first(
+        app,
+        Gate {
+            table: "workflow_tasks",
+            event: "INSERT",
+        },
+        ("the submission", submission(app, token, document)),
+        ("the delete", || spawn_delete_role(app, token, role)),
+        "FOR UPDATE",
+    )
+    .await;
+
+    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+
+    deleted
+}
+
+/// Where [`second_waits_on_first`] stops the first request: before any row of
+/// `event` on `table` in its transaction, in this test's own database.
+struct Gate {
+    table: &'static str,
+    event: &'static str,
+}
+
+/// Sends `first`, holds it inside its transaction at `gate`, sends `second`,
+/// and answers both once `second` has been seen blocked by `first` in a
+/// statement on `roles` taking `lock`. Each is named for the panics.
+///
+/// **The interleave is forced, not timed** (#528). A trigger at the gate makes
+/// the first request's statement take a shared advisory lock this helper holds
+/// exclusively on a connection of its own. So the first request stops there,
+/// holding whatever it locked before the statement, for as long as the helper
+/// says. The helper sees it stopped in `pg_locks`, sends the second, and sees
+/// the second's backend in `pg_blocking_pids` behind the first's before it
+/// opens the gate. `first` is spawned after the gate is closed, so it is a
+/// closure too.
+async fn second_waits_on_first<First, Second>(
+    app: &Arc<TestApp>,
+    gate: Gate,
+    (first_name, first): (&str, First),
+    (second_name, second): (&str, Second),
+    lock: &str,
+) -> (common::TestResponse, common::TestResponse)
+where
+    First: FnOnce() -> tokio::task::JoinHandle<common::TestResponse>,
+    Second: FnOnce() -> tokio::task::JoinHandle<common::TestResponse>,
+{
     use sqlx::{Connection, PgConnection};
     use std::time::Duration;
     use tokio::time::Instant;
@@ -3022,7 +3066,7 @@ async fn delete_during_a_held_submission(
     const PATIENCE: Duration = Duration::from_secs(30);
 
     sqlx::query(&format!(
-        "CREATE FUNCTION test_hold_task_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+        "CREATE FUNCTION test_gate() RETURNS trigger LANGUAGE plpgsql AS $$
          BEGIN
              PERFORM pg_advisory_xact_lock_shared({GATE});
              RETURN NEW;
@@ -3032,42 +3076,31 @@ async fn delete_during_a_held_submission(
     .execute(&app.pool)
     .await
     .expect("the gate's function");
-    sqlx::query(
-        "CREATE TRIGGER test_hold_task_insert BEFORE INSERT ON workflow_tasks
-         FOR EACH ROW EXECUTE FUNCTION test_hold_task_insert()",
-    )
+    sqlx::query(&format!(
+        "CREATE TRIGGER test_gate BEFORE {} ON {}
+         FOR EACH ROW EXECUTE FUNCTION test_gate()",
+        gate.event, gate.table
+    ))
     .execute(&app.pool)
     .await
     .expect("the gate's trigger");
 
     // Off the pool, so the gate never competes with the requests for a
     // connection.
-    let mut gate = PgConnection::connect_with(&app.pool.connect_options())
+    let mut gate_connection = PgConnection::connect_with(&app.pool.connect_options())
         .await
         .expect("the gate's connection");
     sqlx::query("SELECT pg_advisory_lock($1)")
         .bind(GATE)
-        .execute(&mut gate)
+        .execute(&mut gate_connection)
         .await
         .expect("close the gate");
 
-    let submission = {
-        let app = Arc::clone(app);
-        let token = token.to_owned();
-        tokio::spawn(async move {
-            app.send(
-                Method::POST,
-                &format!("/api/v1/documents/{document}/submission"),
-                Some(&token),
-                None,
-            )
-            .await
-        })
-    };
+    let first = first();
 
-    // The submission's backend, stopped at the gate inside its task INSERT.
+    // The first request's backend, stopped at the gate.
     let deadline = Instant::now() + PATIENCE;
-    let transition: i32 = loop {
+    let held: i32 = loop {
         let waiting: Option<i32> = sqlx::query_scalar(
             "SELECT pid FROM pg_locks
              WHERE locktype = 'advisory' AND objid::text::bigint = $1 AND objsubid = 1
@@ -3081,69 +3114,103 @@ async fn delete_during_a_held_submission(
         if let Some(pid) = waiting {
             break pid;
         }
-        assert!(
-            !submission.is_finished(),
-            "the submission finished without reaching its task INSERT"
-        );
+        if first.is_finished() {
+            let answered = first.await.expect("the first request did not panic");
+            panic!(
+                "{first_name} finished without reaching the gate on {} {}: {} {}",
+                gate.event, gate.table, answered.status, answered.body
+            );
+        }
         assert!(
             Instant::now() < deadline,
-            "the submission never reached its task INSERT"
+            "{first_name} never reached the gate on {} {}",
+            gate.event,
+            gate.table
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     };
 
-    let delete = {
-        let app = Arc::clone(app);
-        let token = token.to_owned();
-        tokio::spawn(async move { delete_role(&app, &token, role).await })
-    };
+    let second = second();
 
-    // The delete's backend, in its lock on the role, blocked by the
-    // submission's.
+    // The second request's backend, in its lock on a role, blocked by the
+    // first's.
+    let pattern = format!("%{lock}%");
     let deadline = Instant::now() + PATIENCE;
     loop {
         let waiting: Option<i32> = sqlx::query_scalar(
             "SELECT pid FROM pg_stat_activity
              WHERE datname = current_database() AND $1 = ANY(pg_blocking_pids(pid))
-               AND query LIKE '%FROM roles%' AND query LIKE '%FOR UPDATE%'",
+               AND query LIKE '%FROM roles%' AND query LIKE $2",
         )
-        .bind(transition)
+        .bind(held)
+        .bind(&pattern)
         .fetch_optional(&app.pool)
         .await
         .expect("read pg_stat_activity");
         if waiting.is_some() {
             break;
         }
-        if delete.is_finished() {
-            let answered = delete.await.expect("the delete did not panic");
+        if second.is_finished() {
+            let answered = second.await.expect("the second request did not panic");
             panic!(
-                "the delete did not wait for the transition holding the role: {} {}",
+                "{second_name} did not wait for {first_name}: {} {}",
                 answered.status, answered.body
             );
         }
         assert!(
             Instant::now() < deadline,
-            "the delete was never seen waiting on the transition in its lock on the role"
+            "{second_name} was never seen waiting on {first_name} in its {lock} on a role"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
     sqlx::query("SELECT pg_advisory_unlock($1)")
         .bind(GATE)
-        .execute(&mut gate)
+        .execute(&mut gate_connection)
         .await
         .expect("open the gate");
 
-    let submitted = tokio::time::timeout(PATIENCE, submission)
+    let first = tokio::time::timeout(PATIENCE, first)
         .await
-        .expect("the submission did not finish once the gate opened")
-        .expect("the submission did not panic");
-    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+        .unwrap_or_else(|_| panic!("{first_name} did not finish once the gate opened"))
+        .expect("the first request did not panic");
+    let second = tokio::time::timeout(PATIENCE, second)
+        .await
+        .unwrap_or_else(|_| panic!("{second_name} did not finish once {first_name} committed"))
+        .expect("the second request did not panic");
 
-    tokio::time::timeout(PATIENCE, delete)
-        .await
-        .expect("the delete did not finish once the submission committed")
-        .expect("the delete did not panic")
+    (first, second)
+}
+
+/// A submission of `document`, not yet sent.
+fn submission(
+    app: &Arc<TestApp>,
+    token: &str,
+    document: Uuid,
+) -> impl FnOnce() -> tokio::task::JoinHandle<common::TestResponse> {
+    let app = Arc::clone(app);
+    let token = token.to_owned();
+    move || {
+        tokio::spawn(async move {
+            app.send(
+                Method::POST,
+                &format!("/api/v1/documents/{document}/submission"),
+                Some(&token),
+                None,
+            )
+            .await
+        })
+    }
+}
+
+fn spawn_delete_role(
+    app: &Arc<TestApp>,
+    token: &str,
+    role: Uuid,
+) -> tokio::task::JoinHandle<common::TestResponse> {
+    let app = Arc::clone(app);
+    let token = token.to_owned();
+    tokio::spawn(async move { delete_role(&app, &token, role).await })
 }
 
 /// The delete was refused for the one task the submission raised, the role is
@@ -4494,4 +4561,1595 @@ async fn an_unclaimed_task_is_judged_by_its_offered_role_and_not_by_the_clause()
         "the detail gate refuses an unclaimed task on a live offered role"
     );
     assert!(!is_visible_to(&app, approver_id, claimed).await);
+}
+
+// ---------------------------------------------------------------------------
+// #512 — an administrator reassigns an open task (FR-WF-017, D-91, ADR-0042)
+// ---------------------------------------------------------------------------
+
+// # Seen to fail (coding standard §2.9)
+//
+// Each mutation was applied alone, the named tests run, and the mutation
+// reverted, on 2026-09-26, and the rows marked (2026-09-28) again after the
+// campaign's round:
+//
+// | Mutation | Reddened |
+// |---|---|
+// | The closed-status 409 after `lock_task` removed from `service::task::reassign` (2026-09-28) | *a closed task whose instance moved on…* — 422 `TARGET_CANNOT_DECIDE` about `FINANCE_APPROVAL`. *A decided task is not reassigned* stays green: its instance is final, so no edge is judged and the write's predicate answers 409 |
+// | The open-status predicate dropped from `repository::task::reassign` | Nothing since 2026-09-28: it is the backstop behind the 409 above, and under the task lock no test can reach it |
+// | The tenant filter dropped from `repository::task::lock_task` (2026-09-28) | Nothing, and nothing can: `reassign` reads the task through the tenant-filtered `find_task` before its transaction, and answers 404 there. The row said 409 until 2026-09-28 |
+// | The tenant filter dropped from `assignment::direct`'s user lookup | *a reassign stays in its tenant* — reassigned to the other tenant's user, 200 |
+// | The tenant filter dropped from `assignment::direct`'s role lookup (2026-09-28) | *a reassign stays in its tenant* — `TARGET_CANNOT_DECIDE` rather than `ASSIGNMENT_UNRESOLVED`: the other tenant's role resolved, and only the decidability check refused it |
+// | `deleted_at IS NULL` dropped from `direct`'s user lookup | *a reassign names one live target…* — a deleted user accepted |
+// | `deleted_at IS NULL` dropped from `direct`'s role lookup | *a reassign names one live target…* — a deleted role accepted; *a reassign arriving during a role delete…* — 200 onto the deleted role |
+// | `FOR KEY SHARE` dropped from `direct`'s role lookup | *a role delete arriving during a reassign…* — the delete never waits, 204; *a reassign arriving during a role delete…* — never seen waiting in its lock |
+// | `assignee_user_id = COALESCE($3, assignee_user_id)` in `reassign` | *…to a role whose holders may claim it* — the claim stayed |
+// | `candidate_role_id = COALESCE($4, candidate_role_id)` in `reassign` | *…to a user who then decides it* — the role stayed |
+// | The decidability check's call removed from `service::task::reassign` | *a user target must satisfy…* and *a role target must be named…* — a target that could not decide accepted |
+// | "At least one" decision edge turned into "every" | *a user target must satisfy…* — the mixed case's reject-only holder refused |
+// | `DEPARTMENT_ROLE` scope dropped before `permits` for a user target | *a user target must satisfy…* — the holder scoped to another department accepted |
+// | The audit event renamed, or its call's `.await` dropped (2026-09-28) | *a reassign is audited once…* — no record |
+// | `FOR UPDATE` dropped from `lock_task` (2026-09-28) | *a claim arriving during a reassign…* — the claim did not wait, 200 |
+// | `COALESCE` on `candidate_department_id`, then on `delegated_from_user_id`, in `reassign` (2026-09-28) | *a reassign clears the department and the delegation* |
+// | `Return` dropped from the decision actions; `Cancel` added; an edge with no `allowedBy` made to `continue` (2026-09-28) | *the decidability check reads return and not cancel*, each case |
+
+/// What every role in this section carries: the inbox's permissions, and not
+/// `workflow:task:reassign`, which only the administrator holds.
+const WORKER: &[&str] = &[
+    "workflow:task:read",
+    "workflow:task:execute",
+    "workflow:instance:read",
+    "document:read",
+];
+
+async fn reassign(app: &TestApp, token: &str, task: Uuid, body: Value) -> common::TestResponse {
+    app.post(
+        &format!("/api/v1/workflow/tasks/{task}/reassign"),
+        Some(token),
+        body,
+    )
+    .await
+}
+
+/// A reassign of `task`, not yet sent.
+fn reassignment(
+    app: &Arc<TestApp>,
+    token: &str,
+    task: Uuid,
+    body: Value,
+) -> impl FnOnce() -> tokio::task::JoinHandle<common::TestResponse> {
+    let app = Arc::clone(app);
+    let token = token.to_owned();
+    move || tokio::spawn(async move { reassign(&app, &token, task, body).await })
+}
+
+async fn worker_role(app: &TestApp, code: &str) -> Uuid {
+    fixtures::create_role_with_permissions(&app.pool, fixtures::SYSTEM_TENANT_ID, code, WORKER)
+        .await
+}
+
+/// A user of the system tenant holding `roles`, and their token.
+async fn worker(app: &TestApp, username: &str, roles: &[Uuid]) -> (Uuid, String) {
+    let id = fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        username,
+        &format!("{username}@example.test"),
+        common::ADMIN_PASSWORD,
+        roles,
+    )
+    .await;
+
+    (id, app.sign_in(username, common::ADMIN_PASSWORD).await)
+}
+
+/// A definition whose task is offered to `queue` and whose edges are
+/// `allowedBy` `edge` (JWSS §5 lets the two differ).
+fn offered_to_and_decided_by(key: &str, queue: &str, edge: &str) -> Value {
+    let mut definition = workflow_for(key, queue);
+    for transition in definition["transitions"]
+        .as_array_mut()
+        .expect("transitions")
+    {
+        transition["allowedBy"] = json!(format!("ROLE:{edge}"));
+    }
+    definition
+}
+
+fn inbox_holds(inbox: &common::TestResponse, task: Uuid) -> bool {
+    inbox.body["data"]
+        .as_array()
+        .expect("a page")
+        .iter()
+        .any(|row| row["id"] == json!(task))
+}
+
+async fn administrator_id(app: &TestApp) -> Uuid {
+    sqlx::query_scalar("SELECT id FROM users WHERE username = $1")
+        .bind(common::ADMIN_USERNAME)
+        .fetch_one(&app.pool)
+        .await
+        .expect("read the administrator")
+}
+
+/// The task's `REASSIGN` history rows: old status, new status, comment, actor.
+async fn reassign_history(
+    app: &TestApp,
+    task: Uuid,
+) -> Vec<(Option<String>, String, Option<String>, Option<Uuid>)> {
+    sqlx::query_as(
+        "SELECT old_status, new_status, comment, actor_user_id FROM workflow_task_history
+         WHERE task_id = $1 AND action = 'REASSIGN' ORDER BY created_at",
+    )
+    .bind(task)
+    .fetch_all(&app.pool)
+    .await
+    .expect("read the task's history")
+}
+
+async fn workflow_history_rows(app: &TestApp, document: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM workflow_history WHERE document_id = $1")
+        .bind(document)
+        .fetch_one(&app.pool)
+        .await
+        .expect("count the document's workflow history")
+}
+
+/// The task's holder columns and status, straight from the row.
+async fn task_holder(app: &TestApp, task: Uuid) -> (Option<Uuid>, Option<Uuid>, String) {
+    sqlx::query_as(
+        "SELECT assignee_user_id, candidate_role_id, status FROM workflow_tasks WHERE id = $1",
+    )
+    .bind(task)
+    .fetch_one(&app.pool)
+    .await
+    .expect("read the task")
+}
+
+fn detail_paths_and_codes(response: &common::TestResponse) -> Vec<(String, String)> {
+    response.body["error"]["details"]
+        .as_array()
+        .expect("details")
+        .iter()
+        .map(|detail| {
+            (
+                detail["path"].as_str().expect("a path").to_owned(),
+                detail["code"].as_str().expect("a code").to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// **A claimed task reassigned to a user is that user's to decide, and
+/// nobody else's** (FR-WF-017, [#512]).
+///
+/// Two holders of the task's role. The first claims it, so the second cannot
+/// decide it. The administrator reassigns it to the second with a reason, and
+/// the row, the response, the history and both inboxes say so: the second
+/// holds it `ASSIGNED`, the role column is cleared, one `REASSIGN` row records
+/// the move with the reason trimmed and the administrator as actor, and no
+/// `workflow_history` row is written, because the process did not move. Then
+/// the second decides it.
+///
+/// [#512]: https://github.com/sujanto-gaws/kelir/issues/512
+#[tokio::test]
+async fn an_administrator_reassigns_a_claimed_task_to_a_user_who_then_decides_it() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let queue = worker_role(&app, "TI-RA-USER").await;
+    let (_, first) = worker(&app, "ti.ra.first", &[queue]).await;
+    let (second_id, second) = worker(&app, "ti.ra.second", &[queue]).await;
+
+    let workflow = publish_workflow(&app, &token, "ti_ra_user", "TI-RA-USER").await;
+    let type_id = document_type(&app, &token, "TI_RA_USER", workflow).await;
+    let document = submitted_document(&app, &token, type_id, "Reassigned to a person").await;
+    let task = open_task_of(&app, document).await;
+    claim(&app, &first, task).await;
+
+    let not_theirs = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&second),
+            json!({ "action": "APPROVE" }),
+        )
+        .await;
+    assert_eq!(
+        not_theirs.status,
+        StatusCode::FORBIDDEN,
+        "a claimed task was decidable by another holder of its role: {}",
+        not_theirs.body
+    );
+
+    let moves = workflow_history_rows(&app, document).await;
+
+    let reassigned = reassign(
+        &app,
+        &token,
+        task,
+        json!({ "userId": second_id, "comment": "  Ani is on leave  " }),
+    )
+    .await;
+    assert_eq!(reassigned.status, StatusCode::OK, "{}", reassigned.body);
+
+    let data = reassigned.data();
+    assert_eq!(data["assigneeUserId"], json!(second_id), "{data}");
+    assert!(data["candidateRoleId"].is_null(), "the role stayed: {data}");
+    assert_eq!(data["status"], "ASSIGNED", "{data}");
+    assert!(data["delegatedFromUserId"].is_null(), "{data}");
+    assert_eq!(
+        task_holder(&app, task).await,
+        (Some(second_id), None, "ASSIGNED".to_owned())
+    );
+
+    assert_eq!(
+        reassign_history(&app, task).await,
+        [(
+            Some("ASSIGNED".to_owned()),
+            "ASSIGNED".to_owned(),
+            Some("Ani is on leave".to_owned()),
+            Some(administrator_id(&app).await),
+        )],
+        "one REASSIGN row, with the reason and the administrator"
+    );
+    assert_eq!(
+        workflow_history_rows(&app, document).await,
+        moves,
+        "a reassign wrote a workflow_history row, but the process did not move"
+    );
+
+    assert!(
+        !inbox_holds(&app.get(TASKS, Some(&first)).await, task),
+        "the previous holder still sees the task"
+    );
+    let inbox = app.get(TASKS, Some(&second)).await;
+    assert!(inbox_holds(&inbox, task), "{}", inbox.body);
+
+    decide(&app, &second, task).await;
+}
+
+/// **A claimed task reassigned to a role is unclaimed and offered to that
+/// role, and the role delete counts it there** ([#512], **D-89**, [#529]).
+///
+/// The task is offered to `Q`; its `APPROVE` is `allowedBy` `R` and its
+/// `REJECT` `allowedBy` `E`, so `R` is a role that can decide it. `A` holds `Q`
+/// and `E` and claims it; `B` holds `R` and `E`. The administrator reassigns
+/// it to `R`: the assignee is cleared, the status goes back to `CREATED`, and
+/// the history records both ends. `A` no longer sees it; `B` sees it as a role
+/// task, claims it, and decides it.
+///
+/// **Row 7's count, after the assignee is cleared.** Deleting `R` is refused:
+/// the task is offered to it unclaimed, and an edge names it. (A reassign to a
+/// role is only accepted to a role an edge names, so the edge alone would hold
+/// it; the first clause is asserted by the row, in `task_holder`.) `Q`, which
+/// neither offers the task any more nor names an edge, is needed by no open
+/// task. Once `B` decides it, neither is `R`. Both are still named by the
+/// published definition, so since **D-91** (3) ([#510]) each delete is refused
+/// with that code instead, which is asked only once no open task needs the
+/// role.
+///
+/// [#510]: https://github.com/sujanto-gaws/kelir/issues/510
+///
+/// [#512]: https://github.com/sujanto-gaws/kelir/issues/512
+/// [#529]: https://github.com/sujanto-gaws/kelir/issues/529
+#[tokio::test]
+async fn an_administrator_reassigns_a_claimed_task_to_a_role_whose_holders_may_claim_it() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let queue = worker_role(&app, "TI-RA-Q").await;
+    let edge = worker_role(&app, "TI-RA-E").await;
+    let target = worker_role(&app, "TI-RA-R").await;
+    let (_, a) = worker(&app, "ti.ra.a", &[queue, edge]).await;
+    let (b_id, b) = worker(&app, "ti.ra.b", &[target, edge]).await;
+
+    let mut definition = workflow_for("ti_ra_role", "TI-RA-Q");
+    definition["transitions"][0]["allowedBy"] = json!("ROLE:TI-RA-R");
+    definition["transitions"][1]["allowedBy"] = json!("ROLE:TI-RA-E");
+    let workflow = publish_workflow_definition(&app, &token, "ti_ra_role", definition).await;
+    let type_id = document_type(&app, &token, "TI_RA_ROLE", workflow).await;
+    let document = submitted_document(&app, &token, type_id, "Reassigned to a role").await;
+    let task = open_task_of(&app, document).await;
+    claim(&app, &a, task).await;
+    assert!(!inbox_holds(&app.get(TASKS, Some(&b)).await, task));
+
+    let reassigned = reassign(
+        &app,
+        &token,
+        task,
+        json!({ "roleCode": "TI-RA-R", "comment": "Finance takes these now" }),
+    )
+    .await;
+    assert_eq!(reassigned.status, StatusCode::OK, "{}", reassigned.body);
+
+    let data = reassigned.data();
+    assert!(data["assigneeUserId"].is_null(), "the claim stayed: {data}");
+    assert_eq!(data["candidateRoleId"], json!(target), "{data}");
+    assert_eq!(data["candidateRoleCode"], "TI-RA-R", "{data}");
+    assert_eq!(data["status"], "CREATED", "{data}");
+    assert_eq!(
+        task_holder(&app, task).await,
+        (None, Some(target), "CREATED".to_owned())
+    );
+    assert_eq!(
+        reassign_history(&app, task).await,
+        [(
+            Some("ASSIGNED".to_owned()),
+            "CREATED".to_owned(),
+            Some("Finance takes these now".to_owned()),
+            Some(administrator_id(&app).await),
+        )]
+    );
+
+    assert!(
+        !inbox_holds(&app.get(TASKS, Some(&a)).await, task),
+        "the previous assignee still sees a task reassigned to a role they do not hold"
+    );
+    let inbox = app.get(TASKS, Some(&b)).await;
+    let row = inbox.body["data"]
+        .as_array()
+        .expect("a page")
+        .iter()
+        .find(|row| row["id"] == json!(task))
+        .unwrap_or_else(|| {
+            panic!(
+                "the new role's holder is not offered the task: {}",
+                inbox.body
+            )
+        })
+        .clone();
+    assert_eq!(row["assignment"], "ROLE", "{row}");
+
+    let target_refused = delete_role(&app, &token, target).await;
+    assert_eq!(
+        target_refused.status,
+        StatusCode::CONFLICT,
+        "the role a task was reassigned to did not hold it: {}",
+        target_refused.body
+    );
+    assert_eq!(
+        target_refused.body["error"]["code"], "ROLE_HAS_OPEN_TASKS",
+        "{}",
+        target_refused.body
+    );
+    assert!(
+        target_refused.body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("1 open task needs")),
+        "{}",
+        target_refused.body
+    );
+
+    assert_needed_by_no_open_task(
+        &app,
+        &token,
+        queue,
+        "the role the task was reassigned away from still held it",
+    )
+    .await;
+
+    claim(&app, &b, task).await;
+    assert_eq!(
+        task_holder(&app, task).await,
+        (Some(b_id), Some(target), "ASSIGNED".to_owned())
+    );
+    decide(&app, &b, task).await;
+
+    assert_needed_by_no_open_task(&app, &token, target, "the decided task still held its role")
+        .await;
+}
+
+/// No open task needs `role`: its list is empty, and its delete is refused, if
+/// at all, for the published definition that names it, **D-91** (3)'s refusal,
+/// which is asked only after the open-task count.
+async fn assert_needed_by_no_open_task(app: &TestApp, token: &str, role: Uuid, why: &str) {
+    let listed = open_tasks(app, token, role, "").await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    assert_eq!(listed.body["meta"]["total"], 0, "{why}: {}", listed.body);
+
+    let refused = delete_role(app, token, role).await;
+    assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.body);
+    assert_eq!(
+        refused.body["error"]["code"], "ROLE_NAMED_BY_PUBLISHED_DEFINITION",
+        "{why}: {}",
+        refused.body
+    );
+}
+
+/// **A reassign names exactly one live target, or nothing changes** ([#512]
+/// AC3, AC4, AC9).
+///
+/// Both targets, neither, and a null one are refused before anything is read,
+/// naming both fields. A user or a role that is deleted, or never existed, is
+/// refused as `ASSIGNMENT_UNRESOLVED` on the field that named it, by the
+/// engine's own checks. The task keeps its holder and gains no history row.
+///
+/// [#512]: https://github.com/sujanto-gaws/kelir/issues/512
+#[tokio::test]
+async fn a_reassign_names_one_live_target_or_changes_nothing() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let queue = worker_role(&app, "TI-RA-ONE").await;
+    let (live, _) = worker(&app, "ti.ra.live", &[queue]).await;
+    let (gone, _) = worker(&app, "ti.ra.gone", &[queue]).await;
+    sqlx::query("UPDATE users SET deleted_at = now() WHERE id = $1")
+        .bind(gone)
+        .execute(&app.pool)
+        .await
+        .expect("delete the user");
+    let deleted_role = worker_role(&app, "TI-RA-GONE").await;
+    sqlx::query("UPDATE roles SET deleted_at = now() WHERE id = $1")
+        .bind(deleted_role)
+        .execute(&app.pool)
+        .await
+        .expect("delete the role");
+
+    let workflow = publish_workflow(&app, &token, "ti_ra_one", "TI-RA-ONE").await;
+    let type_id = document_type(&app, &token, "TI_RA_ONE", workflow).await;
+    let document = submitted_document(&app, &token, type_id, "Nobody new holds this").await;
+    let task = open_task_of(&app, document).await;
+
+    let both = [
+        ("userId".to_owned(), "ONE_TARGET_REQUIRED".to_owned()),
+        ("roleCode".to_owned(), "ONE_TARGET_REQUIRED".to_owned()),
+    ];
+    let user = [("userId".to_owned(), "ASSIGNMENT_UNRESOLVED".to_owned())];
+    let role = [("roleCode".to_owned(), "ASSIGNMENT_UNRESOLVED".to_owned())];
+
+    for (body, expected) in [
+        (
+            json!({ "userId": live, "roleCode": "TI-RA-ONE" }),
+            &both[..],
+        ),
+        (json!({}), &both[..]),
+        (json!({ "userId": null, "comment": "to nobody" }), &both[..]),
+        (json!({ "roleCode": "  " }), &both[..]),
+        (json!({ "userId": gone }), &user[..]),
+        (json!({ "userId": Uuid::now_v7() }), &user[..]),
+        (json!({ "roleCode": "TI-RA-GONE" }), &role[..]),
+        (json!({ "roleCode": "TI-RA-NEVER" }), &role[..]),
+    ] {
+        let refused = reassign(&app, &token, task, body.clone()).await;
+
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{body} was not refused: {}",
+            refused.body
+        );
+        assert_eq!(detail_paths_and_codes(&refused), expected, "{body}");
+    }
+
+    assert_eq!(
+        task_holder(&app, task).await,
+        (None, Some(queue), "CREATED".to_owned()),
+        "a refused reassign changed the task"
+    );
+    assert!(reassign_history(&app, task).await.is_empty());
+}
+
+/// **Only an open task is reassigned** ([#512] AC6).
+///
+/// A decided task answers 409 naming its status, is still the decider's, and
+/// gains no history row. The refusal comes straight after the task lock,
+/// before the target is resolved or judged; the write's own predicate is the
+/// backstop behind it. *A closed task whose instance moved on…* is the case
+/// where the order matters.
+///
+/// [#512]: https://github.com/sujanto-gaws/kelir/issues/512
+#[tokio::test]
+async fn a_decided_task_is_not_reassigned() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let queue = worker_role(&app, "TI-RA-DONE").await;
+    let (decider, approver) = worker(&app, "ti.ra.decider", &[queue]).await;
+    let (other, _) = worker(&app, "ti.ra.other", &[queue]).await;
+
+    let workflow = publish_workflow(&app, &token, "ti_ra_done", "TI-RA-DONE").await;
+    let type_id = document_type(&app, &token, "TI_RA_DONE", workflow).await;
+    let document = submitted_document(&app, &token, type_id, "Already decided").await;
+    let task = open_task_of(&app, document).await;
+    decide(&app, &approver, task).await;
+
+    let refused = reassign(&app, &token, task, json!({ "userId": other })).await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::CONFLICT,
+        "a decided task was reassigned: {}",
+        refused.body
+    );
+    assert!(
+        refused.body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("COMPLETED")),
+        "{}",
+        refused.body
+    );
+    assert_eq!(
+        task_holder(&app, task).await,
+        (Some(decider), Some(queue), "COMPLETED".to_owned())
+    );
+    assert!(reassign_history(&app, task).await.is_empty());
+}
+
+/// **The reassign has a permission of its own** ([#512] AC2, **D-91**).
+///
+/// The task's own holder, with `workflow:task:execute`, is refused 403: working
+/// a task is not moving one. The administrator, whose `ROLE-ADMIN` `0048`
+/// granted it, is answered 404 for a task that does not exist.
+///
+/// [#512]: https://github.com/sujanto-gaws/kelir/issues/512
+#[tokio::test]
+async fn a_reassign_requires_workflow_task_reassign() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let queue = worker_role(&app, "TI-RA-PERM").await;
+    let (holder_id, holder) = worker(&app, "ti.ra.holder", &[queue]).await;
+
+    let workflow = publish_workflow(&app, &token, "ti_ra_perm", "TI-RA-PERM").await;
+    let type_id = document_type(&app, &token, "TI_RA_PERM", workflow).await;
+    let document = submitted_document(&app, &token, type_id, "Not theirs to move").await;
+    let task = open_task_of(&app, document).await;
+    claim(&app, &holder, task).await;
+
+    let refused = reassign(&app, &holder, task, json!({ "roleCode": "TI-RA-PERM" })).await;
+    assert_eq!(
+        refused.status,
+        StatusCode::FORBIDDEN,
+        "a holder without workflow:task:reassign reassigned their task: {}",
+        refused.body
+    );
+    assert_eq!(
+        task_holder(&app, task).await,
+        (Some(holder_id), Some(queue), "ASSIGNED".to_owned())
+    );
+
+    let missing = reassign(&app, &token, Uuid::now_v7(), json!({ "userId": holder_id })).await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND, "{}", missing.body);
+}
+
+/// **A reassign stays in its tenant, and a provisioned tenant's administrator
+/// holds it** ([#512], ADR-0042 §2).
+///
+/// Tenant B is provisioned through the real route, so its administrator holds
+/// what provisioning grants, `workflow:task:reassign` among it. They are
+/// answered 404 for the system tenant's task, which is untouched. The system
+/// tenant's administrator cannot reassign their own task to B's user, or to a
+/// role code only B has: both are 422, because the engine resolves a target
+/// in the caller's tenant.
+#[tokio::test]
+async fn a_reassign_stays_in_its_tenant() {
+    let app = TestApp::spawn_with(|config| config.multi_tenant = true).await;
+    let token = app
+        .sign_in_to("SYSTEM", common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await;
+
+    let provisioned = app
+        .post(
+            "/api/v1/organization/tenants",
+            Some(&token),
+            json!({
+                "tenantCode": "TNT-RA",
+                "name": "Another Customer",
+                "administrator": {
+                    "username": "ti.ra.b.admin",
+                    "email": "ti.ra.b.admin@example.test",
+                    "displayName": "Tenant Administrator",
+                    "password": "a-sufficiently-long-password",
+                },
+            }),
+        )
+        .await;
+    assert_eq!(
+        provisioned.status,
+        StatusCode::CREATED,
+        "{}",
+        provisioned.body
+    );
+    let other = id_of(provisioned.data());
+    let other_token = app
+        .sign_in_to("TNT-RA", "ti.ra.b.admin", "a-sufficiently-long-password")
+        .await;
+
+    let profile = app.get("/api/v1/auth/me", Some(&other_token)).await;
+    assert!(
+        profile.data()["permissions"]
+            .as_array()
+            .expect("permissions")
+            .contains(&json!("workflow:task:reassign")),
+        "a provisioned tenant's administrator cannot reassign: {}",
+        profile.body
+    );
+
+    let their_user = fixtures::create_user(
+        &app.pool,
+        other,
+        "ti.ra.b.user",
+        "ti.ra.b.user@example.test",
+        common::ADMIN_PASSWORD,
+        &[],
+    )
+    .await;
+    fixtures::create_role_with_permissions(&app.pool, other, "TI-RA-B-ONLY", &[]).await;
+
+    let queue = worker_role(&app, "TI-RA-XT").await;
+    let workflow = publish_workflow(&app, &token, "ti_ra_xt", "TI-RA-XT").await;
+    let type_id = document_type(&app, &token, "TI_RA_XT", workflow).await;
+    let document = submitted_document(&app, &token, type_id, "Ours to move").await;
+    let task = open_task_of(&app, document).await;
+
+    let across = reassign(&app, &other_token, task, json!({ "userId": their_user })).await;
+    assert_eq!(
+        across.status,
+        StatusCode::NOT_FOUND,
+        "another tenant's administrator reached this task: {}",
+        across.body
+    );
+    // The task's own 404, not the instance's or the document's.
+    assert_eq!(
+        across.body["error"]["message"], "Task not found",
+        "{}",
+        across.body
+    );
+
+    let to_their_user = reassign(&app, &token, task, json!({ "userId": their_user })).await;
+    assert_eq!(
+        to_their_user.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        to_their_user.body
+    );
+    assert_eq!(
+        detail_paths_and_codes(&to_their_user),
+        [("userId".to_owned(), "ASSIGNMENT_UNRESOLVED".to_owned())]
+    );
+
+    let to_their_role = reassign(&app, &token, task, json!({ "roleCode": "TI-RA-B-ONLY" })).await;
+    assert_eq!(
+        to_their_role.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        to_their_role.body
+    );
+    // Not `TARGET_CANNOT_DECIDE`: the code must not resolve at all here, or
+    // another tenant's role is only refused because no edge names it.
+    assert_eq!(
+        detail_paths_and_codes(&to_their_role),
+        [("roleCode".to_owned(), "ASSIGNMENT_UNRESOLVED".to_owned())]
+    );
+
+    assert_eq!(
+        task_holder(&app, task).await,
+        (None, Some(queue), "CREATED".to_owned()),
+        "a refused reassign changed the task"
+    );
+    assert!(reassign_history(&app, task).await.is_empty());
+}
+
+/// **A real role delete waits on a reassign holding the role, then refuses**
+/// ([#512] AC5, **D-89**).
+///
+/// The reassign moves an unclaimed task from `Q` to `R`, which its edges name.
+/// It locks the task, reads `R` `FOR KEY SHARE`, and is held at its `UPDATE`
+/// of the task, before it commits. `DELETE /api/v1/identity/roles/{R}` arrives
+/// and must wait in its `FOR UPDATE` on `R`. Released, the reassign commits,
+/// and the delete answers 409 with nothing deleted.
+///
+/// **The wait is what this asserts.** The delete's 409 would come anyway,
+/// since the task's edges name `R`; the decidability check makes that true of
+/// every accepted reassign to a role.
+///
+/// [#512]: https://github.com/sujanto-gaws/kelir/issues/512
+#[tokio::test]
+async fn a_role_delete_arriving_during_a_reassign_to_it_waits_and_refuses() {
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+
+    worker_role(&app, "TI-RA-RACE-Q").await;
+    let target = worker_role(&app, "TI-RA-RACE-R").await;
+
+    let definition = offered_to_and_decided_by("ti_ra_race", "TI-RA-RACE-Q", "TI-RA-RACE-R");
+    let workflow = publish_workflow_definition(&app, &token, "ti_ra_race", definition).await;
+    let type_id = document_type(&app, &token, "TI_RA_RACE", workflow).await;
+    let document = submitted_document(&app, &token, type_id, "Reassigned during a delete").await;
+    let task = open_task_of(&app, document).await;
+
+    let (reassigned, deleted) = second_waits_on_first(
+        &app,
+        Gate {
+            table: "workflow_tasks",
+            event: "UPDATE",
+        },
+        (
+            "the reassign",
+            reassignment(&app, &token, task, json!({ "roleCode": "TI-RA-RACE-R" })),
+        ),
+        ("the delete", || spawn_delete_role(&app, &token, target)),
+        "FOR UPDATE",
+    )
+    .await;
+
+    assert_eq!(reassigned.status, StatusCode::OK, "{}", reassigned.body);
+    assert_refused_for_one_open_task(&app, &deleted, target, document).await;
+    assert_eq!(
+        task_holder(&app, task).await,
+        (None, Some(target), "CREATED".to_owned())
+    );
+}
+
+/// **A reassign arriving during a role's delete waits, then finds the role
+/// gone** ([#512] AC5, **D-89**): the order the test above reverses.
+///
+/// **The delete's half is held by the test**, as
+/// `a_submission_racing_a_role_delete_waits_and_then_finds_the_role_gone`
+/// holds it. The real route cannot be used here: a reassign to `R` is only
+/// accepted when the task's edges name `R`, and then the real delete counts
+/// the task and refuses before it writes anything a gate could stop. So the
+/// test locks `R` `FOR UPDATE` in a transaction of its own, sends the reassign,
+/// sees it blocked by that transaction in its `FOR KEY SHARE` on `roles`,
+/// soft-deletes `R` and commits. The reassign then reads `R` again, finds it
+/// deleted, and is refused as `ASSIGNMENT_UNRESOLVED`, with the task still
+/// offered to `Q`.
+///
+/// [#512]: https://github.com/sujanto-gaws/kelir/issues/512
+#[tokio::test]
+async fn a_reassign_arriving_during_a_role_delete_waits_and_finds_the_role_gone() {
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+
+    let queue = worker_role(&app, "TI-RA-GATE-Q").await;
+    let target = worker_role(&app, "TI-RA-GATE-R").await;
+
+    let definition = offered_to_and_decided_by("ti_ra_gate", "TI-RA-GATE-Q", "TI-RA-GATE-R");
+    let workflow = publish_workflow_definition(&app, &token, "ti_ra_gate", definition).await;
+    let type_id = document_type(&app, &token, "TI_RA_GATE", workflow).await;
+    let document = submitted_document(&app, &token, type_id, "Reassigned to a role going").await;
+    let task = open_task_of(&app, document).await;
+
+    let mut delete = app.pool.begin().await.expect("a transaction");
+    let deleting: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *delete)
+        .await
+        .expect("the delete's backend");
+    sqlx::query("SELECT id FROM roles WHERE id = $1 FOR UPDATE")
+        .bind(target)
+        .execute(&mut *delete)
+        .await
+        .expect("the delete's lock");
+
+    let reassigned = reassignment(&app, &token, task, json!({ "roleCode": "TI-RA-GATE-R" }))();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let waiting: Option<i32> = sqlx::query_scalar(
+            "SELECT pid FROM pg_stat_activity
+             WHERE datname = current_database() AND $1 = ANY(pg_blocking_pids(pid))
+               AND query LIKE '%FROM roles%' AND query LIKE '%FOR KEY SHARE%'",
+        )
+        .bind(deleting)
+        .fetch_optional(&app.pool)
+        .await
+        .expect("read pg_stat_activity");
+        if waiting.is_some() {
+            break;
+        }
+        if reassigned.is_finished() {
+            let answered = reassigned.await.expect("the reassign did not panic");
+            panic!(
+                "the reassign did not wait for the delete: {} {}",
+                answered.status, answered.body
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the reassign was never seen waiting on the delete in its FOR KEY SHARE on a role"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    sqlx::query("UPDATE roles SET deleted_at = now() WHERE id = $1")
+        .bind(target)
+        .execute(&mut *delete)
+        .await
+        .expect("the delete");
+    delete.commit().await.expect("the delete commits");
+
+    let reassigned = reassigned.await.expect("the reassign did not panic");
+    assert_eq!(
+        reassigned.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a task was reassigned to a role deleted under it: {}",
+        reassigned.body
+    );
+    assert_eq!(
+        detail_paths_and_codes(&reassigned),
+        [("roleCode".to_owned(), "ASSIGNMENT_UNRESOLVED".to_owned())]
+    );
+    assert_eq!(
+        task_holder(&app, task).await,
+        (None, Some(queue), "CREATED".to_owned()),
+        "the task moved to a deleted role"
+    );
+    assert!(reassign_history(&app, task).await.is_empty());
+}
+
+/// A task offered to `TI-RA-DQ` whose `APPROVE` and `REJECT` are `allowedBy`
+/// the two rules given, raised on a document of its own. Answers the task.
+async fn task_decided_by(
+    app: &TestApp,
+    token: &str,
+    code: &str,
+    approve: Value,
+    reject: Value,
+) -> Uuid {
+    let key = code.to_lowercase();
+    let mut definition = workflow_for(&key, "TI-RA-DQ");
+    definition["transitions"][0]["allowedBy"] = approve;
+    definition["transitions"][1]["allowedBy"] = reject;
+
+    let workflow = publish_workflow_definition(app, token, &key, definition).await;
+    let type_id = document_type(app, token, code, workflow).await;
+    let document = submitted_document(app, token, type_id, code).await;
+
+    open_task_of(app, document).await
+}
+
+/// A department of the system tenant, by code.
+async fn department(app: &TestApp, code: &str) -> Uuid {
+    let id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO departments (id, tenant_id, department_code, name) VALUES ($1, $2, $3, $3)",
+    )
+    .bind(id)
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .bind(code)
+    .execute(&app.pool)
+    .await
+    .expect("insert the department");
+    id
+}
+
+/// Every grant `user` holds is scoped to `department`.
+async fn scope_grants(app: &TestApp, user: Uuid, department: Uuid) {
+    sqlx::query("UPDATE user_roles SET department_id = $1 WHERE user_id = $2")
+        .bind(department)
+        .bind(user)
+        .execute(&app.pool)
+        .await
+        .expect("scope the grants");
+}
+
+fn cannot_decide(response: &common::TestResponse, field: &str) {
+    assert_eq!(
+        response.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a reassign to somebody who could not decide the task was accepted: {}",
+        response.body
+    );
+    assert_eq!(
+        detail_paths_and_codes(response),
+        [(field.to_owned(), "TARGET_CANNOT_DECIDE".to_owned())]
+    );
+}
+
+/// **A user target must satisfy at least one decision edge, as the decision
+/// itself would judge it** ([#512], the product owner's decision of
+/// 2026-09-26).
+///
+/// One task per `allowedBy` form, each refused for somebody the form does not
+/// admit and then accepted for somebody it does: `USER`, `ROLE`, `OWNER` (the
+/// administrator raised every document), and `DEPARTMENT_ROLE`, whose scope is
+/// checked rather than assumed — a holder of the role whose grant is scoped to
+/// another department is refused. A refusal names the state and what its
+/// decisions need, and leaves the task as it was.
+///
+/// **Mixed edges pass on one.** `APPROVE` is `allowedBy` another user and
+/// `REJECT` a role the target holds: the target can reject, so the task is not
+/// stranded, and the reassign is accepted.
+#[tokio::test]
+async fn a_user_target_must_satisfy_a_decision_edge() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let queue = worker_role(&app, "TI-RA-DQ").await;
+    let edge = worker_role(&app, "TI-RA-DE").await;
+    let scoped = worker_role(&app, "TI-RA-DD").await;
+    let procurement = department(&app, "TI-RA-PROC").await;
+    let finance = department(&app, "TI-RA-FIN").await;
+
+    let (stranger, _) = worker(&app, "ti.ra.stranger", &[queue]).await;
+    let (named, _) = worker(&app, "ti.ra.named", &[queue, edge]).await;
+    let (inside, _) = worker(&app, "ti.ra.inside", &[scoped]).await;
+    scope_grants(&app, inside, procurement).await;
+    let (outside, _) = worker(&app, "ti.ra.outside", &[scoped]).await;
+    scope_grants(&app, outside, finance).await;
+    let creator = administrator_id(&app).await;
+
+    let user_rule = json!(format!("USER:{named}"));
+    let cases = [
+        (
+            "TI_RA_D_USER",
+            user_rule.clone(),
+            user_rule,
+            stranger,
+            named,
+        ),
+        (
+            "TI_RA_D_ROLE",
+            json!("ROLE:TI-RA-DE"),
+            json!("ROLE:TI-RA-DE"),
+            stranger,
+            named,
+        ),
+        (
+            "TI_RA_D_OWNER",
+            json!("OWNER"),
+            json!("OWNER"),
+            named,
+            creator,
+        ),
+        (
+            "TI_RA_D_DEPT",
+            json!({ "assigneeType": "DEPARTMENT_ROLE", "roleCode": "TI-RA-DD",
+                    "departmentScope": "TI-RA-PROC" }),
+            json!({ "assigneeType": "DEPARTMENT_ROLE", "roleCode": "TI-RA-DD",
+                    "departmentScope": "TI-RA-PROC" }),
+            outside,
+            inside,
+        ),
+        (
+            "TI_RA_D_MIXED",
+            json!(format!("USER:{stranger}")),
+            json!("ROLE:TI-RA-DE"),
+            inside,
+            named,
+        ),
+    ];
+
+    for (code, approve, reject, refused_user, accepted_user) in cases {
+        let task = task_decided_by(&app, &token, code, approve, reject).await;
+
+        let refused = reassign(&app, &token, task, json!({ "userId": refused_user })).await;
+        cannot_decide(&refused, "userId");
+        assert!(
+            refused.body["error"]["details"][0]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("`MANAGER_APPROVAL`")),
+            "{code}: the refusal names the state: {}",
+            refused.body
+        );
+        assert_eq!(
+            task_holder(&app, task).await,
+            (None, Some(queue), "CREATED".to_owned()),
+            "{code}: a refused reassign changed the task"
+        );
+
+        let accepted = reassign(&app, &token, task, json!({ "userId": accepted_user })).await;
+        assert_eq!(
+            accepted.status,
+            StatusCode::OK,
+            "{code}: somebody who could decide the task was refused: {}",
+            accepted.body
+        );
+        assert_eq!(accepted.data()["assigneeUserId"], json!(accepted_user));
+    }
+}
+
+/// **A role target must be named by a decision edge** ([#512], ADR-0042 §2).
+///
+/// A role is a set of people who may change after the reassign, so it passes
+/// an edge that names it — `ROLE`, or `DEPARTMENT_ROLE` whose department
+/// resolves — and not an `OWNER` or `USER` edge, which no role satisfies by
+/// being held. The task's own queue role, named by no edge, is refused; so is
+/// any role on a task whose decisions are the owner's.
+#[tokio::test]
+async fn a_role_target_must_be_named_by_a_decision_edge() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let queue = worker_role(&app, "TI-RA-DQ").await;
+    let edge = worker_role(&app, "TI-RA-RE").await;
+    let scoped = worker_role(&app, "TI-RA-RD").await;
+    department(&app, "TI-RA-RPROC").await;
+
+    let task = task_decided_by(
+        &app,
+        &token,
+        "TI_RA_R_ROLE",
+        json!("ROLE:TI-RA-RE"),
+        json!("OWNER"),
+    )
+    .await;
+    let refused = reassign(&app, &token, task, json!({ "roleCode": "TI-RA-DQ" })).await;
+    cannot_decide(&refused, "roleCode");
+    let accepted = reassign(&app, &token, task, json!({ "roleCode": "TI-RA-RE" })).await;
+    assert_eq!(accepted.status, StatusCode::OK, "{}", accepted.body);
+    assert_eq!(accepted.data()["candidateRoleId"], json!(edge));
+
+    let owners = task_decided_by(
+        &app,
+        &token,
+        "TI_RA_R_OWNER",
+        json!("OWNER"),
+        json!("OWNER"),
+    )
+    .await;
+    let refused = reassign(&app, &token, owners, json!({ "roleCode": "TI-RA-RE" })).await;
+    cannot_decide(&refused, "roleCode");
+    assert!(
+        refused.body["error"]["details"][0]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("the document's creator")),
+        "{}",
+        refused.body
+    );
+    assert_eq!(
+        task_holder(&app, owners).await,
+        (None, Some(queue), "CREATED".to_owned())
+    );
+
+    let rule = json!({ "assigneeType": "DEPARTMENT_ROLE", "roleCode": "TI-RA-RD",
+                       "departmentScope": "TI-RA-RPROC" });
+    let departmental = task_decided_by(&app, &token, "TI_RA_R_DEPT", rule.clone(), rule).await;
+    let accepted = reassign(
+        &app,
+        &token,
+        departmental,
+        json!({ "roleCode": "TI-RA-RD" }),
+    )
+    .await;
+    assert_eq!(accepted.status, StatusCode::OK, "{}", accepted.body);
+    assert_eq!(accepted.data()["candidateRoleId"], json!(scoped));
+}
+
+/// **A state with no decision edges is not judged** ([#512], ADR-0042 §2).
+///
+/// A return puts the document in `RETURNED`, whose task is the owner's
+/// correction and whose only edge is `RESUBMIT`, taken on the document rather
+/// than decided on the task. There is no decision to strand, so a reassign of
+/// that task to a user no edge names is accepted.
+#[tokio::test]
+async fn a_task_with_no_decision_edges_is_reassigned_without_the_check() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let queue = worker_role(&app, "TI-RA-ZQ").await;
+    let (_, approver) = worker(&app, "ti.ra.approver", &[queue]).await;
+    let (anybody, _) = worker(&app, "ti.ra.anybody", &[]).await;
+
+    let definition = json!({
+        "workflowKey": "ti_ra_zero",
+        "version": "1.0.0",
+        "name": "With a return",
+        "initialState": "MANAGER_APPROVAL",
+        "states": [
+            { "code": "MANAGER_APPROVAL", "name": "Manager approval",
+              "mapsToDocumentStatus": "PENDING_APPROVAL",
+              "task": { "taskDefinitionKey": "manager_approval", "taskName": "Decide",
+                        "assignment": { "assigneeType": "ROLE", "roleCode": "TI-RA-ZQ" } } },
+            { "code": "RETURNED", "name": "Returned to the author",
+              "mapsToDocumentStatus": "RETURNED",
+              "task": { "taskDefinitionKey": "correct_it", "taskName": "Correct the request",
+                        "assignment": { "assigneeType": "OWNER" } } },
+            { "code": "COMPLETED", "name": "Completed", "mapsToDocumentStatus": "COMPLETED",
+              "isFinal": true }
+        ],
+        "transitions": [
+            { "from": "MANAGER_APPROVAL", "to": "COMPLETED", "action": "APPROVE",
+              "allowedBy": "ROLE:TI-RA-ZQ" },
+            { "from": "MANAGER_APPROVAL", "to": "RETURNED", "action": "RETURN",
+              "allowedBy": "ROLE:TI-RA-ZQ" },
+            { "from": "RETURNED", "to": "MANAGER_APPROVAL", "action": "RESUBMIT",
+              "allowedBy": "OWNER" }
+        ]
+    });
+    let workflow = publish_workflow_definition(&app, &token, "ti_ra_zero", definition).await;
+    let type_id = document_type(&app, &token, "TI_RA_ZERO", workflow).await;
+    let document = submitted_document(&app, &token, type_id, "Returned for correction").await;
+    let manager = open_task_of(&app, document).await;
+
+    let returned = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{manager}/decision"),
+            Some(&approver),
+            json!({ "action": "RETURN", "comment": "Fix the amount" }),
+        )
+        .await;
+    assert_eq!(returned.status, StatusCode::OK, "{}", returned.body);
+
+    let correction = open_task_of(&app, document).await;
+    assert_ne!(correction, manager);
+
+    let reassigned = reassign(&app, &token, correction, json!({ "userId": anybody })).await;
+    assert_eq!(
+        reassigned.status,
+        StatusCode::OK,
+        "a task with no decision to strand was refused: {}",
+        reassigned.body
+    );
+    assert_eq!(reassigned.data()["assigneeUserId"], json!(anybody));
+}
+
+/// **A closed task is refused as closed, whatever the target** ([#512] AC6).
+///
+/// A two-stage workflow: the manager's task is decided, and the instance waits
+/// at `FINANCE_APPROVAL` on a task of its own. The manager's task is closed,
+/// so a reassign of it is a 409 naming `COMPLETED`, to a user, to a role, to a
+/// deleted user and to a role code nothing holds. None of them is judged: the
+/// target's decidability is asked of the instance's *current* state, which the
+/// closed task has left, and a dead target is not looked up.
+///
+/// **Seen red** without the 409 after `lock_task`: the user and the role were
+/// `TARGET_CANNOT_DECIDE` (*a decision in `FINANCE_APPROVAL` needs role
+/// `TI-RA-MS-F`*), and the dead targets `ASSIGNMENT_UNRESOLVED`, each a 422.
+///
+/// [#512]: https://github.com/sujanto-gaws/kelir/issues/512
+#[tokio::test]
+async fn a_closed_task_whose_instance_moved_on_is_refused_as_closed() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let manager = worker_role(&app, "TI-RA-MS-M").await;
+    worker_role(&app, "TI-RA-MS-F").await;
+    let (manager_id, approver) = worker(&app, "ti.ra.ms.manager", &[manager]).await;
+    let (other, _) = worker(&app, "ti.ra.ms.other", &[manager]).await;
+    let (gone, _) = worker(&app, "ti.ra.ms.gone", &[manager]).await;
+    sqlx::query("UPDATE users SET deleted_at = now() WHERE id = $1")
+        .bind(gone)
+        .execute(&app.pool)
+        .await
+        .expect("delete the user");
+
+    let definition = two_stage("ti_ra_ms", "TI-RA-MS-M", "TI-RA-MS-F");
+    let workflow = publish_workflow_definition(&app, &token, "ti_ra_ms", definition).await;
+    let type_id = document_type(&app, &token, "TI_RA_MS", workflow).await;
+    let document = submitted_document(&app, &token, type_id, "Past the manager").await;
+    let task = open_task_of(&app, document).await;
+    decide(&app, &approver, task).await;
+    assert_ne!(
+        open_task_of(&app, document).await,
+        task,
+        "the instance did not move on to finance"
+    );
+
+    for (target, body) in [
+        ("a user", json!({ "userId": other })),
+        ("a role", json!({ "roleCode": "TI-RA-MS-M" })),
+        ("a deleted user", json!({ "userId": gone })),
+        (
+            "a role code nothing holds",
+            json!({ "roleCode": "TI-RA-MS-NONE" }),
+        ),
+    ] {
+        let refused = reassign(&app, &token, task, body).await;
+        assert_eq!(
+            refused.status,
+            StatusCode::CONFLICT,
+            "a closed task's reassign to {target} was not refused as closed: {}",
+            refused.body
+        );
+        assert!(
+            refused.body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("COMPLETED")),
+            "{target}: {}",
+            refused.body
+        );
+    }
+
+    assert_eq!(
+        task_holder(&app, task).await,
+        (Some(manager_id), Some(manager), "COMPLETED".to_owned())
+    );
+    assert!(reassign_history(&app, task).await.is_empty());
+}
+
+/// An `audit_events` row: action, object type, actor, reason, old and new.
+type AuditRow = (String, String, Option<Uuid>, Option<String>, Value, Value);
+
+/// **A reassign is audited once, with both holders** ([#512], ADR-0042).
+///
+/// One `Workflow.TaskReassigned` record, `REASSIGN` on the `WORKFLOW_TASK`,
+/// by the administrator, with no reason: the comment is prose about somebody's
+/// document, so the record says only that there was one. The old value is the
+/// claim, the new one the target.
+///
+/// **Seen red** with the event renamed `Workflow.TaskReassign`, and with the
+/// audit call dropped: no record.
+///
+/// [#512]: https://github.com/sujanto-gaws/kelir/issues/512
+#[tokio::test]
+async fn a_reassign_is_audited_once_with_both_holders() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let queue = worker_role(&app, "TI-RA-AUD").await;
+    let (first_id, first) = worker(&app, "ti.ra.aud.first", &[queue]).await;
+    let (second_id, _) = worker(&app, "ti.ra.aud.second", &[queue]).await;
+
+    let workflow = publish_workflow(&app, &token, "ti_ra_aud", "TI-RA-AUD").await;
+    let type_id = document_type(&app, &token, "TI_RA_AUD", workflow).await;
+    let document = submitted_document(&app, &token, type_id, "Audited").await;
+    let task = open_task_of(&app, document).await;
+    claim(&app, &first, task).await;
+
+    let reassigned = reassign(
+        &app,
+        &token,
+        task,
+        json!({ "userId": second_id, "comment": "A private note" }),
+    )
+    .await;
+    assert_eq!(reassigned.status, StatusCode::OK, "{}", reassigned.body);
+
+    let records: Vec<AuditRow> = sqlx::query_as(
+        "SELECT action, object_type, actor_user_id, reason, old_value_json, new_value_json
+             FROM audit_events WHERE object_id = $1 AND event_type = 'Workflow.TaskReassigned'",
+    )
+    .bind(task)
+    .fetch_all(&app.pool)
+    .await
+    .expect("read the audit");
+    assert_eq!(records.len(), 1, "{records:#?}");
+
+    let (action, object_type, actor, reason, old, new) = &records[0];
+    assert_eq!(action, "REASSIGN");
+    assert_eq!(object_type, "WORKFLOW_TASK");
+    assert_eq!(*actor, Some(administrator_id(&app).await));
+    assert_eq!(*reason, None, "the comment reached the audit");
+    assert_eq!(old["assigneeUserId"], json!(first_id), "{old}");
+    assert_eq!(old["candidateRoleId"], json!(queue), "{old}");
+    assert_eq!(old["status"], "ASSIGNED", "{old}");
+    assert_eq!(new["assigneeUserId"], json!(second_id), "{new}");
+    assert!(new["candidateRoleId"].is_null(), "{new}");
+    assert_eq!(new["status"], "ASSIGNED", "{new}");
+    assert_eq!(new["documentId"], json!(document), "{new}");
+    assert_eq!(new["commented"], true, "{new}");
+    assert!(
+        !new.to_string().contains("A private note"),
+        "the comment reached the audit: {new}"
+    );
+}
+
+/// The backend blocked by `blocker` in a statement matching `table` and `lock`.
+async fn blocked_by(app: &TestApp, blocker: i32, table: &str, lock: &str) -> Option<i32> {
+    sqlx::query_scalar(
+        "SELECT pid FROM pg_stat_activity
+         WHERE datname = current_database() AND $1 = ANY(pg_blocking_pids(pid))
+           AND query LIKE $2 AND query LIKE $3",
+    )
+    .bind(blocker)
+    .bind(format!("%{table}%"))
+    .bind(format!("%{lock}%"))
+    .fetch_optional(&app.pool)
+    .await
+    .expect("read pg_stat_activity")
+}
+
+/// **A claim arriving during a reassign waits for it** ([#512] AC5).
+///
+/// The reassign moves an unclaimed task from `Q` to `R`. The test holds `R`
+/// `FOR UPDATE`, so the reassign stops in its `FOR KEY SHARE` on the role,
+/// **after** it has locked the task. A claim by somebody holding both roles is
+/// then sent, and must be seen blocked by the reassign in its own
+/// `FOR UPDATE` on `workflow_tasks`. Released, the reassign commits, then the
+/// claim does: the claimant holds the task under `R`, and the history reads
+/// the reassign, then the claim.
+///
+/// [`second_waits_on_first`] cannot stage this: its gate is a row trigger, and
+/// an `UPDATE`'s row trigger fires after the row is locked, so a gate at the
+/// reassign's `UPDATE` would hold the task with or without `lock_task`'s lock.
+/// The only point between that lock and the write is the role's.
+///
+/// **Seen red** with `FOR UPDATE` dropped from `lock_task`: the claim did not
+/// wait, and answered 200 before the reassign overwrote it.
+///
+/// [#512]: https://github.com/sujanto-gaws/kelir/issues/512
+#[tokio::test]
+async fn a_claim_arriving_during_a_reassign_waits_for_it() {
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+
+    let queue = worker_role(&app, "TI-RA-CL-Q").await;
+    let target = worker_role(&app, "TI-RA-CL-R").await;
+    let (claimant_id, claimant) = worker(&app, "ti.ra.cl.claimant", &[queue, target]).await;
+
+    let definition = offered_to_and_decided_by("ti_ra_cl", "TI-RA-CL-Q", "TI-RA-CL-R");
+    let workflow = publish_workflow_definition(&app, &token, "ti_ra_cl", definition).await;
+    let type_id = document_type(&app, &token, "TI_RA_CL", workflow).await;
+    let document = submitted_document(&app, &token, type_id, "Claimed mid-reassign").await;
+    let task = open_task_of(&app, document).await;
+
+    let mut holding = app.pool.begin().await.expect("a transaction");
+    let holder: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holding)
+        .await
+        .expect("the holder's backend");
+    sqlx::query("SELECT id FROM roles WHERE id = $1 FOR UPDATE")
+        .bind(target)
+        .execute(&mut *holding)
+        .await
+        .expect("hold the role");
+
+    let reassigned = reassignment(&app, &token, task, json!({ "roleCode": "TI-RA-CL-R" }))();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let reassigning = loop {
+        if let Some(pid) = blocked_by(&app, holder, "FROM roles", "FOR KEY SHARE").await {
+            break pid;
+        }
+        assert!(
+            !reassigned.is_finished(),
+            "the reassign did not stop at the role"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "the reassign was never seen waiting on the role"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let claimed = {
+        let app = Arc::clone(&app);
+        tokio::spawn(async move {
+            app.post(
+                &format!("/api/v1/workflow/tasks/{task}/claim"),
+                Some(&claimant),
+                json!({}),
+            )
+            .await
+        })
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while blocked_by(&app, reassigning, "workflow_tasks", "FOR UPDATE")
+        .await
+        .is_none()
+    {
+        if claimed.is_finished() {
+            let answered = claimed.await.expect("the claim did not panic");
+            panic!(
+                "the claim did not wait for the reassign: {} {}",
+                answered.status, answered.body
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the claim was never seen waiting on the reassign's task lock"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    holding.rollback().await.expect("release the role");
+
+    let reassigned = reassigned.await.expect("the reassign did not panic");
+    assert_eq!(reassigned.status, StatusCode::OK, "{}", reassigned.body);
+    let claimed = claimed.await.expect("the claim did not panic");
+    assert_eq!(claimed.status, StatusCode::OK, "{}", claimed.body);
+
+    assert_eq!(
+        task_holder(&app, task).await,
+        (Some(claimant_id), Some(target), "ASSIGNED".to_owned()),
+        "the claim was overwritten"
+    );
+
+    let history: Vec<(Option<String>, Option<String>, String)> = sqlx::query_as(
+        "SELECT action, old_status, new_status FROM workflow_task_history
+         WHERE task_id = $1 AND old_status IS NOT NULL
+         ORDER BY created_at, id",
+    )
+    .bind(task)
+    .fetch_all(&app.pool)
+    .await
+    .expect("read the task's history");
+    assert_eq!(
+        history,
+        [
+            (
+                Some("REASSIGN".to_owned()),
+                Some("CREATED".to_owned()),
+                "CREATED".to_owned()
+            ),
+            (None, Some("CREATED".to_owned()), "ASSIGNED".to_owned()),
+        ]
+    );
+}
+
+/// **A reassign writes every holder column, clearing what it does not name**
+/// ([#512], ADR-0042 §2).
+///
+/// The task is claimed, scoped to a department, and carries a delegation's
+/// `delegated_from_user_id`, all written directly. A reassign to a role names
+/// no department and no delegation, so both are cleared along with the claim.
+///
+/// **Seen red** with `COALESCE($5, candidate_department_id)` and with
+/// `COALESCE($6, delegated_from_user_id)` in `repository::task::reassign`.
+///
+/// [#512]: https://github.com/sujanto-gaws/kelir/issues/512
+#[tokio::test]
+async fn a_reassign_clears_the_department_and_the_delegation() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    worker_role(&app, "TI-RA-HC-Q").await;
+    let target = worker_role(&app, "TI-RA-HC-R").await;
+    let (holder, _) = worker(&app, "ti.ra.hc.holder", &[]).await;
+    let (delegator, _) = worker(&app, "ti.ra.hc.delegator", &[]).await;
+    let scope = department(&app, "TI-RA-HC").await;
+
+    let definition = offered_to_and_decided_by("ti_ra_hc", "TI-RA-HC-Q", "TI-RA-HC-R");
+    let workflow = publish_workflow_definition(&app, &token, "ti_ra_hc", definition).await;
+    let type_id = document_type(&app, &token, "TI_RA_HC", workflow).await;
+    let document = submitted_document(&app, &token, type_id, "Every column").await;
+    let task = open_task_of(&app, document).await;
+
+    sqlx::query(
+        "UPDATE workflow_tasks SET assignee_user_id = $1, status = 'ASSIGNED',
+             candidate_department_id = $2, delegated_from_user_id = $3
+         WHERE id = $4",
+    )
+    .bind(holder)
+    .bind(scope)
+    .bind(delegator)
+    .bind(task)
+    .execute(&app.pool)
+    .await
+    .expect("scope and delegate the task");
+
+    let reassigned = reassign(&app, &token, task, json!({ "roleCode": "TI-RA-HC-R" })).await;
+    assert_eq!(reassigned.status, StatusCode::OK, "{}", reassigned.body);
+
+    let columns: (Option<Uuid>, Option<Uuid>, Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+        "SELECT assignee_user_id, candidate_role_id, candidate_department_id,
+                delegated_from_user_id
+         FROM workflow_tasks WHERE id = $1",
+    )
+    .bind(task)
+    .fetch_one(&app.pool)
+    .await
+    .expect("read the task");
+    assert_eq!(
+        columns,
+        (None, Some(target), None, None),
+        "a holder column the reassign did not name survived it"
+    );
+}
+
+/// A task at `MANAGER_APPROVAL` offered to `TI-RA-EQ`, with `transitions`,
+/// raised on a document of its own. Answers the task.
+async fn task_with_edges(app: &TestApp, token: &str, code: &str, transitions: Value) -> Uuid {
+    let key = code.to_lowercase();
+    let mut definition = workflow_for(&key, "TI-RA-EQ");
+    definition["transitions"] = transitions;
+
+    let workflow = publish_workflow_definition(app, token, &key, definition).await;
+    let type_id = document_type(app, token, code, workflow).await;
+    let document = submitted_document(app, token, type_id, code).await;
+
+    open_task_of(app, document).await
+}
+
+/// **Which edges the decidability check reads** ([#512], ADR-0042 §2).
+///
+/// * **`RETURN` is a decision.** A target who can take only the state's
+///   `RETURN` is accepted. Seen red with `Return` dropped from the check's
+///   actions: 422.
+/// * **`CANCEL` is not.** A target who can take only the state's `CANCEL` is
+///   refused. Seen red with `Cancel` added: 200.
+/// * **An edge with no `allowedBy` admits anybody**, so the target passes.
+///   JWSS S5 refuses such an edge at publish, so the published definition is
+///   rewritten under the running instance. Seen red with that edge made to
+///   `continue`: 422.
+///
+/// [#512]: https://github.com/sujanto-gaws/kelir/issues/512
+#[tokio::test]
+async fn the_decidability_check_reads_return_and_not_cancel() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let queue = worker_role(&app, "TI-RA-EQ").await;
+    let (nobody, _) = worker(&app, "ti.ra.e.nobody", &[]).await;
+    let (target, _) = worker(&app, "ti.ra.e.target", &[]).await;
+    let only = |user: Uuid| json!(format!("USER:{user}"));
+
+    // RETURN, to a state whose correction task is the owner's.
+    let key = "ti_ra_e_return";
+    let returns = json!({
+        "workflowKey": key, "version": "1.0.0", "name": "With a return",
+        "initialState": "MANAGER_APPROVAL",
+        "states": [
+            { "code": "MANAGER_APPROVAL", "name": "Manager approval",
+              "mapsToDocumentStatus": "PENDING_APPROVAL",
+              "task": { "taskDefinitionKey": "manager_approval", "taskName": "Decide",
+                        "assignment": { "assigneeType": "ROLE", "roleCode": "TI-RA-EQ" } } },
+            { "code": "RETURNED", "name": "Returned", "mapsToDocumentStatus": "RETURNED",
+              "task": { "taskDefinitionKey": "correct_it", "taskName": "Correct",
+                        "assignment": { "assigneeType": "OWNER" } } },
+            { "code": "COMPLETED", "name": "Completed", "mapsToDocumentStatus": "COMPLETED",
+              "isFinal": true }
+        ],
+        "transitions": [
+            { "from": "MANAGER_APPROVAL", "to": "COMPLETED", "action": "APPROVE",
+              "allowedBy": only(nobody) },
+            { "from": "MANAGER_APPROVAL", "to": "RETURNED", "action": "RETURN",
+              "allowedBy": only(target) },
+            { "from": "RETURNED", "to": "MANAGER_APPROVAL", "action": "RESUBMIT",
+              "allowedBy": "OWNER" }
+        ]
+    });
+    let workflow = publish_workflow_definition(&app, &token, key, returns).await;
+    let type_id = document_type(&app, &token, "TI_RA_E_RETURN", workflow).await;
+    let document = submitted_document(&app, &token, type_id, "Only a return").await;
+    let task = open_task_of(&app, document).await;
+    let accepted = reassign(&app, &token, task, json!({ "userId": target })).await;
+    assert_eq!(
+        accepted.status,
+        StatusCode::OK,
+        "a target who can return the task was refused: {}",
+        accepted.body
+    );
+
+    // CANCEL, beside decisions the target cannot take.
+    let task = task_with_edges(
+        &app,
+        &token,
+        "TI_RA_E_CANCEL",
+        json!([
+            { "from": "MANAGER_APPROVAL", "to": "COMPLETED", "action": "APPROVE",
+              "allowedBy": only(nobody) },
+            { "from": "MANAGER_APPROVAL", "to": "REJECTED", "action": "REJECT",
+              "allowedBy": only(nobody) },
+            { "from": "MANAGER_APPROVAL", "to": "REJECTED", "action": "CANCEL",
+              "allowedBy": only(target) }
+        ]),
+    )
+    .await;
+    let refused = reassign(&app, &token, task, json!({ "userId": target })).await;
+    cannot_decide(&refused, "userId");
+    assert_eq!(
+        task_holder(&app, task).await,
+        (None, Some(queue), "CREATED".to_owned())
+    );
+
+    // No allowedBy on APPROVE, written under the running instance.
+    let task = task_with_edges(
+        &app,
+        &token,
+        "TI_RA_E_OPEN",
+        json!([
+            { "from": "MANAGER_APPROVAL", "to": "COMPLETED", "action": "APPROVE",
+              "allowedBy": only(nobody) },
+            { "from": "MANAGER_APPROVAL", "to": "REJECTED", "action": "REJECT",
+              "allowedBy": only(nobody) }
+        ]),
+    )
+    .await;
+    sqlx::query(
+        "UPDATE workflow_definitions d
+         SET definition_json = jsonb_set(d.definition_json, '{transitions,0}',
+                                         (d.definition_json #> '{transitions,0}') - 'allowedBy')
+         FROM workflow_instances i JOIN workflow_tasks t ON t.workflow_instance_id = i.id
+         WHERE t.id = $1 AND d.id = i.workflow_definition_id",
+    )
+    .bind(task)
+    .execute(&app.pool)
+    .await
+    .expect("drop the edge's allowedBy");
+    let accepted = reassign(&app, &token, task, json!({ "userId": target })).await;
+    assert_eq!(
+        accepted.status,
+        StatusCode::OK,
+        "an edge that admits anybody did not admit the target: {}",
+        accepted.body
+    );
 }
