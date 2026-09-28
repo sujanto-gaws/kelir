@@ -26,6 +26,7 @@ import ConfirmDialog from './ConfirmDialog.vue'
 import ReassignTaskDialog from './ReassignTaskDialog.vue'
 import RoleFormDialog from './RoleFormDialog.vue'
 import RoleOpenTasksDialog from './RoleOpenTasksDialog.vue'
+import RoleStrandedTasksNotice from './RoleStrandedTasksNotice.vue'
 
 /**
  * Role administration (FR-IDM-002, FR-IDM-004, FR-IDM-005).
@@ -68,7 +69,11 @@ const isConfirmOpen = ref(false)
 const isDeleting = ref(false)
 const deleteError = ref('')
 
-/** The role whose delete open tasks refused (#532), and the refusal's words. */
+/**
+ * The role whose open tasks are listed, and the refusal's words: a delete the
+ * open tasks refused (#532), or no words when the list was opened from the
+ * role's stranded-tasks notice (#508).
+ */
 const blocked = ref<Role | null>(null)
 const blockedRefusal = ref('')
 const isOpenTasksOpen = ref(false)
@@ -153,6 +158,16 @@ async function confirmDelete(): Promise<void> {
   }
 }
 
+/**
+ * A role nobody holds while open tasks need it (#508) opens the same list a
+ * refused delete does, where the same Reassign sits: one list, one reassign.
+ */
+function openStranded(role: Role): void {
+  blocked.value = role
+  blockedRefusal.value = ''
+  isOpenTasksOpen.value = true
+}
+
 function openReassign(task: OpenTaskNeedingRole): void {
   reassigning.value = task
   isReassignOpen.value = true
@@ -161,11 +176,12 @@ function openReassign(task: OpenTaskNeedingRole): void {
 /**
  * The list is read again rather than the row dropped: a task reassigned to a
  * user may still need the role, when a decision on it is reserved to it, and
- * only the server says which.
+ * only the server says which. The roles are read again too, so a role's
+ * stranded-tasks notice (#508) shows the count the reassign left, or goes.
  */
 async function onReassigned(): Promise<void> {
   reassigning.value = null
-  await openTasks.value?.refresh()
+  await Promise.all([openTasks.value?.refresh(), roles.refresh()])
 }
 
 onMounted(async () => {
@@ -220,7 +236,17 @@ onMounted(async () => {
               <span class="font-mono text-xs">{{ role.roleCode }}</span>
               <Badge v-if="role.isSystem" variant="secondary" class="ml-2">System</Badge>
             </TableCell>
-            <TableCell>{{ role.name }}</TableCell>
+            <TableCell>
+              {{ role.name }}
+              <!-- The server sends the counts only to a reassigner; checked here
+                   as well, like every control on this page. -->
+              <RoleStrandedTasksNotice
+                v-if="canReassign"
+                :role="role"
+                :can-list="canDelete"
+                @open="openStranded"
+              />
+            </TableCell>
             <TableCell class="text-muted-foreground">{{ role.description ?? '—' }}</TableCell>
             <TableCell>{{ role.permissions.length }}</TableCell>
             <TableCell v-if="canUpdate || canDelete" class="text-right">

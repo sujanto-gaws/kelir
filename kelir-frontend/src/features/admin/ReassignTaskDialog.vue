@@ -19,8 +19,8 @@ import type { ReassignTarget, WorkflowTask } from '@/types/workflow'
 /**
  * An administrator reassigns an open task (FR-WF-017, #512, ADR-0042).
  *
- * Opened from the open tasks a refused role delete lists (User Manual §11.2),
- * by a caller holding `workflow:task:reassign`; the list itself needs only
+ * Opened from the open tasks a role is needed by (User Manual §11.2), listed on
+ * a refused role delete or from a role nobody holds (#508), by a caller holding `workflow:task:reassign`; the list itself needs only
  * `identity:role:delete`, so `RoleListPage` decides whether the action is drawn.
  *
  * # A user or a role, never both

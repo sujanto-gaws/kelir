@@ -17,11 +17,13 @@ import { usePaginatedList } from '@/composables/usePaginatedList'
 import type { OpenTaskNeedingRole, Role } from '@/types/identity'
 
 /**
- * The open tasks a refused role delete waits on (**D-89**, #532).
+ * The open tasks a role is needed by (**D-89**, #532).
  *
- * Opened by `RoleListPage` on a `ROLE_HAS_OPEN_TASKS` refusal, and only
- * there: the refusal's own message says how many, and this lists which, from
- * `GET /identity/roles/{id}/open-tasks`. Each row names the task, its
+ * Opened by `RoleListPage` in two places. On a `ROLE_HAS_OPEN_TASKS` refusal,
+ * the refusal's own message says how many, and this lists which, from
+ * `GET /identity/roles/{id}/open-tasks`. From a role's stranded-tasks notice
+ * (#508), with no refusal: nobody holds the role, and this lists what waits on
+ * it, so it is found without a delete attempt. Each row names the task, its
  * document, the state its workflow is in, who holds it, and why it needs the
  * role, which is what User Manual §11.2 promises.
  *
@@ -36,8 +38,12 @@ import type { OpenTaskNeedingRole, Role } from '@/types/identity'
  */
 const props = defineProps<{
   role: Role | null
-  /** The server's refusal, verbatim: it carries the count. */
-  refusal: string
+  /**
+   * The server's refusal, verbatim: it carries the count. Absent or empty when
+   * the list is opened from the stranded-tasks notice, where no delete was
+   * tried.
+   */
+  refusal?: string
 }>()
 
 defineSlots<{
@@ -88,7 +94,11 @@ defineExpose({
 
 <template>
   <Dialog v-model:open="open" :title="title" class="max-w-4xl">
-    <Alert variant="destructive">{{ refusal }}</Alert>
+    <Alert v-if="refusal" variant="destructive">{{ refusal }}</Alert>
+    <p v-else class="text-sm text-muted-foreground" data-testid="role-open-tasks-stranded">
+      Nobody holds this role any more, so nobody can decide these tasks. Reassign each one to a role
+      or a user who can.
+    </p>
 
     <p v-if="tasks.isLoading.value" class="mt-4 text-sm text-muted-foreground">
       Loading the open tasks…
@@ -104,8 +114,11 @@ defineExpose({
       class="mt-4 text-sm text-muted-foreground"
       data-testid="role-open-tasks-empty"
     >
-      No open task needs this role any more. They were decided or reassigned after the delete was
-      refused, so it can be tried again.
+      <template v-if="refusal">
+        No open task needs this role any more. They were decided or reassigned after the delete was
+        refused, so it can be tried again.
+      </template>
+      <template v-else>No open task needs this role any more.</template>
     </p>
 
     <template v-else>

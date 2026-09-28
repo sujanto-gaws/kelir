@@ -70,7 +70,11 @@ While the major version is `0`, the public API may change in any release.
   finds a role whose last holder has left. `liveHolders` counts users with a
   live grant inside its validity window whose account can sign in, and
   `openTasks` is the count a delete is refused on. Without that permission the
-  two fields are omitted. Each task is cleared with the reassign below.
+  two fields are omitted. Each task is cleared with the reassign below. On the
+  Roles page such a role's row says *N open tasks, 0 active holders*, and for
+  a caller who may also delete roles it opens that role's open-task list, where
+  each task is reassigned, without a delete attempt. The roles are read again
+  after each reassign, so the notice follows.
 - **JWSS `actions` run, delivered after the transition commits**
   ([#519](https://github.com/sujanto-gaws/kelir/issues/519),
   [ADR-0041](docs/architectures/adr/0041.%20Every%20Workflow%20Transition%20Writes%20an%20Outbox%20Event,%20and%20After-Hooks%20Are%20Its%20First%20Consumer.md)).

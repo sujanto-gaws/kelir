@@ -394,6 +394,154 @@ describe('RoleListPage', () => {
     })
   })
 
+  describe('a role nobody holds while open tasks need it (#508)', () => {
+    const openTask = {
+      id: 't-1',
+      taskRef: 'TSK-0001',
+      documentNumber: 'PR-2026-0007',
+      documentTitle: 'Printer paper',
+      currentState: 'APPROVAL',
+      status: 'CREATED',
+      assigneeUserId: null,
+      assigneeDisplayName: null,
+      why: 'offered to the role, and unclaimed',
+    }
+
+    const financeRole: Role = {
+      ...clerkRole,
+      id: 'r-3',
+      roleCode: 'ROLE-FINANCE',
+      name: 'Finance',
+      liveHolders: 2,
+      openTasks: 0,
+    }
+
+    /** The clerk role stranded with one task, until that task is reassigned. */
+    function strandedClerk(): void {
+      let reassigned = false
+
+      handler = (request) => {
+        if (request.url === '/identity/roles/r-2/open-tasks') {
+          return { status: 200, body: listBody(reassigned ? [] : [openTask]) }
+        }
+
+        if (request.url === '/workflow/tasks/t-1/reassign') {
+          reassigned = true
+
+          return { status: 200, body: itemBody({ id: 't-1', candidateRoleCode: 'ROLE-FINANCE' }) }
+        }
+
+        if (request.url === '/identity/users') {
+          return { status: 200, body: listBody([]) }
+        }
+
+        if (request.url === '/identity/permissions') {
+          return permissionsReply([readUsers, createUsers])
+        }
+
+        return rolesReply([
+          { ...adminRole, liveHolders: 1, openTasks: 0 },
+          { ...clerkRole, liveHolders: 0, openTasks: reassigned ? 0 : 1 },
+          financeRole,
+        ])
+      }
+    }
+
+    const REASSIGNER = ['identity:role:read', 'identity:role:delete', 'workflow:task:reassign']
+
+    function noticesOf(wrapper: VueWrapper): DOMWrapper<Element>[] {
+      return wrapper.findAll('[data-testid="role-stranded-tasks"]')
+    }
+
+    it('marks only the stranded role, on its row', async () => {
+      strandedClerk()
+
+      const wrapper = await mountPage(REASSIGNER)
+      const rows = rowsOf(wrapper)
+
+      expect(noticesOf(wrapper)).toHaveLength(1)
+      expect(rows[1].find('[data-testid="role-stranded-tasks"]').text()).toBe(
+        '1 open task, 0 active holders',
+      )
+    })
+
+    it('draws nothing without workflow:task:reassign, even were the counts sent', async () => {
+      strandedClerk()
+
+      const wrapper = await mountPage(['identity:role:read', 'identity:role:delete'])
+
+      expect(noticesOf(wrapper)).toHaveLength(0)
+    })
+
+    it('draws nothing when the server sends no counts', async () => {
+      // The default handler's roles carry neither field, as for a caller the
+      // server does not tell.
+      const wrapper = await mountPage(REASSIGNER)
+
+      expect(noticesOf(wrapper)).toHaveLength(0)
+    })
+
+    it('opens the open-task list from the notice, with no delete tried', async () => {
+      strandedClerk()
+
+      const wrapper = await mountPage(REASSIGNER)
+
+      await wrapper.find('[data-testid="role-stranded-tasks-open"]').trigger('click')
+      await flushPromises()
+
+      const dialogs = wrapper.findAll('[role="dialog"]')
+      expect(dialogs).toHaveLength(1)
+      expect(dialogs[0].text()).toContain('Open tasks need Clerk')
+      // No refusal, since nothing was refused: the dialog says why instead.
+      expect(dialogs[0].find('[role="alert"]').exists()).toBe(false)
+      expect(dialogs[0].find('[data-testid="role-open-tasks-stranded"]').exists()).toBe(true)
+      expect(dialogs[0].find('[data-testid="role-open-task"]').text()).toContain('Printer paper')
+      expect(backend.requests.some((request) => request.method === 'delete')).toBe(false)
+    })
+
+    it('offers no list to a reassigner who may not delete roles', async () => {
+      strandedClerk()
+
+      const wrapper = await mountPage(['identity:role:read', 'workflow:task:reassign'])
+
+      expect(noticesOf(wrapper)).toHaveLength(1)
+      expect(wrapper.find('[data-testid="role-stranded-tasks-open"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="role-stranded-tasks-unlisted"]').exists()).toBe(true)
+    })
+
+    it('reads the roles again after a reassign, and the notice goes', async () => {
+      strandedClerk()
+
+      const wrapper = await mountPage(REASSIGNER)
+      const rolesReadBefore = backend.countOf('/identity/roles')
+
+      await wrapper.find('[data-testid="role-stranded-tasks-open"]').trigger('click')
+      await flushPromises()
+
+      const task = wrapper.find('[data-testid="role-open-task"]')
+      await buttonLabelled(task.findAll('button'), 'Reassign')?.trigger('click')
+      await flushPromises()
+
+      const reassign = wrapper
+        .findAll('[role="dialog"]')
+        .find((dialog) => dialog.text().includes('Reassign TSK-0001'))
+      await reassign?.find('#reassign-task-role').setValue('ROLE-FINANCE')
+      await reassign?.find('form').trigger('submit')
+      await flushPromises()
+
+      expect(
+        backend.requests.find((request) => request.url === '/workflow/tasks/t-1/reassign')?.body,
+      ).toEqual({ roleCode: 'ROLE-FINANCE' })
+      // The reassign dialog reads the roles for its own choices, so count the
+      // page's own read: at least one more after the reassign than before it.
+      expect(backend.countOf('/identity/roles')).toBeGreaterThan(rolesReadBefore + 1)
+      expect(noticesOf(wrapper)).toHaveLength(0)
+      expect(wrapper.find('[data-testid="role-open-tasks-empty"]').text()).toBe(
+        'No open task needs this role any more.',
+      )
+    })
+  })
+
   it('keeps a plain conflict in the confirmation and reads no task list', async () => {
     handler = (request) => {
       if (request.method === 'delete') {
