@@ -46,6 +46,27 @@
 //! | `WHERE n.role_id = r.id` dropped from the per-role count in `open_tasks_needing_roles` | every test here |
 //! | `get_role` not filling the counts | the four tests that read a role alone |
 //!
+//! The test engineer's campaign, 2026-09-29, each reverted after (this file
+//! and `task_inbox` run for each):
+//!
+//! | Mutation | Reddened |
+//! |---|---|
+//! | `count_live_holders`' `valid_from <= current_date` made `<` | *a grant starting today is a live holder*, added for it |
+//! | A refusal of a reassign to a role nobody holds, injected into `service::task::reassign` | *a role nobody holds is still offered new tasks…*: 409 where 200 was due |
+//! | A refusal of a new task offered to a role nobody holds, injected into `engine`'s task creation | *a role nobody holds is still offered new tasks…*: the submission refused |
+//! | Both of `open_tasks_needing_roles`' tenant lines dropped | task_inbox's *a role is not held by another tenant's task* and *another tenant's task is not listed* |
+//! | The fold opening a page for every row | task_inbox's *the list is exactly what the delete counts…* and *the list pages and its total…* |
+//! | The page's `LIMIT`/`OFFSET` moved to the outer `SELECT` | every test here: a count's page of 0 drops each role's one row |
+//! | The page's `OFFSET` dropped, or its `LIMIT` | task_inbox's *the list pages and its total is every task* |
+//!
+//! Green, and equivalent: `ro.deleted_at IS NULL`, `ur.tenant_id = $1` and
+//! `ur.role_id = ANY($2)` in `count_live_holders` (the roles asked about are
+//! live and the caller's, and the join to `roles` holds the tenant); either of
+//! the two tenant lines alone (the other holds it); the outer `ORDER BY r.id`,
+//! and the page's `n.role_id = r.id` (a set of roles is asked only with a page
+//! of 0, and a page only for one role); and `count_open_tasks_needing_roles`
+//! keeping zero totals (a missing role reads as 0).
+//!
 //! [#508]: https://github.com/sujanto-gaws/kelir/issues/508
 
 mod common;
@@ -699,4 +720,182 @@ async fn each_role_on_the_page_reads_its_own_counts() {
     assert_eq!(counts(fixture.q), (json!(1), json!(0)), "Q");
     assert_eq!(counts(idle), (json!(0), json!(0)), "a role nobody holds");
     assert_eq!(counts(twice), (json!(1), json!(0)), "one user, two grants");
+}
+
+/// A task's holder, its offered role and its status, straight from the row.
+async fn task_holder(app: &TestApp, task: Uuid) -> (Option<Uuid>, Option<Uuid>, String) {
+    sqlx::query_as(
+        "SELECT assignee_user_id, candidate_role_id, status FROM workflow_tasks WHERE id = $1",
+    )
+    .bind(task)
+    .fetch_one(&app.pool)
+    .await
+    .expect("read the task")
+}
+
+async fn reassign(app: &TestApp, token: &str, task: Uuid, body: Value) -> common::TestResponse {
+    app.post(
+        &format!("/api/v1/workflow/tasks/{task}/reassign"),
+        Some(token),
+        body,
+    )
+    .await
+}
+
+/// A reassign refused by row 10's rule, *the target must be able to decide
+/// the task* (#512, ADR-0042 §2), and by nothing else.
+fn refused_as_cannot_decide(response: &common::TestResponse) {
+    assert_eq!(
+        response.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        response.body
+    );
+    let details: Vec<(&str, &str)> = response.body["error"]["details"]
+        .as_array()
+        .expect("details")
+        .iter()
+        .map(|detail| {
+            (
+                detail["path"].as_str().expect("a path"),
+                detail["code"].as_str().expect("a code"),
+            )
+        })
+        .collect();
+    assert_eq!(details, [("roleCode", "TARGET_CANNOT_DECIDE")]);
+}
+
+/// **A role nobody holds still takes work** ([#508] AC1): nothing new keyed on
+/// the holder count refuses anything.
+///
+/// `R` is stranded by trigger (a), and reads 0 holders and 2 open tasks. Then:
+///
+/// * **A new submission** whose workflow offers its task to `R`, and whose
+///   edges are `allowedBy` `R`, answers 200. Its task is open, offered to `R`
+///   and unclaimed, and `R` reads 3.
+/// * **A reassign to `R`** is judged by row 10's rule alone (#512, ADR-0042
+///   §2): *a role target passes a decision edge that names it*. B's edges name
+///   `R`, so B's reassign to `R` is **accepted**: B leaves its claimant and is
+///   offered to `R`, unclaimed, and `R` still reads 3 (B already needed it
+///   through its edges). D's edges name only `Q`, so D's reassign to `R` is
+///   **refused as `TARGET_CANNOT_DECIDE`**, and so is D's reassign to `S`, a
+///   role that *has* a holder and no edge of D names: the refusal is the same
+///   with holders and without, so it is not the holder count's.
+///
+/// [#508]: https://github.com/sujanto-gaws/kelir/issues/508
+#[tokio::test]
+async fn a_role_nobody_holds_is_still_offered_new_tasks_and_reassigned_them() {
+    let app = TestApp::spawn().await;
+    let fixture = stranding(&app, "AC1").await;
+    let r_code = "RH-AC1-R";
+
+    let removed = app
+        .put(
+            &format!("/api/v1/identity/users/{}", fixture.r_holder),
+            Some(&fixture.token),
+            json!({ "roleIds": [] }),
+        )
+        .await;
+    assert_eq!(removed.status, StatusCode::OK, "{}", removed.body);
+    assert_eq!(
+        staffing(&app, &fixture.token, fixture.r).await,
+        (json!(0), json!(2)),
+        "R is stranded"
+    );
+
+    // (a) A submission offering its task to R is not refused.
+    let c = document_needing(&app, &fixture.token, "RH_AC1_C", r_code, r_code).await;
+    assert_eq!(
+        states_of(&app, c).await,
+        ("CREATED".to_owned(), "PENDING_APPROVAL".to_owned()),
+        "the new task is open and its document pending"
+    );
+    assert_eq!(
+        task_holder(&app, c.1).await,
+        (None, Some(fixture.r), "CREATED".to_owned()),
+        "the new task is offered to R, unclaimed"
+    );
+    assert_eq!(
+        staffing(&app, &fixture.token, fixture.r).await,
+        (json!(0), json!(3)),
+        "R counts the new task"
+    );
+
+    // (b) Accepted: B's edges name R, which is row 10's rule for a role.
+    let accepted = reassign(
+        &app,
+        &fixture.token,
+        fixture.b.1,
+        json!({ "roleCode": r_code }),
+    )
+    .await;
+    assert_eq!(
+        accepted.status,
+        StatusCode::OK,
+        "a reassign to a role nobody holds was refused although an edge names it: {}",
+        accepted.body
+    );
+    assert_eq!(accepted.body["data"]["candidateRoleId"], json!(fixture.r));
+    assert_eq!(
+        task_holder(&app, fixture.b.1).await,
+        (None, Some(fixture.r), "CREATED".to_owned()),
+        "B left its claimant and is offered to R"
+    );
+    assert_eq!(
+        staffing(&app, &fixture.token, fixture.r).await,
+        (json!(0), json!(3)),
+        "B already needed R through its edges"
+    );
+
+    // (b) Refused, by row 10's rule and nothing else: no edge of D names R, and
+    // a held role no edge names is refused the same way.
+    let q_code = "RH-AC1-Q";
+    let d = document_needing(&app, &fixture.token, "RH_AC1_D", q_code, q_code).await;
+    let s = worker_role(&app, "RH-AC1-S").await;
+    worker(&app, "rh.ac1.s", &[s]).await;
+    assert_eq!(
+        staffing(&app, &fixture.token, s).await,
+        (json!(1), json!(0))
+    );
+
+    let stranded = reassign(&app, &fixture.token, d.1, json!({ "roleCode": r_code })).await;
+    refused_as_cannot_decide(&stranded);
+    let held = reassign(&app, &fixture.token, d.1, json!({ "roleCode": "RH-AC1-S" })).await;
+    refused_as_cannot_decide(&held);
+    assert_eq!(
+        task_holder(&app, d.1).await,
+        (None, Some(fixture.q), "CREATED".to_owned()),
+        "a refused reassign changed D"
+    );
+}
+
+/// **A grant that starts today holds the role today** ([#508] AC6): the
+/// window's opening day is inclusive, as its closing day is, and as
+/// `holds_role` reads it. A grant from tomorrow does not count yet.
+///
+/// [#508]: https://github.com/sujanto-gaws/kelir/issues/508
+#[tokio::test]
+async fn a_grant_starting_today_is_a_live_holder() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let role = worker_role(&app, "RH-FROM").await;
+    let (today, _) = worker(&app, "rh.from.today", &[role]).await;
+    let (tomorrow, _) = worker(&app, "rh.from.tomorrow", &[role]).await;
+
+    sqlx::query("UPDATE user_roles SET valid_from = current_date WHERE user_id = $1")
+        .bind(today)
+        .execute(&app.pool)
+        .await
+        .expect("date the grant from today");
+    sqlx::query("UPDATE user_roles SET valid_from = current_date + 1 WHERE user_id = $1")
+        .bind(tomorrow)
+        .execute(&app.pool)
+        .await
+        .expect("date the grant from tomorrow");
+
+    assert_eq!(
+        staffing(&app, &token, role).await,
+        (json!(1), json!(0)),
+        "today's grant is a holder, tomorrow's is not yet"
+    );
 }
