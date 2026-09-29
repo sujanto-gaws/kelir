@@ -179,6 +179,33 @@ async fn the_trail_is_searchable_by_each_of_its_axes() {
     assert_eq!(none.body["meta"]["total"], 0);
 }
 
+/// A date before PostgreSQL's first `timestamptz` (4714 BC) parses in chrono
+/// and must be refused with a 422 before it reaches the query, not answered
+/// with `timestamp out of range` as a 500 — the defect #548's gate found in
+/// the integration log's identical filter.
+///
+/// **Ignored: the audit search has the same defect** (probed 2026-09-29,
+/// `from=-5000-01-01T00:00:00Z` answers 500 `INTERNAL_ERROR`). Out of #548's
+/// scope; remove the `ignore` with the fix.
+#[tokio::test]
+#[ignore = "defect #594: a pre-4714 BC date on /audit is a 500, not a 422"]
+async fn a_date_before_postgresqls_range_is_refused_not_a_500() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for query in ["from=-5000-01-01T00:00:00Z", "to=-5000-01-01T00:00:00Z"] {
+        let response = app
+            .get(&format!("/api/v1/audit?{query}"), Some(&token))
+            .await;
+        assert_eq!(
+            response.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{query}: {}",
+            response.body
+        );
+    }
+}
+
 /// A range that ends before it starts selects nothing, and is refused rather
 /// than answered with an empty page — the two are different mistakes.
 #[tokio::test]

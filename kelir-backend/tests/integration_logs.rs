@@ -1293,17 +1293,15 @@ async fn hostile_queries_are_refused_or_answered_and_never_a_500() {
     }
 }
 
-/// **A date before PostgreSQL's first timestamp is a 500** — a defect, found
-/// by the test-engineer gate for #548 and not fixed there.
+/// **A date before PostgreSQL's first timestamp is a 422, not a 500** — a
+/// defect found by the test-engineer gate for #548.
 ///
 /// chrono parses years down to -262143 and `timestamptz` starts at 4714 BC,
-/// so `from=-5000-01-01T00:00:00Z` parses, reaches the database, and comes
-/// back as `timestamp out of range`, which the API answers as
-/// `INTERNAL_ERROR`. The expected answer is a 422 naming the parameter.
-/// Ignored until the range is checked before the query; remove the `ignore`
-/// with that fix.
+/// so `from=-5000-01-01T00:00:00Z` parsed, reached the database, and came
+/// back as `timestamp out of range`, which the API answered as
+/// `INTERNAL_ERROR`. `validate_query` now refuses a bound PostgreSQL cannot
+/// hold before the query runs.
 #[tokio::test]
-#[ignore = "defect found at #548's gate: a pre-4714 BC date is a 500, not a 422"]
 async fn a_date_before_postgresqls_range_is_refused_not_a_500() {
     let app = TestApp::spawn().await;
     let token = app.administrator_token().await;
