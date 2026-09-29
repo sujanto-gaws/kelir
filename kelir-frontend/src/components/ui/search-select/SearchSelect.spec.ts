@@ -133,9 +133,14 @@ describe('SearchSelect', () => {
 
     const box = wrapper.get('[data-testid="thing-search"]')
     await box.setValue('T003')
-    await box.trigger('keydown', { key: 'Enter' })
+    // A real, cancelable event: jsdom never submits a form implicitly, so
+    // `submit` staying uncalled proves nothing on its own. The browser submits
+    // on Enter unless the keydown's default is prevented, and that is checked.
+    const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
+    box.element.dispatchEvent(enter)
     await flushPromises()
 
+    expect(enter.defaultPrevented).toBe(true)
     expect(fetch).toHaveBeenCalledTimes(2)
     expect(fetch).toHaveBeenLastCalledWith({ search: 'T003', pageSize: 100 })
     expect(submit).not.toHaveBeenCalled()
@@ -203,6 +208,32 @@ describe('SearchSelect', () => {
     expect(resolve).toHaveBeenCalledTimes(1)
     expect(resolve).toHaveBeenCalledWith('id-Z500')
     expect(optionLabels(wrapper)[0]).toBe('Far down (Z500)')
+  })
+
+  it('asks again for a label whose read failed, the next time a label is needed', async () => {
+    const stored: Thing = { id: 'id-Z500', code: 'Z500', name: 'Far down' }
+    const resolve = vi
+      .fn<(value: string) => Promise<Thing>>()
+      .mockRejectedValueOnce(new ApiError('INTERNAL_ERROR', 'Try again', 500))
+      .mockResolvedValue(stored)
+    const wrapper = mountChooser({
+      multiple: true,
+      source: sourceOf(serverOver(things(2)), { resolve }),
+      modelValue: [stored.id],
+    })
+    await flushPromises()
+
+    expect(resolve).toHaveBeenCalledTimes(1)
+    expect(wrapper.findAll('fieldset label')[0].text()).toBe(
+      'The current choice, outside these results',
+    )
+
+    await wrapper.setProps({ modelValue: [stored.id, 'id-T001'] })
+    await flushPromises()
+
+    expect(resolve).toHaveBeenCalledTimes(2)
+    expect(resolve).toHaveBeenLastCalledWith('id-Z500')
+    expect(wrapper.findAll('fieldset label')[0].text()).toBe('Far down (Z500)')
   })
 
   it('falls back to saying a stored value is outside the results when nothing names it', async () => {

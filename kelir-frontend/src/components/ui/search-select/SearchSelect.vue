@@ -218,7 +218,11 @@ async function load(): Promise<void> {
   }
 }
 
-/** Names a stored value no search has returned, once, when the source can. */
+/**
+ * Names a stored value no search has returned, when the source can: once while
+ * a read is in flight or has succeeded, and again at the next need after one
+ * failed, so a passing outage does not leave the fallback label for good.
+ */
 function resolveUnnamed(): void {
   const resolve = props.source.resolve
 
@@ -239,7 +243,9 @@ function resolveUnnamed(): void {
         seen.set(value, props.source.label(row))
       })
       .catch(() => {
-        // The fallback label stands. The value is still chosen, and saving
+        // Forgotten, so the next change of selection asks again.
+        resolving.delete(value)
+        // Until then the fallback label stands. The value is still chosen, and saving
         // sends it back unchanged; the server decides whether it still binds.
       })
   }
