@@ -15,7 +15,13 @@ import {
   type IntegrationLog,
 } from '@/types/integration'
 
-import { formatDuration, formatPayload, formatTimestamp, logStatusVariant } from './integration-log'
+import {
+  formatDuration,
+  formatPayload,
+  formatTimestamp,
+  isLogId,
+  logStatusVariant,
+} from './integration-log'
 
 /**
  * One integration log row in full (FR-INT-006, #548): every column, and the
@@ -42,6 +48,8 @@ const auth = useAuthStore()
 const canOpenSystem = computed(() => auth.can('integration:external-system:read'))
 const canOpenDocument = computed(() => auth.can('document:read'))
 
+const NOT_FOUND = 'There is no integration log with this id.'
+
 const log = ref<IntegrationLog | null>(null)
 const isLoading = ref(false)
 const loadError = ref('')
@@ -56,6 +64,17 @@ async function load(id: string): Promise<void> {
   log.value = null
   loadError.value = ''
   isNotFound.value = false
+
+  // The id comes from the URL: one that cannot name a row is not found, and
+  // is never sent.
+  if (!isLogId(id)) {
+    isNotFound.value = true
+    loadError.value = NOT_FOUND
+    isLoading.value = false
+
+    return
+  }
+
   isLoading.value = true
 
   try {
@@ -116,7 +135,7 @@ const systemLabel = computed(() => {
 
       <Alert v-else-if="loadError" variant="destructive" data-testid="integration-log-detail-error">
         <p>
-          {{ isNotFound ? 'There is no integration log with this id.' : loadError }}
+          {{ isNotFound ? NOT_FOUND : loadError }}
         </p>
         <Button
           v-if="!isNotFound && logId"

@@ -95,6 +95,10 @@ const listQuery = computed<ListQuery>(() => {
   return rest
 })
 
+/**
+ * The row the URL names, as written: the dialog opens for any value, and one
+ * that is not a UUID shows as not found without a request being made.
+ */
 const openLogId = computed(() => currentQuery.value[DETAIL_KEY] ?? null)
 
 const isDetailOpen = computed({

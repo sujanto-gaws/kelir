@@ -203,4 +203,10 @@ describe('integration api', () => {
 
     expect([only().method, only().url]).toEqual(['get', '/integration/logs/log-1'])
   })
+
+  it('encodes the log id, so it cannot step out of its own path', async () => {
+    await getIntegrationLog('../external-systems')
+
+    expect(only().url).toBe('/integration/logs/..%2Fexternal-systems')
+  })
 })

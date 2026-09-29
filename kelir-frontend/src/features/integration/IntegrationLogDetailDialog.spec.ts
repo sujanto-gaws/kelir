@@ -48,7 +48,7 @@ function detail(overrides: Record<string, unknown> = {}) {
     documentId: DOCUMENT_ID,
     requestPayload: {
       method: 'POST',
-      headers: { Authorization: 'Bearer ****' },
+      headers: { Authorization: '[REDACTED]' },
       correlationId: 'corr-1',
     },
     responsePayload: { statusCode: 500, bodyPreview: 'upstream exploded', bodyTruncated: false },
@@ -151,7 +151,7 @@ describe('IntegrationLogDetailDialog', () => {
     const request = wrapper.get('[data-testid="integration-log-detail-request-payload"]')
     expect(request.element.tagName).toBe('PRE')
     expect(request.text()).toBe(JSON.stringify(detail().requestPayload, null, 2))
-    expect(request.text()).toContain('"Authorization": "Bearer ****"')
+    expect(request.text()).toContain('"Authorization": "[REDACTED]"')
 
     expect(text(wrapper, 'integration-log-detail-response-payload')).toBe(
       JSON.stringify(detail().responsePayload, null, 2),
@@ -225,6 +225,21 @@ describe('IntegrationLogDetailDialog', () => {
       'There is no integration log with this id',
     )
   })
+
+  it.each(['../external-systems', 'not-a-uuid', `${LOG_ID}/../../x`])(
+    'treats %j, which is not a UUID, as not found without a request',
+    async (logId) => {
+      const wrapper = await render(undefined, logId)
+
+      expect(backend.requests).toHaveLength(0)
+      expect(text(wrapper, 'integration-log-detail-error')).toContain(
+        'There is no integration log with this id',
+      )
+      expect(wrapper.find('[data-testid="integration-log-detail-error"] button').exists()).toBe(
+        false,
+      )
+    },
+  )
 
   it('shows a refusal as a failure, with a way to try again', async () => {
     reply = () => ({ status: 403, body: errorBody('FORBIDDEN', 'Missing integration:log:read') })

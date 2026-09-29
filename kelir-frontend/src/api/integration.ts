@@ -196,5 +196,5 @@ export function listIntegrationLogs(
 
 /** One log row with its payloads, masked when written and returned as stored. */
 export function getIntegrationLog(id: string): Promise<IntegrationLog> {
-  return getItem<IntegrationLog>(`${LOGS}/${id}`)
+  return getItem<IntegrationLog>(`${LOGS}/${encodeURIComponent(id)}`)
 }

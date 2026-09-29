@@ -7,6 +7,17 @@ import type { IntegrationLogStatus } from '@/types/integration'
  * and the query string's ISO instants turn into each other.
  */
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/**
+ * Whether a value can be a log id. `?log=` comes from the URL, so anyone can
+ * write anything there; a value that is not a UUID names no row and is never
+ * put into a request path (a `../external-systems` would read another route).
+ */
+export function isLogId(value: string): boolean {
+  return UUID.test(value)
+}
+
 /** A failure is red, a success is solid, and a call still in flight is an outline. */
 export function logStatusVariant(status: IntegrationLogStatus): BadgeVariant {
   switch (status) {

@@ -115,7 +115,7 @@ describe('IntegrationLogPage', () => {
       body: itemBody({
         ...logRow(),
         documentId: null,
-        requestPayload: { method: 'GET', headers: { Authorization: 'Bearer ****' } },
+        requestPayload: { method: 'GET', headers: { Authorization: '[REDACTED]' } },
         responsePayload: { statusCode: 200, bodyPreview: '{"ok":true}', bodyTruncated: false },
       }),
     })
@@ -413,5 +413,19 @@ describe('IntegrationLogPage', () => {
 
     expect(wrapper.get('[data-testid="integration-log-detail-id"]').text()).toBe(LOG_OK)
     expect(lastLogRequest().params).not.toHaveProperty('log')
+  })
+
+  it('shows a ?log= that is not a UUID as not found, and never requests it', async () => {
+    const wrapper = await render(undefined, '?log=../external-systems')
+
+    expect(wrapper.get('[data-testid="integration-log-detail-error"]').text()).toContain(
+      'There is no integration log with this id',
+    )
+    // Only the list and the system chooser were read: no detail, and nothing
+    // the crafted value could have pointed at.
+    expect([...new Set(backend.requests.map((request) => request.url))].sort()).toEqual([
+      '/integration/external-systems',
+      '/integration/logs',
+    ])
   })
 })
