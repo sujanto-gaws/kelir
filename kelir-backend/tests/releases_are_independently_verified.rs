@@ -716,6 +716,20 @@
 //! and the other 48 green. Both files were removed and the tree left as it
 //! was.
 //!
+//! **Added at the row's gate**, each seen red under a mutation and restored:
+//! `a_session_line_matches_the_reader_whichever_form_each_side_writes` joins
+//! the two parsers at the seam — a URL trailer against a bare-token reader and
+//! the reverse, an upper-case UUID against one in braces and the reverse, the
+//! key in lower case, before a space and colon, with trailing whitespace — and
+//! holds four non-matches: a token's case, a UUID without hyphens,
+//! `Claude-Session-Id:`, a bulleted line (red: a URL's token not read; a token
+//! lower-cased). `a_squash_s_every_session_line_is_read_from_the_log` reads
+//! `886ab70`, a real squash of two sessions, from `git log` (red: only a
+//! message's first session line read).
+//! `a_record_cited_by_two_releases_is_read_against_each_range` holds one
+//! record under two releases, its reader clean in the first range and a
+//! builder in the second (red: the range ignores the previous tag).
+//!
 //! **Stated limits.**
 //!
 //! - **A reader in no `Claude-Session:` line cannot be matched.** A person, or
@@ -4592,5 +4606,189 @@ fn rule_14_reads_a_tagged_release_over_its_range_and_at_its_tag() {
         ),
         Vec::<String>::new(),
         "the control: the same record at HEAD, citing nothing"
+    );
+}
+
+/// A claude.ai session in no commit, for the cross-form probes.
+const PROBE_TOKEN: &str = "session_01ProbeTokenAbCdEf99";
+
+/// **A trailer and a reader line name the same session whichever form each
+/// writes** — added at the row's gate. The parser tests above read each side
+/// alone; this is the seam, the intersection rule 14 takes.
+#[test]
+fn a_session_line_matches_the_reader_whichever_form_each_side_writes() {
+    let upper = NOBODY_S_SESSION.to_ascii_uppercase();
+    let url = format!("https://claude.ai/code/{PROBE_TOKEN}");
+
+    for (trailer, reader) in [
+        (format!("Claude-Session: {url}"), PROBE_TOKEN.to_owned()),
+        (format!("Claude-Session: {PROBE_TOKEN}"), url.clone()),
+        (
+            format!("Claude-Session: {url}"),
+            format!("[the session]({url})"),
+        ),
+        (
+            format!("Claude-Session: {upper}"),
+            format!("{{{NOBODY_S_SESSION}}}"),
+        ),
+        (
+            format!("Claude-Session: {{{NOBODY_S_SESSION}}}"),
+            upper.clone(),
+        ),
+        (
+            format!("Claude-session: {NOBODY_S_SESSION}"),
+            NOBODY_S_SESSION.to_owned(),
+        ),
+        (
+            format!("Claude-Session: {NOBODY_S_SESSION} \t "),
+            NOBODY_S_SESSION.to_owned(),
+        ),
+        (
+            format!("Claude-Session : {NOBODY_S_SESSION}"),
+            NOBODY_S_SESSION.to_owned(),
+        ),
+    ] {
+        let sessions = trailer_sessions(&format!("feat(x): a change\n\n{trailer}\n"));
+        let readers = record_readers(&verification_record(&format!(
+            "**Reader session:** {reader}"
+        )))
+        .expect("a reader is named");
+
+        assert!(
+            sessions.intersection(&readers).next().is_some(),
+            "{trailer:?} and a reader line naming {reader:?} are one session: \
+             {sessions:?} against {readers:?}"
+        );
+    }
+
+    for (trailer, reader, why) in [
+        (
+            format!("Claude-Session: {}", PROBE_TOKEN.to_ascii_lowercase()),
+            PROBE_TOKEN,
+            "a claude.ai token is case-sensitive",
+        ),
+        (
+            format!("Claude-Session: {}", NOBODY_S_SESSION.replace('-', "")),
+            NOBODY_S_SESSION,
+            "a UUID without its hyphens is not read, and check-commit-messages.sh refuses it",
+        ),
+        (
+            format!("Claude-Session-Id: {NOBODY_S_SESSION}"),
+            NOBODY_S_SESSION,
+            "another key is not the session line",
+        ),
+        (
+            format!("- Claude-Session: {NOBODY_S_SESSION}"),
+            NOBODY_S_SESSION,
+            "a bulleted line is prose; GitHub's squash writes the key at column 0",
+        ),
+    ] {
+        let sessions = trailer_sessions(&format!("feat(x): a change\n\n{trailer}\n"));
+        let readers = record_readers(&verification_record(&format!(
+            "**Reader session:** {reader}"
+        )))
+        .expect("a reader is named");
+
+        assert!(
+            sessions.intersection(&readers).next().is_none(),
+            "{why}: {trailer:?} against {readers:?}"
+        );
+    }
+}
+
+/// **A real squash with two sessions carries both to rule 14**, and a reader
+/// named by the second is found — added at the row's gate. `886ab70` (#582)
+/// squashes nine commits: the first signed `04a94975-…`, the other eight
+/// `b26c0822-…`, each in its own paragraph at column 0.
+#[test]
+fn a_squash_s_every_session_line_is_read_from_the_log() {
+    const FIRST: &str = "04a94975-60a6-4fff-9edd-984b449047a2";
+    const REST: &str = "b26c0822-59df-469e-a413-ddb461af0127";
+
+    let commits = range_commits(Some("886ab70~1"), "886ab70");
+    let [squash] = commits.as_slice() else {
+        panic!(
+            "886ab70~1..886ab70 is one commit, and the walk read {}",
+            commits.len()
+        );
+    };
+
+    assert!(squash.commit.starts_with("886ab70"), "{}", squash.commit);
+    assert_eq!(
+        squash.sessions,
+        BTreeSet::from([FIRST.to_owned(), REST.to_owned()]),
+        "both sessions of the squash, the second one's eight lines read as one"
+    );
+    assert!(
+        is_construction(&squash.paths),
+        "886ab70 changes a test file: {:?}",
+        squash.paths
+    );
+
+    for reader in [FIRST, REST] {
+        let readers = BTreeSet::from([reader.to_owned()]);
+        assert_eq!(
+            written_by_a_reader(&readers, &commits).len(),
+            1,
+            "{reader} signed a paragraph of 886ab70"
+        );
+    }
+}
+
+/// **One record cited by two releases is read against each one's range** —
+/// added at the row's gate. Its reader, clean when the first release was
+/// tagged, built something after it: the first release stays green, and the
+/// second, citing the same record beside its own, is refused on it alone.
+#[test]
+fn a_record_cited_by_two_releases_is_read_against_each_range() {
+    const PROBE_21_CITED: &str = "../verifications/21.%20A%20Second%20Probe.md";
+    const PROBE_21: &str = "21. A Second Probe.md";
+
+    let tags = vec![
+        ("v0.8.0".to_owned(), (0, 8, 0)),
+        ("v0.9.0".to_owned(), (0, 9, 0)),
+    ];
+    let records = vec![
+        (
+            (0, 9, 0),
+            "09. Release v0.9.0.md".to_owned(),
+            record_at_its_tag("Final", &[PROBE_20_CITED]),
+        ),
+        (
+            (0, 10, 0),
+            "10. Release v0.10.0.md".to_owned(),
+            record_at_its_tag("Draft", &[PROBE_20_CITED, PROBE_21_CITED]),
+        ),
+    ];
+    let commits_in = |from: Option<&str>, to: &str| match (from, to) {
+        (Some("v0.9.0"), "HEAD") => vec![RangeCommit {
+            commit: "c0ffee0 feat(x): after the tag".to_owned(),
+            sessions: BTreeSet::from([RECORD_19_SESSION.to_owned()]),
+            paths: vec!["kelir-backend/src/main.rs".to_owned()],
+        }],
+        _ => Vec::new(),
+    };
+    let verification = |record: &str| match record {
+        PROBE_20 => Some(verification_record(RECORD_19_READER)),
+        PROBE_21 => Some(verification_record(&format!(
+            "**Reader session:** {NOBODY_S_SESSION}"
+        ))),
+        _ => None,
+    };
+
+    assert_eq!(
+        readers_who_built(
+            &records,
+            &tags,
+            |_: &str, _: &str| None,
+            verification,
+            commits_in
+        ),
+        vec![format!(
+            "10. Release v0.10.0.md cites {PROBE_20}, whose reader wrote c0ffee0 feat(x): after \
+             the tag ({RECORD_19_SESSION}) in v0.9.0..HEAD"
+        )],
+        "v0.9.0 is read over v0.8.0..v0.9.0 and stays green; v0.10.0 is refused on record 20, \
+         not on record 21"
     );
 }
