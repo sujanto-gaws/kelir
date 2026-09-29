@@ -56,7 +56,8 @@ While the major version is `0`, the public API may change in any release.
   test call to an RFC 1918 or IPv6 unique-local address is refused unless the
   range is listed, for example `10.20.0.0/16`. Loopback, link-local (the cloud
   metadata address included), unspecified and multicast addresses are always
-  refused.
+  refused. **An entry that is not `address/prefix` stops the backend at
+  startup**, a bare address included.
 - **`0049` adds one permission, `integration:endpoint:call`**, and grants it
   to the system tenant's `ROLE-ADMIN`. A tenant created after the upgrade gets it on its
   `ROLE-ADMIN`. A tenant created before the upgrade does not: grant it to that
