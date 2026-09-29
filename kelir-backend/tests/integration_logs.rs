@@ -29,6 +29,23 @@
 //! | `validate_query` not called | `a_filter_that_cannot_be_read_is_refused` |
 //! | the detail's `requestPayload` is the response's | `the_detail_is_the_summary_and_the_payloads_as_stored`, `a_test_calls_rows_are_listed_and_shown_exactly_as_stored_without_the_secret` |
 //! | `0050` grants nothing to `ROLE-ADMIN` | `the_permission_is_catalogued_at_its_id_and_held_by_the_administrator` and ten others |
+//!
+//! The test-engineer gate's survivors, and the tests that now redden them
+//! (**seen red, 2026-09-29**):
+//!
+//! | Mutation | Reddened |
+//! |---|---|
+//! | the endpoint filter drops `entity_type` | `an_endpoint_filter_matches_endpoint_rows_only_and_a_row_is_shown_as_stored` |
+//! | the detail's `documentId` is always `null` | `an_endpoint_filter_matches_endpoint_rows_only_and_a_row_is_shown_as_stored` |
+//! | `direction` is always `OUTBOUND` | `an_endpoint_filter_matches_endpoint_rows_only_and_a_row_is_shown_as_stored` |
+//! | `list_logs` judges the range before the permission | `a_caller_without_the_permission_is_refused_before_the_range_is_judged` |
+//! | the limit is the raw `pageSize` | `the_page_size_is_clamped_and_a_page_below_one_is_the_first` |
+//! | the offset is computed from the raw `page` | `the_page_size_is_clamped_and_a_page_below_one_is_the_first` |
+//! | `meta.total` capped at the page size | `the_list_is_newest_first_and_a_tie_is_broken_by_id_across_pages`, `the_page_size_is_clamped_and_a_page_below_one_is_the_first` |
+//!
+//! **Two survive and are equivalent**: dropping `s.tenant_id = l.tenant_id`
+//! from either join. The composite foreign key refuses the only row that could
+//! tell them apart, and `a_row_cannot_name_another_tenants_system` asserts it.
 
 mod common;
 
@@ -975,4 +992,333 @@ async fn a_refused_test_calls_row_carries_its_error_message() {
         )
         .await;
     assert_eq!(ids(&window), [id.to_owned()]);
+}
+
+// ---------------------------------------------------------------------------
+// The test-engineer gate's additions (#548, plan 17 row 17)
+// ---------------------------------------------------------------------------
+
+/// **The endpoint filter matches endpoint rows only**, and a row's direction,
+/// document and entity are shown as stored.
+///
+/// A log row names what it was about with `entityType` and `entityId`, and an
+/// id is only an endpoint's under `IntegrationEndpoint`. A row about a
+/// document whose id is the one filtered on is not that endpoint's call, so a
+/// predicate reading `entity_id` alone would list it. Every other seeded row
+/// is an outbound test call with no document, so neither `direction` nor
+/// `documentId` was read from the row anywhere else.
+#[tokio::test]
+async fn an_endpoint_filter_matches_endpoint_rows_only_and_a_row_is_shown_as_stored() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let erp = system(&app, &token, "ERP", "https://erp.example").await;
+
+    let type_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO document_types (id, tenant_id, type_code, name)
+         VALUES ($1, $2, 'LOG_DOC', 'Logged document')",
+    )
+    .bind(type_id)
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .execute(&app.pool)
+    .await
+    .expect("insert a document type");
+    let document = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO documents (id, tenant_id, document_ref, document_type_id, title)
+         VALUES ($1, $2, 'DOC-2026-000123', $3, 'A synced purchase requisition')",
+    )
+    .bind(document)
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .bind(type_id)
+    .execute(&app.pool)
+    .await
+    .expect("insert a document");
+
+    // An inbound call about the document, whose entity id is the id the
+    // filter below names — as an endpoint's.
+    let shared_id = Uuid::now_v7();
+    let inbound = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO integration_logs
+             (id, tenant_id, external_system_id, direction, integration_type, endpoint, method,
+              correlation_id, document_id, entity_type, entity_id, request_payload_json,
+              status_code, status, started_at)
+         VALUES ($1, $2, $3, 'INBOUND', 'WEBHOOK', '/hooks/erp', 'POST', 'corr-inbound', $4,
+                 'Document', $5, '{\"event\": \"po.updated\"}', 202, 'PENDING',
+                 '2026-09-02T08:00:00Z')",
+    )
+    .bind(inbound)
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .bind(erp)
+    .bind(document)
+    .bind(shared_id)
+    .execute(&app.pool)
+    .await
+    .expect("seed an inbound row");
+
+    let endpoint_row = seed(
+        &app,
+        Seed {
+            endpoint: Some(shared_id),
+            ..Seed::new(erp, "SUCCESS", "2026-09-02T09:00:00Z")
+        },
+    )
+    .await;
+
+    let filtered = app
+        .get(&format!("{LOGS}?endpointId={shared_id}"), Some(&token))
+        .await;
+    assert_eq!(filtered.status, StatusCode::OK, "{}", filtered.body);
+    assert_eq!(
+        ids(&filtered),
+        strings(&[endpoint_row]),
+        "a document's row is not an endpoint's call"
+    );
+    assert_eq!(filtered.body["meta"]["total"], 1);
+
+    let shown = app.get(&format!("{LOGS}/{inbound}"), Some(&token)).await;
+    assert_eq!(shown.status, StatusCode::OK, "{}", shown.body);
+    let data = shown.data();
+    assert_eq!(data["direction"], "INBOUND");
+    assert_eq!(data["integrationType"], "WEBHOOK");
+    assert_eq!(data["documentId"], document.to_string());
+    assert_eq!(data["entityType"], "Document");
+    assert_eq!(data["entityId"], shared_id.to_string());
+    assert_eq!(data["status"], "PENDING");
+    assert_eq!(data["statusCode"], 202);
+    assert_eq!(data["requestPayload"], json!({ "event": "po.updated" }));
+    assert_eq!(data["responsePayload"], Value::Null);
+    assert_eq!(data["completedAt"], Value::Null);
+    assert_eq!(data["durationMs"], Value::Null);
+
+    let listed = app.get(LOGS, Some(&token)).await;
+    assert_eq!(
+        listed.body["data"][1]["direction"], "INBOUND",
+        "{}",
+        listed.body
+    );
+}
+
+/// **A row cannot name another tenant's system**, which is why the joins'
+/// `s.tenant_id = l.tenant_id` has nothing to leak today.
+///
+/// Dropping that join predicate survives every test here (the gate's M11 and
+/// M12): the composite foreign key refuses the only row that could tell the
+/// two apart. This asserts the key, so the join's safety does not rest on a
+/// constraint nobody checks.
+#[tokio::test]
+async fn a_row_cannot_name_another_tenants_system() {
+    let app = TestApp::spawn_with(|config| config.multi_tenant = true).await;
+    let system_admin = app
+        .sign_in_to("SYSTEM", common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await;
+    let ours = system(&app, &system_admin, "ERP", "https://erp.example").await;
+    let other = fixtures::create_tenant(&app.pool, "TNT-LOG-FK", "Tenant FK").await;
+
+    let refused = sqlx::query(
+        "INSERT INTO integration_logs
+             (id, tenant_id, external_system_id, direction, correlation_id, status, started_at)
+         VALUES ($1, $2, $3, 'OUTBOUND', 'corr-fk', 'FAILED', now())",
+    )
+    .bind(Uuid::now_v7())
+    .bind(other)
+    .bind(ours)
+    .execute(&app.pool)
+    .await
+    .expect_err("a row in one tenant naming another tenant's system");
+    assert!(
+        refused
+            .to_string()
+            .contains("fk_integration_logs_external_system_id_tenant_id"),
+        "{refused}"
+    );
+}
+
+/// **The page size is clamped and a page below one is the first**, on the
+/// wire and in `meta`.
+///
+/// Seeds one row more than a page can hold, so an unclamped limit would show
+/// it, and asks for page 0, which an offset computed from the raw page would
+/// turn negative.
+#[tokio::test]
+async fn the_page_size_is_clamped_and_a_page_below_one_is_the_first() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let erp = system(&app, &token, "ERP", "https://erp.example").await;
+
+    sqlx::query(
+        "INSERT INTO integration_logs
+             (id, tenant_id, external_system_id, direction, correlation_id, status, started_at)
+         SELECT gen_random_uuid(), $1, $2, 'OUTBOUND', 'corr-page-' || n, 'SUCCESS',
+                timestamptz '2026-09-01T00:00:00Z' + n * interval '1 minute'
+         FROM generate_series(1, 101) AS n",
+    )
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .bind(erp)
+    .execute(&app.pool)
+    .await
+    .expect("seed 101 rows");
+
+    let first = app
+        .get(&format!("{LOGS}?pageSize=1000"), Some(&token))
+        .await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+    assert_eq!(ids(&first).len(), 100);
+    assert_eq!(first.body["meta"]["pageSize"], 100);
+    assert_eq!(first.body["meta"]["total"], 101);
+
+    let second = app
+        .get(&format!("{LOGS}?page=2&pageSize=1000"), Some(&token))
+        .await;
+    assert_eq!(second.status, StatusCode::OK, "{}", second.body);
+    assert_eq!(ids(&second).len(), 1);
+    assert!(!ids(&first).contains(&ids(&second)[0]));
+
+    let zero = app
+        .get(&format!("{LOGS}?page=0&pageSize=5"), Some(&token))
+        .await;
+    assert_eq!(zero.status, StatusCode::OK, "{}", zero.body);
+    assert_eq!(zero.body["meta"]["page"], 1);
+    assert_eq!(ids(&zero), ids(&first)[..5].to_vec());
+
+    let one = app.get(&format!("{LOGS}?pageSize=0"), Some(&token)).await;
+    assert_eq!(one.status, StatusCode::OK, "{}", one.body);
+    assert_eq!(ids(&one).len(), 1);
+    assert_eq!(one.body["meta"]["pageSize"], 1);
+}
+
+/// **The permission is checked before the query is judged**: a caller
+/// without `integration:log:read` is told 403, not that their range is
+/// inverted.
+#[tokio::test]
+async fn a_caller_without_the_permission_is_refused_before_the_range_is_judged() {
+    let app = TestApp::spawn().await;
+    let without = caller_holding(&app, "RANGE", &["integration:external-system:read"]).await;
+
+    let response = app
+        .get(
+            &format!("{LOGS}?from=2026-09-02T00:00:00Z&to=2026-09-01T00:00:00Z"),
+            Some(&without),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::FORBIDDEN, "{}", response.body);
+}
+
+/// **No query string or path reaches a 500**, and none reads a row it should
+/// not: hostile page sizes and pages, dates outside what PostgreSQL can hold,
+/// and SQL in the enum and the ids.
+#[tokio::test]
+async fn hostile_queries_are_refused_or_answered_and_never_a_500() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let erp = system(&app, &token, "ERP", "https://erp.example").await;
+    let id = seed(&app, Seed::new(erp, "SUCCESS", "2026-09-02T08:00:00Z")).await;
+
+    // Refused: none of these parse as the parameter they name.
+    for query in [
+        "pageSize=4294967296",
+        "pageSize=-1",
+        "page=-1",
+        "page=1.5",
+        "status=success",
+        "status=SUCCESS'%20OR%20'1'='1",
+        "status=SUCCESS%3B%20DROP%20TABLE%20integration_logs",
+        "status=SUCCESS&status=FAILED",
+        "externalSystemId='%20OR%201=1--",
+        "endpointId=00000000-0000-0000-0000-00000000000g",
+        "from=2026-13-45T00:00:00Z",
+        "from=2026-09-02",
+        "from=2026-09-02T00:00:00",
+        // An unencoded `+` is a space, so this offset does not parse.
+        "from=2026-09-02T00:00:00+07:00",
+    ] {
+        let response = app.get(&format!("{LOGS}?{query}"), Some(&token)).await;
+        assert_eq!(
+            response.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{query}: {}",
+            response.body
+        );
+    }
+
+    // Answered: in range for the parser, and each a well-formed question.
+    for (query, expected) in [
+        ("page=4294967295&pageSize=100", vec![]),
+        ("from=2026-09-02T15:00:00%2B07:00", vec![id]),
+        (
+            "from=0001-01-01T00:00:00Z&to=9999-12-31T23:59:59Z",
+            vec![id],
+        ),
+        ("unknown=1&log=whatever", vec![id]),
+    ] {
+        let response = app.get(&format!("{LOGS}?{query}"), Some(&token)).await;
+        assert_eq!(
+            response.status,
+            StatusCode::OK,
+            "{query}: {}",
+            response.body
+        );
+        assert_eq!(ids(&response), strings(&expected), "{query}");
+    }
+
+    // Years the parser takes and PostgreSQL holds, and years it refuses.
+    for (query, status) in [
+        ("from=-4713-11-24T00:00:00Z", StatusCode::OK),
+        ("to=%2B200000-01-01T00:00:00Z", StatusCode::OK),
+        ("from=%2B262142-12-31T23:59:59Z", StatusCode::OK),
+        (
+            "from=%2B294277-01-01T00:00:00Z",
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            "from=10000-01-01T00:00:00Z",
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+    ] {
+        let response = app.get(&format!("{LOGS}?{query}"), Some(&token)).await;
+        assert_eq!(response.status, status, "{query}: {}", response.body);
+    }
+
+    // The detail's path takes an id and nothing else.
+    for path in ["not-a-uuid", "'%20OR%201=1--", "%2E%2E"] {
+        let response = app.get(&format!("{LOGS}/{path}"), Some(&token)).await;
+        assert!(
+            response.status.is_client_error(),
+            "{path}: {} {}",
+            response.status,
+            response.body
+        );
+        assert_ne!(response.status, StatusCode::OK);
+    }
+}
+
+/// **A date before PostgreSQL's first timestamp is a 500** — a defect, found
+/// by the test-engineer gate for #548 and not fixed there.
+///
+/// chrono parses years down to -262143 and `timestamptz` starts at 4714 BC,
+/// so `from=-5000-01-01T00:00:00Z` parses, reaches the database, and comes
+/// back as `timestamp out of range`, which the API answers as
+/// `INTERNAL_ERROR`. The expected answer is a 422 naming the parameter.
+/// Ignored until the range is checked before the query; remove the `ignore`
+/// with that fix.
+#[tokio::test]
+#[ignore = "defect found at #548's gate: a pre-4714 BC date is a 500, not a 422"]
+async fn a_date_before_postgresqls_range_is_refused_not_a_500() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for query in [
+        "from=-5000-01-01T00:00:00Z",
+        "from=-4714-11-23T00:00:00Z",
+        "to=-5000-01-01T00:00:00Z",
+    ] {
+        let response = app.get(&format!("{LOGS}?{query}"), Some(&token)).await;
+        assert_eq!(
+            response.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{query}: {}",
+            response.body
+        );
+    }
 }
