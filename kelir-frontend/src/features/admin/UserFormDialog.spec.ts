@@ -12,6 +12,7 @@ import {
   type FakeBackendHandle,
   type FakeHandler,
 } from '@/lib/testing/fake-backend'
+import { filler, searchedPage } from '@/lib/testing/searched-page'
 import type { Role, User } from '@/types/identity'
 
 const clerkRole: Role = {
@@ -45,6 +46,9 @@ const existingUser: User = {
   roles: [clerkRole],
 }
 
+/** The role catalogue `GET /identity/roles` searches, in role-code order. */
+let catalogue: Role[] = []
+
 /** The tsconfig lib target predates `Array.prototype.at`, so index by hand. */
 function lastRequest(backend: FakeBackendHandle) {
   return backend.requests[backend.requests.length - 1]
@@ -52,7 +56,7 @@ function lastRequest(backend: FakeBackendHandle) {
 
 function mountDialog(user: User | null): VueWrapper {
   return mount(UserFormDialog, {
-    props: { open: true, user, roles: [clerkRole, approverRole] },
+    props: { open: true, user, rolesReadable: true },
   })
 }
 
@@ -72,7 +76,13 @@ describe('UserFormDialog', () => {
     window.localStorage.clear()
 
     handler = () => ({ status: 201, body: itemBody(existingUser) })
-    backend = installFakeBackend((request) => handler(request))
+    catalogue = [clerkRole, approverRole]
+    // The picker's reads go to the catalogue whatever a test does with the rest.
+    backend = installFakeBackend((request) =>
+      request.method === 'get' && request.url === '/identity/roles'
+        ? searchedPage(request, catalogue, ['roleCode', 'name'])
+        : handler(request),
+    )
   })
 
   afterEach(() => {
@@ -263,7 +273,8 @@ describe('UserFormDialog', () => {
     await wrapper.find('form').trigger('submit')
     await flushPromises()
 
-    expect(backend.requests).toHaveLength(0)
+    // The role picker's own read is the only request: nothing was sent.
+    expect(backend.requests.filter((request) => request.method !== 'get')).toHaveLength(0)
     expect(wrapper.find('#user-username-error').exists()).toBe(true)
     expect(wrapper.find('#user-password-error').text()).toContain('12 characters')
   })
@@ -278,5 +289,58 @@ describe('UserFormDialog', () => {
     expect(wrapper.emitted('saved')?.[0]).toEqual([existingUser])
     const openEvents = wrapper.emitted('update:open') ?? []
     expect(openEvents[openEvents.length - 1]).toEqual([false])
+  })
+
+  it('grants, by search, a role that sorts past the first hundred', async () => {
+    // #525: the page read one page of a hundred roles and handed it in, so a
+    // role that sorted after it could not be granted at all.
+    const wanted: Role = { ...approverRole, id: 'r-zz', roleCode: 'ZZ-AUDITOR', name: 'Auditor' }
+    catalogue = [
+      ...filler(120, (n) => ({
+        ...clerkRole,
+        id: `r-${n}`,
+        roleCode: `AA-${n}`,
+        name: `Filler ${n}`,
+      })),
+      wanted,
+    ]
+
+    const wrapper = mountDialog(existingUser)
+    await flushPromises()
+
+    expect(wrapper.find('#user-role-r-zz').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="user-roles-status"]').text()).toContain('Showing 100 of 121')
+    // Held already and outside the first page: still shown, still ticked.
+    expect((wrapper.get('#user-role-r-1').element as HTMLInputElement).checked).toBe(true)
+
+    await wrapper.get('[data-testid="user-roles-search"]').setValue('auditor')
+    await wrapper.get('[data-testid="user-roles-search"]').trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+
+    const reads = backend.requests.filter((request) => request.url === '/identity/roles')
+    expect(reads[reads.length - 1].params).toEqual({ search: 'auditor', pageSize: 100 })
+
+    await wrapper.get('#user-role-r-zz').setValue(true)
+    handler = () => ({ status: 200, body: itemBody(existingUser) })
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(lastRequest(backend)?.body).toMatchObject({ roleIds: ['r-1', 'r-zz'] })
+  })
+
+  it('offers no role picker to a caller who cannot read roles, and keeps the grants', async () => {
+    const wrapper = mount(UserFormDialog, {
+      props: { open: true, user: existingUser, rolesReadable: false },
+    })
+    await flushPromises()
+
+    expect(backend.countOf('/identity/roles')).toBe(0)
+    expect(wrapper.find('[data-testid="user-roles-unavailable"]').exists()).toBe(true)
+
+    handler = () => ({ status: 200, body: itemBody(existingUser) })
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(lastRequest(backend)?.body).toMatchObject({ roleIds: ['r-1'] })
   })
 })

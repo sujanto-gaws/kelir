@@ -3,12 +3,13 @@ import { computed, ref, watch } from 'vue'
 
 import { createDocumentType, updateDocumentType } from '@/api/document-types'
 import { toApiError } from '@/api/client'
-import { listForms, listLists } from '@/api/rad'
+import { getForm, getList, listForms, listLists } from '@/api/rad'
 import { listWorkflowDefinitions } from '@/api/workflow'
 import { Alert } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { SearchSelect, type SearchSource } from '@/components/ui/search-select'
 import { Select } from '@/components/ui/select'
 import type { ValidationDetail } from '@/types/api'
 import type {
@@ -18,6 +19,8 @@ import type {
   GovernedEntityType,
   SecurityLevel,
 } from '@/types/document-type'
+import type { FormSummary, ListSummary } from '@/types/rad'
+import type { WorkflowDefinitionSummary } from '@/types/workflow'
 
 /**
  * Creating and editing a document type (FR-RAD-008, FR-DTYPE-001..004; #341).
@@ -40,7 +43,8 @@ import type {
  * that reads as a broken document type later. Both choosers list only what can
  * actually be bound — a `PUBLISHED` form, an `ACTIVE` workflow — because the
  * backend refuses the rest and a chooser that offered them would be offering a
- * 422.
+ * 422. **The status is asked of the server and the choosers search** (#525):
+ * filtering one page after it arrived hid whatever sorted past it.
  *
  * **The numbering rule is its own dialog**, as it is its own sub-resource: a
  * type has one or it does not, and folding it in here would make creating a
@@ -63,11 +67,6 @@ const workflowId = ref('')
 const isSaving = ref(false)
 const error = ref('')
 const details = ref<ValidationDetail[]>([])
-
-const forms = ref<{ value: string; label: string }[]>([])
-const lists = ref<{ value: string; label: string }[]>([])
-const workflows = ref<{ value: string; label: string }[]>([])
-const choicesError = ref('')
 
 const isEditing = computed(() => props.editing !== null)
 
@@ -104,60 +103,35 @@ function messageFor(path: string): string {
 }
 
 /**
- * Loads what may be bound.
+ * What may be bound, each searched on the server.
  *
- * **A failure here does not close the dialog.** The choosers say they could not
- * load and the rest of the form still works, which is the shape
- * `NewDocumentPage` already takes for the same reason: a type is configurable
- * without a form, and a caller who may configure types but may not read form
- * definitions should get a usable dialog rather than a refusal.
+ * **A chooser that cannot load does not close the dialog.** It says so under
+ * itself and the rest of the form still works: a type is configurable without a
+ * form, and the three reads want three different permissions — a caller who may
+ * configure types but not read list definitions gets a usable dialog rather
+ * than a refusal.
  */
-async function loadChoices(): Promise<void> {
-  choicesError.value = ''
+const formSource: SearchSource<FormSummary> = {
+  fetch: (query) => listForms({ ...query, status: 'PUBLISHED' }),
+  value: (form) => form.id,
+  label: (form) => `${form.title} (r${form.revision})`,
+  // The form a type is already bound to, when no search has named it.
+  resolve: getForm,
+}
 
-  try {
-    // **Settled individually**, because the three reads want three different
-    // permissions and a caller may hold some of them. `Promise.all` would let
-    // a missing `rad:list:read` empty the form chooser too.
-    const [publishedForms, activeLists, activeWorkflows] = await Promise.allSettled([
-      listForms({ pageSize: 100 }),
-      listLists({ pageSize: 100 }),
-      listWorkflowDefinitions({ pageSize: 100 }),
-    ])
+const listSource: SearchSource<ListSummary> = {
+  // A `DEPRECATED` list still renders, but binding a type to one is
+  // configuring a screen somebody has already retired.
+  fetch: (query) => listLists({ ...query, status: 'ACTIVE' }),
+  value: (list) => list.id,
+  label: (list) => `${list.title} (${list.listKey})`,
+  resolve: getList,
+}
 
-    const refused = [publishedForms, activeLists, activeWorkflows].find(
-      (settled) => settled.status === 'rejected',
-    )
-
-    if (refused?.status === 'rejected') {
-      choicesError.value = toApiError(refused.reason).message
-    }
-
-    if (publishedForms.status === 'fulfilled') {
-      forms.value = publishedForms.value.items
-        .filter((form) => form.status === 'PUBLISHED')
-        .map((form) => ({ value: form.id, label: `${form.title} (r${form.revision})` }))
-    }
-
-    if (activeLists.status === 'fulfilled') {
-      // A `DEPRECATED` list still renders, but binding a type to one is
-      // configuring a screen somebody has already retired.
-      lists.value = activeLists.value.items
-        .filter((list) => list.status === 'ACTIVE')
-        .map((list) => ({ value: list.id, label: `${list.title} (${list.listKey})` }))
-    }
-
-    if (activeWorkflows.status === 'fulfilled') {
-      workflows.value = activeWorkflows.value.items
-        .filter((workflow) => workflow.status === 'ACTIVE')
-        .map((workflow) => ({
-          value: workflow.id,
-          label: `${workflow.name} (r${workflow.version})`,
-        }))
-    }
-  } catch (failure) {
-    choicesError.value = toApiError(failure).message
-  }
+const workflowSource: SearchSource<WorkflowDefinitionSummary> = {
+  fetch: (query) => listWorkflowDefinitions({ ...query, status: 'ACTIVE' }),
+  value: (workflow) => workflow.id,
+  label: (workflow) => `${workflow.name} (r${workflow.version})`,
 }
 
 /**
@@ -195,8 +169,6 @@ watch(
     // Guarded, because a dialog that throws while opening renders nothing
     // at all — including the error that would have said why.
     workflowId.value = editing?.workflows?.[0]?.workflowDefinitionId ?? ''
-
-    void loadChoices()
   },
   { immediate: true },
 )
@@ -272,10 +244,6 @@ async function save(): Promise<void> {
         {{ error }}
       </Alert>
 
-      <Alert v-if="choicesError" variant="destructive" class="mt-4" data-testid="choices-error">
-        {{ choicesError }}
-      </Alert>
-
       <form class="mt-4 grid gap-4 sm:grid-cols-2" @submit.prevent="save">
         <div class="space-y-2">
           <Label for="type-code">Type code</Label>
@@ -326,13 +294,14 @@ async function save(): Promise<void> {
         </div>
 
         <div class="space-y-2">
-          <Label for="type-form">Form</Label>
-          <Select
+          <SearchSelect
             id="type-form"
             v-model="formId"
-            data-testid="type-form"
+            label="Form"
+            test-id="type-form"
             placeholder="No form"
-            :options="forms"
+            search-placeholder="Search by title or key"
+            :source="formSource"
           />
           <!-- Only published revisions: a draft is rewritten in place, so a
                document pinning one would render against a definition that no
@@ -341,13 +310,14 @@ async function save(): Promise<void> {
         </div>
 
         <div class="space-y-2">
-          <Label for="type-list">List</Label>
-          <Select
+          <SearchSelect
             id="type-list"
             v-model="listId"
-            data-testid="type-list"
+            label="List"
+            test-id="type-list"
             placeholder="No list"
-            :options="lists"
+            search-placeholder="Search by title or key"
+            :source="listSource"
           />
           <!-- The list a document of this type appears on — the renderer #340
                built. A type with none is not on a configured list; it is still
@@ -378,13 +348,14 @@ async function save(): Promise<void> {
         </div>
 
         <div class="space-y-2">
-          <Label for="type-workflow">Workflow</Label>
-          <Select
+          <SearchSelect
             id="type-workflow"
             v-model="workflowId"
-            data-testid="type-workflow"
+            label="Workflow"
+            test-id="type-workflow"
             placeholder="No workflow"
-            :options="workflows"
+            search-placeholder="Search by name or key"
+            :source="workflowSource"
           />
           <p class="text-xs text-muted-foreground">
             Documents of this type route through it when submitted.

@@ -6,7 +6,8 @@ import { cn } from '@/lib/utils'
 const props = withDefaults(
   defineProps<{
     id?: string
-    options: { value: string; label: string }[]
+    /** `disabled` greys one choice out: shown, so it can be explained, and not choosable. */
+    options: { value: string; label: string; disabled?: boolean }[]
     placeholder?: string
     disabled?: boolean
     invalid?: boolean
@@ -48,7 +49,12 @@ const classes = computed(() =>
     :aria-describedby="describedBy"
   >
     <option v-if="placeholder !== undefined" value="">{{ placeholder }}</option>
-    <option v-for="option in options" :key="option.value" :value="option.value">
+    <option
+      v-for="option in options"
+      :key="option.value"
+      :value="option.value"
+      :disabled="option.disabled"
+    >
       {{ option.label }}
     </option>
   </select>

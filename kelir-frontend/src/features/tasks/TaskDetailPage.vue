@@ -9,7 +9,7 @@ import { Alert } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
-import { Select } from '@/components/ui/select'
+import { SearchSelect, type SearchSource } from '@/components/ui/search-select'
 import { Textarea } from '@/components/ui/textarea'
 import { useAuthStore } from '@/stores/auth'
 import { DOCUMENT_STATUS_LABELS } from '@/types/document'
@@ -84,7 +84,8 @@ const missingComment = ref(false)
 const handingOver = ref(false)
 const delegateUserId = ref('')
 const handOverReason = ref('')
-const people = ref<User[]>([])
+/** The person last picked, so the notice after a hand-over can name them. */
+const recipient = ref<User>()
 
 /**
  * One collapsed entry per action, carrying how many edges it came from.
@@ -239,42 +240,32 @@ const handOverable = computed(() => open.value && task.value?.assignment === 'MI
  */
 const canPickPeople = computed(() => auth.can('identity:user:read'))
 
-const peopleOptions = computed(() =>
-  people.value.map((person) => ({ value: person.id, label: person.displayName })),
-)
-
-async function loadPeople(): Promise<void> {
-  if (people.value.length || !canPickPeople.value) {
-    return
-  }
-
-  try {
-    // One page. A tenant with more people than this needs a search, which is
-    // the same unbuilt read named above rather than a bigger number here.
-    const page = await listUsers({ page: 1, pageSize: 100 })
-
-    people.value = page.items.filter(
-      // Not yourself, and nobody who cannot sign in: the server refuses both,
-      // and offering a choice it declines would be the product drawing a
-      // control it then refuses.
-      (person) => person.id !== auth.user?.id && person.status === 'ACTIVE',
-    )
-  } catch {
-    people.value = []
-  }
+/**
+ * Who it can be handed to, searched on the server (#525).
+ *
+ * Not yourself, and nobody who cannot sign in: the server refuses both, and
+ * offering a choice it declines would be the product drawing a control it then
+ * refuses. Sign-in status is a column, so the server is asked for it; "not
+ * yourself" is about the caller and stays here.
+ */
+const peopleSource: SearchSource<User> = {
+  fetch: (query) => listUsers({ ...query, status: 'ACTIVE' }),
+  value: (person) => person.id,
+  label: (person) => `${person.displayName} (${person.username})`,
+  exclude: (person) => person.id === auth.user?.id,
 }
 
 function startHandOver(): void {
   handingOver.value = true
   problem.value = ''
   notice.value = ''
-  void loadPeople()
 }
 
 function cancelHandOver(): void {
   handingOver.value = false
   delegateUserId.value = ''
   handOverReason.value = ''
+  recipient.value = undefined
 }
 
 async function handOver(): Promise<void> {
@@ -286,15 +277,15 @@ async function handOver(): Promise<void> {
   problem.value = ''
   notice.value = ''
 
-  const recipient = people.value.find((person) => person.id === delegateUserId.value)
+  const handedTo = recipient.value?.id === delegateUserId.value ? recipient.value : undefined
 
   try {
     await delegateTask(task.value.id, delegateUserId.value, handOverReason.value)
     const id = task.value.id
     cancelHandOver()
     await load(id)
-    notice.value = recipient
-      ? `${recipient.displayName} has it now. It is still your approval — the record says so.`
+    notice.value = handedTo
+      ? `${handedTo.displayName} has it now. It is still your approval — the record says so.`
       : 'Handed over. It is still your approval — the record says so.'
   } catch (error) {
     report(error)
@@ -590,14 +581,16 @@ function openDocument(): void {
 
               <template v-else>
                 <div class="space-y-2">
-                  <Label for="delegate-user">Hand it to</Label>
-                  <Select
+                  <SearchSelect
                     id="delegate-user"
                     v-model="delegateUserId"
-                    :options="peopleOptions"
+                    label="Hand it to"
                     placeholder="Choose somebody"
+                    search-placeholder="Search by name, username or email"
                     :disabled="busy"
-                    data-testid="delegate-user"
+                    :source="peopleSource"
+                    test-id="delegate-user"
+                    @pick="recipient = $event"
                   />
                 </div>
 

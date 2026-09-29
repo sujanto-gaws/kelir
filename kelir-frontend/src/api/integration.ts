@@ -1,4 +1,4 @@
-import { deleteItem, getItem, getPage, postItem, putItem } from './client'
+import { deleteItem, getItem, getPage, postItem, putItem, withoutBlanks } from './client'
 import type { ListFetchQuery } from '@/composables/useQueryBackedList'
 import type { Page, PageQuery } from '@/types/api'
 import type {
@@ -42,19 +42,6 @@ const SYSTEMS = '/integration/external-systems'
  */
 export function listExternalSystems(query: ListFetchQuery = {}): Promise<Page<ExternalSystem>> {
   return getPage<ExternalSystem>(SYSTEMS, withoutBlanks(query))
-}
-
-/** A list query with its blank values left out, so none reaches the wire as `?key=`. */
-function withoutBlanks(query: ListFetchQuery): Record<string, string | number> {
-  const params: Record<string, string | number> = {}
-
-  for (const [key, value] of Object.entries(query)) {
-    if (value !== undefined && value !== null && value !== '') {
-      params[key] = value
-    }
-  }
-
-  return params
 }
 
 export function getExternalSystem(id: string): Promise<ExternalSystem> {

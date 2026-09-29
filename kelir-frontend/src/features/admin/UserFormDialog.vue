@@ -3,12 +3,12 @@ import { computed, ref, watch } from 'vue'
 
 import { Alert } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
-import { Checkbox } from '@/components/ui/checkbox'
 import { Dialog } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { SearchSelect, type KnownOption, type SearchSource } from '@/components/ui/search-select'
 import { Select } from '@/components/ui/select'
-import { createUser, updateUser } from '@/api/identity'
+import { createUser, listRoles, updateUser } from '@/api/identity'
 import { useFormErrors, type ConflictRule } from '@/composables/useFormErrors'
 import {
   USER_STATUS_LABELS,
@@ -32,8 +32,12 @@ import {
  */
 const props = defineProps<{
   user: User | null
-  /** The catalogue for the role multi-select, loaded once by the page. */
-  roles: Role[]
+  /**
+   * Whether the caller may read the role catalogue (`identity:role:read`).
+   * Without it the form offers no role picker rather than one that can only
+   * fail; the roles a user already holds are kept and sent back unchanged.
+   */
+  rolesReadable: boolean
 }>()
 
 const emit = defineEmits<{ saved: [user: User] }>()
@@ -134,11 +138,25 @@ watch(
   { immediate: true },
 )
 
-function toggleRole(id: string, selected: boolean): void {
-  roleIds.value = selected
-    ? [...new Set([...roleIds.value, id])]
-    : roleIds.value.filter((candidate) => candidate !== id)
+/**
+ * The role catalogue, searched on the server (#525).
+ *
+ * The page used to read one page of a hundred and hand it in, so a role that
+ * sorted past it could not be granted. The roles the user already holds are
+ * named from the user record, so they stay ticked whatever the search shows.
+ */
+const roleSource: SearchSource<Role> = {
+  fetch: (query) => listRoles(query),
+  value: (role) => role.id,
+  label: (role) => `${role.name} (${role.roleCode})`,
 }
+
+const heldRoles = computed<KnownOption[]>(() =>
+  (props.user?.roles ?? []).map((role) => ({
+    value: role.id,
+    label: `${role.name} (${role.roleCode})`,
+  })),
+)
 
 function buildUpdate(): UpdateUserRequest {
   const request: UpdateUserRequest = {
@@ -306,28 +324,25 @@ async function submit(): Promise<void> {
         </p>
       </div>
 
-      <fieldset class="space-y-2">
-        <legend class="text-sm font-medium leading-none">Roles</legend>
+      <SearchSelect
+        v-if="rolesReadable"
+        id="user-role"
+        v-model="roleIds"
+        label="Roles"
+        multiple
+        test-id="user-roles"
+        search-placeholder="Search by name or code"
+        :source="roleSource"
+        :known="heldRoles"
+        :disabled="isSaving"
+        :option-test-id="(role) => `user-role-option-${role.roleCode}`"
+      >
+        <template #empty>No roles are available to grant.</template>
+      </SearchSelect>
 
-        <p v-if="roles.length === 0" class="text-sm text-muted-foreground">
-          No roles are available to grant.
-        </p>
-
-        <div v-else class="max-h-40 space-y-2 overflow-y-auto rounded-md border border-border p-3">
-          <div v-for="role in roles" :key="role.id" class="flex items-center gap-2">
-            <Checkbox
-              :id="`user-role-${role.id}`"
-              :model-value="roleIds.includes(role.id)"
-              :disabled="isSaving"
-              @update:model-value="toggleRole(role.id, $event)"
-            />
-            <Label :for="`user-role-${role.id}`" class="font-normal">
-              {{ role.name }}
-              <span class="text-muted-foreground">({{ role.roleCode }})</span>
-            </Label>
-          </div>
-        </div>
-      </fieldset>
+      <p v-else class="text-sm text-muted-foreground" data-testid="user-roles-unavailable">
+        You cannot see the role catalogue, so roles cannot be changed here.
+      </p>
     </form>
 
     <template #footer>

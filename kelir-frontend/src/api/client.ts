@@ -223,6 +223,24 @@ export async function getItem<T>(url: string, config?: AxiosRequestConfig): Prom
   }
 }
 
+/**
+ * A query with its blank values left out, so none reaches the wire as `?key=`.
+ *
+ * An empty search box means "no filter", and `?status=` does not parse as a
+ * status: the two must not be spelled the same as an absent parameter.
+ */
+export function withoutBlanks(query: object): Record<string, string | number> {
+  const params: Record<string, string | number> = {}
+
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined && value !== null && value !== '') {
+      params[key] = value as string | number
+    }
+  }
+
+  return params
+}
+
 /** GET a list resource, returning its rows and pagination metadata. */
 export async function getPage<T>(
   url: string,

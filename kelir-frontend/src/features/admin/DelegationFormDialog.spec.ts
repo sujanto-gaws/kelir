@@ -10,6 +10,7 @@ import {
   type FakeBackendHandle,
   type FakeHandler,
 } from '@/lib/testing/fake-backend'
+import { filler, searchedPage } from '@/lib/testing/searched-page'
 import { useAuthStore } from '@/stores/auth'
 import type { CurrentUser } from '@/types/auth'
 
@@ -113,7 +114,7 @@ describe('DelegationFormDialog', () => {
 
     handler = (request) =>
       request.url.startsWith('/identity/users')
-        ? { status: 200, body: listBody(people) }
+        ? searchedPage(request, people, ['username', 'email', 'displayName'])
         : { status: 200, body: listBody([]) }
 
     backend = installFakeBackend((request) => handler(request))
@@ -139,9 +140,111 @@ describe('DelegationFormDialog', () => {
     const options = wrapper.find('#delegation-delegate').findAll('option')
     const labels = options.map((option) => option.text())
 
-    expect(labels).toContain('Budi Santoso')
-    expect(labels).not.toContain('Ani Wijaya')
-    expect(labels).not.toContain('Dedi Kurnia')
+    expect(labels).toContain('Budi Santoso (budi)')
+    expect(labels).not.toContain('Ani Wijaya (ani)')
+    expect(labels).not.toContain('Dedi Kurnia (gone)')
+    // Who cannot sign in is a column, so the server is asked to leave them out.
+    expect(backend.requests.find((request) => request.url === '/identity/users')?.params).toEqual({
+      pageSize: 100,
+      status: 'ACTIVE',
+    })
+  })
+
+  it('reaches, by search, somebody who sorts past the first hundred', async () => {
+    // #525: the chooser read one page of a hundred, so whoever sorted after it
+    // could not be picked. 120 people sort ahead of the one wanted here.
+    const crowd = filler(120, (n) => ({
+      ...people[1],
+      id: `u-${n}`,
+      username: `aa${n}`,
+      displayName: `Crowd ${n}`,
+    }))
+    const wanted = {
+      ...people[1],
+      id: 'u-zul',
+      username: 'zulkifli',
+      displayName: 'Zulkifli Hasan',
+    }
+    handler = (request) =>
+      request.url === '/identity/users'
+        ? searchedPage(request, [...crowd, wanted], ['username', 'email', 'displayName'])
+        : { status: 200, body: listBody([]) }
+
+    const wrapper = await mountDialog()
+    const choices = () =>
+      wrapper
+        .find('#delegation-delegate')
+        .findAll('option')
+        .map((option) => option.text())
+
+    expect(choices()).not.toContain('Zulkifli Hasan (zulkifli)')
+    expect(wrapper.text()).toContain('Showing 100 of 121')
+
+    await wrapper.find('#delegation-delegate-search').setValue('zulk')
+    await wrapper.find('#delegation-delegate-search').trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+
+    expect(choices()).toEqual(['Choose somebody', 'Zulkifli Hasan (zulkifli)'])
+    expect(backend.requests.slice(-1)[0]?.params).toEqual({
+      search: 'zulk',
+      pageSize: 100,
+      status: 'ACTIVE',
+    })
+
+    await wrapper.find('#delegation-delegate').setValue('u-zul')
+    await fill(wrapper, { 'delegation-starts': soon(1), 'delegation-ends': soon(8) })
+    handler = () => ({ status: 201, body: { success: true, data: { id: 'd-1' } } })
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    const posted = backend.requests.find((request) => request.method === 'post')
+    expect((posted?.body as Record<string, unknown>).delegateUserId).toBe('u-zul')
+  })
+
+  it('reaches, by search, a document type that sorts past the first hundred', async () => {
+    const types = [
+      ...filler(110, (n) => ({
+        id: `t-${n}`,
+        typeCode: `AA${n}`,
+        name: `Filler ${n}`,
+        status: 'ACTIVE',
+      })),
+      { id: 't-zz', typeCode: 'ZZ_LAST', name: 'Last of all', status: 'ACTIVE' },
+    ]
+    handler = (request) =>
+      request.url === '/document-types'
+        ? searchedPage(request, types, ['typeCode', 'name'])
+        : searchedPage(request, people, ['username', 'email', 'displayName'])
+
+    const wrapper = await mountDialog()
+    await fill(wrapper, { 'delegation-scope': 'DOCUMENT_TYPE' })
+    await flushPromises()
+
+    expect(wrapper.find('#delegation-type').findAll('option')).toHaveLength(101)
+
+    await wrapper.find('#delegation-type-search').setValue('zz_l')
+    await wrapper.find('#delegation-type-search').trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+
+    expect(
+      wrapper
+        .find('#delegation-type')
+        .findAll('option')
+        .map((option) => option.text()),
+    ).toEqual(['Choose a type', 'Last of all (ZZ_LAST)'])
+
+    await wrapper.find('#delegation-type').setValue('t-zz')
+    await fill(wrapper, {
+      'delegation-delegate': 'u-budi',
+      'delegation-starts': soon(1),
+      'delegation-ends': soon(8),
+    })
+    handler = () => ({ status: 201, body: { success: true, data: { id: 'd-2' } } })
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    const posted = backend.requests.find((request) => request.method === 'post')
+    expect((posted?.body as Record<string, unknown>).documentTypeId).toBe('t-zz')
   })
 
   it('offers only the two scopes the engine can honour', async () => {

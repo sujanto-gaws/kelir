@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { expect, test, type Page } from '@playwright/test'
 
 import { createSupplier, runSuffix, signInOverApi, type ApiSession } from '../support/api'
+import { chooseDocumentType } from '../support/choosers'
 import { createDocumentType, createDraft, type SeededDocumentType } from '../support/documents'
 import { credentials } from '../support/env'
 import { publishForm, type SeededForm } from '../support/forms'
@@ -125,7 +126,7 @@ test('a document is created from a type, filled in, submitted, found and moved',
   // The traversal Sprint 8 did not have. Nothing here names a form.
   await page.goto('/documents/new')
 
-  await page.getByTestId(`type-${documentType.typeCode}`).getByRole('radio').check()
+  await chooseDocumentType(page, documentType.typeCode)
   await page.getByTestId('new-document-title').fill(title)
   await page.getByTestId('create-document').click()
 
