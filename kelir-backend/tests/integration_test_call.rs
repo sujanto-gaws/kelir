@@ -144,7 +144,102 @@ async fn answer(request: Request, recorder: Arc<Mutex<Vec<Seen>>>) -> Response {
             (StatusCode::FOUND, [(header::LOCATION, "/landed")], "moved").into_response()
         }
         "/big" => "x".repeat(100 * 1024).into_response(),
+        // Each part of the credential on its own, never the whole header: a
+        // system that logs the token, or decodes a Basic pair and repeats the
+        // password. Only the needle for that part can redact it.
+        "/parts" => parts_of(&echoed).into_response(),
+        "/exactly-preview" => "y".repeat(2048).into_response(),
+        // The header begins 18 characters before the preview's cut, and the
+        // body runs on past it either way, so a cut made before redaction
+        // would show the header's first 18 characters.
+        "/straddle" => format!("{}{echoed}{}", "x".repeat(2030), "y".repeat(100)).into_response(),
+        "/one-past-preview" => "y".repeat(2049).into_response(),
+        status if status.starts_with("/status/") => {
+            let code = status["/status/".len()..]
+                .parse::<u16>()
+                .ok()
+                .and_then(|code| StatusCode::from_u16(code).ok())
+                .expect("a status code in the path");
+            (code, "answered").into_response()
+        }
         _ => "ok".into_response(),
+    }
+}
+
+/// The parts of an `Authorization` value, each alone, space-separated: the
+/// token of a bearer; the base64 and, decoded, the password of a Basic pair.
+fn parts_of(authorization: &str) -> String {
+    match authorization.split_once(' ') {
+        Some(("Bearer", token)) => format!("token={token}"),
+        Some(("Basic", encoded)) => {
+            let pair = STANDARD
+                .decode(encoded)
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .unwrap_or_default();
+            let password = pair.split_once(':').map(|(_, p)| p).unwrap_or_default();
+            format!("encoded={encoded} password={password}")
+        }
+        _ => "nothing".to_owned(),
+    }
+}
+
+/// A system on loopback that speaks raw TCP, for the answers axum will not
+/// give: a connection closed before any response, and a body that never ends.
+struct RawSystem {
+    address: SocketAddr,
+}
+
+impl RawSystem {
+    /// Accepts each connection and closes it without a byte.
+    async fn hanging_up() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the raw system");
+        let address = listener.local_addr().expect("its address");
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                drop(stream);
+            }
+        });
+        Self { address }
+    }
+
+    /// Answers `200` and then writes a body until the client goes away.
+    async fn endless() -> Self {
+        use tokio::io::AsyncWriteExt as _;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the raw system");
+        let address = listener.local_addr().expect("its address");
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    // Read the request head before answering, so the client
+                    // is not reset mid-send.
+                    let mut head = [0_u8; 4096];
+                    let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut head).await;
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n",
+                        )
+                        .await;
+                    // 8 KiB every 10 ms: the 64 KiB cap is reached in about
+                    // 80 ms, and a cap even a thousand times larger is not
+                    // reached within the system's two seconds.
+                    let chunk = vec![b'z'; 8 * 1024];
+                    while stream.write_all(&chunk).await.is_ok() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                });
+            }
+        });
+        Self { address }
+    }
+
+    fn base_url(&self) -> String {
+        format!("http://{}", self.address)
     }
 }
 
@@ -226,6 +321,17 @@ async fn target(app: &TestApp, token: &str, base_url: &str, method: &str, path: 
         system,
         endpoint: id_of(&endpoint),
     }
+}
+
+/// Sets a system's `timeout_seconds` directly: the API's floor is the
+/// schema's, and a test needs a second either side of it.
+async fn set_timeout(app: &TestApp, system: Uuid, seconds: i32) {
+    sqlx::query("UPDATE external_systems SET timeout_seconds = $2 WHERE id = $1")
+        .bind(system)
+        .bind(seconds)
+        .execute(&app.pool)
+        .await
+        .expect("set the system's timeout");
 }
 
 async fn credential(app: &TestApp, token: &str, system: Uuid, body: Value) -> Uuid {
@@ -905,6 +1011,8 @@ async fn a_listed_private_range_passes_the_guard() {
     let (reference, _) = plant("kelir-planted-listed-9e21");
 
     let listed = target(&app, &token, "http://10.255.255.1", "GET", "/x").await;
+    // The address is unroutable, so the call waits out its budget: one second.
+    set_timeout(&app, listed.system, 1).await;
     bearer(&app, &token, listed.system, &reference).await;
     let response = call(&app, &token, &listed).await;
 
@@ -1250,5 +1358,446 @@ async fn the_route_is_in_the_openapi_document_and_its_answer_has_no_headers() {
             "url"
         ],
         "a field added to the answer is a decision about what it may carry"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Added by the test-engineer campaign (#547, 2026-09-29): each test below
+// reddened under a mutation the builder's table does not list, and is green
+// on the unmutated code.
+//
+// | Mutation | Reddened |
+// |---|---|
+// | `deleted_at IS NULL` dropped from `credential::active_credentials` | `a_soft_deleted_credential_is_not_chosen_and_its_replacement_is` |
+// | the bare secret's needle dropped from `secret::redactions` | `each_part_of_a_credential_echoed_alone_is_redacted` |
+// | the base64 needle dropped from `secret::redactions` | `each_part_of_a_credential_echoed_alone_is_redacted` |
+// | the password needle dropped from `secret::redactions` | `each_part_of_a_credential_echoed_alone_is_redacted` |
+// | an `UPSTREAM_UNREACHABLE` outcome returned before the row is written | `a_system_that_hangs_up_is_a_502_and_writes_one_row` |
+// | `TestCallStatus::for_status_code` takes `200..=300` | `success_is_exactly_the_2xx_range` |
+// | a preview of exactly 2048 characters marked truncated | `a_body_of_exactly_the_preview_length_is_whole_and_one_more_is_cut` |
+// | `MAX_BODY_BYTES` raised to 64 MiB | `a_body_that_never_ends_is_cut_at_the_read_cap_and_answered` |
+// | `preview` cuts at 2048 characters before it redacts | `a_secret_that_straddles_the_preview_cut_is_redacted_whole` |
+// | a row written to `outbox_events` after the log row | `a_test_call_writes_no_outbox_event_and_runs_no_hook` |
+// | `.no_proxy()` removed from `outbound::send` | `a_proxy_named_in_the_environment_is_not_used` |
+// | `log_repo::insert_log` skipped for `HOST_NOT_RESOLVED` | `a_host_that_does_not_resolve_is_named_and_writes_one_row` |
+// | `service::test_call` writes its row under the system tenant | `a_caller_in_another_tenant_calls_their_own_endpoint_and_neither_reaches_the_other` |
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_soft_deleted_credential_is_not_chosen_and_its_replacement_is() {
+    // The credential choice: `deleted_at IS NULL` in the read.
+    let app = app_reaching_loopback().await;
+    let token = app.administrator_token().await;
+    let mock = Mock::start().await;
+    let (retired_reference, retired) = plant("kelir-planted-deleted-0d0d");
+    let (reference, secret) = plant("kelir-planted-replacement-1e1e");
+
+    let target = target(&app, &token, &mock.base_url(), "GET", "/echo").await;
+    let deleted = bearer(&app, &token, target.system, &retired_reference).await;
+    let response = app
+        .delete(
+            &format!("{BASE}/{}/credentials/{deleted}", target.system),
+            Some(&token),
+        )
+        .await;
+    assert!(response.status.is_success(), "{}", response.body);
+
+    let response = call(&app, &token, &target).await;
+    assert_eq!(
+        response.error_code(),
+        Some("NO_USABLE_CREDENTIAL"),
+        "a deleted credential was used: {}",
+        response.body
+    );
+
+    // Its replacement is the one, not one of two.
+    bearer(&app, &token, target.system, &reference).await;
+    let response = call(&app, &token, &target).await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    let sent: Vec<Option<String>> = mock.seen().into_iter().map(|s| s.authorization).collect();
+    assert_eq!(sent, vec![Some(format!("Bearer {secret}"))]);
+    assert!(!format!("{sent:?}").contains(&retired));
+}
+
+#[tokio::test]
+async fn each_part_of_a_credential_echoed_alone_is_redacted() {
+    // AC3: the bare token, the base64 of a Basic pair and its password each
+    // need their own needle; the whole header's needle covers none of them.
+    let app = app_reaching_loopback().await;
+    let token = app.administrator_token().await;
+    let mock = Mock::start().await;
+
+    let (reference, secret) = plant("kelir-planted-bare-token-2f2f");
+    let target_bearer = target(&app, &token, &mock.base_url(), "GET", "/parts").await;
+    bearer(&app, &token, target_bearer.system, &reference).await;
+    let response = call(&app, &token, &target_bearer).await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    assert_eq!(response.data()["bodyPreview"], "token=[REDACTED]");
+
+    let (reference, pair) = plant("svc-kelir:planted-part-password-3a3a");
+    let encoded = STANDARD.encode(&pair);
+    let target_basic = target(&app, &token, &mock.base_url(), "GET", "/parts").await;
+    credential(
+        &app,
+        &token,
+        target_basic.system,
+        json!({ "credentialType": "BASIC_AUTH", "secretReference": reference }),
+    )
+    .await;
+    let response = call(&app, &token, &target_basic).await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    assert_eq!(
+        response.data()["bodyPreview"],
+        "encoded=[REDACTED] password=[REDACTED]"
+    );
+
+    let everything = format!("{}\n{}", response.body, all_log_text(&app).await);
+    for form in [
+        secret.as_str(),
+        encoded.as_str(),
+        "planted-part-password-3a3a",
+    ] {
+        assert!(!everything.contains(form), "{form} escaped: {everything}");
+    }
+}
+
+#[tokio::test]
+async fn a_system_that_hangs_up_is_a_502_and_writes_one_row() {
+    // AC6 on the UPSTREAM_UNREACHABLE path, which no other test reaches.
+    let app = app_reaching_loopback().await;
+    let token = app.administrator_token().await;
+    let system = RawSystem::hanging_up().await;
+    let (reference, secret) = plant("kelir-planted-hangup-4b4b");
+
+    let target = target(&app, &token, &system.base_url(), "GET", "/x").await;
+    bearer(&app, &token, target.system, &reference).await;
+
+    let response = call(&app, &token, &target).await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::BAD_GATEWAY,
+        "{}",
+        response.body
+    );
+    assert_eq!(response.error_code(), Some("UPSTREAM_UNREACHABLE"));
+
+    let rows = log_rows(&app, target.endpoint).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["status"], "FAILED");
+    assert!(rows[0]["status_code"].is_null());
+    assert!(rows[0]["error_message"]
+        .as_str()
+        .is_some_and(|message| message.starts_with("UPSTREAM_UNREACHABLE")));
+    assert_eq!(
+        rows[0]["request_payload_json"]["headers"]["Authorization"], "[REDACTED]",
+        "the header was sent, so it is recorded as sent"
+    );
+    assert!(error_message(&response).contains(rows[0]["id"].as_str().expect("an id")));
+    assert!(!response.body.to_string().contains(&secret));
+    assert!(!rows[0].to_string().contains(&secret));
+}
+
+#[tokio::test]
+async fn a_host_that_does_not_resolve_is_named_and_writes_one_row() {
+    // AC4/AC6 on the HOST_NOT_RESOLVED path: `.invalid` never resolves
+    // (RFC 6761), so nothing is sent anywhere.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let (reference, _) = plant("kelir-planted-nxdomain-5c5c");
+
+    let target = target(&app, &token, "http://kelir-test-call.invalid", "GET", "/x").await;
+    // Resolution is inside the call's budget, and a negative answer took over
+    // two seconds on a loaded Windows runner: give it the default thirty.
+    set_timeout(&app, target.system, 30).await;
+    bearer(&app, &token, target.system, &reference).await;
+
+    let response = call(&app, &token, &target).await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        response.body
+    );
+    assert_eq!(response.error_code(), Some("HOST_NOT_RESOLVED"));
+    let rows = log_rows(&app, target.endpoint).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(rows[0]["request_payload_json"]["headers"]["Authorization"].is_null());
+}
+
+#[tokio::test]
+async fn success_is_exactly_the_2xx_range() {
+    // The SUCCESS/FAILED boundary at both of its edges, in the answer and the
+    // row alike.
+    let app = app_reaching_loopback().await;
+    let token = app.administrator_token().await;
+    let mock = Mock::start().await;
+    let (reference, _) = plant("kelir-planted-boundary-6d6d");
+
+    for (code, expected) in [
+        (200, "SUCCESS"),
+        (204, "SUCCESS"),
+        (299, "SUCCESS"),
+        (300, "FAILED"),
+        (404, "FAILED"),
+    ] {
+        let target = target(
+            &app,
+            &token,
+            &mock.base_url(),
+            "GET",
+            &format!("/status/{code}"),
+        )
+        .await;
+        bearer(&app, &token, target.system, &reference).await;
+
+        let response = call(&app, &token, &target).await;
+
+        assert_eq!(response.status, StatusCode::OK, "{code}: {}", response.body);
+        assert_eq!(response.data()["statusCode"], code, "{code}");
+        assert_eq!(response.data()["status"], expected, "{code}");
+        let rows = log_rows(&app, target.endpoint).await;
+        assert_eq!(rows[0]["status"], expected, "{code}");
+        assert_eq!(rows[0]["status_code"], code, "{code}");
+    }
+}
+
+#[tokio::test]
+async fn a_body_of_exactly_the_preview_length_is_whole_and_one_more_is_cut() {
+    let app = app_reaching_loopback().await;
+    let token = app.administrator_token().await;
+    let mock = Mock::start().await;
+    let (reference, _) = plant("kelir-planted-edge-7e7e");
+
+    for (path, truncated) in [("/exactly-preview", false), ("/one-past-preview", true)] {
+        let target = target(&app, &token, &mock.base_url(), "GET", path).await;
+        bearer(&app, &token, target.system, &reference).await;
+
+        let response = call(&app, &token, &target).await;
+
+        assert_eq!(response.status, StatusCode::OK, "{path}: {}", response.body);
+        assert_eq!(response.data()["bodyTruncated"], truncated, "{path}");
+        assert_eq!(response.data()["bodyPreview"], "y".repeat(2048), "{path}");
+        let rows = log_rows(&app, target.endpoint).await;
+        assert_eq!(
+            rows[0]["response_payload_json"]["bodyTruncated"], truncated,
+            "{path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_body_that_never_ends_is_cut_at_the_read_cap_and_answered() {
+    // The 64 KiB read cap: without it the client reads until the system's
+    // timeout and the call is a 504 with nothing to show.
+    let app = app_reaching_loopback().await;
+    let token = app.administrator_token().await;
+    let system = RawSystem::endless().await;
+    let (reference, _) = plant("kelir-planted-endless-8f8f");
+
+    let target = target(&app, &token, &system.base_url(), "GET", "/stream").await;
+    bearer(&app, &token, target.system, &reference).await;
+
+    let response = call(&app, &token, &target).await;
+
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    assert_eq!(response.data()["statusCode"], 200);
+    assert_eq!(response.data()["bodyTruncated"], true);
+    assert_eq!(response.data()["bodyPreview"], "z".repeat(2048));
+}
+
+#[tokio::test]
+async fn a_caller_in_another_tenant_calls_their_own_endpoint_and_neither_reaches_the_other() {
+    // Tenant isolation with both tenants' systems present, in both directions,
+    // and the row written under the caller's tenant.
+    let app = TestApp::spawn_with(|config| {
+        config.integration_allow_loopback = true;
+        config.multi_tenant = true;
+    })
+    .await;
+    let system_admin = app
+        .sign_in_to("SYSTEM", common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await;
+    let mock = Mock::start().await;
+    let (reference, _) = plant("kelir-planted-tenant-9a9a");
+
+    let other = fixtures::create_tenant(&app.pool, "TNT-CALL-B", "Tenant B").await;
+    let role = fixtures::create_role_with_permissions(
+        &app.pool,
+        other,
+        "ROLE-CALL-B",
+        &[
+            "integration:external-system:create",
+            "integration:external-system:read",
+            "integration:external-system:update",
+            "integration:credential:create",
+            "integration:endpoint:call",
+        ],
+    )
+    .await;
+    fixtures::create_user(
+        &app.pool,
+        other,
+        "user.call.b",
+        "call.b@kelir.test",
+        PASSWORD,
+        &[role],
+    )
+    .await;
+    let theirs_token = app.sign_in_to("TNT-CALL-B", "user.call.b", PASSWORD).await;
+
+    let ours = target(&app, &system_admin, &mock.base_url(), "GET", "/echo").await;
+    bearer(&app, &system_admin, ours.system, &reference).await;
+    let theirs = target(&app, &theirs_token, &mock.base_url(), "GET", "/echo").await;
+    bearer(&app, &theirs_token, theirs.system, &reference).await;
+
+    // Each calls its own.
+    let response = call(&app, &theirs_token, &theirs).await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    let rows = log_rows(&app, theirs.endpoint).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["tenant_id"], other.to_string());
+
+    // Neither reaches the other's, whole or mixed.
+    let mixed_ours = Target {
+        system: ours.system,
+        endpoint: theirs.endpoint,
+    };
+    let mixed_theirs = Target {
+        system: theirs.system,
+        endpoint: ours.endpoint,
+    };
+    for (token, crossing) in [
+        (&system_admin, &theirs),
+        (&theirs_token, &ours),
+        (&system_admin, &mixed_ours),
+        (&theirs_token, &mixed_theirs),
+    ] {
+        let response = call(&app, token, crossing).await;
+        assert_eq!(response.status, StatusCode::NOT_FOUND, "{}", response.body);
+    }
+
+    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM integration_logs")
+        .fetch_one(&app.pool)
+        .await
+        .expect("count integration_logs");
+    assert_eq!(total, 1, "only tenant B's own call wrote a row");
+    assert_eq!(mock.seen().len(), 1);
+}
+
+#[tokio::test]
+async fn a_secret_that_straddles_the_preview_cut_is_redacted_whole() {
+    // Redaction runs on the whole body before the cut: cut first, and the
+    // secret's first characters would sit at the end of the preview, matched
+    // by no needle.
+    let app = app_reaching_loopback().await;
+    let token = app.administrator_token().await;
+    let mock = Mock::start().await;
+    let (reference, secret) = plant("kelir-planted-straddle-c3c3");
+
+    let target = target(&app, &token, &mock.base_url(), "GET", "/straddle").await;
+    bearer(&app, &token, target.system, &reference).await;
+
+    let response = call(&app, &token, &target).await;
+
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    let preview = response.data()["bodyPreview"]
+        .as_str()
+        .expect("a preview")
+        .to_owned();
+    assert_eq!(preview.chars().count(), 2048);
+    assert_eq!(response.data()["bodyTruncated"], true);
+    let head = &secret[..8];
+    assert!(
+        !preview.contains("Bearer ") && !preview.contains(head),
+        "the start of the header survived the cut: {}",
+        &preview[2000..]
+    );
+    assert!(!log_rows(&app, target.endpoint).await[0]
+        .to_string()
+        .contains(head));
+}
+
+#[tokio::test]
+async fn a_test_call_writes_no_outbox_event_and_runs_no_hook() {
+    // ADR-0041 §6 stays untripped: the call, answered or refused, adds no
+    // `outbox_events` row and no `document_hook_executions` row.
+    let app = app_reaching_loopback().await;
+    let token = app.administrator_token().await;
+    let mock = Mock::start().await;
+    let (reference, _) = plant("kelir-planted-outbox-a1a1");
+
+    let answered = target(&app, &token, &mock.base_url(), "GET", "/echo").await;
+    bearer(&app, &token, answered.system, &reference).await;
+    let refused = target(&app, &token, &mock.base_url(), "GET", "/echo").await;
+    bearer(
+        &app,
+        &token,
+        refused.system,
+        "vault://kelir/erp/api-key#token",
+    )
+    .await;
+
+    let count = |table: &'static str| {
+        let pool = app.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(&format!("SELECT count(*) FROM {table}"))
+                .fetch_one(&pool)
+                .await
+                .expect("count")
+        }
+    };
+    let outbox_before = count("outbox_events").await;
+    let hooks_before = count("document_hook_executions").await;
+
+    assert_eq!(call(&app, &token, &answered).await.status, StatusCode::OK);
+    assert_eq!(
+        call(&app, &token, &refused).await.status,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+
+    assert_eq!(count("outbox_events").await, outbox_before);
+    assert_eq!(count("document_hook_executions").await, hooks_before);
+    assert_eq!(count("integration_logs").await, 2, "the calls did happen");
+}
+
+#[tokio::test]
+async fn a_proxy_named_in_the_environment_is_not_used() {
+    // `no_proxy()` in `outbound::send`: a proxy would carry the call, and its
+    // Authorization header, to an address the guard never checked. The
+    // variables are process-wide, so they are set for this test only and are
+    // harmless to every other test while the line holds.
+    let app = app_reaching_loopback().await;
+    let token = app.administrator_token().await;
+    let mock = Mock::start().await;
+    let proxy = Mock::start().await;
+    let (reference, secret) = plant("kelir-planted-proxy-b2b2");
+
+    let target = target(&app, &token, &mock.base_url(), "GET", "/echo").await;
+    bearer(&app, &token, target.system, &reference).await;
+
+    let names = ["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"];
+    for name in names {
+        std::env::set_var(name, proxy.base_url());
+    }
+    std::env::remove_var("NO_PROXY");
+    std::env::remove_var("no_proxy");
+    let response = call(&app, &token, &target).await;
+    for name in names {
+        std::env::remove_var(name);
+    }
+
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    assert!(
+        proxy.seen().is_empty(),
+        "the call went through the proxy: {:?}",
+        proxy.seen()
+    );
+    assert_eq!(
+        mock.seen()
+            .last()
+            .and_then(|seen| seen.authorization.clone()),
+        Some(format!("Bearer {secret}"))
     );
 }
