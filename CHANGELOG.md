@@ -79,7 +79,9 @@ While the major version is `0`, the public API may change in any release.
   `integration:log:read`, apart from the external-system permissions. **The
   payloads are returned exactly as stored, masked**: nothing is resolved or
   unmasked, and the API has no field that could carry an unmasked payload.
-  Another tenant's row is a 404.
+  Another tenant's row is a 404. In the browser, **Integration Logs** in the
+  navigation opens `/admin/integration-logs`, a row opens its detail at
+  `?log=<id>`, and a test call's log id links to its row.
 
 - **An administrator test-calls a registered endpoint** (FR-INT-002;
   [#547](https://github.com/sujanto-gaws/kelir/issues/547), decision
