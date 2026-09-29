@@ -3,7 +3,7 @@
 //!
 //! **The address is judged, not the name.** A host name is whatever its zone
 //! answers today, so the guard runs on every address the name resolved to, and
-//! the connection is then pinned to an address that passed
+//! the connection is then pinned to the addresses that passed
 //! (`integration::outbound`). This module is the judgement alone: pure, and
 //! tested address by address.
 //!
@@ -143,14 +143,21 @@ impl EgressPolicy {
 
     /// Every address must pass, not one of them: a name that resolves to a
     /// public and a private address is a name the connection could take to
-    /// either. Answers the first address in `addresses` order that passed, the
-    /// one the connection is pinned to.
-    pub fn choose(&self, addresses: &[IpAddr]) -> Result<Option<IpAddr>, EgressRefusal> {
+    /// either. Answers **every** address, in `addresses` order with repeats
+    /// dropped: each passed, so the connection is pinned to all of them and
+    /// may try the next when the first does not answer (a dual-stack name
+    /// whose IPv6 route is down). Empty when `addresses` is.
+    pub fn choose(&self, addresses: &[IpAddr]) -> Result<Vec<IpAddr>, EgressRefusal> {
+        let mut chosen: Vec<IpAddr> = Vec::with_capacity(addresses.len());
+
         for address in addresses {
             self.check(*address)?;
+            if !chosen.contains(address) {
+                chosen.push(*address);
+            }
         }
 
-        Ok(addresses.first().copied())
+        Ok(chosen)
     }
 }
 
@@ -309,10 +316,17 @@ mod tests {
             "one private answer refuses the name"
         );
         assert_eq!(
-            policy.choose(&[ip("8.8.8.8"), ip("1.1.1.1")]),
-            Ok(Some(ip("8.8.8.8"))),
-            "the first address that passed is the one pinned"
+            policy.choose(&[ip("10.0.0.1"), ip("8.8.8.8")]),
+            Err(EgressRefusal {
+                class: AddressClass::Private
+            }),
+            "wherever the refused answer stands"
         );
-        assert_eq!(policy.choose(&[]), Ok(None));
+        assert_eq!(
+            policy.choose(&[ip("8.8.8.8"), ip("2001:4860:4860::8888"), ip("8.8.8.8")]),
+            Ok(vec![ip("8.8.8.8"), ip("2001:4860:4860::8888")]),
+            "every address passed, so every one is pinned, in order, once"
+        );
+        assert_eq!(policy.choose(&[]), Ok(Vec::new()));
     }
 }

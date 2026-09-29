@@ -12,15 +12,19 @@
 //!   a destination the guard never saw;
 //! * `no_proxy()` — a proxy from the environment would carry the call to an
 //!   address other than the one checked;
-//! * a resolver that answers **only the checked address, and only for the
+//! * a resolver that answers **only the checked addresses, and only for the
 //!   call's own host** ([`PinnedResolver`]) — so the connection goes where the
-//!   guard looked, and a second DNS answer (rebinding) is never asked for;
+//!   guard looked, and a second DNS answer (rebinding) is never asked for.
+//!   Every address the name resolved to passed the guard, so every one is
+//!   pinned, in the resolver's order: a dual-stack name whose first answer
+//!   does not connect is tried at the next, as the system resolver would;
 //! * the system's `timeout_seconds` as the request timeout, inside a deadline
 //!   the caller already holds over resolution and the body read.
 //!
 //! TLS still verifies the certificate against the **host name**: pinning the
 //! address does not weaken `https`.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -70,18 +74,45 @@ pub fn resolve_secret(reference: &str) -> Result<Secret, TestCallError> {
     }
 }
 
-/// Where the connection goes: the address that passed the guard.
-#[derive(Debug, Clone, Copy)]
+/// Where the connection goes: the addresses that passed the guard, in the
+/// order the lookup gave them. Never empty.
+#[derive(Debug, Clone)]
 pub struct Pinned {
-    pub address: IpAddr,
+    pub addresses: Vec<IpAddr>,
+}
+
+/// How a host name becomes addresses: the system resolver, with the test
+/// seam's table in front of it (`AppConfig::integration_dns_overrides`, which
+/// nothing outside the test harness fills).
+#[derive(Debug, Clone, Copy)]
+pub struct Lookup<'a> {
+    pub overrides: &'a HashMap<String, Vec<IpAddr>>,
+}
+
+impl Lookup<'_> {
+    async fn addresses(&self, name: &str, port: u16) -> Result<Vec<IpAddr>, TestCallError> {
+        if let Some(addresses) = self.overrides.get(&name.to_ascii_lowercase()) {
+            return Ok(addresses.clone());
+        }
+
+        Ok(tokio::net::lookup_host((name, port))
+            .await
+            .map_err(|_| TestCallError::HostNotResolved)?
+            .map(|socket| socket.ip())
+            .collect())
+    }
 }
 
 /// Resolves the URL's host — once — and holds every answer to `policy`.
 ///
-/// An IP literal is its own answer. A name is looked up with the system
-/// resolver; **every** address it returns must pass, and the first is the one
-/// the connection is pinned to.
-pub async fn resolve_and_check(url: &Url, policy: &EgressPolicy) -> Result<Pinned, TestCallError> {
+/// An IP literal is its own answer. A name is looked up through `lookup`;
+/// **every** address it returns must pass, and the connection is pinned to all
+/// of them.
+pub async fn resolve_and_check(
+    url: &Url,
+    policy: &EgressPolicy,
+    lookup: Lookup<'_>,
+) -> Result<Pinned, TestCallError> {
     let port = url
         .port_or_known_default()
         .ok_or(TestCallError::TargetUrlInvalid)?;
@@ -89,17 +120,13 @@ pub async fn resolve_and_check(url: &Url, policy: &EgressPolicy) -> Result<Pinne
     let addresses: Vec<IpAddr> = match url.host() {
         Some(Host::Ipv4(v4)) => vec![IpAddr::V4(v4)],
         Some(Host::Ipv6(v6)) => vec![IpAddr::V6(v6)],
-        Some(Host::Domain(name)) => tokio::net::lookup_host((name, port))
-            .await
-            .map_err(|_| TestCallError::HostNotResolved)?
-            .map(|socket| socket.ip())
-            .collect(),
+        Some(Host::Domain(name)) => lookup.addresses(name, port).await?,
         None => return Err(TestCallError::TargetUrlInvalid),
     };
 
     match policy.choose(&addresses) {
-        Ok(Some(address)) => Ok(Pinned { address }),
-        Ok(None) => Err(TestCallError::HostNotResolved),
+        Ok(addresses) if addresses.is_empty() => Err(TestCallError::HostNotResolved),
+        Ok(addresses) => Ok(Pinned { addresses }),
         Err(refusal) => Err(TestCallError::EgressRefused(refusal.class)),
     }
 }
@@ -112,7 +139,7 @@ pub struct RawAnswer {
     pub body_cut: bool,
 }
 
-/// Sends one request to `url`, connecting only to `pinned`.
+/// Sends one request to `url`, connecting only to `pinned`'s addresses.
 ///
 /// `authorization` is the whole header value, marked sensitive so the client's
 /// own debug output does not print it. No other caller-controlled header is
@@ -120,7 +147,7 @@ pub struct RawAnswer {
 pub async fn send(
     method: HttpMethod,
     url: &Url,
-    pinned: Pinned,
+    pinned: &Pinned,
     authorization: Option<&Secret>,
     correlation_id: &str,
     timeout: Duration,
@@ -135,7 +162,7 @@ pub async fn send(
     if let Some(Host::Domain(name)) = url.host() {
         builder = builder.dns_resolver(Arc::new(PinnedResolver {
             host: name.to_ascii_lowercase(),
-            address: pinned.address,
+            addresses: pinned.addresses.clone(),
         }));
     }
 
@@ -203,14 +230,20 @@ fn upstream(error: reqwest::Error) -> TestCallError {
     }
 }
 
-/// A resolver that knows one name and one address.
+/// A resolver that knows one name and the addresses that passed the guard.
 ///
 /// Installed on the per-call client in place of the system resolver, so the
 /// client cannot look the host up a second time and get a different answer.
 /// Any other name — there should be none — is refused rather than resolved.
+/// (reqwest's own `resolve_to_addrs` pins a name the same way, but lets every
+/// other name through to the system resolver.)
+///
+/// The client tries the addresses in order, dividing its connect timeout
+/// between them, so an address that does not answer costs its share and not
+/// the call.
 struct PinnedResolver {
     host: String,
-    address: IpAddr,
+    addresses: Vec<IpAddr>,
 }
 
 impl Resolve for PinnedResolver {
@@ -218,8 +251,12 @@ impl Resolve for PinnedResolver {
         let answer: Result<Addrs, Box<dyn std::error::Error + Send + Sync>> =
             if name.as_str().eq_ignore_ascii_case(&self.host) {
                 // Port 0: the client uses the URL's port.
-                let address = SocketAddr::new(self.address, 0);
-                Ok(Box::new(std::iter::once(address)))
+                let addresses: Vec<SocketAddr> = self
+                    .addresses
+                    .iter()
+                    .map(|address| SocketAddr::new(*address, 0))
+                    .collect();
+                Ok(Box::new(addresses.into_iter()))
             } else {
                 Err("only the checked host is resolved for an integration call".into())
             };
@@ -291,7 +328,9 @@ mod tests {
         ] {
             let url = Url::parse(url).expect("a URL");
             assert_eq!(
-                resolve_and_check(&url, &policy).await.map(|p| p.address),
+                resolve_and_check(&url, &policy, no_overrides())
+                    .await
+                    .map(|p| p.addresses),
                 Err(TestCallError::EgressRefused(class)),
                 "{url}"
             );
@@ -303,10 +342,66 @@ mod tests {
         let url = Url::parse("http://localhost:9/x").expect("a URL");
 
         assert_eq!(
-            resolve_and_check(&url, &EgressPolicy::default())
+            resolve_and_check(&url, &EgressPolicy::default(), no_overrides())
                 .await
-                .map(|p| p.address),
+                .map(|p| p.addresses),
             Err(TestCallError::EgressRefused(AddressClass::Loopback))
+        );
+    }
+
+    fn no_overrides() -> Lookup<'static> {
+        static EMPTY: std::sync::OnceLock<HashMap<String, Vec<IpAddr>>> =
+            std::sync::OnceLock::new();
+        Lookup {
+            overrides: EMPTY.get_or_init(HashMap::new),
+        }
+    }
+
+    fn ip(raw: &str) -> IpAddr {
+        raw.parse().expect("an address")
+    }
+
+    #[tokio::test]
+    async fn an_overridden_name_is_judged_on_every_address_it_is_given() {
+        let overrides = HashMap::from([
+            (
+                "mixed.kelir.test".to_owned(),
+                vec![ip("203.0.113.7"), ip("10.0.0.5")],
+            ),
+            (
+                "public.kelir.test".to_owned(),
+                vec![ip("203.0.113.7"), ip("2001:db8::7"), ip("203.0.113.7")],
+            ),
+            ("empty.kelir.test".to_owned(), Vec::new()),
+        ]);
+        let lookup = Lookup {
+            overrides: &overrides,
+        };
+        let policy = EgressPolicy::default();
+
+        let mut answers = Vec::new();
+        for raw in [
+            "https://MIXED.kelir.test/x",
+            "https://public.kelir.test/x",
+            "https://empty.kelir.test/x",
+        ] {
+            let url = Url::parse(raw).expect("a URL");
+            answers.push(
+                resolve_and_check(&url, &policy, lookup)
+                    .await
+                    .map(|p| p.addresses),
+            );
+        }
+
+        assert_eq!(
+            answers,
+            vec![
+                // A private second answer refuses the name.
+                Err(TestCallError::EgressRefused(AddressClass::Private)),
+                // Every answer is pinned, in order, once.
+                Ok(vec![ip("203.0.113.7"), ip("2001:db8::7")]),
+                Err(TestCallError::HostNotResolved),
+            ]
         );
     }
 
@@ -314,7 +409,7 @@ mod tests {
     async fn the_pinned_resolver_answers_its_host_only() {
         let resolver = PinnedResolver {
             host: "erp.example.com".to_owned(),
-            address: "203.0.113.7".parse().expect("an address"),
+            addresses: vec![ip("203.0.113.7"), ip("2001:db8::7")],
         };
 
         let answer: Vec<SocketAddr> = resolver
@@ -322,7 +417,13 @@ mod tests {
             .await
             .expect("its own host resolves")
             .collect();
-        assert_eq!(answer, vec!["203.0.113.7:0".parse().expect("an address")]);
+        assert_eq!(
+            answer,
+            vec![
+                "203.0.113.7:0".parse().expect("an address"),
+                "[2001:db8::7]:0".parse().expect("an address"),
+            ]
+        );
 
         assert!(resolver
             .resolve("other.example.com".parse().expect("a name"))

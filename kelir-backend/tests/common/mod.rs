@@ -942,6 +942,9 @@ fn test_config(database_url: &str) -> AppConfig {
         // `tests/integration_test_call.rs`.
         integration_allowed_cidrs: Vec::new(),
         integration_allow_loopback: false,
+        // The system resolver answers every name; a test that needs a name to
+        // resolve to chosen addresses fills this through `spawn_with`.
+        integration_dns_overrides: std::collections::HashMap::new(),
         bootstrap_admin: Some(BootstrapAdmin {
             username: ADMIN_USERNAME.to_owned(),
             email: "admin@kelir.test".to_owned(),

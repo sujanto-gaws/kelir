@@ -84,11 +84,16 @@ While the major version is `0`, the public API may change in any release.
     and `Authorization: Basic` from a `user:password` secret. Every other
     credential type is refused with a 422 naming it as not built.
   - **The server connects only to an address it has checked.** The host is
-    resolved once, the address is checked and the connection pinned to it, and
-    redirects are not followed. Private ranges need
+    resolved once, every address is checked and the connection pinned to
+    them, and redirects are not followed. Private ranges need
     `KELIR_INTEGRATION_ALLOWED_CIDRS` (see *Upgrade notes*).
   - **Every call writes one `integration_logs` row**, success or failure, with
-    masked payloads. It is the table's first writer; the log has no screen yet
+    masked payloads: sensitive keys are masked in JSON and in text, a body
+    too long to parse included, and the secret is redacted as written and in
+    its base64, percent-encoded and `\u`-escaped spellings (the answer's
+    preview too). A U+0000 in a reply is stored and shown as U+FFFD, so it
+    cannot stop the row being written. It is the table's first writer; the
+    log has no screen yet
     ([#548](https://github.com/sujanto-gaws/kelir/issues/548)).
 
 - **A refused role delete lists the tasks it waits on**

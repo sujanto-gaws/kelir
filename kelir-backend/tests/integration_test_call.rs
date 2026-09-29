@@ -11,6 +11,11 @@
 //! **The tests that prove the guard use the harness default**, which is the
 //! production default: no seam, no allow-list.
 //!
+//! A second code-only seam, `AppConfig::integration_dns_overrides`, answers a
+//! chosen host name with chosen addresses ahead of the system resolver. The
+//! tests of the every-address rule, the pinning and the fall-through to a
+//! second address use it; the guard judges its answers like any other.
+//!
 //! # A planted secret
 //!
 //! Each test that resolves a secret sets its own environment variable (a
@@ -35,6 +40,12 @@
 //! | The outer `tokio::time::timeout` alone widened to 60 s | green — the client's own timeout held; two layers |
 //! | Both layers widened to 60 s (`budget` in `service::test_call`) | `a_slow_system_fails_at_its_timeout` |
 //! | `tracing::info!(authorization = value.expose(), ..)` added in `outbound::send` | `no_log_line_carries_the_secret_even_at_trace` |
+//! | E7b: `resolve_and_check` passes only the first address to `EgressPolicy::choose` | `a_name_resolving_to_a_public_and_a_private_address_is_refused`, `a_first_address_that_does_not_connect_falls_through_to_the_next` |
+//! | PR1: `outbound::send` never installs the `PinnedResolver` | `the_connection_goes_to_the_checked_address_and_not_a_second_lookup`, `a_first_address_that_does_not_connect_falls_through_to_the_next` |
+//! | `PinnedResolver` answers only the first pinned address | `a_first_address_that_does_not_connect_falls_through_to_the_next` |
+//! | `domain::test_call::without_nul` returns its input | `a_nul_in_the_answer_is_stored_and_answered` |
+//! | `domain::secret::encoded_forms` returns nothing | `an_encoded_echo_of_the_secret_is_redacted` |
+//! | `domain::test_call::mask_text` returns its input | `a_json_body_over_the_read_cap_is_masked_by_key` |
 
 mod common;
 
@@ -63,6 +74,9 @@ const PASSWORD: &str = "integration-test-call-password";
 struct Seen {
     method: String,
     path: String,
+    /// The `Host` header: the name the call was addressed to, whatever
+    /// address it connected to.
+    host: Option<String>,
     authorization: Option<String>,
     correlation_id: Option<String>,
 }
@@ -119,6 +133,7 @@ async fn answer(request: Request, recorder: Arc<Mutex<Vec<Seen>>>) -> Response {
     recorder.lock().expect("the mock's record").push(Seen {
         method: request.method().to_string(),
         path: path.clone(),
+        host: header_text(request.headers(), "host"),
         authorization: authorization.clone(),
         correlation_id: header_text(request.headers(), "x-correlation-id"),
     });
@@ -154,6 +169,38 @@ async fn answer(request: Request, recorder: Arc<Mutex<Vec<Seen>>>) -> Response {
         // would show the header's first 18 characters.
         "/straddle" => format!("{}{echoed}{}", "x".repeat(2030), "y".repeat(100)).into_response(),
         "/one-past-preview" => "y".repeat(2049).into_response(),
+        // U+0000, which PostgreSQL stores in neither `text` nor `jsonb`: raw,
+        // and as a JSON escape.
+        "/nul" => b"before\0after".to_vec().into_response(),
+        "/nul-json" => (
+            [(header::CONTENT_TYPE, "application/json")],
+            r#"{"note":"x\u0000y","status":"ok"}"#,
+        )
+            .into_response(),
+        // The bearer token echoed in an encoding: a JSONP callback that
+        // `\u`-escapes every character, a URL that percent-encodes it, and its
+        // base64. None contains the token as written.
+        "/jsonp-echo" => format!(
+            "callback({{\"echo\":\"{}\"}})",
+            unicode_escaped(token_of(&echoed))
+        )
+        .into_response(),
+        "/percent-echo" => format!(
+            "https://return.example/cb?t={}",
+            percent_encoded(token_of(&echoed))
+        )
+        .into_response(),
+        "/base64-echo" => format!("seen={}", STANDARD.encode(token_of(&echoed))).into_response(),
+        // JSON longer than the read cap, so it is cut and never parsed, with
+        // a token the system issued at its very start.
+        "/big-json" => (
+            [(header::CONTENT_TYPE, "application/json")],
+            format!(
+                r#"{{"access_token":"issued-by-the-system-9999","pad":"{}"}}"#,
+                "x".repeat(70 * 1024)
+            ),
+        )
+            .into_response(),
         status if status.starts_with("/status/") => {
             let code = status["/status/".len()..]
                 .parse::<u16>()
@@ -164,6 +211,33 @@ async fn answer(request: Request, recorder: Arc<Mutex<Vec<Seen>>>) -> Response {
         }
         _ => "ok".into_response(),
     }
+}
+
+/// The token of a `Bearer` value.
+fn token_of(authorization: &str) -> &str {
+    authorization
+        .strip_prefix("Bearer ")
+        .unwrap_or(authorization)
+}
+
+/// Every character as a JSON `\uXXXX` escape, lower-case hex.
+fn unicode_escaped(text: &str) -> String {
+    text.encode_utf16()
+        .map(|unit| format!("\\u{unit:04x}"))
+        .collect()
+}
+
+/// `encodeURIComponent`: everything outside RFC 3986's unreserved set.
+fn percent_encoded(text: &str) -> String {
+    text.bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+                char::from(byte).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect()
 }
 
 /// The parts of an `Authorization` value, each alone, space-separated: the
@@ -1800,4 +1874,247 @@ async fn a_proxy_named_in_the_environment_is_not_used() {
             .and_then(|seen| seen.authorization.clone()),
         Some(format!("Bearer {secret}"))
     );
+}
+
+// ---------------------------------------------------------------------------
+// Added with the campaign's findings (#547, 2026-09-29): a NUL in an answer,
+// the product owner's two decisions — encoded echoes redacted, keys masked in
+// text — and the lookup seam that makes the address rules testable.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_nul_in_the_answer_is_stored_and_answered() {
+    // AC6: the credentialed request was sent, so the call has its row — even
+    // when the answer holds the one character PostgreSQL will not store.
+    let app = app_reaching_loopback().await;
+    let token = app.administrator_token().await;
+    let mock = Mock::start().await;
+    let (reference, _) = plant("kelir-planted-nul-8a8a");
+
+    for (path, expected) in [
+        ("/nul", json!("before\u{FFFD}after")),
+        ("/nul-json", json!({"note": "x\u{FFFD}y", "status": "ok"})),
+    ] {
+        let target = target(&app, &token, &mock.base_url(), "GET", path).await;
+        bearer(&app, &token, target.system, &reference).await;
+
+        let response = call(&app, &token, &target).await;
+
+        assert_eq!(response.status, StatusCode::OK, "{path}: {}", response.body);
+        let preview = response.data()["bodyPreview"]
+            .as_str()
+            .expect("a preview")
+            .to_owned();
+        let shown: Value = serde_json::from_str(&preview).unwrap_or(Value::String(preview));
+        assert_eq!(shown, expected, "{path}");
+
+        let rows = log_rows(&app, target.endpoint).await;
+        assert_eq!(rows.len(), 1, "{path}: {rows:?}");
+        assert_eq!(rows[0]["status"], "SUCCESS");
+        assert_eq!(
+            rows[0]["response_payload_json"]["bodyPreview"],
+            response.data()["bodyPreview"],
+            "{path}: the row holds what was answered"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_encoded_echo_of_the_secret_is_redacted() {
+    // The product owner's decision on #547: a system that echoes the token
+    // encoded has it redacted as surely as one that echoes it as written.
+    // The token has `/`, `+` and `=` so that its percent-encoding differs from
+    // it.
+    let app = app_reaching_loopback().await;
+    let token = app.administrator_token().await;
+    let mock = Mock::start().await;
+    let (reference, secret) = plant("kelir/planted+encoded=7a7a");
+
+    for (path, form, shown) in [
+        (
+            "/jsonp-echo",
+            unicode_escaped(&secret),
+            r#"callback({"echo":"[REDACTED]"})"#,
+        ),
+        (
+            "/percent-echo",
+            percent_encoded(&secret),
+            "https://return.example/cb?t=[REDACTED]",
+        ),
+        ("/base64-echo", STANDARD.encode(&secret), "seen=[REDACTED]"),
+    ] {
+        assert_ne!(form, secret, "{path}: the echo is encoded");
+        let target = target(&app, &token, &mock.base_url(), "GET", path).await;
+        bearer(&app, &token, target.system, &reference).await;
+
+        let response = call(&app, &token, &target).await;
+
+        assert_eq!(response.status, StatusCode::OK, "{path}: {}", response.body);
+        assert_eq!(response.data()["bodyPreview"], shown, "{path}");
+
+        let rows = log_rows(&app, target.endpoint).await;
+        assert_eq!(rows.len(), 1, "{path}");
+        assert_eq!(
+            rows[0]["response_payload_json"]["bodyPreview"], shown,
+            "{path}"
+        );
+        // As text, too: the response and the row are JSON, so a `\u` form
+        // would sit in them with its backslash doubled.
+        for text in [response.body.to_string(), rows[0].to_string()] {
+            for needle in [form.clone(), form.replace('\\', "\\\\"), secret.clone()] {
+                assert!(!text.contains(&needle), "{path}: {needle} in {text}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_json_body_over_the_read_cap_is_masked_by_key() {
+    // The product owner's decision on #547: a body cut at 64 KiB is not
+    // parsed as JSON, and its sensitive pairs are still masked in the text.
+    let app = app_reaching_loopback().await;
+    let token = app.administrator_token().await;
+    let mock = Mock::start().await;
+    let (reference, _) = plant("kelir-planted-bigjson-9b9b");
+
+    let target = target(&app, &token, &mock.base_url(), "GET", "/big-json").await;
+    bearer(&app, &token, target.system, &reference).await;
+
+    let response = call(&app, &token, &target).await;
+
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    assert_eq!(response.data()["bodyTruncated"], true);
+    let preview = response.data()["bodyPreview"]
+        .as_str()
+        .expect("a preview")
+        .to_owned();
+    assert!(
+        preview.starts_with(r#"{"access_token":"[REDACTED]","pad":"xxx"#),
+        "{preview}"
+    );
+
+    let rows = log_rows(&app, target.endpoint).await;
+    assert_eq!(rows.len(), 1);
+    for text in [response.body.to_string(), rows[0].to_string()] {
+        assert!(!text.contains("issued-by-the-system-9999"), "{text}");
+    }
+}
+
+/// An app whose lookup answers `name` with `addresses` (the seam
+/// `AppConfig::integration_dns_overrides`), with loopback opened or not.
+async fn app_resolving(name: &str, addresses: &[&str], loopback: bool) -> TestApp {
+    let addresses: Vec<std::net::IpAddr> = addresses
+        .iter()
+        .map(|address| address.parse().expect("an address"))
+        .collect();
+    let name = name.to_owned();
+
+    TestApp::spawn_with(move |config| {
+        config.integration_allow_loopback = loopback;
+        config.integration_dns_overrides.insert(name, addresses);
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_name_resolving_to_a_public_and_a_private_address_is_refused() {
+    // E7b: every answer must pass, not the first. 203.0.113.7 (TEST-NET-3) is
+    // public and first; were it the only one judged, the call would go out to
+    // it and time out instead of being refused here.
+    let app = app_resolving("mixed.kelir.test", &["203.0.113.7", "10.0.0.5"], false).await;
+    let token = app.administrator_token().await;
+    let (reference, secret) = plant("kelir-planted-mixed-c3c3");
+
+    let target = target(&app, &token, "http://mixed.kelir.test", "GET", "/x").await;
+    bearer(&app, &token, target.system, &reference).await;
+
+    let response = call(&app, &token, &target).await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        response.body
+    );
+    assert_eq!(response.error_code(), Some("EGRESS_REFUSED"));
+    assert!(
+        error_message(&response).contains("a private address"),
+        "the refusal names the class that failed: {}",
+        response.body
+    );
+
+    let rows = log_rows(&app, target.endpoint).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["status"], "FAILED");
+    assert!(rows[0]["error_message"]
+        .as_str()
+        .is_some_and(|message| message.starts_with("EGRESS_REFUSED")));
+    assert!(
+        rows[0]["request_payload_json"]["headers"]["Authorization"].is_null(),
+        "nothing was sent"
+    );
+    for text in [response.body.to_string(), rows[0].to_string()] {
+        assert!(!text.contains(&secret));
+        assert!(!text.contains("10.0.0.5"), "no address is shown: {text}");
+    }
+}
+
+#[tokio::test]
+async fn the_connection_goes_to_the_checked_address_and_not_a_second_lookup() {
+    // PR1: `pinned.kelir.test` exists only in the seam's table — `.test` is
+    // never delegated (RFC 6761) — so a client that looked the name up again
+    // would find nothing, and only the pinned address reaches the mock.
+    let app = app_resolving("pinned.kelir.test", &["127.0.0.1"], true).await;
+    let token = app.administrator_token().await;
+    let mock = Mock::start().await;
+    let (reference, secret) = plant("kelir-planted-pinned-d4d4");
+    let base_url = format!("http://pinned.kelir.test:{}", mock.address.port());
+
+    let target = target(&app, &token, &base_url, "GET", "/echo").await;
+    bearer(&app, &token, target.system, &reference).await;
+
+    let response = call(&app, &token, &target).await;
+
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    assert_eq!(response.data()["url"], format!("{base_url}/echo"));
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!(
+        seen[0].host.as_deref(),
+        Some(format!("pinned.kelir.test:{}", mock.address.port()).as_str()),
+        "the request is addressed to the name, and connected to the address"
+    );
+    assert_eq!(
+        seen[0].authorization.as_deref(),
+        Some(format!("Bearer {secret}").as_str())
+    );
+    assert_eq!(log_rows(&app, target.endpoint).await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_first_address_that_does_not_connect_falls_through_to_the_next() {
+    // Dual-stack pinning: every address passed the guard, so every one is
+    // pinned. 127.0.0.2 is loopback — which the seam opens — but nothing
+    // listens there, so the connection is refused and the client goes on to
+    // 127.0.0.1, where the mock is. Pinned to the first address alone, the
+    // call would fail UPSTREAM_UNREACHABLE.
+    let app = app_resolving("dual.kelir.test", &["127.0.0.2", "127.0.0.1"], true).await;
+    let token = app.administrator_token().await;
+    let mock = Mock::start().await;
+    let (reference, _) = plant("kelir-planted-dual-e5e5");
+    let base_url = format!("http://dual.kelir.test:{}", mock.address.port());
+
+    let target = target(&app, &token, &base_url, "GET", "/echo").await;
+    // The client divides its connect timeout between the addresses, and a
+    // refused loopback connection takes about two seconds on Windows: give
+    // each address five.
+    set_timeout(&app, target.system, 10).await;
+    bearer(&app, &token, target.system, &reference).await;
+
+    let response = call(&app, &token, &target).await;
+
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    assert_eq!(response.data()["status"], "SUCCESS");
+    assert_eq!(mock.seen().len(), 1);
+    assert_eq!(log_rows(&app, target.endpoint).await.len(), 1);
 }

@@ -15,7 +15,7 @@
 //! `String` the standard library allocated. Zeroing is hygiene on the copy this
 //! module owns, not a guarantee about the process.
 
-use base64::engine::general_purpose::STANDARD;
+use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine as _;
 use zeroize::Zeroizing;
 
@@ -179,17 +179,35 @@ pub fn authorization_value(
     }
 }
 
+/// The shortest value whose own spellings are listed on their own: a
+/// `BASIC_AUTH` password shorter than this is not, and no value shorter than
+/// this has its encoded forms listed.
+pub const MIN_REDACTED_CHARACTERS: usize = 4;
+
 /// What must not appear in anything a call returns or stores: the secret, the
 /// header it became, the base64 of a `BASIC_AUTH` pair, and its password on
-/// its own.
+/// its own — **and each of those values spelled as a system might echo it**
+/// (the product owner's decision on #547): for the secret (a bearer token, or
+/// a Basic `user:password` pair) and for a Basic password alone,
 ///
-/// **A password shorter than four characters is not listed on its own**:
-/// redacting every `a` in a response body would destroy the body to protect a
-/// value no policy should allow. It is still redacted inside the pair and the
-/// header.
+/// * base64, standard and URL-safe, each with and without padding;
+/// * percent-encoded, with every character outside RFC 3986's unreserved set
+///   escaped (`encodeURIComponent`), with every byte escaped, and as a form
+///   field (space as `+`) — each in upper- and lower-case hex;
+/// * JSON `\u`-escaped, every character (`\u0073\u0065…`, as a JSONP
+///   callback spells a string), upper- and lower-case hex.
+///
+/// A spelling mixed from these — half a token escaped, half not — is not
+/// listed; neither is the base64 of a longer text the secret is part of.
+///
+/// **A value shorter than [`MIN_REDACTED_CHARACTERS`] has no encoded forms
+/// listed, and a password that short is not listed on its own**: redacting
+/// every `a` in a response body would destroy the body to protect a value no
+/// policy should allow. It is still redacted inside the pair and the header.
 pub fn redactions(credential_type: AuthType, secret: &Secret) -> Vec<Secret> {
     let value = secret.expose();
     let mut needles = vec![Secret::new(value.to_owned())];
+    let mut sources = vec![value];
 
     if let Ok(header) = authorization_value(credential_type, secret) {
         if let Some((_, encoded)) = header.expose().split_once(' ') {
@@ -200,17 +218,95 @@ pub fn redactions(credential_type: AuthType, secret: &Secret) -> Vec<Secret> {
 
     if credential_type == AuthType::BasicAuth {
         if let Some((_, password)) = value.split_once(':') {
-            if password.chars().count() >= 4 {
+            if password.chars().count() >= MIN_REDACTED_CHARACTERS {
                 needles.push(Secret::new(password.to_owned()));
+                sources.push(password);
             }
+        }
+    }
+
+    for source in sources {
+        if source.chars().count() >= MIN_REDACTED_CHARACTERS {
+            needles.extend(encoded_forms(source).into_iter().map(Secret::new));
         }
     }
 
     needles.retain(|needle| !needle.expose().is_empty());
     // Longest first, so a pair is replaced whole before its password is looked
-    // for inside what is left.
-    needles.sort_by_key(|needle| std::cmp::Reverse(needle.expose().len()));
+    // for inside what is left; then once each.
+    needles.sort_by(|a, b| {
+        b.expose()
+            .len()
+            .cmp(&a.expose().len())
+            .then_with(|| a.expose().cmp(b.expose()))
+    });
+    needles.dedup_by(|a, b| a.expose() == b.expose());
     needles
+}
+
+/// The spellings of `value` [`redactions`] lists besides the value itself.
+fn encoded_forms(value: &str) -> Vec<String> {
+    let bytes = value.as_bytes();
+    let mut forms = vec![
+        STANDARD.encode(bytes),
+        STANDARD_NO_PAD.encode(bytes),
+        URL_SAFE.encode(bytes),
+        URL_SAFE_NO_PAD.encode(bytes),
+    ];
+
+    for upper in [true, false] {
+        forms.push(percent_encoded(value, upper, Percent::Component));
+        forms.push(percent_encoded(value, upper, Percent::Form));
+        forms.push(percent_encoded(value, upper, Percent::EveryByte));
+        forms.push(unicode_escaped(value, upper));
+    }
+
+    forms
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Percent {
+    /// Everything but RFC 3986's unreserved characters escaped.
+    Component,
+    /// As [`Percent::Component`], with a space as `+`
+    /// (`application/x-www-form-urlencoded`).
+    Form,
+    /// Every byte escaped.
+    EveryByte,
+}
+
+fn percent_encoded(value: &str, upper: bool, style: Percent) -> String {
+    let mut encoded = String::with_capacity(value.len() * 3);
+
+    for byte in value.bytes() {
+        let unreserved = byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~');
+
+        if style != Percent::EveryByte && unreserved {
+            encoded.push(char::from(byte));
+        } else if style == Percent::Form && byte == b' ' {
+            encoded.push('+');
+        } else if upper {
+            encoded.push_str(&format!("%{byte:02X}"));
+        } else {
+            encoded.push_str(&format!("%{byte:02x}"));
+        }
+    }
+
+    encoded
+}
+
+/// Every UTF-16 unit as a JSON `\uXXXX` escape.
+fn unicode_escaped(value: &str, upper: bool) -> String {
+    value
+        .encode_utf16()
+        .map(|unit| {
+            if upper {
+                format!("\\u{unit:04X}")
+            } else {
+                format!("\\u{unit:04x}")
+            }
+        })
+        .collect()
 }
 
 fn header_safe(value: &str) -> bool {
@@ -363,6 +459,78 @@ mod tests {
                 .windows(2)
                 .all(|pair| pair[0].len() >= pair[1].len()),
             "longest first: {needles:?}"
+        );
+    }
+
+    fn needles_of(credential_type: AuthType, value: &str) -> Vec<String> {
+        redactions(credential_type, &Secret::new(value.to_owned()))
+            .iter()
+            .map(|needle| needle.expose().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn a_bearer_token_is_listed_in_every_encoding_it_may_be_echoed_in() {
+        // `/`, `+` and `?` make the base64 alphabets and the percent forms
+        // differ from each other and from the token.
+        let token = "tok/en+?>> 9";
+        let needles = needles_of(AuthType::BearerToken, token);
+
+        for form in [
+            token.to_owned(),
+            format!("Bearer {token}"),
+            STANDARD.encode(token),
+            STANDARD_NO_PAD.encode(token),
+            URL_SAFE.encode(token),
+            URL_SAFE_NO_PAD.encode(token),
+            "tok%2Fen%2B%3F%3E%3E%209".to_owned(),
+            "tok%2fen%2b%3f%3e%3e%209".to_owned(),
+            "tok%2Fen%2B%3F%3E%3E+9".to_owned(),
+            "%74%6F%6B%2F%65%6E%2B%3F%3E%3E%20%39".to_owned(),
+            "\\u0074\\u006f\\u006b\\u002f\\u0065\\u006e\\u002b\\u003f\\u003e\\u003e\\u0020\\u0039"
+                .to_owned(),
+            "\\u0074\\u006F\\u006B\\u002F\\u0065\\u006E\\u002B\\u003F\\u003E\\u003E\\u0020\\u0039"
+                .to_owned(),
+        ] {
+            assert!(needles.contains(&form), "{form} missing from {needles:?}");
+        }
+
+        // The URL-safe and standard alphabets do differ here, so both are
+        // really listed and not one twice.
+        assert_ne!(STANDARD.encode(token), URL_SAFE.encode(token));
+        let mut unique = needles.clone();
+        unique.dedup();
+        assert_eq!(unique, needles, "each needle once");
+    }
+
+    #[test]
+    fn a_basic_password_alone_is_listed_encoded_too() {
+        let needles = needles_of(AuthType::BasicAuth, "svc:pass/word");
+
+        for form in [
+            STANDARD.encode("pass/word"),
+            URL_SAFE_NO_PAD.encode("pass/word"),
+            "pass%2Fword".to_owned(),
+            STANDARD.encode("svc:pass/word"),
+            URL_SAFE_NO_PAD.encode("svc:pass/word"),
+            "svc%3Apass%2Fword".to_owned(),
+        ] {
+            assert!(needles.contains(&form), "{form} missing from {needles:?}");
+        }
+    }
+
+    #[test]
+    fn a_value_too_short_to_list_alone_has_no_encoded_forms() {
+        let needles = needles_of(AuthType::BearerToken, "abc");
+
+        assert!(needles.contains(&"abc".to_owned()));
+        assert!(!needles.contains(&STANDARD.encode("abc")), "{needles:?}");
+        assert!(!needles.contains(&"\\u0061\\u0062\\u0063".to_owned()));
+
+        let needles = needles_of(AuthType::BasicAuth, "svc:a");
+        assert!(
+            !needles.contains(&STANDARD_NO_PAD.encode("a")),
+            "{needles:?}"
         );
     }
 

@@ -2,7 +2,11 @@
 //! its answer, the failures it names, and the pure rules the service applies —
 //! which credential, which URL, and what of a body may be shown or stored.
 
+use std::borrow::Cow;
+use std::sync::OnceLock;
+
 use chrono::NaiveDate;
+use regex::{Captures, Regex};
 use serde::Serialize;
 use serde_json::{Map, Value};
 use utoipa::ToSchema;
@@ -157,7 +161,8 @@ impl TestCallError {
                     .to_owned()
             }
             Self::SecretNameNotPermitted => format!(
-                "The credential's env:// reference names a variable outside {}*, which is the                  only part of the environment a test call reads",
+                "The credential's env:// reference names a variable outside {}*, which is the \
+                 only part of the environment a test call reads",
                 super::secret::RESOLVABLE_ENVIRONMENT_PREFIX
             ),
             Self::SecretBackendNotConfigured => "The credential is a vault:// reference, and no \
@@ -280,13 +285,20 @@ pub struct BodyPreview {
 
 /// Masks and cuts a body.
 ///
-/// 1. **JSON is masked by key**: the value of any key naming a password, token,
-///    secret, key, credential or account number — architectures/03 rule 3's
-///    list — becomes [`REDACTED`], at any depth.
+/// 1. **Sensitive keys are masked**: the value of any key naming a password,
+///    token, secret, key, credential or account number — architectures/03
+///    rule 3's list — becomes [`REDACTED`]. A JSON body is walked, at any
+///    depth; a body that is not parsed as JSON — not JSON, or cut at
+///    [`MAX_BODY_BYTES`] — has every `"<key>": "<string>"` pair in its text
+///    masked by the same list ([`mask_text`]; the product owner's decision on
+///    #547).
 /// 2. **Every form of the secret is redacted**, JSON or not: `redactions` is
-///    [`super::secret::redactions`]' list, and a system that echoes the header
-///    it was sent (many test endpoints do) has it replaced here.
-/// 3. The result is cut to [`PREVIEW_CHARACTERS`]. `read_was_cut` says the body
+///    [`super::secret::redactions`]' list — the literal forms and their
+///    base64, percent- and `\u`-escaped spellings — and a system that echoes
+///    the header it was sent (many test endpoints do) has it replaced here.
+/// 3. **U+0000 becomes U+FFFD**: PostgreSQL stores neither a `text` nor a
+///    `jsonb` string with it, and the preview is stored ([`without_nul`]).
+/// 4. The result is cut to [`PREVIEW_CHARACTERS`]. `read_was_cut` says the body
 ///    was already longer than [`MAX_BODY_BYTES`] when it was read.
 pub fn preview(body: &[u8], redactions: &[Secret], read_was_cut: bool) -> BodyPreview {
     let text = match serde_json::from_slice::<Value>(body) {
@@ -294,12 +306,12 @@ pub fn preview(body: &[u8], redactions: &[Secret], read_was_cut: bool) -> BodyPr
             let masked = mask_json(value, redactions);
             serde_json::to_string(&masked).unwrap_or_default()
         }
-        _ => redact(&String::from_utf8_lossy(body), redactions),
+        _ => redact(&mask_text(&String::from_utf8_lossy(body)), redactions),
     };
 
     // Redact the serialized form too: JSON escaping can spell a secret with a
     // `"` or `\` in it differently from the value the walk above compared.
-    let text = redact(&text, redactions);
+    let text = without_nul(&redact(&text, redactions)).into_owned();
 
     let mut characters = text.char_indices();
     match characters.nth(PREVIEW_CHARACTERS) {
@@ -335,6 +347,64 @@ pub fn redact(text: &str, redactions: &[Secret]) -> String {
     text
 }
 
+/// What replaces U+0000, which PostgreSQL refuses in `text` and in a `jsonb`
+/// string: the Unicode replacement character, so the reader still sees that
+/// something was there.
+pub const NUL_REPLACEMENT: char = '\u{FFFD}';
+
+/// `text` with every U+0000 replaced by [`NUL_REPLACEMENT`]; borrowed when
+/// there is none.
+pub fn without_nul(text: &str) -> Cow<'_, str> {
+    if text.contains('\0') {
+        Cow::Owned(text.replace('\0', &NUL_REPLACEMENT.to_string()))
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
+/// [`without_nul`] over every string and key of a JSON value, at any depth.
+pub fn value_without_nul(value: Value) -> Value {
+    match value {
+        Value::String(text) => Value::String(without_nul(&text).into_owned()),
+        Value::Array(items) => Value::Array(items.into_iter().map(value_without_nul).collect()),
+        Value::Object(object) => Value::Object(
+            object
+                .into_iter()
+                .map(|(key, value)| (without_nul(&key).into_owned(), value_without_nul(value)))
+                .collect::<Map<String, Value>>(),
+        ),
+        other => other,
+    }
+}
+
+/// Masks every `"<key>": "<string>"` pair in a text whose key
+/// [`is_sensitive_key`], replacing the string's content with [`REDACTED`].
+///
+/// For a body that was not parsed as JSON: a document longer than
+/// [`MAX_BODY_BYTES`] and so cut, JSONP, a log excerpt, JSON with a syntax
+/// error. **A pattern, not a parser**: the key and the value are JSON strings
+/// (escapes allowed) with only whitespace and a `:` between them, and a value
+/// cut off by the end of the text is masked to the end. A number, a boolean
+/// or an object under a sensitive key is left alone — the JSON walk masks
+/// those, this does not — and so is a pair spelled with single quotes.
+pub fn mask_text(text: &str) -> Cow<'_, str> {
+    static PAIR: OnceLock<Regex> = OnceLock::new();
+    let pair = PAIR.get_or_init(|| {
+        Regex::new(
+            r#"(?s)(?P<head>"(?P<key>(?:[^"\\]|\\.)*)"\s*:\s*")(?P<value>(?:[^"\\]|\\.)*\\?)(?P<tail>"|$)"#,
+        )
+        .expect("the key-value pattern compiles")
+    });
+
+    pair.replace_all(text, |captures: &Captures<'_>| {
+        if is_sensitive_key(&captures["key"]) {
+            format!("{}{REDACTED}{}", &captures["head"], &captures["tail"])
+        } else {
+            captures[0].to_owned()
+        }
+    })
+}
+
 fn mask_json(value: Value, redactions: &[Secret]) -> Value {
     match value {
         Value::Object(object) => Value::Object(
@@ -346,7 +416,7 @@ fn mask_json(value: Value, redactions: &[Secret]) -> Value {
                     } else {
                         mask_json(value, redactions)
                     };
-                    (redact(&key, redactions), value)
+                    (without_nul(&redact(&key, redactions)).into_owned(), value)
                 })
                 .collect::<Map<String, Value>>(),
         ),
@@ -356,7 +426,7 @@ fn mask_json(value: Value, redactions: &[Secret]) -> Value {
                 .map(|item| mask_json(item, redactions))
                 .collect(),
         ),
-        Value::String(text) => Value::String(redact(&text, redactions)),
+        Value::String(text) => Value::String(without_nul(&redact(&text, redactions)).into_owned()),
         other => other,
     }
 }
@@ -399,6 +469,7 @@ pub fn is_sensitive_key(key: &str) -> bool {
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
+    use serde_json::json;
 
     fn credential(
         active: bool,
@@ -534,6 +605,71 @@ mod tests {
     }
 
     #[test]
+    fn a_nul_becomes_the_replacement_character_in_text_and_in_json() {
+        let text = preview(b"before\0after", &[], false);
+        assert_eq!(text.text, "before\u{FFFD}after");
+
+        let json = preview(br#"{"note":"x\u0000y","k\u0000":1}"#, &[], false);
+        assert!(!json.text.contains('\0'), "{}", json.text);
+        assert!(!json.text.contains("\\u0000"), "{}", json.text);
+        let value: Value = serde_json::from_str(&json.text).expect("still JSON");
+        assert_eq!(value["note"], "x\u{FFFD}y");
+        assert_eq!(value["k\u{FFFD}"], 1);
+
+        assert_eq!(
+            value_without_nul(json!({"a": ["\0", {"\0": "b\0"}]})),
+            json!({"a": ["\u{FFFD}", {"\u{FFFD}": "b\u{FFFD}"}]})
+        );
+        assert!(matches!(without_nul("clean"), Cow::Borrowed("clean")));
+    }
+
+    #[test]
+    fn a_sensitive_pair_in_text_is_masked_by_key() {
+        let jsonp = r#"cb({"access_token": "issued-9999", "Client-Secret":"s\"q", "id":"7"})"#;
+        assert_eq!(
+            mask_text(jsonp),
+            r#"cb({"access_token": "[REDACTED]", "Client-Secret":"[REDACTED]", "id":"7"})"#
+        );
+
+        // A value the end of the text cut off is masked to the end.
+        assert_eq!(
+            mask_text(r#"{"refresh_token":"abc"#),
+            r#"{"refresh_token":"[REDACTED]"#
+        );
+        assert_eq!(
+            mask_text(r#"{"password":"abc\"#),
+            r#"{"password":"[REDACTED]"#
+        );
+
+        // Not a sensitive key, not a string, not a pair: left alone.
+        for untouched in [
+            r#"{"status":"ok","amount":"12"}"#,
+            r#"{"token":12}"#,
+            r#"["token","x"]"#,
+        ] {
+            assert_eq!(mask_text(untouched), untouched);
+        }
+    }
+
+    #[test]
+    fn a_body_too_long_to_parse_is_still_masked_by_key() {
+        let body = format!(
+            r#"{{"access_token":"issued-by-the-system-9999","pad":"{}"}}"#,
+            "x".repeat(MAX_BODY_BYTES)
+        );
+
+        let shown = preview(&body.as_bytes()[..MAX_BODY_BYTES], &[], true);
+
+        assert!(shown.truncated);
+        assert!(
+            !shown.text.contains("issued-by-the-system-9999"),
+            "{}",
+            shown.text
+        );
+        assert!(shown.text.starts_with(r#"{"access_token":"[REDACTED]""#));
+    }
+
+    #[test]
     fn a_long_body_is_cut_on_a_character_boundary() {
         let body = "é".repeat(PREVIEW_CHARACTERS + 10);
 
@@ -606,5 +742,13 @@ mod tests {
 
         let codes: std::collections::BTreeSet<&str> = all.iter().map(TestCallError::code).collect();
         assert_eq!(codes.len(), all.len());
+
+        // A `\` continuation left out of a message leaves its source indent in
+        // it (SECRET_NAME_NOT_PERMITTED had 18 spaces).
+        for error in &all {
+            let message = error.message();
+            assert!(!message.contains("  "), "{}: {message:?}", error.code());
+            assert!(!message.contains('\n'), "{}: {message:?}", error.code());
+        }
     }
 }

@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::env::{self, VarError};
 use std::fmt;
+use std::net::IpAddr;
 
 use crate::utils::cidr::{self, Cidr};
 
@@ -139,6 +141,18 @@ pub struct AppConfig {
     /// that. Only code that builds an `AppConfig` by hand — the test harness —
     /// can turn it on.
     pub integration_allow_loopback: bool,
+    /// **A test seam, and not a setting.** Host names a test call's lookup
+    /// answers from this table instead of the system resolver: a lowercase
+    /// name, and the addresses it "resolves" to, in order. A name not in the
+    /// table is looked up as usual, and the answer is judged by the egress
+    /// guard either way.
+    ///
+    /// It exists so an integration test can make a name resolve to several
+    /// addresses — one public and one private, or one that does not answer
+    /// before one that does — which no real zone on a test machine will. Like
+    /// [`AppConfig::integration_allow_loopback`], nothing reads it from the
+    /// environment: [`AppConfig::from_env`] always leaves it empty.
+    pub integration_dns_overrides: HashMap<String, Vec<IpAddr>>,
 }
 
 /// What a deployment accepts when it says nothing.
@@ -543,8 +557,9 @@ impl AppConfig {
                     reason: error.to_string(),
                 })?
             },
-            // Never from the environment: see the field.
+            // Never from the environment: see the fields.
             integration_allow_loopback: false,
+            integration_dns_overrides: HashMap::new(),
         })
     }
 }
@@ -582,6 +597,7 @@ impl AppConfig {
             trusted_proxy_hops: 0,
             integration_allowed_cidrs: Vec::new(),
             integration_allow_loopback: false,
+            integration_dns_overrides: HashMap::new(),
         }
     }
 }
@@ -649,10 +665,15 @@ mod tests {
             ("KELIR_JWT_SECRET", "s3cret"),
             ("KELIR_INTEGRATION_ALLOW_LOOPBACK", "true"),
             ("KELIR_INTEGRATION_ALLOWED_CIDRS", "127.0.0.0/8"),
+            (
+                "KELIR_INTEGRATION_DNS_OVERRIDES",
+                "erp.example.com=127.0.0.1",
+            ),
         ]))
         .expect("loads");
 
         assert!(!config.integration_allow_loopback);
+        assert!(config.integration_dns_overrides.is_empty());
     }
 
     #[test]

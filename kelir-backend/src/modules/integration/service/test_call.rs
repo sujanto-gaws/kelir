@@ -40,8 +40,8 @@ use crate::modules::integration::domain::secret::{
     authorization_value, is_supported, redactions, HeaderError,
 };
 use crate::modules::integration::domain::test_call::{
-    choose_credential, preview, target_url, BodyPreview, TestCallError, TestCallResponse,
-    TestCallStatus,
+    choose_credential, preview, target_url, value_without_nul, without_nul, BodyPreview,
+    TestCallError, TestCallResponse, TestCallStatus, REDACTED,
 };
 use crate::modules::integration::domain::{
     EndpointStatus, ExternalSystem, ExternalSystemStatus, IntegrationEndpoint,
@@ -142,7 +142,9 @@ pub async fn test_call(
             "FAILED",
             None,
             None,
-            Some(format!("{}: {}", error.code(), error.message())),
+            // A secret's environment-variable name comes from a stored
+            // reference, and a `text` column refuses U+0000.
+            Some(without_nul(&format!("{}: {}", error.code(), error.message())).into_owned()),
         ),
         Err(Failure::Internal(_)) => (
             "FAILED",
@@ -152,7 +154,13 @@ pub async fn test_call(
         ),
     };
 
-    log_repo::insert_log(
+    // PostgreSQL refuses U+0000 in `jsonb` and `text`, so a system that
+    // answered with one would otherwise cost the call its row (AC6). The
+    // preview has none already; this is the net under everything else.
+    let request_payload = value_without_nul(request_record(&endpoint, &sent, &correlation_id));
+    let response_payload = response_payload.map(value_without_nul);
+
+    let written = log_repo::insert_log(
         &state.pool,
         &NewIntegrationLog {
             id: log_id,
@@ -164,7 +172,7 @@ pub async fn test_call(
             correlation_id: &correlation_id,
             entity_type: LOG_ENTITY_TYPE,
             entity_id: endpoint.id,
-            request_payload_json: Some(request_record(&endpoint, &sent, &correlation_id)),
+            request_payload_json: Some(request_payload),
             response_payload_json: response_payload,
             status_code,
             status,
@@ -174,7 +182,25 @@ pub async fn test_call(
             duration_ms: i32::try_from(duration_ms).unwrap_or(i32::MAX),
         },
     )
-    .await?;
+    .await;
+
+    if let Err(error) = written {
+        // The call was made — perhaps with the credential attached — and its
+        // record is lost. Said here, at error level and with the ids an
+        // operator needs, before the generic 500 discards the context.
+        tracing::error!(
+            %log_id,
+            system_id = %system.id,
+            endpoint_id = %endpoint.id,
+            %correlation_id,
+            status,
+            status_code,
+            authorization_sent = sent.authorization,
+            error = %error,
+            "an integration test call's log row could not be written"
+        );
+        return Err(error.into());
+    }
 
     tracing::info!(
         %log_id,
@@ -265,15 +291,19 @@ async fn attempt(
         allow_loopback: state.config.integration_allow_loopback,
     };
 
+    let lookup = outbound::Lookup {
+        overrides: &state.config.integration_dns_overrides,
+    };
+
     // One deadline over resolution, the request and the body read: the
     // system's timeout is the whole call's, not each step's.
     let call = async {
-        let pinned = outbound::resolve_and_check(&url, &policy).await?;
+        let pinned = outbound::resolve_and_check(&url, &policy, lookup).await?;
         sent.authorization = true;
         outbound::send(
             endpoint.method,
             &url,
-            pinned,
+            &pinned,
             Some(&header),
             correlation_id,
             budget,
@@ -306,7 +336,7 @@ fn request_record(endpoint: &IntegrationEndpoint, sent: &Sent, correlation_id: &
     if sent.authorization {
         headers.insert(
             "Authorization".to_owned(),
-            Value::String(crate::modules::integration::domain::test_call::REDACTED.to_owned()),
+            Value::String(REDACTED.to_owned()),
         );
     }
 
