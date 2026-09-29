@@ -147,6 +147,12 @@ While the major version is `0`, the public API may change in any release.
 
 ### Changed
 
+- **ClamAV is pulled from `ghcr.io/sujanto-gaws/clamav:1.5.4`**, Kelir's own copy, in CI and both
+  compose files ([#546](https://github.com/sujanto-gaws/kelir/issues/546)). `1.5.4` is what
+  `clamav/clamav:1.5` resolved to on 2026-09-29, copied registry to registry, so the digest is
+  upstream's. Two registries have closed on MinIO without notice (**D-80**, **D-92**), and ClamAV
+  is the other image CI's backend job needs from a single vendor. Every other image is accepted
+  where it is, and #546 records why for each.
 - **The coding standard says hand-built forms are validated by the server**
   ([#541](https://github.com/sujanto-gaws/kelir/issues/541)). [Coding
   standard](docs/standards/01.%20Coding%20Standard.md) §3.4 and the
