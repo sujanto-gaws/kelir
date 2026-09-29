@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT count(*)\n        FROM rad_forms\n        WHERE tenant_id = $1\n          AND deleted_at IS NULL\n          AND ($2::text IS NULL OR form_key ILIKE $2 OR title ILIKE $2)\n          AND ($3::text IS NULL OR status = $3)\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "890aba27e9a56f681b1d0b585c86cd90ff3456c70160536f1c8f9e5a0524e51e"
+}

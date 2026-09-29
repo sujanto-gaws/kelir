@@ -9,10 +9,11 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::error::{AppError, ValidationDetail};
+use crate::response::Pagination;
 use crate::utils::serde::present_or_absent;
 
 /// Longest `listKey` §5.6 holds — `list_key VARCHAR(64)`.
@@ -148,6 +149,37 @@ pub struct ListDefinition {
     pub filters: Vec<ListFilterInput>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// The list-of-lists' query string: paging, a search and a status.
+///
+/// Unknown parameters are ignored, as [`Pagination`] ignores them everywhere;
+/// a `status` outside the vocabulary is a 422 naming `status`, because it
+/// deserializes into the enum. Added for the choosers of
+/// [#525](https://github.com/sujanto-gaws/kelir/issues/525), which read the
+/// server's match rather than filtering one page of 100.
+#[derive(Debug, Clone, Default, Deserialize, IntoParams)]
+#[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
+pub struct ListDefinitionQuery {
+    /// 1-based page number; absent or below 1 is 1.
+    pub page: Option<u32>,
+    /// Rows per page, clamped to `response::MAX_PAGE_SIZE`.
+    pub page_size: Option<u32>,
+    /// Case-insensitive substring of the list key or the title. `%`, `_` and `\` in
+    /// it match themselves; a blank search is no search.
+    pub search: Option<String>,
+    /// `DRAFT`, `ACTIVE` or `DEPRECATED`, matched exactly.
+    pub status: Option<ListStatus>,
+}
+
+impl ListDefinitionQuery {
+    pub fn pagination(&self) -> Pagination {
+        Pagination {
+            page: self.page,
+            page_size: self.page_size,
+        }
+    }
 }
 
 /// A list on a list-of-lists screen: without its children.

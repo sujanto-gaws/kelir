@@ -33,7 +33,8 @@ use super::super::domain::jwss;
 use super::super::domain::{
     definition::{initial_state, jwss_version},
     validate_create, validate_update, CreateWorkflowRequest, DefinitionNamingRole, Graph,
-    UpdateWorkflowRequest, WorkflowDefinition, WorkflowDefinitionStatus, WorkflowDefinitionSummary,
+    UpdateWorkflowRequest, WorkflowDefinition, WorkflowDefinitionQuery, WorkflowDefinitionStatus,
+    WorkflowDefinitionSummary,
 };
 use super::super::repository::{definition as repo, projection};
 use super::super::{
@@ -42,21 +43,29 @@ use super::super::{
 use crate::error::{AppError, ValidationDetail};
 use crate::middleware::auth::Authenticated;
 use crate::modules::audit::{self, domain::ObjectType, AuditEntry, ChangeSet};
-use crate::response::{PageMeta, Pagination};
+use crate::response::PageMeta;
 use crate::state::AppState;
+use crate::utils::search::search_term;
 
 pub async fn list_definitions(
     state: &AppState,
     caller: &Authenticated,
-    pagination: &Pagination,
+    query: &WorkflowDefinitionQuery,
 ) -> Result<(Vec<WorkflowDefinitionSummary>, PageMeta), AppError> {
     caller.require(DEFINITION_READ)?;
 
     let tenant_id = caller.tenant_id();
-    let total = repo::count_definitions(&state.pool, tenant_id).await?;
+    let pagination = query.pagination();
+    let filter = repo::DefinitionFilter {
+        search: search_term(query.search.as_deref()),
+        status: query.status.map(WorkflowDefinitionStatus::as_db),
+    };
+
+    let total = repo::count_definitions(&state.pool, tenant_id, filter).await?;
     let definitions = repo::list_definitions(
         &state.pool,
         tenant_id,
+        filter,
         pagination.limit(),
         pagination.offset(),
     )

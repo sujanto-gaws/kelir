@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, role_code, name, description, is_system\n        FROM roles\n        WHERE tenant_id = $1 AND deleted_at IS NULL\n        ORDER BY role_code\n        LIMIT $2 OFFSET $3\n        ",
+  "query": "\n        SELECT id, role_code, name, description, is_system\n        FROM roles\n        WHERE tenant_id = $1\n          AND deleted_at IS NULL\n          AND ($2::text IS NULL OR role_code ILIKE $2 OR name ILIKE $2)\n        ORDER BY role_code\n        LIMIT $3 OFFSET $4\n        ",
   "describe": {
     "columns": [
       {
@@ -32,6 +32,7 @@
     "parameters": {
       "Left": [
         "Uuid",
+        "Text",
         "Int8",
         "Int8"
       ]
@@ -44,5 +45,5 @@
       false
     ]
   },
-  "hash": "90978d9526fac1a4677458ed91d1ce6fb24951a4dfe98221b4cdbeec8e3659a3"
+  "hash": "8728c463eb87bc92f7e3130c10709f44c9eacc7094f0a6cb3299f2dc37297815"
 }

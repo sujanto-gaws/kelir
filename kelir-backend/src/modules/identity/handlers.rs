@@ -8,8 +8,8 @@ use uuid::Uuid;
 use super::delegation::{CreateDelegationRequest, Delegation};
 use super::delegation_service;
 use super::domain::{
-    CreateRoleRequest, CreateUserRequest, Permission, Role, UpdateRoleRequest, UpdateUserRequest,
-    User,
+    CreateRoleRequest, CreateUserRequest, Permission, Role, RoleQuery, UpdateRoleRequest,
+    UpdateUserRequest, User, UserQuery,
 };
 use super::service;
 use crate::error::AppError;
@@ -47,16 +47,20 @@ pub fn routes() -> Router<AppState> {
 
 #[utoipa::path(
     get, path = "/api/v1/identity/users", tag = "identity",
-    params(Pagination),
-    responses((status = 200, description = "Users", body = [User]), (status = 403, description = "Missing identity:user:read")),
+    params(UserQuery),
+    responses(
+        (status = 200, description = "Users; a soft-deleted user is never listed", body = [User]),
+        (status = 403, description = "Missing identity:user:read"),
+        (status = 422, description = "A query parameter that does not parse, such as a status outside the vocabulary")
+    ),
     security(("bearer" = []))
 )]
 async fn list_users(
     State(state): State<AppState>,
     caller: Authenticated,
-    QueryParams(pagination): QueryParams<Pagination>,
+    QueryParams(query): QueryParams<UserQuery>,
 ) -> Result<Json<ListEnvelope<User>>, AppError> {
-    let (users, meta) = service::list_users(&state, &caller, &pagination).await?;
+    let (users, meta) = service::list_users(&state, &caller, &query).await?;
 
     Ok(Json(ListEnvelope::new(users, meta)))
 }
@@ -156,7 +160,7 @@ async fn set_password(
 
 #[utoipa::path(
     get, path = "/api/v1/identity/roles", tag = "identity",
-    params(Pagination),
+    params(RoleQuery),
     responses(
         (status = 200, description = "Roles with their permissions. For a caller holding             `workflow:task:reassign`, each also carries `liveHolders` and `openTasks` (#508,             D-91 (2)); both are omitted for anybody else. `liveHolders` 0 beside a non-zero             `openTasks` is a role whose last holder has left while open tasks still need it:             `GET /api/v1/identity/roles/{id}/open-tasks` lists them, and             `POST /api/v1/workflow/tasks/{id}/reassign` clears each one.", body = [Role]),
         (status = 403, description = "Missing identity:role:read")
@@ -166,9 +170,9 @@ async fn set_password(
 async fn list_roles(
     State(state): State<AppState>,
     caller: Authenticated,
-    QueryParams(pagination): QueryParams<Pagination>,
+    QueryParams(query): QueryParams<RoleQuery>,
 ) -> Result<Json<ListEnvelope<Role>>, AppError> {
-    let (roles, meta) = service::list_roles(&state, &caller, &pagination).await?;
+    let (roles, meta) = service::list_roles(&state, &caller, &query).await?;
 
     Ok(Json(ListEnvelope::new(roles, meta)))
 }

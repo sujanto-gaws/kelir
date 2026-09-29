@@ -38,7 +38,8 @@ use uuid::Uuid;
 
 use super::domain::{
     CreateWorkflowRequest, DecisionRequest, DelegateRequest, ReassignTaskRequest,
-    UpdateWorkflowRequest, WorkflowDefinition, WorkflowDefinitionSummary, WorkflowTask,
+    UpdateWorkflowRequest, WorkflowDefinition, WorkflowDefinitionQuery, WorkflowDefinitionSummary,
+    WorkflowTask,
 };
 use super::service::instance::DocumentWorkflow;
 use super::service::task::DecisionResult;
@@ -48,7 +49,7 @@ use super::service::{
 use crate::error::AppError;
 use crate::extract::{JsonBody, PathParam, QueryParams};
 use crate::middleware::auth::Authenticated;
-use crate::response::{ItemEnvelope, ListEnvelope, Pagination};
+use crate::response::{ItemEnvelope, ListEnvelope};
 use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
@@ -74,21 +75,20 @@ pub fn routes() -> Router<AppState> {
 
 #[utoipa::path(
     get, path = "/api/v1/workflow/definitions", tag = "workflow",
-    params(("page" = Option<u32>, Query, description = "1-based page"),
-           ("pageSize" = Option<u32>, Query, description = "rows per page")),
+    params(WorkflowDefinitionQuery),
     responses(
         (status = 200, description = "Workflow definitions in the caller's tenant", body = [WorkflowDefinitionSummary]),
-        (status = 403, description = "Missing workflow:definition:read")
+        (status = 403, description = "Missing workflow:definition:read"),
+        (status = 422, description = "A query parameter that does not parse, such as a status outside the vocabulary")
     ),
     security(("bearer" = []))
 )]
 async fn list_definitions(
     State(state): State<AppState>,
     caller: Authenticated,
-    QueryParams(pagination): QueryParams<Pagination>,
+    QueryParams(query): QueryParams<WorkflowDefinitionQuery>,
 ) -> Result<Json<ListEnvelope<WorkflowDefinitionSummary>>, AppError> {
-    let (definitions, meta) =
-        definition_service::list_definitions(&state, &caller, &pagination).await?;
+    let (definitions, meta) = definition_service::list_definitions(&state, &caller, &query).await?;
 
     Ok(Json(ListEnvelope::new(definitions, meta)))
 }

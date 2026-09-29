@@ -3,7 +3,7 @@
 use serde_json::json;
 use uuid::Uuid;
 
-use super::{duplicate_to_conflict, search_term, system_not_found};
+use super::{duplicate_to_conflict, system_not_found};
 use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
 use crate::modules::audit::{self, domain::ObjectType, AuditEntry, ChangeSet};
@@ -23,6 +23,7 @@ use crate::modules::integration::{
 };
 use crate::response::PageMeta;
 use crate::state::AppState;
+use crate::utils::search::search_term;
 
 /// The default `timeout_seconds`, §12.1's column default.
 const DEFAULT_TIMEOUT_SECONDS: i32 = 30;

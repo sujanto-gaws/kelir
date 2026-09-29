@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT count(*)\n        FROM workflow_definitions\n        WHERE tenant_id = $1\n          AND deleted_at IS NULL\n          AND ($2::text IS NULL OR workflow_key ILIKE $2 OR name ILIKE $2)\n          AND ($3::text IS NULL OR status = $3)\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "edcd6bf451fdb0cc07ca36d9453834d5b5d96c6841c75b50d0909d444abe50d2"
+}

@@ -10,6 +10,8 @@ use serde_json::Value;
 use sqlx::{PgExecutor, PgPool};
 use uuid::Uuid;
 
+use crate::utils::search::like_contains;
+
 use crate::modules::rad::domain::list::FilterType;
 use crate::modules::rad::domain::{
     ListColumnInput, ListDefinition, ListFilterInput, ListStatus, ListSummary,
@@ -35,31 +37,68 @@ pub struct ListFields<'a> {
     pub status: Option<&'a str>,
 }
 
-pub async fn count_lists(pool: &PgPool, tenant_id: Uuid) -> Result<i64, sqlx::Error> {
+/// The list-of-lists's filters: a search term already trimmed (blank is `None`) and a
+/// status already reduced to its column value (#525).
+///
+/// **The count and the page take the same one**: a `meta.total` counted over a
+/// different population than the rows is not a smaller version of the same
+/// answer.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ListFilter<'a> {
+    pub search: Option<&'a str>,
+    pub status: Option<&'a str>,
+}
+
+/// How many lists the filters match.
+pub async fn count_lists(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    filter: ListFilter<'_>,
+) -> Result<i64, sqlx::Error> {
+    let search = filter.search.map(like_contains);
+
     sqlx::query_scalar!(
-        "SELECT count(*) FROM rad_lists WHERE tenant_id = $1 AND deleted_at IS NULL",
-        tenant_id
+        r#"
+        SELECT count(*)
+        FROM rad_lists
+        WHERE tenant_id = $1
+          AND deleted_at IS NULL
+          AND ($2::text IS NULL OR list_key ILIKE $2 OR title ILIKE $2)
+          AND ($3::text IS NULL OR status = $3)
+        "#,
+        tenant_id,
+        search,
+        filter.status,
     )
     .fetch_one(pool)
     .await
     .map(|count| count.unwrap_or(0))
 }
 
+/// One page of lists, ordered by key.
 pub async fn list_lists(
     pool: &PgPool,
     tenant_id: Uuid,
+    filter: ListFilter<'_>,
     limit: i64,
     offset: i64,
 ) -> Result<Vec<ListSummary>, sqlx::Error> {
+    let search = filter.search.map(like_contains);
+
     let rows = sqlx::query!(
         r#"
         SELECT id, list_key, title, entity_id, page_size, status, created_at, updated_at
         FROM rad_lists
-        WHERE tenant_id = $1 AND deleted_at IS NULL
+        WHERE tenant_id = $1
+          AND deleted_at IS NULL
+          AND ($2::text IS NULL OR list_key ILIKE $2 OR title ILIKE $2)
+          AND ($3::text IS NULL OR status = $3)
         ORDER BY list_key
-        LIMIT $2 OFFSET $3
+        LIMIT $4 OFFSET $5
         "#,
         tenant_id,
+        search,
+        filter.status,
         limit,
         offset
     )

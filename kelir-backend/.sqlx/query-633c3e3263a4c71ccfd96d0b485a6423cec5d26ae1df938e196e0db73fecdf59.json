@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, form_key, title, revision, jfss_version, status, entity_id,\n               created_at, updated_at\n        FROM rad_forms\n        WHERE tenant_id = $1 AND deleted_at IS NULL\n        ORDER BY form_key, revision DESC\n        LIMIT $2 OFFSET $3\n        ",
+  "query": "\n        SELECT id, list_key, title, entity_id, page_size, status, created_at, updated_at\n        FROM rad_lists\n        WHERE tenant_id = $1\n          AND deleted_at IS NULL\n          AND ($2::text IS NULL OR list_key ILIKE $2 OR title ILIKE $2)\n          AND ($3::text IS NULL OR status = $3)\n        ORDER BY list_key\n        LIMIT $4 OFFSET $5\n        ",
   "describe": {
     "columns": [
       {
@@ -10,7 +10,7 @@
       },
       {
         "ordinal": 1,
-        "name": "form_key",
+        "name": "list_key",
         "type_info": "Varchar"
       },
       {
@@ -20,13 +20,13 @@
       },
       {
         "ordinal": 3,
-        "name": "revision",
-        "type_info": "Int4"
+        "name": "entity_id",
+        "type_info": "Uuid"
       },
       {
         "ordinal": 4,
-        "name": "jfss_version",
-        "type_info": "Varchar"
+        "name": "page_size",
+        "type_info": "Int4"
       },
       {
         "ordinal": 5,
@@ -35,16 +35,11 @@
       },
       {
         "ordinal": 6,
-        "name": "entity_id",
-        "type_info": "Uuid"
-      },
-      {
-        "ordinal": 7,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 8,
+        "ordinal": 7,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
@@ -52,6 +47,8 @@
     "parameters": {
       "Left": [
         "Uuid",
+        "Text",
+        "Text",
         "Int8",
         "Int8"
       ]
@@ -60,13 +57,12 @@
       false,
       false,
       false,
-      false,
-      false,
-      false,
       true,
+      false,
+      false,
       false,
       false
     ]
   },
-  "hash": "7b310426f530d7724d5e5dfe90c9c2f4d6c6e22e710687069a8570b4cad7ed83"
+  "hash": "633c3e3263a4c71ccfd96d0b485a6423cec5d26ae1df938e196e0db73fecdf59"
 }

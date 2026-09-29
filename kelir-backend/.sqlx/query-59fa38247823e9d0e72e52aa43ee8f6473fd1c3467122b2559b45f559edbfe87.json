@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT count(*)\n        FROM document_types\n        WHERE tenant_id = $1\n          AND deleted_at IS NULL\n          AND ($2::text IS NULL OR type_code ILIKE $2 OR name ILIKE $2)\n          AND ($3::text IS NULL OR status = $3)\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "59fa38247823e9d0e72e52aa43ee8f6473fd1c3467122b2559b45f559edbfe87"
+}

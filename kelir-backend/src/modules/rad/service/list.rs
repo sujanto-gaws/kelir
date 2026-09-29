@@ -9,16 +9,17 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::super::domain::{
-    validate_create_list, validate_update_list, CreateListRequest, ListDefinition, ListStatus,
-    ListSummary, UpdateListRequest,
+    validate_create_list, validate_update_list, CreateListRequest, ListDefinition,
+    ListDefinitionQuery, ListStatus, ListSummary, UpdateListRequest,
 };
 use super::super::repository::list::{self as repo, ListFields, NewList};
 use super::super::{LIST_CREATE, LIST_DELETE, LIST_READ, LIST_UPDATE};
 use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
 use crate::modules::audit::{self, domain::ObjectType, AuditEntry, ChangeSet};
-use crate::response::{PageMeta, Pagination};
+use crate::response::PageMeta;
 use crate::state::AppState;
+use crate::utils::search::search_term;
 
 /// `rad_lists.page_size`'s own default, repeated here because a create that
 /// omits the field has to send *something* and the column default would
@@ -28,15 +29,22 @@ const DEFAULT_PAGE_SIZE: i32 = 20;
 pub async fn list_lists(
     state: &AppState,
     caller: &Authenticated,
-    pagination: &Pagination,
+    query: &ListDefinitionQuery,
 ) -> Result<(Vec<ListSummary>, PageMeta), AppError> {
     caller.require(LIST_READ)?;
 
     let tenant_id = caller.tenant_id();
-    let total = repo::count_lists(&state.pool, tenant_id).await?;
+    let pagination = query.pagination();
+    let filter = repo::ListFilter {
+        search: search_term(query.search.as_deref()),
+        status: query.status.map(ListStatus::as_db),
+    };
+
+    let total = repo::count_lists(&state.pool, tenant_id, filter).await?;
     let lists = repo::list_lists(
         &state.pool,
         tenant_id,
+        filter,
         pagination.limit(),
         pagination.offset(),
     )

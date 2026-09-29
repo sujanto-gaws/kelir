@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT count(*)\n        FROM users\n        WHERE tenant_id = $1\n          AND deleted_at IS NULL\n          AND ($2::text IS NULL\n               OR username ILIKE $2 OR email ILIKE $2 OR display_name ILIKE $2)\n          AND ($3::text IS NULL OR status = $3)\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "37f102e369a77b635d23dc55f0a5b76e22bca03dc7a2801312dbe46f0b556536"
+}

@@ -11,16 +11,17 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use super::super::domain::{
-    jfss, validate_create_form, validate_update_form, CreateFormRequest, Form, FormStatus,
-    FormSummary, UpdateFormRequest,
+    jfss, validate_create_form, validate_update_form, CreateFormRequest, Form, FormQuery,
+    FormStatus, FormSummary, UpdateFormRequest,
 };
 use super::super::repository::form::{self as repo, FormFields, NewForm};
 use super::super::{FORM_CREATE, FORM_DELETE, FORM_PUBLISH, FORM_READ, FORM_UPDATE};
 use crate::error::{AppError, ValidationDetail};
 use crate::middleware::auth::Authenticated;
 use crate::modules::audit::{self, domain::ObjectType, AuditEntry, ChangeSet};
-use crate::response::{PageMeta, Pagination};
+use crate::response::PageMeta;
 use crate::state::AppState;
+use crate::utils::search::search_term;
 
 /// The JFSS specification version a definition is recorded against.
 ///
@@ -39,15 +40,22 @@ fn jfss_version(definition: &Value) -> String {
 pub async fn list_forms(
     state: &AppState,
     caller: &Authenticated,
-    pagination: &Pagination,
+    query: &FormQuery,
 ) -> Result<(Vec<FormSummary>, PageMeta), AppError> {
     caller.require(FORM_READ)?;
 
     let tenant_id = caller.tenant_id();
-    let total = repo::count_forms(&state.pool, tenant_id).await?;
+    let pagination = query.pagination();
+    let filter = repo::FormFilter {
+        search: search_term(query.search.as_deref()),
+        status: query.status.map(FormStatus::as_db),
+    };
+
+    let total = repo::count_forms(&state.pool, tenant_id, filter).await?;
     let forms = repo::list_forms(
         &state.pool,
         tenant_id,
+        filter,
         pagination.limit(),
         pagination.offset(),
     )

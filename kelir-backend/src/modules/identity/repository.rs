@@ -11,6 +11,8 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgExecutor, PgPool};
 use uuid::Uuid;
 
+use crate::utils::search::like_contains;
+
 use super::domain::{Permission, Role, RoleSummary, User, UserStatus};
 
 /// A user row including the password hash — repository-internal, so the hash
@@ -314,32 +316,71 @@ pub async fn any_user_exists(executor: impl PgExecutor<'_>) -> Result<bool, sqlx
         .await
 }
 
-pub async fn count_users(pool: &PgPool, tenant_id: Uuid) -> Result<i64, sqlx::Error> {
+/// The user list's filters: a search term already trimmed (blank is `None`) and a
+/// status already reduced to its column value (#525).
+///
+/// **The count and the page take the same one**: a `meta.total` counted over a
+/// different population than the rows is not a smaller version of the same
+/// answer.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UserFilter<'a> {
+    pub search: Option<&'a str>,
+    pub status: Option<&'a str>,
+}
+
+/// How many live users the filters match; a soft-deleted user never counts.
+pub async fn count_users(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    filter: UserFilter<'_>,
+) -> Result<i64, sqlx::Error> {
+    let search = filter.search.map(like_contains);
+
     sqlx::query_scalar!(
-        "SELECT count(*) FROM users WHERE tenant_id = $1 AND deleted_at IS NULL",
-        tenant_id
+        r#"
+        SELECT count(*)
+        FROM users
+        WHERE tenant_id = $1
+          AND deleted_at IS NULL
+          AND ($2::text IS NULL
+               OR username ILIKE $2 OR email ILIKE $2 OR display_name ILIKE $2)
+          AND ($3::text IS NULL OR status = $3)
+        "#,
+        tenant_id,
+        search,
+        filter.status,
     )
     .fetch_one(pool)
     .await
     .map(|count| count.unwrap_or(0))
 }
 
+/// One page of live users, ordered by username.
 pub async fn list_users(
     pool: &PgPool,
     tenant_id: Uuid,
+    filter: UserFilter<'_>,
     limit: i64,
     offset: i64,
 ) -> Result<Vec<User>, sqlx::Error> {
+    let search = filter.search.map(like_contains);
+
     let rows = sqlx::query!(
         r#"
         SELECT id, username, email, display_name, status, department_id,
                must_change_password, last_login_at, locked_until, created_at
         FROM users
-        WHERE tenant_id = $1 AND deleted_at IS NULL
+        WHERE tenant_id = $1
+          AND deleted_at IS NULL
+          AND ($2::text IS NULL
+               OR username ILIKE $2 OR email ILIKE $2 OR display_name ILIKE $2)
+          AND ($3::text IS NULL OR status = $3)
         ORDER BY username
-        LIMIT $2 OFFSET $3
+        LIMIT $4 OFFSET $5
         "#,
         tenant_id,
+        search,
+        filter.status,
         limit,
         offset
     )
@@ -572,31 +613,53 @@ pub async fn replace_user_roles(
 // Roles and permissions
 // ---------------------------------------------------------------------------
 
-pub async fn count_roles(pool: &PgPool, tenant_id: Uuid) -> Result<i64, sqlx::Error> {
+/// How many roles match the list's search (#525); `None` counts them all.
+/// A role has no status to filter on. Changed together with [`list_roles`].
+pub async fn count_roles(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    search: Option<&str>,
+) -> Result<i64, sqlx::Error> {
+    let search = search.map(like_contains);
+
     sqlx::query_scalar!(
-        "SELECT count(*) FROM roles WHERE tenant_id = $1 AND deleted_at IS NULL",
-        tenant_id
+        r#"
+        SELECT count(*)
+        FROM roles
+        WHERE tenant_id = $1
+          AND deleted_at IS NULL
+          AND ($2::text IS NULL OR role_code ILIKE $2 OR name ILIKE $2)
+        "#,
+        tenant_id,
+        search,
     )
     .fetch_one(pool)
     .await
     .map(|count| count.unwrap_or(0))
 }
 
+/// One page of roles, ordered by code.
 pub async fn list_roles(
     pool: &PgPool,
     tenant_id: Uuid,
+    search: Option<&str>,
     limit: i64,
     offset: i64,
 ) -> Result<Vec<Role>, sqlx::Error> {
+    let search = search.map(like_contains);
+
     let rows = sqlx::query!(
         r#"
         SELECT id, role_code, name, description, is_system
         FROM roles
-        WHERE tenant_id = $1 AND deleted_at IS NULL
+        WHERE tenant_id = $1
+          AND deleted_at IS NULL
+          AND ($2::text IS NULL OR role_code ILIKE $2 OR name ILIKE $2)
         ORDER BY role_code
-        LIMIT $2 OFFSET $3
+        LIMIT $3 OFFSET $4
         "#,
         tenant_id,
+        search,
         limit,
         offset
     )

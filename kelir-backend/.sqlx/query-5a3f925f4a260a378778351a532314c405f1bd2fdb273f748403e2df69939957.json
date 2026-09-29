@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, list_key, title, entity_id, page_size, status, created_at, updated_at\n        FROM rad_lists\n        WHERE tenant_id = $1 AND deleted_at IS NULL\n        ORDER BY list_key\n        LIMIT $2 OFFSET $3\n        ",
+  "query": "\n        SELECT id, type_code, name, category, form_id, status, created_at, updated_at\n        FROM document_types\n        WHERE tenant_id = $1\n          AND deleted_at IS NULL\n          AND ($2::text IS NULL OR type_code ILIKE $2 OR name ILIKE $2)\n          AND ($3::text IS NULL OR status = $3)\n        ORDER BY type_code\n        LIMIT $4 OFFSET $5\n        ",
   "describe": {
     "columns": [
       {
@@ -10,23 +10,23 @@
       },
       {
         "ordinal": 1,
-        "name": "list_key",
+        "name": "type_code",
         "type_info": "Varchar"
       },
       {
         "ordinal": 2,
-        "name": "title",
+        "name": "name",
         "type_info": "Varchar"
       },
       {
         "ordinal": 3,
-        "name": "entity_id",
-        "type_info": "Uuid"
+        "name": "category",
+        "type_info": "Varchar"
       },
       {
         "ordinal": 4,
-        "name": "page_size",
-        "type_info": "Int4"
+        "name": "form_id",
+        "type_info": "Uuid"
       },
       {
         "ordinal": 5,
@@ -47,6 +47,8 @@
     "parameters": {
       "Left": [
         "Uuid",
+        "Text",
+        "Text",
         "Int8",
         "Int8"
       ]
@@ -56,11 +58,11 @@
       false,
       false,
       true,
-      false,
+      true,
       false,
       false,
       false
     ]
   },
-  "hash": "ba5256c4531506c67f892e8fee0cb40ad8f08c6f46e6d816058aa2a2b6df6d5a"
+  "hash": "5a3f925f4a260a378778351a532314c405f1bd2fdb273f748403e2df69939957"
 }

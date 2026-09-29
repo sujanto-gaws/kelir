@@ -379,7 +379,13 @@ While the major version is `0`, the public API may change in any release.
   match what is typed, sends the status it needs as a filter rather than
   applying it to a page, and says *Showing 100 of N* when there are more.
   The list endpoints for document types, forms, lists, workflow definitions,
-  users and roles take `search`, and all but roles take `status`.
+  users and roles take `search`, and all but roles take `status`. `search` is
+  a case-insensitive substring of the key and the name (a user's username,
+  email and display name), in which `%`, `_` and `\` match themselves; a
+  blank one is ignored. `status` is an exact match, and one outside the
+  resource's vocabulary is a 422. `meta.total` counts the rows matching both,
+  and the order is by key as before. The search is an unindexed `ILIKE`, as
+  the existing searches are.
 
 - **Firefox no longer refuses a value because it gave up matching a pattern**
   ([#496](https://github.com/sujanto-gaws/kelir/issues/496)). On a pattern
