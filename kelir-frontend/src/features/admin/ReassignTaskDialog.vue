@@ -122,8 +122,10 @@ const unplaced = computed(() =>
 /**
  * Every page of a list, not the first hundred.
  *
- * The identity lists have no search and page at a hundred, so a first page
- * alone would leave out whoever sorts past it, with nothing saying so.
+ * The identity lists page at a hundred, so a first page alone would leave
+ * out whoever sorts past it, with nothing saying so. They search since #525,
+ * but this dialog offers every eligible holder, so it reads every page
+ * (the Coding Standard §3.4 exception).
  */
 async function readEvery<T>(fetcher: (query: PageQuery) => Promise<Page<T>>): Promise<T[]> {
   const items: T[] = []
