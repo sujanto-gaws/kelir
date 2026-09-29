@@ -336,7 +336,7 @@ mod tests {
     }
 
     async fn live_users(pool: &PgPool) -> i64 {
-        identity_repo::count_users(pool, SYSTEM_TENANT_ID)
+        identity_repo::count_users(pool, SYSTEM_TENANT_ID, Default::default())
             .await
             .expect("counts users")
     }
@@ -356,7 +356,7 @@ mod tests {
 
         assert_eq!(outcome, BootstrapOutcome::Created);
 
-        let users = identity_repo::list_users(&pool, SYSTEM_TENANT_ID, 10, 0)
+        let users = identity_repo::list_users(&pool, SYSTEM_TENANT_ID, Default::default(), 10, 0)
             .await
             .expect("lists users");
 
@@ -384,7 +384,7 @@ mod tests {
         // opened at all.
         assert_eq!(outcome, BootstrapOutcome::AlreadyBootstrapped);
 
-        let users = identity_repo::list_users(&pool, SYSTEM_TENANT_ID, 10, 0)
+        let users = identity_repo::list_users(&pool, SYSTEM_TENANT_ID, Default::default(), 10, 0)
             .await
             .expect("lists users");
 

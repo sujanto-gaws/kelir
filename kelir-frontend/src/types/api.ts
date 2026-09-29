@@ -52,3 +52,17 @@ export interface PageQuery {
   page?: number
   pageSize?: number
 }
+
+/**
+ * A list query that also narrows on the server (#525).
+ *
+ * `search` is a case-insensitive substring match on the resource's key and
+ * name; `status` is an exact match on its status. A chooser sends these rather
+ * than fetching one page and filtering it, which left whatever sorted past the
+ * hundredth row unreachable. A resource with no status filter leaves `Status`
+ * at `never`. Blank values are not sent (`withoutBlanks`).
+ */
+export interface SearchPageQuery<Status extends string = never> extends PageQuery {
+  search?: string
+  status?: Status
+}

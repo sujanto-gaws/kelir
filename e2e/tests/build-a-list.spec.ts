@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { expect, test } from '@playwright/test'
 
 import { signInOverApi, runSuffix, type ApiSession } from '../support/api'
+import { chooseDocumentType, chooseOption } from '../support/choosers'
 import { credentials } from '../support/env'
 import { publishForm, type SeededForm } from '../support/forms'
 
@@ -104,8 +105,8 @@ test('an administrator builds a list through a screen, and it opens with rows', 
 
   await page.getByTestId('type-code').fill(typeCode)
   await page.getByTestId('type-name').fill('Listed requisition')
-  await page.getByTestId('type-form').selectOption({ label: `${form.title} (r1)` })
-  await page.getByTestId('type-list').selectOption({ label: `Built in the browser (${listKey})` })
+  await chooseOption(page, 'type-form', form.formKey, `${form.title} (r1)`)
+  await chooseOption(page, 'type-list', listKey, `Built in the browser (${listKey})`)
   await page.getByTestId('type-status').selectOption('ACTIVE')
 
   // **The save is confirmed by its response, not by the row** (#503). The type
@@ -132,7 +133,7 @@ test('an administrator builds a list through a screen, and it opens with rows', 
 
   // --- Give it a document to show -------------------------------------------
   await page.goto('/documents/new')
-  await page.getByTestId(`type-${typeCode}`).getByRole('radio').check()
+  await chooseDocumentType(page, typeCode)
   await page.getByTestId('new-document-title').fill('A row in a list nobody seeded')
   await page.getByTestId('create-document').click()
 

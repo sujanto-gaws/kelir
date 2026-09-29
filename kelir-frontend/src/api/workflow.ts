@@ -1,6 +1,6 @@
-import { getPage } from './client'
-import type { Page, PageQuery } from '@/types/api'
-import type { WorkflowDefinitionSummary } from '@/types/workflow'
+import { getPage, withoutBlanks } from './client'
+import type { Page, SearchPageQuery } from '@/types/api'
+import type { WorkflowDefinitionStatus, WorkflowDefinitionSummary } from '@/types/workflow'
 
 /**
  * The workflow endpoints (`/api/v1/workflow/*`) this client reads.
@@ -12,7 +12,8 @@ import type { WorkflowDefinitionSummary } from '@/types/workflow'
  * `types/rad.ts` states and `document-types.ts` used to.
  */
 export function listWorkflowDefinitions(
-  query: PageQuery = {},
+  query: SearchPageQuery<WorkflowDefinitionStatus> = {},
 ): Promise<Page<WorkflowDefinitionSummary>> {
-  return getPage<WorkflowDefinitionSummary>('/workflow/definitions', query)
+  // `search` matches the workflow key and the name (#525).
+  return getPage<WorkflowDefinitionSummary>('/workflow/definitions', withoutBlanks(query))
 }

@@ -9,6 +9,8 @@ use serde_json::Value;
 use sqlx::{PgExecutor, PgPool};
 use uuid::Uuid;
 
+use crate::utils::search::like_contains;
+
 use crate::modules::workflow::domain::{
     DefinitionNamingRole, WorkflowDefinition, WorkflowDefinitionStatus, WorkflowDefinitionSummary,
 };
@@ -40,32 +42,69 @@ pub struct DefinitionFields<'a> {
     pub jwss_version: Option<&'a str>,
 }
 
-pub async fn count_definitions(pool: &PgPool, tenant_id: Uuid) -> Result<i64, sqlx::Error> {
+/// The definition list's filters: a search term already trimmed (blank is `None`) and a
+/// status already reduced to its column value (#525).
+///
+/// **The count and the page take the same one**: a `meta.total` counted over a
+/// different population than the rows is not a smaller version of the same
+/// answer.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DefinitionFilter<'a> {
+    pub search: Option<&'a str>,
+    pub status: Option<&'a str>,
+}
+
+/// How many definition revisions the list's filters match.
+pub async fn count_definitions(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    filter: DefinitionFilter<'_>,
+) -> Result<i64, sqlx::Error> {
+    let search = filter.search.map(like_contains);
+
     sqlx::query_scalar!(
-        "SELECT count(*) FROM workflow_definitions WHERE tenant_id = $1 AND deleted_at IS NULL",
-        tenant_id
+        r#"
+        SELECT count(*)
+        FROM workflow_definitions
+        WHERE tenant_id = $1
+          AND deleted_at IS NULL
+          AND ($2::text IS NULL OR workflow_key ILIKE $2 OR name ILIKE $2)
+          AND ($3::text IS NULL OR status = $3)
+        "#,
+        tenant_id,
+        search,
+        filter.status,
     )
     .fetch_one(pool)
     .await
     .map(|count| count.unwrap_or(0))
 }
 
+/// One page of definition revisions, by key and then newest first.
 pub async fn list_definitions(
     pool: &PgPool,
     tenant_id: Uuid,
+    filter: DefinitionFilter<'_>,
     limit: i64,
     offset: i64,
 ) -> Result<Vec<WorkflowDefinitionSummary>, sqlx::Error> {
+    let search = filter.search.map(like_contains);
+
     let rows = sqlx::query!(
         r#"
         SELECT id, workflow_key, name, version, jwss_version, status, initial_state,
                created_at, updated_at
         FROM workflow_definitions
-        WHERE tenant_id = $1 AND deleted_at IS NULL
+        WHERE tenant_id = $1
+          AND deleted_at IS NULL
+          AND ($2::text IS NULL OR workflow_key ILIKE $2 OR name ILIKE $2)
+          AND ($3::text IS NULL OR status = $3)
         ORDER BY workflow_key, version DESC
-        LIMIT $2 OFFSET $3
+        LIMIT $4 OFFSET $5
         "#,
         tenant_id,
+        search,
+        filter.status,
         limit,
         offset
     )

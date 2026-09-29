@@ -12,11 +12,11 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { deactivateUser, listRoles, listUsers } from '@/api/identity'
+import { deactivateUser, listUsers } from '@/api/identity'
 import { toApiError } from '@/api/client'
 import { usePaginatedList } from '@/composables/usePaginatedList'
 import { useAuthStore } from '@/stores/auth'
-import { USER_STATUS_LABELS, type Role, type User } from '@/types/identity'
+import { USER_STATUS_LABELS, type User } from '@/types/identity'
 import ConfirmDialog from './ConfirmDialog.vue'
 import UserFormDialog from './UserFormDialog.vue'
 
@@ -37,9 +37,6 @@ const canDelete = computed(() => auth.can('identity:user:delete'))
 const canReadRoles = computed(() => auth.can('identity:role:read'))
 
 const users = usePaginatedList<User>(listUsers)
-
-const roles = ref<Role[]>([])
-const rolesError = ref('')
 
 const isFormOpen = ref(false)
 const editing = ref<User | null>(null)
@@ -64,24 +61,6 @@ function statusVariant(status: User['status']): 'default' | 'secondary' | 'destr
   }
 
   return status === 'LOCKED' ? 'destructive' : 'secondary'
-}
-
-async function loadRoles(): Promise<void> {
-  if (!canReadRoles.value) {
-    // Without `identity:role:read` the catalogue is unreadable, so the form
-    // offers no role picker rather than an empty one that looks broken.
-    return
-  }
-
-  rolesError.value = ''
-
-  try {
-    // One page at the backend's maximum: the role catalogue is small and a
-    // paged picker inside a form would be a worse trade than a single call.
-    roles.value = (await listRoles({ page: 1, pageSize: 100 })).items
-  } catch (error) {
-    rolesError.value = toApiError(error).message
-  }
 }
 
 function openCreate(): void {
@@ -129,7 +108,7 @@ async function confirmDeactivate(): Promise<void> {
 }
 
 onMounted(async () => {
-  await Promise.all([users.load(), loadRoles()])
+  await users.load()
 })
 </script>
 
@@ -149,10 +128,6 @@ onMounted(async () => {
     <Alert v-if="users.error.value" variant="destructive">
       <p>{{ users.error.value }}</p>
       <Button variant="outline" size="sm" class="mt-3" @click="users.load()">Try again</Button>
-    </Alert>
-
-    <Alert v-if="rolesError" variant="destructive">
-      Roles could not be loaded, so the role picker is unavailable: {{ rolesError }}
     </Alert>
 
     <p v-if="users.isLoading.value" class="text-sm text-muted-foreground">Loading users…</p>
@@ -241,7 +216,12 @@ onMounted(async () => {
       </div>
     </template>
 
-    <UserFormDialog v-model:open="isFormOpen" :user="editing" :roles="roles" @saved="onSaved()" />
+    <UserFormDialog
+      v-model:open="isFormOpen"
+      :user="editing"
+      :roles-readable="canReadRoles"
+      @saved="onSaved()"
+    />
 
     <ConfirmDialog
       v-model:open="isConfirmOpen"

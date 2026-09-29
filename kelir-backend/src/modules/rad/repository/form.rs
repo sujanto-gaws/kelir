@@ -11,6 +11,8 @@ use serde_json::Value;
 use sqlx::{PgExecutor, PgPool};
 use uuid::Uuid;
 
+use crate::utils::search::like_contains;
+
 use crate::modules::rad::domain::{Form, FormStatus, FormSummary};
 
 /// The columns a create writes.
@@ -41,32 +43,69 @@ pub struct FormFields<'a> {
     pub entity_id: Option<Option<Uuid>>,
 }
 
-pub async fn count_forms(pool: &PgPool, tenant_id: Uuid) -> Result<i64, sqlx::Error> {
+/// The form list's filters: a search term already trimmed (blank is `None`) and a
+/// status already reduced to its column value (#525).
+///
+/// **The count and the page take the same one**: a `meta.total` counted over a
+/// different population than the rows is not a smaller version of the same
+/// answer.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FormFilter<'a> {
+    pub search: Option<&'a str>,
+    pub status: Option<&'a str>,
+}
+
+/// How many form revisions the list's filters match.
+pub async fn count_forms(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    filter: FormFilter<'_>,
+) -> Result<i64, sqlx::Error> {
+    let search = filter.search.map(like_contains);
+
     sqlx::query_scalar!(
-        "SELECT count(*) FROM rad_forms WHERE tenant_id = $1 AND deleted_at IS NULL",
-        tenant_id
+        r#"
+        SELECT count(*)
+        FROM rad_forms
+        WHERE tenant_id = $1
+          AND deleted_at IS NULL
+          AND ($2::text IS NULL OR form_key ILIKE $2 OR title ILIKE $2)
+          AND ($3::text IS NULL OR status = $3)
+        "#,
+        tenant_id,
+        search,
+        filter.status,
     )
     .fetch_one(pool)
     .await
     .map(|count| count.unwrap_or(0))
 }
 
+/// One page of form revisions, by key and then newest revision first.
 pub async fn list_forms(
     pool: &PgPool,
     tenant_id: Uuid,
+    filter: FormFilter<'_>,
     limit: i64,
     offset: i64,
 ) -> Result<Vec<FormSummary>, sqlx::Error> {
+    let search = filter.search.map(like_contains);
+
     let rows = sqlx::query!(
         r#"
         SELECT id, form_key, title, revision, jfss_version, status, entity_id,
                created_at, updated_at
         FROM rad_forms
-        WHERE tenant_id = $1 AND deleted_at IS NULL
+        WHERE tenant_id = $1
+          AND deleted_at IS NULL
+          AND ($2::text IS NULL OR form_key ILIKE $2 OR title ILIKE $2)
+          AND ($3::text IS NULL OR status = $3)
         ORDER BY form_key, revision DESC
-        LIMIT $2 OFFSET $3
+        LIMIT $4 OFFSET $5
         "#,
         tenant_id,
+        search,
+        filter.status,
         limit,
         offset
     )

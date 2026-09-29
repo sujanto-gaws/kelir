@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { createDocument } from '@/api/documents'
@@ -9,6 +9,7 @@ import { Alert } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { SearchSelect, type SearchSource } from '@/components/ui/search-select'
 import type { DocumentTypeSummary } from '@/types/document-type'
 
 /**
@@ -36,8 +37,6 @@ import type { DocumentTypeSummary } from '@/types/document-type'
  */
 const router = useRouter()
 
-const types = ref<DocumentTypeSummary[]>([])
-const loading = ref(true)
 const problem = ref('')
 const creating = ref(false)
 
@@ -45,35 +44,30 @@ const title = ref('')
 const chosen = ref<string>('')
 
 /**
- * The types a document may actually be created from.
+ * The types a document may actually be created from, searched on the server.
  *
  * `DEPRECATED` is what an administrator sets to stop new documents being
  * created from a type while its existing ones keep working — the alternative to
  * retiring it, which `delete_type` refuses while documents exist. A chooser that
  * offered deprecated types would defeat the one control that exists for this.
+ *
+ * **`ACTIVE` is asked of the server, not applied to a page (#525).** Filtering
+ * a hundred rows after they arrived showed fewer than a hundred and could never
+ * show the type that sorted past them.
  */
-const available = computed(() => types.value.filter((type) => type.status === 'ACTIVE'))
+const typeSource: SearchSource<DocumentTypeSummary> = {
+  fetch: (query) => listDocumentTypes({ ...query, status: 'ACTIVE' }),
+  value: (type) => type.id,
+  label: (type) => `${type.name} (${type.typeCode})`,
+  // Shown, greyed and explained: see the note on this screen.
+  disabled: (type) => !type.formId,
+}
 
-const chosenType = computed(() => available.value.find((type) => type.id === chosen.value))
-
-const ready = computed(
-  () => Boolean(chosenType.value?.formId) && title.value.trim() !== '' && !creating.value,
-)
-
-onMounted(async () => {
-  try {
-    const page = await listDocumentTypes({ pageSize: 100 })
-    types.value = page.items
-  } catch (error) {
-    problem.value =
-      error instanceof ApiError ? error.message : 'The document types could not be loaded.'
-  } finally {
-    loading.value = false
-  }
-})
+// A type with no form cannot be chosen, so a chosen type always has one.
+const ready = computed(() => chosen.value !== '' && title.value.trim() !== '' && !creating.value)
 
 async function start(): Promise<void> {
-  if (!chosenType.value || creating.value) {
+  if (!ready.value) {
     return
   }
 
@@ -85,7 +79,7 @@ async function start(): Promise<void> {
     // is where the form is, and a chooser that also rendered the form would be
     // the workspace with a different name.
     const created = await createDocument({
-      documentTypeId: chosenType.value.id,
+      documentTypeId: chosen.value,
       title: title.value.trim(),
     })
 
@@ -111,60 +105,49 @@ async function start(): Promise<void> {
       {{ problem }}
     </Alert>
 
-    <p v-if="loading" class="text-sm text-muted-foreground">Loading document types…</p>
-
-    <template v-else>
-      <p v-if="available.length === 0" class="text-sm text-muted-foreground" data-testid="no-types">
-        No document type is active in this tenant yet. An administrator configures one before a
-        document can be raised.
-      </p>
-
-      <template v-else>
-        <fieldset class="space-y-2">
-          <legend class="text-sm font-medium">Document type</legend>
-
-          <label
-            v-for="type in available"
-            :key="type.id"
-            class="flex cursor-pointer items-start gap-3 rounded-md border border-border p-3"
-            :data-testid="`type-${type.typeCode}`"
-          >
-            <input
-              v-model="chosen"
-              type="radio"
-              name="document-type"
-              :value="type.id"
-              :disabled="!type.formId"
-              class="mt-1"
-            />
-            <span>
-              <span class="font-medium">{{ type.name }}</span>
-              <span class="ml-2 text-xs text-muted-foreground">{{ type.typeCode }}</span>
-              <!-- Shown rather than hidden, and said rather than left blank. -->
-              <span v-if="!type.formId" class="block text-sm text-muted-foreground">
-                This type has no form bound to it yet, so there would be nothing to fill in.
-              </span>
-            </span>
-          </label>
-        </fieldset>
-
-        <div class="space-y-2">
-          <Label for="new-document-title">Title</Label>
-          <Input
-            id="new-document-title"
-            v-model="title"
-            data-testid="new-document-title"
-            placeholder="What this document is about"
-          />
-          <p class="text-sm text-muted-foreground">
-            What this is called in every list it appears in. The form's own fields come next.
-          </p>
-        </div>
-
-        <Button :disabled="!ready" data-testid="create-document" @click="start">
-          Create draft
-        </Button>
+    <SearchSelect
+      id="new-document-type"
+      v-model="chosen"
+      label="Document type"
+      variant="list"
+      test-id="document-type"
+      search-placeholder="Search by name or code"
+      :source="typeSource"
+      :option-test-id="(type) => `type-${type.typeCode}`"
+    >
+      <template #option="{ row: type, label }">
+        <template v-if="type">
+          <span class="font-medium">{{ type.name }}</span>
+          <span class="ml-2 text-xs text-muted-foreground">{{ type.typeCode }}</span>
+          <!-- Shown rather than hidden, and said rather than left blank. -->
+          <span v-if="!type.formId" class="block text-sm text-muted-foreground">
+            This type has no form bound to it yet, so there would be nothing to fill in.
+          </span>
+        </template>
+        <template v-else>{{ label }}</template>
       </template>
-    </template>
+
+      <template #empty>
+        <span data-testid="no-types">
+          No document type is active in this tenant yet. An administrator configures one before a
+          document can be raised.
+        </span>
+      </template>
+    </SearchSelect>
+
+    <div class="space-y-2">
+      <Label for="new-document-title">Title</Label>
+      <Input
+        id="new-document-title"
+        v-model="title"
+        data-testid="new-document-title"
+        placeholder="What this document is about"
+      />
+      <p class="text-sm text-muted-foreground">
+        What this is called in every list it appears in. The form's own fields come next.
+      </p>
+    </div>
+
+    <Button :disabled="!ready" data-testid="create-document" @click="start"> Create draft </Button>
   </section>
 </template>

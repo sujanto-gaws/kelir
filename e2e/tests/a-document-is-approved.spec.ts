@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 
 import { runSuffix, signInOverApi, type ApiSession } from '../support/api'
+import { chooseDocumentType } from '../support/choosers'
 import { createDocumentType, type SeededDocumentType } from '../support/documents'
 import { credentials } from '../support/env'
 import { publishForm, type SeededForm } from '../support/forms'
@@ -149,10 +150,7 @@ test('a submitted document is approved by somebody else, and its status follows'
     // --- A user creates a document from a type that carries a workflow ------
     await requester.goto('/documents/new')
 
-    await requester
-      .getByTestId(`type-${documentType.typeCode}`)
-      .getByRole('radio')
-      .check()
+    await chooseDocumentType(requester, documentType.typeCode)
     await requester.getByTestId('new-document-title').fill(title)
     await requester.getByTestId('create-document').click()
 
@@ -279,7 +277,7 @@ test('a rejection cannot be recorded without a reason, and carries it once given
     await signIn(requester, username, password)
 
     await requester.goto('/documents/new')
-    await requester.getByTestId(`type-${documentType.typeCode}`).getByRole('radio').check()
+    await chooseDocumentType(requester, documentType.typeCode)
     await requester.getByTestId('new-document-title').fill(`Refused outright ${suffix}`)
     await requester.getByTestId('create-document').click()
 
@@ -348,7 +346,7 @@ test('a returned document is corrected, sent again, and keeps its number', async
     await signIn(requester, username, password)
 
     await requester.goto('/documents/new')
-    await requester.getByTestId(`type-${documentType.typeCode}`).getByRole('radio').check()
+    await chooseDocumentType(requester, documentType.typeCode)
     await requester.getByTestId('new-document-title').fill(`Sent back once ${suffix}`)
     await requester.getByTestId('create-document').click()
 
@@ -436,7 +434,7 @@ test('a document under a workflow cannot have its status set by hand', async ({ 
   await signIn(page, username, password)
 
   await page.goto('/documents/new')
-  await page.getByTestId(`type-${documentType.typeCode}`).getByRole('radio').check()
+  await chooseDocumentType(page, documentType.typeCode)
   await page.getByTestId('new-document-title').fill(`Under approval ${suffix}`)
   await page.getByTestId('create-document').click()
 
@@ -479,7 +477,7 @@ test('a large request branches to the director, whose window sends it on, and th
     await signIn(requester, username, password)
 
     await requester.goto('/documents/new')
-    await requester.getByTestId(`type-${documentType.typeCode}`).getByRole('radio').check()
+    await chooseDocumentType(requester, documentType.typeCode)
     await requester.getByTestId('new-document-title').fill(`Above the threshold ${suffix}`)
     await requester.getByTestId('create-document').click()
 

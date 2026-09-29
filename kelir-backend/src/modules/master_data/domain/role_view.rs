@@ -21,6 +21,7 @@ use uuid::Uuid;
 use super::{PartyRoleStatus, PartyStatusCode, PartyType};
 use crate::error::{AppError, ValidationDetail};
 use crate::response::Pagination;
+use crate::utils::search::parse_search;
 
 /// Longest `search` this accepts, past which the request is a 422 rather than a
 /// scan. Matches the bound on the columns it searches (§4, `VARCHAR(200)`):
@@ -146,12 +147,15 @@ impl RoleViewQuery {
     pub fn filters(&self) -> Result<RoleViewFilters, AppError> {
         let mut details = Vec::new();
 
-        let search = self
-            .search
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned);
+        // The trim, the blank rule and the NUL refusal are every list's
+        // (`utils::search`); the bound is this view's.
+        let search = match parse_search("search", self.search.as_deref()) {
+            Ok(search) => search.map(str::to_owned),
+            Err(detail) => {
+                details.push(detail);
+                None
+            }
+        };
 
         if search
             .as_deref()
@@ -361,6 +365,20 @@ mod tests {
             .expect_err("an over-long search is refused");
 
         assert!(matches!(error, AppError::Validation { .. }));
+    }
+
+    #[test]
+    fn refuses_a_nul_in_a_search() {
+        // PostgreSQL `text` cannot hold 0x00; bound, it was a 500.
+        let error = query("search", "AC\0ME")
+            .filters()
+            .expect_err("a NUL is refused");
+
+        assert!(
+            matches!(error, AppError::Validation { ref details }
+                if details.iter().any(|detail| detail.path == "search")),
+            "{error:?}"
+        );
     }
 
     #[test]

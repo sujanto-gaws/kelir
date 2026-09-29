@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, workflow_key, name, version, jwss_version, status, initial_state,\n               created_at, updated_at\n        FROM workflow_definitions\n        WHERE tenant_id = $1 AND deleted_at IS NULL\n        ORDER BY workflow_key, version DESC\n        LIMIT $2 OFFSET $3\n        ",
+  "query": "\n        SELECT id, workflow_key, name, version, jwss_version, status, initial_state,\n               created_at, updated_at\n        FROM workflow_definitions\n        WHERE tenant_id = $1\n          AND deleted_at IS NULL\n          AND ($2::text IS NULL OR workflow_key ILIKE $2 OR name ILIKE $2)\n          AND ($3::text IS NULL OR status = $3)\n        ORDER BY workflow_key, version DESC\n        LIMIT $4 OFFSET $5\n        ",
   "describe": {
     "columns": [
       {
@@ -52,6 +52,8 @@
     "parameters": {
       "Left": [
         "Uuid",
+        "Text",
+        "Text",
         "Int8",
         "Int8"
       ]
@@ -68,5 +70,5 @@
       false
     ]
   },
-  "hash": "c005b8bfb418effbcd5054bffc72fb356a9540089d6c739e2c1fb59b26784464"
+  "hash": "6d9b0db6be9de9f708da4389c8291953c29b7f6fd34494f522cf6ee3c0adecb3"
 }

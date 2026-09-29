@@ -1,15 +1,17 @@
-import { deleteItem, getItem, getPage, postItem, putItem } from './client'
-import type { Page, PageQuery } from '@/types/api'
+import { deleteItem, getItem, getPage, postItem, putItem, withoutBlanks } from './client'
+import type { Page, SearchPageQuery } from '@/types/api'
 import type {
   CreateFormRequest,
   CreateListRequest,
   CreateMenuRequest,
   Form,
+  FormStatus,
   FormSummary,
   MenuEntry,
   FormSubmission,
   ListRow,
   ListDefinition,
+  ListStatus,
   ListSummary,
   LookupOption,
   LookupQuery,
@@ -172,8 +174,9 @@ export function listActions(
  * with their JFSS documents inlined is twenty definition trees on the wire to
  * render a list of titles, and `FormSummary` exists for exactly that reason.
  */
-export function listForms(query: PageQuery = {}): Promise<Page<FormSummary>> {
-  return getPage<FormSummary>('/rad/forms', query)
+export function listForms(query: SearchPageQuery<FormStatus> = {}): Promise<Page<FormSummary>> {
+  // `search` matches the form key and the title (#525).
+  return getPage<FormSummary>('/rad/forms', withoutBlanks(query))
 }
 
 /**
@@ -292,6 +295,7 @@ export function deleteList(id: string): Promise<void> {
  * rather than as a page failure: binding a list is optional, and a person who
  * may configure a type but not read list definitions can still configure one.
  */
-export function listLists(query: PageQuery = {}): Promise<Page<ListSummary>> {
-  return getPage<ListSummary>('/rad/lists', query)
+export function listLists(query: SearchPageQuery<ListStatus> = {}): Promise<Page<ListSummary>> {
+  // `search` matches the list key and the title (#525).
+  return getPage<ListSummary>('/rad/lists', withoutBlanks(query))
 }

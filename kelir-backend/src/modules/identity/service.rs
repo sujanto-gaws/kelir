@@ -6,8 +6,8 @@ use uuid::Uuid;
 use super::domain::{
     open_tasks_refusal, published_definitions_refusal, validate_create_user, validate_distinct_ids,
     validate_password_value, with_staffing, CreateRoleRequest, CreateUserRequest, Permission, Role,
-    UpdateRoleRequest, UpdateUserRequest, User, UserStatus, ROLE_HAS_OPEN_TASKS,
-    ROLE_NAMED_BY_PUBLISHED_DEFINITION,
+    RoleQuery, UpdateRoleRequest, UpdateUserRequest, User, UserQuery, UserStatus,
+    ROLE_HAS_OPEN_TASKS, ROLE_NAMED_BY_PUBLISHED_DEFINITION,
 };
 use super::repository as repo;
 use crate::error::{AppError, ValidationDetail};
@@ -21,19 +21,27 @@ use crate::modules::workflow::service::task as workflow_task;
 use crate::modules::workflow::TASK_REASSIGN;
 use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
+use crate::utils::search::search_term;
 
 pub async fn list_users(
     state: &AppState,
     caller: &Authenticated,
-    pagination: &Pagination,
+    query: &UserQuery,
 ) -> Result<(Vec<User>, PageMeta), AppError> {
     caller.require("identity:user:read")?;
 
     let tenant_id = caller.tenant_id();
-    let total = repo::count_users(&state.pool, tenant_id).await?;
+    let pagination = query.pagination();
+    let filter = repo::UserFilter {
+        search: search_term(query.search.as_deref())?,
+        status: query.status.map(UserStatus::as_db),
+    };
+
+    let total = repo::count_users(&state.pool, tenant_id, filter).await?;
     let users = repo::list_users(
         &state.pool,
         tenant_id,
+        filter,
         pagination.limit(),
         pagination.offset(),
     )
@@ -304,15 +312,19 @@ pub async fn set_password(
 pub async fn list_roles(
     state: &AppState,
     caller: &Authenticated,
-    pagination: &Pagination,
+    query: &RoleQuery,
 ) -> Result<(Vec<Role>, PageMeta), AppError> {
     caller.require("identity:role:read")?;
 
     let tenant_id = caller.tenant_id();
-    let total = repo::count_roles(&state.pool, tenant_id).await?;
+    let pagination = query.pagination();
+    let search = search_term(query.search.as_deref())?;
+
+    let total = repo::count_roles(&state.pool, tenant_id, search).await?;
     let mut roles = repo::list_roles(
         &state.pool,
         tenant_id,
+        search,
         pagination.limit(),
         pagination.offset(),
     )

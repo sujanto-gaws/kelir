@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { expect, test } from '@playwright/test'
 
 import { signInOverApi, runSuffix, type ApiSession } from '../support/api'
+import { chooseDocumentType, chooseOption } from '../support/choosers'
 import { credentials } from '../support/env'
 import { publishForm, type SeededForm } from '../support/forms'
 import { pageUntilVisible } from '../support/paging'
@@ -96,7 +97,7 @@ test('an administrator configures a document type through a screen, and a docume
   // Named from the seeded form rather than from a literal, so a change to how
   // the chooser labels a revision fails here rather than silently selecting
   // nothing.
-  await page.getByTestId('type-form').selectOption({ label: `${form.title} (r1)` })
+  await chooseOption(page, 'type-form', form.formKey, `${form.title} (r1)`)
 
   // A document may only be created from an ACTIVE type, so the flow sets it —
   // which is the state a person configuring a type actually has to reach.
@@ -152,7 +153,7 @@ test('an administrator configures a document type through a screen, and a docume
   // The type the flow configured is offered, and it is **selectable** — a type
   // with no form bound is rendered disabled with the reason, so checking this
   // radio asserts the binding took as well as the type.
-  await page.getByTestId(`type-${typeCode}`).getByRole('radio').check()
+  await chooseDocumentType(page, typeCode)
   await page.getByTestId('new-document-title').fill('Two standing desks')
   await page.getByTestId('create-document').click()
 

@@ -22,6 +22,7 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::error::{AppError, ValidationDetail};
 use crate::response::Pagination;
+use crate::utils::search::search_term;
 
 /// Longest `search` a lookup accepts, past which the request is a 422 rather
 /// than a scan.
@@ -163,12 +164,9 @@ impl LookupQuery {
     /// A blank search means *everything*, which is what a chooser sends when its
     /// box is empty — not "records whose name contains nothing".
     pub fn search(&self) -> Result<Option<String>, AppError> {
-        let search = self
-            .search
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned);
+        // The trim, the blank rule and the NUL refusal are every list's
+        // (`utils::search`); the bound is this lookup's.
+        let search = search_term(self.search.as_deref())?.map(str::to_owned);
 
         if search
             .as_deref()
@@ -242,6 +240,20 @@ mod tests {
             .expect_err("an over-long search is refused");
 
         assert!(matches!(error, AppError::Validation { .. }));
+    }
+
+    #[test]
+    fn refuses_a_nul_in_a_search() {
+        // PostgreSQL `text` cannot hold 0x00; bound, it was a 500.
+        let error = with_search("AC\0ME")
+            .search()
+            .expect_err("a NUL is refused");
+
+        assert!(
+            matches!(error, AppError::Validation { ref details }
+                if details[0].path == "search"),
+            "{error:?}"
+        );
     }
 
     #[test]

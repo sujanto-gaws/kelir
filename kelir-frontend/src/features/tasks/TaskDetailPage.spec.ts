@@ -14,6 +14,7 @@ import {
   type FakeReply,
   type RecordedRequest,
 } from '@/lib/testing/fake-backend'
+import { filler, searchedPage } from '@/lib/testing/searched-page'
 
 /**
  * One task, and what it is asking (#179 AC4).
@@ -117,6 +118,8 @@ describe('TaskDetailPage', () => {
   let current: Record<string, unknown>
   let onDecision: (request: RecordedRequest) => FakeReply
   let onDelegation: (request: RecordedRequest) => FakeReply
+  /** The user directory the picker searches. */
+  let directory: typeof people
 
   beforeEach(() => {
     setActivePinia(createPinia())
@@ -136,6 +139,7 @@ describe('TaskDetailPage', () => {
     })
 
     onDelegation = () => ({ status: 200, body: itemBody(current) })
+    directory = people
 
     backend = installFakeBackend((request) => {
       if (request.url.includes('/decision')) {
@@ -147,14 +151,7 @@ describe('TaskDetailPage', () => {
       }
 
       if (request.url.startsWith('/identity/users')) {
-        return {
-          status: 200,
-          body: {
-            success: true,
-            data: people,
-            meta: { page: 1, pageSize: 100, total: people.length },
-          },
-        }
+        return searchedPage(request, directory, ['username', 'email', 'displayName'])
       }
 
       if (request.url.includes('/claim')) {
@@ -652,9 +649,55 @@ describe('TaskDetailPage', () => {
       .findAll('option')
       .map((option) => option.text())
 
-    expect(labels).toContain('Budi Santoso')
-    expect(labels).not.toContain('Ani Wijaya')
+    expect(labels).toContain('Budi Santoso (budi)')
+    expect(labels).not.toContain('Ani Wijaya (ani)')
     expect(wrapper.find('[data-testid="hand-over-unavailable"]').exists()).toBe(false)
+  })
+
+  it('reaches, by search, somebody who sorts past the first hundred', async () => {
+    // #525: one page of a hundred, filtered here, and whoever sorted after it
+    // could not be handed anything. The inactive filler is the server's to
+    // leave out, so the page it sends is already only the people who can sign in.
+    signIn(['workflow:task:execute', 'identity:user:read'])
+    current = detail({ assignment: 'MINE', status: 'ASSIGNED' })
+    directory = [
+      ...filler(105, (n) => ({
+        ...people[1],
+        id: `u-${n}`,
+        username: `aa${n}`,
+        displayName: `Crowd ${n}`,
+      })),
+      ...filler(5, (n) => ({
+        ...people[1],
+        id: `u-off-${n}`,
+        username: `zz-off-${n}`,
+        status: 'INACTIVE',
+      })),
+      { ...people[1], id: 'u-zul', username: 'zulkifli', displayName: 'Zulkifli Hasan' },
+    ]
+
+    const wrapper = await render()
+    await wrapper.get('[data-testid="start-hand-over"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="delegate-user-status"]').text()).toContain(
+      'Showing 100 of 106',
+    )
+
+    await wrapper.get('[data-testid="delegate-user-search"]').setValue('zul')
+    await wrapper.get('[data-testid="delegate-user-search"]').trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+
+    const users = backend.requests.filter((request) => request.url === '/identity/users')
+    expect(users.slice(-1)[0]?.params).toEqual({ search: 'zul', pageSize: 100, status: 'ACTIVE' })
+
+    await wrapper.get('#delegate-user').setValue('u-zul')
+    await wrapper.get('[data-testid="confirm-hand-over"]').trigger('click')
+    await flushPromises()
+
+    const posted = backend.requests.find((request) => request.url.includes('/delegation'))
+    expect(posted?.body).toMatchObject({ delegateUserId: 'u-zul' })
+    expect(wrapper.get('[data-testid="task-notice"]').text()).toContain('Zulkifli Hasan has it now')
   })
 
   it('says why the picker is empty when the caller cannot read users', async () => {

@@ -6,6 +6,8 @@
 use sqlx::{PgExecutor, PgPool};
 use uuid::Uuid;
 
+use crate::utils::search::like_contains;
+
 use super::domain::{
     DocumentType, DocumentTypeStatus, DocumentTypeSummary, SecurityLevel, WorkflowBinding,
 };
@@ -50,31 +52,68 @@ pub struct BindableForm {
     pub status: String,
 }
 
-pub async fn count_types(pool: &PgPool, tenant_id: Uuid) -> Result<i64, sqlx::Error> {
+/// The type list's filters: a search term already trimmed (blank is `None`) and a
+/// status already reduced to its column value (#525).
+///
+/// **The count and the page take the same one**: a `meta.total` counted over a
+/// different population than the rows is not a smaller version of the same
+/// answer.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DocumentTypeFilter<'a> {
+    pub search: Option<&'a str>,
+    pub status: Option<&'a str>,
+}
+
+/// How many types the list's filters match.
+pub async fn count_types(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    filter: DocumentTypeFilter<'_>,
+) -> Result<i64, sqlx::Error> {
+    let search = filter.search.map(like_contains);
+
     sqlx::query_scalar!(
-        "SELECT count(*) FROM document_types WHERE tenant_id = $1 AND deleted_at IS NULL",
-        tenant_id
+        r#"
+        SELECT count(*)
+        FROM document_types
+        WHERE tenant_id = $1
+          AND deleted_at IS NULL
+          AND ($2::text IS NULL OR type_code ILIKE $2 OR name ILIKE $2)
+          AND ($3::text IS NULL OR status = $3)
+        "#,
+        tenant_id,
+        search,
+        filter.status,
     )
     .fetch_one(pool)
     .await
     .map(|count| count.unwrap_or(0))
 }
 
+/// One page of types, ordered by code.
 pub async fn list_types(
     pool: &PgPool,
     tenant_id: Uuid,
+    filter: DocumentTypeFilter<'_>,
     limit: i64,
     offset: i64,
 ) -> Result<Vec<DocumentTypeSummary>, sqlx::Error> {
+    let search = filter.search.map(like_contains);
+
     let rows = sqlx::query!(
         r#"
         SELECT id, type_code, name, category, form_id, status, created_at, updated_at
         FROM document_types
-        WHERE tenant_id = $1 AND deleted_at IS NULL
+        WHERE tenant_id = $1
+          AND deleted_at IS NULL
+          AND ($2::text IS NULL OR type_code ILIKE $2 OR name ILIKE $2)
+          AND ($3::text IS NULL OR status = $3)
         ORDER BY type_code
-        LIMIT $2 OFFSET $3
+        LIMIT $4 OFFSET $5
         "#,
         tenant_id,
+        search,
+        filter.status,
         limit,
         offset
     )

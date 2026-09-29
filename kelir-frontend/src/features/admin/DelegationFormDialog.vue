@@ -6,12 +6,14 @@ import { Button } from '@/components/ui/button'
 import { Dialog } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { SearchSelect, type SearchSource } from '@/components/ui/search-select'
 import { Select } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import { createDelegation, listUsers } from '@/api/identity'
 import { listDocumentTypes } from '@/api/document-types'
 import { useFormErrors } from '@/composables/useFormErrors'
 import { useAuthStore } from '@/stores/auth'
+import type { DocumentTypeSummary } from '@/types/document-type'
 import type { Delegation, DelegationScope, User } from '@/types/identity'
 
 /**
@@ -53,8 +55,6 @@ const scope = ref<DelegationScope>('ALL')
 const documentTypeId = ref('')
 const reason = ref('')
 
-const people = ref<User[]>([])
-const documentTypes = ref<{ value: string; label: string }[]>([])
 const isSaving = ref(false)
 const submitted = ref(false)
 
@@ -65,9 +65,31 @@ const scopeOptions: { value: DelegationScope; label: string }[] = [
   { value: 'DOCUMENT_TYPE', label: 'One type of document' },
 ]
 
-const peopleOptions = computed(() =>
-  people.value.map((person) => ({ value: person.id, label: person.displayName })),
-)
+/**
+ * Who can take it, searched on the server (#525).
+ *
+ * Not yourself, and nobody who cannot sign in. `ck_delegations_not_self`
+ * refuses the first and the service refuses the second; offering either would
+ * be a choice the product then declines. The second is a column, so the server
+ * is asked for it; the first is a rule about the caller, so it stays here.
+ */
+const peopleSource: SearchSource<User> = {
+  fetch: (query) => listUsers({ ...query, status: 'ACTIVE' }),
+  value: (person) => person.id,
+  label: (person) => `${person.displayName} (${person.username})`,
+  exclude: (person) => person.id === auth.user?.id,
+}
+
+/**
+ * The types a window can be narrowed to. A caller who may not read document
+ * types can still open an `ALL` window, which is the common case; the chooser
+ * says it could not load and the narrower choice is what goes missing.
+ */
+const typeSource: SearchSource<DocumentTypeSummary> = {
+  fetch: (query) => listDocumentTypes(query),
+  value: (type) => type.id,
+  label: (type) => `${type.name} (${type.typeCode})`,
+}
 
 /**
  * Mirrors the backend's rules so a slip costs no round trip. The backend
@@ -110,31 +132,6 @@ const errors = computed<Record<string, string>>(() => ({
   ...fieldErrors.value,
 }))
 
-async function loadChoices(): Promise<void> {
-  try {
-    const page = await listUsers({ page: 1, pageSize: 100 })
-
-    people.value = page.items.filter(
-      // Not yourself, and nobody who cannot sign in. `ck_delegations_not_self`
-      // refuses the first and the service refuses the second; offering either
-      // would be a choice the product then declines.
-      (person) => person.id !== auth.user?.id && person.status === 'ACTIVE',
-    )
-  } catch {
-    people.value = []
-  }
-
-  try {
-    const types = await listDocumentTypes({ page: 1, pageSize: 100 })
-
-    documentTypes.value = types.items.map((type) => ({ value: type.id, label: type.name }))
-  } catch {
-    // A caller who may not read document types can still open an `ALL` window,
-    // which is the common case. The narrower choice is what goes missing.
-    documentTypes.value = []
-  }
-}
-
 function resetForm(): void {
   delegateUserId.value = ''
   startsAt.value = ''
@@ -151,7 +148,6 @@ watch(
   (isOpen) => {
     if (isOpen) {
       resetForm()
-      void loadChoices()
     }
   },
   { immediate: true },
@@ -202,12 +198,14 @@ async function submit(): Promise<void> {
       <Alert v-if="formError" variant="destructive">{{ formError }}</Alert>
 
       <div class="space-y-2">
-        <Label for="delegation-delegate">Hand my approvals to</Label>
-        <Select
+        <SearchSelect
           id="delegation-delegate"
           v-model="delegateUserId"
-          :options="peopleOptions"
+          label="Hand my approvals to"
+          test-id="delegation-delegate"
           placeholder="Choose somebody"
+          search-placeholder="Search by name, username or email"
+          :source="peopleSource"
           :disabled="isSaving"
           :invalid="Boolean(errors.delegateUserId)"
           described-by="delegation-delegate-error"
@@ -272,12 +270,14 @@ async function submit(): Promise<void> {
       </div>
 
       <div v-if="scope === 'DOCUMENT_TYPE'" class="space-y-2">
-        <Label for="delegation-type">Document type</Label>
-        <Select
+        <SearchSelect
           id="delegation-type"
           v-model="documentTypeId"
-          :options="documentTypes"
+          label="Document type"
+          test-id="delegation-type"
           placeholder="Choose a type"
+          search-placeholder="Search by name or code"
+          :source="typeSource"
           :disabled="isSaving"
           :invalid="Boolean(errors.documentTypeId)"
           described-by="delegation-type-error"

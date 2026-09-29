@@ -21,8 +21,9 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::domain::{
-    validate_create, validate_update, CreateDocumentTypeRequest, DocumentType, DocumentTypeStatus,
-    DocumentTypeSummary, SecurityLevel, UpdateDocumentTypeRequest, WorkflowBinding,
+    validate_create, validate_update, CreateDocumentTypeRequest, DocumentType, DocumentTypeQuery,
+    DocumentTypeStatus, DocumentTypeSummary, SecurityLevel, UpdateDocumentTypeRequest,
+    WorkflowBinding,
 };
 use super::repository::{self as repo, DocumentTypeFields, NewDocumentType};
 use super::{TYPE_CREATE, TYPE_DELETE, TYPE_READ, TYPE_UPDATE};
@@ -30,21 +31,29 @@ use crate::error::{AppError, ValidationDetail};
 use crate::middleware::auth::Authenticated;
 use crate::modules::audit::{self, domain::ObjectType, AuditEntry, ChangeSet};
 use crate::modules::workflow::repository::definition as workflow_repository;
-use crate::response::{PageMeta, Pagination};
+use crate::response::PageMeta;
 use crate::state::AppState;
+use crate::utils::search::search_term;
 
 pub async fn list_types(
     state: &AppState,
     caller: &Authenticated,
-    pagination: &Pagination,
+    query: &DocumentTypeQuery,
 ) -> Result<(Vec<DocumentTypeSummary>, PageMeta), AppError> {
     caller.require(TYPE_READ)?;
 
     let tenant_id = caller.tenant_id();
-    let total = repo::count_types(&state.pool, tenant_id).await?;
+    let pagination = query.pagination();
+    let filter = repo::DocumentTypeFilter {
+        search: search_term(query.search.as_deref())?,
+        status: query.status.map(DocumentTypeStatus::as_db),
+    };
+
+    let total = repo::count_types(&state.pool, tenant_id, filter).await?;
     let types = repo::list_types(
         &state.pool,
         tenant_id,
+        filter,
         pagination.limit(),
         pagination.offset(),
     )

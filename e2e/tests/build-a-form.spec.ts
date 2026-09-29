@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 
 import { signInOverApi, runSuffix, type ApiSession } from '../support/api'
+import { chooseDocumentType, chooseOption } from '../support/choosers'
 import { credentials } from '../support/env'
 
 /**
@@ -122,7 +123,7 @@ test('an administrator builds a form through a screen, and a document is raised 
 
   // The chooser offers published revisions, which is what a document may pin —
   // and the only published revision this flow has is the one it just made.
-  await page.getByTestId('type-form').selectOption({ label: `${formTitle} (r1)` })
+  await chooseOption(page, 'type-form', formKey, `${formTitle} (r1)`)
   await page.getByTestId('type-status').selectOption('ACTIVE')
 
   // **The save is confirmed by its response, not by the row** (#503, #521).
@@ -152,7 +153,7 @@ test('an administrator builds a form through a screen, and a document is raised 
   // renderer cannot draw fails here rather than passing on its own rendering.
   await page.goto('/documents/new')
 
-  await page.getByTestId(`type-${typeCode}`).getByRole('radio').check()
+  await chooseDocumentType(page, typeCode)
   await page.getByTestId('new-document-title').fill('A form nobody seeded')
   await page.getByTestId('create-document').click()
 

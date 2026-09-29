@@ -1,5 +1,5 @@
-import { deleteItem, getItem, getPage, postItem, postVoid, putItem } from './client'
-import type { Page, PageQuery } from '@/types/api'
+import { deleteItem, getItem, getPage, postItem, postVoid, putItem, withoutBlanks } from './client'
+import type { Page, PageQuery, SearchPageQuery } from '@/types/api'
 import type {
   CreateDelegationRequest,
   CreateRoleRequest,
@@ -12,6 +12,7 @@ import type {
   UpdateRoleRequest,
   UpdateUserRequest,
   User,
+  UserStatus,
 } from '@/types/identity'
 
 /**
@@ -32,9 +33,12 @@ const USERS = '/identity/users'
 const ROLES = '/identity/roles'
 const DELEGATIONS = '/identity/delegations'
 
-/** Paginated. `page` is 1-based; `pageSize` is clamped server-side to 1..=100. */
-export function listUsers(query: PageQuery = {}): Promise<Page<User>> {
-  return getPage<User>(USERS, query)
+/**
+ * Paginated. `page` is 1-based; `pageSize` is clamped server-side to 1..=100.
+ * `search` matches the username, the email and the display name (#525).
+ */
+export function listUsers(query: SearchPageQuery<UserStatus> = {}): Promise<Page<User>> {
+  return getPage<User>(USERS, withoutBlanks(query))
 }
 
 export function getUser(id: string): Promise<User> {
@@ -66,8 +70,9 @@ export function setUserPassword(id: string, request: SetPasswordRequest): Promis
   return postVoid(`${USERS}/${id}/password`, request)
 }
 
-export function listRoles(query: PageQuery = {}): Promise<Page<Role>> {
-  return getPage<Role>(ROLES, query)
+/** `search` matches the role code and the name (#525). A role has no status to filter on. */
+export function listRoles(query: SearchPageQuery = {}): Promise<Page<Role>> {
+  return getPage<Role>(ROLES, withoutBlanks(query))
 }
 
 export function getRole(id: string): Promise<Role> {

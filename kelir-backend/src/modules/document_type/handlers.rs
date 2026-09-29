@@ -15,14 +15,15 @@ use axum::{Json, Router};
 use uuid::Uuid;
 
 use super::domain::{
-    CreateDocumentTypeRequest, DocumentType, DocumentTypeSummary, UpdateDocumentTypeRequest,
+    CreateDocumentTypeRequest, DocumentType, DocumentTypeQuery, DocumentTypeSummary,
+    UpdateDocumentTypeRequest,
 };
 use super::numbering::{NumberingRule, SetNumberingRuleRequest};
 use super::{numbering_service, service};
 use crate::error::AppError;
 use crate::extract::{JsonBody, PathParam, QueryParams};
 use crate::middleware::auth::Authenticated;
-use crate::response::{ItemEnvelope, ListEnvelope, Pagination};
+use crate::response::{ItemEnvelope, ListEnvelope};
 use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
@@ -101,19 +102,20 @@ async fn clear_numbering_rule(
 
 #[utoipa::path(
     get, path = "/api/v1/document-types", tag = "document-type",
-    params(Pagination),
+    params(DocumentTypeQuery),
     responses(
         (status = 200, description = "Document types, without their workflow bindings", body = [DocumentTypeSummary]),
-        (status = 403, description = "Missing document-type:read")
+        (status = 403, description = "Missing document-type:read"),
+        (status = 422, description = "A query parameter that does not parse, such as a status outside the vocabulary")
     ),
     security(("bearer" = []))
 )]
 async fn list_types(
     State(state): State<AppState>,
     caller: Authenticated,
-    QueryParams(pagination): QueryParams<Pagination>,
+    QueryParams(query): QueryParams<DocumentTypeQuery>,
 ) -> Result<Json<ListEnvelope<DocumentTypeSummary>>, AppError> {
-    let (types, meta) = service::list_types(&state, &caller, &pagination).await?;
+    let (types, meta) = service::list_types(&state, &caller, &query).await?;
 
     Ok(Json(ListEnvelope::new(types, meta)))
 }

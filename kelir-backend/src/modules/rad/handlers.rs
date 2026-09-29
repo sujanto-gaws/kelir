@@ -19,15 +19,16 @@ use super::domain::menu::{CreateMenuRequest, MenuEntry, UpdateMenuRequest};
 use super::domain::render::RenderableList;
 use super::domain::submission::{Submission, SubmitFormRequest};
 use super::domain::{
-    CreateFormRequest, CreateListRequest, Form, FormSummary, ListDefinition, ListSummary,
-    LookupOption, LookupQuery, LookupSource, UpdateFormRequest, UpdateListRequest,
+    CreateFormRequest, CreateListRequest, Form, FormQuery, FormSummary, ListDefinition,
+    ListDefinitionQuery, ListSummary, LookupOption, LookupQuery, LookupSource, UpdateFormRequest,
+    UpdateListRequest,
 };
 use super::service;
 use super::service::render::{ListRow, RowQuery};
 use crate::error::AppError;
 use crate::extract::{JsonBody, PathParam, QueryParams};
 use crate::middleware::auth::Authenticated;
-use crate::response::{ItemEnvelope, ListEnvelope, Pagination};
+use crate::response::{ItemEnvelope, ListEnvelope};
 use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
@@ -97,19 +98,20 @@ pub fn routes() -> Router<AppState> {
 
 #[utoipa::path(
     get, path = "/api/v1/rad/forms", tag = "rad",
-    params(Pagination),
+    params(FormQuery),
     responses(
         (status = 200, description = "Form definitions, without their documents", body = [FormSummary]),
-        (status = 403, description = "Missing rad:form:read")
+        (status = 403, description = "Missing rad:form:read"),
+        (status = 422, description = "A query parameter that does not parse, such as a status outside the vocabulary")
     ),
     security(("bearer" = []))
 )]
 async fn list_forms(
     State(state): State<AppState>,
     caller: Authenticated,
-    QueryParams(pagination): QueryParams<Pagination>,
+    QueryParams(query): QueryParams<FormQuery>,
 ) -> Result<Json<ListEnvelope<FormSummary>>, AppError> {
-    let (forms, meta) = service::form::list_forms(&state, &caller, &pagination).await?;
+    let (forms, meta) = service::form::list_forms(&state, &caller, &query).await?;
 
     Ok(Json(ListEnvelope::new(forms, meta)))
 }
@@ -257,19 +259,20 @@ async fn delete_form(
 
 #[utoipa::path(
     get, path = "/api/v1/rad/lists", tag = "rad",
-    params(Pagination),
+    params(ListDefinitionQuery),
     responses(
         (status = 200, description = "List definitions, without their columns and filters", body = [ListSummary]),
-        (status = 403, description = "Missing rad:list:read")
+        (status = 403, description = "Missing rad:list:read"),
+        (status = 422, description = "A query parameter that does not parse, such as a status outside the vocabulary")
     ),
     security(("bearer" = []))
 )]
 async fn list_lists(
     State(state): State<AppState>,
     caller: Authenticated,
-    QueryParams(pagination): QueryParams<Pagination>,
+    QueryParams(query): QueryParams<ListDefinitionQuery>,
 ) -> Result<Json<ListEnvelope<ListSummary>>, AppError> {
-    let (lists, meta) = service::list::list_lists(&state, &caller, &pagination).await?;
+    let (lists, meta) = service::list::list_lists(&state, &caller, &query).await?;
 
     Ok(Json(ListEnvelope::new(lists, meta)))
 }

@@ -1,8 +1,9 @@
-import { deleteItem, getItem, getPage, postItem, putItem } from './client'
-import type { Page, PageQuery } from '@/types/api'
+import { deleteItem, getItem, getPage, postItem, putItem, withoutBlanks } from './client'
+import type { Page, SearchPageQuery } from '@/types/api'
 import type {
   CreateDocumentTypeRequest,
   DocumentType,
+  DocumentTypeStatus,
   DocumentTypeSummary,
   NumberingRule,
   SetNumberingRuleRequest,
@@ -19,8 +20,11 @@ import type {
  * accepted SRS §9 criterion 4 against — an administrator configured a document
  * type over the API because there was no screen. There is one now.
  */
-export function listDocumentTypes(query: PageQuery = {}): Promise<Page<DocumentTypeSummary>> {
-  return getPage<DocumentTypeSummary>('/document-types', query)
+export function listDocumentTypes(
+  query: SearchPageQuery<DocumentTypeStatus> = {},
+): Promise<Page<DocumentTypeSummary>> {
+  // `search` matches the type code and the name (#525).
+  return getPage<DocumentTypeSummary>('/document-types', withoutBlanks(query))
 }
 
 /** One type, with its bindings and workflows. */

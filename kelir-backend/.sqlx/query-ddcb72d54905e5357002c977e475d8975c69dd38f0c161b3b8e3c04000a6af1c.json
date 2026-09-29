@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, type_code, name, category, form_id, status, created_at, updated_at\n        FROM document_types\n        WHERE tenant_id = $1 AND deleted_at IS NULL\n        ORDER BY type_code\n        LIMIT $2 OFFSET $3\n        ",
+  "query": "\n        SELECT id, form_key, title, revision, jfss_version, status, entity_id,\n               created_at, updated_at\n        FROM rad_forms\n        WHERE tenant_id = $1\n          AND deleted_at IS NULL\n          AND ($2::text IS NULL OR form_key ILIKE $2 OR title ILIKE $2)\n          AND ($3::text IS NULL OR status = $3)\n        ORDER BY form_key, revision DESC\n        LIMIT $4 OFFSET $5\n        ",
   "describe": {
     "columns": [
       {
@@ -10,23 +10,23 @@
       },
       {
         "ordinal": 1,
-        "name": "type_code",
+        "name": "form_key",
         "type_info": "Varchar"
       },
       {
         "ordinal": 2,
-        "name": "name",
+        "name": "title",
         "type_info": "Varchar"
       },
       {
         "ordinal": 3,
-        "name": "category",
-        "type_info": "Varchar"
+        "name": "revision",
+        "type_info": "Int4"
       },
       {
         "ordinal": 4,
-        "name": "form_id",
-        "type_info": "Uuid"
+        "name": "jfss_version",
+        "type_info": "Varchar"
       },
       {
         "ordinal": 5,
@@ -35,11 +35,16 @@
       },
       {
         "ordinal": 6,
+        "name": "entity_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 7,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
@@ -47,6 +52,8 @@
     "parameters": {
       "Left": [
         "Uuid",
+        "Text",
+        "Text",
         "Int8",
         "Int8"
       ]
@@ -55,12 +62,13 @@
       false,
       false,
       false,
-      true,
-      true,
       false,
+      false,
+      false,
+      true,
       false,
       false
     ]
   },
-  "hash": "21907e723dea2543b53c6250ccc05e082cb51b4bb00889ee63658037d24bffba"
+  "hash": "ddcb72d54905e5357002c977e475d8975c69dd38f0c161b3b8e3c04000a6af1c"
 }

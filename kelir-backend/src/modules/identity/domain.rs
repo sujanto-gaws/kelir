@@ -2,11 +2,12 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::error::{AppError, ValidationDetail};
 use crate::modules::workflow::domain::{DefinitionNamingRole, WorkflowDefinitionStatus};
+use crate::response::Pagination;
 use crate::utils::serde::present_or_absent;
 
 /// Account lifecycle (SRS FR-IDM-007).
@@ -67,6 +68,65 @@ impl UserStatus {
             .filter(|status| status.can_sign_in())
             .map(Self::as_db)
             .collect()
+    }
+}
+
+/// The user list's query string: paging, a search and a status.
+///
+/// Unknown parameters are ignored, as [`Pagination`] ignores them everywhere;
+/// a `status` outside the vocabulary is a 422 naming `status`, because it
+/// deserializes into the enum. Added for the choosers of
+/// [#525](https://github.com/sujanto-gaws/kelir/issues/525), which read the
+/// server's match rather than filtering one page of 100.
+#[derive(Debug, Clone, Default, Deserialize, IntoParams)]
+#[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
+pub struct UserQuery {
+    /// 1-based page number; absent or below 1 is 1.
+    pub page: Option<u32>,
+    /// Rows per page, clamped to `response::MAX_PAGE_SIZE`.
+    pub page_size: Option<u32>,
+    /// Case-insensitive substring of the username, the email or the display name.
+    /// `%`, `_` and `\` in it match themselves; a blank search is no search.
+    pub search: Option<String>,
+    /// `ACTIVE`, `INACTIVE`, `LOCKED` or `PENDING_ACTIVATION`, matched exactly.
+    pub status: Option<UserStatus>,
+}
+
+impl UserQuery {
+    pub fn pagination(&self) -> Pagination {
+        Pagination {
+            page: self.page,
+            page_size: self.page_size,
+        }
+    }
+}
+
+/// The role list's query string: paging and a search.
+///
+/// A role has no status, so there is no `status` filter: an unknown parameter
+/// is ignored, as [`Pagination`] ignores them everywhere. Added for the choosers of
+/// [#525](https://github.com/sujanto-gaws/kelir/issues/525), which read the
+/// server's match rather than filtering one page of 100.
+#[derive(Debug, Clone, Default, Deserialize, IntoParams)]
+#[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
+pub struct RoleQuery {
+    /// 1-based page number; absent or below 1 is 1.
+    pub page: Option<u32>,
+    /// Rows per page, clamped to `response::MAX_PAGE_SIZE`.
+    pub page_size: Option<u32>,
+    /// Case-insensitive substring of the role code or the name. `%`, `_` and `\` in
+    /// it match themselves; a blank search is no search.
+    pub search: Option<String>,
+}
+
+impl RoleQuery {
+    pub fn pagination(&self) -> Pagination {
+        Pagination {
+            page: self.page,
+            page_size: self.page_size,
+        }
     }
 }
 

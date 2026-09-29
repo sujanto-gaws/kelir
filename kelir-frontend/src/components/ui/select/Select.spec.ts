@@ -41,4 +41,14 @@ describe('Select', () => {
 
     expect(wrapper.get('select').element.value).toBe('posted')
   })
+
+  it('greys out an option marked disabled and leaves the rest choosable', () => {
+    const wrapper = mount(Select, {
+      props: { modelValue: '', options: [options[0], { ...options[1], disabled: true }] },
+    })
+    const [draft, posted] = wrapper.findAll('option')
+
+    expect((draft.element as HTMLOptionElement).disabled).toBe(false)
+    expect((posted.element as HTMLOptionElement).disabled).toBe(true)
+  })
 })

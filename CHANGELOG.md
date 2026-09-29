@@ -382,6 +382,28 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A chooser reaches every row, not the first 100**
+  ([#525](https://github.com/sujanto-gaws/kelir/issues/525)). The document
+  type on **New document**, the form, list and workflow of a document type,
+  the roles on a user, the person and type of a delegation window, and the
+  person a task is handed to each read one page of 100 rows, and the form and
+  list choosers then kept only the published or active ones. A row that
+  sorted past the hundredth could not be picked. Each is now a searching
+  chooser (`SearchSelect`): it asks the server for the first 100 rows that
+  match what is typed, sends the status it needs as a filter rather than
+  applying it to a page, and says *Showing 100 of N* when there are more.
+  The list endpoints for document types, forms, lists, workflow definitions,
+  users and roles take `search`, and all but roles take `status`. `search` is
+  a case-insensitive substring of the key and the name (a user's username,
+  email and display name), in which `%`, `_` and `\` match themselves; a
+  blank one is ignored. `status` is an exact match, and one outside the
+  resource's vocabulary is a 422. `meta.total` counts the rows matching both,
+  and the order is by key as before. The search is an unindexed `ILIKE`, as
+  the existing searches are.
+  **A NUL in any list's search is now a 422** on the search field, where it
+  was a 500 on every searching list, the documents list and external systems
+  included.
+
 - **Firefox no longer refuses a value because it gave up matching a pattern**
   ([#496](https://github.com/sujanto-gaws/kelir/issues/496)). On a pattern
   that backtracks long enough, Firefox throws *too much recursion*, and the

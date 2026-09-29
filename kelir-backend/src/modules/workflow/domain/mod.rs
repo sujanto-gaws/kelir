@@ -11,7 +11,8 @@ pub mod task_type;
 pub use approval_time::ApprovalTime;
 pub use definition::{
     validate_create, validate_update, CreateWorkflowRequest, DefinitionNamingRole,
-    UpdateWorkflowRequest, WorkflowDefinition, WorkflowDefinitionStatus, WorkflowDefinitionSummary,
+    UpdateWorkflowRequest, WorkflowDefinition, WorkflowDefinitionQuery, WorkflowDefinitionStatus,
+    WorkflowDefinitionSummary,
 };
 pub use graph::{
     AssigneeType, AssignmentRule, Graph, State, TaskSpec, Transition, TransitionAction,

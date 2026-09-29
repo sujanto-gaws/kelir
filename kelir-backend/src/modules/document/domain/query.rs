@@ -38,6 +38,7 @@ use super::link::EntityType;
 use super::status::DocumentStatus;
 use crate::error::{AppError, ValidationDetail};
 use crate::response::Pagination;
+use crate::utils::search::parse_search;
 
 /// The same bound the role view puts on its search term, and the same reason:
 /// a search term is an index scan's argument, and an unbounded one is an
@@ -86,12 +87,15 @@ impl DocumentQuery {
     pub fn filters(&self) -> Result<DocumentFilters, AppError> {
         let mut details = Vec::new();
 
-        let search = self
-            .search
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned);
+        // The trim, the blank rule and the NUL refusal are every list's
+        // (`utils::search`); the bound is this list's.
+        let search = match parse_search("search", self.search.as_deref()) {
+            Ok(search) => search.map(str::to_owned),
+            Err(detail) => {
+                details.push(detail);
+                None
+            }
+        };
 
         if search
             .as_deref()
@@ -336,6 +340,22 @@ mod tests {
                 .search,
             None
         );
+    }
+
+    #[test]
+    fn a_nul_in_a_search_is_refused_alongside_the_other_bad_parameters() {
+        // PostgreSQL `text` cannot hold 0x00; bound, it was a 500.
+        let mut parameters = query();
+        parameters.search = Some("a\0b".to_owned());
+        parameters.status = Some("NOPE".to_owned());
+
+        let error = parameters.filters().expect_err("both are refused");
+        let AppError::Validation { details } = error else {
+            panic!("expected a validation failure");
+        };
+
+        let paths: Vec<&str> = details.iter().map(|detail| detail.path.as_str()).collect();
+        assert_eq!(paths, ["search", "status"], "{details:?}");
     }
 
     #[test]

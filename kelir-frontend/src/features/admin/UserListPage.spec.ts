@@ -276,4 +276,24 @@ describe('UserListPage', () => {
     expect(wrapper.text()).toContain('Page 2 of 3')
     expect(buttonLabelled(wrapper.findAll('button'), 'Previous')?.element.disabled).toBe(false)
   })
+
+  it('reads the role catalogue when the form opens, searched on the server', async () => {
+    // #525: the page used to read one page of a hundred roles on mount and hand
+    // it to the form, so a role past the hundredth could not be granted. The
+    // form's own picker searches instead, and only once somebody opens it.
+    const wrapper = await mountPage([
+      'identity:user:read',
+      'identity:user:create',
+      'identity:role:read',
+    ])
+
+    expect(backend.countOf('/identity/roles')).toBe(0)
+
+    await buttonLabelled(wrapper.findAll('button'), 'New user')?.trigger('click')
+    await flushPromises()
+
+    const read = backend.requests.find((request) => request.url === '/identity/roles')
+    expect(read?.params).toEqual({ pageSize: 100 })
+    expect(wrapper.find('[data-testid="user-roles-search"]').exists()).toBe(true)
+  })
 })

@@ -22,6 +22,7 @@ use uuid::Uuid;
 use crate::error::{AppError, ValidationDetail};
 use crate::modules::workflow::repository::inbox::{InboxFilters, InboxOrder, InboxScope};
 use crate::response::Pagination;
+use crate::utils::search::parse_search;
 
 /// The longest search term this list will take.
 ///
@@ -82,8 +83,13 @@ pub struct InboxQuery {
 ///
 /// `%` and `_` are `LIKE`'s wildcards and a person typing either means the
 /// character — searching for `50%` should not return everything.
+///
+/// The trim, the blank rule and the refusal of a NUL (which PostgreSQL `text`
+/// cannot hold) are [`parse_search`]'s, shared with every other list's search.
 pub fn normalize_search(term: Option<&str>) -> Result<Option<String>, AppError> {
-    let Some(trimmed) = term.map(str::trim).filter(|value| !value.is_empty()) else {
+    let Some(trimmed) =
+        parse_search("q", term).map_err(|detail| AppError::validation(vec![detail]))?
+    else {
         return Ok(None);
     };
 
@@ -251,6 +257,20 @@ mod tests {
             normalize_search(Some("  desk  ")).expect("a term"),
             Some("desk".to_owned())
         );
+    }
+
+    #[test]
+    fn a_nul_in_a_search_is_refused_on_q() {
+        // PostgreSQL `text` cannot hold 0x00; bound, it was a 500.
+        for term in ["\0", "desk\0top"] {
+            let error = normalize_search(Some(term)).expect_err("refused");
+
+            let AppError::Validation { details } = error else {
+                panic!("expected a validation failure");
+            };
+
+            assert_eq!(details[0].path, "q", "{term:?}");
+        }
     }
 
     #[test]

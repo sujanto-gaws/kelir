@@ -53,8 +53,3 @@ fn duplicate_to_conflict(error: sqlx::Error, message: &str) -> AppError {
         _ => error.into(),
     }
 }
-
-/// A search term with its whitespace trimmed; blank is no search.
-fn search_term(value: Option<&str>) -> Option<&str> {
-    value.map(str::trim).filter(|value| !value.is_empty())
-}
