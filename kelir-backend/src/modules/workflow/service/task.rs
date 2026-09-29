@@ -79,6 +79,8 @@
 //! [#512]: https://github.com/sujanto-gaws/kelir/issues/512
 //! [ADR-0042]: ../../../../../docs/architectures/adr/0042.%20An%20Administrator%20Reassigns%20an%20Open%20Task%20and%20Nothing%20Cancels%20One.md
 
+use std::collections::HashMap;
+
 use serde_json::json;
 use uuid::Uuid;
 
@@ -1115,6 +1117,25 @@ pub async fn open_tasks_needing_role(
     role_id: Uuid,
 ) -> Result<i64, AppError> {
     Ok(repo::count_open_tasks_needing_role(&mut **transaction, tenant_id, role_id).await?)
+}
+
+/// [`open_tasks_needing_role`]'s count for each of `role_ids`, from one
+/// statement ([#508]). A role no open task needs is absent, and reads as zero.
+///
+/// The Roles screen's count beside each role (**D-91** (2)): what an
+/// administrator reads to find a role whose last holder has left while tasks
+/// still need it, and clears with `POST /api/v1/workflow/tasks/{id}/reassign`.
+/// Read on the pool, **outside any delete's lock**, like
+/// [`list_open_tasks_needing_role`]: a diagnostic. The caller has checked the
+/// permission and read the roles.
+///
+/// [#508]: https://github.com/sujanto-gaws/kelir/issues/508
+pub async fn open_tasks_needing_roles(
+    state: &AppState,
+    tenant_id: Uuid,
+    role_ids: &[Uuid],
+) -> Result<HashMap<Uuid, i64>, AppError> {
+    Ok(repo::count_open_tasks_needing_roles(&state.pool, tenant_id, role_ids).await?)
 }
 
 /// The tasks [`open_tasks_needing_role`] counts, a page of them, and their

@@ -157,7 +157,10 @@ async fn set_password(
 #[utoipa::path(
     get, path = "/api/v1/identity/roles", tag = "identity",
     params(Pagination),
-    responses((status = 200, description = "Roles with their permissions", body = [Role])),
+    responses(
+        (status = 200, description = "Roles with their permissions. For a caller holding             `workflow:task:reassign`, each also carries `liveHolders` and `openTasks` (#508,             D-91 (2)); both are omitted for anybody else. `liveHolders` 0 beside a non-zero             `openTasks` is a role whose last holder has left while open tasks still need it:             `GET /api/v1/identity/roles/{id}/open-tasks` lists them, and             `POST /api/v1/workflow/tasks/{id}/reassign` clears each one.", body = [Role]),
+        (status = 403, description = "Missing identity:role:read")
+    ),
     security(("bearer" = []))
 )]
 async fn list_roles(
@@ -172,7 +175,11 @@ async fn list_roles(
 
 #[utoipa::path(
     get, path = "/api/v1/identity/roles/{id}", tag = "identity",
-    responses((status = 200, description = "The role", body = Role)),
+    responses(
+        (status = 200, description = "The role. `liveHolders` and `openTasks` as on the list:             present only for a caller holding `workflow:task:reassign` (#508).", body = Role),
+        (status = 403, description = "Missing identity:role:read"),
+        (status = 404, description = "No live role by that id in this tenant")
+    ),
     security(("bearer" = []))
 )]
 async fn get_role(

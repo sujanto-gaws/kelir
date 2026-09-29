@@ -71,6 +71,20 @@ export interface Role {
    */
   isSystem: boolean
   permissions: Permission[]
+  /**
+   * How many users hold the role today (#508, D-91 (2)): a grant inside its
+   * window, held by a user who can sign in, each user counted once.
+   *
+   * **Present only for a caller holding `workflow:task:reassign`**, and
+   * omitted, not null, for anyone else. Absent means *not told*, never 0.
+   */
+  liveHolders?: number
+  /**
+   * How many open tasks need the role (#508): the count a delete is refused
+   * on, and the total of `listOpenTasksOfRole`. Present and omitted with
+   * `liveHolders`.
+   */
+  openTasks?: number
 }
 
 /**

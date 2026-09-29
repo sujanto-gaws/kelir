@@ -1,6 +1,8 @@
 //! Queries for `workflow_tasks`, its history, and the decisions recorded
 //! against it (§7.6, §7.7, §7.8).
 
+use std::collections::HashMap;
+
 use sqlx::{PgExecutor, PgPool};
 use uuid::Uuid;
 
@@ -714,6 +716,35 @@ pub async fn count_open_tasks_needing_role<'e, E: PgExecutor<'e>>(
         .total)
 }
 
+/// [`count_open_tasks_needing_role`] for each role of a page of them, in one
+/// statement ([#508]).
+///
+/// The Roles screen shows, beside each role, how many open tasks need it, so an
+/// administrator can find a role whose last holder has left while its tasks
+/// wait (**D-91** (2)). Asking [`count_open_tasks_needing_role`] once a role
+/// would be a statement per row of the page. This is the same statement, asked
+/// about the page's roles at once, so the count beside a role and the count its
+/// delete refuses on are one predicate.
+///
+/// A role no open task needs is absent from the map rather than present with
+/// zero; the caller reads a missing role as zero.
+///
+/// [#508]: https://github.com/sujanto-gaws/kelir/issues/508
+pub async fn count_open_tasks_needing_roles<'e, E: PgExecutor<'e>>(
+    executor: E,
+    tenant_id: Uuid,
+    role_ids: &[Uuid],
+) -> Result<HashMap<Uuid, i64>, sqlx::Error> {
+    Ok(
+        open_tasks_needing_roles(executor, tenant_id, Asked::Counts(role_ids))
+            .await?
+            .into_iter()
+            .filter(|(_, page)| page.total > 0)
+            .map(|(role_id, page)| (role_id, page.total))
+            .collect(),
+    )
+}
+
 /// A page of [`count_open_tasks_needing_role`]'s tasks, and how many there
 /// are.
 pub struct OpenTasksPage {
@@ -725,21 +756,11 @@ pub struct OpenTasksPage {
 /// The open tasks that need `role_id`, a page of them, and their number, in
 /// one statement ([#532]).
 ///
-/// **The predicate is written once**, in the `needing` CTE, and
-/// [`count_open_tasks_needing_role`] is this statement with a page of none.
-/// So what `delete_role` counts and what
+/// **The predicate is written once**, in [`open_tasks_needing_roles`]'s
+/// `needing` CTE, and [`count_open_tasks_needing_role`] is this statement with
+/// a page of none. So what `delete_role` counts and what
 /// `GET /api/v1/identity/roles/{id}/open-tasks` lists cannot differ in which
 /// tasks they mean.
-///
-/// **`total` rides on the one row the outer `SELECT` always returns**, rather
-/// than on each task as `count(*) OVER ()` would: the count is taken over the
-/// CTE and the page is joined to it laterally, so a page past the end, or of
-/// size 0, still carries the total. The inbox's `InboxPage::matching` is an
-/// `Option` for want of that row.
-///
-/// The document, and the holder's name, are joined **inside the page** and
-/// **`LEFT`**, after the predicate has chosen the tasks, so a join that found
-/// nothing would drop a column and never a task.
 ///
 /// [#532]: https://github.com/sujanto-gaws/kelir/issues/532
 pub async fn open_tasks_needing_role<'e, E: PgExecutor<'e>>(
@@ -749,11 +770,92 @@ pub async fn open_tasks_needing_role<'e, E: PgExecutor<'e>>(
     limit: i64,
     offset: i64,
 ) -> Result<OpenTasksPage, sqlx::Error> {
+    let asked = Asked::Page {
+        role_id,
+        limit,
+        offset,
+    };
+    let page = open_tasks_needing_roles(executor, tenant_id, asked)
+        .await?
+        .into_iter()
+        .find(|(asked, _)| *asked == role_id)
+        .map(|(_, page)| page);
+
+    // A role the statement found no row for is a role no task needs.
+    Ok(page.unwrap_or(OpenTasksPage {
+        rows: Vec::new(),
+        total: 0,
+    }))
+}
+
+/// What [`open_tasks_needing_roles`] is asked: **several roles' counts, or one
+/// role's page, and never several roles' pages.**
+///
+/// The statement can take a page for each of several roles, and nothing asks
+/// for that. The shape is left out rather than supported untested: a test of
+/// one role, or of counts, cannot tell whether one role's page stays apart
+/// from another's, so a mistake there would go unseen until a caller asked.
+/// A caller that needs several roles' pages adds a variant here and the test
+/// that shows the pages kept apart.
+enum Asked<'a> {
+    /// Each role's total, and no tasks: a page of none.
+    Counts(&'a [Uuid]),
+    /// One role's total, and a page of its tasks.
+    Page {
+        role_id: Uuid,
+        limit: i64,
+        offset: i64,
+    },
+}
+
+/// The open tasks that need each role `asked` names, their number, and for
+/// [`Asked::Page`] a page of them, in one statement ([#532], [#508]).
+///
+/// **This is the one definition of *needs the role*.** A delete's count and
+/// the list behind it ask about one role, and the Roles screen's counts ask
+/// about a page of roles. Each role is answered as though it had been asked
+/// alone, because the predicate reads that role's id and code and nothing about
+/// any other role. The count and the page are each taken per role. The page
+/// half is only ever asked for one role ([`Asked`]).
+///
+/// **`total` rides on the one row per role the outer `SELECT` always
+/// returns**, rather than on each task as `count(*) OVER ()` would: the count
+/// is taken over the CTE and the page is joined to it laterally, so a page past
+/// the end, or of size 0, still carries the total. The inbox's
+/// `InboxPage::matching` is an `Option` for want of that row.
+///
+/// The document, and the holder's name, are joined **inside the page** and
+/// **`LEFT`**, after the predicate has chosen the tasks, so a join that found
+/// nothing would drop a column and never a task.
+///
+/// [#532]: https://github.com/sujanto-gaws/kelir/issues/532
+/// [#508]: https://github.com/sujanto-gaws/kelir/issues/508
+async fn open_tasks_needing_roles<'e, E: PgExecutor<'e>>(
+    executor: E,
+    tenant_id: Uuid,
+    asked: Asked<'_>,
+) -> Result<Vec<(Uuid, OpenTasksPage)>, sqlx::Error> {
+    let (role_ids, limit, offset) = match &asked {
+        Asked::Counts(role_ids) => (*role_ids, 0, 0),
+        Asked::Page {
+            role_id,
+            limit,
+            offset,
+        } => (std::slice::from_ref(role_id), *limit, *offset),
+    };
+
     let rows = sqlx::query!(
         r#"
-        WITH open_task AS (
-            SELECT t.id, t.task_ref, t.status, t.assignee_user_id, t.document_id,
-                   t.created_at, i.current_state,
+        WITH asked AS (
+            -- The roles asked about: one for a delete and its list, a page of
+            -- them for the Roles screen (#508). Not filtered on `deleted_at`,
+            -- as this statement never was, and not on the tenant: the join
+            -- below and `t.tenant_id = $1` each hold the task to it.
+            SELECT r.id, r.tenant_id, r.role_code FROM roles r WHERE r.id = ANY($2)
+        ),
+        open_task AS (
+            SELECT r.id AS role_id, t.id, t.task_ref, t.status, t.assignee_user_id,
+                   t.document_id, t.created_at, i.current_state,
                    -- Clause (a). NULL for a task offered to no role, which
                    -- neither `WHERE` nor `CASE` below takes as true.
                    (t.candidate_role_id = r.id AND t.assignee_user_id IS NULL) AS offered,
@@ -764,12 +866,12 @@ pub async fn open_tasks_needing_role<'e, E: PgExecutor<'e>>(
                              AND tr.allowed_by_json->>'roleCode' = r.role_code) AS named
             FROM workflow_tasks t
             JOIN workflow_instances i ON i.id = t.workflow_instance_id AND i.tenant_id = t.tenant_id
-            JOIN roles r ON r.id = $2 AND r.tenant_id = t.tenant_id
+            JOIN asked r ON r.tenant_id = t.tenant_id
             WHERE t.tenant_id = $1 AND t.deleted_at IS NULL
               AND t.status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')
         ),
         needing AS (
-            SELECT id, task_ref, status, assignee_user_id, document_id, created_at,
+            SELECT role_id, id, task_ref, status, assignee_user_id, document_id, created_at,
                    current_state,
                    -- The single reasons are the words of the stranded-task
                    -- query, Installation and Deployment §9. That query does not
@@ -784,53 +886,75 @@ pub async fn open_tasks_needing_role<'e, E: PgExecutor<'e>>(
             FROM open_task
             WHERE offered OR named
         )
-        SELECT counted.total AS "total!",
+        SELECT r.id AS "role_id!", counted.total AS "total!",
                page.id AS "id?", page.task_ref AS "task_ref?", page.status AS "status?",
                page.current_state AS "current_state?", page.why AS "why?",
                page.assignee_user_id AS "assignee_user_id?",
                page.display_name AS "assignee_display_name?",
                page.document_number AS "document_number?", page.title AS "document_title?"
-        FROM (SELECT COUNT(*) AS total FROM needing) counted
+        FROM asked r
+        CROSS JOIN LATERAL (SELECT COUNT(*) AS total FROM needing n WHERE n.role_id = r.id) counted
         LEFT JOIN LATERAL (
             SELECT n.task_ref, n.status, n.current_state, n.why, n.assignee_user_id,
                    n.created_at, n.id, u.display_name, d.document_number, d.title
             FROM needing n
             LEFT JOIN documents d ON d.id = n.document_id AND d.tenant_id = $1
             LEFT JOIN users u ON u.id = n.assignee_user_id AND u.tenant_id = $1
+            WHERE n.role_id = r.id
             ORDER BY n.created_at, n.id
             LIMIT $3 OFFSET $4
         ) page ON true
-        ORDER BY page.created_at, page.id
+        ORDER BY r.id, page.created_at, page.id
         "#,
         tenant_id,
-        role_id,
+        role_ids,
         limit,
         offset
     )
     .fetch_all(executor)
     .await?;
 
-    let total = rows.first().map_or(0, |row| row.total);
+    let mut pages: Vec<(Uuid, OpenTasksPage)> = Vec::new();
 
-    // A page of none is still one row, carrying the total and no task.
-    let rows = rows
-        .into_iter()
-        .filter_map(|row| {
-            Some(OpenTaskNeedingRole {
-                id: row.id?,
-                task_ref: row.task_ref?,
+    for row in rows {
+        // Rows arrive grouped by role, so a role's page is the last one opened.
+        if pages
+            .last()
+            .is_none_or(|(role_id, _)| *role_id != row.role_id)
+        {
+            pages.push((
+                row.role_id,
+                OpenTasksPage {
+                    rows: Vec::new(),
+                    total: row.total,
+                },
+            ));
+        }
+
+        // A page of none is still one row per role, carrying the total and no
+        // task.
+        let (Some(id), Some(task_ref), Some(current_state), Some(status), Some(why)) =
+            (row.id, row.task_ref, row.current_state, row.status, row.why)
+        else {
+            continue;
+        };
+
+        if let Some((_, page)) = pages.last_mut() {
+            page.rows.push(OpenTaskNeedingRole {
+                id,
+                task_ref,
                 document_number: row.document_number,
                 document_title: row.document_title,
-                current_state: row.current_state?,
-                status: TaskStatus::from_db(&row.status?),
+                current_state,
+                status: TaskStatus::from_db(&status),
                 assignee_user_id: row.assignee_user_id,
                 assignee_display_name: row.assignee_display_name,
-                why: row.why?,
-            })
-        })
-        .collect();
+                why,
+            });
+        }
+    }
 
-    Ok(OpenTasksPage { rows, total })
+    Ok(pages)
 }
 
 /// Reads one task.

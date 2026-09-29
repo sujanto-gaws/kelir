@@ -259,4 +259,33 @@ describe('RoleOpenTasksDialog', () => {
 
     expect(backend.requests).toHaveLength(0)
   })
+
+  describe('opened from a stranded role, with no refusal (#508)', () => {
+    async function mountStranded(): Promise<VueWrapper> {
+      const wrapper = mount(RoleOpenTasksDialog, { props: { open: true, role: clerkRole } })
+      await flushPromises()
+
+      return wrapper
+    }
+
+    it('says nobody holds the role in place of a refusal, and lists the tasks', async () => {
+      const wrapper = await mountStranded()
+
+      expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="role-open-tasks-stranded"]').text()).toContain(
+        'Nobody holds this role any more',
+      )
+      expect(rowsOf(wrapper)).toHaveLength(2)
+    })
+
+    it('does not speak of a delete to retry once the list is empty', async () => {
+      handler = () => ({ status: 200, body: listBody([]) })
+
+      const wrapper = await mountStranded()
+
+      expect(wrapper.find('[data-testid="role-open-tasks-empty"]').text()).toBe(
+        'No open task needs this role any more.',
+      )
+    })
+  })
 })

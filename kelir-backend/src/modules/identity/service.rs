@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use super::domain::{
     open_tasks_refusal, published_definitions_refusal, validate_create_user, validate_distinct_ids,
-    validate_password_value, CreateRoleRequest, CreateUserRequest, Permission, Role,
+    validate_password_value, with_staffing, CreateRoleRequest, CreateUserRequest, Permission, Role,
     UpdateRoleRequest, UpdateUserRequest, User, UserStatus, ROLE_HAS_OPEN_TASKS,
     ROLE_NAMED_BY_PUBLISHED_DEFINITION,
 };
@@ -18,6 +18,7 @@ use crate::modules::organization::department_repository as department_repo;
 use crate::modules::workflow::domain::OpenTaskNeedingRole;
 use crate::modules::workflow::service::definition as workflow_definition;
 use crate::modules::workflow::service::task as workflow_task;
+use crate::modules::workflow::TASK_REASSIGN;
 use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
 
@@ -309,13 +310,14 @@ pub async fn list_roles(
 
     let tenant_id = caller.tenant_id();
     let total = repo::count_roles(&state.pool, tenant_id).await?;
-    let roles = repo::list_roles(
+    let mut roles = repo::list_roles(
         &state.pool,
         tenant_id,
         pagination.limit(),
         pagination.offset(),
     )
     .await?;
+    staff(state, caller, &mut roles).await?;
 
     Ok((roles, pagination.meta(total.max(0) as u64)))
 }
@@ -327,9 +329,61 @@ pub async fn get_role(
 ) -> Result<Role, AppError> {
     caller.require("identity:role:read")?;
 
-    repo::find_role(&state.pool, caller.tenant_id(), id)
+    let role = repo::find_role(&state.pool, caller.tenant_id(), id)
         .await?
-        .ok_or_else(|| AppError::not_found("Role"))
+        .ok_or_else(|| AppError::not_found("Role"))?;
+    let mut roles = [role];
+    staff(state, caller, &mut roles).await?;
+
+    let [role] = roles;
+    Ok(role)
+}
+
+/// Fills each role's `liveHolders` and `openTasks` ([#508], **D-91** (2)), for
+/// a caller holding `workflow:task:reassign`, and leaves them out for anybody
+/// else.
+///
+/// **The counts are the Roles screen's pointer to a role whose last holder has
+/// left** while open tasks still need it. Nothing refuses the grant's removal,
+/// its expiry, or the holder's deactivation that led there (D-89's refusals
+/// are for a delete); the tasks stay open, and an administrator clears each
+/// one with `POST /api/v1/workflow/tasks/{id}/reassign`. So the counts are
+/// gated on that route's permission, the product owner's decision of
+/// 2026-09-28: whoever can act on them may read them.
+///
+/// **Less is served, not a refusal.** The role itself is `identity:role:read`'s,
+/// and a caller without `workflow:task:reassign` still reads it, without the
+/// two fields ([`Authenticated::holds`]). A 403 would take the Roles screen
+/// from a caller who may read it.
+///
+/// **Two statements for the whole page**, whatever its size: one count of each
+/// kind, asked about every role on it.
+///
+/// [#508]: https://github.com/sujanto-gaws/kelir/issues/508
+async fn staff(
+    state: &AppState,
+    caller: &Authenticated,
+    roles: &mut [Role],
+) -> Result<(), AppError> {
+    if roles.is_empty() || !caller.holds(TASK_REASSIGN) {
+        return Ok(());
+    }
+
+    let tenant_id = caller.tenant_id();
+    let ids: Vec<Uuid> = roles.iter().map(|role| role.id).collect();
+
+    let holders = repo::count_live_holders(
+        &state.pool,
+        tenant_id,
+        &ids,
+        &UserStatus::signing_in_db_values(),
+    )
+    .await?;
+    let open = workflow_task::open_tasks_needing_roles(state, tenant_id, &ids).await?;
+
+    with_staffing(roles, &holders, &open);
+
+    Ok(())
 }
 
 /// The open tasks that keep `id` from being deleted (**D-89**, [#532]): the
