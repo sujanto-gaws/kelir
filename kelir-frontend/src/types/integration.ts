@@ -163,6 +163,34 @@ export interface UpdateIntegrationCredentialRequest {
   isActive?: boolean
 }
 
+/** `SUCCESS` for a `2xx` answer, `FAILED` for any other, a `3xx` included. */
+export type TestCallStatus = 'SUCCESS' | 'FAILED'
+
+/**
+ * A test call the external system answered (FR-INT-002, #547).
+ *
+ * **An answer is not a success**: a `500` from the system is a `200` from
+ * Kelir with `status: 'FAILED'`. A call that got no answer, or was refused
+ * before anything was sent, is an error instead, whose message names the
+ * integration log row. No header is returned, and the preview has the secret
+ * redacted.
+ */
+export interface TestCallResponse {
+  /** The `integration_logs` row this call wrote. */
+  logId: string
+  method: HttpMethod
+  /** The system's `baseUrl` joined with the endpoint's `path`. */
+  url: string
+  status: TestCallStatus
+  /** The system's HTTP status. Redirects are not followed, so a `3xx` is returned as it came. */
+  statusCode: number
+  durationMs: number
+  /** The start of the response body, at most 2048 characters, masked. */
+  bodyPreview: string
+  /** Whether `bodyPreview` is shorter than the body. */
+  bodyTruncated: boolean
+}
+
 export const EXTERNAL_SYSTEM_STATUS_LABELS: Record<ExternalSystemStatus, string> = {
   ACTIVE: 'Active',
   INACTIVE: 'Inactive',

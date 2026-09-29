@@ -33,7 +33,8 @@ import IntegrationEndpointSection from './IntegrationEndpointSection.vue'
  * `:deactivate` — turning a system on or off is one permission, and the only
  * way into or out of `INACTIVE`. Endpoints ride on the system's permissions;
  * credential references have their own, and their section is absent for a
- * caller who may not read them.
+ * caller who may not read them. A test call is `integration:endpoint:call`,
+ * a permission of its own (#547).
  *
  * There is no delete. A system is deactivated, and stays listed.
  */
@@ -42,6 +43,7 @@ const auth = useAuthStore()
 
 const canUpdate = computed(() => auth.can('integration:external-system:update'))
 const canToggle = computed(() => auth.can('integration:external-system:deactivate'))
+const canCall = computed(() => auth.can('integration:endpoint:call'))
 
 const systemId = computed(() => String(route.params.id ?? ''))
 
@@ -245,7 +247,12 @@ watch(systemId, () => void load(), { immediate: true })
         </dd>
       </dl>
 
-      <IntegrationEndpointSection :system-id="system.id" :can-update="canUpdate" />
+      <IntegrationEndpointSection
+        :system-id="system.id"
+        :can-update="canUpdate"
+        :can-call="canCall"
+        :timeout-seconds="system.timeoutSeconds"
+      />
 
       <IntegrationCredentialSection :system-id="system.id" />
 

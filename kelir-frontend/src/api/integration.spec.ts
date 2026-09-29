@@ -11,6 +11,7 @@ import {
   listIntegrationCredentials,
   listIntegrationEndpoints,
   registerExternalSystem,
+  testCallIntegrationEndpoint,
   updateExternalSystem,
   updateIntegrationCredential,
   updateIntegrationEndpoint,
@@ -158,5 +159,18 @@ describe('integration api', () => {
 
     expect(failure).toBeInstanceOf(ApiError)
     expect((failure as ApiError).fieldErrors()).toEqual({ 'retryPolicy.maxRetries': 'At most 20' })
+  })
+
+  it('test-calls an endpoint with no body, waiting past the system timeout', async () => {
+    await testCallIntegrationEndpoint(SYSTEM, 'ep-1', 120)
+
+    const request = only()
+
+    expect([request.method, request.url]).toEqual([
+      'post',
+      '/integration/external-systems/sys-1/endpoints/ep-1/test-call',
+    ])
+    expect(request.body).toBeUndefined()
+    expect(request.timeout).toBe(135_000)
   })
 })
