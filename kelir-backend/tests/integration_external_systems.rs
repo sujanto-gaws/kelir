@@ -1691,6 +1691,25 @@ async fn the_list_searches_filters_and_pages() {
         .await;
     assert_eq!(bad.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(bad.body["error"]["details"][0]["path"], "status");
+
+    // A NUL cannot reach PostgreSQL `text`: a 422 on `search`, not a 500.
+    for search in ["%00", "a%00b"] {
+        let nul = app
+            .send(
+                Method::GET,
+                &format!("{BASE}?search={search}"),
+                Some(&token),
+                None,
+            )
+            .await;
+        assert_eq!(
+            nul.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "search={search}: {}",
+            nul.body
+        );
+        assert_eq!(nul.body["error"]["details"][0]["path"], "search");
+    }
 }
 
 #[tokio::test]

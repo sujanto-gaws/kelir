@@ -386,6 +386,9 @@ While the major version is `0`, the public API may change in any release.
   resource's vocabulary is a 422. `meta.total` counts the rows matching both,
   and the order is by key as before. The search is an unindexed `ILIKE`, as
   the existing searches are.
+  **A NUL in any list's search is now a 422** on the search field, where it
+  was a 500 on every searching list, the documents list and external systems
+  included.
 
 - **Firefox no longer refuses a value because it gave up matching a pattern**
   ([#496](https://github.com/sujanto-gaws/kelir/issues/496)). On a pattern

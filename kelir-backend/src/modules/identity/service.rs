@@ -33,7 +33,7 @@ pub async fn list_users(
     let tenant_id = caller.tenant_id();
     let pagination = query.pagination();
     let filter = repo::UserFilter {
-        search: search_term(query.search.as_deref()),
+        search: search_term(query.search.as_deref())?,
         status: query.status.map(UserStatus::as_db),
     };
 
@@ -318,7 +318,7 @@ pub async fn list_roles(
 
     let tenant_id = caller.tenant_id();
     let pagination = query.pagination();
-    let search = search_term(query.search.as_deref());
+    let search = search_term(query.search.as_deref())?;
 
     let total = repo::count_roles(&state.pool, tenant_id, search).await?;
     let mut roles = repo::list_roles(

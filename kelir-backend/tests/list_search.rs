@@ -673,9 +673,11 @@ async fn a_percent_or_a_backslash_in_a_search_matches_itself() {
 /// Inputs a hand-written URL can carry and a chooser never sends. None of them
 /// may be a 500; what each one *is* is pinned below.
 ///
-/// **A search containing NUL (`%00`) is left out: it is a 500 on all six
-/// lists** (PostgreSQL rejects 0x00 in `text`). Reported as a finding on #525;
-/// it predates this change on `/documents` and `/integration/external-systems`.
+/// **A search containing NUL (`%00`) is a 422 on `search`**, not a 500 and not
+/// a search for the term with the NUL stripped out. PostgreSQL `text` cannot
+/// hold 0x00, so binding one failed the statement ("invalid byte sequence for
+/// encoding UTF8: 0x00"); `utils::search` now refuses it before any query runs,
+/// on these six lists and on every other list that searches (#525).
 #[tokio::test]
 async fn an_unusual_search_or_paging_value_is_never_a_server_error() {
     let app = TestApp::spawn().await;
@@ -694,6 +696,19 @@ async fn an_unusual_search_or_paging_value_is_never_a_server_error() {
             let response = get(&app, &token, &format!("{base}?{query}")).await;
             if response.status != StatusCode::OK {
                 failures.push(format!("{base}?{query:.40}: {}", response.status));
+            }
+        }
+
+        // NUL alone and NUL inside a term: both refused, naming the field.
+        for query in ["search=%00", "search=a%00b"] {
+            let response = get(&app, &token, &format!("{base}?{query}")).await;
+            if response.status != StatusCode::UNPROCESSABLE_ENTITY
+                || response.body["error"]["details"][0]["path"] != "search"
+            {
+                failures.push(format!(
+                    "{base}?{query}: {} {}",
+                    response.status, response.body["error"]
+                ));
             }
         }
 

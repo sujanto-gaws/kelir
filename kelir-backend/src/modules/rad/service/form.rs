@@ -47,7 +47,7 @@ pub async fn list_forms(
     let tenant_id = caller.tenant_id();
     let pagination = query.pagination();
     let filter = repo::FormFilter {
-        search: search_term(query.search.as_deref()),
+        search: search_term(query.search.as_deref())?,
         status: query.status.map(FormStatus::as_db),
     };
 

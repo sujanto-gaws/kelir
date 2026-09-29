@@ -312,6 +312,29 @@ async fn a_wildcard_in_a_search_term_matches_itself() {
     );
 }
 
+/// A NUL in a search term is a 422 on `search`.
+///
+/// PostgreSQL `text` cannot hold 0x00, so a bound NUL failed the statement and
+/// the caller saw a 500. Stripping it would answer a different search than the
+/// one asked, so it is refused instead.
+#[tokio::test]
+async fn a_nul_in_a_search_term_is_refused() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for search in ["%00", "a%00b"] {
+        let response = list(&app, &token, &format!("?search={search}")).await;
+
+        assert_eq!(
+            response.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "search={search}: {}",
+            response.body
+        );
+        assert_eq!(response.body["error"]["details"][0]["path"], "search");
+    }
+}
+
 /// The status and entity filters respect the same visibility rule, by being
 /// predicates in the same statement (AC4).
 #[tokio::test]

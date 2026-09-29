@@ -36,7 +36,7 @@ pub async fn list_lists(
     let tenant_id = caller.tenant_id();
     let pagination = query.pagination();
     let filter = repo::ListFilter {
-        search: search_term(query.search.as_deref()),
+        search: search_term(query.search.as_deref())?,
         status: query.status.map(ListStatus::as_db),
     };
 

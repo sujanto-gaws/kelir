@@ -38,7 +38,7 @@ pub async fn list_external_systems(
     let tenant_id = caller.tenant_id();
     let pagination = query.pagination();
     let filter = ExternalSystemFilter {
-        search: search_term(query.search.as_deref()),
+        search: search_term(query.search.as_deref())?,
         status: query.status.map(ExternalSystemStatus::as_db),
         system_type: query.system_type.map(|kind| kind.as_db()),
     };
