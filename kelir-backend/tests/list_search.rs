@@ -37,6 +37,18 @@
 //! | `AND deleted_at IS NULL` dropped from `identity::repository::count_users` | `a_user_is_found_past_the_first_hundred` |
 //! | `identity::service::list_roles` passes `None` to `repo::list_roles` (the count still searches) | `a_role_is_found_past_the_first_hundred` |
 //! | `params(FormQuery)` put back to `params(Pagination)` on `rad::handlers::list_forms` | `each_list_documents_its_search_and_status` |
+//!
+//! The test-engineer gate added the last four tests and the padded search in
+//! `holds_the_contract`, for mutations that survived the table above. **Seen
+//! red, 2026-09-29.**
+//!
+//! | Mutation | Reddened |
+//! |---|---|
+//! | `tenant_id = $1` dropped from `workflow::repository::definition::list_definitions` | `a_search_never_reaches_another_tenants_rows` |
+//! | `tenant_id = $1` dropped from `identity::repository::count_roles`, and from `rad::repository::list::count_lists` | `a_search_never_reaches_another_tenants_rows` |
+//! | `AND deleted_at IS NULL` dropped from `identity::repository::list_roles` | `a_search_never_reaches_a_soft_deleted_row` |
+//! | `utils::search::like_contains` stops escaping `%`, or `\` | `a_percent_or_a_backslash_in_a_search_matches_itself` |
+//! | `utils::search::search_term` stops trimming but still treats blank as no search | all six `*_past_the_first_hundred` |
 
 mod common;
 
@@ -134,6 +146,16 @@ async fn holds_the_contract(
     let blank = get(app, token, &format!("{base}?search=%20%20&pageSize=100")).await;
     assert_eq!(blank.status, StatusCode::OK, "{}", blank.body);
     assert_eq!(total(&blank), total(&unfiltered), "{}", blank.body);
+
+    // A padded search is the search: the trim reaches every list, not only
+    // the helper's unit test (test-engineer gate).
+    let padded = get(
+        app,
+        token,
+        &format!("{base}?search=%20{SEARCH}%20&pageSize=100"),
+    )
+    .await;
+    assert_eq!(total(&padded), 3, "padded search: {}", padded.body);
 
     if let Some((active, other)) = statuses {
         // meta.total counts the rows matching both, not either.
@@ -489,4 +511,206 @@ async fn each_list_documents_its_search_and_status() {
         }
         assert_eq!(names.contains(&"status"), has_status, "{path}: {names:?}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Test-engineer gate (#525): the predicates the tests above do not reach.
+//
+// Each test below collects every endpoint's failure before asserting, so one
+// run names every list a mutation breaks rather than only the first.
+// ---------------------------------------------------------------------------
+
+/// The six lists, with the response field holding each one's key.
+const LISTS: [(&str, &str); 6] = [
+    ("/api/v1/document-types", "typeCode"),
+    ("/api/v1/rad/forms", "formKey"),
+    ("/api/v1/rad/lists", "listKey"),
+    ("/api/v1/workflow/definitions", "workflowKey"),
+    ("/api/v1/identity/users", "username"),
+    ("/api/v1/identity/roles", "roleCode"),
+];
+
+/// One `zz_seek`-matching row in each of the six tables, in `tenant_id`, with
+/// `deleted_at` set or not. `suffix` keeps the keys apart between calls.
+async fn seed_one_of_each(app: &TestApp, tenant_id: Uuid, suffix: &str, deleted: bool) {
+    let deleted_at = if deleted { "now()" } else { "NULL" };
+    let key = format!("ZZ_SEEK_{suffix}");
+    let username = key.to_lowercase();
+
+    for sql in [
+        format!(
+            "INSERT INTO document_types (id, tenant_id, type_code, name, status, deleted_at)
+             VALUES (gen_random_uuid(), $1, '{key}', 'Hidden type', 'ACTIVE', {deleted_at})"
+        ),
+        format!(
+            "INSERT INTO rad_forms (id, tenant_id, form_key, title, jfss_version, definition_json,
+                                    status, published_at, deleted_at)
+             VALUES (gen_random_uuid(), $1, '{key}', 'Hidden form', '2.0.1', '{{}}', 'PUBLISHED',
+                     now(), {deleted_at})"
+        ),
+        format!(
+            "INSERT INTO rad_lists (id, tenant_id, list_key, title, status, deleted_at)
+             VALUES (gen_random_uuid(), $1, '{key}', 'Hidden list', 'ACTIVE', {deleted_at})"
+        ),
+        format!(
+            "INSERT INTO workflow_definitions (id, tenant_id, workflow_key, name, jwss_version,
+                                               definition_json, initial_state, status,
+                                               published_at, deleted_at)
+             VALUES (gen_random_uuid(), $1, '{key}', 'Hidden workflow', '1.0.0', '{{}}', 'draft',
+                     'ACTIVE', now(), {deleted_at})"
+        ),
+        format!(
+            "INSERT INTO users (id, tenant_id, username, email, password_hash, display_name,
+                                status, deleted_at)
+             VALUES (gen_random_uuid(), $1, '{username}', '{username}@example.test', 'x',
+                     'Hidden user', 'ACTIVE', {deleted_at})"
+        ),
+        format!(
+            "INSERT INTO roles (id, tenant_id, role_code, name, deleted_at)
+             VALUES (gen_random_uuid(), $1, '{key}', 'Hidden role', {deleted_at})"
+        ),
+    ] {
+        execute(app, &sql, tenant_id).await;
+    }
+}
+
+/// Every list, searched for `zz_seek`, must show nothing and count nothing:
+/// the only matching rows are another tenant's or soft-deleted. The page and
+/// `meta.total` are checked apart, because each has its own `WHERE`.
+async fn every_list_finds_nothing(app: &TestApp, token: &str, why: &str) {
+    let mut failures = Vec::new();
+
+    for (base, key) in LISTS {
+        let response = get(app, token, &format!("{base}?search={SEARCH}&pageSize=100")).await;
+        if response.status != StatusCode::OK {
+            failures.push(format!("{base}: {} {}", response.status, response.body));
+            continue;
+        }
+        let keys = column(&response, key);
+        if !keys.is_empty() {
+            failures.push(format!("{base} lists {keys:?}"));
+        }
+        if total(&response) != 0 {
+            failures.push(format!("{base} counts {}", total(&response)));
+        }
+    }
+
+    assert!(failures.is_empty(), "{why}:\n{}", failures.join("\n"));
+}
+
+#[tokio::test]
+async fn a_search_never_reaches_another_tenants_rows() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let foreign = common::fixtures::create_tenant(&app.pool, "TNT-525", "Foreign tenant").await;
+
+    seed_one_of_each(&app, foreign, "FOREIGN", false).await;
+
+    every_list_finds_nothing(&app, &token, "another tenant's rows were searched").await;
+}
+
+#[tokio::test]
+async fn a_search_never_reaches_a_soft_deleted_row() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let tenant_id = tenant_of_administrator(&app).await;
+
+    seed_one_of_each(&app, tenant_id, "GONE", true).await;
+
+    every_list_finds_nothing(&app, &token, "a soft-deleted row was searched").await;
+}
+
+#[tokio::test]
+async fn a_percent_or_a_backslash_in_a_search_matches_itself() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let tenant_id = tenant_of_administrator(&app).await;
+
+    // The decoys are what an unescaped pattern finds instead: `100%` as a
+    // pattern is "100 then anything", and `a\b` as a pattern is "ab".
+    execute(
+        &app,
+        r"INSERT INTO document_types (id, tenant_id, type_code, name, status) VALUES
+            (gen_random_uuid(), $1, 'PCT_ONE', 'Sure 100% of it', 'ACTIVE'),
+            (gen_random_uuid(), $1, 'PCT_DECOY', 'Sure 1000 of it', 'ACTIVE'),
+            (gen_random_uuid(), $1, 'BSL_ONE', 'Path a\b here', 'ACTIVE'),
+            (gen_random_uuid(), $1, 'BSL_DECOY', 'Path ab here', 'ACTIVE')",
+        tenant_id,
+    )
+    .await;
+    execute(
+        &app,
+        r"INSERT INTO roles (id, tenant_id, role_code, name) VALUES
+            (gen_random_uuid(), $1, 'PCT_ONE', 'Sure 100% of it'),
+            (gen_random_uuid(), $1, 'PCT_DECOY', 'Sure 1000 of it'),
+            (gen_random_uuid(), $1, 'BSL_ONE', 'Path a\b here'),
+            (gen_random_uuid(), $1, 'BSL_DECOY', 'Path ab here')",
+        tenant_id,
+    )
+    .await;
+
+    let mut failures = Vec::new();
+    for (base, key) in [
+        ("/api/v1/document-types", "typeCode"),
+        ("/api/v1/identity/roles", "roleCode"),
+    ] {
+        // `%25` is `%`, `%5C` is `\`.
+        for (search, wanted) in [("100%25", "PCT_ONE"), ("a%5Cb", "BSL_ONE")] {
+            let response = get(&app, &token, &format!("{base}?search={search}")).await;
+            let keys = column(&response, key);
+            if keys != [wanted] || total(&response) != 1 {
+                failures.push(format!(
+                    "{base}?search={search}: {keys:?}, total {}",
+                    total(&response)
+                ));
+            }
+        }
+    }
+
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Inputs a hand-written URL can carry and a chooser never sends. None of them
+/// may be a 500; what each one *is* is pinned below.
+///
+/// **A search containing NUL (`%00`) is left out: it is a 500 on all six
+/// lists** (PostgreSQL rejects 0x00 in `text`). Reported as a finding on #525;
+/// it predates this change on `/documents` and `/integration/external-systems`.
+#[tokio::test]
+async fn an_unusual_search_or_paging_value_is_never_a_server_error() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let long = "a".repeat(1000);
+
+    let mut failures = Vec::new();
+    for (base, _) in LISTS {
+        for query in [
+            format!("search={long}"),
+            "search=a%01%1F%7Fb".to_owned(),
+            "search=%0A%09".to_owned(),
+            "pageSize=0".to_owned(),
+            "page=0".to_owned(),
+        ] {
+            let response = get(&app, &token, &format!("{base}?{query}")).await;
+            if response.status != StatusCode::OK {
+                failures.push(format!("{base}?{query:.40}: {}", response.status));
+            }
+        }
+
+        // pageSize=0 is clamped up to 1, and page=0 is page 1.
+        let zero = get(&app, &token, &format!("{base}?pageSize=0&page=0")).await;
+        if zero.body["meta"]["pageSize"] != 1 || zero.body["meta"]["page"] != 1 {
+            failures.push(format!("{base}?pageSize=0&page=0: {}", zero.body["meta"]));
+        }
+
+        // A status is matched exactly, so lower case is outside the vocabulary.
+        if base != "/api/v1/identity/roles" {
+            let lower = get(&app, &token, &format!("{base}?status=active")).await;
+            if lower.status != StatusCode::UNPROCESSABLE_ENTITY {
+                failures.push(format!("{base}?status=active: {}", lower.status));
+            }
+        }
+    }
+
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
