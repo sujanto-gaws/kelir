@@ -1,5 +1,9 @@
+use std::collections::HashMap;
 use std::env::{self, VarError};
 use std::fmt;
+use std::net::IpAddr;
+
+use crate::utils::cidr::{self, Cidr};
 
 /// Application configuration, loaded from `KELIR_*` environment variables.
 ///
@@ -118,6 +122,37 @@ pub struct AppConfig {
     /// How many reverse-proxy hops sit in front of this instance
     /// (`KELIR_TRUSTED_PROXY_HOPS`). See [`trusted_proxy_hops`].
     pub trusted_proxy_hops: usize,
+    /// Private networks an administrator's test call may reach
+    /// (`KELIR_INTEGRATION_ALLOWED_CIDRS`; FR-INT-002, #547, the product
+    /// owner's answer 2 of 2026-09-29).
+    ///
+    /// **Empty by default, and empty refuses every private address.** A private
+    /// range (RFC 1918, IPv6 ULA) is reachable only inside a network listed
+    /// here. Loopback, link-local, unspecified and multicast addresses are
+    /// refused whatever this says: listing `127.0.0.0/8` does not open it, see
+    /// `integration::domain::egress`.
+    pub integration_allowed_cidrs: Vec<Cidr>,
+    /// **A test seam, and not a setting.** `true` lets the egress guard pass a
+    /// loopback address, so an integration test can call a mock server on
+    /// `127.0.0.1`.
+    ///
+    /// Nothing reads it from the environment: [`AppConfig::from_env`] always
+    /// sets `false`, and there is no variable a deployment could set to change
+    /// that. Only code that builds an `AppConfig` by hand — the test harness —
+    /// can turn it on.
+    pub integration_allow_loopback: bool,
+    /// **A test seam, and not a setting.** Host names a test call's lookup
+    /// answers from this table instead of the system resolver: a lowercase
+    /// name, and the addresses it "resolves" to, in order. A name not in the
+    /// table is looked up as usual, and the answer is judged by the egress
+    /// guard either way.
+    ///
+    /// It exists so an integration test can make a name resolve to several
+    /// addresses — one public and one private, or one that does not answer
+    /// before one that does — which no real zone on a test machine will. Like
+    /// [`AppConfig::integration_allow_loopback`], nothing reads it from the
+    /// environment: [`AppConfig::from_env`] always leaves it empty.
+    pub integration_dns_overrides: HashMap<String, Vec<IpAddr>>,
 }
 
 /// What a deployment accepts when it says nothing.
@@ -514,6 +549,17 @@ impl AppConfig {
                 .to_ascii_uppercase(),
             bootstrap_admin: bootstrap_admin(&get, app_env)?,
             trusted_proxy_hops: trusted_proxy_hops(&get)?,
+            integration_allowed_cidrs: {
+                let raw = optional("KELIR_INTEGRATION_ALLOWED_CIDRS", "");
+
+                cidr::parse_list(&raw).map_err(|error| ConfigError::Invalid {
+                    key: "KELIR_INTEGRATION_ALLOWED_CIDRS",
+                    reason: error.to_string(),
+                })?
+            },
+            // Never from the environment: see the fields.
+            integration_allow_loopback: false,
+            integration_dns_overrides: HashMap::new(),
         })
     }
 }
@@ -549,6 +595,9 @@ impl AppConfig {
             default_tenant_code: "SYSTEM".to_owned(),
             bootstrap_admin: None,
             trusted_proxy_hops: 0,
+            integration_allowed_cidrs: Vec::new(),
+            integration_allow_loopback: false,
+            integration_dns_overrides: HashMap::new(),
         }
     }
 }
@@ -575,6 +624,56 @@ mod tests {
         assert_eq!(config.app_name, "Kelir");
         assert_eq!(config.app_env, AppEnv::Development);
         assert_eq!(config.bind_address, "0.0.0.0:8080");
+    }
+
+    #[test]
+    fn the_integration_allow_list_is_empty_unless_set_and_parsed_when_it_is() {
+        let unset =
+            AppConfig::from_source(source(&[("KELIR_JWT_SECRET", "s3cret")])).expect("loads");
+        assert!(unset.integration_allowed_cidrs.is_empty());
+
+        let set = AppConfig::from_source(source(&[
+            ("KELIR_JWT_SECRET", "s3cret"),
+            ("KELIR_INTEGRATION_ALLOWED_CIDRS", "10.20.0.0/16, fd00::/8"),
+        ]))
+        .expect("loads");
+        assert_eq!(set.integration_allowed_cidrs.len(), 2);
+    }
+
+    #[test]
+    fn a_malformed_integration_allow_list_refuses_to_start() {
+        let error = AppConfig::from_source(source(&[
+            ("KELIR_JWT_SECRET", "s3cret"),
+            ("KELIR_INTEGRATION_ALLOWED_CIDRS", "10.0.0.0/8,intranet"),
+        ]))
+        .expect_err("half an allow-list is not what the operator wrote");
+
+        assert!(matches!(
+            error,
+            ConfigError::Invalid {
+                key: "KELIR_INTEGRATION_ALLOWED_CIDRS",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn no_environment_variable_opens_loopback_to_a_test_call() {
+        // The seam is for the harness, which builds its config by hand. Every
+        // spelling a deployer might guess at leaves it off.
+        let config = AppConfig::from_source(source(&[
+            ("KELIR_JWT_SECRET", "s3cret"),
+            ("KELIR_INTEGRATION_ALLOW_LOOPBACK", "true"),
+            ("KELIR_INTEGRATION_ALLOWED_CIDRS", "127.0.0.0/8"),
+            (
+                "KELIR_INTEGRATION_DNS_OVERRIDES",
+                "erp.example.com=127.0.0.1",
+            ),
+        ]))
+        .expect("loads");
+
+        assert!(!config.integration_allow_loopback);
+        assert!(config.integration_dns_overrides.is_empty());
     }
 
     #[test]

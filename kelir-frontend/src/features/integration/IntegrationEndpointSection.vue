@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 import { toApiError } from '@/api/client'
 import { listIntegrationEndpoints, updateIntegrationEndpoint } from '@/api/integration'
@@ -19,6 +19,7 @@ import ConfirmDialog from '@/features/admin/ConfirmDialog.vue'
 import { ENDPOINT_STATUS_LABELS, type IntegrationEndpoint } from '@/types/integration'
 
 import IntegrationEndpointFormDialog from './IntegrationEndpointFormDialog.vue'
+import IntegrationEndpointTestCallDialog from './IntegrationEndpointTestCallDialog.vue'
 
 /**
  * A system's endpoints, on its detail page (FR-INT-001, #520).
@@ -27,8 +28,19 @@ import IntegrationEndpointFormDialog from './IntegrationEndpointFormDialog.vue'
  * whoever may read the system reads its endpoints, and whoever may update it
  * adds, edits, retires and reinstates them. There is no delete — a retired
  * endpoint stays on the list, marked, because an integration log may name it.
+ *
+ * **Calling one is a permission of its own**, `integration:endpoint:call`
+ * (FR-INT-002, #547): *Test call* is offered on an active endpoint to a caller
+ * who holds it, whether or not they may edit the system. A retired endpoint is
+ * not offered it, because the server would refuse it unsent.
  */
-const props = defineProps<{ systemId: string; canUpdate: boolean }>()
+const props = defineProps<{
+  systemId: string
+  canUpdate: boolean
+  canCall: boolean
+  /** The system's `timeoutSeconds`, which bounds a test call. */
+  timeoutSeconds: number
+}>()
 
 const endpoints = usePaginatedList<IntegrationEndpoint>((query) =>
   listIntegrationEndpoints(props.systemId, query),
@@ -36,6 +48,11 @@ const endpoints = usePaginatedList<IntegrationEndpoint>((query) =>
 
 const isFormOpen = ref(false)
 const editing = ref<IntegrationEndpoint | null>(null)
+
+const hasActions = computed(() => props.canUpdate || props.canCall)
+
+const calling = ref<IntegrationEndpoint | null>(null)
+const isTestCallOpen = ref(false)
 
 const retiring = ref<IntegrationEndpoint | null>(null)
 const isRetireOpen = ref(false)
@@ -52,6 +69,11 @@ function startAdding(): void {
 function startEditing(endpoint: IntegrationEndpoint): void {
   editing.value = endpoint
   isFormOpen.value = true
+}
+
+function startTestCall(endpoint: IntegrationEndpoint): void {
+  calling.value = endpoint
+  isTestCallOpen.value = true
 }
 
 function confirmRetire(endpoint: IntegrationEndpoint): void {
@@ -138,7 +160,7 @@ onMounted(() => {
             <TableHead>Method</TableHead>
             <TableHead>Path</TableHead>
             <TableHead>Status</TableHead>
-            <TableHead v-if="canUpdate" class="text-right">Actions</TableHead>
+            <TableHead v-if="hasActions" class="text-right">Actions</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -160,8 +182,18 @@ onMounted(() => {
                 {{ ENDPOINT_STATUS_LABELS[endpoint.status] }}
               </Badge>
             </TableCell>
-            <TableCell v-if="canUpdate" class="space-x-2 text-right">
+            <TableCell v-if="hasActions" class="space-x-2 text-right">
               <Button
+                v-if="canCall && endpoint.status === 'ACTIVE'"
+                size="sm"
+                variant="outline"
+                :data-testid="`test-call-endpoint-${endpoint.endpointCode}`"
+                @click="startTestCall(endpoint)"
+              >
+                Test call
+              </Button>
+              <Button
+                v-if="canUpdate"
                 size="sm"
                 variant="secondary"
                 :data-testid="`edit-endpoint-${endpoint.endpointCode}`"
@@ -170,7 +202,7 @@ onMounted(() => {
                 Edit
               </Button>
               <Button
-                v-if="endpoint.status === 'ACTIVE'"
+                v-if="canUpdate && endpoint.status === 'ACTIVE'"
                 size="sm"
                 variant="destructive"
                 :data-testid="`retire-endpoint-${endpoint.endpointCode}`"
@@ -179,7 +211,7 @@ onMounted(() => {
                 Retire
               </Button>
               <Button
-                v-else
+                v-else-if="canUpdate"
                 size="sm"
                 variant="outline"
                 :data-testid="`reinstate-endpoint-${endpoint.endpointCode}`"
@@ -223,6 +255,14 @@ onMounted(() => {
       :system-id="systemId"
       :editing="editing"
       @saved="endpoints.load()"
+    />
+
+    <IntegrationEndpointTestCallDialog
+      v-if="canCall"
+      v-model:open="isTestCallOpen"
+      :system-id="systemId"
+      :endpoint="calling"
+      :timeout-seconds="timeoutSeconds"
     />
 
     <ConfirmDialog

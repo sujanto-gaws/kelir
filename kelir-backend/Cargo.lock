@@ -1218,6 +1218,7 @@ dependencies = [
  "anyhow",
  "argon2",
  "axum",
+ "base64 0.22.1",
  "bumpalo",
  "chrono",
  "datalogic-rs",
@@ -1230,6 +1231,7 @@ dependencies = [
  "pulldown-cmark",
  "rand 0.8.7",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "serde_path_to_error",
@@ -1244,6 +1246,7 @@ dependencies = [
  "url",
  "utoipa",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

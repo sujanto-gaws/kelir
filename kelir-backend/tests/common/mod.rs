@@ -936,6 +936,15 @@ fn test_config(database_url: &str) -> AppConfig {
         // the whole truth and X-Forwarded-For must not be read. This is also the
         // production default (see `middleware::client_address`).
         trusted_proxy_hops: 0,
+        // The production default: no private range is reachable, and loopback
+        // is refused. A test that calls a mock server on 127.0.0.1 turns the
+        // seam on through `TestApp::spawn_with` — see
+        // `tests/integration_test_call.rs`.
+        integration_allowed_cidrs: Vec::new(),
+        integration_allow_loopback: false,
+        // The system resolver answers every name; a test that needs a name to
+        // resolve to chosen addresses fills this through `spawn_with`.
+        integration_dns_overrides: std::collections::HashMap::new(),
         bootstrap_admin: Some(BootstrapAdmin {
             username: ADMIN_USERNAME.to_owned(),
             email: "admin@kelir.test".to_owned(),

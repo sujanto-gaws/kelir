@@ -19,6 +19,7 @@
 pub mod credential;
 pub mod endpoint;
 pub mod external_system;
+pub mod test_call;
 
 use uuid::Uuid;
 

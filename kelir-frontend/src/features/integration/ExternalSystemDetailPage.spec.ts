@@ -31,6 +31,9 @@ import type { CurrentUser } from '@/types/auth'
  * 4. **Into and out of INACTIVE is the verbs'**: activate and deactivate post to
  *    their routes and the page shows the status the server returned, and an
  *    edit never sends `INACTIVE` — nor any status for an inactive system.
+ * 5. **A test call is `integration:endpoint:call`'s alone** (#547): offered on an
+ *    active endpoint to a caller who holds it, whatever else they hold, and to
+ *    nobody else.
  */
 
 const ID = '0199a1a0-0000-7000-8000-00000000e501'
@@ -121,6 +124,8 @@ describe('ExternalSystemDetailPage', () => {
   let credentialsReply: () => FakeReply
   let toggleReply: (action: string) => FakeReply
   let putReply: () => FakeReply
+  let endpointsReply: () => FakeReply
+  let testCallReply: () => FakeReply
 
   beforeEach(() => {
     setActivePinia(createPinia())
@@ -134,13 +139,28 @@ describe('ExternalSystemDetailPage', () => {
       body: itemBody({ ...current, status: action === 'activate' ? 'ACTIVE' : 'INACTIVE' }),
     })
     putReply = () => ({ status: 200, body: itemBody(current) })
+    endpointsReply = () => ({ status: 200, body: page([endpoint()]) })
+    testCallReply = () => ({
+      status: 200,
+      body: itemBody({
+        logId: '0199a1a0-0000-7000-8000-00000000f001',
+        method: 'POST',
+        url: 'https://erp.example.com/api/purchase-orders',
+        status: 'SUCCESS',
+        statusCode: 201,
+        durationMs: 88,
+        bodyPreview: '{"id":7}',
+        bodyTruncated: false,
+      }),
+    })
 
     backend = installFakeBackend((request: RecordedRequest): FakeReply => {
       if (request.url === BASE && request.method === 'get') return systemReply()
       if (request.url === BASE && request.method === 'put') return putReply()
       if (request.url.endsWith('/activate')) return toggleReply('activate')
       if (request.url.endsWith('/deactivate')) return toggleReply('deactivate')
-      if (request.url === `${BASE}/endpoints`) return { status: 200, body: page([endpoint()]) }
+      if (request.url === `${BASE}/endpoints`) return endpointsReply()
+      if (request.url.endsWith('/test-call')) return testCallReply()
       if (request.url.startsWith(`${BASE}/endpoints/`)) {
         return { status: 200, body: itemBody(endpoint({ status: 'INACTIVE' })) }
       }
@@ -211,6 +231,7 @@ describe('ExternalSystemDetailPage', () => {
       'add-endpoint',
       'edit-endpoint-CREATE_PO',
       'retire-endpoint-CREATE_PO',
+      'test-call-endpoint-CREATE_PO',
     ]) {
       expect(has(wrapper, testId), testId).toBe(false)
     }
@@ -448,5 +469,83 @@ describe('ExternalSystemDetailPage', () => {
     )
 
     expect(put?.body).toEqual({ status: 'INACTIVE' })
+  })
+
+  // -- Test call ------------------------------------------------------------
+
+  const CALL = 'integration:endpoint:call'
+
+  it('offers a test call with the call permission alone, and no edit with it', async () => {
+    const wrapper = await render(['integration:external-system:read', CALL])
+
+    expect(has(wrapper, 'test-call-endpoint-CREATE_PO')).toBe(true)
+    expect(has(wrapper, 'edit-endpoint-CREATE_PO')).toBe(false)
+    expect(has(wrapper, 'retire-endpoint-CREATE_PO')).toBe(false)
+    expect(has(wrapper, 'reinstate-endpoint-CREATE_PO')).toBe(false)
+  })
+
+  it('offers no test call to a caller who may edit the system but not call it', async () => {
+    const wrapper = await render(SYSTEM_ALL)
+
+    expect(has(wrapper, 'edit-endpoint-CREATE_PO')).toBe(true)
+    expect(has(wrapper, 'test-call-endpoint-CREATE_PO')).toBe(false)
+  })
+
+  it('offers no test call on a retired endpoint, which the server would refuse', async () => {
+    endpointsReply = () => ({ status: 200, body: page([endpoint({ status: 'INACTIVE' })]) })
+
+    const wrapper = await render([...SYSTEM_ALL, CALL])
+
+    expect(has(wrapper, 'reinstate-endpoint-CREATE_PO')).toBe(true)
+    expect(has(wrapper, 'test-call-endpoint-CREATE_PO')).toBe(false)
+  })
+
+  it('posts nothing but the call, waits past the system timeout, and shows the answer', async () => {
+    const wrapper = await render([...SYSTEM_ALL, CALL])
+
+    await wrapper.get('[data-testid="test-call-endpoint-CREATE_PO"]').trigger('click')
+
+    expect(backend.requests.some((request) => request.url.endsWith('/test-call'))).toBe(false)
+
+    await wrapper.get('[data-testid="test-call-run"]').trigger('click')
+    await flushPromises()
+
+    const post = backend.requests.find((request) => request.url.endsWith('/test-call'))
+
+    expect(post?.method).toBe('post')
+    expect(post?.url).toBe(`${BASE}/endpoints/ep-1/test-call`)
+    expect(post?.body).toBeUndefined()
+    // The system's 30 seconds plus the margin, so the browser hears the
+    // server's UPSTREAM_TIMEOUT rather than giving up at the same moment.
+    expect(post?.timeout).toBe(45_000)
+    expect(wrapper.get('[data-testid="test-call-status-code"]').text()).toBe('HTTP 201')
+    expect(wrapper.get('[data-testid="test-call-log-id"]').text()).toBe(
+      '0199a1a0-0000-7000-8000-00000000f001',
+    )
+  })
+
+  it('shows a refusal in the dialog with its log id', async () => {
+    testCallReply = () => ({
+      status: 422,
+      body: errorBody(
+        'NO_USABLE_CREDENTIAL',
+        'The external system has no credential that is active and valid today; a test call needs exactly one (integration log 0199a1a0-0000-7000-8000-00000000f002)',
+      ),
+    })
+
+    const wrapper = await render([...SYSTEM_ALL, CALL])
+
+    await wrapper.get('[data-testid="test-call-endpoint-CREATE_PO"]').trigger('click')
+    await wrapper.get('[data-testid="test-call-run"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="test-call-failure-code"]').text()).toBe(
+      'NO_USABLE_CREDENTIAL',
+    )
+    expect(wrapper.get('[data-testid="test-call-log-id"]').text()).toBe(
+      '0199a1a0-0000-7000-8000-00000000f002',
+    )
+    // The page itself is untouched: no banner outside the dialog.
+    expect(has(wrapper, 'endpoint-action-error')).toBe(false)
   })
 })

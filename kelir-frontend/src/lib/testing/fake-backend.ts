@@ -30,6 +30,8 @@ export interface RecordedRequest {
    */
   params: Record<string, unknown>
   authorization?: string
+  /** The timeout, in milliseconds, the request was sent with: the client's own unless it set one. */
+  timeout?: number
 }
 
 export interface FakeReply {
@@ -89,6 +91,7 @@ function toRecorded(config: InternalAxiosRequestConfig): RecordedRequest {
     body: parseBody(config.data),
     params: (config.params as Record<string, unknown> | undefined) ?? {},
     authorization: typeof authorization === 'string' ? authorization : undefined,
+    timeout: config.timeout,
   }
 }
 

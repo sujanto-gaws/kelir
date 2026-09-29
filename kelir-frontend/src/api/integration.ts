@@ -8,6 +8,7 @@ import type {
   IntegrationCredential,
   IntegrationEndpoint,
   RegisterExternalSystemRequest,
+  TestCallResponse,
   UpdateExternalSystemRequest,
   UpdateIntegrationCredentialRequest,
   UpdateIntegrationEndpointRequest,
@@ -25,6 +26,9 @@ import type {
  *
  * There is no `DELETE` for a system or an endpoint: a system is deactivated,
  * an endpoint is retired by its status.
+ *
+ * **A test call has a permission of its own** (`integration:endpoint:call`,
+ * FR-INT-002, #547): reading an endpoint does not let you call it.
  */
 const SYSTEMS = '/integration/external-systems'
 
@@ -134,4 +138,34 @@ export function updateIntegrationCredential(
 /** A soft delete; the API answers 204. */
 export function deleteIntegrationCredential(systemId: string, credentialId: string): Promise<void> {
   return deleteItem(`${SYSTEMS}/${systemId}/credentials/${credentialId}`)
+}
+
+/**
+ * The margin the browser waits beyond the system's own timeout, for the
+ * server's resolution, logging and reply. Without it the client's default of
+ * 30 seconds equals the default `timeoutSeconds`, and the browser would give
+ * up at the same moment the server reports `UPSTREAM_TIMEOUT` — with its log id.
+ */
+const TEST_CALL_MARGIN_SECONDS = 15
+
+/**
+ * Calls one endpoint once, with the system's one usable credential, and says
+ * what came back (FR-INT-002, #547). There is no request body, here or to the
+ * system.
+ *
+ * A `200` is an answer, `SUCCESS` or `FAILED`. A refusal before anything was
+ * sent is a 422, an unreachable system a 502 and a timeout a 504; each is
+ * logged, and its message names the log row. `timeoutSeconds` is the system's,
+ * so the browser waits for the server's verdict rather than giving up first.
+ */
+export function testCallIntegrationEndpoint(
+  systemId: string,
+  endpointId: string,
+  timeoutSeconds: number,
+): Promise<TestCallResponse> {
+  return postItem<TestCallResponse>(
+    `${SYSTEMS}/${systemId}/endpoints/${endpointId}/test-call`,
+    undefined,
+    { timeout: (timeoutSeconds + TEST_CALL_MARGIN_SECONDS) * 1000 },
+  )
 }

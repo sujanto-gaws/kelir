@@ -5,8 +5,11 @@
 //! length are refused identically whichever of the three carried them.
 
 pub mod credential;
+pub mod egress;
 pub mod endpoint;
 pub mod external_system;
+pub mod secret;
+pub mod test_call;
 
 pub use credential::{
     CreateIntegrationCredentialRequest, IntegrationCredential, UpdateIntegrationCredentialRequest,
@@ -15,6 +18,8 @@ pub use endpoint::{
     CreateIntegrationEndpointRequest, EndpointStatus, HttpMethod, IntegrationEndpoint,
     UpdateIntegrationEndpointRequest,
 };
+pub use test_call::{TestCallResponse, TestCallStatus};
+
 pub use external_system::{
     AuthType, ExternalSystem, ExternalSystemQuery, ExternalSystemStatus, ExternalSystemType,
     RegisterExternalSystemRequest, RetryPolicy, UpdateExternalSystemRequest,

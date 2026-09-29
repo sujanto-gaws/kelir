@@ -15,6 +15,7 @@
 pub mod credential;
 pub mod endpoint;
 pub mod external_system;
+pub mod log;
 
 /// `%term%` with `\`, `%` and `_` escaped, so a caller searching for `_` finds
 /// an underscore rather than every row.

@@ -16,10 +16,10 @@ use uuid::Uuid;
 use super::domain::{
     CreateIntegrationCredentialRequest, CreateIntegrationEndpointRequest, ExternalSystem,
     ExternalSystemQuery, IntegrationCredential, IntegrationEndpoint, RegisterExternalSystemRequest,
-    UpdateExternalSystemRequest, UpdateIntegrationCredentialRequest,
+    TestCallResponse, UpdateExternalSystemRequest, UpdateIntegrationCredentialRequest,
     UpdateIntegrationEndpointRequest,
 };
-use super::service::{credential, endpoint, external_system};
+use super::service::{credential, endpoint, external_system, test_call};
 use crate::error::AppError;
 use crate::extract::{JsonBody, PathParam, QueryParams};
 use crate::middleware::auth::Authenticated;
@@ -51,6 +51,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/external-systems/{id}/endpoints/{endpointId}",
             get(get_endpoint).put(update_endpoint),
+        )
+        .route(
+            "/external-systems/{id}/endpoints/{endpointId}/test-call",
+            post(test_call_endpoint),
         )
         .route(
             "/external-systems/{id}/credentials",
@@ -292,6 +296,48 @@ pub async fn update_endpoint(
 ) -> Result<Json<ItemEnvelope<IntegrationEndpoint>>, AppError> {
     Ok(Json(ItemEnvelope::new(
         endpoint::update_endpoint(&state, &caller, id, endpoint_id, request).await?,
+    )))
+}
+
+/// Make a test call to an endpoint, and answer with what came back
+/// (FR-INT-002, #547; ADR-0043).
+///
+/// **A real request**: the endpoint's `method` to the system's `baseUrl` joined
+/// with the endpoint's `path`, with no body, carrying the system's one
+/// credential that is active and valid today — `BEARER_TOKEN` as
+/// `Authorization: Bearer`, `BASIC_AUTH` (`user:password`) as
+/// `Authorization: Basic`. The request body is ignored; nothing in it can name
+/// a URL, a host or a header.
+///
+/// The host is resolved once and every address it resolves to is checked:
+/// loopback, link-local, unspecified and multicast are always refused, and a
+/// private address unless `KELIR_INTEGRATION_ALLOWED_CIDRS` lists its range.
+/// The connection is pinned to the checked address, redirects are not
+/// followed, and the whole call is bounded by the system's `timeoutSeconds`.
+///
+/// **Every call from the moment the endpoint is found writes exactly one
+/// `integration_logs` row**, answered or not; its id is `logId` here, and in
+/// the message of a failure. No header is returned, and the body preview has
+/// the secret redacted in every form it was sent in.
+#[utoipa::path(
+    post, path = "/api/v1/integration/external-systems/{id}/endpoints/{endpointId}/test-call", tag = "integration",
+    responses(
+        (status = 200, description = "The system answered. `status` is SUCCESS for a 2xx and FAILED for anything else, a 3xx included: redirects are not followed", body = TestCallResponse),
+        (status = 403, description = "Missing integration:endpoint:call"),
+        (status = 404, description = "No such external system in this tenant, or no such endpoint on it"),
+        (status = 422, description = "The call was refused before anything was sent, and logged: EXTERNAL_SYSTEM_NOT_ACTIVE, ENDPOINT_NOT_ACTIVE, BASE_URL_MISSING, TARGET_URL_INVALID, NO_USABLE_CREDENTIAL, AMBIGUOUS_CREDENTIAL, CREDENTIAL_TYPE_NOT_SUPPORTED (only BEARER_TOKEN and BASIC_AUTH are built), SECRET_REFERENCE_MALFORMED, SECRET_NAME_NOT_PERMITTED (an env:// name outside KELIR_INTEGRATION_SECRET_*), SECRET_BACKEND_NOT_CONFIGURED (a vault:// reference), SECRET_NOT_FOUND, SECRET_MALFORMED, HOST_NOT_RESOLVED, EGRESS_REFUSED"),
+        (status = 502, description = "UPSTREAM_UNREACHABLE — the connection failed or was closed; logged"),
+        (status = 504, description = "UPSTREAM_TIMEOUT — no answer within the system's timeoutSeconds; logged")
+    ),
+    security(("bearer" = []))
+)]
+pub async fn test_call_endpoint(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    PathParam((id, endpoint_id)): PathParam<(Uuid, Uuid)>,
+) -> Result<Json<ItemEnvelope<TestCallResponse>>, AppError> {
+    Ok(Json(ItemEnvelope::new(
+        test_call::test_call(&state, &caller, id, endpoint_id).await?,
     )))
 }
 

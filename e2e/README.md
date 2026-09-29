@@ -53,7 +53,7 @@ video are kept for failures only.
 
 ## What it covers
 
-Twenty-one flows, each the criterion that decides whether an item is Done rather
+Twenty-two flows, each the criterion that decides whether an item is Done rather
 than a broad sweep. **This table said six until 2026-09-14**, while eight more
 specs landed beside it; it is listed in the order the flows were added.
 
@@ -80,6 +80,7 @@ specs landed beside it; it is listed in the order the flows were added.
 | An administrator deletes a role a claimed task still needs, is shown that task and who holds it, and the role is still there (`a-refused-role-delete-lists-its-open-tasks.spec.ts`) | #532, **D-89** |
 | An administrator reassigns the open task a role delete waits on, from that list, to a role that can decide it, and the retried delete gets past the open tasks; to a live user who can decide it, who then holds it; somebody without `workflow:task:reassign` sees the list and no Reassign; and a role deleted while the dialog is open is refused under the role field (`an-open-task-is-reassigned-from-the-roles-page.spec.ts`) | #512, FR-WF-017 |
 | A role whose last holder is deactivated says *1 open task, 0 active holders* on its row of the Roles page; the notice opens that role's open-task list with no delete tried, the task is reassigned from it, and the roles read again drop the notice (`a-role-nobody-holds-shows-its-open-tasks.spec.ts`) | #508, **D-91** (2) |
+| An administrator runs a test call on an endpoint of a system with no credential from the system's page, confirms it, and is shown the refusal `NO_USABLE_CREDENTIAL` explained, with the integration log id the server named. **A refusal, not an answer**: an answer needs a reachable system and a secret in the backend's environment, which the release stack does not have (`a-test-call-is-refused-and-explained.spec.ts`) | #547, FR-INT-002 |
 
 **Every flow runs in Chromium except `a-pattern-the-browser-gives-up-on.spec.ts`, which runs in Firefox and only there** ([#496](https://github.com/sujanto-gaws/kelir/issues/496)). It is about a match Firefox throws on. Chromium does not throw on the same match, it keeps matching, so the spec would hold its tab until the test timed out. `playwright.config.ts` holds the split, as two projects.
 

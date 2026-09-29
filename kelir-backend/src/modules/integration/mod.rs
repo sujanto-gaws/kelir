@@ -9,15 +9,26 @@
 //! tables those will write were created by `0046_integration.sql` beside the
 //! three this module reads, and no route here touches them (#520 AC-3).
 //!
-//! # No function in this module resolves a reference
+//! # One function resolves a reference, for one call
 //!
 //! `integration_credentials.secret_reference` is a pointer —
-//! `vault://kelir/erp/api-key`, `env://KELIR_ERP_API_KEY` — and **no function
-//! here resolves one**. There is no field, response, OpenAPI schema or log line
-//! that carries a resolved secret because there is nothing to resolve it with.
-//! What the API checks about a reference's shape is in
-//! [`domain::credential::validate_secret_reference`], and it says there what it
-//! cannot check.
+//! `vault://kelir/erp/api-key`, `env://KELIR_ERP_API_KEY`. **Only
+//! [`outbound::resolve_secret`] resolves one**, for an administrator's test
+//! call (FR-INT-002, #547; ADR-0043), and the value it returns is a
+//! [`domain::secret::Secret`]: no `Debug`, `Display` or `Serialize` that could
+//! carry it into a response, a log line, an `integration_logs` row or an audit
+//! row. `env://NAME` resolves when `NAME` starts with
+//! `KELIR_INTEGRATION_SECRET_`, and fails with `SECRET_NAME_NOT_PERMITTED`
+//! otherwise; `vault://` fails the call with `SECRET_BACKEND_NOT_CONFIGURED`. What the API checks about a reference's
+//! shape at save is in [`domain::credential::validate_secret_reference`].
+//!
+//! # One route calls out
+//!
+//! `POST …/external-systems/{id}/endpoints/{endpointId}/test-call`, under
+//! [`ENDPOINT_CALL`], is the only traffic this module makes. It runs in the
+//! request, behind the egress guard in [`domain::egress`], within the system's
+//! timeout, and writes exactly one `integration_logs` row
+//! ([`service::test_call`]).
 //!
 //! # Three resources and eight permissions (#520, the product owner's answers)
 //!
@@ -38,6 +49,7 @@
 
 pub mod domain;
 pub mod handlers;
+pub mod outbound;
 pub mod repository;
 pub mod service;
 
@@ -66,3 +78,11 @@ pub const CREDENTIAL_CREATE: &str = "integration:credential:create";
 pub const CREDENTIAL_READ: &str = "integration:credential:read";
 pub const CREDENTIAL_UPDATE: &str = "integration:credential:update";
 pub const CREDENTIAL_DELETE: &str = "integration:credential:delete";
+
+/// Make a test call to an endpoint (FR-INT-002, #547) — **a real request** to
+/// the system, with its credential attached.
+///
+/// Its own permission, apart from `:external-system:*` and `:credential:*`:
+/// reading a system, editing it and seeing where its secrets live are each a
+/// different question from sending a request under its credential.
+pub const ENDPOINT_CALL: &str = "integration:endpoint:call";

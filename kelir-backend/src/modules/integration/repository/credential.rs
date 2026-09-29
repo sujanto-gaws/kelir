@@ -112,6 +112,33 @@ pub async fn list_credentials(
     Ok(rows.into_iter().filter_map(Row::into_credential).collect())
 }
 
+/// A system's active credential references, for a test call to choose from
+/// (`domain::test_call::choose_credential` applies the validity window).
+///
+/// **The reference, not a secret** — as everywhere in this file.
+pub async fn active_credentials(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    external_system_id: Uuid,
+) -> Result<Vec<IntegrationCredential>, sqlx::Error> {
+    let rows = sqlx::query_as!(
+        Row,
+        r#"
+        SELECT id, external_system_id, credential_type, secret_reference, valid_from,
+               valid_to, is_active, created_at, updated_at
+        FROM integration_credentials
+        WHERE tenant_id = $1 AND external_system_id = $2 AND is_active AND deleted_at IS NULL
+        ORDER BY created_at, id
+        "#,
+        tenant_id,
+        external_system_id,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.into_iter().filter_map(Row::into_credential).collect())
+}
+
 pub async fn find_credential<'e, E: PgExecutor<'e>>(
     executor: E,
     tenant_id: Uuid,

@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO integration_logs\n            (id, tenant_id, external_system_id, direction, integration_type, endpoint, method,\n             correlation_id, entity_type, entity_id, request_payload_json,\n             response_payload_json, status_code, status, error_message, started_at,\n             completed_at, duration_ms)\n        VALUES ($1, $2, $3, 'OUTBOUND', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,\n                $16, $17)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Varchar",
+        "Uuid",
+        "Jsonb",
+        "Jsonb",
+        "Int4",
+        "Varchar",
+        "Text",
+        "Timestamptz",
+        "Timestamptz",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b93bb13fd09543eb03102c36b28d8169f1a20823df4a2c5fa6428ab9875a29d1"
+}
