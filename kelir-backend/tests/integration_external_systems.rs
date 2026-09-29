@@ -1782,6 +1782,11 @@ async fn every_route_is_in_the_document_and_no_schema_can_carry_a_secret() {
         (format!("{BASE}/{{id}}/endpoints"), "post"),
         (format!("{BASE}/{{id}}/endpoints/{{endpointId}}"), "get"),
         (format!("{BASE}/{{id}}/endpoints/{{endpointId}}"), "put"),
+        // #547's test call, the one route that calls out.
+        (
+            format!("{BASE}/{{id}}/endpoints/{{endpointId}}/test-call"),
+            "post",
+        ),
         (format!("{BASE}/{{id}}/credentials"), "get"),
         (format!("{BASE}/{{id}}/credentials"), "post"),
         (format!("{BASE}/{{id}}/credentials/{{credentialId}}"), "get"),
@@ -1802,7 +1807,8 @@ async fn every_route_is_in_the_document_and_no_schema_can_carry_a_secret() {
         "a system has no delete (#520, answer 2)"
     );
 
-    // Fifteen operations, and no more: the list above is the whole surface.
+    // Sixteen operations, and no more: the list above is the whole surface.
+    // #520 made fifteen; #547 added the test call.
     let operations: usize = paths
         .as_object()
         .expect("paths")
@@ -1816,7 +1822,7 @@ async fn every_route_is_in_the_document_and_no_schema_can_carry_a_secret() {
         })
         .sum();
     assert_eq!(
-        operations, 15,
+        operations, 16,
         "the integration surface has {operations} operations"
     );
 
@@ -1918,7 +1924,8 @@ async fn the_database_texts_say_reference_and_not_never_the_secret() {
     .fetch_all(&app.pool)
     .await
     .expect("the catalogue rows");
-    assert_eq!(descriptions.len(), 8, "{descriptions:?}");
+    // #520's eight, and `0049`'s `integration:endpoint:call` (#547).
+    assert_eq!(descriptions.len(), 9, "{descriptions:?}");
 
     let comment = comment.expect("secret_reference has a comment");
     assert!(comment.contains("shape"), "{comment}");

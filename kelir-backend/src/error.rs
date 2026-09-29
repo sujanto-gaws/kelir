@@ -75,6 +75,23 @@ pub enum AppError {
         code: &'static str,
         message: String,
     },
+    /// A 422 with a code of its own, for a request that was well formed and
+    /// could not be carried out for a reason the caller branches on — an
+    /// integration test call whose credential is a `vault://` reference
+    /// (`SECRET_BACKEND_NOT_CONFIGURED`), or whose host resolves to an address
+    /// the egress guard refuses (FR-INT-002, #547). Field-level failures stay
+    /// [`Self::Validation`].
+    CodedUnprocessable {
+        code: &'static str,
+        message: String,
+    },
+    /// A system Kelir called on the caller's behalf did not answer: 504 when
+    /// it ran out of time, 502 otherwise (FR-INT-002, #547).
+    Upstream {
+        code: &'static str,
+        message: String,
+        timed_out: bool,
+    },
     /// Rate limited. Carries the wait so a legitimate client can back off
     /// rather than retry blindly.
     TooManyRequests {
@@ -124,7 +141,9 @@ impl AppError {
             Self::Unauthorized => "UNAUTHORIZED",
             Self::Forbidden => "FORBIDDEN",
             Self::Conflict { .. } => "CONFLICT",
-            Self::CodedConflict { code, .. } => code,
+            Self::CodedConflict { code, .. }
+            | Self::CodedUnprocessable { code, .. }
+            | Self::Upstream { code, .. } => code,
             Self::TooManyRequests { .. } => "TOO_MANY_REQUESTS",
             Self::Internal { .. } => "INTERNAL_ERROR",
         }
@@ -139,6 +158,11 @@ impl AppError {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Forbidden => StatusCode::FORBIDDEN,
             Self::Conflict { .. } | Self::CodedConflict { .. } => StatusCode::CONFLICT,
+            Self::CodedUnprocessable { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::Upstream {
+                timed_out: true, ..
+            } => StatusCode::GATEWAY_TIMEOUT,
+            Self::Upstream { .. } => StatusCode::BAD_GATEWAY,
             Self::TooManyRequests { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -152,7 +176,9 @@ impl AppError {
             Self::Validation { .. } => "Validation failed".to_owned(),
             Self::BadRequest { message }
             | Self::Conflict { message }
-            | Self::CodedConflict { message, .. } => message.clone(),
+            | Self::CodedConflict { message, .. }
+            | Self::CodedUnprocessable { message, .. }
+            | Self::Upstream { message, .. } => message.clone(),
             Self::TooManyRequests {
                 retry_after_seconds,
             } => format!("Too many attempts. Try again in {retry_after_seconds} seconds."),
@@ -271,6 +297,34 @@ mod tests {
 
         let (_, plain) = body_of(AppError::conflict("Refused")).await;
         assert_eq!(plain["error"]["code"], "CONFLICT");
+    }
+
+    #[tokio::test]
+    async fn a_coded_unprocessable_and_an_upstream_failure_keep_their_codes() {
+        let (status, body) = body_of(AppError::CodedUnprocessable {
+            code: "SECRET_BACKEND_NOT_CONFIGURED",
+            message: "No vault".to_owned(),
+        })
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"]["code"], "SECRET_BACKEND_NOT_CONFIGURED");
+
+        let (status, body) = body_of(AppError::Upstream {
+            code: "UPSTREAM_TIMEOUT",
+            message: "Slow".to_owned(),
+            timed_out: true,
+        })
+        .await;
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(body["error"]["code"], "UPSTREAM_TIMEOUT");
+
+        let (status, _) = body_of(AppError::Upstream {
+            code: "UPSTREAM_UNREACHABLE",
+            message: "Gone".to_owned(),
+            timed_out: false,
+        })
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
     }
 
     #[tokio::test]

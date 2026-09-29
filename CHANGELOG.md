@@ -43,8 +43,52 @@ While the major version is `0`, the public API may change in any release.
   on its `ROLE-ADMIN`. A tenant created before the upgrade does not: grant it
   to that tenant's administrator role. No schema changes, and `v0.8.0` runs
   against the migrated schema.
+- **An integration secret must be named `KELIR_INTEGRATION_SECRET_…` to be
+  used.** A test call resolves `env://NAME` only when `NAME` starts with
+  `KELIR_INTEGRATION_SECRET_`, and fails with `SECRET_NAME_NOT_PERMITTED`
+  otherwise (decision **D-96**). A credential reference already saved under
+  another name, such as `env://ERP_API_KEY`, is still stored and fails when
+  called: set the secret on the backend under a prefixed name and edit the
+  reference to match. Put nothing under the prefix but secrets meant for an
+  external system ([Installation and Deployment](docs/operations/01.%20Installation%20and%20Deployment.md)
+  §7.1).
+- **A private-network system needs `KELIR_INTEGRATION_ALLOWED_CIDRS`.** A
+  test call to an RFC 1918 or IPv6 unique-local address is refused unless the
+  range is listed, for example `10.20.0.0/16`. Loopback, link-local (the cloud
+  metadata address included), unspecified and multicast addresses are always
+  refused.
+- **`0049` adds one permission, `integration:endpoint:call`**, and grants it
+  to the system tenant's `ROLE-ADMIN`. A tenant created after the upgrade gets it on its
+  `ROLE-ADMIN`. A tenant created before the upgrade does not: grant it to that
+  tenant's administrator role. No schema changes.
 
 ### Added
+
+- **An administrator test-calls a registered endpoint** (FR-INT-002;
+  [#547](https://github.com/sujanto-gaws/kelir/issues/547), decision
+  **D-96**,
+  [ADR-0043](docs/architectures/adr/0043.%20A%20Test%20Call%20Runs%20in%20the%20Request,%20Resolves%20Only%20env%20Secrets,%20and%20Connects%20Only%20to%20a%20Checked%20Address.md)).
+  `POST /api/v1/integration/external-systems/{id}/endpoints/{endpointId}/test-call`,
+  under the new `integration:endpoint:call`, calls the endpoint's `path` on
+  its system's `baseUrl` with the endpoint's method, and answers with what
+  happened. Nothing in the request names a URL. The call runs inside the
+  request, bounded by the system's `timeoutSeconds`, with no outbox and no
+  retry. **It is a real call**: a `POST` endpoint receives a real request.
+  - **Secrets are resolved for the call only.** `env://KELIR_INTEGRATION_SECRET_…`
+    is read from the backend's environment; any other `env://` name fails as
+    `SECRET_NAME_NOT_PERMITTED`, and `vault://` fails as
+    `SECRET_BACKEND_NOT_CONFIGURED` until a Vault client exists. No response,
+    log line, integration log row or audit row carries a resolved secret.
+  - **`BEARER_TOKEN` and `BASIC_AUTH` are sent**, as `Authorization: Bearer`
+    and `Authorization: Basic` from a `user:password` secret. Every other
+    credential type is refused with a 422 naming it as not built.
+  - **The server connects only to an address it has checked.** The host is
+    resolved once, the address is checked and the connection pinned to it, and
+    redirects are not followed. Private ranges need
+    `KELIR_INTEGRATION_ALLOWED_CIDRS` (see *Upgrade notes*).
+  - **Every call writes one `integration_logs` row**, success or failure, with
+    masked payloads. It is the table's first writer; the log has no screen yet
+    ([#548](https://github.com/sujanto-gaws/kelir/issues/548)).
 
 - **A refused role delete lists the tasks it waits on**
   ([#532](https://github.com/sujanto-gaws/kelir/issues/532), decision **D-89**).
@@ -131,8 +175,8 @@ While the major version is `0`, the public API may change in any release.
     Only the shapes `env://NAME` and `vault://path[#field]` are accepted, and
     only the shape is checked. A secret typed as a path segment, such as
     `vault://sk_live_…`, has the right shape, and it is stored and returned as
-    sent. Put the secret in the store first, then enter its reference. No
-    route resolves a reference. A `baseUrl` containing a user name or password
+    sent. Put the secret in the store first, then enter its reference. Only
+    the test call above resolves a reference. A `baseUrl` containing a user name or password
     is refused as `CREDENTIALS_IN_URL`, and one with any query string as
     `QUERY_IN_BASE_URL`, so a key cannot ride in `?api_key=`.
   - **Credentials have their own permissions.** They are under

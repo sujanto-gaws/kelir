@@ -109,6 +109,24 @@ uuid = { version = "1", features = ["v7", "serde"] }
 # `object_store` and `jsonschema`, so it adds nothing to the build; a
 # hand-written URL parser is the thing this avoids owning.
 url = "2"
+# The outbound HTTP client behind an administrator's test call (FR-INT-002,
+# #547). Already in the tree through `object_store`, at this version and with
+# these features, so it adds no new crate to the build.
+#
+# `default-features = false` for `lettre`'s reason: the default is
+# `native-tls`, and every other TLS user here is rustls. `system-proxy` goes
+# with the defaults too, and has to: a proxy read from the environment would
+# carry the call somewhere other than the address the egress guard checked
+# (`integration::outbound`, which also calls `no_proxy()`).
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls-native-roots",
+] }
+# `Authorization: Basic` is base64 of `user:password` (RFC 7617). Already in the
+# tree at this version.
+base64 = "0.22"
+# A resolved secret is wiped from memory when the call ends (FR-INT-002,
+# #547). Already in the tree through `rustls`.
+zeroize = "1"
 # JSON Schema validation of stored JFSS form definitions (FR-RAD-002, #156).
 # All references in the meta-schema are internal (`#/$defs/...`), so no
 # resolver feature is enabled: a validator that can fetch a remote schema is a
