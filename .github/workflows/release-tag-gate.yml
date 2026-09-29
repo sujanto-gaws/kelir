@@ -4,9 +4,12 @@ name: Release tag gate
 #
 # `releases_are_independently_verified.rs` rules 11 and 12 ask whether a
 # release tag's commit already carries its release record, citing a new
-# verification record. `ci.yml` asks that on the next pull request or push to
-# `main`; this asks it the moment the tag lands. **It detects and does not
-# prevent**: nothing here can stop `git push --tags`, so a red run here means
+# verification record, and rule 14 (#549) whether that record's reader appears
+# in a `Claude-Session:` line of the construction since the previous tag,
+# which needs the full history fetched below. `ci.yml` asks all three on the
+# next pull request or push to `main`; this asks them the moment the tag
+# lands. **It detects and does not prevent**: nothing here can stop
+# `git push --tags`, so a red run here means
 # the tag is wrong and must be moved before anything is built from it.
 #
 # `workflow_dispatch` runs it by hand on any branch, so the gate can be

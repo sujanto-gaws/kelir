@@ -3,7 +3,9 @@
 //! ([#392](https://github.com/sujanto-gaws/kelir/issues/392), Sprint 16 item 1;
 //! hardened by [#412](https://github.com/sujanto-gaws/kelir/issues/412), Sprint
 //! 17 item 2; tied to the tag by [#484](https://github.com/sujanto-gaws/kelir/issues/484),
-//! Sprint 21 row 4). **This detects and does not prevent**: no test can stop
+//! Sprint 21 row 4) — and so is a pass whose named reader wrote any of the
+//! release's construction ([#549](https://github.com/sujanto-gaws/kelir/issues/549),
+//! Sprint 21 row 19). **This detects and does not prevent**: no test can stop
 //! `git tag` or `git push --tags`.
 //!
 //! [Sprint plan](../../projects/planning/01.%20Sprint%20Plan.md) §2 has said
@@ -112,6 +114,24 @@
 //!     required), and a citation that resolves, is new and is above the
 //!     high-water mark. See *Rules 11 and 12, 2026-09-26* below.
 //!
+//! Rules 13 and 14 are [#549](https://github.com/sujanto-gaws/kelir/issues/549),
+//! Sprint 21 row 19: [#448](https://github.com/sujanto-gaws/kelir/issues/448)'s
+//! instrument. Rules 1–12 ask whether a pass was *recorded*; these are the
+//! first to ask whether its reader stood outside the work, which is
+//! [sprint plan](../../projects/planning/01.%20Sprint%20Plan.md) §2's own
+//! criterion and until now was asserted by each record's §1 and checked by
+//! nobody.
+//!
+//! 13. **A verification record from record 19 on names its reader** in a
+//!     `**Reader session:**` line carrying a session ID. Records 01–18
+//!     predate the field: they are exempt by number, and counted.
+//! 14. **No reader a cited record names appears in a `Claude-Session:` line
+//!     of a construction commit in the release's range** — from the previous
+//!     release tag to the release's own, or to `HEAD` before it is tagged. A
+//!     commit that changes only `projects/verifications/` is the reading's own
+//!     record, and is not construction. See *Rules 13 and 14, 2026-09-29*
+//!     below.
+//!
 //! # The floor, and why it is not the next release
 //!
 //! [`FIRST_GOVERNED_RELEASE`] is `v0.3.0` rather than `v0.7.0`, and the
@@ -132,9 +152,10 @@
 //!   own independence criterion needs `git log`, and CI cloned at depth 1
 //!   ([finding 4](../../projects/verifications/15.%20Sprint%2016%20Independent%20Pass.md)).
 //!   Since [#453](https://github.com/sujanto-gaws/kelir/issues/453) the backend
-//!   job fetches full history; reading a named reader's absence from trailers
-//!   is still not asked, and sprint plan §2 has said so since
-//!   [#448](https://github.com/sujanto-gaws/kelir/issues/448).
+//!   job fetches full history, and since [#549](https://github.com/sujanto-gaws/kelir/issues/549)
+//!   rule 14 reads a named reader against the range's trailers — which is
+//!   whether the reader was independent, not whether the reading happened.
+//!   See *Rules 13 and 14* below for what it still cannot see.
 //! - **Cite a record that is new, resolves, is numbered above the high-water
 //!   mark, and read none of this release's work.** Rule 7 sharpens rule 2's
 //!   *new* and does not make it *relevant*. Matching a release to the sprints
@@ -564,6 +585,160 @@
 //! - **The shallow-clone refusal was not run.** It guards a depth-1 checkout,
 //!   where a tag's name can arrive without the tree it points at, and asks the
 //!   question `sprint_reports_are_verified.rs` already asks there.
+//!
+//! # Rules 13 and 14, the reader against the trailers, 2026-09-29 (#549)
+//!
+//! [#448](https://github.com/sujanto-gaws/kelir/issues/448): §2 counts a
+//! reader as independent when their session *appears in no construction
+//! commit trailer in the range*, and nothing in the tree read a trailer.
+//! [Record 15](../../projects/verifications/15.%20Sprint%2016%20Independent%20Pass.md)
+//! is the case — its reader carried the `Claude-Session:` line of `aa3af07`,
+//! `64c2e89`, `1cd3f99` and `191662e`, the release run it read, and rules
+//! 1–10 were green on it. #448 took branch A, the amendment, and left branch
+//! B, this, to Phase 9 for want of a field: record 15 names its session in
+//! prose. **[Record 19](../../projects/verifications/19.%20Sprint%2020%20Independent%20Pass.md)
+//! is the first record with the field**, because [construction plan 17](../../projects/planning/17.%20Sprint%2021%20Phase%209%20Pre-Release%20Construction%20Plan.md)
+//! §7 step 3 asked for one *so that row 19 has a field to parse*. Branch B's
+//! fetch-depth cost was paid by #453 and #484: both workflows that run this
+//! file fetch full history and tags, and [`tags`] refuses a shallow clone.
+//!
+//! **The range** is [`release_range`]'s: from the highest `vX.Y.Z` tag below
+//! the release's version to its own tag, the tags rules 11 and 12 read. **A
+//! release record with no tag yet runs to `HEAD`**, so a `Draft` for the next
+//! release citing a record whose reader wrote something since the last tag is
+//! red on the pull request that cites it — before the tag, as #484 made rules
+//! 11 and 12. Every release record from [`FIRST_GOVERNED_RELEASE`] on is read,
+//! whatever its status, and a tagged one's citations are read at `HEAD` and at
+//! its tag. A record's readers come from the record on disk.
+//!
+//! **"Construction" is §2's word, and it is load-bearing.** Read literally, *a
+//! `Claude-Session` line in the release's range* would refuse `v0.9.0` for
+//! citing record 19: its reader is in `13e1e76`, the commit that adds record
+//! 19 and nothing else, because a top-level reader commits its own reading. So
+//! [`is_construction`] excludes a commit whose every path is inside
+//! `projects/verifications/`, and nothing else — a commit that also touches
+//! any other path is construction, and so is one that touches none, such as a
+//! merge.
+//!
+//! **The exemption, and why it is by number.** Records 01–18 carry no
+//! `**Reader session:**` line, and rule 13 requires one only from
+//! [`FIRST_READER_SESSION_RECORD`], record 19, on. #448's branch B asks for *a
+//! reader a test can parse*, and until record 19 no record had one: recovering
+//! a session from prose would be guessing at settled records, and amending
+//! them is what [`FIRST_AFTERMATH_GOVERNED_RELEASE`] already declines to ask.
+//! **The exemption is named, not silent**: a test counts the eighteen, so it
+//! cannot grow, and a record that gains a line is read by rule 14 like any
+//! other. **Its cost, stated**: record 15 fails the criterion by its own
+//! finding 4 and is exempt — its §7 re-read by a second session is what met
+//! the criterion, and `v0.7.0` is settled. **And rule 14 governs no release on
+//! `main` today**, because no release cites record 19 yet; `v0.9.0`'s record
+//! will be the first. Rule 13 governs record 19 now, and the tests that read
+//! the real trailers — record 15's case over `v0.6.0..v0.7.0`, record 19's
+//! reader over `v0.8.0..13e1e76` — are what keep the walk connected until then.
+//!
+//! **The parsing is tolerant in the directions rules 2 and 10 were taught.**
+//! [`after_reader_label`] reads the label in any case, with the colon inside
+//! or outside the bold, joined by a space or a hyphen, after indentation, `>`,
+//! `|` and any list marker. [`session_ids`] reads a UUID in either case and a
+//! claude.ai session as its `session_…` token, as a URL, a bare token, a link
+//! or in backticks. A citation is read through [`normalised_citation`], so
+//! `./20…` and `%32%30…` are record 20. **Every reader line counts**, so a
+//! second reader cannot hide behind a first, and a line naming no session —
+//! `<your id>`, a truncated ID, the nil UUID — is refused by rule 13.
+//!
+//! **Probes, committed.** `a_reader_line_is_read_under_any_spelling_or_marker`
+//! sends 22 spellings of record 19's line and three of record 15's session,
+//! and five mentions that are not labels, record 19's own §1 sentence among
+//! them. `every_reader_line_is_read_and_each_names_a_session` sends two
+//! readers under two spellings and eight lines naming nothing.
+//! `rule_13_judges_a_record_by_its_number` holds 19, 20 and 99 and exempts 15
+//! and 18, and reads record 19 on disk as exactly its reader.
+//! `a_session_line_is_read_as_its_session` reads three session lines — any
+//! case, indented, CRLF — and not one quoted mid-line.
+//! `only_a_commit_confined_to_verification_records_is_not_construction` and
+//! `a_release_range_runs_from_the_previous_tag_to_its_own` pin the two
+//! definitions. **Against the real trailers**:
+//! `record_15_s_reader_is_found_in_the_trailers_of_v0_7_0_s_range` finds all
+//! four of finding 4's commits for a synthetic record naming record 15's
+//! reader; `rule_14_refuses_a_draft_citing_a_range_author_before_its_tag`
+//! refuses a synthetic `Draft` `v0.9.0` citing a record whose reader wrote
+//! #560–#562, under three spellings of the citation, over `v0.8.0..HEAD`;
+//! `rule_14_reads_a_tagged_release_over_its_range_and_at_its_tag` refuses
+//! record 15's reader over `v0.6.0..v0.7.0` through a citation only the tag's
+//! record holds. Each has its control: a session in no commit, record 19
+//! cited, a release below the floor, the record at `HEAD` citing nothing.
+//!
+//! **Seen red.** Baseline before the change: 36 passed. After: 49. Fourteen
+//! mutations, each applied alone to this file, the suite run, and the file
+//! restored — every one red:
+//!
+//! | # | Mutation | Red |
+//! |---|---|---|
+//! | 1 | Every commit is construction | `only_a_commit_…_is_not_construction`, `record_19_s_reader_recorded_its_reading_and_built_nothing`, `rule_14_refuses_a_draft_…` (record 19 cited) |
+//! | 2 | A commit changing no path is not construction | `only_a_commit_…_is_not_construction` |
+//! | 3 | The label matched in its house case only | `a_reader_line_is_read_under_any_spelling_or_marker` |
+//! | 4 | No list marker stripped before the label | the same, `every_reader_line_is_read_…`, `record_15_s_reader_is_found_…` |
+//! | 5 | Only the first reader line read | `every_reader_line_is_read_…` |
+//! | 6 | The nil UUID read as a session | `every_reader_line_is_read_…` |
+//! | 7 | A claude.ai session not read | five: the three parser tests, `record_15_s_reader_is_found_…`, `rule_14_reads_a_tagged_release_…` |
+//! | 8 | The `Claude-Session` key in its house case only | `a_session_line_is_read_as_its_session` |
+//! | 9 | The range from the lowest tag below | `a_release_range_…`, both `rule_14_…` walk tests |
+//! | 10 | An untagged release runs to the newest tag, not `HEAD` | `a_release_range_…`, `rule_14_refuses_a_draft_…` |
+//! | 11 | A tagged release's citations at the tag ignored | `rule_14_reads_a_tagged_release_…` |
+//! | 12 | [`FIRST_READER_SESSION_RECORD`] raised to 20 | `rule_13_judges_a_record_by_its_number` |
+//! | 13 | Rule 14 reads `Final` records only | `rule_14_refuses_a_draft_…` |
+//! | 14 | A `>` or `|` not stripped before the label | `a_reader_line_is_read_under_any_spelling_or_marker` |
+//!
+//! **Probes on disk**, each a synthetic `20. A Probe Pass.md` and a `Draft`
+//! `09. Release v0.9.0.md` citing it, planted, run against the binary before
+//! the change and after it, and removed. The range author is
+//! `8b90e70f-…-b04e6f3336c4`, construction plan 17's author, in the
+//! `Claude-Session:` lines of #560, #561, #562 and nine commits before them
+//! since `v0.8.0`:
+//!
+//! | Record 20, and the citation | Before | After |
+//! |---|---|---|
+//! | The range author under a `- ` marker, the label spelt `**Reader Session**:`, the ID in backticks | 36 of 36 | red: rule 14, twelve commits named |
+//! | The house line; cited as `./20.%20…` | 36 of 36 | red: rule 14 |
+//! | The house line; cited as `%32%30.%20…` | 36 of 36 | red: rule 14 |
+//! | A clean reader, then the range author on a second line under `* ` | 36 of 36 | red: rule 14 |
+//! | The label upper-case in a table row, the UUID upper-case | 36 of 36 | red: rule 14 |
+//! | No reader line | 36 of 36 | red: rule 13, *no `**Reader session:**` line* |
+//! | `**Reader session:** <your id>` | 36 of 36 | red: rule 13, quoting the line |
+//! | Record 19 cited, not record 20 | 36 of 36 | 49 of 49 |
+//! | A session in no commit | 36 of 36 | 49 of 49 |
+//!
+//! **Positive control, last**: record 20 with the house line naming the range
+//! author, cited in the house spelling — the shape #549's *Done when* names.
+//! Before: 36 of 36. After: red on
+//! `no_reader_of_a_cited_record_wrote_the_release_s_construction` alone,
+//! naming `970ee0c`, `2748312`, `ab51a03` and the rest over `v0.8.0..HEAD`,
+//! and the other 48 green. Both files were removed and the tree left as it
+//! was.
+//!
+//! **Stated limits.**
+//!
+//! - **A reader in no `Claude-Session:` line cannot be matched.** A person, or
+//!   a commit carrying no line: `check-commit-messages.sh` has refused a
+//!   commit co-authored by Claude without one since
+//!   [#475](https://github.com/sujanto-gaws/kelir/issues/475), and a commit
+//!   not co-authored by Claude carries none.
+//! - **A record that names the wrong session passes.** Rule 14 reads what the
+//!   record says; the reader's §1 prints `CLAUDE_CODE_SESSION_ID` before it
+//!   reads, and the record copies it. A subagent carries its dispatcher's ID
+//!   (§2 (b)), so a dispatched reader names its dispatcher — and is refused
+//!   when the dispatcher built anything in the range, which is right.
+//! - **The release's range, not the range the record read.** A reader who
+//!   built something in the release outside what it read is refused. That is
+//!   stricter than §2's *the sprint's range*, and costs a refusal, not a pass.
+//! - **A commit that touches a verification record and anything else is
+//!   construction**, however small the other change; and a `Claude-Session:`
+//!   line quoted at the start of a line in a message counts as that commit's.
+//!   Both cost a refusal, not a pass.
+//! - **A line that opens with the label and names no session is refused**,
+//!   including prose that happens to start `Reader session:`. From record 19
+//!   on that costs a refusal by rule 13. Below it, rule 14 skips such a
+//!   record, as it skips one with no line.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -3397,5 +3572,1025 @@ fn rule_12_resolves_against_the_tag_s_own_listing() {
     assert!(
         !judge(RECORD_16_CITED).is_empty(),
         "record 16 is on this checkout's disk and not in the tag's listing"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The reader against the trailers (#549)
+// ---------------------------------------------------------------------------
+
+/// The first verification record that must name its reader, by number.
+///
+/// **Record 19 is the first record with a field to name one.** Construction
+/// plan 17 §7 step 3 asked its brief for a `**Reader session:**` header line
+/// *so that row 19 has a field to parse*, and [sprint plan](../../projects/planning/01.%20Sprint%20Plan.md)
+/// §2 said until then that *record 15 names its session in prose, and no
+/// record has a field for it*. Records 01–18 were written before the field
+/// existed, and each is `Final`.
+///
+/// **The exemption is by number, and it is named**: rule 13 requires the line
+/// of every record from this one on, and
+/// `the_records_before_the_reader_field_are_named_rather_than_silently_skipped`
+/// counts the eighteen that lack it. **Lowering this is a claim that a settled
+/// record should be amended to carry a session its reader may no longer have.
+/// Raising it excuses record 19, which carries the line.**
+const FIRST_READER_SESSION_RECORD: u32 = 19;
+
+/// How many numbered records sit below [`FIRST_READER_SESSION_RECORD`] with no
+/// reader line: records 01–18, every one.
+const RECORDS_BEFORE_THE_READER_FIELD: usize = 18;
+
+/// Whether `byte` can continue a session ID, so that a match inside a longer
+/// token is not read as one.
+fn continues_an_id(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
+}
+
+/// The end of a UUID `8-4-4-4-12` starting at `start`, if one does.
+fn uuid_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut at = start;
+
+    for (group, length) in [8, 4, 4, 4, 12].into_iter().enumerate() {
+        if group > 0 {
+            if bytes.get(at) != Some(&b'-') {
+                return None;
+            }
+            at += 1;
+        }
+        for _ in 0..length {
+            if !bytes.get(at).is_some_and(u8::is_ascii_hexdigit) {
+                return None;
+            }
+            at += 1;
+        }
+    }
+
+    Some(at)
+}
+
+/// Every session ID `text` carries, **in the one form both sides are compared
+/// in** ([#549](https://github.com/sujanto-gaws/kelir/issues/549)).
+///
+/// `check-commit-messages.sh` accepts two kinds of session, and so does this:
+///
+/// - **A local session's UUID**, `CLAUDE_CODE_SESSION_ID`, lower-cased, since
+///   a UUID's hex digits are the same number in either case.
+/// - **A claude.ai session**, `https://claude.ai/code/session_…`, read as its
+///   `session_…` token, so a record naming the URL, the bare token or the
+///   token in a link is the same reader. Its base-62 characters are compared
+///   as written, because they are case-sensitive.
+///
+/// A match must stand alone: a UUID inside a longer hex run, or a `session_`
+/// inside `CLAUDE_CODE_session_…`, is not one. **The nil UUID is not a
+/// session**: `check-commit-messages.sh` refuses it as a placeholder, and it
+/// cannot name a reader. Nor is a `session_` token shorter than sixteen
+/// characters, which claude.ai's are not.
+fn session_ids(text: &str) -> BTreeSet<String> {
+    let bytes = text.as_bytes();
+    let mut found = BTreeSet::new();
+
+    for start in 0..bytes.len() {
+        if start > 0 && continues_an_id(bytes[start - 1]) {
+            continue;
+        }
+        let Some(end) = uuid_end(bytes, start) else {
+            continue;
+        };
+        if bytes.get(end).is_some_and(|&byte| continues_an_id(byte)) {
+            continue;
+        }
+        let uuid = text[start..end].to_ascii_lowercase();
+        if uuid.bytes().any(|byte| byte != b'0' && byte != b'-') {
+            found.insert(uuid);
+        }
+    }
+
+    for (at, prefix) in text.match_indices("session_") {
+        if at > 0 && continues_an_id(bytes[at - 1]) {
+            continue;
+        }
+        let tail = &text[at + prefix.len()..];
+        let length = tail.bytes().take_while(u8::is_ascii_alphanumeric).count();
+        if length >= 16 && tail.as_bytes().get(length) != Some(&b'_') {
+            found.insert(text[at..at + prefix.len() + length].to_owned());
+        }
+    }
+
+    found
+}
+
+/// The text after a reader label, if `line` opens with one.
+///
+/// **Tolerant, in the directions rules 2 and 10 were taught to be.** The
+/// label is `Reader session`, in any case, with the colon inside or outside
+/// the bold (`**Reader session:**`, `**Reader Session**:`), under any bold or
+/// emphasis marker or none, joined by a space or a hyphen, and `Reader
+/// sessions` too. It may open the line after indentation, a blockquote's `>`,
+/// a table's `|` and any CommonMark list marker ([`after_list_marker`]),
+/// repeated. **A line this does not read can only cost a record**: from
+/// record 19 on, a record whose every reader line is unread names no reader,
+/// and rule 13 refuses it.
+///
+/// A label mentioned inside a sentence is not one — record 19's own §1 says
+/// *the `**Reader session:**` header line above* mid-line, and that line is
+/// not a reader line.
+fn after_reader_label(line: &str) -> Option<&str> {
+    let mut rest = line.trim_start();
+    loop {
+        let before = rest.len();
+        rest = rest.trim_start_matches(['>', '|']).trim_start();
+        if let Some(after) = after_list_marker(rest) {
+            rest = after.trim_start();
+        }
+        if rest.len() == before {
+            break;
+        }
+    }
+
+    let rest = rest.trim_start_matches(['*', '_']);
+    if !rest.get(..6)?.eq_ignore_ascii_case("reader") {
+        return None;
+    }
+    let rest = rest[6..].strip_prefix([' ', '-'])?;
+    if !rest.get(..7)?.eq_ignore_ascii_case("session") {
+        return None;
+    }
+    let rest = &rest[7..];
+    let rest = rest.strip_prefix(['s', 'S']).unwrap_or(rest);
+    let rest = rest.trim_start_matches(['*', '_']).trim_start();
+
+    Some(rest.strip_prefix(':')?.trim_start_matches(['*', '_']))
+}
+
+/// Every reader a verification record names, or why it names none.
+///
+/// **Every reader line counts, not the first**: a record read twice — record
+/// 15's §7 re-read came from a second session — names two readers, and a
+/// release citing it is independent of neither's work only if neither wrote
+/// any of it. So a second line cannot hide behind a first. A line naming no
+/// session is refused rather than skipped, since `<your id>` or a truncated
+/// `8b90e70f-…` would otherwise read as a reader nobody can match.
+fn record_readers(body: &str) -> Result<BTreeSet<String>, String> {
+    let mut readers = BTreeSet::new();
+    let mut lines = 0;
+
+    for line in body.lines() {
+        let Some(value) = after_reader_label(line) else {
+            continue;
+        };
+        lines += 1;
+
+        let named = session_ids(value);
+        if named.is_empty() {
+            return Err(format!(
+                "its reader line names no session ID: {:?}",
+                line.trim()
+            ));
+        }
+        readers.extend(named);
+    }
+
+    if lines == 0 {
+        return Err("it has no `**Reader session:**` line".to_owned());
+    }
+
+    Ok(readers)
+}
+
+/// Rule 13's judgement of one verification record: `None` when it names its
+/// reader or is exempt, and otherwise why not.
+///
+/// A record numbered below [`FIRST_READER_SESSION_RECORD`] is exempt, and so
+/// is a file with no number, which rule 7 could not cite as a numbered record.
+fn unnamed_reader(record: &str, body: &str) -> Option<String> {
+    let number = record_number(record)?;
+    if number < FIRST_READER_SESSION_RECORD {
+        return None;
+    }
+
+    record_readers(body).err()
+}
+
+/// Every session a commit message's `Claude-Session:` lines name.
+///
+/// **Message bodies, not git's trailer block**: a squash merge puts each
+/// commit's `Claude-Session:` line in a paragraph above the closing
+/// `Co-authored-by`, where `git interpret-trailers` finds none of them (record
+/// 16 §7). The key is read in any case and after any indentation, and the
+/// value by [`session_ids`], so a URL and its `session_…` token are one
+/// session.
+fn trailer_sessions(message: &str) -> BTreeSet<String> {
+    const KEY: &str = "claude-session";
+
+    message
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_start();
+            if !line.get(..KEY.len())?.eq_ignore_ascii_case(KEY) {
+                return None;
+            }
+            let value = line[KEY.len()..].trim_start().strip_prefix(':')?;
+            Some(session_ids(value))
+        })
+        .flatten()
+        .collect()
+}
+
+/// One commit in a release's range, as rule 14 reads it.
+struct RangeCommit {
+    /// The short hash and subject, which a refusal names.
+    commit: String,
+    /// The sessions its `Claude-Session:` lines name.
+    sessions: BTreeSet<String>,
+    /// Every path it changes, a rename's two paths included.
+    paths: Vec<String>,
+}
+
+/// Whether a commit is construction: **anything but the record of a reading.**
+///
+/// [Sprint plan](../../projects/planning/01.%20Sprint%20Plan.md) §2's
+/// criterion is *a session appearing in no **construction** commit trailer*.
+/// A reader started as a top-level session commits its own record, with its
+/// own `Claude-Session:` line — record 19's reader is in `13e1e76`, the commit
+/// that adds record 19 and nothing else. **A commit whose every path is inside
+/// `projects/verifications/` is that act, and is not construction**; one that
+/// also touches any other path is. A commit changing no path, such as a
+/// merge, is construction, so the exemption cannot be reached by changing
+/// nothing.
+fn is_construction(paths: &[String]) -> bool {
+    let folder = format!("{VERIFICATIONS}/");
+
+    paths.is_empty() || paths.iter().any(|path| !path.starts_with(&folder))
+}
+
+/// Every commit in `from..to` — or all of `to`'s history when `from` is
+/// `None` — with its sessions and paths, from one `git log`.
+fn range_commits(from: Option<&str>, to: &str) -> Vec<RangeCommit> {
+    let range = from.map_or_else(|| to.to_owned(), |from| format!("{from}..{to}"));
+    let log = git(&[
+        "-c",
+        "core.quotepath=off",
+        "log",
+        "--no-renames",
+        "--name-only",
+        "--format=%x1e%h %s%n%B%x1d",
+        &range,
+    ]);
+
+    log.split('\u{1e}')
+        .filter(|chunk| !chunk.trim().is_empty())
+        .map(|chunk| {
+            let (head, names) = chunk.split_once('\u{1d}').unwrap_or((chunk, ""));
+            let (commit, message) = head.split_once('\n').unwrap_or((head, ""));
+
+            RangeCommit {
+                commit: commit.trim().to_owned(),
+                sessions: trailer_sessions(message),
+                paths: names
+                    .lines()
+                    .map(|name| name.trim().trim_matches('"'))
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+            }
+        })
+        .collect()
+}
+
+/// Rule 14's judgement of one cited record's readers against a range: every
+/// construction commit whose `Claude-Session:` lines name one of them.
+fn written_by_a_reader(readers: &BTreeSet<String>, commits: &[RangeCommit]) -> Vec<String> {
+    commits
+        .iter()
+        .filter(|commit| is_construction(&commit.paths))
+        .filter_map(|commit| {
+            let shared: Vec<_> = commit.sessions.intersection(readers).cloned().collect();
+
+            (!shared.is_empty()).then(|| format!("{} ({})", commit.commit, shared.join(", ")))
+        })
+        .collect()
+}
+
+/// Every release tag `vX.Y.Z`, whatever its version: the ranges start at tags
+/// below [`FIRST_TAG_GOVERNED_RELEASE`] too.
+fn release_tags() -> Vec<(String, (u32, u32, u32))> {
+    tags()
+        .into_iter()
+        .filter_map(|name| Some((tag_version(&name)?, name)))
+        .map(|(version, name)| (name, version))
+        .collect()
+}
+
+/// A release's range, as `(from, to)`: **from the highest release tag below
+/// its version, to its own tag** — or to `HEAD` while it has none.
+///
+/// The tagged half is `previous tag..tag`. **The untagged half is what makes
+/// this redden before the tag**, as [#484](https://github.com/sujanto-gaws/kelir/issues/484)
+/// made rules 11 and 12 do: a `Draft` record for the next release citing a
+/// record whose reader wrote something since the last tag is red on the pull
+/// request that cites it, not on the tag push. `from` is `None` below the
+/// first tag, and then the range is all of `to`'s history.
+fn release_range(
+    version: (u32, u32, u32),
+    tags: &[(String, (u32, u32, u32))],
+) -> (Option<String>, String) {
+    let from = tags
+        .iter()
+        .filter(|(_, at)| *at < version)
+        .max_by_key(|(_, at)| *at)
+        .map(|(name, _)| name.clone());
+    let to = tags
+        .iter()
+        .find(|(_, at)| *at == version)
+        .map_or_else(|| "HEAD".to_owned(), |(name, _)| name.clone());
+
+    (from, to)
+}
+
+/// Rule 14's judgement over release records, apart from the disk — so a
+/// synthetic record naming a range author is sent to it as text, against the
+/// real trailers.
+///
+/// `records` are the release records, `tags` the release tags, `at_tag` a
+/// record's body at a tag, `verification` a cited record's body when it is on
+/// disk, and `commits_in` a range's commits. Every release from
+/// [`FIRST_GOVERNED_RELEASE`] on is read, whatever its status; a tagged one's
+/// citations are read at `HEAD` and at its tag. A cited record that is not on
+/// disk is rule 6's, and one naming no reader is rule 13's or exempt.
+fn readers_who_built(
+    records: &[((u32, u32, u32), String, String)],
+    tags: &[(String, (u32, u32, u32))],
+    at_tag: impl Fn(&str, &str) -> Option<String>,
+    verification: impl Fn(&str) -> Option<String>,
+    commits_in: impl Fn(Option<&str>, &str) -> Vec<RangeCommit>,
+) -> Vec<String> {
+    let mut refused = Vec::new();
+
+    for (version, name, body) in records {
+        if *version < FIRST_GOVERNED_RELEASE {
+            continue;
+        }
+
+        let (from, to) = release_range(*version, tags);
+        let mut cited = citations(body);
+        if to != "HEAD" {
+            if let Some(body) = at_tag(&to, name) {
+                cited.extend(citations(&body));
+            }
+        }
+
+        let range = from
+            .as_ref()
+            .map_or_else(|| to.clone(), |from| format!("{from}..{to}"));
+        let mut commits = None;
+        for record in cited_records(&cited) {
+            let Some(text) = verification(&record) else {
+                continue;
+            };
+            let Ok(readers) = record_readers(&text) else {
+                continue;
+            };
+
+            let commits = commits.get_or_insert_with(|| commits_in(from.as_deref(), &to));
+            for commit in written_by_a_reader(&readers, commits) {
+                refused.push(format!(
+                    "{name} cites {record}, whose reader wrote {commit} in {range}"
+                ));
+            }
+        }
+    }
+
+    refused
+}
+
+/// Rule 13. **A verification record from record 19 on names its reader** in a
+/// `**Reader session:**` line carrying a session ID.
+///
+/// Rule 14 can only check a reader the record names. Without this, a record
+/// that left the line out — or wrote `<your id>` in it — would be exempt from
+/// rule 14 by saying nothing, which is door B's shape: **a record the walk
+/// cannot read must not be a record the walk ignores.** Every record on disk
+/// is read, cited or not, so the line is missing on the pull request that adds
+/// the record, while its reader still has the session to print.
+#[test]
+fn a_verification_record_from_record_19_on_names_its_reader() {
+    let directory = repository_root().join(VERIFICATIONS);
+    let unnamed: Vec<_> = verification_files()
+        .into_iter()
+        .filter_map(|record| {
+            let body = fs::read_to_string(directory.join(&record))
+                .expect("a verification record is readable");
+            unnamed_reader(&record, &body).map(|why| format!("{record} — {why}"))
+        })
+        .collect();
+
+    assert!(
+        unnamed.is_empty(),
+        "a verification record from record {FIRST_READER_SESSION_RECORD:02} on names no reader \
+         (#549):\n  {}\n\n\
+         Its header carries `**Reader session:** <id>` under the status line, where <id> is \
+         the reader's $CLAUDE_CODE_SESSION_ID or https://claude.ai/code/session_… — the value \
+         the reader's own §1 prints before it reads anything (sprint plan §2 (b)). Rule 14 \
+         checks that session against the Claude-Session lines of the release's range, and \
+         cannot check a reader the record does not name.",
+        unnamed.join("\n  ")
+    );
+}
+
+/// The records before the field are named rather than silently skipped.
+///
+/// **Eighteen, and the count is exact**, as
+/// `the_pre_rule_releases_are_named_rather_than_silently_skipped` is for
+/// releases: every record from [`FIRST_READER_SESSION_RECORD`] on is held by
+/// rule 13, so the exempt set cannot grow, and if it *shrinks* somebody has
+/// added a reader line to a settled record — which rule 14 would then read,
+/// and which should be argued here rather than done in passing.
+#[test]
+fn the_records_before_the_reader_field_are_named_rather_than_silently_skipped() {
+    let directory = repository_root().join(VERIFICATIONS);
+    let exempt: Vec<_> = verification_files()
+        .into_iter()
+        .filter(|record| record_number(record).is_some_and(|n| n < FIRST_READER_SESSION_RECORD))
+        .filter(|record| {
+            let body = fs::read_to_string(directory.join(record))
+                .expect("a verification record is readable");
+            record_readers(&body).is_err()
+        })
+        .collect();
+
+    assert_eq!(
+        exempt.len(),
+        RECORDS_BEFORE_THE_READER_FIELD,
+        "the records below record {FIRST_READER_SESSION_RECORD:02} with no reader line are \
+         expected to be records 01–18, and the walk found:\n  {}",
+        exempt.join("\n  ")
+    );
+}
+
+/// Rule 14. **No reader of a record a release cites wrote any of the release's
+/// construction** — no session a cited record names appears in a
+/// `Claude-Session:` line of a construction commit in the release's range.
+///
+/// This is [sprint plan](../../projects/planning/01.%20Sprint%20Plan.md) §2's
+/// criterion, *the reader is any session appearing in no construction commit
+/// trailer*, which [#448](https://github.com/sujanto-gaws/kelir/issues/448)
+/// found asserted by each record's §1 and verified by nobody. [Record 15](../../projects/verifications/15.%20Sprint%2016%20Independent%20Pass.md)
+/// is the case: its reader was in the trailers of `aa3af07`, `64c2e89`,
+/// `1cd3f99` and `191662e`, the release run it read, and every rule here was
+/// green on it.
+///
+/// **Every release record from [`FIRST_GOVERNED_RELEASE`] on, whatever its
+/// status**, so a `Draft` citing the wrong reader is red before its tag. A
+/// tagged release's citations are read at `HEAD` and at its tag, so a citation
+/// dropped after the tag is still read. **A record without a reader line is
+/// skipped here**: below record 19 it is exempt, and from record 19 on rule 13
+/// refuses it. A citation that does not resolve is rule 6's.
+#[test]
+fn no_reader_of_a_cited_record_wrote_the_release_s_construction() {
+    let on_disk = verification_files();
+    let directory = repository_root().join(VERIFICATIONS);
+
+    let refused = readers_who_built(
+        &release_records(),
+        &release_tags(),
+        |tag, name| record_body_at_tag(tag, &format!("{RELEASES}/{name}")).ok(),
+        |record| {
+            on_disk.contains(record).then(|| {
+                fs::read_to_string(directory.join(record))
+                    .expect("a verification record is readable")
+            })
+        },
+        range_commits,
+    );
+
+    assert!(
+        refused.is_empty(),
+        "a release cites a verification record whose reader wrote construction in the \
+         release's range (sprint plan §2, #448, #549):\n  {}\n\n\
+         §2 counts a reader as independent when their session appears in no construction \
+         commit's Claude-Session line in the range. This one does, so the reading is not \
+         independent of that commit. Have a session that wrote none of the range read it — \
+         started by the product owner as a top-level session, never dispatched — and cite \
+         that record. A commit that changes only projects/verifications/ is the reading's \
+         own record, and does not count.",
+        refused.join("\n  ")
+    );
+}
+
+/// Record 19's reader line, verbatim.
+const RECORD_19_READER: &str = "**Reader session:** bde5e89b-0b43-4bf5-b13e-2f29c17bff12";
+
+/// Record 19's reader.
+const RECORD_19_SESSION: &str = "bde5e89b-0b43-4bf5-b13e-2f29c17bff12";
+
+/// The session in the `Claude-Session:` lines of `aa3af07`, `64c2e89`,
+/// `1cd3f99` and `191662e`: Sprint 16's item 6 and the `v0.7.0` release run,
+/// and record 15's reader (record 15 finding 4).
+const RECORD_15_SESSION: &str = "https://claude.ai/code/session_013um2b1gm62DsTSh4zmv3F9";
+
+/// [`RECORD_15_SESSION`] as [`session_ids`] reads it.
+const RECORD_15_TOKEN: &str = "session_013um2b1gm62DsTSh4zmv3F9";
+
+/// A session in no commit on any branch: a fresh UUID, for the controls.
+const NOBODY_S_SESSION: &str = "5d0c4b43-7a1e-4f0b-9c55-3f2d6a8e1b90";
+
+/// A verification record's header, naming `reader_line` under its status.
+fn verification_record(reader_line: &str) -> String {
+    format!(
+        "# Sprint 99 Independent Pass — 2099-01-01\n\
+         \n\
+         **Status:** Final · **Last updated:** 2099-01-01\n\
+         \n\
+         {reader_line}\n\
+         \n\
+         **Subject:** a range.\n"
+    )
+}
+
+/// **The reader line is read under every spelling and list marker the earlier
+/// rules were taught**, and a mention in a sentence is not one.
+#[test]
+fn a_reader_line_is_read_under_any_spelling_or_marker() {
+    let record_19 = Ok(BTreeSet::from([RECORD_19_SESSION.to_owned()]));
+
+    for line in [
+        RECORD_19_READER.to_owned(),
+        format!("**Reader Session:** {RECORD_19_SESSION}"),
+        format!("**READER SESSION:** {RECORD_19_SESSION}"),
+        format!("**Reader session**: {RECORD_19_SESSION}"),
+        format!("**Reader sessions:** {RECORD_19_SESSION}"),
+        format!("**Reader-session:** {RECORD_19_SESSION}"),
+        format!("__Reader session:__ {RECORD_19_SESSION}"),
+        format!("*Reader session:* {RECORD_19_SESSION}"),
+        format!("Reader session: {RECORD_19_SESSION}"),
+        format!("**Reader session:** `{RECORD_19_SESSION}`"),
+        format!(
+            "**Reader session:** {}",
+            RECORD_19_SESSION.to_ascii_uppercase()
+        ),
+        format!("- **Reader session:** {RECORD_19_SESSION}"),
+        format!("* **Reader session:** {RECORD_19_SESSION}"),
+        format!("+ **Reader session:** {RECORD_19_SESSION}"),
+        format!("1. **Reader session:** {RECORD_19_SESSION}"),
+        format!("2) **Reader session:** {RECORD_19_SESSION}"),
+        format!("-\t**Reader session:** {RECORD_19_SESSION}"),
+        format!("  - **Reader session:** {RECORD_19_SESSION}"),
+        format!("> **Reader session:** {RECORD_19_SESSION}"),
+        format!("> - **Reader session:** {RECORD_19_SESSION}"),
+        format!("| **Reader session:** | {RECORD_19_SESSION} |"),
+        format!("{RECORD_19_READER}\r"),
+    ] {
+        assert_eq!(
+            record_readers(&verification_record(&line)),
+            record_19,
+            "{line:?}"
+        );
+    }
+
+    for line in [
+        format!("**Reader session:** {RECORD_15_SESSION}"),
+        format!("**Reader session:** [the session]({RECORD_15_SESSION})"),
+        format!("**Reader session:** {RECORD_15_TOKEN}"),
+    ] {
+        assert_eq!(
+            record_readers(&verification_record(&line)),
+            Ok(BTreeSet::from([RECORD_15_TOKEN.to_owned()])),
+            "a claude.ai session is its `session_…` token, however it is written: {line:?}"
+        );
+    }
+
+    for mention in [
+        "3. Plan 17 asks for the **`**Reader session:**` header line** above.",
+        "The **Reader session:** line is in the header.",
+        "**Readers session:** is not the label",
+        "**Reader:** bde5e89b-0b43-4bf5-b13e-2f29c17bff12",
+        "**Session:** bde5e89b-0b43-4bf5-b13e-2f29c17bff12",
+    ] {
+        assert_eq!(after_reader_label(mention), None, "{mention:?}");
+    }
+}
+
+/// **Every reader line is read**, so a second reader cannot hide behind a
+/// first, and a line naming no session is refused.
+#[test]
+fn every_reader_line_is_read_and_each_names_a_session() {
+    let two = format!(
+        "{}\n- **Reader Session**: {RECORD_15_SESSION}\n",
+        verification_record(&format!("**Reader session:** {NOBODY_S_SESSION}"))
+    );
+    assert_eq!(
+        record_readers(&two),
+        Ok(BTreeSet::from([
+            NOBODY_S_SESSION.to_owned(),
+            RECORD_15_TOKEN.to_owned(),
+        ])),
+        "both readers, the second under another marker and spelling"
+    );
+
+    for line in [
+        "**Reader session:** <your id>",
+        "**Reader session:**",
+        "**Reader session:** 8b90e70f-…",
+        "**Reader session:** 8b90e70f-f340-42e3-9945-b04e6f3336c",
+        "**Reader session:** 00000000-0000-0000-0000-000000000000",
+        "**Reader session:** 8b90e70f-f340-42e3-9945-b04e6f3336c4a",
+        "**Reader session:** session_0123",
+        "**Reader session:** CLAUDE_CODE_session_013um2b1gm62DsTSh4zmv3F9",
+    ] {
+        assert!(
+            record_readers(&verification_record(line)).is_err(),
+            "{line:?} names no session"
+        );
+    }
+
+    let good_then_empty = format!(
+        "{}\n**Reader session:** <your id>\n",
+        verification_record(RECORD_19_READER)
+    );
+    assert!(
+        record_readers(&good_then_empty).is_err(),
+        "an empty second line is refused, though the first names a session"
+    );
+}
+
+/// **Rule 13 holds record 19 on, and exempts what came before**, by number.
+#[test]
+fn rule_13_judges_a_record_by_its_number() {
+    let silent = verification_record("**Subject:** no reader line at all.");
+
+    for record in [
+        "19. Sprint 20 Independent Pass.md",
+        "20. A Probe Pass.md",
+        "99. Sprint 99 Independent Pass.md",
+    ] {
+        assert!(
+            unnamed_reader(record, &silent).is_some(),
+            "{record} names no reader"
+        );
+        assert!(
+            unnamed_reader(
+                record,
+                &verification_record("**Reader session:** <your id>")
+            )
+            .is_some(),
+            "{record} names a placeholder"
+        );
+        assert_eq!(
+            unnamed_reader(record, &verification_record(RECORD_19_READER)),
+            None,
+            "{record}, the control: a reader named"
+        );
+    }
+
+    for record in [
+        "18. Sprint 19 Post-Tag Reading.md",
+        "15. Sprint 16 Independent Pass.md",
+    ] {
+        assert_eq!(
+            unnamed_reader(record, &silent),
+            None,
+            "{record} predates the field"
+        );
+    }
+
+    let on_disk = fs::read_to_string(
+        repository_root()
+            .join(VERIFICATIONS)
+            .join("19. Sprint 20 Independent Pass.md"),
+    )
+    .expect("record 19 is on disk");
+    assert_eq!(
+        record_readers(&on_disk),
+        Ok(BTreeSet::from([RECORD_19_SESSION.to_owned()])),
+        "record 19's own header names exactly its reader, and its §1's mid-sentence mention \
+         of the label is not read as a second line"
+    );
+}
+
+/// **A `Claude-Session:` line is read as the session it names**, in either
+/// form, and nothing else in a message is.
+#[test]
+fn a_session_line_is_read_as_its_session() {
+    let message = format!(
+        "feat(x): a change\n\
+         \n\
+         * feat(x): the first commit\n\
+         \n\
+         Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n\
+         Claude-Session: {RECORD_19_SESSION}\n\
+         \n\
+         claude-session: {RECORD_15_SESSION}\n  \
+         Claude-Session:   8B90E70F-F340-42E3-9945-B04E6F3336C4\r\n\
+         The Claude-Session: {NOBODY_S_SESSION} of another commit, quoted mid-line.\n\
+         Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>\n"
+    );
+
+    assert_eq!(
+        trailer_sessions(&message),
+        BTreeSet::from([
+            RECORD_19_SESSION.to_owned(),
+            "8b90e70f-f340-42e3-9945-b04e6f3336c4".to_owned(),
+            RECORD_15_TOKEN.to_owned(),
+        ]),
+        "the three session lines, in any case, indented or not; the quoted one is prose"
+    );
+}
+
+/// **A commit that changes only verification records is the reading's own
+/// record**, and every other commit is construction.
+#[test]
+fn only_a_commit_confined_to_verification_records_is_not_construction() {
+    let paths = |names: &[&str]| {
+        names
+            .iter()
+            .map(|&name| name.to_owned())
+            .collect::<Vec<_>>()
+    };
+
+    assert!(!is_construction(&paths(&[
+        "projects/verifications/19. Sprint 20 Independent Pass.md"
+    ])));
+    assert!(!is_construction(&paths(&[
+        "projects/verifications/19. Sprint 20 Independent Pass.md",
+        "projects/verifications/20. A Second Reading.md",
+    ])));
+
+    for (names, how) in [
+        (
+            &[
+                "projects/verifications/19. Sprint 20 Independent Pass.md",
+                "kelir-backend/src/main.rs",
+            ][..],
+            "a record and a line of code",
+        ),
+        (
+            &["projects/releases/09. Release v0.9.0.md"][..],
+            "a release record",
+        ),
+        (
+            &["projects/verificationsX/19.md"][..],
+            "a folder that only starts with the name",
+        ),
+        (
+            &["docs/projects/verifications/19.md"][..],
+            "the name further down a path",
+        ),
+        (&[][..], "a commit changing no path, such as a merge"),
+    ] {
+        assert!(is_construction(&paths(names)), "{how}");
+    }
+}
+
+/// **A release's range runs from the highest tag below it to its own tag**,
+/// or to `HEAD` while it has none.
+#[test]
+fn a_release_range_runs_from_the_previous_tag_to_its_own() {
+    let tags: Vec<_> = [
+        ("v0.8.0", (0, 8, 0)),
+        ("v0.1.0", (0, 1, 0)),
+        ("v0.7.0", (0, 7, 0)),
+        ("v0.6.0", (0, 6, 0)),
+        ("v0.2.0", (0, 2, 0)),
+    ]
+    .into_iter()
+    .map(|(name, version)| (name.to_owned(), version))
+    .collect();
+    let range = |version| release_range(version, &tags);
+
+    assert_eq!(
+        range((0, 7, 0)),
+        (Some("v0.6.0".to_owned()), "v0.7.0".to_owned())
+    );
+    assert_eq!(
+        range((0, 8, 0)),
+        (Some("v0.7.0".to_owned()), "v0.8.0".to_owned())
+    );
+    assert_eq!(
+        range((0, 9, 0)),
+        (Some("v0.8.0".to_owned()), "HEAD".to_owned()),
+        "the next release, before its tag"
+    );
+    assert_eq!(
+        range((0, 7, 1)),
+        (Some("v0.7.0".to_owned()), "HEAD".to_owned()),
+        "a patch release never tagged runs to HEAD, which reaches past a later tag"
+    );
+    assert_eq!(
+        range((0, 6, 0)),
+        (Some("v0.2.0".to_owned()), "v0.6.0".to_owned()),
+        "from the highest tag below, whatever tags are missing between"
+    );
+    assert_eq!(
+        range((0, 1, 0)),
+        (None, "v0.1.0".to_owned()),
+        "the first tag"
+    );
+}
+
+/// **Seen red against a synthetic record naming a range author**: record 15's
+/// case, from the real trailers of `v0.6.0..v0.7.0`, with a record naming its
+/// reader as record 19's field would.
+#[test]
+fn record_15_s_reader_is_found_in_the_trailers_of_v0_7_0_s_range() {
+    let commits = range_commits(Some("v0.6.0"), "v0.7.0");
+
+    for line in [
+        format!("**Reader session:** {RECORD_15_SESSION}"),
+        format!("- **Reader Session**: `{RECORD_15_TOKEN}`"),
+    ] {
+        let readers = record_readers(&verification_record(&line)).expect("a reader is named");
+        let written = written_by_a_reader(&readers, &commits);
+
+        for commit in ["aa3af07", "64c2e89", "1cd3f99", "191662e"] {
+            assert!(
+                written.iter().any(|found| found.starts_with(commit)),
+                "{line:?}: record 15 finding 4 names {commit}, and the walk found only:\n  {}",
+                written.join("\n  ")
+            );
+        }
+    }
+
+    let control = record_readers(&verification_record(&format!(
+        "**Reader session:** {NOBODY_S_SESSION}"
+    )))
+    .expect("a reader is named");
+    assert_eq!(
+        written_by_a_reader(&control, &commits),
+        Vec::<String>::new(),
+        "the control: a session in no commit wrote none of the range"
+    );
+}
+
+/// **Record 19's reader committed its record and nothing else**: it is in
+/// `13e1e76`'s `Claude-Session:` line, which changes only record 19, so rule
+/// 14 counts it in no construction. Bounded at `13e1e76` so a later commit
+/// cannot change the answer.
+#[test]
+fn record_19_s_reader_recorded_its_reading_and_built_nothing() {
+    let readers = BTreeSet::from([RECORD_19_SESSION.to_owned()]);
+    let commits = range_commits(Some("v0.8.0"), "13e1e76");
+
+    let own = commits
+        .iter()
+        .find(|commit| commit.commit.starts_with("13e1e76"))
+        .expect("13e1e76 is in v0.8.0..13e1e76");
+    assert!(
+        own.sessions.contains(RECORD_19_SESSION),
+        "13e1e76 carries record 19's reader, so the walk reads the line"
+    );
+    assert!(
+        !is_construction(&own.paths),
+        "13e1e76 changes only record 19: {:?}",
+        own.paths
+    );
+
+    assert_eq!(
+        written_by_a_reader(&readers, &commits),
+        Vec::<String>::new(),
+        "record 19's reader wrote no construction up to its record"
+    );
+    assert_eq!(
+        written_by_a_reader(&readers, &range_commits(Some("5cce1a9"), "5791681")),
+        Vec::<String>::new(),
+        "nor in the range it read"
+    );
+}
+
+/// A synthetic record 20, as a release cites it.
+const PROBE_20_CITED: &str = "../verifications/20.%20A%20Probe%20Pass.md";
+
+/// A synthetic record 20, as it would be named on disk.
+const PROBE_20: &str = "20. A Probe Pass.md";
+
+/// Construction plan 17's author: in the `Claude-Session:` lines of `ab51a03`,
+/// `2748312` and `970ee0c` (#560–#562), among others after `v0.8.0`.
+const RANGE_AUTHOR: &str = "8b90e70f-f340-42e3-9945-b04e6f3336c4";
+
+/// Rule 14 over `records`, against the real tags and trailers, with record 20
+/// naming `reader_line` and record 19 read from disk.
+fn judge_readers(
+    records: &[((u32, u32, u32), String, String)],
+    at_tag: impl Fn(&str, &str) -> Option<String>,
+    reader_line: &str,
+) -> Vec<String> {
+    let record_19 = repository_root()
+        .join(VERIFICATIONS)
+        .join("19. Sprint 20 Independent Pass.md");
+
+    readers_who_built(
+        records,
+        &release_tags(),
+        at_tag,
+        |record| match record {
+            PROBE_20 => Some(verification_record(reader_line)),
+            "19. Sprint 20 Independent Pass.md" => fs::read_to_string(&record_19).ok(),
+            _ => None,
+        },
+        range_commits,
+    )
+}
+
+/// **Seen red against a synthetic record naming a range author, before the
+/// tag**: a `Draft` `v0.9.0` citing a record whose reader wrote #560–#562 is
+/// refused over `v0.8.0..HEAD`, under any spelling of the citation.
+#[test]
+fn rule_14_refuses_a_draft_citing_a_range_author_before_its_tag() {
+    let draft = |cited: &str| {
+        vec![(
+            (0, 9, 0),
+            "09. Release v0.9.0.md".to_owned(),
+            record_at_its_tag("Draft", &[cited]),
+        )]
+    };
+    let no_tag = |_: &str, _: &str| None;
+    let author = format!("**Reader session:** {RANGE_AUTHOR}");
+
+    for cited in [
+        PROBE_20_CITED,
+        "../verifications/./20.%20A%20Probe%20Pass.md",
+        "../verifications/%32%30.%20A%20Probe%20Pass.md",
+    ] {
+        let refused = judge_readers(&draft(cited), no_tag, &author);
+        assert!(
+            refused
+                .iter()
+                .any(|why| why.contains("wrote 970ee0c") && why.ends_with("in v0.8.0..HEAD")),
+            "{cited}: the walk found only:\n  {}",
+            refused.join("\n  ")
+        );
+    }
+
+    assert_eq!(
+        judge_readers(
+            &draft(PROBE_20_CITED),
+            no_tag,
+            &format!("**Reader session:** {NOBODY_S_SESSION}")
+        ),
+        Vec::<String>::new(),
+        "the control: a reader who wrote nothing"
+    );
+    assert_eq!(
+        judge_readers(
+            &draft("../verifications/19.%20Sprint%2020%20Independent%20Pass.md"),
+            no_tag,
+            &author
+        ),
+        Vec::<String>::new(),
+        "record 19, whose reader's one commit is its own record"
+    );
+    assert_eq!(
+        judge_readers(
+            &[(
+                (0, 2, 0),
+                "02. Release v0.2.0.md".to_owned(),
+                record_at_its_tag("Final", &[PROBE_20_CITED]),
+            )],
+            no_tag,
+            &author
+        ),
+        Vec::<String>::new(),
+        "a release below the floor is not read"
+    );
+}
+
+/// **A tagged release is read over `previous tag..tag`, and its citations at
+/// the tag count** — record 15's case at `v0.7.0`, with the citation only in
+/// the record as it stood at the tag.
+#[test]
+fn rule_14_reads_a_tagged_release_over_its_range_and_at_its_tag() {
+    let records = vec![(
+        (0, 7, 0),
+        "07. Release v0.7.0.md".to_owned(),
+        record_at_its_tag("Final", &[]),
+    )];
+    let at_tag = |tag: &str, name: &str| {
+        (tag == "v0.7.0" && name == "07. Release v0.7.0.md")
+            .then(|| record_at_its_tag("Draft", &[PROBE_20_CITED]))
+    };
+
+    let refused = judge_readers(
+        &records,
+        at_tag,
+        &format!("**Reader session:** {RECORD_15_SESSION}"),
+    );
+    for commit in ["aa3af07", "64c2e89", "1cd3f99", "191662e"] {
+        assert!(
+            refused
+                .iter()
+                .any(|why| why.contains(&format!("wrote {commit}"))
+                    && why.ends_with("in v0.6.0..v0.7.0")),
+            "{commit}: the walk found only:\n  {}",
+            refused.join("\n  ")
+        );
+    }
+
+    assert_eq!(
+        judge_readers(
+            &records,
+            |_: &str, _: &str| None,
+            &format!("**Reader session:** {RECORD_15_SESSION}")
+        ),
+        Vec::<String>::new(),
+        "the control: the same record at HEAD, citing nothing"
     );
 }

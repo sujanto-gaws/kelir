@@ -245,6 +245,20 @@ While the major version is `0`, the public API may change in any release.
   `Draft` whose `Blocked by:` names no issue, such as a template copy with the
   commented `#NNN` left in, is refused too; it used to pass.
 
+- **A release is refused when a verification record it cites was read by a
+  session that wrote some of the release**
+  ([#549](https://github.com/sujanto-gaws/kelir/issues/549),
+  [#448](https://github.com/sujanto-gaws/kelir/issues/448)).
+  `releases_are_independently_verified.rs` checked that a cited record exists
+  and is new, and took the record's word that its reader was independent. It
+  now reads each session a cited record names in its `**Reader session:**`
+  line against the `Claude-Session:` lines from the previous release tag to
+  the release's tag, or to `HEAD` before the tag. A commit that changes only
+  `projects/verifications/` is the reading's own record and does not count.
+  Every verification record from record 19 on must name its reader; records
+  01–18 predate the field and are exempt. Every release record on `main`
+  still passes, and none of them cites record 19 or later yet.
+
 - **A release record's follow-up without an issue is refused under any list
   marker** ([#486](https://github.com/sujanto-gaws/kelir/issues/486)). Rule 10
   of `releases_are_independently_verified.rs` started a follow-up row only at
