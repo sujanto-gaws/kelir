@@ -175,7 +175,7 @@ services:
   # `FAILED` is refused at download exactly as `INFECTED` is. Raising the upload
   # limit means raising this with it.
   clamav:
-    image: clamav/clamav:1.5
+    image: ghcr.io/sujanto-gaws/clamav:1.5.4
     environment:
       CLAMD_CONF_StreamMaxLength: 32M
     restart: unless-stopped
