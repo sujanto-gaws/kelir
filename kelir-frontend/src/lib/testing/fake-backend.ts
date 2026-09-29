@@ -61,6 +61,21 @@ export function itemBody(data: unknown): unknown {
   return { success: true, data }
 }
 
+/**
+ * A list envelope, as every paged endpoint returns: the rows and their
+ * pagination. `meta` defaults to one page holding all of `rows`.
+ */
+export function pageBody(
+  rows: unknown[],
+  meta: { page?: number; pageSize?: number; total?: number } = {},
+): unknown {
+  return {
+    success: true,
+    data: rows,
+    meta: { page: 1, pageSize: 20, total: rows.length, ...meta },
+  }
+}
+
 /** An error envelope, matching `kelir-backend/src/response.rs`. */
 export function errorBody(
   code: string,

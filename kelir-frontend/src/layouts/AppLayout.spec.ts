@@ -74,6 +74,7 @@ describe('AppLayout', () => {
         { path: '/admin/users', name: 'admin-users', component: blank },
         { path: '/admin/roles', name: 'admin-roles', component: blank },
         { path: '/admin/external-systems', name: 'admin-external-systems', component: blank },
+        { path: '/admin/integration-logs', name: 'admin-integration-logs', component: blank },
       ],
     })
   })
@@ -129,6 +130,19 @@ describe('AppLayout', () => {
     permissions = ['integration:external-system:read']
 
     expect((await renderSignedIn()).find('a[href="/admin/external-systems"]').exists()).toBe(true)
+  })
+
+  it('links to the integration log only with its own read permission', async () => {
+    // #548 AC7. The registry's permission does not reveal the log, nor the reverse.
+    permissions = ['integration:external-system:read']
+
+    expect((await renderSignedIn()).find('a[href="/admin/integration-logs"]').exists()).toBe(false)
+
+    permissions = ['integration:log:read']
+    const wrapper = await renderSignedIn()
+
+    expect(wrapper.find('a[href="/admin/integration-logs"]').exists()).toBe(true)
+    expect(wrapper.find('a[href="/admin/external-systems"]').exists()).toBe(false)
   })
 
   it('names the signed-in user', async () => {

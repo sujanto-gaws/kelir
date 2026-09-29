@@ -7,7 +7,9 @@ import {
   deactivateExternalSystem,
   deleteIntegrationCredential,
   getExternalSystem,
+  getIntegrationLog,
   listExternalSystems,
+  listIntegrationLogs,
   listIntegrationCredentials,
   listIntegrationEndpoints,
   registerExternalSystem,
@@ -172,5 +174,39 @@ describe('integration api', () => {
     ])
     expect(request.body).toBeUndefined()
     expect(request.timeout).toBe(135_000)
+  })
+
+  it('reads the integration log with its filters, blank ones left out', async () => {
+    await listIntegrationLogs({
+      page: 1,
+      pageSize: 20,
+      externalSystemId: 'sys-1',
+      status: 'FAILED',
+      from: '2026-09-01T00:00:00.000Z',
+      to: '',
+    })
+
+    const request = only()
+
+    expect([request.method, request.url]).toEqual(['get', '/integration/logs'])
+    expect(request.params).toEqual({
+      page: 1,
+      pageSize: 20,
+      externalSystemId: 'sys-1',
+      status: 'FAILED',
+      from: '2026-09-01T00:00:00.000Z',
+    })
+  })
+
+  it('reads one log row at its own path', async () => {
+    await getIntegrationLog('log-1')
+
+    expect([only().method, only().url]).toEqual(['get', '/integration/logs/log-1'])
+  })
+
+  it('encodes the log id, so it cannot step out of its own path', async () => {
+    await getIntegrationLog('../external-systems')
+
+    expect(only().url).toBe('/integration/logs/..%2Fexternal-systems')
   })
 })

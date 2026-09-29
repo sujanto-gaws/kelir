@@ -62,8 +62,26 @@ While the major version is `0`, the public API may change in any release.
   to the system tenant's `ROLE-ADMIN`. A tenant created after the upgrade gets it on its
   `ROLE-ADMIN`. A tenant created before the upgrade does not: grant it to that
   tenant's administrator role. No schema changes.
+- **`0050` adds one permission, `integration:log:read`**, and grants it to the
+  system tenant's `ROLE-ADMIN`. A tenant created after the upgrade gets it on
+  its `ROLE-ADMIN`. A tenant created before the upgrade does not: grant it to
+  that tenant's administrator role, or to whichever role should read the
+  integration log. No schema changes.
 
 ### Added
+
+- **An administrator reads the integration log** (FR-INT-006;
+  [#548](https://github.com/sujanto-gaws/kelir/issues/548)).
+  `GET /api/v1/integration/logs` lists the calls Kelir made, newest first,
+  filtered by `externalSystemId`, `endpointId`, `status` and a `from`/`to`
+  range on the start time (from inclusive, to exclusive); `GET …/logs/{id}`
+  shows one with its request and response payloads. Both are under the new
+  `integration:log:read`, apart from the external-system permissions. **The
+  payloads are returned exactly as stored, masked**: nothing is resolved or
+  unmasked, and the API has no field that could carry an unmasked payload.
+  Another tenant's row is a 404. In the browser, **Integration Logs** in the
+  navigation opens `/admin/integration-logs`, a row opens its detail at
+  `?log=<id>`, and a test call's log id links to its row.
 
 - **An administrator test-calls a registered endpoint** (FR-INT-002;
   [#547](https://github.com/sujanto-gaws/kelir/issues/547), decision
@@ -92,8 +110,8 @@ While the major version is `0`, the public API may change in any release.
     too long to parse included, and the secret is redacted as written and in
     its base64, percent-encoded and `\u`-escaped spellings (the answer's
     preview too). A U+0000 in a reply is stored and shown as U+FFFD, so it
-    cannot stop the row being written. It is the table's first writer; the
-    log has no screen yet
+    cannot stop the row being written. It is the table's first writer, and
+    the integration log above reads what it wrote
     ([#548](https://github.com/sujanto-gaws/kelir/issues/548)).
 
 - **A refused role delete lists the tasks it waits on**

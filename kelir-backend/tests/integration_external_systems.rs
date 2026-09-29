@@ -1924,8 +1924,9 @@ async fn the_database_texts_say_reference_and_not_never_the_secret() {
     .fetch_all(&app.pool)
     .await
     .expect("the catalogue rows");
-    // #520's eight, and `0049`'s `integration:endpoint:call` (#547).
-    assert_eq!(descriptions.len(), 9, "{descriptions:?}");
+    // #520's eight, `0049`'s `integration:endpoint:call` (#547) and `0050`'s
+    // `integration:log:read` (#548).
+    assert_eq!(descriptions.len(), 10, "{descriptions:?}");
 
     let comment = comment.expect("secret_reference has a comment");
     assert!(comment.contains("shape"), "{comment}");

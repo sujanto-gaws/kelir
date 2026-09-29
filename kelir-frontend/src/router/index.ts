@@ -296,6 +296,21 @@ export const routes: RouteRecordRaw[] = [
         },
       },
       {
+        // The integration log (FR-INT-006, #548; architectures/03 §3.2's
+        // `IntegrationLogPage`). Beside the registry, under a permission of its
+        // own: a log reader need not manage systems, and a system manager does
+        // not see every call's payload by default. One row opens as a dialog
+        // over the list, at `?log=<id>`.
+        path: 'admin/integration-logs',
+        name: 'admin-integration-logs',
+        component: () => import('@/features/integration/IntegrationLogPage.vue'),
+        meta: {
+          requiresAuth: true,
+          permission: 'integration:log:read',
+          title: 'Integration logs',
+        },
+      },
+      {
         path: 'forbidden',
         name: 'forbidden',
         component: () => import('@/pages/ForbiddenPage.vue'),

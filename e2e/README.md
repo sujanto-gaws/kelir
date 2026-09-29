@@ -53,7 +53,7 @@ video are kept for failures only.
 
 ## What it covers
 
-Twenty-two flows, each the criterion that decides whether an item is Done rather
+Twenty-three flows, each the criterion that decides whether an item is Done rather
 than a broad sweep. **This table said six until 2026-09-14**, while eight more
 specs landed beside it; it is listed in the order the flows were added.
 
@@ -81,6 +81,7 @@ specs landed beside it; it is listed in the order the flows were added.
 | An administrator reassigns the open task a role delete waits on, from that list, to a role that can decide it, and the retried delete gets past the open tasks; to a live user who can decide it, who then holds it; somebody without `workflow:task:reassign` sees the list and no Reassign; and a role deleted while the dialog is open is refused under the role field (`an-open-task-is-reassigned-from-the-roles-page.spec.ts`) | #512, FR-WF-017 |
 | A role whose last holder is deactivated says *1 open task, 0 active holders* on its row of the Roles page; the notice opens that role's open-task list with no delete tried, the task is reassigned from it, and the roles read again drop the notice (`a-role-nobody-holds-shows-its-open-tasks.spec.ts`) | #508, **D-91** (2) |
 | An administrator runs a test call on an endpoint of a system with no credential from the system's page, confirms it, and is shown the refusal `NO_USABLE_CREDENTIAL` explained, with the integration log id the server named. **A refusal, not an answer**: an answer needs a reachable system and a secret in the backend's environment, which the release stack does not have (`a-test-call-is-refused-and-explained.spec.ts`) | #547, FR-INT-002 |
+| An administrator runs a test call whose log id opens the integration log at its row, reaches the log from the navigation, filters it by system so that only that system's row is listed, and reads another system's row in full: its error, its URL, a link to the system, and the request payload showing the credential's type and never its reference. **Two refusals, not a success**, for the reason #547's flow gives: `NO_USABLE_CREDENTIAL` and `SECRET_BACKEND_NOT_CONFIGURED` (`an-integration-log-is-filtered-and-read.spec.ts`) | #548, FR-INT-006 |
 
 **Every flow runs in Chromium except `a-pattern-the-browser-gives-up-on.spec.ts`, which runs in Firefox and only there** ([#496](https://github.com/sujanto-gaws/kelir/issues/496)). It is about a match Firefox throws on. Chromium does not throw on the same match, it keeps matching, so the spec would hold its tab until the test timed out. `playwright.config.ts` holds the split, as two projects.
 
