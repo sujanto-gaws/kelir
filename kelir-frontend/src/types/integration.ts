@@ -191,6 +191,70 @@ export interface TestCallResponse {
   bodyTruncated: boolean
 }
 
+/** Where a logged call went: out to a system, or in from one. */
+export type IntegrationDirection = 'INBOUND' | 'OUTBOUND'
+
+/**
+ * A logged call's state (Database Schema §12.5). A test call writes only the
+ * two terminal values; the other three belong to the retry work (FR-INT-007).
+ */
+export type IntegrationLogStatus = 'SUCCESS' | 'FAILED' | 'PENDING' | 'RETRYING' | 'DEAD_LETTER'
+
+/**
+ * One `integration_logs` row as the log list returns it (FR-INT-006, #548).
+ *
+ * **Everything but the payloads.** Most columns are nullable in the schema
+ * because a call can be refused before it has a URL, a method or an answer —
+ * a test call refused at the credential has no `statusCode`, for one.
+ */
+export interface IntegrationLogSummary {
+  id: string
+  externalSystemId: string | null
+  /** The system's code and name as they are now, or `null` for a row with no system. */
+  externalSystemCode: string | null
+  externalSystemName: string | null
+  direction: IntegrationDirection
+  /** `REST`, `SOAP`, `FILE`, `WEBHOOK` or `QUEUE`. */
+  integrationType: string | null
+  method: string | null
+  /** The URL called, or `null` when the call was refused before it had one. */
+  endpoint: string | null
+  /** What the call was about: a test call's is `IntegrationEndpoint` and the endpoint's id. */
+  entityType: string | null
+  entityId: string | null
+  status: IntegrationLogStatus
+  statusCode: number | null
+  errorMessage: string | null
+  correlationId: string | null
+  startedAt: string
+  completedAt: string | null
+  durationMs: number | null
+}
+
+/**
+ * One row in full: the summary, the document it was made for, and what was
+ * sent and received. **The payloads are masked when written and shown as
+ * stored**: nothing on the client, or behind the route, resolves them again.
+ */
+export interface IntegrationLog extends IntegrationLogSummary {
+  documentId: string | null
+  requestPayload: unknown
+  responsePayload: unknown
+}
+
+export const INTEGRATION_LOG_STATUS_LABELS: Record<IntegrationLogStatus, string> = {
+  SUCCESS: 'Success',
+  FAILED: 'Failed',
+  PENDING: 'Pending',
+  RETRYING: 'Retrying',
+  DEAD_LETTER: 'Dead letter',
+}
+
+export const INTEGRATION_DIRECTION_LABELS: Record<IntegrationDirection, string> = {
+  INBOUND: 'Inbound',
+  OUTBOUND: 'Outbound',
+}
+
 export const EXTERNAL_SYSTEM_STATUS_LABELS: Record<ExternalSystemStatus, string> = {
   ACTIVE: 'Active',
   INACTIVE: 'Inactive',

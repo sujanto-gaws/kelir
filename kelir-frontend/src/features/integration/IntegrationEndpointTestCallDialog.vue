@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { RouterLink } from 'vue-router'
 
 import { toApiError } from '@/api/client'
 import { testCallIntegrationEndpoint } from '@/api/integration'
@@ -7,8 +8,10 @@ import { Alert } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Dialog } from '@/components/ui/dialog'
+import { useAuthStore } from '@/stores/auth'
 import type { IntegrationEndpoint, TestCallResponse } from '@/types/integration'
 
+import { formatDuration } from './integration-log'
 import { describeTestCallFailure, type TestCallFailure } from './test-call-outcome'
 
 /**
@@ -23,6 +26,10 @@ import { describeTestCallFailure, type TestCallFailure } from './test-call-outco
  *
  * The dialog runs the request itself, unlike `ConfirmDialog`, because what it
  * shows afterwards is the result rather than a closed dialog.
+ *
+ * **The log id opens the row** in the integration log (#548) for a caller who
+ * holds `integration:log:read`, and is plain text for anybody else: calling an
+ * endpoint and reading the log are separate grants.
  */
 const props = defineProps<{
   systemId: string
@@ -32,6 +39,10 @@ const props = defineProps<{
 }>()
 
 const open = defineModel<boolean>('open', { default: false })
+
+const auth = useAuthStore()
+
+const canOpenLog = computed(() => auth.can('integration:log:read'))
 
 type Phase = 'confirm' | 'pending' | 'answered' | 'failed'
 
@@ -104,10 +115,6 @@ async function call(): Promise<void> {
     phase.value = 'failed'
   }
 }
-
-function formatDuration(ms: number): string {
-  return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(2)} s`
-}
 </script>
 
 <template>
@@ -164,7 +171,19 @@ function formatDuration(ms: number): string {
           </dd>
           <dt class="text-muted-foreground">Log</dt>
           <dd>
-            <code class="font-mono text-xs" data-testid="test-call-log-id">{{ result.logId }}</code>
+            <RouterLink
+              v-if="canOpenLog"
+              :to="{ name: 'admin-integration-logs', query: { log: result.logId } }"
+              class="text-primary underline-offset-4 hover:underline"
+              data-testid="test-call-log-link"
+            >
+              <code class="font-mono text-xs" data-testid="test-call-log-id">{{
+                result.logId
+              }}</code>
+            </RouterLink>
+            <code v-else class="font-mono text-xs" data-testid="test-call-log-id">{{
+              result.logId
+            }}</code>
           </dd>
         </dl>
 
@@ -207,7 +226,17 @@ function formatDuration(ms: number): string {
           <template v-if="failure.logId">
             <dt class="text-muted-foreground">Log</dt>
             <dd>
-              <code class="font-mono text-xs" data-testid="test-call-log-id">{{
+              <RouterLink
+                v-if="canOpenLog"
+                :to="{ name: 'admin-integration-logs', query: { log: failure.logId } }"
+                class="text-primary underline-offset-4 hover:underline"
+                data-testid="test-call-log-link"
+              >
+                <code class="font-mono text-xs" data-testid="test-call-log-id">{{
+                  failure.logId
+                }}</code>
+              </RouterLink>
+              <code v-else class="font-mono text-xs" data-testid="test-call-log-id">{{
                 failure.logId
               }}</code>
             </dd>

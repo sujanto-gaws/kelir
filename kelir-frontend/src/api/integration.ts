@@ -7,6 +7,8 @@ import type {
   ExternalSystem,
   IntegrationCredential,
   IntegrationEndpoint,
+  IntegrationLog,
+  IntegrationLogSummary,
   RegisterExternalSystemRequest,
   TestCallResponse,
   UpdateExternalSystemRequest,
@@ -39,6 +41,11 @@ const SYSTEMS = '/integration/external-systems'
  * does not parse as a status and the backend answers it with a 422.
  */
 export function listExternalSystems(query: ListFetchQuery = {}): Promise<Page<ExternalSystem>> {
+  return getPage<ExternalSystem>(SYSTEMS, withoutBlanks(query))
+}
+
+/** A list query with its blank values left out, so none reaches the wire as `?key=`. */
+function withoutBlanks(query: ListFetchQuery): Record<string, string | number> {
   const params: Record<string, string | number> = {}
 
   for (const [key, value] of Object.entries(query)) {
@@ -47,7 +54,7 @@ export function listExternalSystems(query: ListFetchQuery = {}): Promise<Page<Ex
     }
   }
 
-  return getPage<ExternalSystem>(SYSTEMS, params)
+  return params
 }
 
 export function getExternalSystem(id: string): Promise<ExternalSystem> {
@@ -168,4 +175,26 @@ export function testCallIntegrationEndpoint(
     undefined,
     { timeout: (timeoutSeconds + TEST_CALL_MARGIN_SECONDS) * 1000 },
   )
+}
+
+const LOGS = '/integration/logs'
+
+/**
+ * The integration log, newest first (FR-INT-006, #548), under
+ * `integration:log:read` — a permission of its own, apart from reading the
+ * systems: a log reader need not manage them, and a system manager does not
+ * see every call's payload by default.
+ *
+ * Filters: `externalSystemId`, `status`, and `from` and `to` as ISO instants
+ * on `startedAt`. Blank ones are left out, as on the system list.
+ */
+export function listIntegrationLogs(
+  query: ListFetchQuery = {},
+): Promise<Page<IntegrationLogSummary>> {
+  return getPage<IntegrationLogSummary>(LOGS, withoutBlanks(query))
+}
+
+/** One log row with its payloads, masked when written and returned as stored. */
+export function getIntegrationLog(id: string): Promise<IntegrationLog> {
+  return getItem<IntegrationLog>(`${LOGS}/${id}`)
 }

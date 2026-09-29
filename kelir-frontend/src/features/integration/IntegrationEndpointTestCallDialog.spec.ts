@@ -1,9 +1,12 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
+import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 
 import IntegrationEndpointTestCallDialog from './IntegrationEndpointTestCallDialog.vue'
 import { ApiError } from '@/api/error'
 import { testCallIntegrationEndpoint } from '@/api/integration'
+import { useAuthStore } from '@/stores/auth'
 import type { IntegrationEndpoint, TestCallResponse } from '@/types/integration'
 
 /**
@@ -17,6 +20,8 @@ import type { IntegrationEndpoint, TestCallResponse } from '@/types/integration'
  * 4. **A refusal or an unanswered call is explained**, with its code, the
  *    server's words and the log id its message names.
  * 5. **A call still running when the dialog closes never lands on the next one.**
+ * 6. **The log id opens the log row** for a caller with `integration:log:read`
+ *    (#548), and is text for anybody else.
  */
 
 vi.mock('@/api/integration', () => ({
@@ -74,9 +79,21 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve, reject }
 }
 
+const blank = { template: '<div />' }
+
 describe('IntegrationEndpointTestCallDialog', () => {
+  let router: Router
+
   beforeEach(() => {
     call.mockReset()
+    setActivePinia(createPinia())
+    router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', component: blank },
+        { path: '/admin/integration-logs', name: 'admin-integration-logs', component: blank },
+      ],
+    })
   })
 
   afterEach(() => {
@@ -86,6 +103,7 @@ describe('IntegrationEndpointTestCallDialog', () => {
   function render(target: IntegrationEndpoint = endpoint()): VueWrapper {
     return mount(IntegrationEndpointTestCallDialog, {
       props: { open: true, systemId: 'sys-1', endpoint: target, timeoutSeconds: 45 },
+      global: { plugins: [router] },
     })
   }
 
@@ -295,5 +313,46 @@ describe('IntegrationEndpointTestCallDialog', () => {
 
     expect(phase(wrapper)).toBe('confirm')
     expect(wrapper.find('[data-testid="test-call-status"]').exists()).toBe(false)
+  })
+
+  // -- The log row ----------------------------------------------------------
+
+  function grant(permissions: string[]): void {
+    useAuthStore().$patch({
+      user: {
+        id: 'u-1',
+        username: 'admin',
+        displayName: 'Administrator',
+        email: 'admin@example.test',
+        roles: [],
+        permissions,
+      },
+    })
+  }
+
+  it('shows the log id as text to a caller who may not read the log', async () => {
+    grant(['integration:endpoint:call'])
+    call.mockResolvedValue(answer())
+
+    const wrapper = render()
+    await run(wrapper)
+
+    expect(text(wrapper, 'test-call-log-id')).toBe(LOG_ID)
+    expect(wrapper.find('[data-testid="test-call-log-link"]').exists()).toBe(false)
+  })
+
+  it('links the log id to its row for a caller who may read the log', async () => {
+    grant(['integration:endpoint:call', 'integration:log:read'])
+    call.mockRejectedValue(
+      new ApiError('NO_USABLE_CREDENTIAL', `No credential (integration log ${LOG_ID})`, 422),
+    )
+
+    const wrapper = render()
+    await run(wrapper)
+
+    const link = wrapper.get('[data-testid="test-call-log-link"]')
+
+    expect(link.attributes('href')).toBe(`/admin/integration-logs?log=${LOG_ID}`)
+    expect(text(wrapper, 'test-call-log-id')).toBe(LOG_ID)
   })
 })

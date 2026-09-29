@@ -93,6 +93,17 @@ describe('the shipped route table', () => {
     }
   })
 
+  it('has the integration log behind its own permission, not the registry one', () => {
+    // #548 AC2. Reading systems does not open the log, and the log does not
+    // need the registry's permission.
+    const byName = new Map(all.map((route) => [route.name, route]))
+
+    expect(byName.get('admin-integration-logs')?.meta).toMatchObject({
+      requiresAuth: true,
+      permission: 'integration:log:read',
+    })
+  })
+
   it('protects every route that is not deliberately public', () => {
     const unprotected = all
       .filter((route) => !PUBLIC_ROUTES.has(route.name))

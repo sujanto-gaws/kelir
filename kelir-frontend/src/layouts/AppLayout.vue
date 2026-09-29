@@ -15,6 +15,7 @@ import {
   Menu,
   Moon,
   Plug,
+  ScrollText,
   ShieldCheck,
   Sun,
   UserRoundCheck,
@@ -161,6 +162,16 @@ const navigation = [
     enabled: true,
     permission: 'integration:external-system:read',
     sortOrder: 110,
+  },
+  {
+    // #548. Beside the registry, under its own permission: holding one of the
+    // two does not show the other.
+    name: 'admin-integration-logs',
+    label: 'Integration Logs',
+    icon: ScrollText,
+    enabled: true,
+    permission: 'integration:log:read',
+    sortOrder: 120,
   },
 ] as const
 
