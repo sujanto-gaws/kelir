@@ -1,4 +1,5 @@
-//! Routes under `/api/v1/integration/external-systems` (FR-INT-001, #520).
+//! Routes under `/api/v1/integration/external-systems` (FR-INT-001, #520) and
+//! `/api/v1/integration/logs` (FR-INT-006, #548).
 //!
 //! **No `DELETE` on a system** — `POST {id}/deactivate` instead (#520, the
 //! product owner's answer 2), and `POST {id}/activate` to undo it, both under
@@ -15,11 +16,12 @@ use uuid::Uuid;
 
 use super::domain::{
     CreateIntegrationCredentialRequest, CreateIntegrationEndpointRequest, ExternalSystem,
-    ExternalSystemQuery, IntegrationCredential, IntegrationEndpoint, RegisterExternalSystemRequest,
-    TestCallResponse, UpdateExternalSystemRequest, UpdateIntegrationCredentialRequest,
+    ExternalSystemQuery, IntegrationCredential, IntegrationEndpoint, IntegrationLog,
+    IntegrationLogQuery, IntegrationLogSummary, RegisterExternalSystemRequest, TestCallResponse,
+    UpdateExternalSystemRequest, UpdateIntegrationCredentialRequest,
     UpdateIntegrationEndpointRequest,
 };
-use super::service::{credential, endpoint, external_system, test_call};
+use super::service::{credential, endpoint, external_system, log, test_call};
 use crate::error::AppError;
 use crate::extract::{JsonBody, PathParam, QueryParams};
 use crate::middleware::auth::Authenticated;
@@ -66,6 +68,8 @@ pub fn routes() -> Router<AppState> {
                 .put(update_credential)
                 .delete(delete_credential),
         )
+        .route("/logs", get(list_logs))
+        .route("/logs/{id}", get(get_log))
 }
 
 // ---------------------------------------------------------------------------
@@ -448,4 +452,54 @@ pub async fn delete_credential(
     credential::delete_credential(&state, &caller, id, credential_id).await?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// The integration log — under integration:log:read
+// ---------------------------------------------------------------------------
+
+/// List the integration log, newest first (FR-INT-006, #548).
+///
+/// Ordered by `startedAt` descending, then `id` descending. `from` is
+/// inclusive and `to` exclusive. The payloads are not in a list item: they are
+/// the detail's.
+#[utoipa::path(
+    get, path = "/api/v1/integration/logs", tag = "integration",
+    params(IntegrationLogQuery),
+    responses(
+        (status = 200, description = "One page of the tenant's integration log rows, newest first", body = [IntegrationLogSummary]),
+        (status = 403, description = "Missing integration:log:read"),
+        (status = 422, description = "A query parameter would not parse, or RANGE_INVERTED when `to` is before `from`")
+    ),
+    security(("bearer" = []))
+)]
+pub async fn list_logs(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    QueryParams(query): QueryParams<IntegrationLogQuery>,
+) -> Result<Json<ListEnvelope<IntegrationLogSummary>>, AppError> {
+    let (logs, meta) = log::list_logs(&state, &caller, &query).await?;
+
+    Ok(Json(ListEnvelope::new(logs, meta)))
+}
+
+/// One integration log row whole. Its payloads are returned **exactly as
+/// stored** — masked when they were written, and never resolved again.
+#[utoipa::path(
+    get, path = "/api/v1/integration/logs/{id}", tag = "integration",
+    responses(
+        (status = 200, description = "The log row, with its masked payloads as stored", body = IntegrationLog),
+        (status = 403, description = "Missing integration:log:read"),
+        (status = 404, description = "No such log row in this tenant")
+    ),
+    security(("bearer" = []))
+)]
+pub async fn get_log(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    PathParam(id): PathParam<Uuid>,
+) -> Result<Json<ItemEnvelope<IntegrationLog>>, AppError> {
+    Ok(Json(ItemEnvelope::new(
+        log::get_log(&state, &caller, id).await?,
+    )))
 }

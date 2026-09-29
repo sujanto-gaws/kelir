@@ -1,0 +1,137 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT l.id, l.external_system_id,\n               s.system_code AS \"external_system_code?\",\n               s.system_name AS \"external_system_name?\",\n               l.direction, l.integration_type, l.method, l.endpoint, l.entity_type,\n               l.entity_id, l.status, l.status_code, l.error_message, l.correlation_id,\n               l.started_at, l.completed_at, l.duration_ms,\n               l.document_id, l.request_payload_json, l.response_payload_json\n        FROM integration_logs l\n        LEFT JOIN external_systems s\n               ON s.id = l.external_system_id AND s.tenant_id = l.tenant_id\n        WHERE l.tenant_id = $1 AND l.id = $2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "external_system_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "external_system_code?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "external_system_name?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "direction",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "integration_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "method",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "endpoint",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "entity_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 9,
+        "name": "entity_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 10,
+        "name": "status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 11,
+        "name": "status_code",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 12,
+        "name": "error_message",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
+        "name": "correlation_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 14,
+        "name": "started_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 15,
+        "name": "completed_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 16,
+        "name": "duration_ms",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 17,
+        "name": "document_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 18,
+        "name": "request_payload_json",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 19,
+        "name": "response_payload_json",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "4a1ecf604f820b3984986a36c894f38a9aa00f446a6456ebc109c38a39b15d09"
+}

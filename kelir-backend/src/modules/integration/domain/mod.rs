@@ -8,6 +8,7 @@ pub mod credential;
 pub mod egress;
 pub mod endpoint;
 pub mod external_system;
+pub mod log;
 pub mod secret;
 pub mod test_call;
 
@@ -17,6 +18,10 @@ pub use credential::{
 pub use endpoint::{
     CreateIntegrationEndpointRequest, EndpointStatus, HttpMethod, IntegrationEndpoint,
     UpdateIntegrationEndpointRequest,
+};
+pub use log::{
+    IntegrationDirection, IntegrationLog, IntegrationLogQuery, IntegrationLogStatus,
+    IntegrationLogSummary,
 };
 pub use test_call::{TestCallResponse, TestCallStatus};
 

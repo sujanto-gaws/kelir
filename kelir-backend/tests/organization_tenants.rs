@@ -175,8 +175,11 @@ async fn a_created_tenants_administrator_sees_systems_and_not_where_secrets_are_
             "integration:external-system:deactivate",
             "integration:external-system:read",
             "integration:external-system:update",
+            "integration:log:read",
         ],
-        "a created tenant's ROLE-ADMIN holds the four external-system codes and          integration:endpoint:call (0049, #547), and no credential code"
+        "a created tenant's ROLE-ADMIN holds the four external-system codes, \
+         integration:endpoint:call (0049, #547) and integration:log:read (0050, #548), \
+         and no credential code"
     );
 
     // The routes agree with the grant: that administrator registers a system,
@@ -204,8 +207,8 @@ async fn a_created_tenants_administrator_sees_systems_and_not_where_secrets_are_
         credentials.body
     );
 
-    // Control: the system tenant's administrator, whose grants `0046` and
-    // `0049` made and provisioning never touches, still holds all nine.
+    // Control: the system tenant's administrator, whose grants `0046`, `0049`
+    // and `0050` made and provisioning never touches, still holds all ten.
     assert_eq!(
         integration_permissions(&app, &token).await,
         [
@@ -218,6 +221,7 @@ async fn a_created_tenants_administrator_sees_systems_and_not_where_secrets_are_
             "integration:external-system:deactivate",
             "integration:external-system:read",
             "integration:external-system:update",
+            "integration:log:read",
         ],
         "the system tenant's administrator lost an integration grant"
     );

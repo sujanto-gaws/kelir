@@ -1,13 +1,14 @@
 //! Integration core: the external system registry (FR-INT-001, #520;
 //! architectures/03 §2.1, §3.1, §4).
 //!
-//! **What this module holds today is configuration, not traffic.** An
+//! **What this module holds today is mostly configuration.** An
 //! administrator registers the systems Kelir talks to, the endpoints each one
-//! exposes and **where** each one's secrets live. Nothing here calls out, and
-//! nothing here receives: outbound and inbound REST, webhooks, logs, retry,
-//! sync and file exchange are FR-INT-002 to FR-INT-010 (#520 AC-9). The five
-//! tables those will write were created by `0046_integration.sql` beside the
-//! three this module reads, and no route here touches them (#520 AC-3).
+//! exposes and **where** each one's secrets live, makes a test call to one
+//! endpoint (FR-INT-002, #547) and reads the log those calls write
+//! (FR-INT-006, #548). Nothing here receives, and nothing calls out on its
+//! own: business-driven outbound REST, inbound REST, webhooks, retry, sync and
+//! file exchange are still unbuilt (#520 AC-9). Of the five traffic tables
+//! `0046_integration.sql` created, only `integration_logs` is written or read.
 //!
 //! # One function resolves a reference, for one call
 //!
@@ -29,6 +30,13 @@
 //! request, behind the egress guard in [`domain::egress`], within the system's
 //! timeout, and writes exactly one `integration_logs` row
 //! ([`service::test_call`]).
+//!
+//! # One route pair reads what was called
+//!
+//! `GET /integration/logs` and `GET /integration/logs/{id}`, under
+//! [`LOG_READ`], list and show `integration_logs` rows (FR-INT-006, #548). The
+//! payloads are returned exactly as they were stored — masked when written,
+//! never resolved again ([`service::log`]).
 //!
 //! # Three resources and eight permissions (#520, the product owner's answers)
 //!
@@ -86,3 +94,11 @@ pub const CREDENTIAL_DELETE: &str = "integration:credential:delete";
 /// reading a system, editing it and seeing where its secrets live are each a
 /// different question from sending a request under its credential.
 pub const ENDPOINT_CALL: &str = "integration:endpoint:call";
+
+/// Read the integration log (FR-INT-006, #548) — every call's row, with its
+/// masked payloads.
+///
+/// Its own permission, apart from `:external-system:read`: a log reader need
+/// not manage systems, and a system manager does not see every call's payload
+/// by default (#548 AC2).
+pub const LOG_READ: &str = "integration:log:read";
