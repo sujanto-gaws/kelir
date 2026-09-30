@@ -61,9 +61,10 @@ jobs:
           --health-retries 10
 
       clamav:
-        # Pinned like the compose stacks are (**D-62**) — `1.5` is what
-        # `latest` resolved to on 2026-09-03, so this froze CI rather than
-        # moving it. A scanner that changes under a green pipeline is a
+        # Pinned like the compose stacks are (**D-62**). `1.5.4` is what
+        # `clamav/clamav:1.5` resolved to on 2026-09-29, copied registry to
+        # registry into Kelir's own GHCR package (#546, #591), so the digest
+        # is upstream's. A scanner that changes under a green pipeline is a
         # product change nobody made.
         image: ghcr.io/sujanto-gaws/clamav:1.5.4
         # The same `StreamMaxLength` both compose files set (#324), so CI's
