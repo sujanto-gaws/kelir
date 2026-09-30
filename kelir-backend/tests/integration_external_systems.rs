@@ -1909,12 +1909,28 @@ async fn every_route_is_in_the_document_and_no_schema_can_carry_a_secret() {
             "a description is missing: {credential_texts:?}"
         );
         let lower = text.to_lowercase();
-        for claim in ["never a secret", "never the secret", "carries a secret"] {
+        for claim in [
+            "never a secret",
+            "never the secret",
+            "carries a secret",
+            // #620 (record 20 finding 3): the test call resolves one.
+            "no route resolves",
+        ] {
             assert!(
                 !lower.contains(claim),
                 "the document claims `{claim}`: {text}"
             );
         }
+    }
+
+    // #620: the tag names the one route that does resolve a reference. Seen
+    // red, 2026-10-01, with the tag's `and no route resolves one` put back.
+    let tag = &credential_texts[0];
+    for named in ["test call", "KELIR_INTEGRATION_SECRET_"] {
+        assert!(
+            tag.contains(named),
+            "the integration tag does not name `{named}`: {tag}"
+        );
     }
 
     // #555 (record 19 finding 5): both routes that take a baseUrl refuse a

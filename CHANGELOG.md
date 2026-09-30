@@ -67,6 +67,17 @@ While the major version is `0`, the public API may change in any release.
   its `ROLE-ADMIN`. A tenant created before the upgrade does not: grant it to
   that tenant's administrator role, or to whichever role should read the
   integration log. No schema changes.
+  - **`0050`'s comment gives the wrong reason for that grant**
+    ([#621](https://github.com/sujanto-gaws/kelir/issues/621)). It says a
+    reader of a log row's payloads sees nothing secret. A secret the called
+    system echoes in a spelling ADR-0043 §R does not list is stored as sent,
+    and a log reader sees it. Migrations are not edited, so the correction is here and in
+    [Database Schema](docs/design/02.%20Database%20Schema.md) §12.10. **The
+    grant is kept**, for three reasons. The permission is not a boundary: a
+    tenant administrator holds `identity:role:update` and can grant it to
+    themselves. The same preview already reaches every holder of
+    `integration:endpoint:call`, in the test call's own answer. And what an
+    unlisted echo exposes is a secret the called system already had.
 
 ### Added
 
@@ -96,8 +107,12 @@ While the major version is `0`, the public API may change in any release.
   - **Secrets are resolved for the call only.** `env://KELIR_INTEGRATION_SECRET_…`
     is read from the backend's environment; any other `env://` name fails as
     `SECRET_NAME_NOT_PERMITTED`, and `vault://` fails as
-    `SECRET_BACKEND_NOT_CONFIGURED` until a Vault client exists. No response,
-    log line, integration log row or audit row carries a resolved secret.
+    `SECRET_BACKEND_NOT_CONFIGURED` until a Vault client exists. **An echo
+    is redacted only in the spellings listed below.** A spelling outside the
+    list, such as a double percent-encoding, is stored and shown exactly as
+    the called system sent it, in the answer's preview and in the integration
+    log row. No log line or audit row holds the body, and a test call writes
+    no audit row.
   - **`BEARER_TOKEN` and `BASIC_AUTH` are sent**, as `Authorization: Bearer`
     and `Authorization: Basic` from a `user:password` secret. Every other
     credential type is refused with a 422 naming it as not built.
@@ -212,9 +227,11 @@ While the major version is `0`, the public API may change in any release.
     permissions. A new tenant's administrator does not start with the
     credential permissions (see *Upgrade notes*).
   - Every change is written to the audit trail.
-  - **Configuration only.** Nothing calls out, receives, logs or tests a
-    connection yet. That work is FR-INT-002 onward. Five of the eight new
-    tables have no writer yet.
+  - **The registry is configuration only.** The test call is what calls out
+    and writes a log row, and the integration log reads it, both above.
+    Nothing receives a call yet (FR-INT-003). Four of the eight new tables have no writer yet:
+    `integration_mappings`, `webhook_subscriptions`, `webhook_events` and
+    `inbox_events`.
 
 ### Changed
 

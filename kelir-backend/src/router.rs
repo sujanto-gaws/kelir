@@ -411,7 +411,7 @@ use crate::state::AppState;
         ),
         (
             name = "integration",
-            description = "The external system registry — systems, their endpoints, and references to where their secrets live. A reference is checked for its shape only, and no route resolves one"
+            description = "The external system registry — systems, their endpoints, and references to where their secrets live. A reference is checked for its shape only when it is saved. One route resolves one: an endpoint's test call, which reads an `env://` reference under `KELIR_INTEGRATION_SECRET_` at call time and fails a `vault://` reference as `SECRET_BACKEND_NOT_CONFIGURED`"
         )
     ),
     info(
