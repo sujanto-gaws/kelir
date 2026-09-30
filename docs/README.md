@@ -1,6 +1,6 @@
 # Kelir Documentation
 
-**Status:** Living · **Last updated:** 2026-09-30
+**Status:** Living · **Last updated:** 2026-10-01
 
 Kelir is a metadata-driven, document-centric, workflow-enabled full-stack framework for building enterprise business applications rapidly — Rust (Axum + SQLx + PostgreSQL) on the backend, Vue 3 (Vite + Pinia + shadcn-vue + Tailwind CSS v4) on the frontend. This folder is the complete documentation set; this file is its map.
 
@@ -123,8 +123,8 @@ The JSON standards family. Each specification carries its own version, RFC 2119 
 
 | Standard | Version | Defines |
 |---|---|---|
-| [JSON Form Schema.md](schema/JSON%20Form%20Schema.md) (JFSS) | 2.0.1 (errata E-1) | Dynamic form definitions: components, validation, conditional logic, calculations |
-| [JFSS Validation Rule Registry.md](schema/JFSS%20Validation%20Rule%20Registry.md) | 1.5.5 | Registered validation rules usable in JFSS `rules` |
+| [JSON Form Schema.md](schema/JSON%20Form%20Schema.md) (JFSS) | 2.0.1 (errata E-1, E-2, E-3) | Dynamic form definitions: components, validation, conditional logic, calculations |
+| [JFSS Validation Rule Registry.md](schema/JFSS%20Validation%20Rule%20Registry.md) | 1.5.7 | Registered validation rules usable in JFSS `rules` |
 | [JFSS Calculation Rule Registry.md](schema/JFSS%20Calculation%20Rule%20Registry.md) | 1.7.1 | Registered JSON Logic operators for calculations and all platform conditions |
 | [JSON Workflow Schema.md](schema/JSON%20Workflow%20Schema.md) (JWSS) | 1.0.0 | Workflow definitions: states, transitions, tasks, assignment rules, guards/actions |
 | [Lifecycle Hook Contract.md](schema/Lifecycle%20Hook%20Contract.md) (LHCS) | 1.0.0 | The hook ABI: registration entry, invocation payload, CONTINUE/MODIFY/REJECT result |

@@ -1,7 +1,7 @@
 # JFSS Validation Rule Registry
-**Version:** 1.5.6  
+**Version:** 1.5.7  
 **Status:** Active Standard  
-**Last updated:** 2026-09-26  
+**Last updated:** 2026-10-01  
 **Pairs with:** JFSS v2.0.1  
 **Maintainers:** Full-Stack Engineering Team
 
@@ -12,7 +12,7 @@ The JFSS Validation Rule Registry defines the standardized, advanced validation 
 Kelir runs a Vue frontend and a **Rust** backend, so adding a new rule to this registry is a **binding architectural commitment** across exactly two runtimes. Two, not three: earlier versions named Go alongside Rust, for a backend that does not exist and is not planned (decision **D-11**).
 
 Before adding a new rule to this document, the engineering team must ensure:
-1. **Frontend Parity:** The rule can be evaluated using Vue/Zod/Yup.
+1. **Frontend Parity:** ~~The rule can be evaluated using Vue/Zod/Yup.~~ The rule can be evaluated in the browser by the renderer's rule catalogue, `kelir-frontend/src/features/rad/renderer/validation.ts`, which uses no validation library (1.5.7).
 2. **Backend Parity:** The rule can be evaluated natively in Rust without relying on an embedded JavaScript engine.
 3. **Semantic Parity:** For a rule scoped `both`, the two implementations agree on the **edge cases**, not just the happy path — a rule that both sides evaluate but decide differently is worse than one only the server enforces, because nothing surfaces the disagreement. See the `regex` warning below for a live example.
 4. **Security Boundary:** The rule's `scope` correctly reflects whether it is a UX enhancement (`client`), a strict security boundary (`server`), or a shared data-integrity check (`both`).
@@ -49,7 +49,7 @@ Ensures the current field's value exactly matches the value of another data comp
   { "rule": "matchesField", "scope": "both", "params": { "target": "password" }, "message": "Passwords do not match." }
   ```
 * **Implementation Notes:**
-  * **Vue:** Use Zod's `superRefine` or Yup's `oneOf([Yup.ref('target')])` to access the global form context.
+  * **Vue:** ~~Use Zod's `superRefine` or Yup's `oneOf([Yup.ref('target')])` to access the global form context.~~ The renderer's catalogue compares the value with the value at the target key in the scope the component's `key` addresses (the form payload, or the row inside a datagrid), which the renderer is given with the value (`validation.ts`; 1.5.7).
   * **Rust:** Compare `payload[current_key] == payload[&params.target]` on `serde_json::Value`, whose `PartialEq` is structural — note that a missing key and an explicit `null` are both `Value::Null` and therefore compare equal, which is the correct outcome here only because S10.1 requires every data `key` to be submitted.
 
 #### `notMatchesField`
@@ -219,7 +219,7 @@ Triggers a debounced, read-only API call to provide real-time UX feedback.
   ```
   or, on failure, `{ "valid": false, "message": "Optional override for the rule's message" }`.
 * **Implementation Notes:**
-  * **Vue:** Wrap the fetch call in a Zod `refine` or Yup `test` that returns a Promise. Apply the debounce at the component level. Note that Zod integration requires the async parse path — `parseAsync`/`safeParseAsync` — because a synchronous `parse` throws on async refinements.
+  * **Vue:** ~~Wrap the fetch call in a Zod `refine` or Yup `test` that returns a Promise. Apply the debounce at the component level. Note that Zod integration requires the async parse path — `parseAsync`/`safeParseAsync` — because a synchronous `parse` throws on async refinements.~~ The renderer does not decide this rule yet, and says so: no endpoint is allow-listed (`validation.ts`). The registry's contract above is unchanged: the endpoint must be allow-listed, read-only and rate-limited, and the debounce sits at the component level (1.5.7).
 
 ---
 
@@ -269,7 +269,7 @@ If a developer needs to introduce a new validation rule (e.g., `validateCryptoAd
 
 1. **Draft the Rule:** Define the `rule` name, `scope`, and `params` schema.
 2. **Update this Registry:** Add the rule to the appropriate scope section in this document.
-3. **Implement in Vue:** Add the logic to the `zodBuilder.ts` (or equivalent) switch statement.
+3. **Implement in Vue:** Add the logic to ~~the `zodBuilder.ts` (or equivalent) switch statement~~ the renderer's rule catalogue, `kelir-frontend/src/features/rad/renderer/validation.ts` (1.5.7).
 4. **Implement in Rust:** Add the logic to the backend's server-rule evaluator (`evaluate_server_rules` or equivalent) as a new `match` arm. An unrecognised rule name MUST be an error, not a skipped arm — a rule the backend silently ignores is a `server`-scoped check that does not run.
 5. **Update Meta-Schema (Optional):** If the rule requires strict parameter validation, update the `advancedRule` definition in `jfss-meta-v2.0.1.json` to include an `if/then` block for the new `rule` string.
 6. **Code Review:** The PR must be reviewed by at least one frontend and one backend engineer to ensure parity.
@@ -311,6 +311,7 @@ The Vue submission handler must catch the `400` response, iterate through the `d
 
 ## 6. Changelog
 
+- **1.5.7 (2026-10-01):** **The Vue notes stop prescribing Zod and Yup** ([#626](https://github.com/sujanto-gaws/kelir/issues/626), record 20 finding 9). Kelir's renderer uses neither: it decides the rules in its own catalogue, `kelir-frontend/src/features/rad/renderer/validation.ts`, and the server validates every submission. [#577](https://github.com/sujanto-gaws/kelir/pull/577) removed them from the architecture documents, the SDD and the coding standard, and missed this registry. §1.1's frontend-parity condition, the `matchesField` and `async` implementation notes, and §4's step 3 are struck in place beside what the renderer does. The `async` note now says the renderer does not decide the rule yet. No rule, scope, code or refusal changed.
 - **1.4.1 (2026-09-11):** **1.4.0 called the `regex` question resolved, and it is not wholly.** The save-time refusal closes lookahead, backreferences and a bare `\d`, `\w` or `\s`; `\b`, POSIX bracket expressions and `\p{…}` still compile on the server and diverge silently in the browser ([#413](https://github.com/sujanto-gaws/kelir/issues/413), the [Sprint 16 independent pass](../../projects/verifications/15.%20Sprint%2016%20Independent%20Pass.md) finding 1). The warning under `regex` now says which. Found again by the `v0.7.0` pre-flight schema check; 1.4.0's entry below is left as written. No rule is added, removed, or re-scoped.
 - **1.5.6 (2026-09-26):** **A match the browser throws on is left to the server, not refused** ([#496](https://github.com/sujanto-gaws/kelir/issues/496), the product owner's 2026-09-25 decision, options 2A and 1A). The warning under `regex` said the renderer counts an exception as a violation, and it now leaves the rule, or `validation.pattern`, undecided, and the server decides on submit. **A pattern the browser cannot compile still fails**: the renderer compiles first, and treats only a throw from the match as undecided. **Once a keyword has failed on the field, the renderer also runs none of the rules it decides itself** (`matchesField`, `notMatchesField`, `oneOf`, `notOneOf` and `regex`), which changes no verdict. The measured table is left as measured, with a note that its *refused* is the renderer before this version. **This fixes only the engine that throws.** It says nothing about which patterns the two sides decide alike (**D-88**), and changes nothing for an engine that keeps matching or answers *no match*. No rule, code or refusal changed.
 - **1.5.5 (2026-09-17):** **The `\p{…}` refusal row says what happens under `u`** ([#466](https://github.com/sujanto-gaws/kelir/issues/466), record 16 finding 3). The row explained the refusal only for a rule without the flag, and the refusal's message told a rule carrying `u` that it did not. **The refusal did not change, and neither did any other row**: `\p` is refused whatever the flags. What changed is the reason, and the reasons for a negated class (`\D`, `\W`, `\S`) and for `\B`, which had been their positive forms' reasons. Those needed no table change, because the rows already name the constructs and not their messages. No rule is added, removed, or re-scoped.

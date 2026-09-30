@@ -4,11 +4,11 @@
 //! # There is no secret here, and that is structural
 //!
 //! `secret_reference` holds `vault://kelir/erp/api-key` or
-//! `env://KELIR_ERP_API_KEY`: a pointer into the deployment's secret store. No
-//! type in this module has a field for the secret itself, no route resolves a
-//! reference, and so no response, OpenAPI schema or log line can carry a
-//! resolved secret (#520 AC-5). The runtime that will one day resolve a
-//! reference to make a call is FR-INT-002's, and it will do so in process.
+//! `env://KELIR_INTEGRATION_SECRET_ERP_API_KEY`: a pointer into the
+//! deployment's secret store. No type in this module has a field for the
+//! secret itself (#520 AC-5). No route of the registry resolves a reference.
+//! The endpoint's test call does, in process and for the call only, through
+//! `outbound::resolve_secret` (FR-INT-002, ADR-0043).
 //!
 //! # What [`validate_secret_reference`] checks, and what it cannot
 //!
