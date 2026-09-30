@@ -4,7 +4,7 @@
 //! # There is no secret here, and that is structural
 //!
 //! `secret_reference` holds `vault://kelir/erp/api-key` or
-//! `env://KELIR_INTEGRATION_SECRET_ERP_API_KEY`: a pointer into the
+//! `env://KELIR_INTEGRATION_SECRET_SYSTEM__ERP_API_KEY`: a pointer into the
 //! deployment's secret store. No type in this module has a field for the
 //! secret itself (#520 AC-5). No route of the registry resolves a reference.
 //! The endpoint's test call does, in process and for the call only, through
