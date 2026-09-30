@@ -129,6 +129,11 @@ services:
   # `RELEASE.<timestamp>` and `latest`, so they take a dated release and a bump
   # is a deliberate edit. ClamAV and Mailpit have patch lines — `1.5`, `v1.31` —
   # which is the granularity `postgres:16` already uses.
+  #
+  # **The release Dockerfiles are held more strictly** (#590): every `FROM`
+  # names a release (a patch-level or dated tag, or a digest), not a line,
+  # because the image built from it is what a Kelir tag ships. The images in
+  # this file still name lines, which the pin test accepts for compose files.
   minio:
     image: ghcr.io/sujanto-gaws/minio:RELEASE.2025-09-07T16-13-09Z
     restart: unless-stopped

@@ -32,7 +32,8 @@
 		#
 		# Stated rather than left to the default because the default has changed:
 		# Caddy appended to the incoming header before 2.7, which let a caller
-		# plant the leftmost entry the backend read. `caddy:2-alpine` floats, so
+		# plant the leftmost entry the backend read. The image is pinned to one
+		# Caddy release since #590, but a bump moves the default with it, so
 		# the trust boundary is written down instead of inherited.
 		trusted_proxies static 127.0.0.1/32 ::1/128
 	}

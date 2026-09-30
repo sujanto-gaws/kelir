@@ -215,6 +215,15 @@ While the major version is `0`, the public API may change in any release.
 
 ### Changed
 
+- **The release images are built from pinned releases, and a test holds every Dockerfile to it**
+  ([#590](https://github.com/sujanto-gaws/kelir/issues/590)). The frontend image was built
+  `FROM caddy:2-alpine`, which follows every Caddy 2 release, and no test read a Dockerfile.
+  `deployment_images_are_pinned.rs` now finds every Dockerfile in the repository by name and
+  refuses a `FROM` that names a line instead of a release. The four bases are pinned to what their
+  lines resolved to on 2026-09-30, checked by digest, so nothing a release runs changed:
+  `caddy:2.11.4-alpine`, `node:24.21.0-alpine`, `rust:1.89.0-slim-bookworm` and
+  `debian:bookworm-20260918-slim`. See [Installation and
+  Deployment](docs/operations/01.%20Installation%20and%20Deployment.md) §2.
 - **ClamAV is pulled from `ghcr.io/sujanto-gaws/clamav:1.5.4`**, Kelir's own copy, in CI and both
   compose files ([#546](https://github.com/sujanto-gaws/kelir/issues/546)). `1.5.4` is what
   `clamav/clamav:1.5` resolved to on 2026-09-29, copied registry to registry, so the digest is
