@@ -65,6 +65,8 @@ use uuid::Uuid;
 
 const BASE: &str = "/api/v1/integration/external-systems";
 const PASSWORD: &str = "integration-test-call-password";
+const TENANTS: &str = "/api/v1/organization/tenants";
+const TENANT_PASSWORD: &str = "a-sufficiently-long-password";
 
 // ---------------------------------------------------------------------------
 // The mock system
@@ -326,15 +328,100 @@ async fn app_reaching_loopback() -> TestApp {
     TestApp::spawn_with(|config| config.integration_allow_loopback = true).await
 }
 
-/// A planted secret behind a fresh environment variable; returns
-/// `(reference, value)`.
+/// A planted secret behind a fresh environment variable in the system
+/// tenant's namespace; returns `(reference, value)`.
 fn plant(value: &str) -> (String, String) {
+    plant_in("SYSTEM", value)
+}
+
+/// A planted secret behind a fresh variable in the namespace of the tenant
+/// whose code maps to `code_segment` (#618):
+/// `KELIR_INTEGRATION_SECRET_<CODE>__TEST_<unique>`.
+fn plant_in(code_segment: &str, value: &str) -> (String, String) {
     let name = format!(
-        "KELIR_INTEGRATION_SECRET_TEST_{}",
+        "KELIR_INTEGRATION_SECRET_{code_segment}__TEST_{}",
         Uuid::now_v7().simple().to_string().to_uppercase()
     );
     std::env::set_var(&name, value);
     (format!("env://{name}"), value.to_owned())
+}
+
+/// A tenant created through `POST /organization/tenants`, whose administrator
+/// has granted themselves `integration:credential:create` — record 20's P1.
+/// Provisioning withholds that code, and the administrator may grant it to
+/// their own `ROLE-ADMIN` (`organization::service` says the withholding "is
+/// not a boundary"). Returns a token carrying the grant.
+async fn created_tenant_administrator(app: &TestApp, system_admin: &str, code: &str) -> String {
+    let username = format!("admin.{}", code.to_lowercase().replace('_', "-"));
+    let created = app
+        .post(
+            TENANTS,
+            Some(system_admin),
+            json!({
+                "tenantCode": code,
+                "name": format!("{code} Limited"),
+                "administrator": {
+                    "username": username,
+                    "email": format!("{username}@example.test"),
+                    "displayName": "Tenant Administrator",
+                    "password": TENANT_PASSWORD,
+                },
+            }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+    let token = app.sign_in_to(code, &username, TENANT_PASSWORD).await;
+
+    let catalogue = app.get("/api/v1/identity/permissions", Some(&token)).await;
+    let credential_create = catalogue
+        .data()
+        .as_array()
+        .expect("the catalogue is an array")
+        .iter()
+        .find(|permission| permission["permissionCode"] == "integration:credential:create")
+        .map(|permission| permission["id"].clone())
+        .expect("integration:credential:create is catalogued");
+
+    let roles = app.get("/api/v1/identity/roles", Some(&token)).await;
+    let role = roles.body["data"]
+        .as_array()
+        .expect("roles are an array")
+        .iter()
+        .find(|role| role["roleCode"] == "ROLE-ADMIN")
+        .cloned()
+        .unwrap_or_else(|| panic!("no ROLE-ADMIN in {}", roles.body));
+    let mut permission_ids: Vec<Value> = role["permissions"]
+        .as_array()
+        .expect("a role lists its permissions")
+        .iter()
+        .map(|permission| permission["id"].clone())
+        .collect();
+    permission_ids.push(credential_create);
+
+    let granted = app
+        .put(
+            &format!(
+                "/api/v1/identity/roles/{}",
+                role["id"].as_str().expect("a role id")
+            ),
+            Some(&token),
+            json!({ "permissionIds": permission_ids }),
+        )
+        .await;
+    assert_eq!(granted.status, StatusCode::OK, "{}", granted.body);
+
+    // A fresh token, so the claims carry what was just granted.
+    app.sign_in_to(code, &username, TENANT_PASSWORD).await
+}
+
+/// An app serving more than one tenant, whose guard lets the mock through.
+async fn multi_tenant_app_reaching_loopback() -> TestApp {
+    TestApp::spawn_with(|config| {
+        config.integration_allow_loopback = true;
+        config.multi_tenant = true;
+    })
+    .await
 }
 
 fn id_of(response: &TestResponse) -> Uuid {
@@ -730,7 +817,7 @@ async fn an_unset_environment_variable_is_named_and_logged() {
         &app,
         &token,
         target.system,
-        "env://KELIR_INTEGRATION_SECRET_NEVER_SET_ANYWHERE",
+        "env://KELIR_INTEGRATION_SECRET_SYSTEM__NEVER_SET_ANYWHERE",
     )
     .await;
 
@@ -850,7 +937,7 @@ async fn an_unbuilt_credential_type_is_refused_before_its_secret_is_read() {
             target.system,
             json!({
                 "credentialType": kind,
-                "secretReference": "env://KELIR_INTEGRATION_SECRET_NEVER_SET_ANYWHERE",
+                "secretReference": "env://KELIR_INTEGRATION_SECRET_SYSTEM__NEVER_SET_ANYWHERE",
             }),
         )
         .await;
@@ -932,7 +1019,7 @@ async fn exactly_one_active_credential_valid_today_is_required() {
         target.system,
         json!({
             "credentialType": "BEARER_TOKEN",
-            "secretReference": "env://KELIR_INTEGRATION_SECRET_EXPIRED",
+            "secretReference": "env://KELIR_INTEGRATION_SECRET_SYSTEM__EXPIRED",
             "validFrom": "2020-01-01",
             "validTo": "2020-12-31",
         }),
@@ -944,7 +1031,7 @@ async fn exactly_one_active_credential_valid_today_is_required() {
         target.system,
         json!({
             "credentialType": "BEARER_TOKEN",
-            "secretReference": "env://KELIR_INTEGRATION_SECRET_OFF",
+            "secretReference": "env://KELIR_INTEGRATION_SECRET_SYSTEM__OFF",
             "isActive": false,
         }),
     )
@@ -1694,7 +1781,10 @@ async fn a_caller_in_another_tenant_calls_their_own_endpoint_and_neither_reaches
         .sign_in_to("SYSTEM", common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
         .await;
     let mock = Mock::start().await;
+    // Each tenant names a variable in its own namespace (#618): the system
+    // tenant's under `SYSTEM__`, tenant B's under `TNT_CALL_B__`.
     let (reference, _) = plant("kelir-planted-tenant-9a9a");
+    let (their_reference, their_secret) = plant_in("TNT_CALL_B", "kelir-planted-tenant-b-8b8b");
 
     let other = fixtures::create_tenant(&app.pool, "TNT-CALL-B", "Tenant B").await;
     let role = fixtures::create_role_with_permissions(
@@ -1724,11 +1814,17 @@ async fn a_caller_in_another_tenant_calls_their_own_endpoint_and_neither_reaches
     let ours = target(&app, &system_admin, &mock.base_url(), "GET", "/echo").await;
     bearer(&app, &system_admin, ours.system, &reference).await;
     let theirs = target(&app, &theirs_token, &mock.base_url(), "GET", "/echo").await;
-    bearer(&app, &theirs_token, theirs.system, &reference).await;
+    bearer(&app, &theirs_token, theirs.system, &their_reference).await;
 
     // Each calls its own.
     let response = call(&app, &theirs_token, &theirs).await;
     assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    assert_eq!(
+        mock.seen()
+            .last()
+            .and_then(|seen| seen.authorization.clone()),
+        Some(format!("Bearer {their_secret}"))
+    );
     let rows = log_rows(&app, theirs.endpoint).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["tenant_id"], other.to_string());
@@ -1758,6 +1854,254 @@ async fn a_caller_in_another_tenant_calls_their_own_endpoint_and_neither_reaches
         .expect("count integration_logs");
     assert_eq!(total, 1, "only tenant B's own call wrote a row");
     assert_eq!(mock.seen().len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Each tenant resolves only its own variables (#618, record 20's P1)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_created_tenant_naming_the_system_tenants_variable_is_refused_and_sends_nothing() {
+    // Record 20's P1, as a test. On the prefix-only rule the collector received
+    // `Bearer <the system tenant's value>`.
+    let app = multi_tenant_app_reaching_loopback().await;
+    let system_admin = app
+        .sign_in_to("SYSTEM", common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await;
+    let collector = Mock::start().await;
+    let (system_reference, system_value) =
+        plant_in("SYSTEM", "r20-system-tenant-erp-token-5c5c");
+
+    let tenant = created_tenant_administrator(&app, &system_admin, "TNT-P1").await;
+    let foreign = target(&app, &tenant, &collector.base_url(), "GET", "/echo").await;
+    bearer(&app, &tenant, foreign.system, &system_reference).await;
+
+    let response = call(&app, &tenant, &foreign).await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        response.body
+    );
+    assert_eq!(response.error_code(), Some("SECRET_NAME_NOT_PERMITTED"));
+    assert!(
+        collector.seen().is_empty(),
+        "the collector received {:?}",
+        collector.seen()
+    );
+    // The message names the caller's own prefix, and no other tenant's.
+    let message = error_message(&response);
+    assert!(
+        message.contains("KELIR_INTEGRATION_SECRET_TNT_P1__"),
+        "{message}"
+    );
+    assert!(!message.contains("SYSTEM"), "{message}");
+    assert!(!response.body.to_string().contains(&system_value));
+
+    let rows = log_rows(&app, foreign.endpoint).await;
+    assert_eq!(rows.len(), 1, "one row for the refused call");
+    assert_eq!(rows[0]["status"], "FAILED");
+    assert!(rows[0]["error_message"]
+        .as_str()
+        .is_some_and(|message| message.starts_with("SECRET_NAME_NOT_PERMITTED")));
+    assert!(!all_log_text(&app).await.contains(&system_value));
+
+    // Control: the tenant's own variable resolves and is sent.
+    let (own_reference, own_value) = plant_in("TNT_P1", "kelir-planted-tnt-p1-own-3d3d");
+    let own = target(&app, &tenant, &collector.base_url(), "GET", "/echo").await;
+    bearer(&app, &tenant, own.system, &own_reference).await;
+    let response = call(&app, &tenant, &own).await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    assert_eq!(
+        collector
+            .seen()
+            .last()
+            .and_then(|seen| seen.authorization.clone()),
+        Some(format!("Bearer {own_value}"))
+    );
+
+    // Control: the system tenant's own call resolves the same variable.
+    let theirs = target(&app, &system_admin, &collector.base_url(), "GET", "/echo").await;
+    bearer(&app, &system_admin, theirs.system, &system_reference).await;
+    let response = call(&app, &system_admin, &theirs).await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    assert_eq!(
+        collector
+            .seen()
+            .last()
+            .and_then(|seen| seen.authorization.clone()),
+        Some(format!("Bearer {system_value}"))
+    );
+    assert_eq!(collector.seen().len(), 2);
+}
+
+/// A response body with its integration log id replaced, so two answers can
+/// be compared byte for byte apart from the row each wrote.
+fn without_log_id(response: &TestResponse) -> String {
+    let mut body = response.body.to_string();
+    let message = error_message(response);
+    let log_id = message
+        .rsplit_once("(integration log ")
+        .and_then(|(_, rest)| rest.strip_suffix(')'))
+        .unwrap_or_else(|| panic!("no log id in {message}"))
+        .to_owned();
+    body = body.replace(&log_id, "<log>");
+    body
+}
+
+#[tokio::test]
+async fn another_tenants_variable_answers_the_same_set_or_unset() {
+    // Criterion 5: a foreign name is refused before the environment is read,
+    // so whether it is set cannot change a byte of the answer. On the
+    // prefix-only rule, the set one answered 200 and the unset one
+    // SECRET_NOT_FOUND, naming it.
+    let app = multi_tenant_app_reaching_loopback().await;
+    let system_admin = app
+        .sign_in_to("SYSTEM", common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await;
+    let collector = Mock::start().await;
+    let tenant = created_tenant_administrator(&app, &system_admin, "TNT-SAME").await;
+
+    let (set_reference, set_value) = plant_in("SYSTEM", "kelir-planted-foreign-set-6e6e");
+    let unset_reference = format!(
+        "env://KELIR_INTEGRATION_SECRET_SYSTEM__NEVER_SET_{}",
+        Uuid::now_v7().simple().to_string().to_uppercase()
+    );
+
+    let mut answers = Vec::new();
+    let mut stored = Vec::new();
+    for reference in [&set_reference, &unset_reference] {
+        let target = target(&app, &tenant, &collector.base_url(), "GET", "/echo").await;
+        bearer(&app, &tenant, target.system, reference).await;
+        let response = call(&app, &tenant, &target).await;
+        assert_eq!(
+            response.error_code(),
+            Some("SECRET_NAME_NOT_PERMITTED"),
+            "{reference}: {}",
+            response.body
+        );
+        answers.push((response.status, without_log_id(&response)));
+        let rows = log_rows(&app, target.endpoint).await;
+        assert_eq!(rows.len(), 1);
+        stored.push(rows[0]["error_message"].clone());
+    }
+
+    assert_eq!(answers[0], answers[1], "set and unset answer alike");
+    assert_eq!(stored[0], stored[1], "and are stored alike");
+    assert!(!answers[0].1.contains(&set_value));
+    assert!(!answers[0].1.contains("NEVER_SET"), "{}", answers[0].1);
+    assert!(collector.seen().is_empty());
+
+    // SECRET_NOT_FOUND is reachable inside the caller's own namespace, and
+    // still names the variable there.
+    let own_unset = format!(
+        "KELIR_INTEGRATION_SECRET_TNT_SAME__NEVER_SET_{}",
+        Uuid::now_v7().simple().to_string().to_uppercase()
+    );
+    let target = target(&app, &tenant, &collector.base_url(), "GET", "/echo").await;
+    bearer(&app, &tenant, target.system, &format!("env://{own_unset}")).await;
+    let response = call(&app, &tenant, &target).await;
+    assert_eq!(
+        response.error_code(),
+        Some("SECRET_NOT_FOUND"),
+        "{}",
+        response.body
+    );
+    assert!(error_message(&response).contains(&own_unset));
+}
+
+#[tokio::test]
+async fn a_name_two_tenants_codes_both_map_to_is_refused_for_both() {
+    // Criterion 3: `AMB-X` and `AMB_X` both map to `AMB_X`, and `DBL` and
+    // `DBL__X` both claim `..._DBL__X__TOKEN`. Such a name belongs to nobody,
+    // so it is refused for every tenant it matches.
+    let app = multi_tenant_app_reaching_loopback().await;
+    let system_admin = app
+        .sign_in_to("SYSTEM", common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await;
+    let collector = Mock::start().await;
+
+    let hyphen = created_tenant_administrator(&app, &system_admin, "AMB-X").await;
+    let underscore = created_tenant_administrator(&app, &system_admin, "AMB_X").await;
+    let short = created_tenant_administrator(&app, &system_admin, "DBL").await;
+    let long = created_tenant_administrator(&app, &system_admin, "DBL__X").await;
+
+    let (shared, shared_value) = plant_in("AMB_X", "kelir-planted-ambiguous-7f7f");
+    let (nested, nested_value) = plant_in("DBL__X", "kelir-planted-nested-8a8a");
+
+    for (token, reference, value) in [
+        (&hyphen, &shared, &shared_value),
+        (&underscore, &shared, &shared_value),
+        (&short, &nested, &nested_value),
+        (&long, &nested, &nested_value),
+    ] {
+        let target = target(&app, token, &collector.base_url(), "GET", "/echo").await;
+        bearer(&app, token, target.system, reference).await;
+        let response = call(&app, token, &target).await;
+
+        assert_eq!(
+            response.error_code(),
+            Some("SECRET_NAME_NOT_PERMITTED"),
+            "{reference}: {}",
+            response.body
+        );
+        assert!(!response.body.to_string().contains(value.as_str()));
+        assert_eq!(log_rows(&app, target.endpoint).await.len(), 1);
+    }
+    assert!(
+        collector.seen().is_empty(),
+        "the collector received {:?}",
+        collector.seen()
+    );
+
+    // Control: the refusal is of the name, not the tenant. `DBL`'s name that
+    // `DBL__X`'s prefix does not reach is still its own.
+    let (own, own_value) = plant_in("DBL", "kelir-planted-dbl-own-9b9b");
+    let target = target(&app, &short, &collector.base_url(), "GET", "/echo").await;
+    bearer(&app, &short, target.system, &own).await;
+    let response = call(&app, &short, &target).await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    assert_eq!(
+        collector
+            .seen()
+            .last()
+            .and_then(|seen| seen.authorization.clone()),
+        Some(format!("Bearer {own_value}"))
+    );
+}
+
+#[tokio::test]
+async fn a_single_tenant_deployment_reads_only_its_tenants_namespace() {
+    // A1: the rule is the same with one tenant. A name under the bare prefix,
+    // as #547 allowed, is refused, and nothing is sent.
+    let app = app_reaching_loopback().await;
+    let token = app.administrator_token().await;
+    let collector = Mock::start().await;
+
+    let bare = format!(
+        "KELIR_INTEGRATION_SECRET_ERP_TOKEN_{}",
+        Uuid::now_v7().simple().to_string().to_uppercase()
+    );
+    std::env::set_var(&bare, "kelir-planted-bare-prefix-1c1c");
+
+    let target = target(&app, &token, &collector.base_url(), "GET", "/echo").await;
+    bearer(&app, &token, target.system, &format!("env://{bare}")).await;
+    let response = call(&app, &token, &target).await;
+
+    assert_eq!(
+        response.error_code(),
+        Some("SECRET_NAME_NOT_PERMITTED"),
+        "{}",
+        response.body
+    );
+    assert!(
+        error_message(&response).contains("KELIR_INTEGRATION_SECRET_SYSTEM__"),
+        "{}",
+        response.body
+    );
+    assert!(collector.seen().is_empty());
+    assert_eq!(log_rows(&app, target.endpoint).await.len(), 1);
 }
 
 #[tokio::test]

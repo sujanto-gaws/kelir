@@ -801,7 +801,7 @@ async fn a_test_calls_rows_are_listed_and_shown_exactly_as_stored_without_the_se
 
     let secret = "kelir-planted-log-reader-7e41c2";
     let name = format!(
-        "KELIR_INTEGRATION_SECRET_LOGS_{}",
+        "KELIR_INTEGRATION_SECRET_SYSTEM__LOGS_{}",
         Uuid::now_v7().simple().to_string().to_uppercase()
     );
     std::env::set_var(&name, secret);
