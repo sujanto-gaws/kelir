@@ -181,6 +181,18 @@ pub async fn resolve_default(
         })
 }
 
+/// Every live tenant's `(id, tenant_code)`, whatever its status (#618).
+///
+/// For the integration module's secret resolver, which reads the caller's code
+/// by `tenant_id` and refuses a name another tenant's code also covers. No
+/// caller check: a code is not a secret, and nothing here is returned to a
+/// client.
+pub async fn live_tenant_codes(
+    executor: impl PgExecutor<'_>,
+) -> Result<Vec<(Uuid, String)>, AppError> {
+    Ok(repository::live_codes(executor).await?)
+}
+
 /// Shared lookup. Infrastructure errors are not resolution outcomes, so a
 /// database failure is surfaced rather than folded into "unknown tenant" —
 /// otherwise an outage would look to every caller like bad credentials.

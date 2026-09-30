@@ -102,6 +102,24 @@ pub async fn list(
         .collect())
 }
 
+/// Every live tenant's id and code, in one statement (#618).
+///
+/// Unscoped for the reason [`find_by_code`] is: `tenants` defines the
+/// partition. A deployment's tenants are few, and the one caller — an
+/// integration test call — is an administrator's action, so reading them all
+/// keeps the rule deciding which names a tenant may read in one place, in
+/// Rust (`integration::domain::secret`), rather than half in this `WHERE`.
+pub async fn live_codes(executor: impl PgExecutor<'_>) -> Result<Vec<(Uuid, String)>, sqlx::Error> {
+    let rows = sqlx::query!("SELECT id, tenant_code FROM tenants WHERE deleted_at IS NULL")
+        .fetch_all(executor)
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.id, row.tenant_code))
+        .collect())
+}
+
 pub async fn count(executor: impl PgExecutor<'_>) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar!("SELECT count(*) FROM tenants WHERE deleted_at IS NULL")
         .fetch_one(executor)

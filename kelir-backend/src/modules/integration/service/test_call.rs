@@ -37,7 +37,7 @@ use crate::modules::integration::domain::external_system::{
     MAX_TIMEOUT_SECONDS, MIN_TIMEOUT_SECONDS,
 };
 use crate::modules::integration::domain::secret::{
-    authorization_value, is_supported, redactions, HeaderError,
+    authorization_value, is_supported, redactions, HeaderError, TenantNamespaces,
 };
 use crate::modules::integration::domain::test_call::{
     choose_credential, preview, target_url, value_without_nul, without_nul, BodyPreview,
@@ -52,6 +52,7 @@ use crate::modules::integration::repository::{
     credential as credential_repo, endpoint as endpoint_repo, external_system as system_repo,
 };
 use crate::modules::integration::ENDPOINT_CALL;
+use crate::modules::organization::service as organization;
 use crate::state::AppState;
 
 /// `integration_logs.entity_type` for a test call's row: the endpoint called.
@@ -266,7 +267,19 @@ async fn attempt(
         return Err(TestCallError::CredentialTypeNotSupported(credential.credential_type).into());
     }
 
-    let secret = outbound::resolve_secret(&credential.secret_reference)?;
+    // The caller's tenant code, and every other live tenant's, in one read
+    // and before the environment is (#618). From the caller's `tenant_id`,
+    // never from the request, the token or the reference.
+    let live = organization::live_tenant_codes(&state.pool)
+        .await
+        .map_err(Failure::Internal)?;
+    let namespaces = TenantNamespaces::for_caller(tenant_id, live).ok_or_else(|| {
+        Failure::Internal(
+            anyhow::anyhow!("the caller's tenant is not live, so it has no secret namespace")
+                .into(),
+        )
+    })?;
+    let secret = outbound::resolve_secret(&credential.secret_reference, &namespaces)?;
     let header = authorization_value(credential.credential_type, &secret).map_err(|error| {
         TestCallError::SecretMalformed(match error {
             HeaderError::BasicWithoutSeparator => {

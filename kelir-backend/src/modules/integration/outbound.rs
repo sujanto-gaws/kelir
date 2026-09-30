@@ -34,9 +34,7 @@ use reqwest::header::{HeaderValue, AUTHORIZATION};
 use url::{Host, Url};
 
 use super::domain::egress::EgressPolicy;
-use super::domain::secret::{
-    environment_name_is_resolvable, Secret, SecretReference, SecretReferenceError,
-};
+use super::domain::secret::{Secret, SecretReference, SecretReferenceError, TenantNamespaces};
 use super::domain::test_call::{TestCallError, MAX_BODY_BYTES};
 use super::domain::HttpMethod;
 
@@ -48,18 +46,30 @@ pub const CORRELATION_HEADER: &str = "X-Correlation-Id";
 /// Resolves a `secret_reference` for one call.
 ///
 /// * `env://NAME` reads `NAME` from this process's environment **only if it
-///   starts with `KELIR_INTEGRATION_SECRET_`** ([`environment_name_is_resolvable`];
-///   any other name is [`TestCallError::SecretNameNotPermitted`], and the
-///   environment is not read). Unset, empty or not Unicode is
-///   [`TestCallError::SecretNotFound`].
+///   is one of the caller's tenant's names**,
+///   `KELIR_INTEGRATION_SECRET_<CODE>__<NAME>`, and no other live tenant's
+///   ([`TenantNamespaces::admits`], #618). Any other name is
+///   [`TestCallError::SecretNameNotPermitted`], naming the caller's prefix,
+///   and the environment is not read, so a foreign variable answers the same
+///   set or unset. Unset, empty or not Unicode is
+///   [`TestCallError::SecretNotFound`], reachable only inside the caller's
+///   namespace.
 /// * `vault://…` is [`TestCallError::SecretBackendNotConfigured`]: the product
 ///   owner's answer 1, with a HashiCorp Vault KV v2 client named as its
 ///   successor (ADR-0043 §2).
-pub fn resolve_secret(reference: &str) -> Result<Secret, TestCallError> {
+///
+/// `namespaces` is read from `tenants` by the caller's `tenant_id` before this
+/// is called; this function reads nothing but the environment.
+pub fn resolve_secret(
+    reference: &str,
+    namespaces: &TenantNamespaces,
+) -> Result<Secret, TestCallError> {
     match SecretReference::parse(reference) {
         Ok(SecretReference::Environment { name }) => {
-            if !environment_name_is_resolvable(name) {
-                return Err(TestCallError::SecretNameNotPermitted);
+            if !namespaces.admits(name) {
+                return Err(TestCallError::SecretNameNotPermitted {
+                    prefix: namespaces.caller_prefix(),
+                });
             }
 
             match std::env::var(name) {
@@ -270,10 +280,29 @@ mod tests {
     use super::*;
     use crate::modules::integration::domain::egress::AddressClass;
 
+    /// The system tenant, with `TNT-001` live beside it.
+    fn system() -> TenantNamespaces {
+        let caller = uuid::Uuid::now_v7();
+        TenantNamespaces::for_caller(
+            caller,
+            vec![
+                (caller, "SYSTEM".to_owned()),
+                (uuid::Uuid::now_v7(), "TNT-001".to_owned()),
+            ],
+        )
+        .expect("the caller is live")
+    }
+
+    fn refused() -> Result<(), TestCallError> {
+        Err(TestCallError::SecretNameNotPermitted {
+            prefix: "KELIR_INTEGRATION_SECRET_SYSTEM__".to_owned(),
+        })
+    }
+
     #[test]
     fn a_vault_reference_is_refused_by_name() {
         assert_eq!(
-            resolve_secret("vault://kelir/erp/api-key#token").map(|_| ()),
+            resolve_secret("vault://kelir/erp/api-key#token", &system()).map(|_| ()),
             Err(TestCallError::SecretBackendNotConfigured)
         );
     }
@@ -281,9 +310,13 @@ mod tests {
     #[test]
     fn an_unset_environment_variable_is_named() {
         assert_eq!(
-            resolve_secret("env://KELIR_INTEGRATION_SECRET_UNIT_SURELY_UNSET_9B1").map(|_| ()),
+            resolve_secret(
+                "env://KELIR_INTEGRATION_SECRET_SYSTEM__UNIT_SURELY_UNSET_9B1",
+                &system()
+            )
+            .map(|_| ()),
             Err(TestCallError::SecretNotFound {
-                name: "KELIR_INTEGRATION_SECRET_UNIT_SURELY_UNSET_9B1".to_owned()
+                name: "KELIR_INTEGRATION_SECRET_SYSTEM__UNIT_SURELY_UNSET_9B1".to_owned()
             })
         );
     }
@@ -295,15 +328,36 @@ mod tests {
         assert!(std::env::var("PATH").is_ok());
 
         assert_eq!(
-            resolve_secret("env://PATH").map(|_| ()),
-            Err(TestCallError::SecretNameNotPermitted)
+            resolve_secret("env://PATH", &system()).map(|_| ()),
+            refused()
+        );
+    }
+
+    #[test]
+    fn another_tenants_name_is_refused_alike_set_or_unset() {
+        // The tenant check comes before the environment is read, so a set
+        // foreign variable and an unset one are the same refusal.
+        let set = "KELIR_INTEGRATION_SECRET_TNT_001__UNIT_SET_4C1";
+        std::env::set_var(set, "kelir-unit-foreign-value");
+
+        assert_eq!(
+            resolve_secret(&format!("env://{set}"), &system()).map(|_| ()),
+            refused()
+        );
+        assert_eq!(
+            resolve_secret(
+                "env://KELIR_INTEGRATION_SECRET_TNT_001__UNIT_SURELY_UNSET_4C2",
+                &system()
+            )
+            .map(|_| ()),
+            refused()
         );
     }
 
     #[test]
     fn a_stored_value_that_is_not_a_reference_is_not_read() {
         assert_eq!(
-            resolve_secret("PATH").map(|_| ()),
+            resolve_secret("PATH", &system()).map(|_| ()),
             Err(TestCallError::SecretReferenceMalformed)
         );
     }

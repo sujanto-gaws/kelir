@@ -1869,8 +1869,7 @@ async fn a_created_tenant_naming_the_system_tenants_variable_is_refused_and_send
         .sign_in_to("SYSTEM", common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
         .await;
     let collector = Mock::start().await;
-    let (system_reference, system_value) =
-        plant_in("SYSTEM", "r20-system-tenant-erp-token-5c5c");
+    let (system_reference, system_value) = plant_in("SYSTEM", "r20-system-tenant-erp-token-5c5c");
 
     let tenant = created_tenant_administrator(&app, &system_admin, "TNT-P1").await;
     let foreign = target(&app, &tenant, &collector.base_url(), "GET", "/echo").await;
