@@ -49,7 +49,7 @@ Ensures the current field's value exactly matches the value of another data comp
   { "rule": "matchesField", "scope": "both", "params": { "target": "password" }, "message": "Passwords do not match." }
   ```
 * **Implementation Notes:**
-  * **Vue:** ~~Use Zod's `superRefine` or Yup's `oneOf([Yup.ref('target')])` to access the global form context.~~ The renderer's catalogue compares the value with the target key's value in the form's scope, which it is given with the value (`validation.ts`; 1.5.7).
+  * **Vue:** ~~Use Zod's `superRefine` or Yup's `oneOf([Yup.ref('target')])` to access the global form context.~~ The renderer's catalogue compares the value with the value at the target key in the scope the component's `key` addresses (the form payload, or the row inside a datagrid), which the renderer is given with the value (`validation.ts`; 1.5.7).
   * **Rust:** Compare `payload[current_key] == payload[&params.target]` on `serde_json::Value`, whose `PartialEq` is structural — note that a missing key and an explicit `null` are both `Value::Null` and therefore compare equal, which is the correct outcome here only because S10.1 requires every data `key` to be submitted.
 
 #### `notMatchesField`
@@ -219,7 +219,7 @@ Triggers a debounced, read-only API call to provide real-time UX feedback.
   ```
   or, on failure, `{ "valid": false, "message": "Optional override for the rule's message" }`.
 * **Implementation Notes:**
-  * **Vue:** ~~Wrap the fetch call in a Zod `refine` or Yup `test` that returns a Promise. Apply the debounce at the component level. Note that Zod integration requires the async parse path — `parseAsync`/`safeParseAsync` — because a synchronous `parse` throws on async refinements.~~ The renderer does not decide this rule yet, and says so: no endpoint is allow-listed (`validation.ts`). When one is, the rule's check awaits the fetch, debounced at the component level (1.5.7).
+  * **Vue:** ~~Wrap the fetch call in a Zod `refine` or Yup `test` that returns a Promise. Apply the debounce at the component level. Note that Zod integration requires the async parse path — `parseAsync`/`safeParseAsync` — because a synchronous `parse` throws on async refinements.~~ The renderer does not decide this rule yet, and says so: no endpoint is allow-listed (`validation.ts`). The registry's contract above is unchanged: the endpoint must be allow-listed, read-only and rate-limited, and the debounce sits at the component level (1.5.7).
 
 ---
 
