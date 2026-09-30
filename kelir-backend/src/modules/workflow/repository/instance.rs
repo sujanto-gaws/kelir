@@ -64,6 +64,14 @@ pub async fn insert_instance(
 /// [`super::super::service::engine`] states at the top. Two paths taking them in
 /// opposite orders is a deadlock at exactly the concurrency the feature is for,
 /// and it is a defect no single-threaded test can see.
+///
+/// **A path that never calls this can still take the instance.** A
+/// `workflow_task_history` insert takes `FOR KEY SHARE` on it through the
+/// foreign key, so a task path that locked only the task took the instance
+/// second and deadlocked with a decision ([#619]). Every task path in
+/// `service::task` calls this before `task::lock_task`.
+///
+/// [#619]: https://github.com/sujanto-gaws/kelir/issues/619
 pub async fn lock_instance(
     transaction: &mut sqlx::PgTransaction<'_>,
     tenant_id: Uuid,

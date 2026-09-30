@@ -4591,6 +4591,7 @@ async fn an_unclaimed_task_is_judged_by_its_offered_role_and_not_by_the_clause()
 // | The audit event renamed, or its call's `.await` dropped (2026-09-28) | *a reassign is audited once…* — no record |
 // | `FOR UPDATE` dropped from `lock_task` (2026-09-28) | *a claim arriving during a reassign…* — the claim did not wait, 200 |
 // | `COALESCE` on `candidate_department_id`, then on `delegated_from_user_id`, in `reassign` (2026-09-28) | *a reassign clears the department and the delegation* |
+// | `lock_instance` dropped from `claim_task`, `delegate` and `reassign`, one at a time (#619) | See the #619 section's table |
 // | `Return` dropped from the decision actions; `Cancel` added; an edge with no `allowedBy` made to `continue` (2026-09-28) | *the decidability check reads return and not cancel*, each case |
 
 /// What every role in this section carries: the inbox's permissions, and not
@@ -5837,9 +5838,10 @@ async fn blocked_by(app: &TestApp, blocker: i32, table: &str, lock: &str) -> Opt
 ///
 /// The reassign moves an unclaimed task from `Q` to `R`. The test holds `R`
 /// `FOR UPDATE`, so the reassign stops in its `FOR KEY SHARE` on the role,
-/// **after** it has locked the task. A claim by somebody holding both roles is
-/// then sent, and must be seen blocked by the reassign in its own
-/// `FOR UPDATE` on `workflow_tasks`. Released, the reassign commits, then the
+/// **after** it has locked the instance and the task. A claim by somebody
+/// holding both roles is then sent, and must be seen blocked by the reassign
+/// in its own `FOR UPDATE` on `workflow_instances`, which is where every task
+/// path waits since [#619]. Released, the reassign commits, then the
 /// claim does: the claimant holds the task under `R`, and the history reads
 /// the reassign, then the claim.
 ///
@@ -5849,9 +5851,13 @@ async fn blocked_by(app: &TestApp, blocker: i32, table: &str, lock: &str) -> Opt
 /// The only point between that lock and the write is the role's.
 ///
 /// **Seen red** with `FOR UPDATE` dropped from `lock_task`: the claim did not
-/// wait, and answered 200 before the reassign overwrote it.
+/// wait, and answered 200 before the reassign overwrote it (2026-09-28). Since
+/// [#619] that mutation leaves it green, because the claim waits at the
+/// instance first; it is red with `lock_instance` dropped from `reassign` or
+/// from `claim_task`, where the claim is seen waiting in `workflow_tasks`.
 ///
 /// [#512]: https://github.com/sujanto-gaws/kelir/issues/512
+/// [#619]: https://github.com/sujanto-gaws/kelir/issues/619
 #[tokio::test]
 async fn a_claim_arriving_during_a_reassign_waits_for_it() {
     use std::time::Duration;
@@ -5912,7 +5918,7 @@ async fn a_claim_arriving_during_a_reassign_waits_for_it() {
     };
 
     let deadline = Instant::now() + Duration::from_secs(30);
-    while blocked_by(&app, reassigning, "workflow_tasks", "FOR UPDATE")
+    while blocked_by(&app, reassigning, "FROM workflow_instances", "FOR UPDATE")
         .await
         .is_none()
     {
@@ -5925,7 +5931,7 @@ async fn a_claim_arriving_during_a_reassign_waits_for_it() {
         }
         assert!(
             Instant::now() < deadline,
-            "the claim was never seen waiting on the reassign's task lock"
+            "the claim was never seen waiting on the reassign's instance lock"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -6376,6 +6382,151 @@ async fn a_hand_off_meeting_the_instance_lock_waits_for_it() {
         deadlocks_once_settled(&app).await,
         before,
         "PostgreSQL counted a deadlock"
+    );
+}
+
+/// **A reassign meeting the instance lock waits for it, and does not
+/// deadlock** ([#619]).
+///
+/// Staged by [`instance_then_task_against`], which the role-held staging of
+/// *a decision arriving during a reassign…* cannot replace: there the reassign
+/// is parked holding both rows whatever order it took them in, so a reassign
+/// that took the task first would stay green. Here it answers 200, is seen
+/// blocked in `lock_instance`, and the task is offered to `R`.
+///
+/// [#619]: https://github.com/sujanto-gaws/kelir/issues/619
+#[tokio::test]
+async fn a_reassign_meeting_the_instance_lock_waits_for_it() {
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let before = deadlocks_so_far(&app).await;
+
+    worker_role(&app, "TI-LO-RA-Q").await;
+    let target = worker_role(&app, "TI-LO-RA-R").await;
+
+    let definition = offered_to_and_decided_by("ti_lo_ra", "TI-LO-RA-Q", "TI-LO-RA-R");
+    let workflow = publish_workflow_definition(&app, &token, "ti_lo_ra", definition).await;
+    let type_id = document_type(&app, &token, "TI_LO_RA", workflow).await;
+    let document = submitted_document(&app, &token, type_id, "Reassigned under a lock").await;
+    let task = open_task_of(&app, document).await;
+
+    let (reassigned, waited_in) = instance_then_task_against(
+        &app,
+        task,
+        reassignment(&app, &token, task, json!({ "roleCode": "TI-LO-RA-R" })),
+    )
+    .await;
+
+    assert_eq!(reassigned.status, StatusCode::OK, "{}", reassigned.body);
+    assert!(
+        locks_the_instance(&waited_in),
+        "the reassign waited somewhere other than the instance lock: {waited_in}"
+    );
+    assert_eq!(
+        task_holder(&app, task).await,
+        (None, Some(target), "CREATED".to_owned())
+    );
+
+    assert_eq!(
+        deadlocks_once_settled(&app).await,
+        before,
+        "PostgreSQL counted a deadlock"
+    );
+}
+
+/// **The three task paths answer what they answered before the lock order
+/// changed** ([#619] criterion 2).
+///
+/// An unknown task is a 404 about the task, read on the pool before the
+/// transaction. A task whose instance is gone is a 404 about the workflow
+/// instance, from `lock_instance`, as `decide` answers it. Neither writes.
+///
+/// [#619]: https://github.com/sujanto-gaws/kelir/issues/619
+#[tokio::test]
+async fn a_task_path_refuses_a_missing_task_or_instance_with_a_404() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let queue = worker_role(&app, "TI-LO-NF").await;
+    let (_, holder) = worker(&app, "ti.lo.nf.holder", &[queue]).await;
+    let (colleague_id, _) = worker(&app, "ti.lo.nf.colleague", &[queue]).await;
+
+    let workflow = publish_workflow(&app, &token, "ti_lo_nf", "TI-LO-NF").await;
+    let type_id = document_type(&app, &token, "TI_LO_NF", workflow).await;
+    let document = submitted_document(&app, &token, type_id, "Missing pieces").await;
+    let task = open_task_of(&app, document).await;
+    claim(&app, &holder, task).await;
+
+    let paths = |task: Uuid| {
+        [
+            (format!("/api/v1/workflow/tasks/{task}/claim"), json!({})),
+            (
+                format!("/api/v1/workflow/tasks/{task}/delegation"),
+                json!({ "delegateUserId": colleague_id }),
+            ),
+            (
+                format!("/api/v1/workflow/tasks/{task}/reassign"),
+                json!({ "userId": colleague_id }),
+            ),
+        ]
+    };
+
+    for (path, body) in paths(Uuid::now_v7()) {
+        let caller = if path.ends_with("/reassign") {
+            &token
+        } else {
+            &holder
+        };
+        let answered = app.post(&path, Some(caller), body).await;
+        assert_eq!(
+            answered.status,
+            StatusCode::NOT_FOUND,
+            "{path}: {}",
+            answered.body
+        );
+        assert_eq!(
+            answered.body["error"]["message"], "Task not found",
+            "{path}"
+        );
+    }
+
+    sqlx::query(
+        "UPDATE workflow_instances SET deleted_at = now()
+         WHERE id = (SELECT workflow_instance_id FROM workflow_tasks WHERE id = $1)",
+    )
+    .bind(task)
+    .execute(&app.pool)
+    .await
+    .expect("remove the instance");
+
+    for (path, body) in paths(task) {
+        let caller = if path.ends_with("/reassign") {
+            &token
+        } else {
+            &holder
+        };
+        let answered = app.post(&path, Some(caller), body).await;
+        assert_eq!(
+            answered.status,
+            StatusCode::NOT_FOUND,
+            "{path}: {}",
+            answered.body
+        );
+        assert_eq!(
+            answered.body["error"]["message"], "Workflow instance not found",
+            "{path}"
+        );
+    }
+
+    let history: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM workflow_task_history WHERE task_id = $1")
+            .bind(task)
+            .fetch_one(&app.pool)
+            .await
+            .expect("count the task's history");
+    assert_eq!(
+        history, 2,
+        "a refused path wrote history: creation and the claim only"
     );
 }
 
