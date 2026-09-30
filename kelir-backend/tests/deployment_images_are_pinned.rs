@@ -66,7 +66,8 @@
 //!
 //! **The Dockerfiles are found, not listed** (retrospective 6): the walk
 //! starts at the repository root and takes every file named `Dockerfile`,
-//! `Containerfile`, `*.Dockerfile` or `Dockerfile.*`, skipping only `.git`,
+//! `Containerfile`, `*.Dockerfile` or `Dockerfile.*` (but not
+//! `Dockerfile.dockerignore`, BuildKit's ignore file), skipping only `.git`,
 //! `.claude` (other worktrees' checkouts), `node_modules`, `target` and `dist`.
 //! A Dockerfile added anywhere else is read without anybody editing this file.
 //!
@@ -91,7 +92,17 @@
 //! records a stage that a later `FROM name` may reference. A stage is known
 //! only after it is declared, so `FROM builder` above `… AS builder` is an
 //! image named `builder` and is refused. An image named through a build
-//! argument (`FROM ${BASE}`) is refused too: its pin is not in the file.
+//! argument (`FROM ${BASE}`) is refused too: its pin is not in the file. A
+//! leading byte-order mark is dropped, as BuildKit drops it. An `escape`
+//! parser directive is refused outright, because this parser reads only `\`
+//! as the continuation and a backtick escape could hide a `FROM`.
+//!
+//! **Limits, stated**: a tag passes when **any** `-` or `_` separated segment
+//! is patch-level or dated, so `node:24-alpine-3.22.1` would pass on its
+//! variant. The skipped directory names are skipped at any depth, so a
+//! Dockerfile under a `dist/` or `target/` directory is not read. A `RUN`
+//! heredoc whose body starts a line with `FROM` is read as a `FROM`, which
+//! errs toward refusing.
 //!
 //! ## Seen to fail (coding standard §2.9), 2026-09-30
 //!
@@ -120,6 +131,27 @@
 //! | 13 | `is_dockerfile` misses `*.Dockerfile` | *a dockerfile is recognised by its name*, *the walk finds the release dockerfiles* |
 //! | 14 | Anything after `@` is accepted as a digest | *the shapes rule 3 refuses are refused* |
 //! | 15 | Stage names compared case-sensitively | *the shapes rule 3 accepts are accepted* |
+//!
+//! **The `test-engineer` gate then ran 21 probes of its own.** Four mutations
+//! survived and three shapes got through or were misread, and each is now a
+//! shape or a fix: the `$` refusal had no test of its own
+//! (`caddy:2.11.4-${VARIANT}`), a 7-digit date, a non-numeric `a.b.c`,
+//! `RELEASE.latest`, and the `_` separator are sent; a byte-order mark hid the
+//! first `FROM` and is stripped; `Dockerfile.dockerignore` was read as a
+//! Dockerfile and is not; an `escape` directive could hide a `FROM` and is
+//! refused. The three limits above are what it left as limits. Probes 16–23
+//! re-ran the eight survivors against the fixes, and each went red:
+//!
+//! | # | Probe | Reddened |
+//! |---|---|---|
+//! | 16 | `is_dated` accepts 7 digits | *the shapes rule 3 refuses are refused* |
+//! | 17 | The `$` refusal removed | *the shapes rule 3 refuses are refused* |
+//! | 18 | Patch-level parts need not be digits | *the shapes rule 3 refuses are refused* |
+//! | 19 | Tag segments split on `-` only | *the shapes rule 3 accepts are accepted* |
+//! | 20 | `RELEASE.` needs no digit after it | *the shapes rule 3 refuses are refused* |
+//! | 21 | The byte-order mark is not stripped | *the shapes rule 3 refuses are refused* |
+//! | 22 | `Dockerfile.dockerignore` read as a Dockerfile | *a dockerfile is recognised by its name* |
+//! | 23 | The `escape` directive is not refused | *an escape directive is refused* |
 //!
 //! The positive control ran last: every probe reverted, the whole file green.
 
@@ -290,7 +322,7 @@ fn is_dockerfile(name: &str) -> bool {
     name == "dockerfile"
         || name == "containerfile"
         || name.ends_with(".dockerfile")
-        || name.starts_with("dockerfile.")
+        || (name.starts_with("dockerfile.") && !name.ends_with(".dockerignore"))
 }
 
 /// Every Dockerfile in the repository, found by name from the root.
@@ -337,8 +369,11 @@ struct FromInstruction {
 /// A line whose first non-blank character is `#` is a comment; a `#`
 /// anywhere else is not, so only whole lines are dropped. A line ending in
 /// `\` continues onto the next, and a comment line inside a continuation is
-/// dropped without ending it, which is what Docker does.
+/// dropped without ending it, which is what Docker does. A leading
+/// byte-order mark is dropped too, as BuildKit drops it, or the first `FROM`
+/// would read as `\u{feff}FROM` and never be seen.
 fn from_instructions(source: &str) -> Vec<FromInstruction> {
+    let source = source.trim_start_matches('\u{feff}');
     let mut instructions = Vec::new();
     let mut logical = String::new();
     let mut starts_on = 0;
@@ -436,7 +471,11 @@ fn pin_refusal(reference: &str) -> Option<String> {
         return Some("has no tag, so it resolves to `:latest`".into());
     };
 
-    if tag.starts_with("RELEASE.")
+    let is_minio_release = tag
+        .strip_prefix("RELEASE.")
+        .is_some_and(|stamp| stamp.starts_with(|first: char| first.is_ascii_digit()));
+
+    if is_minio_release
         || tag
             .split(['-', '_'])
             .any(|segment| is_patch_level(segment) || is_dated(segment))
@@ -454,6 +493,27 @@ fn pin_refusal(reference: &str) -> Option<String> {
 fn dockerfile_refusals(source: &str) -> Vec<String> {
     let mut stages = HashSet::new();
     let mut refusals = Vec::new();
+
+    // `# escape=` makes another character the continuation, and this parser
+    // reads only `\`: under a backtick escape, `RUN dir C:\` would swallow the
+    // `FROM` after it. Parser directives come first, before any blank line
+    // or instruction, so only the leading comment lines are looked at.
+    for (index, line) in source
+        .trim_start_matches('\u{feff}')
+        .lines()
+        .enumerate()
+        .take_while(|(_, line)| line.trim_start().starts_with('#'))
+    {
+        let directive = line.trim_start()[1..].trim().to_ascii_lowercase();
+
+        if directive.starts_with("escape") && directive.contains('=') {
+            refusals.push(format!(
+                "{} — the `escape` directive changes the continuation character, which this \
+                 test does not parse, so a FROM could be hidden from it",
+                index + 1
+            ));
+        }
+    }
 
     for instruction in from_instructions(source) {
         let base = instruction.base.to_ascii_lowercase();
@@ -538,6 +598,8 @@ fn a_dockerfile_is_recognised_by_its_name() {
         "docker-compose.yml",
         "Caddyfile",
         ".dockerignore",
+        // BuildKit's per-Dockerfile ignore file, which has no FROM.
+        "Dockerfile.dockerignore",
     ] {
         assert!(!is_dockerfile(name), "{name} is not a Dockerfile");
     }
@@ -558,6 +620,7 @@ FROM caddy:2.11.4-alpine AS Edge
 FROM edge
 FROM ghcr.io/sujanto-gaws/minio:RELEASE.2025-09-07T16-13-09Z
 FROM localhost:5000/kelir/base:v1.31.0
+FROM example/base:build_1.2.3
 FROM node@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1
 FROM \
     node:24.21.0-alpine \
@@ -568,7 +631,7 @@ FROM scratch
     let instructions = from_instructions(accepted);
     assert_eq!(
         instructions.len(),
-        11,
+        12,
         "every FROM is read: {instructions:?}"
     );
     assert_eq!(
@@ -581,9 +644,9 @@ FROM scratch
         "the platform flag is skipped and the stage recorded"
     );
     assert_eq!(
-        instructions[9],
+        instructions[10],
         FromInstruction {
-            line: 14,
+            line: 15,
             base: "node:24.21.0-alpine".into(),
             declares: Some("continued".into()),
         },
@@ -591,6 +654,27 @@ FROM scratch
     );
 
     assert_eq!(dockerfile_refusals(accepted), Vec::<String>::new());
+}
+
+/// An `escape` directive is refused outright: the parser reads only `\` as
+/// the continuation, and under a backtick escape a `FROM` could be hidden.
+#[test]
+fn an_escape_directive_is_refused() {
+    let hidden = "# escape=`\nRUN dir C:\\\nFROM caddy:2-alpine";
+    let refusals = dockerfile_refusals(hidden);
+
+    assert!(
+        refusals
+            .iter()
+            .any(|refusal| refusal.starts_with("1 — the `escape` directive")),
+        "the escape directive is refused: {refusals:?}"
+    );
+
+    // `syntax` is a directive too, and changes nothing this test reads.
+    assert_eq!(
+        dockerfile_refusals("# syntax=docker/dockerfile:1\nFROM caddy:2.11.4-alpine"),
+        Vec::<String>::new()
+    );
 }
 
 /// Each shape rule 3 exists to refuse, sent on its own.
@@ -619,6 +703,25 @@ fn the_shapes_rule_3_refuses_are_refused() {
         (
             "# a comment ending in a backslash \\\nFROM caddy:2-alpine",
             "caddy:2-alpine",
+        ),
+        // A build argument inside the tag hides the release as well.
+        (
+            "ARG VARIANT=alpine\nFROM caddy:2.11.4-${VARIANT}",
+            "caddy:2.11.4-${VARIANT}",
+        ),
+        // A byte-order mark does not hide the first FROM.
+        (
+            "\u{feff}FROM caddy:2-alpine\nFROM scratch",
+            "caddy:2-alpine",
+        ),
+        (
+            "FROM debian:bookworm-2026091-slim",
+            "debian:bookworm-2026091-slim",
+        ),
+        ("FROM example/base:a.b.c", "example/base:a.b.c"),
+        (
+            "FROM ghcr.io/sujanto-gaws/minio:RELEASE.latest",
+            "ghcr.io/sujanto-gaws/minio:RELEASE.latest",
         ),
         // A stage is known only once declared, so this is an image.
         (
