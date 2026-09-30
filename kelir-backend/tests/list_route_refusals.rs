@@ -33,9 +33,37 @@
 //!
 //! # Seen red first (coding standard §2.9)
 //!
-//! Run 2026-09-30 against `origin/main` at `63f9224`, before the fix. The cells
-//! that answered 500 are in the pull request; the walk's failure listing was
-//! pasted there unedited.
+//! Run 2026-09-30 against `origin/main` at `63f9224`, before the fix:
+//!
+//! - **The guard was red first**: 31 operations against 33 `QueryParams<`.
+//!   `RowQuery` and `ActionQuery` lacked `#[into_params(parameter_in = Query)]`
+//!   and were documented as *required path* parameters. Fixed in the
+//!   annotations, and the walk run again.
+//! - **Then 57 of 291 cells failed.** Seven were 500s, all on `/audit`:
+//!   `objectType` and `eventType` with `%00` and `a%00b`, and `from`, `to` and
+//!   both together at `-5000-01-01T00:00:00Z`. `/audit` also *accepted*
+//!   `-4713-11-23T23:59:59.999999999Z`, a nanosecond before PostgreSQL's range,
+//!   on both bounds. `/rad/lists/{id}/rows` never refused a NUL in `sort`,
+//!   `dir` or a filter (its unresolved id answered 404 first). The other 43
+//!   were refusals with another code: a NUL in a uuid, an enum or a
+//!   closed-vocabulary string answered `INVALID_TYPE`, `UNKNOWN_VALUE` or
+//!   `INVALID_VALUE`, which is a 422 but not the NUL's.
+//!
+//! After the fix, every cell passes. **Seen red, 2026-09-30**, each mutation
+//! reverted before the next:
+//!
+//! - `refuse_nul(query)?` removed from `QueryParams` — 52 cells, four of them
+//!   `/audit` 500s.
+//! - `refuse_out_of_range` removed from `audit::service::search_audit` — five
+//!   `/audit` date cells, three of them 500s.
+//! - the same call removed from `integration::domain::log::validate_query` —
+//!   the same five cells on `/integration/logs`.
+//! - `>=` made `>` on the lower bound in `utils::storable` — the four cells
+//!   sending PostgreSQL's first instant.
+//! - `.take(1)` on `refuse_out_of_range`'s details — the two both-bounds cells.
+//! - `params(AuditSearch)` removed from `search_audit` — the guard, 32 of 33.
+//! - `#[into_params(parameter_in = Query)]` removed from `RowQuery` — the
+//!   guard, 32 of 33.
 
 mod common;
 
