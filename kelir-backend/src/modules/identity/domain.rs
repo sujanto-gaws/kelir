@@ -249,7 +249,10 @@ pub struct UpdateUserRequest {
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateRoleRequest {
+    /// Required; at most 64 characters once trimmed. Stored trimmed, and
+    /// unique among the tenant's live roles.
     pub role_code: String,
+    /// Required; at most 200 characters once trimmed.
     pub name: String,
     pub description: Option<String>,
     #[serde(default)]
@@ -259,6 +262,8 @@ pub struct CreateRoleRequest {
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateRoleRequest {
+    /// Absent leaves the name as it is; present, it is held to the create
+    /// rules: not blank, at most 200 characters once trimmed.
     pub name: Option<String>,
     pub description: Option<String>,
     pub permission_ids: Option<Vec<Uuid>>,
@@ -335,6 +340,108 @@ fn repeated_ids(field: &str, noun: &str, ids: &[Uuid], details: &mut Vec<Validat
                 format!("The {noun} {id} is already listed at {field}.{first}"),
             ));
         }
+    }
+}
+
+/// `roles.role_code VARCHAR(64)` (`0004_string_lengths.sql`).
+pub const MAX_ROLE_CODE_LENGTH: usize = 64;
+
+/// `roles.name VARCHAR(200)` (`0004_string_lengths.sql`).
+pub const MAX_ROLE_NAME_LENGTH: usize = 200;
+
+/// Validates a create-role payload, collecting every problem at once.
+///
+/// **[#575]: nothing checked a role's code or name.** An empty or blank code
+/// was stored — the column is `NOT NULL`, and `''` is not null — and one over
+/// 64 characters reached `VARCHAR(64)` and came back as a 500. The server is
+/// the validator of a hand-built form (coding standard §3.4), so each is a 422
+/// `VALIDATION_ERROR` with a detail at the field's own path.
+///
+/// Lengths are counted in characters of the **trimmed** value, because the
+/// trimmed value is what `create_role` stores and `VARCHAR(n)` counts
+/// characters, not bytes. No format is imposed on the code: none is specified,
+/// and the seeded and documented codes already differ in shape
+/// (`ROLE-ADMIN`, `FINANCE_APPROVER`).
+///
+/// [#575]: https://github.com/sujanto-gaws/kelir/issues/575
+pub fn validate_create_role(request: &CreateRoleRequest) -> Result<(), AppError> {
+    let mut details = Vec::new();
+
+    bounded_role_text(
+        &request.role_code,
+        "roleCode",
+        "Role code",
+        MAX_ROLE_CODE_LENGTH,
+        &mut details,
+    );
+    bounded_role_text(
+        &request.name,
+        "name",
+        "Name",
+        MAX_ROLE_NAME_LENGTH,
+        &mut details,
+    );
+    repeated_ids(
+        "permissionIds",
+        "permission",
+        &request.permission_ids,
+        &mut details,
+    );
+
+    finish(details)
+}
+
+/// Validates an update-role payload. An absent `name` is left as it is; a
+/// present one is held to the create rules, so an edit cannot blank what a
+/// create could not ([#575]).
+///
+/// [#575]: https://github.com/sujanto-gaws/kelir/issues/575
+pub fn validate_update_role(request: &UpdateRoleRequest) -> Result<(), AppError> {
+    let mut details = Vec::new();
+
+    if let Some(name) = &request.name {
+        bounded_role_text(name, "name", "Name", MAX_ROLE_NAME_LENGTH, &mut details);
+    }
+
+    if let Some(permission_ids) = &request.permission_ids {
+        repeated_ids("permissionIds", "permission", permission_ids, &mut details);
+    }
+
+    finish(details)
+}
+
+/// Required, and at most `max` characters once trimmed.
+fn bounded_role_text(
+    value: &str,
+    path: &str,
+    label: &str,
+    max: usize,
+    details: &mut Vec<ValidationDetail>,
+) {
+    let trimmed = value.trim();
+
+    if trimmed.is_empty() {
+        details.push(ValidationDetail::new(
+            path,
+            "required",
+            "REQUIRED",
+            format!("{label} is required"),
+        ));
+    } else if trimmed.chars().count() > max {
+        details.push(ValidationDetail::new(
+            path,
+            "maxLength",
+            "TOO_LONG",
+            format!("{label} must be at most {max} characters"),
+        ));
+    }
+}
+
+fn finish(details: Vec<ValidationDetail>) -> Result<(), AppError> {
+    if details.is_empty() {
+        Ok(())
+    } else {
+        Err(AppError::validation(details))
     }
 }
 
@@ -781,5 +888,101 @@ mod tests {
         ] {
             assert_eq!(UserStatus::from_db(status.as_db()), status);
         }
+    }
+
+    fn create_role_request(code: &str, name: &str) -> CreateRoleRequest {
+        CreateRoleRequest {
+            role_code: code.to_owned(),
+            name: name.to_owned(),
+            description: None,
+            permission_ids: Vec::new(),
+        }
+    }
+
+    fn placed(error: AppError) -> Vec<(String, String)> {
+        details_of(error)
+            .into_iter()
+            .map(|detail| (detail.path, detail.code))
+            .collect()
+    }
+
+    /// **[#575].** Blank and over-long are refused at the field's own path,
+    /// both fields at once; the column's own length, counted in characters
+    /// of the trimmed value, passes.
+    ///
+    /// [#575]: https://github.com/sujanto-gaws/kelir/issues/575
+    #[test]
+    fn a_role_code_and_name_are_required_and_bounded() {
+        assert_eq!(
+            placed(
+                validate_create_role(&create_role_request("  ", "")).expect_err("blank is refused")
+            ),
+            [
+                ("roleCode".to_owned(), "REQUIRED".to_owned()),
+                ("name".to_owned(), "REQUIRED".to_owned()),
+            ]
+        );
+
+        let long_code = "C".repeat(MAX_ROLE_CODE_LENGTH + 1);
+        let long_name = "N".repeat(MAX_ROLE_NAME_LENGTH + 1);
+        assert_eq!(
+            placed(
+                validate_create_role(&create_role_request(&long_code, &long_name))
+                    .expect_err("too long")
+            ),
+            [
+                ("roleCode".to_owned(), "TOO_LONG".to_owned()),
+                ("name".to_owned(), "TOO_LONG".to_owned()),
+            ]
+        );
+
+        // At the bound exactly, padded with whitespace the store trims, and in
+        // characters wider than a byte: `VARCHAR(n)` counts characters.
+        let at_code = format!("  {}  ", "é".repeat(MAX_ROLE_CODE_LENGTH));
+        let at_name = format!(" {} ", "é".repeat(MAX_ROLE_NAME_LENGTH));
+        assert!(validate_create_role(&create_role_request(&at_code, &at_name)).is_ok());
+    }
+
+    #[test]
+    fn a_role_update_checks_a_present_name_only() {
+        let update = |name: Option<&str>| UpdateRoleRequest {
+            name: name.map(str::to_owned),
+            description: None,
+            permission_ids: None,
+        };
+
+        assert!(validate_update_role(&update(None)).is_ok());
+        assert!(validate_update_role(&update(Some("Approver"))).is_ok());
+        assert_eq!(
+            placed(validate_update_role(&update(Some(" "))).expect_err("blank")),
+            [("name".to_owned(), "REQUIRED".to_owned())]
+        );
+        assert_eq!(
+            placed(
+                validate_update_role(&update(Some(&"N".repeat(MAX_ROLE_NAME_LENGTH + 1))))
+                    .expect_err("too long")
+            ),
+            [("name".to_owned(), "TOO_LONG".to_owned())]
+        );
+    }
+
+    /// The field problems and a repeated permission id are reported together,
+    /// so a form marks all of them from one response.
+    #[test]
+    fn a_role_create_reports_a_repeated_permission_beside_the_fields() {
+        let read = Uuid::from_u128(1);
+        let mut request = create_role_request("", "Approver");
+        request.permission_ids = vec![read, read];
+
+        assert_eq!(
+            placed(validate_create_role(&request).expect_err("refused")),
+            [
+                ("roleCode".to_owned(), "REQUIRED".to_owned()),
+                (
+                    "permissionIds.1".to_owned(),
+                    "DUPLICATE_IN_ARRAY".to_owned()
+                ),
+            ]
+        );
     }
 }

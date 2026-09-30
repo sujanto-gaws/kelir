@@ -67,9 +67,10 @@ const groupedPermissions = computed(() => {
 })
 
 /**
- * The backend does not validate role fields at all — an empty code reaches the
- * database — so these two checks are the only thing standing between a slip and
- * an unusable row.
+ * A presence pre-check only, so a blank field costs no round trip (coding
+ * standard §3.4). The server is the validator: it refuses a blank or over-long
+ * `roleCode` or `name` with a 422 whose `details` `useFormErrors` places under
+ * each field (#575). A length is left to the server alone.
  */
 const localErrors = computed<Record<string, string>>(() => {
   if (!submitted.value) {

@@ -456,3 +456,174 @@ async fn a_repeated_permission_id_is_refused_and_nothing_is_written() {
         "a refused update must leave the grant as it was"
     );
 }
+
+/// Asserts a 422 `VALIDATION_ERROR` whose only detail is `code` at `path`.
+fn assert_refused_at(response: &common::TestResponse, path: &str, code: &str) {
+    assert_eq!(
+        response.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "expected a 422 at `{path}`, got {}: {}",
+        response.status,
+        response.body
+    );
+    assert_eq!(response.error_code(), Some("VALIDATION_ERROR"));
+    let details = response.body["error"]["details"]
+        .as_array()
+        .expect("details");
+    assert_eq!(details.len(), 1, "{}", response.body);
+    assert_eq!(details[0]["path"], path, "{}", response.body);
+    assert_eq!(details[0]["code"], code, "{}", response.body);
+}
+
+async fn roles_with_code(app: &TestApp, role_code: &str) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM roles WHERE role_code = $1")
+        .bind(role_code)
+        .fetch_one(&app.pool)
+        .await
+        .expect("query runs")
+}
+
+async fn stored_name(app: &TestApp, role: Uuid) -> String {
+    sqlx::query_scalar("SELECT name FROM roles WHERE id = $1")
+        .bind(role)
+        .fetch_one(&app.pool)
+        .await
+        .expect("query runs")
+}
+
+/// **[#575]: a role's code and name were never validated by the server.** An
+/// empty code was stored, and one over the column's 64 characters reached
+/// `VARCHAR(64)` and answered 500. Each is now a 422 naming the field, and
+/// nothing is written. The positive control is
+/// `a_role_code_and_name_at_their_column_lengths_are_accepted`.
+///
+/// [#575]: https://github.com/sujanto-gaws/kelir/issues/575
+#[tokio::test]
+async fn a_blank_or_over_long_role_code_or_name_is_refused_on_create() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    // (roleCode sent, name sent, path, code, roleCode a leak would store)
+    let long_code = "R".repeat(65);
+    let long_name = "N".repeat(201);
+    let cases = [
+        ("", "Empty Code", "roleCode", "REQUIRED", ""),
+        ("   ", "Blank Code", "roleCode", "REQUIRED", ""),
+        (
+            long_code.as_str(),
+            "Long Code",
+            "roleCode",
+            "TOO_LONG",
+            long_code.as_str(),
+        ),
+        ("ROLE-EMPTY-NAME", "", "name", "REQUIRED", "ROLE-EMPTY-NAME"),
+        (
+            "ROLE-BLANK-NAME",
+            " \t ",
+            "name",
+            "REQUIRED",
+            "ROLE-BLANK-NAME",
+        ),
+        (
+            "ROLE-LONG-NAME",
+            long_name.as_str(),
+            "name",
+            "TOO_LONG",
+            "ROLE-LONG-NAME",
+        ),
+    ];
+
+    for (role_code, name, path, code, would_store) in cases {
+        let response = app
+            .post(
+                "/api/v1/identity/roles",
+                Some(&token),
+                json!({ "roleCode": role_code, "name": name }),
+            )
+            .await;
+        assert_refused_at(&response, path, code);
+        assert_eq!(
+            roles_with_code(&app, would_store).await,
+            0,
+            "a refused create must not leave a role behind: {role_code:?}, {name:?}"
+        );
+    }
+}
+
+/// The positive control for both routes: a code of exactly 64 characters and
+/// a name of exactly 200, each padded with whitespace, are stored trimmed, and
+/// an update to a 200-character name is accepted.
+#[tokio::test]
+async fn a_role_code_and_name_at_their_column_lengths_are_accepted() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let code = format!("ROLE-{}", "X".repeat(59));
+    // Multibyte: `VARCHAR(200)` counts characters, and so must the check.
+    let name = "é".repeat(200);
+    assert_eq!(code.chars().count(), 64);
+
+    let created = app
+        .post(
+            "/api/v1/identity/roles",
+            Some(&token),
+            json!({ "roleCode": format!("  {code}  "), "name": format!(" {name} ") }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+    let id = role_id(&app, &code).await;
+    assert_eq!(stored_name(&app, id).await, name);
+
+    let renamed = "M".repeat(200);
+    let updated = app
+        .put(
+            &format!("/api/v1/identity/roles/{id}"),
+            Some(&token),
+            json!({ "name": renamed }),
+        )
+        .await;
+    assert_eq!(updated.status, StatusCode::OK, "{}", updated.body);
+    assert_eq!(stored_name(&app, id).await, renamed);
+}
+
+/// **[#575], the update route.** A present `name` is held to the create rules,
+/// so an edit cannot blank what a create could not, and an over-long one is a
+/// 422, not the database's 500. The stored name judges each refusal.
+///
+/// [#575]: https://github.com/sujanto-gaws/kelir/issues/575
+#[tokio::test]
+async fn a_blank_or_over_long_role_name_is_refused_on_update() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let created = app
+        .post(
+            "/api/v1/identity/roles",
+            Some(&token),
+            json!({ "roleCode": "ROLE-RENAMED", "name": "Before" }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let id = role_id(&app, "ROLE-RENAMED").await;
+
+    for (name, code) in [
+        (String::new(), "REQUIRED"),
+        ("   ".to_owned(), "REQUIRED"),
+        ("N".repeat(201), "TOO_LONG"),
+    ] {
+        let response = app
+            .put(
+                &format!("/api/v1/identity/roles/{id}"),
+                Some(&token),
+                json!({ "name": name }),
+            )
+            .await;
+        assert_refused_at(&response, "name", code);
+        assert_eq!(
+            stored_name(&app, id).await,
+            "Before",
+            "a refused update must leave the name as it was"
+        );
+    }
+}
