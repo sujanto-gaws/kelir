@@ -5965,6 +5965,420 @@ async fn a_claim_arriving_during_a_reassign_waits_for_it() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// #619 — every task path takes the instance, then the task (ADR-0042 §2)
+// ---------------------------------------------------------------------------
+//
+// `claim_task`, `delegate` and `reassign` each insert a `workflow_task_history`
+// row, and that row's foreign key to `workflow_instances` takes `FOR KEY
+// SHARE` on the instance. Before #619 they locked only the task, so each of
+// them took the task and then, through the key, the instance: the reverse of
+// `decide`'s order. Record 20's P2 caught a decision and a reassign
+// deadlocking, and the decision answering 500.
+//
+// # Seen red on the unfixed code, 2026-09-30
+//
+// | Test | How it went red |
+// |---|---|
+// | *a decision arriving during a reassign…* | The decision answered 500 `INTERNAL_ERROR`, *deadlock detected* in the log; the reassign answered 200 |
+// | *a claim meeting the instance lock…* | The claim answered 500 `INTERNAL_ERROR`, *deadlock detected*: it waited in the history `INSERT`, holding the task |
+// | *a hand-off meeting the instance lock…* | The test's task lock was aborted with *deadlock detected* (`40P01`): the hand-off waited in the history `INSERT`, holding the task |
+
+/// The statement of the backend `blocker` holds up, if one is waiting on it.
+async fn statement_blocked_by(app: &TestApp, blocker: i32) -> Option<String> {
+    sqlx::query_scalar(
+        "SELECT query FROM pg_stat_activity
+         WHERE datname = current_database() AND $1 = ANY(pg_blocking_pids(pid))",
+    )
+    .bind(blocker)
+    .fetch_optional(&app.pool)
+    .await
+    .expect("read pg_stat_activity")
+}
+
+/// Whether `statement` is `instance_repo::lock_instance`'s.
+fn locks_the_instance(statement: &str) -> bool {
+    statement.contains("FROM workflow_instances") && statement.contains("FOR UPDATE")
+}
+
+/// The deadlocks PostgreSQL has counted in this test's database so far.
+async fn deadlocks_so_far(app: &TestApp) -> i64 {
+    sqlx::query_scalar("SELECT deadlocks FROM pg_stat_database WHERE datname = current_database()")
+        .fetch_one(&app.pool)
+        .await
+        .expect("read pg_stat_database")
+}
+
+/// The deadlocks PostgreSQL has counted in `app`'s database, **read once every
+/// client backend on it has exited**. Closes the application's pool.
+///
+/// A backend counts a deadlock in its own pending statistics and flushes them
+/// when it has been idle long enough, which can be ten seconds after the
+/// abort. A backend that exits flushes them before it leaves
+/// `pg_stat_activity`, so waiting for the database's backends to be gone makes
+/// the read final rather than early.
+async fn deadlocks_once_settled(app: &TestApp) -> i64 {
+    use sqlx::Connection;
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    app.pool.close().await;
+
+    let server = std::env::var("DATABASE_URL")
+        .or_else(|_| std::env::var("KELIR_DATABASE_URL"))
+        .expect("the server's URL");
+    let mut connection = sqlx::PgConnection::connect(&server)
+        .await
+        .expect("reach the server");
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let left: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pg_stat_activity
+             WHERE datname = $1 AND backend_type = 'client backend'",
+        )
+        .bind(&app.database_name)
+        .fetch_one(&mut connection)
+        .await
+        .expect("read pg_stat_activity");
+        if left == 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the test database's backends never exited"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let deadlocks = sqlx::query_scalar("SELECT deadlocks FROM pg_stat_database WHERE datname = $1")
+        .bind(&app.database_name)
+        .fetch_one(&mut connection)
+        .await
+        .expect("read pg_stat_database");
+    connection.close().await.expect("close the connection");
+    deadlocks
+}
+
+/// **A decision arriving during a reassign waits for it, and does not
+/// deadlock** ([#619], record 20's P2).
+///
+/// The task is offered to `Q`, whose `APPROVE` names `Q` and whose `REJECT`
+/// names `R`. The claimant holds `Q` only, and claims it. The test holds `R`
+/// `FOR UPDATE`, so a reassign to `R` stops in its `FOR KEY SHARE` on the role,
+/// **after** it has locked the instance and the task. The claimant's
+/// `APPROVE` is then sent, and must be seen blocked by the reassign in
+/// `lock_instance`'s `FOR UPDATE` on `workflow_instances`. Released, the
+/// reassign commits and answers 200. The decision then reads a task that is
+/// no longer the claimant's and is offered to a role they do not hold, so it
+/// answers **403**, and nothing is decided.
+///
+/// **The status is fixed by the staging.** A decision that ran first would be
+/// 200; one judged after the reassign is 403; one aborted is 500.
+///
+/// [#619]: https://github.com/sujanto-gaws/kelir/issues/619
+#[tokio::test]
+async fn a_decision_arriving_during_a_reassign_waits_for_it() {
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let before = deadlocks_so_far(&app).await;
+
+    let queue = worker_role(&app, "TI-LO-DE-Q").await;
+    let target = worker_role(&app, "TI-LO-DE-R").await;
+    let (_, claimant) = worker(&app, "ti.lo.de.claimant", &[queue]).await;
+
+    let mut definition = workflow_for("ti_lo_de", "TI-LO-DE-Q");
+    definition["transitions"][1]["allowedBy"] = json!("ROLE:TI-LO-DE-R");
+    let workflow = publish_workflow_definition(&app, &token, "ti_lo_de", definition).await;
+    let type_id = document_type(&app, &token, "TI_LO_DE", workflow).await;
+    let document = submitted_document(&app, &token, type_id, "Decided mid-reassign").await;
+    let task = open_task_of(&app, document).await;
+    claim(&app, &claimant, task).await;
+    let moves = workflow_history_rows(&app, document).await;
+
+    let mut holding = app.pool.begin().await.expect("a transaction");
+    let holder: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holding)
+        .await
+        .expect("the holder's backend");
+    sqlx::query("SELECT id FROM roles WHERE id = $1 FOR UPDATE")
+        .bind(target)
+        .execute(&mut *holding)
+        .await
+        .expect("hold the role");
+
+    let reassigned = reassignment(&app, &token, task, json!({ "roleCode": "TI-LO-DE-R" }))();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let reassigning = loop {
+        if let Some(pid) = blocked_by(&app, holder, "FROM roles", "FOR KEY SHARE").await {
+            break pid;
+        }
+        assert!(
+            !reassigned.is_finished(),
+            "the reassign did not stop at the role"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "the reassign was never seen waiting on the role"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let decided = {
+        let app = Arc::clone(&app);
+        tokio::spawn(async move {
+            app.post(
+                &format!("/api/v1/workflow/tasks/{task}/decision"),
+                Some(&claimant),
+                json!({ "action": "APPROVE" }),
+            )
+            .await
+        })
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let waited_in = loop {
+        if let Some(statement) = statement_blocked_by(&app, reassigning).await {
+            break statement;
+        }
+        if decided.is_finished() {
+            let answered = decided.await.expect("the decision did not panic");
+            panic!(
+                "the decision did not wait for the reassign: {} {}",
+                answered.status, answered.body
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the decision was never seen waiting on the reassign"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    holding.rollback().await.expect("release the role");
+
+    let reassigned = reassigned.await.expect("the reassign did not panic");
+    assert_eq!(reassigned.status, StatusCode::OK, "{}", reassigned.body);
+    let decided = decided.await.expect("the decision did not panic");
+    assert_eq!(
+        decided.status,
+        StatusCode::FORBIDDEN,
+        "the decision was not judged after the reassign: {}",
+        decided.body
+    );
+
+    assert!(
+        locks_the_instance(&waited_in),
+        "the decision waited somewhere other than the instance lock: {waited_in}"
+    );
+    assert_eq!(
+        task_holder(&app, task).await,
+        (None, Some(target), "CREATED".to_owned()),
+        "the reassign did not hold"
+    );
+    let decisions: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM approval_decisions WHERE task_id = $1")
+            .bind(task)
+            .fetch_one(&app.pool)
+            .await
+            .expect("count the task's decisions");
+    assert_eq!(decisions, 0, "a refused decision was recorded");
+    assert_eq!(
+        workflow_history_rows(&app, document).await,
+        moves,
+        "the process moved"
+    );
+
+    assert_eq!(
+        deadlocks_once_settled(&app).await,
+        before,
+        "PostgreSQL counted a deadlock"
+    );
+}
+
+/// **#619's inverted order, held by the test against one task route.**
+///
+/// The test takes the task's instance `FOR UPDATE` in a transaction of its
+/// own, sends the route, and waits until the route is blocked by it. Then it
+/// takes the task `FOR UPDATE` too, and commits.
+///
+/// A route that takes the instance first is blocked holding nothing, so the
+/// test's task lock is granted at once and the route completes after the
+/// commit. A route that takes the task first and reaches the instance only
+/// through `workflow_task_history`'s foreign key holds the task while it
+/// waits, and the test's task lock closes a cycle: PostgreSQL aborts one side
+/// with `40P01`. Answers the route's response and the statement it waited in.
+async fn instance_then_task_against(
+    app: &Arc<TestApp>,
+    task: Uuid,
+    route: impl FnOnce() -> tokio::task::JoinHandle<common::TestResponse>,
+) -> (common::TestResponse, String) {
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    let instance: Uuid =
+        sqlx::query_scalar("SELECT workflow_instance_id FROM workflow_tasks WHERE id = $1")
+            .bind(task)
+            .fetch_one(&app.pool)
+            .await
+            .expect("read the task's instance");
+
+    let mut holding = app.pool.begin().await.expect("a transaction");
+    let holder: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holding)
+        .await
+        .expect("the holder's backend");
+    sqlx::query("SELECT id FROM workflow_instances WHERE id = $1 FOR UPDATE")
+        .bind(instance)
+        .execute(&mut *holding)
+        .await
+        .expect("hold the instance");
+
+    let sent = route();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let waited_in = loop {
+        if let Some(statement) = statement_blocked_by(app, holder).await {
+            break statement;
+        }
+        if sent.is_finished() {
+            let answered = sent.await.expect("the route did not panic");
+            panic!(
+                "the route did not wait for the instance: {} {}",
+                answered.status, answered.body
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the route was never seen waiting on the instance"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    if let Err(error) = sqlx::query("SELECT id FROM workflow_tasks WHERE id = $1 FOR UPDATE")
+        .bind(task)
+        .execute(&mut *holding)
+        .await
+    {
+        panic!("the test's task lock, taken after the route waited in `{waited_in}`: {error}");
+    }
+    holding
+        .commit()
+        .await
+        .expect("release the instance and the task");
+
+    (sent.await.expect("the route did not panic"), waited_in)
+}
+
+/// **A claim meeting the instance lock waits for it, and does not deadlock**
+/// ([#619]).
+///
+/// Staged by [`instance_then_task_against`]. The claim is seen blocked in
+/// `lock_instance`, then answers 200, and the claimant holds the task.
+///
+/// [#619]: https://github.com/sujanto-gaws/kelir/issues/619
+#[tokio::test]
+async fn a_claim_meeting_the_instance_lock_waits_for_it() {
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let before = deadlocks_so_far(&app).await;
+
+    let queue = worker_role(&app, "TI-LO-CL").await;
+    let (claimant_id, claimant) = worker(&app, "ti.lo.cl.claimant", &[queue]).await;
+
+    let workflow = publish_workflow(&app, &token, "ti_lo_cl", "TI-LO-CL").await;
+    let type_id = document_type(&app, &token, "TI_LO_CL", workflow).await;
+    let document = submitted_document(&app, &token, type_id, "Claimed under a lock").await;
+    let task = open_task_of(&app, document).await;
+
+    let (claimed, waited_in) = instance_then_task_against(&app, task, || {
+        let app = Arc::clone(&app);
+        tokio::spawn(async move {
+            app.post(
+                &format!("/api/v1/workflow/tasks/{task}/claim"),
+                Some(&claimant),
+                json!({}),
+            )
+            .await
+        })
+    })
+    .await;
+
+    assert_eq!(claimed.status, StatusCode::OK, "{}", claimed.body);
+    assert!(
+        locks_the_instance(&waited_in),
+        "the claim waited somewhere other than the instance lock: {waited_in}"
+    );
+    assert_eq!(
+        task_holder(&app, task).await,
+        (Some(claimant_id), Some(queue), "ASSIGNED".to_owned())
+    );
+
+    assert_eq!(
+        deadlocks_once_settled(&app).await,
+        before,
+        "PostgreSQL counted a deadlock"
+    );
+}
+
+/// **A hand-off meeting the instance lock waits for it, and does not
+/// deadlock** ([#619]).
+///
+/// The holder claims the task, and hands it to a colleague. Staged by
+/// [`instance_then_task_against`]. The hand-off is seen blocked in
+/// `lock_instance`, then answers 200, and the colleague holds the task.
+///
+/// [#619]: https://github.com/sujanto-gaws/kelir/issues/619
+#[tokio::test]
+async fn a_hand_off_meeting_the_instance_lock_waits_for_it() {
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let before = deadlocks_so_far(&app).await;
+
+    let queue = worker_role(&app, "TI-LO-HO").await;
+    let (_, holder) = worker(&app, "ti.lo.ho.holder", &[queue]).await;
+    let (colleague_id, _) = worker(&app, "ti.lo.ho.colleague", &[queue]).await;
+
+    let workflow = publish_workflow(&app, &token, "ti_lo_ho", "TI-LO-HO").await;
+    let type_id = document_type(&app, &token, "TI_LO_HO", workflow).await;
+    let document = submitted_document(&app, &token, type_id, "Handed on under a lock").await;
+    let task = open_task_of(&app, document).await;
+    claim(&app, &holder, task).await;
+
+    let (handed, waited_in) = instance_then_task_against(&app, task, || {
+        let app = Arc::clone(&app);
+        tokio::spawn(async move {
+            app.post(
+                &format!("/api/v1/workflow/tasks/{task}/delegation"),
+                Some(&holder),
+                json!({ "delegateUserId": colleague_id }),
+            )
+            .await
+        })
+    })
+    .await;
+
+    assert_eq!(handed.status, StatusCode::OK, "{}", handed.body);
+    assert!(
+        locks_the_instance(&waited_in),
+        "the hand-off waited somewhere other than the instance lock: {waited_in}"
+    );
+    assert_eq!(
+        task_holder(&app, task).await,
+        (Some(colleague_id), Some(queue), "ASSIGNED".to_owned())
+    );
+
+    assert_eq!(
+        deadlocks_once_settled(&app).await,
+        before,
+        "PostgreSQL counted a deadlock"
+    );
+}
+
 /// **A reassign writes every holder column, clearing what it does not name**
 /// ([#512], ADR-0042 §2).
 ///
