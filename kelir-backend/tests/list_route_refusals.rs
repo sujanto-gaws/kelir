@@ -64,6 +64,22 @@
 //! - `params(AuditSearch)` removed from `search_audit` — the guard, 32 of 33.
 //! - `#[into_params(parameter_in = Query)]` removed from `RowQuery` — the
 //!   guard, 32 of 33.
+//!
+//! **The `test-engineer` gate (PR #612) added three things**, each seen red
+//! under a mutation that left the walk above green:
+//!
+//! - `AuditSearch::to` documented as `value_type = String` *and* its bound
+//!   dropped from `search_audit`: the walk classed `to` as a string and sent
+//!   it no date, and `/audit?to=-5000-01-01T00:00:00Z` answered 500 unseen.
+//!   Every string now also receives that date and must not answer 500 — one
+//!   cell red.
+//! - `QueryParams` refusing every empty query string: the positive control
+//!   read any refusal but `INVALID_CHARACTER`/`OUT_OF_RANGE` as accepted. It
+//!   now requires a 2xx, a 404, or a 422 naming only a `required` parameter —
+//!   33 cells red.
+//! - `RowQuery::filters` dropped from the document (`#[param(ignore)]`): the
+//!   walk stopped sending the flattened key, and the guard asked for only five
+//!   classes. It now asks for `map` too.
 
 mod common;
 
@@ -112,6 +128,9 @@ impl Class {
 struct Parameter {
     name: String,
     class: Class,
+    /// Whether the document says the operation cannot be called without it —
+    /// the one reason the positive control accepts a refusal.
+    required: bool,
 }
 
 #[derive(Debug)]
@@ -233,6 +252,7 @@ fn discover() -> Vec<Operation> {
                 Parameter {
                     name: name.to_owned(),
                     class: classify(name, &parameter["schema"], components),
+                    required: parameter["required"] == true,
                 }
             })
             .collect();
@@ -313,6 +333,16 @@ enum Expect<'a> {
     /// Anything but a 500, and no refusal of the kinds this walk is about: the
     /// value is one PostgreSQL can store.
     Accepted,
+    /// Anything but a 500. For a value whose answer depends on what the
+    /// parameter means, which the walk knows only from the document.
+    Survives,
+    /// **An ordinary request is served** (the positive control): a 2xx, a 404
+    /// for the unresolved capture, or a 422 naming only parameters the
+    /// document marks `required`. [`Expect::Accepted`] would pass a route that
+    /// refused *everything* with any other code, and the walk's negative cells
+    /// cannot tell a refusal of the hostile value from a refusal of every
+    /// value (#612's gate).
+    Ordinary { required: &'a [&'a str] },
 }
 
 const NUL_CODE: &str = "INVALID_CHARACTER";
@@ -333,6 +363,15 @@ impl Walk<'_> {
         }
 
         match expect {
+            Expect::Survives => {}
+            Expect::Ordinary { required } => {
+                if let Err(problem) = ordinary(&response, required) {
+                    self.failures.push(format!(
+                        "{at}: {problem} — got {} {}",
+                        response.status, response.body
+                    ));
+                }
+            }
             Expect::Accepted => {
                 if let Some(detail) = details(&response)
                     .iter()
@@ -359,6 +398,40 @@ fn details(response: &TestResponse) -> Vec<Value> {
         .as_array()
         .cloned()
         .unwrap_or_default()
+}
+
+/// An answer to a request with nothing hostile in it: served, not found, or
+/// refused only for a parameter the document says it cannot do without.
+fn ordinary(response: &TestResponse, required: &[&str]) -> Result<(), String> {
+    if response.status.is_success() || response.status == StatusCode::NOT_FOUND {
+        return Ok(());
+    }
+    if response.status != StatusCode::UNPROCESSABLE_ENTITY || required.is_empty() {
+        return Err("an ordinary request was not served".into());
+    }
+
+    // A missing field has no path of its own in serde's error, so the
+    // extractor names it `query` and the field in the message (#122): that
+    // form counts when the message names a required parameter.
+    let names_a_required = |detail: &Value| {
+        let path = detail["path"].as_str().unwrap_or_default();
+        let message = detail["message"].as_str().unwrap_or_default();
+        required.contains(&path)
+            || (path == "query"
+                && required
+                    .iter()
+                    .any(|name| message.contains(&format!("`{name}`"))))
+    };
+
+    let details = details(response);
+    if !details.is_empty() && details.iter().all(names_a_required) {
+        Ok(())
+    } else {
+        Err(format!(
+            "an ordinary request was refused for something other than its required \
+             parameters {required:?}"
+        ))
+    }
 }
 
 /// The refusal ADR 0017's envelope describes, read as JSON: `success: false`,
@@ -427,7 +500,10 @@ async fn a_value_postgresql_cannot_store_is_refused_on_every_list_route() {
         .iter()
         .flat_map(|op| op.query.iter().map(|p| p.class.name()))
         .collect();
-    for class in ["date-time", "uuid", "integer", "enum", "string"] {
+    // `map` too: without it, `RowQuery`'s filters could fall out of the
+    // document and the walk would stop sending the flattened key, silently
+    // (#612's gate).
+    for class in ["date-time", "uuid", "integer", "enum", "string", "map"] {
         assert!(
             classes.contains(class),
             "no `{class}` parameter anywhere, so that class's cells send nothing: {classes:?}"
@@ -470,6 +546,18 @@ async fn a_value_postgresql_cannot_store_is_refused_on_every_list_route() {
                     // parameter or on an unusual character.
                     walk.cell(operation, &format!("{name}=a%01b"), Expect::Accepted)
                         .await;
+                    // A date PostgreSQL cannot store, sent to every *string*.
+                    // For a real string it is text; for a date the document
+                    // misdescribes as a string, it is the only out-of-range
+                    // cell the walk sends, so a missing bound is still a 500
+                    // here rather than a walk that is silent on dates
+                    // (#612's gate).
+                    walk.cell(
+                        operation,
+                        &format!("{name}=-5000-01-01T00:00:00Z"),
+                        Expect::Survives,
+                    )
+                    .await;
                 }
                 Class::Map => {
                     walk.cell(
@@ -569,7 +657,20 @@ async fn a_value_postgresql_cannot_store_is_refused_on_every_list_route() {
     // Every operation with nothing hostile in it: none of the refusals above
     // may be standing in front of an ordinary request.
     for operation in &operations {
-        walk.cell(operation, "", Expect::Accepted).await;
+        let required: Vec<&str> = operation
+            .query
+            .iter()
+            .filter(|p| p.required)
+            .map(|p| p.name.as_str())
+            .collect();
+        walk.cell(
+            operation,
+            "",
+            Expect::Ordinary {
+                required: &required,
+            },
+        )
+        .await;
     }
 
     assert!(
