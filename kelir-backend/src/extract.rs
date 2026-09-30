@@ -43,6 +43,7 @@ use axum::http::request::Parts;
 use serde::de::DeserializeOwned;
 
 use crate::error::{AppError, ValidationDetail};
+use crate::utils::storable;
 
 /// A JSON request body, rejected through [`AppError`].
 ///
@@ -104,6 +105,16 @@ fn is_json(request: &Request) -> bool {
 /// found in string"`, which breaks the first time axum rewords it. Repeating the
 /// four lines axum's own `try_from_uri` runs costs less and hands the parameter
 /// name over as data.
+///
+/// **A NUL in any value is refused before anything is deserialized**
+/// ([#601](https://github.com/sujanto-gaws/kelir/issues/601)). PostgreSQL
+/// `text` cannot hold one, so a `%00` that reached a bind failed the statement
+/// and answered 500; `/audit`'s `objectType` did, a sprint after every
+/// `search` had been guarded one parameter at a time. Refusing here covers
+/// every string a query string can carry — declared, flattened into a map
+/// (`RowQuery`'s filters) or ignored — on every route that takes one, and on
+/// routes not written yet. The check runs first, so a NUL in a `uuid` or an
+/// enum is `INVALID_CHARACTER` too, rather than whichever parse failed.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct QueryParams<T>(pub T);
 
@@ -116,6 +127,8 @@ where
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         let query = parts.uri.query().unwrap_or_default();
+        refuse_nul(query)?;
+
         let deserializer =
             serde_urlencoded::Deserializer::new(form_urlencoded::parse(query.as_bytes()));
 
@@ -196,6 +209,24 @@ where
 
                 AppError::UnsupportedMediaType
             })
+    }
+}
+
+/// Every parameter whose decoded value holds a NUL, each named once and as the
+/// caller spelled it. A NUL in a *key* is not refused: a key is matched
+/// against names, never bound.
+fn refuse_nul(query: &str) -> Result<(), AppError> {
+    let mut named = std::collections::BTreeSet::new();
+    let details: Vec<ValidationDetail> = form_urlencoded::parse(query.as_bytes())
+        .filter(|(_, value)| value.contains('\0'))
+        .filter(|(key, _)| named.insert(key.clone()))
+        .map(|(key, _)| storable::nul_refusal(key.into_owned()))
+        .collect();
+
+    if details.is_empty() {
+        Ok(())
+    } else {
+        Err(AppError::validation(details))
     }
 }
 
@@ -684,6 +715,62 @@ mod tests {
         // struct and not the others would be a difference with no reason behind
         // it (coding standard §1.1).
         let (status, _) = get_query("page=1&somethingElse=1").await;
+
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn a_nul_in_a_query_value_is_refused_naming_the_parameter() {
+        // #601: PostgreSQL `text` cannot hold 0x00. Alone or inside a value.
+        for query in ["search=%00", "search=a%00b"] {
+            let (status, body) = get_query(query).await;
+
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{query}");
+            assert_eq!(body["error"]["code"], "VALIDATION_ERROR");
+            assert_eq!(detail(&body)["path"], "search");
+            assert_eq!(detail(&body)["code"], "INVALID_CHARACTER");
+            assert_eq!(detail(&body)["rule"], "pattern");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_nul_is_refused_before_the_value_is_parsed() {
+        // A NUL in a `u32` is the NUL's refusal, not a parse failure: the
+        // caller learns the one thing wrong with the value.
+        let (_, body) = get_query("page=1%00").await;
+
+        assert_eq!(detail(&body)["path"], "page");
+        assert_eq!(detail(&body)["code"], "INVALID_CHARACTER");
+    }
+
+    #[tokio::test]
+    async fn a_nul_in_a_parameter_the_type_ignores_is_refused_too() {
+        // What a flattened map collects is not declared either; the extractor
+        // does not know which undeclared keys a type will read.
+        let (status, body) = get_query("somethingElse=a%00b").await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(detail(&body)["path"], "somethingElse");
+    }
+
+    #[tokio::test]
+    async fn every_parameter_holding_a_nul_is_named_once() {
+        let (_, body) = get_query("search=%00&page=1&somethingElse=%00&search=b%00").await;
+        let paths: Vec<&str> = body["error"]["details"]
+            .as_array()
+            .expect("details")
+            .iter()
+            .map(|detail| detail["path"].as_str().expect("a path"))
+            .collect();
+
+        assert_eq!(paths, ["search", "somethingElse"]);
+    }
+
+    #[tokio::test]
+    async fn another_control_character_and_a_nul_in_a_key_pass() {
+        // Only NUL cannot be stored. `%01` is legal `text`, and a key is
+        // matched against names rather than bound.
+        let (status, _) = get_query("search=a%01b&a%00b=1").await;
 
         assert_eq!(status, StatusCode::OK);
     }

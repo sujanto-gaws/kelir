@@ -358,7 +358,8 @@ async fn delete_list(
     get, path = "/api/v1/rad/lookups/{source}/options", tag = "rad",
     params(
         ("source" = String, Path,
-         description = "Master-data source: customer, employee, facility or supplier"),
+         description = "Master-data source: customer, employee, facility or supplier",
+         example = "supplier"),
         LookupQuery,
     ),
     responses(
@@ -393,8 +394,14 @@ async fn list_lookup_options(
 /// deployment has configured no actions* and is the failure
 /// [#326](https://github.com/sujanto-gaws/kelir/issues/326) took in a different
 /// panel: nothing distinguishes "none" from "you asked the wrong question".
+///
+/// Documented as query parameters: without `parameter_in = Query`, utoipa
+/// wrote both as required path parameters ([#601]'s walk found it).
+///
+/// [#601]: https://github.com/sujanto-gaws/kelir/issues/601
 #[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
 struct ActionQuery {
     context: ActionContext,
     /// Narrows a `LIST` catalogue to one list, without excluding the

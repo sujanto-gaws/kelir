@@ -402,6 +402,27 @@ While the major version is `0`, the public API may change in any release.
   `PUT /api/v1/identity/roles/{id}` holds a present `name` to the same rules;
   an absent one is left as it is. Nothing is written on a refusal. The Roles
   dialog's own blank check stays as a pre-check.
+
+- **A value PostgreSQL cannot store is a 422 on every list route, not a 500**
+  ([#601](https://github.com/sujanto-gaws/kelir/issues/601),
+  [#594](https://github.com/sujanto-gaws/kelir/issues/594),
+  [ADR-0044](docs/architectures/adr/0044.%20A%20Value%20PostgreSQL%20Cannot%20Store%20Is%20Refused%20in%20One%20Shared%20Place,%20Never%20per%20Parameter.md)).
+  - **A NUL (`%00`) in any query parameter is refused** with 422
+    `VALIDATION_ERROR`, a detail on that parameter with code
+    `INVALID_CHARACTER`, before the route reads anything. `GET /api/v1/audit`
+    answered 500 to one in `objectType` or `eventType`. A NUL in a uuid, an
+    enum or a status parameter now gets `INVALID_CHARACTER` too, where it got
+    `INVALID_TYPE`, `UNKNOWN_VALUE` or `INVALID_VALUE`.
+  - **A `from` or `to` before 4714 BC is refused on `GET /api/v1/audit`** with
+    `OUT_OF_RANGE` on the field, as `GET /api/v1/integration/logs` already
+    refused it. It answered 500, or matched as though it were the first
+    instant PostgreSQL stores. When both bounds are out of range, both are
+    named.
+  - **The OpenAPI document now lists the query parameters of
+    `GET /api/v1/rad/actions` and `GET /api/v1/rad/lists/{id}/rows` as query
+    parameters.** It listed them as required path parameters, which a
+    generated client would have followed.
+
 - **A chooser reaches every row, not the first 100**
   ([#525](https://github.com/sujanto-gaws/kelir/issues/525)). The document
   type on **New document**, the form, list and workflow of a document type,

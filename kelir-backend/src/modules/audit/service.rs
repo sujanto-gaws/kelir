@@ -9,6 +9,7 @@ use crate::error::{AppError, ValidationDetail};
 use crate::middleware::auth::Authenticated;
 use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
+use crate::utils::storable::refuse_out_of_range;
 
 /// One page of the audit trail, newest first.
 ///
@@ -54,6 +55,10 @@ pub async fn search_audit(
     pagination: &Pagination,
 ) -> Result<(Vec<AuditEvent>, PageMeta), AppError> {
     caller.require(AUDIT_READ)?;
+
+    // A bound before 4714 BC parses and fails the statement as a 500 (#594);
+    // the check is every date range's, shared with `/integration/logs`.
+    refuse_out_of_range(&[("from", filter.from), ("to", filter.to)])?;
 
     if !repo::range_is_ordered(filter.from, filter.to) {
         return Err(AppError::validation(vec![ValidationDetail::new(

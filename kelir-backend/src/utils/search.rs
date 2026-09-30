@@ -26,8 +26,9 @@
 
 use crate::error::{AppError, ValidationDetail};
 
-/// The `code` a NUL in a search is refused with.
-pub const NUL_IN_SEARCH: &str = "INVALID_CHARACTER";
+/// The `code` a NUL in a search is refused with — every NUL's
+/// (`utils::storable`).
+pub const NUL_IN_SEARCH: &str = crate::utils::storable::INVALID_CHARACTER;
 
 /// A search term with its surrounding whitespace trimmed; blank is no search;
 /// a NUL anywhere in it is a refusal naming `path`.
@@ -45,6 +46,14 @@ pub const NUL_IN_SEARCH: &str = "INVALID_CHARACTER";
 ///
 /// `path` is the parameter's name as the caller sent it: `search` everywhere
 /// except the task inbox, whose parameter is `q`.
+///
+/// **Over HTTP, the NUL branch is a second line of defence and unexercised
+/// there** (coding standard §2.5): since
+/// [#601](https://github.com/sujanto-gaws/kelir/issues/601),
+/// `crate::extract::QueryParams` refuses a NUL in any query value before a
+/// handler runs, with this same detail. It stays because this function is
+/// the rule for a search wherever the term comes from, and the unit tests
+/// below reach it directly.
 pub fn parse_search<'a>(
     path: &str,
     value: Option<&'a str>,
@@ -54,12 +63,7 @@ pub fn parse_search<'a>(
     };
 
     if term.contains('\0') {
-        return Err(ValidationDetail::new(
-            path,
-            "pattern",
-            NUL_IN_SEARCH,
-            "Must not contain a NUL character",
-        ));
+        return Err(crate::utils::storable::nul_refusal(path));
     }
 
     Ok(Some(term))

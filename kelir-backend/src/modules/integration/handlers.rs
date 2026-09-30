@@ -469,7 +469,7 @@ pub async fn delete_credential(
     responses(
         (status = 200, description = "One page of the tenant's integration log rows, newest first", body = [IntegrationLogSummary]),
         (status = 403, description = "Missing integration:log:read"),
-        (status = 422, description = "A query parameter would not parse, or RANGE_INVERTED when `to` is before `from`")
+        (status = 422, description = "RANGE_INVERTED when `to` is before `from`; OUT_OF_RANGE on `from` or `to` when PostgreSQL cannot store the instant (before -4713-11-24T00:00:00Z); INVALID_CHARACTER on any parameter holding a NUL; INVALID_TYPE when a parameter will not parse")
     ),
     security(("bearer" = []))
 )]
