@@ -4,10 +4,11 @@
 use uuid::Uuid;
 
 use super::domain::{
-    open_tasks_refusal, published_definitions_refusal, validate_create_user, validate_distinct_ids,
-    validate_password_value, with_staffing, CreateRoleRequest, CreateUserRequest, Permission, Role,
-    RoleQuery, UpdateRoleRequest, UpdateUserRequest, User, UserQuery, UserStatus,
-    ROLE_HAS_OPEN_TASKS, ROLE_NAMED_BY_PUBLISHED_DEFINITION,
+    open_tasks_refusal, published_definitions_refusal, validate_create_role, validate_create_user,
+    validate_distinct_ids, validate_password_value, validate_update_role, with_staffing,
+    CreateRoleRequest, CreateUserRequest, Permission, Role, RoleQuery, UpdateRoleRequest,
+    UpdateUserRequest, User, UserQuery, UserStatus, ROLE_HAS_OPEN_TASKS,
+    ROLE_NAMED_BY_PUBLISHED_DEFINITION,
 };
 use super::repository as repo;
 use crate::error::{AppError, ValidationDetail};
@@ -456,10 +457,11 @@ pub async fn create_role(
     request: CreateRoleRequest,
 ) -> Result<Role, AppError> {
     caller.require("identity:role:create")?;
-    // Before anything is written: a repeated id would otherwise reach
-    // `uq_role_permissions_role_id_permission_id` inside the transaction and
-    // answer 500 (#469).
-    validate_distinct_ids("permissionIds", "permission", &request.permission_ids)?;
+    // Before anything is written: a blank or over-long code or name would
+    // otherwise be stored or reach `VARCHAR(64)`/`VARCHAR(200)` and answer 500
+    // (#575), and a repeated id would reach
+    // `uq_role_permissions_role_id_permission_id` inside the transaction (#469).
+    validate_create_role(&request)?;
 
     let tenant_id = caller.tenant_id();
     let id = Uuid::now_v7();
@@ -507,10 +509,9 @@ pub async fn update_role(
     request: UpdateRoleRequest,
 ) -> Result<Role, AppError> {
     caller.require("identity:role:update")?;
-
-    if let Some(permission_ids) = &request.permission_ids {
-        validate_distinct_ids("permissionIds", "permission", permission_ids)?;
-    }
+    // A present `name` is held to the create rules (#575); a repeated
+    // permission id is refused as on create (#469).
+    validate_update_role(&request)?;
 
     let tenant_id = caller.tenant_id();
     let mut transaction = state.pool.begin().await?;

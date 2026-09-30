@@ -382,6 +382,17 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A role's code and name are validated by the server**
+  ([#575](https://github.com/sujanto-gaws/kelir/issues/575)). Nothing checked
+  them: an empty or blank `roleCode` was stored, and a code over 64 characters
+  or a name over 200 reached the database and answered 500.
+  `POST /api/v1/identity/roles` now refuses a blank `roleCode` or `name`
+  (`REQUIRED`), and one longer than its column once trimmed, 64 and 200
+  characters (`TOO_LONG`), with 422 `VALIDATION_ERROR` and a detail at each
+  field's path, reported together with a repeated permission id.
+  `PUT /api/v1/identity/roles/{id}` holds a present `name` to the same rules;
+  an absent one is left as it is. Nothing is written on a refusal. The Roles
+  dialog's own blank check stays as a pre-check.
 - **A chooser reaches every row, not the first 100**
   ([#525](https://github.com/sujanto-gaws/kelir/issues/525)). The document
   type on **New document**, the form, list and workflow of a document type,

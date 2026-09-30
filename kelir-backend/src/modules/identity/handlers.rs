@@ -201,7 +201,7 @@ async fn get_role(
     request_body = CreateRoleRequest,
     responses(
         (status = 201, description = "Created", body = Role),
-        (status = 422, description = "A permission id listed twice in permissionIds")
+        (status = 422, description = "VALIDATION_ERROR, a detail per field: roleCode or name blank (REQUIRED) or longer than its column, 64 and 200 characters once trimmed (TOO_LONG) (#575); a permission id listed twice in permissionIds (DUPLICATE_IN_ARRAY)")
     ),
     security(("bearer" = []))
 )]
@@ -223,7 +223,7 @@ async fn create_role(
     request_body = UpdateRoleRequest,
     responses(
         (status = 200, description = "Updated", body = Role),
-        (status = 422, description = "A permission id listed twice in permissionIds")
+        (status = 422, description = "VALIDATION_ERROR, a detail per field: a present name blank (REQUIRED) or over 200 characters once trimmed (TOO_LONG) (#575); a permission id listed twice in permissionIds (DUPLICATE_IN_ARRAY)")
     ),
     security(("bearer" = []))
 )]

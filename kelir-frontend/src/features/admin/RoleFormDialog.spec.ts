@@ -157,8 +157,43 @@ describe('RoleFormDialog', () => {
     expect(wrapper.find('[role="alert"]').exists()).toBe(false)
   })
 
+  it('places the server refusal of an over-long code and name under each field', async () => {
+    // #575: the server validates both, and the dialog checks no length itself,
+    // so an over-long value is answered by the server's 422 alone.
+    handler = () => ({
+      status: 422,
+      body: errorBody('VALIDATION_ERROR', 'Validation failed', [
+        {
+          path: 'roleCode',
+          rule: 'maxLength',
+          code: 'TOO_LONG',
+          message: 'Role code must be at most 64 characters',
+        },
+        {
+          path: 'name',
+          rule: 'maxLength',
+          code: 'TOO_LONG',
+          message: 'Name must be at most 200 characters',
+        },
+      ]),
+    })
+
+    const wrapper = mountDialog(null)
+
+    await wrapper.find('#role-code').setValue('R'.repeat(65))
+    await wrapper.find('#role-name').setValue('N'.repeat(201))
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(backend.requests).toHaveLength(1)
+    expect(wrapper.find('#role-code-error').text()).toBe('Role code must be at most 64 characters')
+    expect(wrapper.find('#role-name-error').text()).toBe('Name must be at most 200 characters')
+    expect(wrapper.emitted('saved')).toBeUndefined()
+  })
+
   it('does not submit a role without a code or a name', async () => {
-    // The backend validates neither, so an empty code would reach the database.
+    // A pre-check only: the server refuses both too (#575), but a blank field
+    // need not cost a round trip.
     const wrapper = mountDialog(null)
 
     await wrapper.find('form').trigger('submit')
