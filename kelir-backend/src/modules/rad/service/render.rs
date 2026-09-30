@@ -296,8 +296,17 @@ fn summary_cell(
 /// status would be filtering by something the screen never showed, and a
 /// silently-ignored parameter reads to the sender as a filter that matched
 /// everything.
+///
+/// **`parameter_in = Query` is load-bearing** ([#601]): without it utoipa
+/// documented every field here as a required *path* parameter, and a
+/// generated client would have built `/rows/{page}/…`. #601's walk found it,
+/// because it counts the handlers that read a query string against the
+/// operations the document says take one.
+///
+/// [#601]: https://github.com/sujanto-gaws/kelir/issues/601
 #[derive(Debug, Default, Clone, serde::Deserialize, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
 pub struct RowQuery {
     pub page: Option<u32>,
     /// Accepted and refused by name.
@@ -315,8 +324,10 @@ pub struct RowQuery {
     /// absent too, and ascending otherwise.
     pub dir: Option<String>,
     /// The declared filters, by their **filter key** — the definition's own
-    /// spelling, so a client echoes back what it was given.
+    /// spelling, so a client echoes back what it was given. Documented as an
+    /// exploded form object: each filter is its own `key=value` pair.
     #[serde(flatten)]
+    #[param(style = Form, explode, required = false)]
     pub filters: std::collections::BTreeMap<String, String>,
 }
 

@@ -34,7 +34,7 @@ pub fn routes() -> Router<AppState> {
     responses(
         (status = 200, description = "One page of the trail, newest first. A row whose object this caller may not read carries `valuesWithheld: true` and no values — the row is never hidden", body = [AuditEvent]),
         (status = 403, description = "Missing audit:read"),
-        (status = 422, description = "A date range that ends before it starts")
+        (status = 422, description = "RANGE_INVERTED when `to` is before `from`; OUT_OF_RANGE on `from` or `to` when PostgreSQL cannot store the instant (before -4713-11-24T00:00:00Z); INVALID_CHARACTER on any parameter holding a NUL; INVALID_TYPE when a parameter will not parse")
     ),
     security(("bearer" = []))
 )]

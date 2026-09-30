@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::error::{AppError, ValidationDetail};
 use crate::response::Pagination;
+use crate::utils::storable::refuse_out_of_range;
 
 /// `integration_logs.status` — §12.5's `CHECK` vocabulary, whole.
 ///
@@ -159,60 +160,13 @@ impl IntegrationLogQuery {
     }
 }
 
-/// PostgreSQL's first `timestamptz`, `4714-11-24 00:00:00+00 BC` — Julian
-/// day 0 — in microseconds from the Unix epoch. chrono counts years
-/// astronomically, so 4714 BC is year -4713: this is `-4713-11-24T00:00:00Z`.
-const POSTGRES_MIN_MICROS: i64 = -210_866_803_200_000_000;
-
-/// The first instant **past** PostgreSQL's last `timestamptz`,
-/// `294277-01-01 00:00:00+00`, in microseconds from the Unix epoch. It does
-/// not fit an `i64` of Unix microseconds, which is why it is an `i128`.
-///
-/// chrono's last instant is in year 262143, so no parsed `DateTime` reaches
-/// this bound today; a year above 262143 is refused by the parse before
-/// [`validate_query`] runs. The check stays so the range is PostgreSQL's
-/// whole, not whatever chrono's happens to be.
-const POSTGRES_END_MICROS: i128 = 9_224_318_016_000_000_000;
-
-/// Whether PostgreSQL can hold `at` as a `timestamptz`. Compared at
-/// nanosecond precision: an instant a nanosecond before the minimum is
-/// refused, though sqlx's truncation to microseconds would carry it onto the
-/// minimum itself.
-fn within_postgres_range(at: DateTime<Utc>) -> bool {
-    let nanos =
-        i128::from(at.timestamp()) * 1_000_000_000 + i128::from(at.timestamp_subsec_nanos());
-    unix_nanos_within_postgres_range(nanos)
-}
-
-/// [`within_postgres_range`] over Unix nanoseconds, where the upper bound —
-/// out of chrono's reach — can be tested.
-fn unix_nanos_within_postgres_range(nanos: i128) -> bool {
-    nanos >= i128::from(POSTGRES_MIN_MICROS) * 1_000 && nanos < POSTGRES_END_MICROS * 1_000
-}
-
 /// Refuses a bound PostgreSQL cannot hold, which would otherwise reach the
-/// query and come back as `timestamp out of range`, and a range whose `to` is
-/// before its `from`. An empty range — `to` equal to `from` — is allowed and
+/// query and come back as `timestamp out of range` — `utils::storable`'s
+/// check, shared with `/audit` (#601) — and a range whose `to` is before its
+/// `from`. An empty range — `to` equal to `from` — is allowed and
 /// selects nothing.
 pub fn validate_query(query: &IntegrationLogQuery) -> Result<(), AppError> {
-    let out_of_range: Vec<ValidationDetail> = [("from", query.from), ("to", query.to)]
-        .into_iter()
-        .filter_map(|(field, at)| match at {
-            Some(at) if !within_postgres_range(at) => Some(ValidationDetail::new(
-                field,
-                "range",
-                "OUT_OF_RANGE",
-                format!(
-                    "{field} must be between -4713-11-24T00:00:00Z (4714 BC) and \
-                     294276-12-31T23:59:59.999999Z, the range PostgreSQL stores"
-                ),
-            )),
-            _ => None,
-        })
-        .collect();
-    if !out_of_range.is_empty() {
-        return Err(AppError::validation(out_of_range));
-    }
+    refuse_out_of_range(&[("from", query.from), ("to", query.to)])?;
 
     match (query.from, query.to) {
         (Some(from), Some(to)) if to < from => {
@@ -307,25 +261,6 @@ mod tests {
     }
 
     #[test]
-    fn the_bounds_are_postgresqls_own() {
-        // PostgreSQL's MIN_TIMESTAMP and END_TIMESTAMP are microseconds from
-        // 2000-01-01; the constants are the same instants from 1970-01-01.
-        const POSTGRES_EPOCH_UNIX_MICROS: i64 = 946_684_800_000_000;
-        assert_eq!(
-            POSTGRES_MIN_MICROS,
-            -211_813_488_000_000_000 + POSTGRES_EPOCH_UNIX_MICROS
-        );
-        assert_eq!(
-            POSTGRES_END_MICROS,
-            9_223_371_331_200_000_000_i128 + i128::from(POSTGRES_EPOCH_UNIX_MICROS)
-        );
-        assert_eq!(
-            at("-4713-11-24T00:00:00Z").timestamp_micros(),
-            POSTGRES_MIN_MICROS
-        );
-    }
-
-    #[test]
     fn the_lower_bound_is_accepted_and_a_nanosecond_before_it_is_not() {
         let first = at("-4713-11-24T00:00:00Z");
         assert!(codes_for(Some(first), None).is_empty());
@@ -338,24 +273,6 @@ mod tests {
             codes_for(None, Some(before)),
             vec![("to".to_owned(), "OUT_OF_RANGE".to_owned())]
         );
-    }
-
-    #[test]
-    fn the_upper_bound_lies_beyond_every_instant_chrono_can_parse() {
-        // chrono stops in year 262143, short of PostgreSQL's 294276: its last
-        // instant is accepted, and nothing later parses to be refused.
-        assert!(codes_for(None, Some(DateTime::<Utc>::MAX_UTC)).is_empty());
-        assert!(within_postgres_range(DateTime::<Utc>::MAX_UTC));
-        assert!("+262144-01-01T00:00:00Z".parse::<DateTime<Utc>>().is_err());
-
-        // The bound itself, in nanoseconds where chrono cannot reach:
-        // 294276-12-31T23:59:59.999999999Z is held, 294277-01-01 is not.
-        let end = POSTGRES_END_MICROS * 1_000;
-        assert!(unix_nanos_within_postgres_range(end - 1));
-        assert!(!unix_nanos_within_postgres_range(end));
-        let min = i128::from(POSTGRES_MIN_MICROS) * 1_000;
-        assert!(unix_nanos_within_postgres_range(min));
-        assert!(!unix_nanos_within_postgres_range(min - 1));
     }
 
     #[test]

@@ -184,11 +184,10 @@ async fn the_trail_is_searchable_by_each_of_its_axes() {
 /// with `timestamp out of range` as a 500 — the defect #548's gate found in
 /// the integration log's identical filter.
 ///
-/// **Ignored: the audit search has the same defect** (probed 2026-09-29,
-/// `from=-5000-01-01T00:00:00Z` answers 500 `INTERNAL_ERROR`). Out of #548's
-/// scope; remove the `ignore` with the fix.
+/// The audit search had the same defect (#594, probed 2026-09-29:
+/// `from=-5000-01-01T00:00:00Z` answered 500 `INTERNAL_ERROR`). It now calls
+/// the check the integration log does, `utils::storable` (#601).
 #[tokio::test]
-#[ignore = "defect #594: a pre-4714 BC date on /audit is a 500, not a 422"]
 async fn a_date_before_postgresqls_range_is_refused_not_a_500() {
     let app = TestApp::spawn().await;
     let token = app.administrator_token().await;
