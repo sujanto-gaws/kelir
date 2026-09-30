@@ -627,3 +627,248 @@ async fn a_blank_or_over_long_role_name_is_refused_on_update() {
         );
     }
 }
+
+/// The `(path, rule, code)` of every detail in a 422, in the order sent.
+fn placed_details(response: &common::TestResponse) -> Vec<(String, String, String)> {
+    assert_eq!(
+        response.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        response.body
+    );
+    assert_eq!(response.error_code(), Some("VALIDATION_ERROR"));
+    response.body["error"]["details"]
+        .as_array()
+        .expect("details")
+        .iter()
+        .map(|detail| {
+            let text = |key: &str| detail[key].as_str().unwrap_or_default().to_owned();
+            (text("path"), text("rule"), text("code"))
+        })
+        .collect()
+}
+
+fn detail(path: &str, rule: &str, code: &str) -> (String, String, String) {
+    (path.to_owned(), rule.to_owned(), code.to_owned())
+}
+
+/// **[#575], the envelope through the API.** One refused create reports a
+/// blank code, an over-long name and a repeated permission id together, each
+/// with the `path`, `rule` and `code` a form binds on; an update's blank name
+/// is reported beside its repeated permission id, not skipped for it.
+///
+/// [#575]: https://github.com/sujanto-gaws/kelir/issues/575
+#[tokio::test]
+async fn a_refused_role_create_reports_every_problem_with_its_rule_and_code() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let read = permission_id(&app, "identity:user:read").await;
+
+    let created = app
+        .post(
+            "/api/v1/identity/roles",
+            Some(&token),
+            json!({
+                "roleCode": " \t ",
+                "name": "N".repeat(201),
+                "permissionIds": [read.to_string(), read.to_string()],
+            }),
+        )
+        .await;
+    assert_eq!(
+        placed_details(&created),
+        [
+            detail("roleCode", "required", "REQUIRED"),
+            detail("name", "maxLength", "TOO_LONG"),
+            detail("permissionIds.1", "uniqueItems", "DUPLICATE_IN_ARRAY"),
+        ]
+    );
+
+    let updated = app
+        .put(
+            &format!("/api/v1/identity/roles/{}", fixtures::ADMIN_ROLE_ID),
+            Some(&token),
+            json!({
+                "name": " ",
+                "permissionIds": [read.to_string(), read.to_string()],
+            }),
+        )
+        .await;
+    assert_eq!(
+        placed_details(&updated),
+        [
+            detail("name", "required", "REQUIRED"),
+            detail("permissionIds.1", "uniqueItems", "DUPLICATE_IN_ARRAY"),
+        ]
+    );
+}
+
+/// **[#575]: Unicode whitespace is whitespace.** A code or name of only
+/// no-break or ideographic spaces is blank, and a value padded with them is
+/// stored without them, on create and on update. The check and the store trim
+/// alike, or a name the check passed at 200 characters would reach
+/// `VARCHAR(200)` still padded.
+///
+/// [#575]: https://github.com/sujanto-gaws/kelir/issues/575
+#[tokio::test]
+async fn unicode_whitespace_is_blank_and_trimmed_from_a_role_code_and_name() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for (role_code, name, path) in [
+        ("\u{00A0}\u{3000}", "Only Spaces", "roleCode"),
+        ("ROLE-NBSP-NAME", "\u{2003}\u{00A0}", "name"),
+    ] {
+        let response = app
+            .post(
+                "/api/v1/identity/roles",
+                Some(&token),
+                json!({ "roleCode": role_code, "name": name }),
+            )
+            .await;
+        assert_refused_at(&response, path, "REQUIRED");
+    }
+    assert_eq!(roles_with_code(&app, "ROLE-NBSP-NAME").await, 0);
+
+    let created = app
+        .post(
+            "/api/v1/identity/roles",
+            Some(&token),
+            json!({
+                "roleCode": "\u{00A0}ROLE-PADDED\u{3000}",
+                "name": "\u{2003}Padded\u{00A0}",
+            }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let id = role_id(&app, "ROLE-PADDED").await;
+    assert_eq!(stored_name(&app, id).await, "Padded");
+
+    // 200 characters once trimmed: accepted, and stored trimmed rather than
+    // sent to `VARCHAR(200)` at 202.
+    let renamed = "M".repeat(200);
+    let updated = app
+        .put(
+            &format!("/api/v1/identity/roles/{id}"),
+            Some(&token),
+            json!({ "name": format!("\u{00A0}{renamed}\u{3000}") }),
+        )
+        .await;
+    assert_eq!(updated.status, StatusCode::OK, "{}", updated.body);
+    assert_eq!(stored_name(&app, id).await, renamed);
+
+    let blanked = app
+        .put(
+            &format!("/api/v1/identity/roles/{id}"),
+            Some(&token),
+            json!({ "name": "\u{3000}" }),
+        )
+        .await;
+    assert_refused_at(&blanked, "name", "REQUIRED");
+    assert_eq!(stored_name(&app, id).await, renamed);
+}
+
+/// **[#575]: a role's code is fixed once created.** An update that carries a
+/// `roleCode`, even a blank one, is refused as an unknown field rather than
+/// silently ignored; and an explicit `null` name leaves the name as a missing
+/// one does.
+///
+/// [#575]: https://github.com/sujanto-gaws/kelir/issues/575
+#[tokio::test]
+async fn an_update_cannot_carry_a_role_code_and_a_null_name_is_left_alone() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let created = app
+        .post(
+            "/api/v1/identity/roles",
+            Some(&token),
+            json!({ "roleCode": "ROLE-FIXED", "name": "Fixed" }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let id = role_id(&app, "ROLE-FIXED").await;
+
+    let carried = app
+        .put(
+            &format!("/api/v1/identity/roles/{id}"),
+            Some(&token),
+            json!({ "roleCode": "   ", "name": "Renamed" }),
+        )
+        .await;
+    assert_refused_at(&carried, "roleCode", "UNKNOWN_FIELD");
+    assert_eq!(stored_name(&app, id).await, "Fixed");
+    assert_eq!(roles_with_code(&app, "ROLE-FIXED").await, 1);
+
+    let nulled = app
+        .put(
+            &format!("/api/v1/identity/roles/{id}"),
+            Some(&token),
+            json!({ "name": null, "description": "Described" }),
+        )
+        .await;
+    assert_eq!(nulled.status, StatusCode::OK, "{}", nulled.body);
+    assert_eq!(stored_name(&app, id).await, "Fixed");
+}
+
+/// **[#575]: authorization is decided before the body is read.** A caller
+/// holding `identity:role:read` but neither `identity:role:create` nor
+/// `identity:role:update` is answered 403, never a 422 whose details describe
+/// the rules to somebody who may not use the route.
+///
+/// [#575]: https://github.com/sujanto-gaws/kelir/issues/575
+#[tokio::test]
+async fn a_caller_without_the_permission_is_refused_before_the_body_is_validated() {
+    let app = TestApp::spawn().await;
+
+    let reader = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "ROLE-ROLE-READER",
+        &["identity:role:read"],
+    )
+    .await;
+    fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "role.reader",
+        "role.reader@kelir.test",
+        PASSWORD,
+        &[reader],
+    )
+    .await;
+    let token = app.sign_in("role.reader", PASSWORD).await;
+
+    let created = app
+        .post(
+            "/api/v1/identity/roles",
+            Some(&token),
+            json!({ "roleCode": " ", "name": "N".repeat(201) }),
+        )
+        .await;
+    let updated = app
+        .put(
+            &format!("/api/v1/identity/roles/{reader}"),
+            Some(&token),
+            json!({ "name": "" }),
+        )
+        .await;
+
+    for (route, response) in [("POST", &created), ("PUT", &updated)] {
+        assert_eq!(
+            response.status,
+            StatusCode::FORBIDDEN,
+            "{route} /identity/roles answered {} to a caller without the permission: {}",
+            response.status,
+            response.body
+        );
+        assert_eq!(response.error_code(), Some("FORBIDDEN"));
+        assert!(
+            response.body["error"]["details"]
+                .as_array()
+                .is_none_or(Vec::is_empty),
+            "a 403 must not carry validation details: {}",
+            response.body
+        );
+    }
+}
