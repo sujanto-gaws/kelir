@@ -405,7 +405,8 @@ While the major version is `0`, the public API may change in any release.
 
 - **A value PostgreSQL cannot store is a 422 on every list route, not a 500**
   ([#601](https://github.com/sujanto-gaws/kelir/issues/601),
-  [#594](https://github.com/sujanto-gaws/kelir/issues/594)).
+  [#594](https://github.com/sujanto-gaws/kelir/issues/594),
+  [ADR-0044](docs/architectures/adr/0044.%20A%20Value%20PostgreSQL%20Cannot%20Store%20Is%20Refused%20in%20One%20Shared%20Place,%20Never%20per%20Parameter.md)).
   - **A NUL (`%00`) in any query parameter is refused** with 422
     `VALIDATION_ERROR`, a detail on that parameter with code
     `INVALID_CHARACTER`, before the route reads anything. `GET /api/v1/audit`
