@@ -2,7 +2,7 @@
 **Version:** 1.0.0
 **Status:** Draft Standard
 **Target Stack:** Rust (Workflow Engine), Vue.js (Workflow Designer)
-**Last updated:** 2026-09-24
+**Last updated:** 2026-09-30
 
 ---
 
@@ -137,7 +137,7 @@ Used by `transitions[].allowedBy`, `task.assignment`, and `task.escalation.assig
 | `assigneeType` | `string` | Yes | Enum: `USER`, `ROLE`, `DEPARTMENT_ROLE`, `OWNER`, `MANAGER_OF_OWNER`, `EXPRESSION`. |
 | `userId` | `string` | Conditional | REQUIRED when `assigneeType` is `USER`. |
 | `roleCode` | `string` | Conditional | REQUIRED when `assigneeType` is `ROLE` or `DEPARTMENT_ROLE`. |
-| `departmentScope` | `string` | No | `REQUESTED_DEPARTMENT`, `OWNER_DEPARTMENT`, or a department code. Only meaningful with `DEPARTMENT_ROLE`. |
+| `departmentScope` | `string` | No | `REQUESTED_DEPARTMENT`, `OWNER_DEPARTMENT`, or a department code. Only meaningful with `DEPARTMENT_ROLE`. `REQUESTED_DEPARTMENT` is the document's `requested_for_department_id`. `OWNER_DEPARTMENT` is the department of the document's owner, `documents.created_by`, read from that user's `users.department_id` (D-99). |
 | `expression` | `object` | Conditional | JSON Logic resolving to a user id or role code. REQUIRED when `assigneeType` is `EXPRESSION`. |
 
 Delegation windows (`delegations`, Database Schema §3.8) are applied by the assignment resolver after the rule resolves; they are not part of the rule.
@@ -169,11 +169,14 @@ Validators MUST accept both forms; the engine normalizes to the object form befo
 | `USER` | resolves | `users` |
 | `ROLE` | resolves | `roles.role_code` — an unclaimed role task is claimed by whoever takes it |
 | `DEPARTMENT_ROLE` | resolves | `roles` plus `user_roles.department_id`, which has carried a department-scoped grant since `0002` |
-| `OWNER` | resolves | `documents.created_by` |
+| `OWNER` | resolves | `documents.created_by`, whoever submits the document |
+| `DEPARTMENT_ROLE` with `departmentScope: "OWNER_DEPARTMENT"` | resolves; **accepted at publish**, and **refused at run time** as `ASSIGNMENT_UNRESOLVED` at `…departmentScope` when the owner has no live department | The owner's `users.department_id`, which must name a department of this tenant that is not deleted. An `INACTIVE` department still resolves, and so does the department of an owner who has since been deleted. A deleted department is refused with a message naming it. **Known limit:** a task stores the department in `workflow_tasks.candidate_department_id` when it is raised, and an edge's `allowedBy` reads the owner's department again at each decision and reassign. If the owner moves department in between, the task is still offered to the old department while the edge admits the new one. A task whose `assignment` and `allowedBy` both use the scope then cannot be decided by anybody who is not in both departments until an administrator reassigns it to a user in the new department, or to the role |
 | `MANAGER_OF_OWNER` | **refused** | There is no user-to-manager edge in the schema. `departments.manager_party_id` names a **party**, and party-to-user is not a resolvable relation — FR-ORG-002's reporting line is unbuilt. Resolving it by guesswork would route an approval to somebody chosen by a coincidence of data |
 | `EXPRESSION` | **refused** | The evaluator exists; the context does not. §6.1's condition context is document, formData, variables and actor, and an expression resolving to a *principal* needs a directory nothing reads |
 
 Refused at **save** rather than at run time, for the reason JFSS gives about a stored definition generally: a definition is written once and executed many times, and the execution path has no good failure. A workflow that publishes cleanly and then cannot assign its first task is a stalled instance nobody is told about.
+
+**`OWNER_DEPARTMENT` is refused at run time, not at save**, because what it depends on is not in the definition. Whether a document's owner has a live department is a fact about that document and that user, so a definition using the scope publishes, and a document whose owner has none is refused at the submit, decision or reassign it reaches, with nothing written.
 
 ~~The same applies to `guards` and `actions`: they are **stored and not executed** as of `v0.5.0`, because there is no hook chain to merge them into (architectures/01 §12.4.2 is unbuilt).~~ **`guards` and `actions` were stored and not executed as of `v0.5.0`**, when there was no hook chain to merge them into. **Both run in Kelir now** (corrected 2026-09-24, R-6):
 
@@ -382,6 +385,7 @@ This specification is a **`Draft Standard`** ([naming convention](../standards/0
 | **R-4** | 2026-08-29 | **§6.2 gains the one-evaluator rule, §6.4 says what an engine does when a condition cannot be evaluated, and S7 gains the no-match case**, for FR-WF-015 — [#186](https://github.com/sujanto-gaws/kelir/issues/186). **No change to the shape**: no property is added, removed or re-typed, and the meta-schema is untouched. §6.4 is new text rather than a clarification, and it settles a question two conforming engines could previously answer opposite ways — Kelir itself answered it the other way until this revision, treating an evaluation failure as `false` and falling through to the fallback. S7's addition is the matching obligation at the other end: a definition may leave a gap, and an engine must not paper over it silently. |
 | **R-5** | 2026-08-30 | **§4.2 says a self-transition is legal, §9.1 requires every stored string to be bounded where it is declared, and the meta-schema gains five `maxLength` keywords** — [#259](https://github.com/sujanto-gaws/kelir/issues/259), finding 1 of the Sprint 11 independent pass. **A narrowing, and the first one on this line**: R-1 was a strict widening and R-2 to R-4 changed no shape at all. `version` (40), `states[].name` (200), `states[].task.taskDefinitionKey` (64), `states[].task.taskName` (200) and `variables[].key` (64) are bounds a document already had to respect to be storable, so **no document that could ever have run is refused by them** — what changes is that one which could not is refused at save instead of at run time. §4.2 settles the other half the opposite way: Kelir's own `CHECK` forbade a construct this specification permits, and the constraint was dropped rather than the construct. |
 | **R-6** | 2026-09-24 | **§5.3 stops saying `guards` and `actions` are stored and not executed, §3.1 stops borrowing that reason for `escalation`, and §7 gains a third constraint: a handler in `actions` is after- or both-kind** — [#519](https://github.com/sujanto-gaws/kelir/issues/519), [ADR-0041](../architectures/adr/0041.%20Every%20Workflow%20Transition%20Writes%20an%20Outbox%20Event,%20and%20After-Hooks%20Are%20Its%20First%20Consumer.md). **No change to the shape**: no property is added, removed or re-typed, and the meta-schema is untouched. §5.3's sentence had been false for `guards` since [ADR-0036](../architectures/adr/0036.%20The%20Hook%20Chain%20Ships%20Its%20Before%20Half%20First.md) (Sprint 14) and is struck in place rather than deleted. §7's constraint is **a narrowing at publish**, the second on this line after R-5: `actions` naming `core:set_form_field` or `core:reject_when` saved and published before, and is now refused with `HANDLER_KIND_MISMATCH`. A definition already published with one logs an `ERROR` for that handler on each transition it covers (Lifecycle Hook Contract §5.3), rather than doing nothing silently. |
+| **R-7** | 2026-09-30 | **§5.1 says which department `OWNER_DEPARTMENT` is, and §5.3 gains a row for it** — [#579](https://github.com/sujanto-gaws/kelir/issues/579), **D-99** = A. **No change to the shape**: no property is added, removed or re-typed, and the meta-schema is untouched. The scope was declared, published and resolved to nothing, so every task and decision using it was refused. It is now the owner's `users.department_id`, refused at run time when there is none, and §5.3 states the known limit that a task keeps the department it was raised with while an edge reads the current one. |
 
 ---
 

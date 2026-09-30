@@ -3689,3 +3689,1036 @@ async fn a_submission_racing_the_delete_of_its_edges_role_waits_and_refuses() {
     assert_eq!(stored_status(&app, id).await, "DRAFT");
     assert!(instance_of(&app, id).await.is_none());
 }
+
+// ---------------------------------------------------------------------------
+// #579 — `OWNER_DEPARTMENT` resolves to the creator's `users.department_id`
+// ---------------------------------------------------------------------------
+//
+// **D-99** = A, with the product owner's answers of 2026-09-30:
+//
+// * **Q1** — the owner is `documents.created_by` at every site, so a submit
+//   of somebody else's draft routes by the creator, not the submitter.
+// * **Q2** — a task snapshots the department when it is raised, and an edge's
+//   `allowedBy` reads it live.
+// * **Q3** — an `INACTIVE` department still resolves.
+// * **Q4** — a soft-deleted owner's department still resolves.
+//
+// Every test below drafts as an **owner** who is not the administrator and
+// submits as the administrator, unless the definition's `RESUBMIT` edge needs
+// the owner, so Q1 is under every one of them.
+//
+// Mutations run 2026-09-30, each red against the tests named:
+//
+// | Mutation | Red |
+// | :--- | :--- |
+// | `start_workflow`'s context read back to a literal with `OwnerDepartment::Unset` | `an_owner_department_task_is_offered_to_the_creators_own_department` and every submit below |
+// | `resubmit_workflow`'s the same | `a_resubmitted_owner_department_task_is_the_owners_department_again` |
+// | `decide`'s the same | `a_decision_through_an_owner_department_edge_is_the_owners_departments` |
+// | `reassign`'s the same | `a_reassign_through_an_owner_department_edge_needs_the_owners_department` |
+// | `start_workflow` passing `actor` as the owner | `submitting_another_users_draft_routes_owner_rules_to_its_creator` |
+// | The `OWNER_DEPARTMENT` arm reading `requested_department_id` | `an_owner_department_task_is_offered_to_the_creators_own_department` |
+// | The reader taking the employee profile's department | the same |
+// | `AND d.deleted_at IS NULL` dropped from the reader | `a_deleted_owner_department_refuses_the_submit_naming_it` |
+// | `AND d.tenant_id = $1` dropped from the reader | `the_owners_department_is_read_in_this_tenant_only` |
+// | `u.tenant_id = $1` dropped from the reader | the same |
+// | `AND d.status = 'ACTIVE'` added to the reader | `an_inactive_owner_department_still_routes` |
+// | `AND u.deleted_at IS NULL` added to the reader | `a_decision_through_an_owner_department_edge_is_the_owners_departments` |
+// | `decide` measuring the edge by the task's snapshot | `the_task_keeps_the_owners_old_department_and_the_edge_reads_the_new_one`, once it had a document scoped both ways |
+// | Each of `inbox.rs`'s three `candidate_department_id` clauses dropped | `every_surface_offers_an_owner_department_task_to_that_department_alone`; `is_visible_to`'s only once the test asked the gate directly |
+
+/// The scope under test, as a `DEPARTMENT_ROLE` rule on the approver role.
+fn owner_department_rule() -> Value {
+    json!({
+        "assigneeType": "DEPARTMENT_ROLE",
+        "roleCode": APPROVER_ROLE,
+        "departmentScope": "OWNER_DEPARTMENT",
+    })
+}
+
+/// [`role_workflow`] with its task offered to the owner's department.
+fn owner_task_workflow(key: &str) -> Value {
+    let mut definition = role_workflow(key);
+    definition["states"][0]["task"]["assignment"] = owner_department_rule();
+    definition
+}
+
+/// [`role_workflow`] with both its decisions allowed by the owner's
+/// department, and its task offered to the whole role.
+fn owner_edge_workflow(key: &str) -> Value {
+    let mut definition = role_workflow(key);
+    definition["transitions"][0]["allowedBy"] = owner_department_rule();
+    definition["transitions"][1]["allowedBy"] = owner_department_rule();
+    definition
+}
+
+/// A user holding the administrator role, who drafts and owns documents,
+/// placed in `department` by `users.department_id`.
+async fn owner(app: &TestApp, username: &str, department: Option<Uuid>) -> (Uuid, String) {
+    let id = fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        username,
+        &format!("{username}@example.test"),
+        common::ADMIN_PASSWORD,
+        &[fixtures::ADMIN_ROLE_ID],
+    )
+    .await;
+    place_in(app, id, department).await;
+
+    (id, app.sign_in(username, common::ADMIN_PASSWORD).await)
+}
+
+/// Sets a user's `users.department_id`, which is what D-99 = A reads.
+async fn place_in(app: &TestApp, user: Uuid, department: Option<Uuid>) {
+    sqlx::query("UPDATE users SET department_id = $1 WHERE id = $2")
+        .bind(department)
+        .bind(user)
+        .execute(&app.pool)
+        .await
+        .expect("place the user in a department");
+}
+
+/// A holder of the approver role, and optionally `extra` roles, whose approver
+/// grant is scoped to `department`, or unscoped when it is `None`.
+async fn holder_in(
+    app: &TestApp,
+    username: &str,
+    department: Option<Uuid>,
+    extra: &[Uuid],
+) -> (Uuid, String) {
+    let role = approver_role(app).await;
+    let mut roles = vec![role];
+    roles.extend_from_slice(extra);
+
+    let id = fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        username,
+        &format!("{username}@example.test"),
+        common::ADMIN_PASSWORD,
+        &roles,
+    )
+    .await;
+
+    if let Some(department) = department {
+        let scoped = sqlx::query(
+            "UPDATE user_roles SET department_id = $1 WHERE user_id = $2 AND role_id = $3",
+        )
+        .bind(department)
+        .bind(id)
+        .bind(role)
+        .execute(&app.pool)
+        .await
+        .expect("scope the grant");
+        assert_eq!(scoped.rows_affected(), 1, "the grant was not scoped");
+    }
+
+    (id, app.sign_in(username, common::ADMIN_PASSWORD).await)
+}
+
+/// The department a task was raised with, from the row.
+async fn candidate_department(app: &TestApp, task: Uuid) -> Option<Uuid> {
+    sqlx::query_scalar("SELECT candidate_department_id FROM workflow_tasks WHERE id = $1")
+        .bind(task)
+        .fetch_one(&app.pool)
+        .await
+        .expect("read the task's department")
+}
+
+/// Publishes `definition`, binds it to a new type, and has `owner_token` draft
+/// one document of it. Returns the draft.
+async fn owned_draft(
+    app: &TestApp,
+    token: &str,
+    owner_token: &str,
+    definition: Value,
+    code: &str,
+) -> Uuid {
+    let workflow = publish_workflow(app, token, definition).await;
+    let type_id = document_type(app, token, code, Some(workflow)).await;
+    draft(app, owner_token, type_id).await
+}
+
+async fn claim(app: &TestApp, token: &str, task: Uuid) -> common::TestResponse {
+    app.post(
+        &format!("/api/v1/workflow/tasks/{task}/claim"),
+        Some(token),
+        json!({}),
+    )
+    .await
+}
+
+async fn decide(app: &TestApp, token: &str, task: Uuid, action: &str) -> common::TestResponse {
+    app.post(
+        &format!("/api/v1/workflow/tasks/{task}/decision"),
+        Some(token),
+        json!({ "action": action }),
+    )
+    .await
+}
+
+async fn count_rows(app: &TestApp, statement: &str, document: Uuid) -> i64 {
+    sqlx::query_scalar(statement)
+        .bind(document)
+        .fetch_one(&app.pool)
+        .await
+        .expect("count the rows")
+}
+
+async fn outbox_events(app: &TestApp) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM outbox_events")
+        .fetch_one(&app.pool)
+        .await
+        .expect("count the outbox")
+}
+
+/// A submit refused at the task's `departmentScope`, having written nothing:
+/// the document is a draft, and there is no instance, task, history row or
+/// outbox event. Returns the refusal's message.
+async fn refused_submit(app: &TestApp, token: &str, id: Uuid) -> String {
+    let outbox_before = outbox_events(app).await;
+
+    let refused = submit(app, token, id).await;
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+    let detail = &refused.body["error"]["details"][0];
+    assert_eq!(detail["code"], "ASSIGNMENT_UNRESOLVED", "{detail}");
+    assert_eq!(
+        detail["path"], "states.MANAGER_APPROVAL.task.assignment.departmentScope",
+        "{detail}"
+    );
+
+    assert_eq!(stored_status(app, id).await, "DRAFT");
+    assert!(instance_of(app, id).await.is_none());
+    assert_eq!(
+        count_rows(
+            app,
+            "SELECT count(*) FROM workflow_tasks WHERE document_id = $1",
+            id
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        count_rows(
+            app,
+            "SELECT count(*) FROM workflow_history WHERE document_id = $1",
+            id
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        outbox_events(app).await,
+        outbox_before,
+        "a refused submit wrote an outbox event"
+    );
+
+    detail["message"].as_str().expect("a message").to_owned()
+}
+
+/// **The task is offered to the creator's `users.department_id`, and to no
+/// other department the document could name** ([#579] criterion 1).
+///
+/// The owner has three candidate departments: `users.department_id` (X), an
+/// employee profile's (C), and the document's requested one (R). The submitter
+/// is in a fourth (Z). Only X is D-99 = A's answer.
+///
+/// **Seen red, 2026-09-30**, against the `OWNER_DEPARTMENT` arm reading the
+/// requested department (R), against the reader taking the employee profile's
+/// department (C), and against `start_workflow`'s context put back to a
+/// literal with no department (422).
+///
+/// [#579]: https://github.com/sujanto-gaws/kelir/issues/579
+#[tokio::test]
+async fn an_owner_department_task_is_offered_to_the_creators_own_department() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let own = department(&app, "OD-OWN", "Owner's own").await;
+    let profile = department(&app, "OD-PROFILE", "Employee profile's").await;
+    let requested = department(&app, "OD-REQUESTED", "Requested").await;
+    let submitters = department(&app, "OD-SUBMITTER", "Submitter's").await;
+
+    let (owner_id, owner_token) = owner(&app, "od.owner", Some(own)).await;
+    let admin: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE username = $1")
+        .bind(common::ADMIN_USERNAME)
+        .fetch_one(&app.pool)
+        .await
+        .expect("the administrator");
+    place_in(&app, admin, Some(submitters)).await;
+
+    // The employee profile names another department, so a reader that took it
+    // would route somewhere else.
+    let party = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO mdm_parties (id, tenant_id, party_code, party_type) VALUES ($1, $2, 'OD-OWNER', 'PERSON')",
+    )
+    .bind(party)
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .execute(&app.pool)
+    .await
+    .expect("the owner's party");
+    sqlx::query(
+        "INSERT INTO mdm_employee_profiles (id, tenant_id, party_id, employee_number, department_id)
+         VALUES ($1, $2, $3, 'E-OD-1', $4)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .bind(party)
+    .bind(profile)
+    .execute(&app.pool)
+    .await
+    .expect("the owner's employee profile");
+    sqlx::query("UPDATE users SET party_id = $1 WHERE id = $2")
+        .bind(party)
+        .bind(owner_id)
+        .execute(&app.pool)
+        .await
+        .expect("link the owner to the party");
+
+    let id = owned_draft(
+        &app,
+        &token,
+        &owner_token,
+        owner_task_workflow("wf_od_own"),
+        "PR_OD_OWN",
+    )
+    .await;
+    sqlx::query("UPDATE documents SET requested_for_department_id = $1 WHERE id = $2")
+        .bind(requested)
+        .bind(id)
+        .execute(&app.pool)
+        .await
+        .expect("request another department");
+
+    let submitted = submit(&app, &token, id).await;
+    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+
+    let task = open_task_of(&app, id).await;
+    assert_eq!(
+        candidate_department(&app, task).await,
+        Some(own),
+        "the task is offered to the creator's users.department_id, not the employee \
+         profile's, the requested one or the submitter's"
+    );
+}
+
+/// **`OWNER` and `OWNER_DEPARTMENT` both follow the creator when somebody else
+/// submits the draft** ([#579] criterion 3, the product owner's Q1).
+///
+/// `start_workflow` passed the submitter as the owner, so an `OWNER` task went
+/// to whoever pressed submit. The resubmit, the decision and the reassign
+/// already read `created_by`.
+///
+/// **Seen red, 2026-09-30**, against `start_workflow` passing `actor` as the
+/// owner: the `OWNER` task is the administrator's, and the department task is
+/// the administrator's department.
+///
+/// [#579]: https://github.com/sujanto-gaws/kelir/issues/579
+#[tokio::test]
+async fn submitting_another_users_draft_routes_owner_rules_to_its_creator() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let own = department(&app, "OD-Q1-OWN", "Owner's").await;
+    let submitters = department(&app, "OD-Q1-SUB", "Submitter's").await;
+    let (owner_id, owner_token) = owner(&app, "od.q1.owner", Some(own)).await;
+    let admin: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE username = $1")
+        .bind(common::ADMIN_USERNAME)
+        .fetch_one(&app.pool)
+        .await
+        .expect("the administrator");
+    place_in(&app, admin, Some(submitters)).await;
+
+    let mut owner_workflow = role_workflow("wf_od_q1_owner");
+    owner_workflow["states"][0]["task"]["assignment"] = json!({ "assigneeType": "OWNER" });
+    let by_owner = owned_draft(&app, &token, &owner_token, owner_workflow, "PR_OD_Q1_OWNER").await;
+    let by_department = owned_draft(
+        &app,
+        &token,
+        &owner_token,
+        owner_task_workflow("wf_od_q1_dept"),
+        "PR_OD_Q1_DEPT",
+    )
+    .await;
+
+    for id in [by_owner, by_department] {
+        let submitted = submit(&app, &token, id).await;
+        assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+    }
+
+    let assignee: Option<Uuid> =
+        sqlx::query_scalar("SELECT assignee_user_id FROM workflow_tasks WHERE document_id = $1")
+            .bind(by_owner)
+            .fetch_one(&app.pool)
+            .await
+            .expect("the OWNER task");
+    assert_eq!(assignee, Some(owner_id), "OWNER went to the submitter");
+
+    let task = open_task_of(&app, by_department).await;
+    assert_eq!(
+        candidate_department(&app, task).await,
+        Some(own),
+        "OWNER_DEPARTMENT went to the submitter's department"
+    );
+}
+
+/// **An `INACTIVE` department still routes** (the product owner's Q3).
+///
+/// **Seen red, 2026-09-30**, against `AND d.status = 'ACTIVE'` added to the
+/// reader: the submit is refused as a department that is not live.
+#[tokio::test]
+async fn an_inactive_owner_department_still_routes() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let own = department(&app, "OD-INACTIVE", "Wound down").await;
+    sqlx::query("UPDATE departments SET status = 'INACTIVE' WHERE id = $1")
+        .bind(own)
+        .execute(&app.pool)
+        .await
+        .expect("deactivate the department");
+    let (_, owner_token) = owner(&app, "od.inactive", Some(own)).await;
+
+    let id = owned_draft(
+        &app,
+        &token,
+        &owner_token,
+        owner_task_workflow("wf_od_inactive"),
+        "PR_OD_INACTIVE",
+    )
+    .await;
+    let submitted = submit(&app, &token, id).await;
+    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+
+    let task = open_task_of(&app, id).await;
+    assert_eq!(candidate_department(&app, task).await, Some(own));
+}
+
+/// **An owner with no department refuses the submit, and nothing is written**
+/// ([#579] criterion 5).
+///
+/// [#579]: https://github.com/sujanto-gaws/kelir/issues/579
+#[tokio::test]
+async fn an_owner_with_no_department_refuses_the_submit_and_writes_nothing() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let (_, owner_token) = owner(&app, "od.nodept", None).await;
+
+    let id = owned_draft(
+        &app,
+        &token,
+        &owner_token,
+        owner_task_workflow("wf_od_none"),
+        "PR_OD_NONE",
+    )
+    .await;
+
+    let message = refused_submit(&app, &token, id).await;
+    assert!(
+        message.starts_with(
+            "the document's creator belongs to no department, so OWNER_DEPARTMENT \
+             resolves to nothing. The task this transition would create"
+        ),
+        "{message}"
+    );
+}
+
+/// **A deleted department is refused in its own words, naming it** ([#579]
+/// criterion 5).
+///
+/// **Seen red, 2026-09-30**, against `AND d.deleted_at IS NULL` dropped from
+/// the reader: the submit is a 200 and the task is offered to a deleted
+/// department.
+///
+/// [#579]: https://github.com/sujanto-gaws/kelir/issues/579
+#[tokio::test]
+async fn a_deleted_owner_department_refuses_the_submit_naming_it() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let gone = department(&app, "OD-GONE", "Closed").await;
+    let (_, owner_token) = owner(&app, "od.gone", Some(gone)).await;
+    sqlx::query("UPDATE departments SET deleted_at = now() WHERE id = $1")
+        .bind(gone)
+        .execute(&app.pool)
+        .await
+        .expect("delete the department");
+
+    let id = owned_draft(
+        &app,
+        &token,
+        &owner_token,
+        owner_task_workflow("wf_od_gone"),
+        "PR_OD_GONE",
+    )
+    .await;
+
+    let message = refused_submit(&app, &token, id).await;
+    assert!(
+        message.starts_with(&format!(
+            "the document's creator belongs to department {gone}, which is not a live \
+             department in this tenant, so OWNER_DEPARTMENT resolves to nothing. "
+        )),
+        "{message}"
+    );
+}
+
+/// **The department is this tenant's, and so is the owner it is read from**.
+///
+/// Two drafts, each pointed by SQL at another tenant: one owner's
+/// `users.department_id` names another tenant's department, which is not a
+/// live department here; the other's `created_by` names another tenant's
+/// user, who is nobody here.
+///
+/// **Seen red, 2026-09-30**, against `AND d.tenant_id = $1` dropped (the first
+/// draft submits) and against `u.tenant_id = $1` dropped (the second is
+/// refused as a department that is not live, not as no department).
+#[tokio::test]
+async fn the_owners_department_is_read_in_this_tenant_only() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let other_tenant = fixtures::create_tenant(&app.pool, "OD-OTHER", "Other").await;
+    let foreign = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO departments (id, tenant_id, department_code, name) VALUES ($1, $2, 'OD-FOREIGN', 'Foreign')",
+    )
+    .bind(foreign)
+    .bind(other_tenant)
+    .execute(&app.pool)
+    .await
+    .expect("another tenant's department");
+    let stranger = fixtures::create_user(
+        &app.pool,
+        other_tenant,
+        "od.stranger",
+        "od.stranger@example.test",
+        common::ADMIN_PASSWORD,
+        &[],
+    )
+    .await;
+    place_in(&app, stranger, Some(foreign)).await;
+
+    let (_, owner_token) = owner(&app, "od.crossed", Some(foreign)).await;
+    let crossed = owned_draft(
+        &app,
+        &token,
+        &owner_token,
+        owner_task_workflow("wf_od_crossed"),
+        "PR_OD_CROSSED",
+    )
+    .await;
+    let message = refused_submit(&app, &token, crossed).await;
+    assert!(
+        message.starts_with(&format!(
+            "the document's creator belongs to department {foreign}, which"
+        )),
+        "{message}"
+    );
+
+    let (_, other_token) = owner(&app, "od.adopted", None).await;
+    let adopted = owned_draft(
+        &app,
+        &token,
+        &other_token,
+        owner_task_workflow("wf_od_adopted"),
+        "PR_OD_ADOPTED",
+    )
+    .await;
+    sqlx::query("UPDATE documents SET created_by = $1 WHERE id = $2")
+        .bind(stranger)
+        .bind(adopted)
+        .execute(&app.pool)
+        .await
+        .expect("credit the draft to another tenant's user");
+    let message = refused_submit(&app, &token, adopted).await;
+    assert!(
+        message.starts_with("the document's creator belongs to no department"),
+        "{message}"
+    );
+}
+
+/// **A decision through an `OWNER_DEPARTMENT` edge is the owner's
+/// department's** ([#579] criterion 8), **and the owner may since have been
+/// removed** (the product owner's Q4).
+///
+/// The task is offered to the whole role, so the task check passes both
+/// holders and the edge is the only thing that tells them apart.
+///
+/// **Seen red, 2026-09-30**, against `decide`'s context put back to a literal
+/// with no department (the department's holder is refused with a 422), and
+/// against `AND u.deleted_at IS NULL` added to the reader (the same, after the
+/// owner is deleted).
+///
+/// [#579]: https://github.com/sujanto-gaws/kelir/issues/579
+#[tokio::test]
+async fn a_decision_through_an_owner_department_edge_is_the_owners_departments() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let own = department(&app, "OD-EDGE-X", "Owner's").await;
+    let other = department(&app, "OD-EDGE-Z", "Another").await;
+    let (owner_id, owner_token) = owner(&app, "od.edge.owner", Some(own)).await;
+    let (_, insider) = holder_in(&app, "od.edge.x", Some(own), &[]).await;
+    let (_, outsider) = holder_in(&app, "od.edge.z", Some(other), &[]).await;
+
+    let id = owned_draft(
+        &app,
+        &token,
+        &owner_token,
+        owner_edge_workflow("wf_od_edge"),
+        "PR_OD_EDGE",
+    )
+    .await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+    let task = open_task_of(&app, id).await;
+
+    let refused = decide(&app, &outsider, task, "APPROVE").await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+    assert_eq!(stored_status(&app, id).await, "PENDING_APPROVAL");
+
+    // Q4: the owner leaves, and their department still decides.
+    sqlx::query("UPDATE users SET deleted_at = now() WHERE id = $1")
+        .bind(owner_id)
+        .execute(&app.pool)
+        .await
+        .expect("remove the owner");
+
+    let decided = decide(&app, &insider, task, "APPROVE").await;
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+    assert_eq!(stored_status(&app, id).await, "COMPLETED");
+}
+
+/// **At a decision, an owner with no department, or a deleted one, is refused
+/// for the decision** ([#579] criterion 5). The task stays open.
+///
+/// [#579]: https://github.com/sujanto-gaws/kelir/issues/579
+#[tokio::test]
+async fn an_owner_department_edge_with_no_live_department_refuses_the_decision() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let gone = department(&app, "OD-DEC-GONE", "Closed").await;
+    let (_, approver) = holder_in(&app, "od.dec.holder", None, &[]).await;
+    let (_, none_token) = owner(&app, "od.dec.none", None).await;
+    let (_, gone_token) = owner(&app, "od.dec.gone", Some(gone)).await;
+
+    let workflow = publish_workflow(&app, &token, owner_edge_workflow("wf_od_dec")).await;
+    let type_id = document_type(&app, &token, "PR_OD_DEC", Some(workflow)).await;
+
+    let path = "transitions.MANAGER_APPROVAL.APPROVE.allowedBy.departmentScope";
+
+    let unplaced = draft(&app, &none_token, type_id).await;
+    assert_eq!(submit(&app, &token, unplaced).await.status, StatusCode::OK);
+    let message = refused_decision(&app, &approver, unplaced, "APPROVE", path).await;
+    assert!(
+        message.starts_with("the document's creator belongs to no department, so "),
+        "{message}"
+    );
+
+    let closed = draft(&app, &gone_token, type_id).await;
+    assert_eq!(submit(&app, &token, closed).await.status, StatusCode::OK);
+    sqlx::query("UPDATE departments SET deleted_at = now() WHERE id = $1")
+        .bind(gone)
+        .execute(&app.pool)
+        .await
+        .expect("delete the department");
+    let message = refused_decision(&app, &approver, closed, "APPROVE", path).await;
+    assert!(
+        message.starts_with(&format!(
+            "the document's creator belongs to department {gone}, which is not a live"
+        )),
+        "{message}"
+    );
+
+    for id in [unplaced, closed] {
+        let open: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM workflow_tasks WHERE document_id = $1 AND status = 'CREATED'",
+        )
+        .bind(id)
+        .fetch_one(&app.pool)
+        .await
+        .expect("the task");
+        assert_eq!(open, 1, "the refused decision closed the task");
+    }
+}
+
+/// **A claim is the owner's department's, or an unscoped grant's** ([#579]
+/// criterion 7, FR-TASK-002).
+///
+/// [#579]: https://github.com/sujanto-gaws/kelir/issues/579
+#[tokio::test]
+async fn an_owner_department_task_is_claimed_within_the_department() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let own = department(&app, "OD-CLAIM-X", "Owner's").await;
+    let other = department(&app, "OD-CLAIM-Z", "Another").await;
+    let (_, owner_token) = owner(&app, "od.claim.owner", Some(own)).await;
+    let (_, insider) = holder_in(&app, "od.claim.x", Some(own), &[]).await;
+    let (_, outsider) = holder_in(&app, "od.claim.z", Some(other), &[]).await;
+    let (_, anywhere) = holder_in(&app, "od.claim.any", None, &[]).await;
+
+    let workflow = publish_workflow(&app, &token, owner_task_workflow("wf_od_claim")).await;
+    let type_id = document_type(&app, &token, "PR_OD_CLAIM", Some(workflow)).await;
+
+    let first = draft(&app, &owner_token, type_id).await;
+    assert_eq!(submit(&app, &token, first).await.status, StatusCode::OK);
+    let task = open_task_of(&app, first).await;
+
+    let refused = claim(&app, &outsider, task).await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+
+    let unscoped = claim(&app, &anywhere, task).await;
+    assert_eq!(unscoped.status, StatusCode::OK, "{}", unscoped.body);
+
+    let second = draft(&app, &owner_token, type_id).await;
+    assert_eq!(submit(&app, &token, second).await.status, StatusCode::OK);
+    let task = open_task_of(&app, second).await;
+
+    let claimed = claim(&app, &insider, task).await;
+    assert_eq!(claimed.status, StatusCode::OK, "{}", claimed.body);
+}
+
+/// **The task keeps the department it was raised with, and the edge reads the
+/// owner's department now** ([#579] criterion 9, the product owner's Q2).
+///
+/// The owner moves from X to Y after each task is raised. Where the task is
+/// scoped, X still claims and decides it and Y does not. Where the edge is
+/// scoped, Y decides and X does not. **Where both are, nobody decides**: X
+/// passes the task and not the edge, and Y the edge and not the task. That is
+/// the known limit JWSS §5.3 states.
+///
+/// **Seen red, 2026-09-30**, against `decide` measuring the edge by the task's
+/// `candidate_department_id` in place of the live read: X's decision on the
+/// third document is a 200. The same mutation left the second document green,
+/// because a task offered to the whole role has no department to read.
+///
+/// [#579]: https://github.com/sujanto-gaws/kelir/issues/579
+#[tokio::test]
+async fn the_task_keeps_the_owners_old_department_and_the_edge_reads_the_new_one() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let before = department(&app, "OD-DRIFT-X", "Before").await;
+    let after = department(&app, "OD-DRIFT-Y", "After").await;
+    let (owner_id, owner_token) = owner(&app, "od.drift.owner", Some(before)).await;
+    let (_, old_side) = holder_in(&app, "od.drift.x", Some(before), &[]).await;
+    let (_, new_side) = holder_in(&app, "od.drift.y", Some(after), &[]).await;
+
+    let scoped_task = owned_draft(
+        &app,
+        &token,
+        &owner_token,
+        owner_task_workflow("wf_od_drift_task"),
+        "PR_OD_DRIFT_T",
+    )
+    .await;
+    let scoped_edge = owned_draft(
+        &app,
+        &token,
+        &owner_token,
+        owner_edge_workflow("wf_od_drift_edge"),
+        "PR_OD_DRIFT_E",
+    )
+    .await;
+    let mut both = owner_task_workflow("wf_od_drift_both");
+    both["transitions"] = owner_edge_workflow("wf_od_drift_both")["transitions"].clone();
+    let scoped_both = owned_draft(&app, &token, &owner_token, both, "PR_OD_DRIFT_B").await;
+    for id in [scoped_task, scoped_edge, scoped_both] {
+        assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+    }
+
+    place_in(&app, owner_id, Some(after)).await;
+
+    // The task's own check reads its snapshot.
+    let task = open_task_of(&app, scoped_task).await;
+    assert_eq!(candidate_department(&app, task).await, Some(before));
+    let refused = claim(&app, &new_side, task).await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+    let decided = decide(&app, &old_side, task, "APPROVE").await;
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+
+    // The edge reads the owner's department as it is now.
+    let task = open_task_of(&app, scoped_edge).await;
+    let refused = decide(&app, &old_side, task, "APPROVE").await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+    let decided = decide(&app, &new_side, task, "APPROVE").await;
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+    assert_eq!(stored_status(&app, scoped_edge).await, "COMPLETED");
+
+    // Both: the task says X and the edge says Y.
+    let task = open_task_of(&app, scoped_both).await;
+    for side in [&old_side, &new_side] {
+        let refused = decide(&app, side, task, "APPROVE").await;
+        assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+    }
+    assert_eq!(stored_status(&app, scoped_both).await, "PENDING_APPROVAL");
+}
+
+/// **A reassign target must be in the owner's department to pass an
+/// `OWNER_DEPARTMENT` edge** ([#579] criterion 10, FR-WF-017).
+///
+/// The refusal is `TARGET_CANNOT_DECIDE`, which [ADR-0042] names for every
+/// target that passes no decision edge. The criterion's `ASSIGNMENT_UNRESOLVED`
+/// is the code of an edge that resolves to nobody, which this one does not.
+///
+/// **Seen red, 2026-09-30**, against `reassign`'s context put back to a
+/// literal with no department: the department's own holder is refused.
+///
+/// [#579]: https://github.com/sujanto-gaws/kelir/issues/579
+/// [ADR-0042]: ../../docs/architectures/adr/0042.%20An%20Administrator%20Reassigns%20an%20Open%20Task%20and%20Nothing%20Cancels%20One.md
+#[tokio::test]
+async fn a_reassign_through_an_owner_department_edge_needs_the_owners_department() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let own = department(&app, "OD-RA-X", "Owner's").await;
+    let other = department(&app, "OD-RA-Z", "Another").await;
+    let (_, owner_token) = owner(&app, "od.ra.owner", Some(own)).await;
+    let (insider, _) = holder_in(&app, "od.ra.x", Some(own), &[]).await;
+    let (outsider, _) = holder_in(&app, "od.ra.z", Some(other), &[]).await;
+
+    let id = owned_draft(
+        &app,
+        &token,
+        &owner_token,
+        owner_edge_workflow("wf_od_ra"),
+        "PR_OD_RA",
+    )
+    .await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+    let task = open_task_of(&app, id).await;
+
+    let reassign_uri = format!("/api/v1/workflow/tasks/{task}/reassign");
+
+    let moved = app
+        .post(&reassign_uri, Some(&token), json!({ "userId": insider }))
+        .await;
+    assert_eq!(moved.status, StatusCode::OK, "{}", moved.body);
+
+    let refused = app
+        .post(&reassign_uri, Some(&token), json!({ "userId": outsider }))
+        .await;
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+    assert_eq!(
+        refused.body["error"]["details"][0]["code"], "TARGET_CANNOT_DECIDE",
+        "{}",
+        refused.body
+    );
+
+    let holder: Option<Uuid> =
+        sqlx::query_scalar("SELECT assignee_user_id FROM workflow_tasks WHERE id = $1")
+            .bind(task)
+            .fetch_one(&app.pool)
+            .await
+            .expect("the task");
+    assert_eq!(holder, Some(insider), "the refused reassign moved the task");
+}
+
+/// **A resubmission raises its task in the owner's department again**
+/// ([#579] criterion 11).
+///
+/// **Seen red, 2026-09-30**, against `resubmit_workflow`'s context put back to
+/// a literal with no department: the resubmission is a 422.
+///
+/// [#579]: https://github.com/sujanto-gaws/kelir/issues/579
+#[tokio::test]
+async fn a_resubmitted_owner_department_task_is_the_owners_department_again() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let own = department(&app, "OD-RS-X", "Owner's").await;
+    let (_, owner_token) = owner(&app, "od.rs.owner", Some(own)).await;
+    let (_, insider) = holder_in(&app, "od.rs.x", Some(own), &[]).await;
+
+    let mut definition = returnable_workflow("wf_od_rs");
+    definition["states"][0]["task"]["assignment"] = owner_department_rule();
+    let id = owned_draft(&app, &token, &owner_token, definition, "PR_OD_RS").await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let task = open_task_of(&app, id).await;
+    let returned = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&insider),
+            json!({ "action": "RETURN", "comment": "Attach the quotation." }),
+        )
+        .await;
+    assert_eq!(returned.status, StatusCode::OK, "{}", returned.body);
+
+    // `RESUBMIT` is allowed by `OWNER`, so the owner sends it.
+    let resubmitted = submit(&app, &owner_token, id).await;
+    assert_eq!(resubmitted.status, StatusCode::OK, "{}", resubmitted.body);
+
+    let task = open_task_of(&app, id).await;
+    assert_eq!(candidate_department(&app, task).await, Some(own));
+}
+
+/// **A definition using the scope publishes as it did** ([#579] criterion 6).
+///
+/// D-99's other answer refused the scope at publish. Under A it resolves, so
+/// the publish is unchanged, and this pins it in both places a rule can sit.
+///
+/// [#579]: https://github.com/sujanto-gaws/kelir/issues/579
+#[tokio::test]
+async fn a_definition_using_the_owner_department_scope_still_publishes() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let mut definition = owner_task_workflow("wf_od_publish");
+    definition["transitions"][0]["allowedBy"] = owner_department_rule();
+
+    let id = publish_workflow(&app, &token, definition).await;
+
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM workflow_definitions WHERE id = $1")
+            .bind(id)
+            .fetch_one(&app.pool)
+            .await
+            .expect("the definition");
+    assert_eq!(status, "ACTIVE");
+}
+
+/// **Every surface offers an `OWNER_DEPARTMENT` task to that department
+/// alone** ([#579] criterion 12, FR-TASK-001/002/003).
+///
+/// The inbox page, its count, the detail gate, the dashboard's widgets and
+/// the task's notifications agree for the department's holder, and show a
+/// holder in another department nothing. `inbox.rs` is unchanged: the task
+/// carries an ordinary `candidate_department_id`.
+///
+/// **Seen red, 2026-09-30**, against each of `inbox.rs`'s three
+/// `candidate_department_id` clauses dropped in turn: `list_for_caller` (Z's
+/// page lists the task) and `count_for_caller` (Z's total is 1).
+/// `is_visible_to`'s clause dropped left the HTTP detail a 404, because the
+/// detail reads the row through `list_for_caller` after the gate, so the gate
+/// is also asked directly below. With its clause dropped that answer is
+/// `true` for Z (seen red, 2026-09-30).
+///
+/// [#579]: https://github.com/sujanto-gaws/kelir/issues/579
+#[tokio::test]
+async fn every_surface_offers_an_owner_department_task_to_that_department_alone() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let dashboard = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "OD-DASHBOARD",
+        &["reporting:dashboard:read"],
+    )
+    .await;
+
+    let own = department(&app, "OD-SURF-X", "Owner's").await;
+    let other = department(&app, "OD-SURF-Z", "Another").await;
+    let (_, owner_token) = owner(&app, "od.surf.owner", Some(own)).await;
+    let (insider_id, insider) = holder_in(&app, "od.surf.x", Some(own), &[dashboard]).await;
+    let (outsider_id, outsider) = holder_in(&app, "od.surf.z", Some(other), &[dashboard]).await;
+
+    let id = owned_draft(
+        &app,
+        &token,
+        &owner_token,
+        owner_task_workflow("wf_od_surf"),
+        "PR_OD_SURF",
+    )
+    .await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+    let task = open_task_of(&app, id).await.to_string();
+
+    let ids = |body: &Value| -> Vec<String> {
+        body["data"]
+            .as_array()
+            .expect("a page")
+            .iter()
+            .map(|row| row["id"].as_str().expect("an id").to_owned())
+            .collect()
+    };
+    let pending = |summary: &Value| -> Vec<String> {
+        summary["data"]["pendingTasks"]
+            .as_array()
+            .expect("the widget's rows")
+            .iter()
+            .map(|row| row["id"].as_str().expect("an id").to_owned())
+            .collect()
+    };
+
+    for (caller, expected) in [(&insider, vec![task.clone()]), (&outsider, Vec::new())] {
+        let inbox = app.get("/api/v1/tasks", Some(caller)).await;
+        assert_eq!(inbox.status, StatusCode::OK, "{}", inbox.body);
+        assert_eq!(ids(&inbox.body), expected, "the page: {}", inbox.body);
+        assert_eq!(
+            inbox.body["meta"]["total"],
+            json!(expected.len()),
+            "the count: {}",
+            inbox.body
+        );
+
+        let detail = app
+            .get(&format!("/api/v1/tasks/{task}"), Some(caller))
+            .await;
+        let visible = if expected.is_empty() {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::OK
+        };
+        assert_eq!(detail.status, visible, "the detail: {}", detail.body);
+
+        let summary = app.get("/api/v1/dashboard/summary", Some(caller)).await;
+        assert_eq!(summary.status, StatusCode::OK, "{}", summary.body);
+        assert_eq!(
+            pending(&summary.body),
+            expected,
+            "the widget: {}",
+            summary.body
+        );
+        assert_eq!(
+            summary.body["data"]["tasksWaiting"],
+            json!(expected.len()),
+            "the widget's count: {}",
+            summary.body
+        );
+    }
+
+    // The gate itself, which the detail route puts in front of a read that
+    // would also refuse.
+    let task_id: Uuid = task.parse().expect("a uuid");
+    for (user, expected) in [(insider_id, true), (outsider_id, false)] {
+        let visible = kelir_backend::modules::workflow::repository::inbox::is_visible_to(
+            &app.pool,
+            fixtures::SYSTEM_TENANT_ID,
+            user,
+            task_id,
+        )
+        .await
+        .expect("ask the gate");
+        assert_eq!(visible, expected, "the gate for {user}");
+    }
+
+    let told: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT n.recipient_user_id FROM notifications n
+           JOIN workflow_instances i ON i.id = n.workflow_instance_id
+          WHERE i.document_id = $1 AND n.notification_type = 'TASK_ASSIGNED'",
+    )
+    .bind(id)
+    .fetch_all(&app.pool)
+    .await
+    .expect("the task's notifications");
+    assert_eq!(
+        told,
+        vec![insider_id],
+        "only the department's holder is told"
+    );
+}

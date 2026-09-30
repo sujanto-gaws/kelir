@@ -576,6 +576,15 @@ async fn resubmit_workflow(
 
     let graph = Graph::parse(&definition.definition_json, definition.version);
 
+    let context = AssignmentContext::of_document(
+        &mut **transaction,
+        tenant_id,
+        subject.document_type_id,
+        subject.created_by,
+        subject.requested_for_department_id,
+    )
+    .await?;
+
     engine::fire(
         transaction,
         tenant_id,
@@ -585,12 +594,7 @@ async fn resubmit_workflow(
         &instance.current_state,
         TransitionAction::Resubmit,
         actor,
-        AssignmentContext {
-            document_type_id: subject.document_type_id,
-            owner_user_id: subject.created_by,
-            requested_department_id: subject.requested_for_department_id,
-            owner_department_id: None,
-        },
+        context,
         evaluation,
         // No task drove this and no comment came with it. The correction is the
         // document's own new payload, which the history's `to_state` and this
@@ -653,6 +657,17 @@ async fn start_workflow(
         return Ok(None);
     }
 
+    // The owner is the document's creator, not `actor`: the two differ when
+    // somebody submits another user's draft (#579, the product owner's Q1).
+    let context = AssignmentContext::of_document(
+        &mut **transaction,
+        tenant_id,
+        subject.document_type_id,
+        subject.created_by,
+        subject.requested_for_department_id,
+    )
+    .await?;
+
     let started = engine::start(
         transaction,
         &engine::StartRequest {
@@ -661,12 +676,7 @@ async fn start_workflow(
             workflow_definition_id,
             business_key: Some(document_number),
             actor,
-            context: AssignmentContext {
-                document_type_id: subject.document_type_id,
-                owner_user_id: actor,
-                requested_department_id: subject.requested_for_department_id,
-                owner_department_id: None,
-            },
+            context,
             evaluation,
         },
     )

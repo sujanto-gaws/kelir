@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT u.department_id, d.id AS \"live_department_id?\"\n        FROM users u\n        LEFT JOIN departments d\n               ON d.id = u.department_id\n              AND d.tenant_id = $1\n              AND d.deleted_at IS NULL\n        WHERE u.tenant_id = $1 AND u.id = $2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "department_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "live_department_id?",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "d7cd950b8def9ec1b702a3436f9ce09ee29ca8dab7fd8d060535a849b7bcbd68"
+}
