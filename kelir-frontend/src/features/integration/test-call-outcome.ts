@@ -42,11 +42,11 @@ export const TEST_CALL_EXPLANATIONS: Record<string, string> = {
   CREDENTIAL_TYPE_NOT_SUPPORTED:
     'A test call can send a Bearer token or Basic auth credential only. Other types are not built yet.',
   SECRET_REFERENCE_MALFORMED:
-    'The credential reference is not one Kelir can follow. Use env://KELIR_INTEGRATION_SECRET_<NAME>.',
+    'The credential reference is not one Kelir can follow. Use env://KELIR_INTEGRATION_SECRET_<TENANT CODE>__<NAME>.',
   SECRET_BACKEND_NOT_CONFIGURED:
     'vault:// references cannot be read in this release. Use an env:// reference instead.',
   SECRET_NAME_NOT_PERMITTED:
-    'A test call reads only environment variables whose names start with KELIR_INTEGRATION_SECRET_. Rename the variable and the reference.',
+    "A test call reads only this tenant's environment variables: KELIR_INTEGRATION_SECRET_, your tenant code with any hyphen written as an underscore, two underscores, then the name. The message below names the exact prefix. Rename the variable and the reference.",
   SECRET_NOT_FOUND:
     'The environment variable the credential names is not set on the server, or is empty. Ask whoever runs Kelir to set it.',
   SECRET_MALFORMED:

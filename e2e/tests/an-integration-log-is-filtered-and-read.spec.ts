@@ -12,7 +12,9 @@ import { API_PREFIX, credentials } from '../support/env'
  *
  * **A success needs a system that answers**, reachable from the backend
  * container through the egress guard, with a secret in the backend's
- * environment under `KELIR_INTEGRATION_SECRET_`. The release stack has none
+ * environment under its tenant's own prefix,
+ * `KELIR_INTEGRATION_SECRET_SYSTEM__` for this flow's administrator (#618).
+ * The release stack has none
  * of the three (`deploy/staging` sets no `KELIR_INTEGRATION_*` variable, so a
  * private or loopback upstream is refused and there is no secret to send), and
  * a public upstream would make the flow depend on the internet. The same
