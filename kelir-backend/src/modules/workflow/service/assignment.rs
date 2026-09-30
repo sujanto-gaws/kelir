@@ -90,6 +90,7 @@
 //!
 //! [#176]: https://github.com/sujanto-gaws/kelir/issues/176
 
+use sqlx::PgExecutor;
 use uuid::Uuid;
 
 use super::super::domain::{AssigneeType, AssignmentRule, ReassignTarget};
@@ -161,8 +162,120 @@ pub struct AssignmentContext {
     pub owner_user_id: Option<Uuid>,
     /// `documents.requested_for_department_id`.
     pub requested_department_id: Option<Uuid>,
-    /// The owner's own department, for `OWNER_DEPARTMENT`.
-    pub owner_department_id: Option<Uuid>,
+    /// The owner's own department, for `OWNER_DEPARTMENT`. Read by
+    /// [`AssignmentContext::of_document`] and by nothing else.
+    pub owner_department: OwnerDepartment,
+}
+
+/// Where the owner's department stands, for `OWNER_DEPARTMENT`
+/// ([#579](https://github.com/sujanto-gaws/kelir/issues/579), **D-99** = A).
+///
+/// **Three cases, because two of them are refused with different words.** An
+/// owner with no department and an owner whose department was deleted both
+/// resolve to nothing, and an administrator fixes them in different places: the
+/// first on the user, the second by restoring the department or moving the
+/// user out of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnerDepartment {
+    /// The document has no creator, or the creator's `users.department_id` is
+    /// empty.
+    Unset,
+    /// A department of this tenant that is not soft-deleted. `INACTIVE` is
+    /// still live here (the product owner's Q3, 2026-09-30).
+    Live(Uuid),
+    /// `users.department_id` names a department this tenant does not hold
+    /// live: soft-deleted, or not this tenant's.
+    Gone(Uuid),
+}
+
+impl AssignmentContext {
+    /// The context a document's assignment rules are resolved against, and
+    /// **the one place `OWNER_DEPARTMENT` is read**
+    /// ([#579](https://github.com/sujanto-gaws/kelir/issues/579)).
+    ///
+    /// Every caller that routes or authorizes on a document builds its context
+    /// here: the submit's start and resubmit, the decision, and the reassign.
+    /// A literal built beside it would be a second answer to *whose department
+    /// is this*, and the one this replaces answered `None` at all four.
+    ///
+    /// # The owner is `documents.created_by`, always
+    ///
+    /// The parameter is named for the column, and the product owner's Q1
+    /// (2026-09-30) is why: the submit passed the **submitter** as the owner,
+    /// which is the creator only when the two are one person. `OWNER` and
+    /// `OWNER_DEPARTMENT` both follow the creator.
+    ///
+    /// # The department, and what the read does not check
+    ///
+    /// **D-99** = A: the owner's `users.department_id` (FR-IDM-008, **D-8**),
+    /// not an employee profile's department. The department must be this
+    /// tenant's and not soft-deleted. **Its `status` is not read**, so an
+    /// `INACTIVE` department still routes (Q3), and **the owner's own
+    /// `deleted_at` is not read**, so a document whose creator has since been
+    /// removed still routes to the department they were in (Q4).
+    ///
+    /// # Read at each call, not once
+    ///
+    /// The product owner's Q2: a task **snapshots** the department into
+    /// `workflow_tasks.candidate_department_id` when it is raised, and an
+    /// edge's `allowedBy` reads it **live** at each decision and reassign.
+    /// A user moved between departments after a task is raised is therefore
+    /// measured by the old department at the claim and the task check, and by
+    /// the new one at the edge. JWSS §5.3 states this as a known limit.
+    pub async fn of_document<'e, E: PgExecutor<'e>>(
+        executor: E,
+        tenant_id: Uuid,
+        document_type_id: Uuid,
+        created_by: Option<Uuid>,
+        requested_department_id: Option<Uuid>,
+    ) -> Result<Self, AppError> {
+        let owner_department = match created_by {
+            None => OwnerDepartment::Unset,
+            Some(owner) => owner_department_of(executor, tenant_id, owner).await?,
+        };
+
+        Ok(Self {
+            document_type_id,
+            owner_user_id: created_by,
+            requested_department_id,
+            owner_department,
+        })
+    }
+}
+
+/// The owner's `users.department_id`, and whether this tenant holds it live.
+///
+/// **No `u.deleted_at` and no `d.status`**, which are Q4 and Q3; the doc
+/// comment on [`AssignmentContext::of_document`] carries both.
+async fn owner_department_of<'e, E: PgExecutor<'e>>(
+    executor: E,
+    tenant_id: Uuid,
+    owner: Uuid,
+) -> Result<OwnerDepartment, AppError> {
+    let row = sqlx::query!(
+        r#"
+        SELECT u.department_id, d.id AS "live_department_id?"
+        FROM users u
+        LEFT JOIN departments d
+               ON d.id = u.department_id
+              AND d.tenant_id = $1
+              AND d.deleted_at IS NULL
+        WHERE u.tenant_id = $1 AND u.id = $2
+        "#,
+        tenant_id,
+        owner
+    )
+    .fetch_optional(executor)
+    .await?;
+
+    Ok(match row {
+        Some(row) => match (row.department_id, row.live_department_id) {
+            (Some(_), Some(live)) => OwnerDepartment::Live(live),
+            (Some(named), None) => OwnerDepartment::Gone(named),
+            (None, _) => OwnerDepartment::Unset,
+        },
+        None => OwnerDepartment::Unset,
+    })
 }
 
 /// Whether `actor` satisfies an assignment rule.
@@ -553,18 +666,31 @@ fn normalize(
                         )
                     })?)
                 }
-                Some("OWNER_DEPARTMENT") => {
-                    DepartmentScope::Id(context.owner_department_id.ok_or_else(|| {
-                        unresolvable(
+                Some("OWNER_DEPARTMENT") => match context.owner_department {
+                    OwnerDepartment::Live(id) => DepartmentScope::Id(id),
+                    OwnerDepartment::Unset => {
+                        return Err(unresolvable(
                             question,
                             path,
                             "departmentScope",
                             "the document's creator belongs to no department, so \
                              OWNER_DEPARTMENT resolves to nothing"
                                 .to_owned(),
-                        )
-                    })?)
-                }
+                        ))
+                    }
+                    OwnerDepartment::Gone(id) => {
+                        return Err(unresolvable(
+                            question,
+                            path,
+                            "departmentScope",
+                            format!(
+                                "the document's creator belongs to department {id}, which \
+                                 is not a live department in this tenant, so \
+                                 OWNER_DEPARTMENT resolves to nothing"
+                            ),
+                        ))
+                    }
+                },
                 // Anything else is a department **code**, per JWSS §5.1. Looked
                 // up rather than guessed at: a code that names nothing is
                 // refused below rather than silently widening the task to the
@@ -774,8 +900,166 @@ mod tests {
             document_type_id: Uuid::now_v7(),
             owner_user_id: Some(Uuid::now_v7()),
             requested_department_id: Some(Uuid::now_v7()),
-            owner_department_id: Some(Uuid::now_v7()),
+            owner_department: OwnerDepartment::Live(Uuid::now_v7()),
         }
+    }
+
+    fn owner_department_rule() -> AssignmentRule {
+        let mut department_role = rule(AssigneeType::DepartmentRole);
+        department_role.role_code = Some("FINANCE".to_owned());
+        department_role.department_scope = Some("OWNER_DEPARTMENT".to_owned());
+        department_role
+    }
+
+    fn refusal(error: AppError) -> (String, String, String) {
+        match error {
+            AppError::Validation { details } => (
+                details[0].code.clone(),
+                details[0].path.clone(),
+                details[0].message.clone(),
+            ),
+            other => panic!("expected a validation error, got {other:?}"),
+        }
+    }
+
+    /// `OWNER_DEPARTMENT` reads the owner's department, **not** the requested
+    /// one ([#579]). The context holds a different id in each slot, so an arm
+    /// reading the wrong one names the wrong department.
+    ///
+    /// [#579]: https://github.com/sujanto-gaws/kelir/issues/579
+    #[test]
+    fn an_owner_department_scope_reads_the_owners_department() {
+        let context = context();
+
+        let principal = normalize(
+            &owner_department_rule(),
+            context,
+            "task.assignment",
+            Question::Assignee,
+        )
+        .expect("a scoped role");
+
+        let OwnerDepartment::Live(owner) = context.owner_department else {
+            panic!("the fixture is live");
+        };
+        assert_eq!(
+            principal,
+            Principal::Role {
+                role_code: "FINANCE".to_owned(),
+                department: Some(DepartmentScope::Id(owner)),
+            }
+        );
+    }
+
+    #[test]
+    fn an_owner_with_no_department_is_refused_at_the_scope() {
+        let context = AssignmentContext {
+            owner_department: OwnerDepartment::Unset,
+            ..context()
+        };
+
+        let (code, path, message) = refusal(
+            normalize(
+                &owner_department_rule(),
+                context,
+                "task.assignment",
+                Question::Assignee,
+            )
+            .expect_err("refused"),
+        );
+
+        assert_eq!(code, "ASSIGNMENT_UNRESOLVED");
+        assert_eq!(path, "task.assignment.departmentScope");
+        assert!(
+            message.starts_with("the document's creator belongs to no department"),
+            "{message}"
+        );
+    }
+
+    /// A deleted department is named, so the administrator knows which one to
+    /// restore or move the owner out of.
+    #[test]
+    fn an_owner_whose_department_is_gone_is_refused_naming_it() {
+        let gone = Uuid::now_v7();
+        let context = AssignmentContext {
+            owner_department: OwnerDepartment::Gone(gone),
+            ..context()
+        };
+
+        let (code, path, message) = refusal(
+            normalize(
+                &owner_department_rule(),
+                context,
+                "transitions.A.APPROVE.allowedBy",
+                Question::Decider,
+            )
+            .expect_err("refused"),
+        );
+
+        assert_eq!(code, "ASSIGNMENT_UNRESOLVED");
+        assert_eq!(path, "transitions.A.APPROVE.allowedBy.departmentScope");
+        assert!(
+            message.starts_with(&format!(
+                "the document's creator belongs to department {gone}, which is not a live \
+                 department in this tenant"
+            )),
+            "{message}"
+        );
+        assert!(
+            message.contains("nobody may take this decision"),
+            "{message}"
+        );
+    }
+
+    /// **Every `AssignmentContext` outside this file comes from
+    /// [`AssignmentContext::of_document`]** ([#579] criterion 2).
+    ///
+    /// The four sites each wrote `owner_department_id: None` in a literal of
+    /// their own, which is how `OWNER_DEPARTMENT` published cleanly and then
+    /// resolved to nothing everywhere. A literal added beside the constructor
+    /// would be that again, so the source is read for one.
+    ///
+    /// [#579]: https://github.com/sujanto-gaws/kelir/issues/579
+    #[test]
+    fn every_assignment_context_is_built_by_the_one_reader() {
+        fn walk(dir: &std::path::Path, found: &mut Vec<(String, String)>) {
+            for entry in std::fs::read_dir(dir).expect("read the source tree") {
+                let path = entry.expect("an entry").path();
+                if path.is_dir() {
+                    walk(&path, found);
+                } else if path.extension().is_some_and(|extension| extension == "rs") {
+                    let text = std::fs::read_to_string(&path).expect("read a source file");
+                    found.push((path.display().to_string().replace('\\', "/"), text));
+                }
+            }
+        }
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&root, &mut files);
+
+        let mut literals = Vec::new();
+        let mut readers = 0;
+
+        for (path, text) in &files {
+            if path.ends_with("workflow/service/assignment.rs") {
+                continue;
+            }
+            readers += text.matches("AssignmentContext::of_document(").count();
+            if text.contains("AssignmentContext {") {
+                literals.push(path.clone());
+            }
+        }
+
+        assert!(
+            literals.is_empty(),
+            "an AssignmentContext is built by hand outside the reader: {literals:?}"
+        );
+        assert_eq!(
+            readers, 4,
+            "the submit's start and resubmit, the decision and the reassign each read \
+             the context once"
+        );
     }
 
     fn code(error: AppError) -> String {

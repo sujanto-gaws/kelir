@@ -451,12 +451,16 @@ pub async fn reassign(
     let document = document_repo::find_document(&state.pool, tenant_id, subject.document_id)
         .await?
         .ok_or_else(|| AppError::not_found("Document"))?;
-    let context = AssignmentContext {
-        document_type_id: document.document_type_id,
-        owner_user_id: document.created_by,
-        requested_department_id: document.requested_for_department_id,
-        owner_department_id: None,
-    };
+    // The owner's department is read now, not at the raise: an edge measures
+    // it live (#579, the product owner's Q2).
+    let context = AssignmentContext::of_document(
+        &state.pool,
+        tenant_id,
+        document.document_type_id,
+        document.created_by,
+        document.requested_for_department_id,
+    )
+    .await?;
 
     let mut transaction = state.pool.begin().await?;
 
@@ -795,6 +799,19 @@ pub async fn decide(
         &instance_repo::variables_of(&state.pool, tenant_id, instance_row.id).await?,
     );
 
+    // On the pool with the document's other facts, before the transaction, so
+    // this path still holds one pooled connection at a time (**D-35**). The
+    // owner's department is read now, which is what an edge measures (#579,
+    // the product owner's Q2); the task's own check reads its snapshot.
+    let context = AssignmentContext::of_document(
+        &state.pool,
+        tenant_id,
+        document.document_type_id,
+        document.created_by,
+        document.requested_for_department_id,
+    )
+    .await?;
+
     let mut transaction = state.pool.begin().await?;
 
     // **Instance first.** The check below reads the instance's state to choose a
@@ -896,12 +913,7 @@ pub async fn decide(
         &instance.current_state,
         engine::transition_of(action),
         Some(user_id),
-        AssignmentContext {
-            document_type_id: document.document_type_id,
-            owner_user_id: document.created_by,
-            requested_department_id: document.requested_for_department_id,
-            owner_department_id: None,
-        },
+        context,
         &engine::EvaluationContext {
             document: engine::document_facts(
                 document.status,

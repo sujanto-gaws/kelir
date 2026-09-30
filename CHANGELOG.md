@@ -391,6 +391,23 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **An `OWNER_DEPARTMENT` scope resolves**
+  ([#579](https://github.com/sujanto-gaws/kelir/issues/579), **D-99**). A
+  `DEPARTMENT_ROLE` rule with `departmentScope: "OWNER_DEPARTMENT"` published
+  cleanly and then refused every task and decision that used it with 422
+  `ASSIGNMENT_UNRESOLVED`, because nothing read the owner's department. It is
+  now the department in the document creator's `users.department_id`, and an
+  `INACTIVE` department still counts. A creator with no department, or whose
+  department has been deleted, is refused with `ASSIGNMENT_UNRESOLVED` at
+  `…departmentScope`, and the deleted department is named. A task keeps the
+  department it was raised with, and an edge's `allowedBy` reads the
+  creator's department at each decision and reassign
+  ([JWSS](docs/schema/JSON%20Workflow%20Schema.md) §5.3).
+- **An `OWNER` task goes to the document's creator when somebody else submits
+  it** ([#579](https://github.com/sujanto-gaws/kelir/issues/579)). The first
+  submit passed the submitter as the owner, so an `OWNER` assignment on the
+  first state went to whoever pressed submit. The resubmit, the decision and
+  the reassign already read the creator.
 - **A role's code and name are validated by the server**
   ([#575](https://github.com/sujanto-gaws/kelir/issues/575)). Nothing checked
   them: an empty or blank `roleCode` was stored, and a code over 64 characters
