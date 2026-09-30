@@ -123,7 +123,7 @@ pub async fn get_external_system(
         (status = 201, description = "Registered", body = ExternalSystem),
         (status = 403, description = "Missing integration:external-system:create"),
         (status = 409, description = "That systemCode is already in use in this tenant"),
-        (status = 422, description = "Validation failed — including a baseUrl carrying a user name or password (CREDENTIALS_IN_URL)")
+        (status = 422, description = "Validation failed — including a baseUrl carrying a user name or password (CREDENTIALS_IN_URL) or a query string (QUERY_IN_BASE_URL)")
     ),
     security(("bearer" = []))
 )]
@@ -150,7 +150,7 @@ pub async fn register_external_system(
         (status = 200, description = "Updated", body = ExternalSystem),
         (status = 403, description = "Missing integration:external-system:update"),
         (status = 404, description = "No such external system in this tenant"),
-        (status = 422, description = "Validation failed — NOT_ALLOWED on status when the edit would move the system into or out of INACTIVE")
+        (status = 422, description = "Validation failed — including a baseUrl carrying a user name or password (CREDENTIALS_IN_URL) or a query string (QUERY_IN_BASE_URL), and NOT_ALLOWED on status when the edit would move the system into or out of INACTIVE")
     ),
     security(("bearer" = []))
 )]

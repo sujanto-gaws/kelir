@@ -245,9 +245,11 @@ pub struct RegisterExternalSystemRequest {
     pub system_code: String,
     pub system_name: String,
     pub system_type: Option<ExternalSystemType>,
-    /// `http` or `https`, with a host, and **no user name, password or query
-    /// string in it** — a credential belongs in a credential reference, not in
-    /// a URL anyone with `:read` can see.
+    /// `http` or `https`, with a host: a scheme, host, port and path. **A user
+    /// name or password is refused (`CREDENTIALS_IN_URL`), and so is a query
+    /// string (`QUERY_IN_BASE_URL`)** — a credential belongs in a credential
+    /// reference, not in a URL anyone with `:read` can see. A secret in the
+    /// path is not recognised, and is stored as sent.
     pub base_url: Option<String>,
     pub auth_type: Option<AuthType>,
     /// Defaults to 30.
@@ -271,6 +273,8 @@ pub struct UpdateExternalSystemRequest {
     #[serde(default, deserialize_with = "present_or_absent")]
     #[schema(value_type = Option<ExternalSystemType>)]
     pub system_type: Option<Option<ExternalSystemType>>,
+    /// Checked as on registering: `CREDENTIALS_IN_URL` for a user name or
+    /// password, `QUERY_IN_BASE_URL` for a query string.
     #[serde(default, deserialize_with = "present_or_absent")]
     #[schema(value_type = Option<String>)]
     pub base_url: Option<Option<String>>,

@@ -83,7 +83,9 @@ pub struct IntegrationEndpoint {
     pub endpoint_code: String,
     pub name: String,
     pub method: HttpMethod,
-    /// Relative to the system's `baseUrl` — `/purchase-orders`.
+    /// Relative to the system's `baseUrl` — `/purchase-orders`. It may carry a
+    /// query, which is configuration: shown to every `:read` holder and
+    /// audited as it stands (D-100).
     pub path: String,
     pub description: Option<String>,
     pub status: EndpointStatus,
@@ -98,7 +100,9 @@ pub struct CreateIntegrationEndpointRequest {
     pub endpoint_code: String,
     pub name: String,
     pub method: HttpMethod,
-    /// Starts with `/`; no scheme, host, fragment or whitespace.
+    /// Starts with `/`; no scheme, host, fragment or whitespace. A query such
+    /// as `?expand=true` is allowed and is configuration, shown to every
+    /// `:read` holder and audited: a key belongs in a credential reference.
     pub path: String,
     pub description: Option<String>,
 }
@@ -110,6 +114,8 @@ pub struct CreateIntegrationEndpointRequest {
 pub struct UpdateIntegrationEndpointRequest {
     pub name: Option<String>,
     pub method: Option<HttpMethod>,
+    /// Checked as on creating: a query is allowed, is configuration, and is
+    /// shown and audited as sent.
     pub path: Option<String>,
     #[serde(default, deserialize_with = "present_or_absent")]
     #[schema(value_type = Option<String>)]
@@ -191,6 +197,26 @@ mod tests {
     fn a_relative_path_is_accepted() {
         for good in ["/purchase-orders", "/orders/{id}/lines?expand=true", "/"] {
             assert!(validate_create(&create(good)).is_ok(), "{good}");
+        }
+    }
+
+    /// **D-100 = B** (2026-09-30, #554): a query in a path is configuration,
+    /// not a refusal. F1's `QUERY_IN_BASE_URL` stops at the base URL, and
+    /// nothing in a path is protected, a key included: it is stored as sent.
+    /// Seen red, 2026-09-30, with `path()` refusing `?`.
+    #[test]
+    fn a_query_in_a_path_is_configuration_and_is_accepted() {
+        for query in [
+            "/orders/{id}/lines?expand=true&page=2",
+            "/orders?api_key=sk_live_x",
+        ] {
+            assert!(validate_create(&create(query)).is_ok(), "create {query}");
+
+            let edit = UpdateIntegrationEndpointRequest {
+                path: Some(query.to_owned()),
+                ..UpdateIntegrationEndpointRequest::default()
+            };
+            assert!(validate_update(&edit).is_ok(), "update {query}");
         }
     }
 

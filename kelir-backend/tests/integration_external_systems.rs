@@ -1916,6 +1916,19 @@ async fn every_route_is_in_the_document_and_no_schema_can_carry_a_secret() {
             );
         }
     }
+
+    // #555 (record 19 finding 5): both routes that take a baseUrl refuse a
+    // user name or password and a query string, and both 422s say so. Seen
+    // red, 2026-09-30, before the descriptions named QUERY_IN_BASE_URL.
+    for (path, method) in [(BASE.to_owned(), "post"), (format!("{BASE}/{{id}}"), "put")] {
+        let text = paths[&path][method]["responses"]["422"]["description"].to_string();
+        for code in ["CREDENTIALS_IN_URL", "QUERY_IN_BASE_URL"] {
+            assert!(
+                text.contains(code),
+                "{method} {path}'s 422 does not name {code}: {text}"
+            );
+        }
+    }
 }
 
 /// **#552 in the database**: `0047_credential_reference_texts.sql` rewrites the
