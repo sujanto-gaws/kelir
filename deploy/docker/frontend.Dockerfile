@@ -14,7 +14,13 @@
 # release process §4 step 7):
 #   docker build -f deploy/docker/frontend.Dockerfile #     --build-arg KELIR_BUILD_SHA=$(git rev-parse --short HEAD) #     -t kelir-frontend:0.1.0 kelir-frontend
 
-FROM node:24-alpine AS builder
+# **Both bases are pinned to a release, not a line** (#590, D-62). The pin
+# test reads every `FROM` here and refuses `node:24-alpine` and
+# `caddy:2-alpine`, which follow every Node 24 and every Caddy 2 release. Each
+# pin is the release its line resolved to on 2026-09-30, checked by index
+# digest, so pinning froze the image rather than moving it. Caddy is a Docker
+# Official Image, accepted on Docker Hub by #546's dispositions.
+FROM node:24.21.0-alpine AS builder
 
 WORKDIR /build
 
@@ -37,7 +43,7 @@ ENV KELIR_BUILD_SHA=${KELIR_BUILD_SHA}
 
 RUN npm run build
 
-FROM caddy:2-alpine AS runtime
+FROM caddy:2.11.4-alpine AS runtime
 
 # Only the built site lives in the image. The Caddyfile is supplied by the
 # environment's compose file, so the same image serves staging and production

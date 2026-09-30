@@ -9,7 +9,12 @@
 #     --build-arg KELIR_BUILD_SHA=$(git rev-parse --short HEAD) \
 #     -t kelir-backend:0.1.0 kelir-backend
 
-FROM rust:1.89-slim-bookworm AS builder
+# **Both bases are pinned to a release, not a line** (#590, D-62). The pin
+# test reads every `FROM` here. Each pin is the release its line resolved to on
+# 2026-09-30, checked by index digest, so pinning froze the image rather than
+# moving it: `rust:1.89-slim-bookworm` was `1.89.0`, and `debian:bookworm-slim`
+# was the `20260918` build. A bump is a deliberate edit to a newer release.
+FROM rust:1.89.0-slim-bookworm AS builder
 
 WORKDIR /build
 
@@ -44,7 +49,7 @@ ENV KELIR_BUILD_SHA=${KELIR_BUILD_SHA}
 # Touch main.rs so cargo rebuilds it over the stub from the dependency layer.
 RUN touch src/main.rs && cargo build --release
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-20260918-slim AS runtime
 
 # ca-certificates is needed for outbound TLS (SMTP, object storage, Phase 9
 # integrations); curl gives the container a working HEALTHCHECK.
