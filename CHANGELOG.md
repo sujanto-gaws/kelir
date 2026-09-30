@@ -108,7 +108,7 @@ While the major version is `0`, the public API may change in any release.
     is read from the backend's environment; any other `env://` name fails as
     `SECRET_NAME_NOT_PERMITTED`, and `vault://` fails as
     `SECRET_BACKEND_NOT_CONFIGURED` until a Vault client exists. **An echo
-    is redacted only in the spellings listed below.** A spelling outside the
+    is redacted only in the spellings ADR-0043 §R lists**, which are below. A spelling outside the
     list, such as a double percent-encoding, is stored and shown exactly as
     the called system sent it, in the answer's preview and in the integration
     log row. No log line or audit row holds the body, and a test call writes
@@ -229,9 +229,9 @@ While the major version is `0`, the public API may change in any release.
   - Every change is written to the audit trail.
   - **The registry is configuration only.** The test call is what calls out
     and writes a log row, and the integration log reads it, both above.
-    Nothing receives a call yet (FR-INT-003). Four of the eight new tables have no writer yet:
-    `integration_mappings`, `webhook_subscriptions`, `webhook_events` and
-    `inbox_events`.
+    Nothing receives a call yet (FR-INT-003). Four of the eight new tables
+    have no writer yet: `integration_mappings`, `webhook_subscriptions`,
+    `webhook_events` and `inbox_events`.
 
 ### Changed
 
