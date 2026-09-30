@@ -636,14 +636,15 @@ pub async fn reassign(
 ///
 /// # Locking
 ///
-/// The instance is read, not locked, after the task lock: the engine takes
-/// the instance before the task, so locking it here would invert that order.
-/// It cannot move meanwhile, because the only thing that moves a state with an
-/// open task is a decision, which waits on the task this transaction holds.
+/// The instance is already locked: `reassign` takes it before the task, in
+/// `lock_instance_then_task` ([#619]), so the state read here cannot move
+/// meanwhile. A decision, the only thing that moves a state with an open task,
+/// waits on the same instance lock.
 /// `permits` and `names_role` read each edge's role `FOR KEY SHARE`, as a
 /// decision does.
 ///
 /// [#512]: https://github.com/sujanto-gaws/kelir/issues/512
+/// [#619]: https://github.com/sujanto-gaws/kelir/issues/619
 async fn refuse_unless_target_can_decide(
     transaction: &mut sqlx::PgTransaction<'_>,
     tenant_id: Uuid,
