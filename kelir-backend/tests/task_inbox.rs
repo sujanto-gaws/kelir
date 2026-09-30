@@ -4589,7 +4589,7 @@ async fn an_unclaimed_task_is_judged_by_its_offered_role_and_not_by_the_clause()
 // | "At least one" decision edge turned into "every" | *a user target must satisfy…* — the mixed case's reject-only holder refused |
 // | `DEPARTMENT_ROLE` scope dropped before `permits` for a user target | *a user target must satisfy…* — the holder scoped to another department accepted |
 // | The audit event renamed, or its call's `.await` dropped (2026-09-28) | *a reassign is audited once…* — no record |
-// | `FOR UPDATE` dropped from `lock_task` (2026-09-28) | *a claim arriving during a reassign…* — the claim did not wait, 200 |
+// | `FOR UPDATE` dropped from `lock_task` (2026-09-28) | *a claim arriving during a reassign…* — the claim did not wait, 200. **Green since #619** (2026-10-01): every task path now waits at the instance first, so the task lock no longer decides any race these tests stage; see the #619 table |
 // | `COALESCE` on `candidate_department_id`, then on `delegated_from_user_id`, in `reassign` (2026-09-28) | *a reassign clears the department and the delegation* |
 // | `lock_instance` dropped from `claim_task`, `delegate` and `reassign`, one at a time (#619) | See the #619 section's table |
 // | `Return` dropped from the decision actions; `Cancel` added; an edge with no `allowedBy` made to `continue` (2026-09-28) | *the decidability check reads return and not cancel*, each case |
@@ -5989,6 +5989,26 @@ async fn a_claim_arriving_during_a_reassign_waits_for_it() {
 // | *a decision arriving during a reassign…* | The decision answered 500 `INTERNAL_ERROR`, *deadlock detected* in the log; the reassign answered 200 |
 // | *a claim meeting the instance lock…* | The claim answered 500 `INTERNAL_ERROR`, *deadlock detected*: it waited in the history `INSERT`, holding the task |
 // | *a hand-off meeting the instance lock…* | The test's task lock was aborted with *deadlock detected* (`40P01`): the hand-off waited in the history `INSERT`, holding the task |
+//
+// On the same code, with the settle wait before the status assertion and the
+// test's own abort tolerated, `deadlocks_once_settled` read 1 against 0: the
+// counter guard sees what it guards.
+//
+// # Seen to fail after the fix (coding standard §2.9), 2026-10-01
+//
+// Each mutation applied alone, the #619 tests and the two #512 race tests
+// run, and the mutation reverted.
+//
+// | Mutation | Reddened |
+// |---|---|
+// | `lock_instance` dropped from `claim_task` (bare `lock_task`) | *a claim meeting…* — 500 deadlock; *a claim arriving during a reassign…* — never seen waiting on the instance; *…a missing task or instance…* — 409 rather than 404 "Workflow instance" |
+// | `lock_instance` dropped from `delegate` | *a hand-off meeting…* — 500 deadlock; *…a missing task or instance…* — 200 rather than 404 |
+// | `lock_instance` dropped from `reassign` | *a decision arriving during a reassign…* — 500 rather than 403; *a reassign meeting…* — 500; *a claim arriving during a reassign…* — never seen waiting on the instance |
+// | `claim_task` takes the task, then the instance | *a claim meeting…* — 500; *a claim arriving during a reassign…* |
+// | `delegate` takes the task, then the instance | *a hand-off meeting…* — 500 |
+// | `reassign` takes the task, then the instance | *a reassign meeting…* — 500. *A decision arriving during a reassign…* stays green by construction: the parked reassign holds both rows in either order |
+// | The instance-id equality check under the lock removed | Nothing, and nothing can: a task never changes instance, so the check is a backstop |
+// | `FOR UPDATE` dropped from `lock_task` | Nothing: the instance lock now serializes every task path first |
 
 /// The statement of the backend `blocker` holds up, if one is waiting on it.
 async fn statement_blocked_by(app: &TestApp, blocker: i32) -> Option<String> {
