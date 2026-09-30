@@ -46,6 +46,23 @@
 //! | `domain::test_call::without_nul` returns its input | `a_nul_in_the_answer_is_stored_and_answered` |
 //! | `domain::secret::encoded_forms` returns nothing | `an_encoded_echo_of_the_secret_is_redacted` |
 //! | `domain::test_call::mask_text` returns its input | `a_json_body_over_the_read_cap_is_masked_by_key` |
+//!
+//! **#618's predicates, seen red 2026-10-01**, each also reddening
+//! `domain::secret`'s or `outbound`'s unit tests. Before the fix, the first
+//! four tests below were red on the prefix-only rule: P1 answered `200` and
+//! the collector received the system tenant's bearer.
+//!
+//! | Mutation | Reddened |
+//! |---|---|
+//! | `TenantNamespaces::admits` keeps only the #547 prefix check | `a_created_tenant_naming_the_system_tenants_variable_is_refused_and_sends_nothing`, `another_tenants_variable_answers_the_same_set_or_unset`, `a_name_two_tenants_codes_both_map_to_is_refused_for_both`, `a_single_tenant_deployment_reads_only_its_tenants_namespace` |
+//! | `namespace_segment` does not write `-` as `_` | the first three above, and `a_caller_in_another_tenant_calls_their_own_endpoint_and_neither_reaches_the_other` |
+//! | `namespace_segment` does not upper-case the code | unit tests only: stored codes are upper case |
+//! | The name compared case-insensitively | unit tests only |
+//! | The ambiguity refusal removed | `a_name_two_tenants_codes_both_map_to_is_refused_for_both` |
+//! | The environment read before the tenant check | `another_tenants_variable_answers_the_same_set_or_unset` |
+//! | `NAMESPACE_SEPARATOR` is one underscore | `a_created_tenant_naming_the_system_tenants_variable_is_refused_and_sends_nothing`, `a_single_tenant_deployment_reads_only_its_tenants_namespace` |
+//! | The caller's own gate dropped, the ambiguity rule kept | `a_single_tenant_deployment_reads_only_its_tenants_namespace` |
+//! | The refusal names the bare prefix, not the caller's | `a_created_tenant_naming_the_system_tenants_variable_is_refused_and_sends_nothing`, `a_single_tenant_deployment_reads_only_its_tenants_namespace` |
 
 mod common;
 
