@@ -202,7 +202,10 @@ While the major version is `0`, the public API may change in any release.
     sent. Put the secret in the store first, then enter its reference. Only
     the test call above resolves a reference. A `baseUrl` containing a user name or password
     is refused as `CREDENTIALS_IN_URL`, and one with any query string as
-    `QUERY_IN_BASE_URL`, so a key cannot ride in `?api_key=`.
+    `QUERY_IN_BASE_URL`, so a key cannot ride in `?api_key=`. **An endpoint's
+    `path` may carry a query**, which is configuration and is not protected:
+    it is shown to every `:read` holder and audited as sent (decision
+    **D-100**, [#554](https://github.com/sujanto-gaws/kelir/issues/554)).
   - **Credentials have their own permissions.** They are under
     `integration:credential:*`, and the detail page does not show the section
     without `integration:credential:read`. Endpoints use the system's
