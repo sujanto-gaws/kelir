@@ -2906,10 +2906,11 @@ async fn admitted(app: &TestApp, token: &str) -> kelir_backend::middleware::auth
 /// variable and holds no value, nothing sent, and neither the tenant's own
 /// variable nor another tenant's read.
 ///
-/// Mutations planned against it (not yet run), each alone and neither caught by any other
-/// test: `TenantNamespaces::for_caller` answering the first live tenant's
-/// namespace when the caller's is not among them; the branch answering
-/// `Ok` with an empty namespace list instead of failing.
+/// Planned and not run (the campaign's cargo runs were stopped for memory):
+/// `TenantNamespaces::for_caller` answering the first live tenant's namespace
+/// when the caller's is not among them, which the builder's table records as
+/// green in every suite; and the branch answering with an empty namespace
+/// instead of failing.
 #[tokio::test]
 async fn a_tenant_deleted_after_its_caller_was_admitted_resolves_nothing_and_fails_closed() {
     use kelir_backend::modules::integration::service::test_call::test_call;

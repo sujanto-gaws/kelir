@@ -29,8 +29,11 @@
 //!
 //! # Mutations
 //!
-//! Not yet run at this commit: each test names the mutations planned against
-//! it, and the campaign's later commit records which reddened.
+//! Each test says which mutations were **seen red** against it (made alone,
+//! this file and the builder's two run, reverted; 2026-10-02) and which were
+//! **planned and not run**: the campaign's cargo runs were stopped by the
+//! machine for memory before the second batch finished. A mutation listed as
+//! not run is a claim nobody has checked.
 
 mod common;
 
@@ -373,9 +376,11 @@ async fn traced(
 /// none of it, whichever it was; and a request that is not refused for this
 /// reason does not write the line.
 ///
-/// Mutations planned against it (not yet run), each alone: the `tracing::warn!` removed; the
-/// line written at `debug`; `tenant` and `user` swapped in the line; a
-/// missing row reported as `deleted`; `user_id` dropped from the line.
+/// Seen red, each alone, and by no test of the builder's: the line written
+/// at `debug`; `tenant` and `user` swapped in the line; a missing row
+/// reported as `deleted`; `user_id` carrying the tenant's id; a tenant with
+/// no row read as live (the answer is still 401, because the user is then
+/// missing too: only the line differs).
 #[tokio::test]
 async fn a_refusal_tells_the_operator_which_of_the_two_it_was_and_the_caller_nothing() {
     let app = multi_tenant_app().await;
@@ -602,9 +607,9 @@ async fn a_user_whose_row_is_removed_outright_is_refused_as_missing() {
 /// user, each asked with the one token issued while both were live and
 /// active. **The token is served exactly when neither `deleted_at` is set.**
 ///
-/// Mutations planned against it (not yet run): either predicate read as `status <> 'ACTIVE'`;
-/// the user's read as `status = 'LOCKED'` or `locked_until > now()` beside
-/// `deleted_at`; `is_live` ignoring either side.
+/// Planned and not run: the user's predicate widened by `status = 'LOCKED'`,
+/// by `locked_until > now()` or by `status = 'PENDING_ACTIVATION'`; the
+/// tenant's widened by `status = 'SUSPENDED'` or `'INACTIVE'`.
 #[tokio::test]
 async fn a_token_is_served_exactly_when_neither_deleted_at_is_set_whatever_the_statuses() {
     let app = multi_tenant_app().await;
@@ -862,8 +867,8 @@ async fn read_for(stream: &mut tokio::net::TcpStream, wait: Duration) -> String 
 /// same head is left unanswered, because the handler is waiting for bytes
 /// that have not come, and is answered once they do.
 ///
-/// Mutation planned against it (not yet run): the upload's caller judged after
-/// `read_file_part` (`caller: Result<Authenticated, AppError>`).
+/// Planned and not run: the upload's caller judged after `read_file_part`
+/// (`caller: Result<Authenticated, AppError>`).
 #[tokio::test]
 async fn a_deleted_callers_request_is_answered_before_any_of_its_body_is_sent() {
     const BOUNDARY: &str = "kelircampaignboundary";
@@ -1226,10 +1231,11 @@ const MALFORMATIONS: [Malformation; 8] = [
 /// be answered 401, and each malformation must be refused for itself on at
 /// least one operation, or it is not a malformation.
 ///
-/// Mutations planned against it (not yet run): `PathParam` placed before `caller` in one
-/// handler (`identity::handlers::get_user`); `JsonBody` placed before `caller`
-/// in another (`identity::handlers::create_user`, with the source guard below
-/// red too); the check applied to `GET` only.
+/// Seen red: `PathParam` placed before `caller` in
+/// `identity::handlers::get_user` (6 of 3,036 cells, and the source guard
+/// below; the builder's walk and its count guard stayed green). Planned and
+/// not run: `QueryParams` placed before `caller` in `list_users`; the check
+/// applied to `GET` only.
 #[tokio::test]
 async fn a_deleted_caller_is_refused_before_a_malformed_path_body_or_query_is_judged() {
     let operations = authenticated_operations();
@@ -1638,9 +1644,10 @@ async fn document_type(app: &TestApp, token: &str, code: &str) -> Value {
 /// extractor kept it, the handler would wait for the only connection there
 /// is, held by its own request, until the acquire timeout.
 ///
-/// Mutation planned against it (not yet run): the extractor acquiring a connection and
-/// keeping it for two seconds past its return (500 `INTERNAL_ERROR` after the
-/// five-second acquire timeout).
+/// Seen red: the extractor acquiring a connection and keeping it for two
+/// seconds past its return (ten requests took 20.6 s; the burst below was
+/// red with it, on 500s from the acquire timeout). No test of the builder's
+/// reddened.
 #[tokio::test]
 async fn through_a_pool_of_one_connection_a_transactional_route_is_served() {
     let app = TestApp::spawn().await;
@@ -1810,8 +1817,9 @@ async fn a_burst_wider_than_the_pool_is_served_and_the_deleted_caller_in_it_refu
 /// signature and the expiry are judged before the database is asked. When a
 /// connection comes back the caller is served.
 ///
-/// Mutations planned against it (not yet run): a failed lookup answered as a pass; a failed
-/// lookup answered 401; the lookup made before `verify_access_token`.
+/// Seen red, and by no test of the builder's: a connection taken before
+/// `verify_access_token`. Planned and not run: a failed lookup answered as a
+/// pass; a failed lookup answered 401.
 #[tokio::test]
 async fn a_pool_with_no_connection_to_give_fails_closed_and_refuses_bad_tokens_without_waiting() {
     let app = TestApp::spawn().await;
@@ -1893,8 +1901,8 @@ async fn a_pool_with_no_connection_to_give_fails_closed_and_refuses_bad_tokens_w
 /// This is a sample discarded for its precondition, not a retry of a failed
 /// assertion: nothing is asserted on a sample whose second moved.
 ///
-/// Mutations planned against it (not yet run), on every run of twenty: `validation.leeway =
-/// 1`; the leeway left at the library's sixty.
+/// Planned and not run: `validation.leeway = 1`, and the leeway left at the
+/// library's sixty, each over twenty runs.
 #[tokio::test]
 async fn within_one_second_a_token_that_expired_the_second_before_is_refused() {
     let app = TestApp::spawn().await;
