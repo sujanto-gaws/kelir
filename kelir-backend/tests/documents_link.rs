@@ -90,9 +90,18 @@ async fn a_link_needs_both_of_its_halves() {
     let type_id = plain_type(&app, &token, "PR_LINK_PAIR").await;
     let supplier = party(&app, &token, "LINK-PAIR-1").await;
 
-    for body in [
-        json!({ "documentTypeId": type_id, "title": "Half a link", "entityType": "PARTY" }),
-        json!({ "documentTypeId": type_id, "title": "Half a link", "entityId": supplier }),
+    for (body, missing, sentence) in [
+        (
+            json!({ "documentTypeId": type_id, "title": "Half a link", "entityType": "PARTY" }),
+            "entityId",
+            "an entityType names no record without one",
+        ),
+        (
+            json!({ "documentTypeId": type_id, "title": "Half a link", "entityId": supplier }),
+            "entityType",
+            "an entityId alone could mean a party or a facility, and the two are different \
+             records",
+        ),
     ] {
         let refused = create(&app, &token, body).await;
 
@@ -120,6 +129,26 @@ async fn a_link_needs_both_of_its_halves() {
             "a run of two or more spaces: {message:?}"
         );
         assert!(!message.contains('\n'), "a line break: {message:?}");
+
+        // And each sentence whole, naming the half that is missing. The two
+        // assertions above pass a continuation that runs two words together
+        // ("the twoare"): seen green, 8 of 8, with the blank before the `\`
+        // removed, and red here.
+        assert_eq!(
+            (
+                refused.body["error"]["details"][0]["path"].as_str(),
+                message
+            ),
+            (Some(missing), sentence),
+            "{}",
+            refused.body
+        );
+        assert_eq!(
+            refused.body["error"]["details"].as_array().map(Vec::len),
+            Some(1),
+            "{}",
+            refused.body
+        );
     }
 
     // And the whole thing is accepted, so the assertions above are not green

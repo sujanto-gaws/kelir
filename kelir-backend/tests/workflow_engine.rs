@@ -432,7 +432,7 @@ async fn a_document_under_a_workflow_cannot_have_its_status_set_by_hand() {
     );
 
     // The refusal names the instance in one line (#558's sweep): its literal
-    // carried two runs of nine spaces, as the kind-mismatch one carried 34.
+    // carried two runs of ten spaces, as the kind-mismatch one carried 34.
     let message = refused.body["error"]["message"]
         .as_str()
         .expect("a message");
@@ -446,6 +446,31 @@ async fn a_document_under_a_workflow_cannot_have_its_status_set_by_hand() {
         "a run of two or more spaces: {message:?}"
     );
     assert!(!message.contains('\n'), "a line break: {message:?}");
+
+    // The sentence whole, naming the instance that is deciding. The three
+    // assertions above pass a continuation that runs two words together
+    // ("its statusfollows") and a word dropped from the second half: both seen
+    // green with this assertion absent, and red with it.
+    let instance: Uuid =
+        sqlx::query_scalar("SELECT id FROM workflow_instances WHERE document_id = $1")
+            .bind(id)
+            .fetch_one(&app.pool)
+            .await
+            .expect("the instance deciding the document");
+
+    assert_eq!(
+        message,
+        format!(
+            "this document is being decided by workflow instance {instance}; its status \
+             follows that process rather than being set directly. Act on the task instead — a \
+             status written here would disagree with the process the moment it moved"
+        )
+    );
+    assert_eq!(
+        refused.body["error"]["code"], "CONFLICT",
+        "{}",
+        refused.body
+    );
     assert_eq!(
         stored_status(&app, id).await,
         "PENDING_APPROVAL",
