@@ -8,7 +8,9 @@
 //!
 //! A call begins when its endpoint is found. A caller refused for permission,
 //! or naming a system or endpoint that is not in their tenant, has made no
-//! call and gets no row. **From there, every path ends in [`test_call`]'s one
+//! call and gets no row. Nor has a caller whose token is refused: a deleted
+//! tenant's, or a deleted user's, is a 401 before this module is reached
+//! (#650, D-105; it answers #648). **From there, every path ends in [`test_call`]'s one
 //! insert**: [`attempt`] returns what happened, success or any failure, and
 //! the row is written from that before the response is built. A refusal before
 //! anything left the process — an inactive system, a `vault://` reference, an
@@ -270,6 +272,13 @@ async fn attempt(
     // The caller's tenant code, and every other live tenant's, in one read
     // and before the environment is (#618). From the caller's `tenant_id`,
     // never from the request, the token or the reference.
+    //
+    // **The "not live" branch below is a race and nothing else.** A deleted
+    // tenant's token is refused by `middleware::auth` before this is reached
+    // (#650), so the caller's tenant is missing here only if it was deleted
+    // between that read and this one. No request can stage it; it fails
+    // closed, as a 500 with a `FAILED` row, and resolves nothing.
+    // `domain::secret`'s unit test of `TenantNamespaces::for_caller` holds it.
     let live = organization::live_tenant_codes(&state.pool)
         .await
         .map_err(Failure::Internal)?;

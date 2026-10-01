@@ -211,7 +211,7 @@ async fn setting_a_password_ends_every_refresh_token_for_that_user() {
     // password stops being able to extend their session.
     //
     // It ends the refresh tokens, not the access token already issued — that
-    // one works until it stops being accepted, at most sixteen minutes from
+    // one works until it expires, at most fifteen minutes from
     // issue, which is the documented cost of carrying permissions in the token. #16 and #60 carry the same gap on the
     // self-service path, where the contract claims otherwise.
     let app = TestApp::spawn().await;

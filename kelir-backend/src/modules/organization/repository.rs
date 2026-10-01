@@ -243,9 +243,11 @@ pub async fn soft_delete(
 /// renewed, not merely stop new sign-ins — the same rule `identity::service`
 /// applies to a deactivated account, for the same reason: a refresh token
 /// issued a minute ago is still valid otherwise. An access token already
-/// issued is not reached: it works until it stops being accepted, at most 16
-/// minutes from issue (SDD §11.1, decision D-104). This is the half that can
-/// be revoked, and it is what stops the session being extended.
+/// issued is not reached by this: a suspended or inactive tenant's works until
+/// it expires, at most 15 minutes from issue (SDD §11.1, decision D-104), and
+/// a deleted tenant's is refused on its next request by `middleware::auth`
+/// (D-105). This is the half that can be revoked, and it is what stops the
+/// session being extended.
 pub async fn revoke_sessions(
     executor: impl PgExecutor<'_>,
     tenant_id: Uuid,

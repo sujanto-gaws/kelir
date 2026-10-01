@@ -1010,7 +1010,7 @@ mod tests {
     #[tokio::test]
     async fn the_change_password_contract_does_not_promise_more_than_it_delivers() {
         // #60: the 204 read "every session for the account ends", while only
-        // refresh tokens are revoked — false for up to sixteen minutes, in the
+        // refresh tokens are revoked — false for up to fifteen minutes, in the
         // shared-machine case the doc comment gives as its justification. The
         // wording was narrowed rather than the behaviour changed
         // (architecture 01 §18.1 keeps authorization off the database), and

@@ -142,7 +142,9 @@ pub struct TenantNamespaces {
 
 impl TenantNamespaces {
     /// `None` when the caller's tenant is not among `live` — a tenant deleted
-    /// under a session still open. Nothing is resolved for it.
+    /// between the request's admission and this read, since a deleted
+    /// tenant's token is refused before any route (#650). Nothing is resolved
+    /// for it.
     pub fn for_caller(caller: uuid::Uuid, live: Vec<(uuid::Uuid, String)>) -> Option<Self> {
         let mut caller_code = None;
         let mut other_codes = Vec::with_capacity(live.len());

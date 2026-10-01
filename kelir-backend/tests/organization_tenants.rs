@@ -551,19 +551,21 @@ async fn a_suspended_tenant_stops_admitting_the_administrator_it_was_created_wit
 //
 // **A decision, not a defect** (D-104, answered A by the product owner on
 // 2026-10-01). Sign-in and refresh are refused the moment a tenant is
-// suspended, deactivated or deleted. An access token issued before that is
-// checked by signature and expiry only (`middleware::auth`), so it keeps
-// working until it stops being accepted: at most `ACCESS_TOKEN_TTL_MINUTES`
-// from issue plus the 60 seconds of leeway verification allows, 16 minutes.
-// That window is the stated limit for a suspended or inactive tenant; D-104
-// does not decide a deleted one (#650, open). The tests below send one read
-// and one write, not every route.
+// suspended, deactivated or deleted. For an access token issued before
+// that, `middleware::auth` checks signature and expiry, and that the tenant
+// and the user are not *deleted*; it does not read `status`. So a suspended
+// or inactive tenant's token keeps working until it expires: at most
+// `ACCESS_TOKEN_TTL_MINUTES` from issue, 15 minutes, with no leeway. That
+// window is the stated limit for a suspended or inactive tenant. A deleted
+// one is D-105's case (#650): its token is refused at once, which the last
+// test of this group and `auth_deleted_caller.rs` hold. The tests below send
+// one read and one write, not every route.
 //
 // The tests below pin both halves, so neither can move unnoticed: the token
 // works inside the window, and the window closes. A change that makes the
-// middleware look the tenant up turns the first two red, and that is them
-// working: such a change reverses D-104 and needs the decision reopened, not
-// these assertions edited.
+// middleware read the tenant's status turns the first two red, and that is
+// them working: such a change reverses D-104 and needs the decision
+// reopened, not these assertions edited.
 // ---------------------------------------------------------------------------
 
 const USERS: &str = "/api/v1/identity/users";
@@ -784,12 +786,11 @@ async fn a_tenant_that_left_has_its_expired_access_token_refused_and_nothing_ren
     // ends: the token above stops at its expiry, and a tenant that is not
     // `ACTIVE` has no way to another one.
     //
-    // Aged past `ACCESS_TOKEN_TTL_MINUTES` by two minutes rather than by a
-    // second: `jsonwebtoken`'s default `Validation` allows 60 seconds of
-    // leeway on `exp`, which `verify_access_token` does not turn off.
+    // Aged past `ACCESS_TOKEN_TTL_MINUTES` by one second:
+    // `verify_access_token` allows no leeway on `exp`.
     use kelir_backend::modules::auth::token::ACCESS_TOKEN_TTL_MINUTES;
 
-    let past_expiry = ACCESS_TOKEN_TTL_MINUTES * 60 + 120;
+    let past_expiry = ACCESS_TOKEN_TTL_MINUTES * 60 + 1;
 
     let app = multi_tenant_app().await;
     let token = administering_token(&app).await;

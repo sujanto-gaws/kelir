@@ -206,8 +206,10 @@ async fn changing_a_password_revokes_every_refresh_token() {
 async fn an_access_token_issued_before_a_password_change_still_works() {
     // **This pins a gap, not a guarantee.** Access tokens are stateless JWTs
     // checked against no revocation list (architecture 01 §18.1), so one issued
-    // before the change stays valid until it expires — up to fifteen minutes,
-    // and is accepted for 60 seconds of leeway after that.
+    // before the change stays valid until it expires — up to fifteen minutes
+    // and no longer, since verification allows no leeway (#650). The check
+    // `middleware::auth` makes on every request reads deletion, not a
+    // password.
     //
     // The OpenAPI response used to claim "every session for the account ends",
     // which is what #60 found. The wording now says what happens; this test is

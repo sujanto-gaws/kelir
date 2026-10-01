@@ -224,17 +224,20 @@ async fn a_deleted_users_access_token_and_refresh_token_are_both_refused_at_once
 async fn by_decision_d_104_a_deactivated_users_access_token_works_until_it_expires() {
     // **Intended, and bounded** (D-104, answered A by the product owner on
     // 2026-10-01): an access token outlives the deactivation of its user by at
-    // most its lifetime, `ACCESS_TOKEN_TTL_MINUTES` from issue, plus the 60
-    // seconds of leeway verification allows: 16 minutes. Sign-in and
-    // refresh are refused at once; the token already issued is checked by
-    // signature and expiry only (`middleware::auth`).
+    // most its lifetime, `ACCESS_TOKEN_TTL_MINUTES` from issue: 15 minutes,
+    // with no leeway. Sign-in and refresh are refused at once; for the token
+    // already issued, `middleware::auth` checks signature and expiry, and
+    // that the user and the tenant are not *deleted* (D-105). It does not
+    // read `status`.
     //
-    // Do not "fix" this test. A change that makes the middleware look the
-    // user up turns it red, and that is it working: such a change reverses
-    // D-104 and needs the decision reopened, not these assertions edited.
+    // Do not "fix" this test. A change that makes the middleware read the
+    // user's status turns it red, and that is it working: such a change
+    // reverses D-104 and needs the decision reopened, not these assertions
+    // edited.
     //
-    // The test above deactivates by `DELETE`; this one by `status`, the other
-    // way an account is taken out of use, and it tries a write as well.
+    // The test above removes the account by `DELETE`, which is D-105's case
+    // and is refused at once; this one sets `status`, the other way an
+    // account is taken out of use, and it tries a write as well.
     use kelir_backend::modules::auth::token::ACCESS_TOKEN_TTL_MINUTES;
 
     let app = TestApp::spawn().await;
@@ -309,10 +312,9 @@ async fn by_decision_d_104_a_deactivated_users_access_token_works_until_it_expir
     assert_eq!(rotated.status, StatusCode::UNAUTHORIZED);
 
     // ...and the token itself ends. Its own claims under the same signature,
-    // as they will be two minutes after its lifetime: two minutes rather than
-    // a second because `jsonwebtoken` allows 60 seconds of leeway on `exp` by
-    // default, which `verify_access_token` does not turn off.
-    let past_expiry = ACCESS_TOKEN_TTL_MINUTES * 60 + 120;
+    // as they will be one second after its lifetime: `verify_access_token`
+    // allows no leeway on `exp`.
+    let past_expiry = ACCESS_TOKEN_TTL_MINUTES * 60 + 1;
 
     // Control: re-signed with its expiry untouched it is still accepted, so
     // what refuses the aged one is its age and not that this test minted it.

@@ -11,10 +11,27 @@ use crate::error::AppError;
 ///
 /// Short by design: an access token cannot be revoked, so the time it is
 /// accepted for is the window in which a stolen one is useful. That is this
-/// plus 60 seconds: [`verify_access_token`] leaves `jsonwebtoken`'s default
-/// leeway on `exp` in place, so a token is accepted for up to 16 minutes from
-/// issue. Continuity comes from the refresh token, which can be revoked.
+/// and no longer: [`verify_access_token`] allows no leeway on `exp`
+/// ([`ACCESS_TOKEN_LEEWAY_SECONDS`]). Continuity comes from the refresh
+/// token, which can be revoked.
+///
+/// One thing ends a token sooner: its tenant or its user being deleted, which
+/// `middleware::auth::Authenticated` reads on every request (#650, D-105).
 pub const ACCESS_TOKEN_TTL_MINUTES: i64 = 15;
+
+/// How long past its `exp` an access token is still accepted: not at all.
+///
+/// **Set explicitly because the library's default is not zero.**
+/// `jsonwebtoken::Validation` allows 60 seconds unless told otherwise, and
+/// until #650 that default stood unnoticed: every bound written as "15
+/// minutes" was 16. A named zero is what stops the default coming back with
+/// a change that builds its own `Validation`.
+///
+/// The cost is clock skew. A token issued by one instance and verified by
+/// another whose clock is ahead is refused that much early, so replicas must
+/// keep their clocks within well under a second of each other
+/// (the installation guide says so; the shipped compose files run one backend).
+pub const ACCESS_TOKEN_LEEWAY_SECONDS: u64 = 0;
 
 /// How long a refresh token stays valid. Rotated on every use.
 pub const REFRESH_TOKEN_TTL_DAYS: i64 = 30;
@@ -24,7 +41,9 @@ pub const REFRESH_TOKEN_TTL_DAYS: i64 = 30;
 /// Permissions are embedded so authorisation does not query the database on
 /// every request. The cost is staleness: a permission revoked mid-session takes
 /// effect when the access token stops being accepted, within
-/// `ACCESS_TOKEN_TTL_MINUTES` plus the 60 seconds of leeway verification allows.
+/// `ACCESS_TOKEN_TTL_MINUTES`. Deletion is the exception and is not read from
+/// here: a deleted tenant's token, and a deleted user's, is refused on its
+/// next request (#650, D-105).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccessClaims {
     /// Subject — the user id.
@@ -87,6 +106,7 @@ pub fn issue_access_token(
 pub fn verify_access_token(secret: &str, token: &str) -> Result<AccessClaims, AppError> {
     let mut validation = Validation::new(Algorithm::HS256);
     validation.validate_exp = true;
+    validation.leeway = ACCESS_TOKEN_LEEWAY_SECONDS;
 
     decode::<AccessClaims>(
         token,
@@ -235,6 +255,12 @@ mod tests {
             &EncodingKey::from_secret(SECRET.as_bytes()),
         )
         .expect("signs")
+    }
+
+    #[test]
+    fn the_leeway_is_a_named_zero() {
+        // At compile time, so it cannot be changed without this line.
+        const _: () = assert!(ACCESS_TOKEN_LEEWAY_SECONDS == 0);
     }
 
     #[test]

@@ -117,7 +117,7 @@ async fn create_tenant(
     put, path = "/api/v1/organization/tenants/{id}", tag = "organization",
     request_body = UpdateTenantRequest,
     responses(
-        (status = 200, description = "Updated; suspending a tenant also revokes its refresh tokens", body = TenantView),
+        (status = 200, description = "Updated; suspending a tenant also revokes its refresh tokens. An access token already issued to a user of a suspended or inactive tenant remains valid until it expires.", body = TenantView),
         (status = 400, description = "Refusing to suspend the tenant the request came from"),
         (status = 404, description = "No such tenant")
     ),
@@ -137,7 +137,7 @@ async fn update_tenant(
 #[utoipa::path(
     delete, path = "/api/v1/organization/tenants/{id}", tag = "organization",
     responses(
-        (status = 204, description = "Soft-deleted; its refresh tokens are revoked and its users can no longer sign in. An access token already issued remains valid until it expires."),
+        (status = 204, description = "Soft-deleted; its refresh tokens are revoked and its users can no longer sign in. An access token already issued to one of its users is refused at once, on every route, with 401."),
         (status = 400, description = "Refusing to delete the tenant the request came from")
     ),
     security(("bearer" = []))

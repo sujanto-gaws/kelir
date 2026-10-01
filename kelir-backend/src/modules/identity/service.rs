@@ -6,8 +6,8 @@ use uuid::Uuid;
 use super::domain::{
     open_tasks_refusal, published_definitions_refusal, validate_create_role, validate_create_user,
     validate_distinct_ids, validate_password_value, validate_update_role, with_staffing,
-    CreateRoleRequest, CreateUserRequest, Permission, Role, RoleQuery, UpdateRoleRequest,
-    UpdateUserRequest, User, UserQuery, UserStatus, ROLE_HAS_OPEN_TASKS,
+    CreateRoleRequest, CreateUserRequest, Permission, Role, RoleQuery, TokenSubject,
+    UpdateRoleRequest, UpdateUserRequest, User, UserQuery, UserStatus, ROLE_HAS_OPEN_TASKS,
     ROLE_NAMED_BY_PUBLISHED_DEFINITION,
 };
 use super::repository as repo;
@@ -23,6 +23,25 @@ use crate::modules::workflow::TASK_REASSIGN;
 use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
 use crate::utils::search::search_term;
+
+/// Whether the tenant and the user an access token names are deleted (#650,
+/// decision D-105; ADR-0045).
+///
+/// For `middleware::auth::Authenticated`, which asks on every authenticated
+/// request and refuses the token unless [`TokenSubject::is_live`]. No caller
+/// check: this is what decides whether there is a caller. A database error is
+/// returned as one — the extractor answers it 5xx, never as a pass and never
+/// as a 401.
+///
+/// It takes an executor and holds nothing: one statement, and the connection
+/// is back in the pool before the handler runs.
+pub async fn token_subject(
+    executor: impl sqlx::PgExecutor<'_>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+) -> Result<TokenSubject, AppError> {
+    Ok(repo::token_subject(executor, tenant_id, user_id).await?)
+}
 
 pub async fn list_users(
     state: &AppState,
@@ -239,6 +258,11 @@ pub async fn deactivate_user(
         return Err(AppError::not_found("User"));
     }
 
+    // The refresh tokens, so the session cannot be started again. The access
+    // token already issued needs nothing done here: the row is deleted, and
+    // `middleware::auth` refuses a deleted user's token on its next request
+    // (#650, decision D-105). Setting `status` to `INACTIVE` in `update_user`
+    // is the other case, D-104's, and does not end a token.
     repo::revoke_all_for_user(&state.pool, id, "account deleted").await?;
 
     audit::record_or_warn(

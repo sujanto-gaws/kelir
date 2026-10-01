@@ -464,8 +464,9 @@ pub async fn update_tenant(
     // suspended tenant, but a refresh token issued a minute ago would otherwise
     // keep a session alive indefinitely — the mirror of what `update_user` does
     // for an account. An access token already issued is not reached by this: it
-    // works until it stops being accepted, at most 16 minutes from issue
-    // (SDD §11.1, decision D-104).
+    // works until it expires, at most 15 minutes from issue (SDD §11.1,
+    // decision D-104). Suspension and deactivation are a status; only deletion
+    // ends a token at once (D-105).
     if matches!(request.status, Some(status) if !status.admits_sign_in()) {
         let revoked = repository::revoke_sessions(&state.pool, id, "tenant suspended").await?;
         tracing::info!(tenant_id = %id, revoked, "revoked sessions for a suspended tenant");
@@ -502,9 +503,11 @@ pub async fn update_tenant(
 /// Its users, roles and data are left in place rather than cascaded: a
 /// soft-deleted tenant resolves to nothing at sign-in, which is what makes the
 /// data unreachable to a new sign-in, and hard-deleting it would take the audit
-/// trail with it. A session already open is not ended: its access token still
-/// reads and writes until it stops being accepted, at most 16 minutes from
-/// issue. D-104 does not decide that for a deleted tenant (#650, open).
+/// trail with it. A session already open is ended at once: every access token
+/// the tenant's users hold is refused on its next request, on every route,
+/// because `middleware::auth::Authenticated` reads the tenant's `deleted_at`
+/// on each one (#650, decision D-105; ADR-0045). Nothing here does that — it
+/// follows from the column this sets.
 pub async fn delete_tenant(
     state: &AppState,
     caller: &Authenticated,
