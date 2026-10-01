@@ -6059,20 +6059,38 @@ async fn deadlocks_once_settled(app: &TestApp) -> i64 {
 
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let left: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM pg_stat_activity
-             WHERE datname = $1 AND backend_type = 'client backend'",
+        // Each backend that is left, as one line, so a timeout names what it
+        // waited for (#637) rather than only saying that it waited.
+        let left: Vec<String> = sqlx::query_scalar(
+            "SELECT format(
+                 'pid %s, %s, %s, waiting on %s/%s, started %s ago, in this state for %s: %s',
+                 pid,
+                 COALESCE(NULLIF(application_name, ''), 'no application name'),
+                 COALESCE(state, 'no state'),
+                 COALESCE(wait_event_type, '-'),
+                 COALESCE(wait_event, '-'),
+                 now() - backend_start,
+                 now() - state_change,
+                 left(query, 300))
+             FROM pg_stat_activity
+             WHERE datname = $1 AND backend_type = 'client backend'
+             ORDER BY backend_start",
         )
         .bind(&app.database_name)
-        .fetch_one(&mut connection)
+        .fetch_all(&mut connection)
         .await
         .expect("read pg_stat_activity");
-        if left == 0 {
+        if left.is_empty() {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "the test database's backends never exited"
+            "the test database's backends never exited; the pool is closed: {}, \
+             and it counts {} connections, {} of them idle:\n{}",
+            app.pool.is_closed(),
+            app.pool.size(),
+            app.pool.num_idle(),
+            left.join("\n")
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
