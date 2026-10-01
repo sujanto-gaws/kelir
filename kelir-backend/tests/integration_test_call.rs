@@ -119,6 +119,36 @@
 //! | `ipv4_compatible` unwraps `::` | unit only: `cidr::ipv6_loopback_and_unspecified_are_not_ipv4_compatible_addresses`. Equivalent to the guard: `0.0.0.0` is unspecified too |
 //! | `ipv4_compatible` reads `::/80`, not `::/96` | unit only: `egress::an_ipv4_compatible_address_is_judged_as_the_address_it_carries`, `cidr::ipv6_loopback_and_unspecified_are_not_ipv4_compatible_addresses` |
 //! | `TestCallError`'s message offers `KELIR_INTEGRATION_ALLOWED_CIDRS` for every class but loopback | `a_cloud_metadata_address_is_refused_whatever_is_listed`; no unit test |
+//!
+//! **The test-engineer campaign on #622, seen red 2026-10-01**: thirteen
+//! mutations, eleven the table above does not list and two of its rows run
+//! again. Each was made, `--lib modules::integration utils::cidr`, this file
+//! and `integration_logs` run, the named tests observed red, and the mutation
+//! reverted. **The first four left every test of the builder's green**, and
+//! redden only the campaign's tests at the foot of this file.
+//!
+//! | Mutation | Reddened |
+//! |---|---|
+//! | `EgressPolicy::check`: the test seam opens `Metadata` as it opens `Loopback` | `the_test_seam_does_not_open_a_metadata_address`; no unit test |
+//! | `check`: a listed `/32` or `/128` host route opens `Metadata` | `a_metadata_address_is_refused_in_every_spelling_a_url_host_can_take`, `a_name_resolving_to_a_metadata_address_in_any_form_is_refused`; no unit test |
+//! | `TestCallError`'s message offers the setting for link-local, `169.254.169.254` included | `a_metadata_address_is_refused_in_every_spelling_a_url_host_can_take`, `the_ipv4_compatible_range_ends_where_it_is_written_to`; no unit test |
+//! | `cidr::ipv4_compatible` leaves `::2` alone with `::` and `::1` | `the_ipv4_compatible_range_ends_where_it_is_written_to`; no unit test |
+//! | `METADATA_ADDRESSES`: AWS's last group written `254`, not `0x0254` | `a_cloud_metadata_address_is_refused_whatever_is_listed` and four campaign tests; `egress::a_cloud_metadata_address_is_refused_whatever_is_listed`, `outbound::an_ip_literal_is_judged_without_a_lookup` |
+//! | `ipv4_compatible` reads `::/97`: addresses from `128.0.0.0` up are not unwrapped | `an_ipv4_compatible_address_is_judged_as_the_ipv4_address_it_carries` and three campaign tests; one `egress::` test |
+//! | `ipv4_compatible` reads `::/95` | `the_ipv4_compatible_range_ends_where_it_is_written_to`; one `egress::` and one `cidr::` test. No test of the builder's here |
+//! | `ipv4_compatible` skips the addresses that carry `0.0.0.0/8` | `an_ipv4_compatible_address_is_judged_as_the_ipv4_address_it_carries`, `the_ipv4_compatible_range_ends_where_it_is_written_to`; one `egress::` test |
+//! | `Cidr::contains` unwraps the mapped form and not the compatible one | `the_ipv4_compatible_range_ends_where_it_is_written_to`; one `egress::` and one `cidr::` test. No test of the builder's here |
+//! | `Cidr::contains` reads the address as written, neither form unwrapped | the same campaign test; two `egress::` and two `cidr::` tests. No test of the builder's here |
+//! | `Cidr::contains` answers yes across families | the same campaign test, at a list entry written `::10.255.254.0/120`; one `egress::` and three `cidr::` tests. No test of the builder's here |
+//! | The builder's row again: the arm widened to `100.100.100.0/24` and `192.0.0.0/24` | now also `the_addresses_beside_a_metadata_address_are_judged_by_their_range`: a request names each IPv4 neighbour |
+//! | The builder's row again: `ipv4_compatible` reads `::/80` | now also `the_ipv4_compatible_range_ends_where_it_is_written_to` |
+//!
+//! **What the guard does not unwrap**, probed and left as ADR-0043 §2 and §6
+//! decide it: NAT64 (`64:ff9b::/96`, and the local-use `64:ff9b:1::/48`),
+//! 6to4 (`2002::/16`), Teredo (`2001::/32`), ISATAP under a public prefix and
+//! the IPv4-translated `::ffff:0:a.b.c.d` are public whatever IPv4 address
+//! they carry, the four metadata addresses included. No test here holds that
+//! either way: it is a decision, and its revisit trigger is the ADR's.
 
 mod common;
 
@@ -3200,4 +3230,500 @@ async fn a_code_no_route_stores_reads_upper_case_names_or_nothing() {
         "the collector received {:?}",
         collector.seen()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Added by the test-engineer campaign (#622, 2026-10-01): the spellings, the
+// names, the neighbours and the edges of `::/96` that the campaign's
+// mutations called for. The header's campaign table names the mutation each
+// one reddens under.
+// ---------------------------------------------------------------------------
+
+/// [`app_listing_everything`]'s list, and a host route to each metadata
+/// address in every form a list can write one: the widest list and the
+/// narrowest.
+fn everything_and_each_metadata_address() -> Vec<kelir_backend::utils::cidr::Cidr> {
+    [
+        "fd00::/8",
+        "100.64.0.0/10",
+        "192.0.0.0/24",
+        "169.254.0.0/16",
+        "0.0.0.0/0",
+        "::/0",
+        "100.100.100.200/32",
+        "192.0.0.192/32",
+        "fd00:ec2::254/128",
+        "169.254.169.254/32",
+        "::ffff:100.100.100.200/128",
+        "::100.100.100.200/128",
+    ]
+    .iter()
+    .map(|cidr| cidr.parse().expect("a CIDR"))
+    .collect()
+}
+
+/// Calls `target` and holds the answer to the whole of a refusal: `422
+/// EGRESS_REFUSED` naming `class`, one `FAILED` row saying the same, no
+/// `Authorization` recorded as sent, and the secret nowhere. Returns the
+/// message.
+async fn refused_as(
+    app: &TestApp,
+    token: &str,
+    target: &Target,
+    class: &str,
+    secret: &str,
+    label: &str,
+) -> String {
+    let response = call(app, token, target).await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{label}: {}",
+        response.body
+    );
+    assert_eq!(response.error_code(), Some("EGRESS_REFUSED"), "{label}");
+    let message = error_message(&response);
+    assert!(message.contains(class), "{label}: {message}");
+
+    let rows = log_rows(app, target.endpoint).await;
+    assert_eq!(rows.len(), 1, "{label}: {rows:?}");
+    assert_eq!(rows[0]["status"], "FAILED", "{label}");
+    // The caller's message ends with the row's id; the row carries the rest.
+    let told = message.split(" (integration log ").next().unwrap_or("");
+    assert_eq!(
+        rows[0]["error_message"].as_str(),
+        Some(format!("EGRESS_REFUSED: {told}").as_str()),
+        "{label}: the row says what the caller was told"
+    );
+    assert!(
+        rows[0]["request_payload_json"]["headers"]["Authorization"].is_null(),
+        "{label}: nothing was sent"
+    );
+    for text in [response.body.to_string(), rows[0].to_string()] {
+        assert!(!text.contains(secret), "{label}: {text}");
+    }
+
+    message
+}
+
+/// A call to `base`, which is an address nothing answers at from a test
+/// runner: past the guard, the call ends at the network within its
+/// one-second budget, with any answer but `EGRESS_REFUSED`.
+async fn call_to(app: &TestApp, token: &str, reference: &str, base: &str) -> TestResponse {
+    let target = target(app, token, base, "GET", "/x").await;
+    set_timeout(app, target.system, 1).await;
+    bearer(app, token, target.system, reference).await;
+
+    call(app, token, &target).await
+}
+
+#[tokio::test]
+async fn a_metadata_address_is_refused_in_every_spelling_a_url_host_can_take() {
+    // The URL parser reads each of these as one address before the guard
+    // sees it; the guard then reads the IPv6 forms that carry an IPv4
+    // address. Everything is listed, each address by its own host route too.
+    let app = TestApp::spawn_with(|config| {
+        config.integration_allowed_cidrs = everything_and_each_metadata_address();
+    })
+    .await;
+    let token = app.administrator_token().await;
+    let (reference, secret) = plant("kelir-planted-spelling-8d13");
+
+    let metadata = "a cloud metadata address";
+    let link_local = "a link-local address";
+
+    for (base, class) in [
+        // 100.100.100.200: one number, hex, upper-case hex, octal, the short
+        // forms, mixed radix, a trailing dot, percent-encoded, full-width
+        // digits and the ideographic full stop.
+        ("http://1684301000", metadata),
+        ("http://0x646464c8", metadata),
+        ("http://0x64.0x64.0x64.0xc8", metadata),
+        ("http://0X64.0X64.0X64.0XC8", metadata),
+        ("http://0144.0144.0144.0310", metadata),
+        ("http://100.100.25800", metadata),
+        ("http://100.6579400", metadata),
+        ("http://0x64.100.0144.200", metadata),
+        ("http://100.100.100.200.", metadata),
+        ("http://100.100.100.200:80", metadata),
+        ("http://%31%30%30.100.100.200", metadata),
+        ("http://１００.１００.１００.２００", metadata),
+        ("http://100。100。100。200", metadata),
+        ("https://100.100.100.200", metadata),
+        // The same address inside an IPv6 literal.
+        ("http://[::FFFF:6464:64C8]", metadata),
+        ("http://[0:0:0:0:0:ffff:6464:64c8]", metadata),
+        ("http://[::6464:64c8]", metadata),
+        ("http://[0000:0000:0000:0000:0000:0000:6464:64c8]", metadata),
+        // 192.0.0.192.
+        ("http://3221225664", metadata),
+        ("http://0xc0.0.0.0xc0", metadata),
+        ("http://0300.0.0.0300", metadata),
+        ("http://192.192", metadata),
+        ("http://192.0.192", metadata),
+        ("http://192.0.0.192.", metadata),
+        ("http://[::ffff:c000:c0]", metadata),
+        ("http://[::192.0.0.192]", metadata),
+        ("http://[::c000:c0]", metadata),
+        // fd00:ec2::254.
+        ("http://[FD00:EC2::254]", metadata),
+        ("http://[fd00:0ec2:0000:0000:0000:0000:0000:0254]", metadata),
+        ("http://[fd00:ec2:0:0:0:0:0:254]", metadata),
+        ("http://[fd00:ec2::0.0.2.84]", metadata),
+        ("http://[fd00:ec2::254]:8080", metadata),
+        // The address ADR-0043 named first, in the same spellings: link-local,
+        // and no setting is offered for it either.
+        ("http://2852039166", link_local),
+        ("http://0xa9.0xfe.0xa9.0xfe", link_local),
+        ("http://0251.0376.0251.0376", link_local),
+        ("http://169.254.43518", link_local),
+        ("http://169.254.169.254.", link_local),
+        ("http://[::ffff:a9fe:a9fe]", link_local),
+        ("http://[::a9fe:a9fe]", link_local),
+    ] {
+        let target = target(&app, &token, base, "GET", "/latest/meta-data").await;
+        set_timeout(&app, target.system, 1).await;
+        bearer(&app, &token, target.system, &reference).await;
+
+        let message = refused_as(&app, &token, &target, class, &secret, base).await;
+
+        assert!(
+            !message.contains("KELIR_INTEGRATION_ALLOWED_CIDRS"),
+            "{base}: no setting opens it, so none is offered: {message}"
+        );
+    }
+
+    // A zone id is not a host the API stores, so there is nothing to call.
+    for base in ["http://[fd00:ec2::254%25eth0]", "http://[fe80::1%eth0]"] {
+        let response = app
+            .post(
+                BASE,
+                Some(&token),
+                json!({
+                    "systemCode": format!("SYS_{}", Uuid::now_v7().simple()),
+                    "systemName": "Zoned",
+                    "baseUrl": base,
+                }),
+            )
+            .await;
+
+        assert_eq!(
+            response.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{base}: {}",
+            response.body
+        );
+        assert_eq!(response.error_code(), Some("VALIDATION_ERROR"), "{base}");
+    }
+}
+
+#[tokio::test]
+async fn a_name_resolving_to_a_metadata_address_in_any_form_is_refused() {
+    // The zone's answer is judged as a literal is: each of the three, alone
+    // and behind a public address, and in the IPv6 forms a resolver may give
+    // an IPv4 answer in. 203.0.113.7 (TEST-NET-3) is public. The third
+    // member is text the refusal must not show.
+    let names: [(&str, &[&str], &str); 9] = [
+        (
+            "alibaba.kelir.test",
+            &["100.100.100.200"],
+            "100.100.100.200",
+        ),
+        ("oracle.kelir.test", &["192.0.0.192"], "192.0.0.192"),
+        (
+            "oracle-second.kelir.test",
+            &["203.0.113.7", "192.0.0.192"],
+            "192.0.0.192",
+        ),
+        ("aws.kelir.test", &["fd00:ec2::254"], "fd00:ec2::254"),
+        (
+            "aws-third.kelir.test",
+            &["203.0.113.7", "2001:db8::7", "fd00:ec2::254"],
+            "fd00:ec2::254",
+        ),
+        (
+            "mapped.kelir.test",
+            &["::ffff:100.100.100.200"],
+            "100.100.100.200",
+        ),
+        (
+            "compatible.kelir.test",
+            &["203.0.113.7", "::192.0.0.192"],
+            "c000:c0",
+        ),
+        (
+            "first.kelir.test",
+            &["100.100.100.200", "203.0.113.7"],
+            "100.100.100.200",
+        ),
+        // A private answer the list opens, then the address no list opens.
+        (
+            "private-then-metadata.kelir.test",
+            &["fd00:ec2::253", "fd00:ec2::254"],
+            "fd00:ec2::25",
+        ),
+    ];
+
+    let app = TestApp::spawn_with(|config| {
+        config.integration_allowed_cidrs = everything_and_each_metadata_address();
+        for (name, addresses, _) in names {
+            config.integration_dns_overrides.insert(
+                name.to_owned(),
+                addresses
+                    .iter()
+                    .map(|address| address.parse().expect("an address"))
+                    .collect(),
+            );
+        }
+    })
+    .await;
+    let token = app.administrator_token().await;
+    let (reference, secret) = plant("kelir-planted-zone-3f6b");
+
+    for (name, _, address) in names {
+        // The lookup is by name, whatever case the URL writes it in.
+        let base = format!("http://{}", name.to_uppercase());
+        let target = target(&app, &token, &base, "GET", "/latest/meta-data").await;
+        set_timeout(&app, target.system, 1).await;
+        bearer(&app, &token, target.system, &reference).await;
+
+        let message = refused_as(
+            &app,
+            &token,
+            &target,
+            "a cloud metadata address",
+            &secret,
+            name,
+        )
+        .await;
+
+        assert!(
+            !message.contains("KELIR_INTEGRATION_ALLOWED_CIDRS"),
+            "{name}: {message}"
+        );
+        let row = log_rows(&app, target.endpoint).await[0].to_string();
+        for text in [message, row] {
+            assert!(
+                !text.contains(address),
+                "{name}: no address is shown: {text}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_test_seam_does_not_open_a_metadata_address() {
+    // `integration_allow_loopback` opens loopback for the mock and nothing
+    // else: a metadata address is refused under it, by literal and by name,
+    // and the mock on loopback is still reached.
+    let app = TestApp::spawn_with(|config| {
+        config.integration_allow_loopback = true;
+        config.integration_dns_overrides.insert(
+            "seam.kelir.test".to_owned(),
+            vec![
+                "127.0.0.1".parse().expect("an address"),
+                "192.0.0.192".parse().expect("an address"),
+            ],
+        );
+    })
+    .await;
+    let token = app.administrator_token().await;
+    let mock = Mock::start().await;
+    let (reference, secret) = plant("kelir-planted-seam-a41c");
+
+    for base in [
+        "http://100.100.100.200".to_owned(),
+        "http://192.0.0.192".to_owned(),
+        "http://[fd00:ec2::254]".to_owned(),
+        "http://[::100.100.100.200]".to_owned(),
+        format!("http://seam.kelir.test:{}", mock.address.port()),
+    ] {
+        let target = target(&app, &token, &base, "GET", "/echo").await;
+        set_timeout(&app, target.system, 1).await;
+        bearer(&app, &token, target.system, &reference).await;
+
+        refused_as(
+            &app,
+            &token,
+            &target,
+            "a cloud metadata address",
+            &secret,
+            &base,
+        )
+        .await;
+    }
+    assert!(mock.seen().is_empty(), "{:?}", mock.seen());
+
+    let open = target(&app, &token, &mock.base_url(), "GET", "/echo").await;
+    bearer(&app, &token, open.system, &reference).await;
+    let response = call(&app, &token, &open).await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    assert_eq!(mock.seen().len(), 1);
+}
+
+#[tokio::test]
+async fn the_addresses_beside_a_metadata_address_are_judged_by_their_range() {
+    // The three are addresses, not ranges. With nothing listed, the IPv4
+    // neighbours are public and go out, and the rest of AWS's
+    // `fd00:ec2::/32` is unique-local: refused as private, the setting
+    // offered.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let (reference, secret) = plant("kelir-planted-neighbour-c27e");
+
+    for base in [
+        "http://100.100.100.199",
+        "http://100.100.100.201",
+        "http://192.0.0.191",
+        "http://192.0.0.193",
+    ] {
+        let response = call_to(&app, &token, &reference, base).await;
+
+        assert_ne!(
+            response.error_code(),
+            Some("EGRESS_REFUSED"),
+            "{base} is public: {}",
+            response.body
+        );
+    }
+
+    let aws_neighbours = [
+        "http://[fd00:ec2::253]",
+        "http://[fd00:ec2::255]",
+        "http://[fd00:ec2::23]",
+        "http://[fd00:ec2::fe]",
+        "http://[fd00:ec2:0:0:1::254]",
+    ];
+    for base in aws_neighbours {
+        let target = target(&app, &token, base, "GET", "/x").await;
+        set_timeout(&app, target.system, 1).await;
+        bearer(&app, &token, target.system, &reference).await;
+
+        let message = refused_as(&app, &token, &target, "a private address", &secret, base).await;
+
+        assert!(
+            message.contains("KELIR_INTEGRATION_ALLOWED_CIDRS"),
+            "{base}: a listed range opens it, so the setting is offered: {message}"
+        );
+    }
+
+    // Installation §7.1's example opens every one of them, and not the
+    // metadata address among them.
+    let app = TestApp::spawn_with(|config| {
+        config.integration_allowed_cidrs = vec!["fd00::/8".parse().expect("a CIDR")];
+    })
+    .await;
+    let token = app.administrator_token().await;
+
+    for base in aws_neighbours {
+        let response = call_to(&app, &token, &reference, base).await;
+
+        assert_ne!(
+            response.error_code(),
+            Some("EGRESS_REFUSED"),
+            "{base} is listed: {}",
+            response.body
+        );
+    }
+
+    let target = target(&app, &token, "http://[fd00:ec2::254]", "GET", "/x").await;
+    set_timeout(&app, target.system, 1).await;
+    bearer(&app, &token, target.system, &reference).await;
+    refused_as(
+        &app,
+        &token,
+        &target,
+        "a cloud metadata address",
+        &secret,
+        "fd00:ec2::254 under fd00::/8",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn the_ipv4_compatible_range_ends_where_it_is_written_to() {
+    // `::/96` less `::` and `::1`. Inside it an address is the IPv4 address
+    // it carries; one bit above it, an IPv6 address like any other.
+    let app = TestApp::spawn_with(|config| {
+        config.integration_allowed_cidrs = [
+            "10.255.255.0/24",
+            // Written in the forms the guard unwraps: neither opens the IPv4
+            // range it spells, and `::/0` holds no IPv4 address in any form.
+            "::10.255.254.0/120",
+            "::ffff:10.255.254.0/120",
+            "::/0",
+        ]
+        .iter()
+        .map(|cidr| cidr.parse().expect("a CIDR"))
+        .collect();
+    })
+    .await;
+    let token = app.administrator_token().await;
+    let (reference, secret) = plant("kelir-planted-edge-e90f");
+
+    for (base, class) in [
+        ("http://[::]", "an unspecified address"),
+        ("http://[::1]", "a loopback address"),
+        ("http://[::0.0.0.1]", "a loopback address"),
+        // The lowest address the range carries is 0.0.0.2, in 0.0.0.0/8.
+        ("http://[::2]", "an unspecified address"),
+        ("http://[::0.0.255.255]", "an unspecified address"),
+        ("http://[::0.255.255.255]", "an unspecified address"),
+        // And the highest is 255.255.255.255.
+        ("http://[::ffff:ffff]", "a multicast or broadcast address"),
+        ("http://[::224.0.0.1]", "a multicast or broadcast address"),
+        ("http://[::127.255.255.255]", "a loopback address"),
+        ("http://[::169.254.0.1]", "a link-local address"),
+    ] {
+        let target = target(&app, &token, base, "GET", "/x").await;
+        set_timeout(&app, target.system, 1).await;
+        bearer(&app, &token, target.system, &reference).await;
+
+        let message = refused_as(&app, &token, &target, class, &secret, base).await;
+
+        assert!(
+            !message.contains("KELIR_INTEGRATION_ALLOWED_CIDRS"),
+            "{base}: {message}"
+        );
+    }
+
+    // A private address in either IPv6 form is refused unless its IPv4 range
+    // is listed, and a list entry written in an IPv6 form lists nothing.
+    for base in [
+        "http://[::10.255.254.1]",
+        "http://[::ffff:10.255.254.1]",
+        "http://10.255.254.1",
+    ] {
+        let target = target(&app, &token, base, "GET", "/x").await;
+        set_timeout(&app, target.system, 1).await;
+        bearer(&app, &token, target.system, &reference).await;
+
+        let message = refused_as(&app, &token, &target, "a private address", &secret, base).await;
+
+        assert!(
+            message.contains("KELIR_INTEGRATION_ALLOWED_CIDRS"),
+            "{base}: {message}"
+        );
+    }
+
+    for base in [
+        // Listed by its IPv4 range, in both IPv6 forms.
+        "http://[::10.255.255.1]",
+        "http://[::ffff:10.255.255.1]",
+        // One bit above the /96, carrying loopback, a metadata address and a
+        // private address: none is an IPv4 address.
+        "http://[::1:7f00:1]",
+        "http://[::1:6464:64c8]",
+        "http://[::1:aff:fe01]",
+    ] {
+        let response = call_to(&app, &token, &reference, base).await;
+
+        assert_ne!(
+            response.error_code(),
+            Some("EGRESS_REFUSED"),
+            "{base}: {}",
+            response.body
+        );
+    }
 }
