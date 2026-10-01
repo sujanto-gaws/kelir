@@ -17,11 +17,23 @@
 //!
 //! # The lock ordering
 //!
-//! **Instance first, then task**, which is [`super::engine`]'s rule and applies
-//! to every path in this module. The check reads the *instance's* state to
-//! choose a transition, so §2.5 puts a lock on that too — and two paths taking
-//! the two rows in opposite orders is a deadlock at exactly the concurrency this
+//! **Instance first, then task, then a role**, which is [`super::engine`]'s
+//! rule and applies to every path in this module: `claim_task`, `delegate`,
+//! `reassign` and `decide` all take the instance through `lock_instance_then_task`
+//! or `lock_instance`. The check reads the *instance's* state to choose a
+//! transition, so §2.5 puts a lock on that too — and two paths taking the two
+//! rows in opposite orders is a deadlock at exactly the concurrency this
 //! feature is for.
+//!
+//! **A path takes the instance even when it never names it.** Each of them
+//! writes a `workflow_task_history` row, whose foreign key to
+//! `workflow_instances` takes `FOR KEY SHARE` on the instance. Until [#619]
+//! the hand-off, the claim and the reassign locked only the task, so the key
+//! took the instance *after* the task, and a decision holding the instance
+//! deadlocked with them. The cost of the fix is that task paths now serialize
+//! per instance.
+//!
+//! [#619]: https://github.com/sujanto-gaws/kelir/issues/619
 //!
 //! # Permission, and then the row
 //!
@@ -138,11 +150,20 @@ pub async fn claim_task(
     let tenant_id = caller.tenant_id();
     let user_id = caller.user_id();
 
-    let mut transaction = state.pool.begin().await?;
-
-    let locked = repo::lock_task(&mut transaction, tenant_id, id)
+    // The instance id, read on the pool for the lock order (#619).
+    let subject = repo::find_task(&state.pool, tenant_id, id)
         .await?
         .ok_or_else(|| AppError::not_found("Task"))?;
+
+    let mut transaction = state.pool.begin().await?;
+
+    let locked = lock_instance_then_task(
+        &mut transaction,
+        tenant_id,
+        subject.workflow_instance_id,
+        id,
+    )
+    .await?;
 
     refuse_unless_open(locked.status)?;
 
@@ -239,16 +260,20 @@ pub async fn claim_task(
 /// window that could not be complemented by a hand-off would leave those tasks
 /// stranded for the length of the leave.
 ///
-/// # One lock, and it is the task's
+/// # ~~One lock, and it is the task's~~ The instance, then the task ([#619])
 ///
-/// [`super::engine`]'s ordering rule is *instance first, then task*, and this
-/// path takes only the second of them — which keeps the rule rather than bending
-/// it, because a path that takes one lock cannot invert an order. The instance
-/// is not read and not moved: nothing here depends on where the process is, only
-/// on who holds the task, and locking a running instance to change an assignee
-/// would block every decision on it for no benefit.
+/// [`super::engine`]'s ordering rule is *instance first, then task*. **This
+/// path used to take only the second**, on the argument that a path taking one
+/// lock cannot invert an order, and that locking a running instance to change
+/// an assignee would block every decision on it for no benefit. The argument
+/// missed a lock: the `workflow_task_history` row below has a foreign key to
+/// `workflow_instances`, and inserting it takes `FOR KEY SHARE` on the
+/// instance. So the path took the task, then the instance, and deadlocked
+/// with a decision taking them the other way. It now takes both, through
+/// `lock_instance_then_task`. The instance is still not read and not moved.
 ///
 /// [#184]: https://github.com/sujanto-gaws/kelir/issues/184
+/// [#619]: https://github.com/sujanto-gaws/kelir/issues/619
 pub async fn delegate(
     state: &AppState,
     caller: &Authenticated,
@@ -272,11 +297,20 @@ pub async fn delegate(
     // long is too long whatever the task turns out to be.
     let comment = normalize_comment(request.comment)?;
 
-    let mut transaction = state.pool.begin().await?;
-
-    let task = repo::lock_task(&mut transaction, tenant_id, id)
+    // The instance id, read on the pool for the lock order (#619).
+    let subject = repo::find_task(&state.pool, tenant_id, id)
         .await?
         .ok_or_else(|| AppError::not_found("Task"))?;
+
+    let mut transaction = state.pool.begin().await?;
+
+    let task = lock_instance_then_task(
+        &mut transaction,
+        tenant_id,
+        subject.workflow_instance_id,
+        id,
+    )
+    .await?;
 
     refuse_unless_open(task.status)?;
     refuse_unless_held_by(user_id, task.assignee_user_id)?;
@@ -402,15 +436,19 @@ pub async fn delegate(
 ///
 /// 1. **The permission**, then the request's shape: exactly one target, and a
 ///    comment within bounds. Both refuse before anything is read.
-/// 2. **The task, `FOR UPDATE`.** One lock, as [`delegate`] takes: nothing
-///    here reads or moves the instance, so the engine's *instance first, then
-///    task* order is kept by taking only the second.
+/// 2. **The instance, then the task, both `FOR UPDATE`**
+///    (`lock_instance_then_task`, [#619]). The history row in step 6 takes the
+///    instance through its foreign key whether this path names it or not, so
+///    the engine's *instance first, then task* order is kept by taking the
+///    instance first, as `decide` does. It used to take only the task, and
+///    deadlocked with a decision.
 /// 3. **The target, through `assignment::reassign_to`.** A role is read
 ///    `FOR KEY SHARE`, which `identity::service::delete_role`'s `FOR UPDATE`
 ///    waits on and which waits on it, so a role being deleted is either gone
 ///    when this reads it, and refused, or counted by the delete once this
-///    commits. Task, then role, is the order a decision takes too (`decide`
-///    locks the task, and `engine::fire` resolves the edge's role after).
+///    commits. Instance, task, then role is the order a decision takes too
+///    (`decide` locks the instance and the task, and `engine::fire` resolves
+///    the edge's role after).
 ///    **A closed task is refused with a 409 first**, under the task lock and
 ///    before the target is read: a task whose instance has moved on would
 ///    otherwise be judged against a state it is not in.
@@ -427,6 +465,7 @@ pub async fn delegate(
 /// The audit record follows the commit, as every task action's does.
 ///
 /// [#512]: https://github.com/sujanto-gaws/kelir/issues/512
+/// [#619]: https://github.com/sujanto-gaws/kelir/issues/619
 pub async fn reassign(
     state: &AppState,
     caller: &Authenticated,
@@ -464,9 +503,13 @@ pub async fn reassign(
 
     let mut transaction = state.pool.begin().await?;
 
-    let task = repo::lock_task(&mut transaction, tenant_id, id)
-        .await?
-        .ok_or_else(|| AppError::not_found("Task"))?;
+    let task = lock_instance_then_task(
+        &mut transaction,
+        tenant_id,
+        subject.workflow_instance_id,
+        id,
+    )
+    .await?;
 
     // A closed task is a 409 before its target is looked at. The checks below
     // judge the target against the instance's *current* state, which a closed
@@ -593,14 +636,15 @@ pub async fn reassign(
 ///
 /// # Locking
 ///
-/// The instance is read, not locked, after the task lock: the engine takes
-/// the instance before the task, so locking it here would invert that order.
-/// It cannot move meanwhile, because the only thing that moves a state with an
-/// open task is a decision, which waits on the task this transaction holds.
+/// The instance is already locked: `reassign` takes it before the task, in
+/// `lock_instance_then_task` ([#619]), so the state read here cannot move
+/// meanwhile. A decision, the only thing that moves a state with an open task,
+/// waits on the same instance lock.
 /// `permits` and `names_role` read each edge's role `FOR KEY SHARE`, as a
 /// decision does.
 ///
 /// [#512]: https://github.com/sujanto-gaws/kelir/issues/512
+/// [#619]: https://github.com/sujanto-gaws/kelir/issues/619
 async fn refuse_unless_target_can_decide(
     transaction: &mut sqlx::PgTransaction<'_>,
     tenant_id: Uuid,
@@ -714,6 +758,50 @@ fn describe_rule(rule: &AssignmentRule) -> String {
         ),
         AssigneeType::Owner => "the document's creator".to_owned(),
     }
+}
+
+/// The task's instance, then the task, both `FOR UPDATE`: the order every
+/// path in this module takes, `decide`'s included ([#619]).
+///
+/// **A path that writes a `workflow_task_history` row takes the instance
+/// whether it locks it or not.** The row's foreign key to `workflow_instances`
+/// takes `FOR KEY SHARE` on the instance, which conflicts with `decide`'s
+/// `FOR UPDATE`. A path that locked only the task therefore took the task and
+/// then the instance, and deadlocked with a decision that held the instance
+/// and wanted the task. Taking the instance explicitly and first makes the
+/// key's lock one this transaction already holds.
+///
+/// `instance_id` is the task's, read on the pool before the transaction,
+/// because the instance must be locked before the task can be read under a
+/// lock. A task never changes instance, so a mismatch under the lock is
+/// unreachable today; it is refused with a 409 rather than assumed away,
+/// because the lock would then cover the wrong instance.
+///
+/// A missing instance is a 404 "Workflow instance" and a missing task a 404
+/// "Task", as `decide` answers them.
+///
+/// [#619]: https://github.com/sujanto-gaws/kelir/issues/619
+async fn lock_instance_then_task(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    instance_id: Uuid,
+    id: Uuid,
+) -> Result<repo::LockedTask, AppError> {
+    instance_repo::lock_instance(transaction, tenant_id, instance_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Workflow instance"))?;
+
+    let task = repo::lock_task(transaction, tenant_id, id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Task"))?;
+
+    if task.workflow_instance_id != instance_id {
+        return Err(AppError::conflict(
+            "this task belongs to a different workflow instance than when it was read",
+        ));
+    }
+
+    Ok(task)
 }
 
 /// Records a decision, moves the process, and projects the document's status

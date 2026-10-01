@@ -428,6 +428,18 @@ While the major version is `0`, the public API may change in any release.
   submit passed the submitter as the owner, so an `OWNER` assignment on the
   first state went to whoever pressed submit. The resubmit, the decision and
   the reassign already read the creator.
+
+- **A decision, claim or hand-off arriving during a reassign no longer
+  deadlocks and answers 500**
+  ([#619](https://github.com/sujanto-gaws/kelir/issues/619)). The reassign,
+  the claim and the hand-off locked only the task, then wrote a
+  `workflow_task_history` row whose foreign key took the instance, the reverse
+  of a decision's order. PostgreSQL aborted one side, and it answered
+  `500 INTERNAL_ERROR`. All three now lock the instance, then the task, as a
+  decision does, so the later request waits and then answers what it would
+  have answered alone. Every status is unchanged. The cost is that task
+  actions on the same workflow instance now run one at a time (ADR-0042 §2,
+  §4).
 - **A role's code and name are validated by the server**
   ([#575](https://github.com/sujanto-gaws/kelir/issues/575)). Nothing checked
   them: an empty or blank `roleCode` was stored, and a code over 64 characters

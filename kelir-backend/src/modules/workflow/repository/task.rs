@@ -175,6 +175,15 @@ pub async fn lock_open_task_of_instance(
 }
 
 /// One task, held for the rest of the transaction.
+///
+/// **Taken after the task's instance, never before it or instead of it**
+/// ([#619]). Every service path that locks a task goes on to write a
+/// `workflow_task_history` row, whose foreign key takes `FOR KEY SHARE` on the
+/// instance; a caller that had not locked the instance first would take it
+/// there, after the task, and deadlock with a decision. See
+/// [`super::instance::lock_instance`].
+///
+/// [#619]: https://github.com/sujanto-gaws/kelir/issues/619
 pub async fn lock_task(
     transaction: &mut sqlx::PgTransaction<'_>,
     tenant_id: Uuid,
