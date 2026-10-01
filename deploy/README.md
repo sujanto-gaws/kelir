@@ -16,6 +16,7 @@ deploy/
     ├── deploy.sh                deploy a version to a hostname, over TLS
     ├── deploy-local.sh          deploy to http://<host-ip>:<port> for testing
     ├── docker-compose.staging.yml
+    ├── docker-compose.e2e.yml   overlay for the browser flows only: one system a test call can reach
     ├── Caddyfile                single-origin routing; TLS when the address is a hostname
     └── .env.staging.example     deployment secrets template
 ```

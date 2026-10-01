@@ -333,6 +333,11 @@ jobs:
       KELIR_E2E_USERNAME: admin
       KELIR_E2E_PASSWORD: ci-only-bootstrap-password-4Tz9wK
       KELIR_E2E_BASE_URL: http://127.0.0.1:8080
+      # The token of the one system the stack can reach (#593). The stack is
+      # given the same value two steps down, in `.env`: the backend sends it,
+      # the stand-in upstream answers only to it, and the flow checks that no
+      # screen shows it. Throwaway, like every value here.
+      KELIR_E2E_UPSTREAM_TOKEN: ci-only-upstream-token-7Wq2nV5c
 
     steps:
       - uses: actions/checkout@v7
@@ -399,6 +404,17 @@ jobs:
         # compose interpolates the same file. KELIR_DB_HOST is left at its
         # default (host.docker.internal) because that is where the service
         # container's published port is reachable from inside the stack.
+        #
+        # **The last two lines are what make a test call answerable** (#593).
+        # `KELIR_COMPOSE_OVERLAY` has deploy.sh layer `docker-compose.e2e.yml`
+        # over the release compose file, which starts a stand-in upstream on a
+        # private network, lists that one address in
+        # `KELIR_INTEGRATION_ALLOWED_CIDRS`, and gives the backend the system
+        # tenant's secret. The images are still the release images and the
+        # release compose file is still read whole; `e2e/README.md` says why
+        # the stack has one reachable system and why the range is one address.
+        # In `.env` rather than in the step's environment because `Stack logs`
+        # runs compose again, and compose reads this file.
         run: |
           cat > deploy/staging/.env <<'ENVFILE'
           KELIR_DB_PASSWORD=ci-only-database-password-6Qb2xR
@@ -409,6 +425,8 @@ jobs:
           KELIR_BOOTSTRAP_ADMIN_USERNAME=admin
           KELIR_BOOTSTRAP_ADMIN_PASSWORD=ci-only-bootstrap-password-4Tz9wK
           KELIR_BOOTSTRAP_ADMIN_EMAIL=admin@localhost
+          KELIR_COMPOSE_OVERLAY=docker-compose.e2e.yml
+          KELIR_E2E_UPSTREAM_TOKEN=ci-only-upstream-token-7Wq2nV5c
           ENVFILE
 
       - name: Bring the release stack up
@@ -445,7 +463,9 @@ jobs:
         run: |
           version="$(sed -n 's/^version = "\(.*\)"/\1/p' kelir-backend/Cargo.toml | head -1)"
           cd deploy/staging
-          KELIR_VERSION="${version}" docker compose -f docker-compose.staging.yml logs --tail 200
+          # Both files, as deploy.sh brought them up: with the release file
+          # alone, the upstream's own log would be the one left out (#593).
+          KELIR_VERSION="${version}" docker compose -f docker-compose.staging.yml -f docker-compose.e2e.yml logs --tail 200
 
       - name: Keep the report
         # Gated by the same rule as `Stack logs` above: Playwright writes this

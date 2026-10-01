@@ -73,9 +73,12 @@ While the major version is `0`, the public API may change in any release.
     upgrading from a release has nothing to rename.
   - **Check `deploy/` and your compose files** for `KELIR_INTEGRATION_SECRET_`
     names without a tenant code. Kelir's own `deploy/` and compose files set
-    none.
-  - **The end-to-end stack's variable**, when #593 adds one, is named under
-    the system tenant: `KELIR_INTEGRATION_SECRET_SYSTEM__<NAME>`.
+    ~~none~~ none without one: the release compose file sets no integration
+    secret, and the browser flows' overlay sets one, under the system tenant.
+  - **The end-to-end stack's variable** ~~, when #593 adds one, is named~~ is
+    `KELIR_INTEGRATION_SECRET_SYSTEM__E2E_UPSTREAM_TOKEN`, under the system
+    tenant. Only `deploy/staging/docker-compose.e2e.yml` sets it
+    ([#593](https://github.com/sujanto-gaws/kelir/issues/593)).
 - **A private-network system needs `KELIR_INTEGRATION_ALLOWED_CIDRS`.** A
   test call to an RFC 1918 or IPv6 unique-local address is refused unless the
   range is listed, for example `10.20.0.0/16`. Loopback, link-local (the cloud
@@ -260,6 +263,23 @@ While the major version is `0`, the public API may change in any release.
 
 ### Changed
 
+- **The browser flows' stack has one system an integration test call can reach, and a flow sees
+  it answer** ([#593](https://github.com/sujanto-gaws/kelir/issues/593)). #547's and #548's flows
+  each end in a refusal, because a release stack has no system to call, and #548's AC6 was accepted
+  as partial for it. `deploy/staging/docker-compose.e2e.yml` is an overlay that `deploy.sh` layers
+  over the release compose file when the new `KELIR_COMPOSE_OVERLAY` names it: a stand-in system
+  (`e2e/upstream/server.mjs`) on a private network of its own, that one address as a `/32` in
+  `KELIR_INTEGRATION_ALLOWED_CIDRS`, and `KELIR_INTEGRATION_SECRET_SYSTEM__E2E_UPSTREAM_TOKEN` on
+  the backend. `a-test-call-is-answered-and-its-secret-is-masked.spec.ts` sees *Success* and
+  *HTTP 200* in the dialog and the log beside a call the system answered `404`, `[REDACTED]`
+  wherever the system echoed the credential, no response carrying the secret, and the call in the
+  system's own journal. **No deployment changes**: the variable is unset everywhere but CI's
+  browser job, the release compose file and both images are as they were, and no product code was
+  touched. **The release smoke pass layers the overlay and gives the harness
+  `KELIR_E2E_UPSTREAM_TOKEN`.** Without the token and outside CI that one flow is skipped, and the
+  report says so; with the token, or in CI, it runs or fails
+  ([Release Process](docs/standards/04.%20Release%20Process.md) §4 step 7,
+  [`e2e/README.md`](e2e/README.md)).
 - **The release images are built from pinned releases, and a test holds every Dockerfile to it**
   ([#590](https://github.com/sujanto-gaws/kelir/issues/590)). The frontend image was built
   `FROM caddy:2-alpine`, which follows every Caddy 2 release, and no test read a Dockerfile.

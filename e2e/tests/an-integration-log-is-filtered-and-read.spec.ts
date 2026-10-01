@@ -15,8 +15,9 @@ import { API_PREFIX, credentials } from '../support/env'
  * environment under its tenant's own prefix,
  * `KELIR_INTEGRATION_SECRET_SYSTEM__` for this flow's administrator (#618).
  * The release stack has none
- * of the three (`deploy/staging` sets no `KELIR_INTEGRATION_*` variable, so a
- * private or loopback upstream is refused and there is no secret to send), and
+ * of the three (the release compose file sets no `KELIR_INTEGRATION_*`
+ * variable, so a private or loopback upstream is refused and there is no
+ * secret to send; the browser flows' overlay sets two, for #593's flow), and
  * a public upstream would make the flow depend on the internet. The same
  * reasoning as #547's flow, `a-test-call-is-refused-and-explained.spec.ts`.
  *
@@ -30,7 +31,11 @@ import { API_PREFIX, credentials } from '../support/env'
  *   never the reference.
  *
  * A success row is covered by the backend's integration tests and the page's
- * own component tests.
+ * own component tests, **and since #593 in the browser**, by
+ * `a-test-call-is-answered-and-its-secret-is-masked.spec.ts`, which runs
+ * against the overlay that gives the stack one system to call and shows the
+ * success beside a failure that system answered. That closes the part of AC6
+ * this flow left open; this flow is unchanged and needs no overlay.
  *
  * # What it proves that the component tests cannot
  *
