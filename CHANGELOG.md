@@ -43,15 +43,39 @@ While the major version is `0`, the public API may change in any release.
   on its `ROLE-ADMIN`. A tenant created before the upgrade does not: grant it
   to that tenant's administrator role. No schema changes, and `v0.8.0` runs
   against the migrated schema.
-- **An integration secret must be named `KELIR_INTEGRATION_SECRET_…` to be
-  used.** A test call resolves `env://NAME` only when `NAME` starts with
-  `KELIR_INTEGRATION_SECRET_`, and fails with `SECRET_NAME_NOT_PERMITTED`
-  otherwise (decision **D-96**). A credential reference already saved under
+- **An integration secret must be named for its tenant:
+  `KELIR_INTEGRATION_SECRET_<TENANT CODE>__<NAME>`.** A test call resolves
+  `env://NAME` only when `NAME` is in the calling tenant's namespace, and
+  fails with `SECRET_NAME_NOT_PERMITTED` otherwise (decision **D-96**, amended
+  2026-10-01 by [#618](https://github.com/sujanto-gaws/kelir/issues/618),
+  decided 2026-09-30).
+  `<TENANT CODE>` is the tenant's code in upper case with each `-` written as
+  `_`; two underscores separate it from `<NAME>`, which is upper-case letters,
+  digits and underscores. The system tenant's ERP token is
+  `KELIR_INTEGRATION_SECRET_SYSTEM__ERP_TOKEN`, and tenant `TNT-001`'s is
+  `KELIR_INTEGRATION_SECRET_TNT_001__ERP_TOKEN`. **A single-tenant deployment
+  follows the same rule**, with its one tenant's code. A name two live
+  tenants' codes both cover, such as one under `A_B__` when tenants `A-B` and
+  `A_B` both exist, resolves for neither; a tenant is live until it is
+  deleted, whatever its status. A credential reference already saved under
   another name, such as `env://ERP_API_KEY`, is still stored and fails when
-  called: set the secret on the backend under a prefixed name and edit the
-  reference to match. Put nothing under the prefix but secrets meant for an
-  external system ([Installation and Deployment](docs/operations/01.%20Installation%20and%20Deployment.md)
+  called: set the secret on the backend under the tenant's prefix and edit the
+  reference to match. Put nothing under a tenant's prefix but secrets meant
+  for that tenant's external systems
+  ([Installation and Deployment](docs/operations/01.%20Installation%20and%20Deployment.md)
   §7.1).
+  - **A deployment run from `main` during Sprint 22** may have used
+    `KELIR_INTEGRATION_SECRET_<NAME>` without a tenant code, which #547
+    allowed. Rename each such variable to its tenant's namespace, and edit the
+    stored `env://` references to match. **No migration does this**: a
+    reference is the operator's text, and Kelir cannot tell whose secret a
+    bare name was meant to be. v0.8.0 had no resolver, so a deployment
+    upgrading from a release has nothing to rename.
+  - **Check `deploy/` and your compose files** for `KELIR_INTEGRATION_SECRET_`
+    names without a tenant code. Kelir's own `deploy/` and compose files set
+    none.
+  - **The end-to-end stack's variable**, when #593 adds one, is named under
+    the system tenant: `KELIR_INTEGRATION_SECRET_SYSTEM__<NAME>`.
 - **A private-network system needs `KELIR_INTEGRATION_ALLOWED_CIDRS`.** A
   test call to an RFC 1918 or IPv6 unique-local address is refused unless the
   range is listed, for example `10.20.0.0/16`. Loopback, link-local (the cloud
@@ -104,8 +128,9 @@ While the major version is `0`, the public API may change in any release.
   happened. Nothing in the request names a URL. The call runs inside the
   request, bounded by the system's `timeoutSeconds`, with no outbox and no
   retry. **It is a real call**: a `POST` endpoint receives a real request.
-  - **Secrets are resolved for the call only.** `env://KELIR_INTEGRATION_SECRET_…`
-    is read from the backend's environment; any other `env://` name fails as
+  - **Secrets are resolved for the call only.**
+    `env://KELIR_INTEGRATION_SECRET_<TENANT CODE>__…` is read from the
+    backend's environment for that tenant alone; any other `env://` name fails as
     `SECRET_NAME_NOT_PERMITTED`, and `vault://` fails as
     `SECRET_BACKEND_NOT_CONFIGURED` until a Vault client exists. **An echo
     is redacted only in the spellings ADR-0043 §R lists**, which are below. A spelling outside the
@@ -428,6 +453,20 @@ While the major version is `0`, the public API may change in any release.
   submit passed the submitter as the owner, so an `OWNER` assignment on the
   first state went to whoever pressed submit. The resubmit, the decision and
   the reassign already read the creator.
+
+- **A tenant can no longer resolve another tenant's integration secret**
+  ([#618](https://github.com/sujanto-gaws/kelir/issues/618), verification
+  record 20, Finding 1). A test call resolved any `env://` name under
+  `KELIR_INTEGRATION_SECRET_`, whoever called: a tenant created through
+  `POST /api/v1/organization/tenants` granted itself
+  `integration:credential:create`, named the system tenant's variable, and
+  was sent its token. A name now resolves only in the caller's own namespace,
+  `KELIR_INTEGRATION_SECRET_<TENANT CODE>__<NAME>`, read from the caller's
+  tenant before the environment is read, and in a single-tenant deployment
+  too. A name two live tenants' codes both cover is refused for both. Another
+  tenant's variable answers `SECRET_NAME_NOT_PERMITTED` with the same bytes
+  whether it is set or not, and the message names only the caller's own
+  prefix. See *Upgrade notes*.
 
 - **A decision, claim or hand-off arriving during a reassign no longer
   deadlocks and answers 500**

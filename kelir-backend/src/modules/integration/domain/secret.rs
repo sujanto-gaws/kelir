@@ -88,8 +88,8 @@ impl<'a> SecretReference<'a> {
     }
 }
 
-/// The prefix an `env://` name must carry to be read (the product owner's
-/// decision on #547, 2026-09-29): `KELIR_INTEGRATION_SECRET_ERP_TOKEN`.
+/// The prefix every `env://` name must carry to be read (the product owner's
+/// decision on #547, 2026-09-29), before its tenant's code (#618).
 ///
 /// Built with `concat!` so that no string literal in the crate *is* a
 /// `KELIR_*` name: `tests/configuration_reference.rs` counts every such
@@ -97,24 +97,107 @@ impl<'a> SecretReference<'a> {
 /// variable. The Installation guide §7.1 describes it with the variables.
 pub const RESOLVABLE_ENVIRONMENT_PREFIX: &str = concat!("KELIR", "_INTEGRATION_SECRET_");
 
-/// Whether an `env://NAME` reference may be read at all.
-///
-/// **Only a name that starts with [`RESOLVABLE_ENVIRONMENT_PREFIX`] and has
-/// something after it** (the product owner's decision on #547, 2026-09-29).
-/// The backend's environment also holds the deployment's own settings —
-/// `KELIR_JWT_SECRET`, the database URL, the object-store keys — and a
-/// reference is written by whoever holds `integration:credential:create`, so
-/// without the prefix a test call to a host its caller controls would send any
-/// of them there. A name outside the prefix fails the call with
-/// `SECRET_NAME_NOT_PERMITTED` **before the environment is read**, and that
-/// call writes its one `integration_logs` row like any other failure.
-///
-/// Saving a credential is unchanged: the registry still accepts any
-/// `env://NAME` of the right shape (#520's rules), and this is checked when a
-/// call would read it.
-pub fn environment_name_is_resolvable(name: &str) -> bool {
-    name.len() > RESOLVABLE_ENVIRONMENT_PREFIX.len()
-        && name.starts_with(RESOLVABLE_ENVIRONMENT_PREFIX)
+/// Between a tenant's code and the secret's own name. Two underscores, because
+/// a code may contain one.
+pub const NAMESPACE_SEPARATOR: &str = "__";
+
+/// A tenant code as it is spelled in a variable name (#618): upper case, with
+/// `-`, which no environment variable name may hold, written as `_`. So
+/// `TNT-001` is `TNT_001`.
+pub fn namespace_segment(tenant_code: &str) -> String {
+    tenant_code.to_ascii_uppercase().replace('-', "_")
+}
+
+/// The prefix of every name a tenant's calls may read:
+/// `KELIR_INTEGRATION_SECRET_<CODE>__`. This, and no other tenant's, is what
+/// `SECRET_NAME_NOT_PERMITTED` names.
+pub fn tenant_prefix(tenant_code: &str) -> String {
+    format!(
+        "{RESOLVABLE_ENVIRONMENT_PREFIX}{}{NAMESPACE_SEPARATOR}",
+        namespace_segment(tenant_code)
+    )
+}
+
+/// Whether `name` is spelled as one of `tenant_code`'s names: its prefix,
+/// then one or more of `A–Z 0–9 _`. Exact, and case-sensitive.
+fn is_spelled_in(name: &str, tenant_code: &str) -> bool {
+    name.strip_prefix(tenant_prefix(tenant_code).as_str())
+        .is_some_and(|rest| {
+            !rest.is_empty()
+                && rest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+        })
+}
+
+/// The tenants a resolution is judged against: the caller's code, and every
+/// other live tenant's. Built from one read of `tenants` per call, before the
+/// environment is read; the code comes from the caller's `tenant_id` and never
+/// from the request, the token or the reference.
+#[derive(Debug, Clone)]
+pub struct TenantNamespaces {
+    caller_code: String,
+    other_codes: Vec<String>,
+}
+
+impl TenantNamespaces {
+    /// `None` when the caller's tenant is not among `live` — a tenant deleted
+    /// under a session still open. Nothing is resolved for it.
+    pub fn for_caller(caller: uuid::Uuid, live: Vec<(uuid::Uuid, String)>) -> Option<Self> {
+        let mut caller_code = None;
+        let mut other_codes = Vec::with_capacity(live.len());
+        for (id, code) in live {
+            if id == caller {
+                caller_code = Some(code);
+            } else {
+                other_codes.push(code);
+            }
+        }
+
+        caller_code.map(|caller_code| Self {
+            caller_code,
+            other_codes,
+        })
+    }
+
+    /// The caller's own prefix, for the refusal's message.
+    pub fn caller_prefix(&self) -> String {
+        tenant_prefix(&self.caller_code)
+    }
+
+    /// Whether an `env://NAME` reference may be read for this caller.
+    ///
+    /// **Three gates, in order, and all before the environment is read:**
+    ///
+    /// 1. `NAME` starts with [`RESOLVABLE_ENVIRONMENT_PREFIX`] and has
+    ///    something after it (#547). The backend's environment also holds the
+    ///    deployment's own settings — `KELIR_JWT_SECRET`, the database URL,
+    ///    the object-store keys — and a reference is written by whoever holds
+    ///    `integration:credential:create`.
+    /// 2. `NAME` is one of the caller's own names, `<prefix><CODE>__<NAME>`
+    ///    ([`tenant_prefix`]). Record 20's P1 (#618): with the first gate
+    ///    alone, a tenant created through the route granted itself
+    ///    `integration:credential:create` and was sent the system tenant's
+    ///    token. The same rule holds with one tenant (A1).
+    /// 3. **No other live tenant's names include it.** `A-B` and `A_B` both
+    ///    map to `A_B`, and `ACME`'s `..._ACME__X__T` is also `ACME__X`'s. Such
+    ///    a name belongs to nobody, so it is refused for every tenant it
+    ///    matches: ambiguity fails closed.
+    ///
+    /// A refusal is `SECRET_NAME_NOT_PERMITTED`, the same bytes whether the
+    /// variable is set or not, and its call writes its one `integration_logs`
+    /// row like any other failure. Saving a credential is unchanged: the
+    /// registry accepts any `env://NAME` of the right shape (#520's rules),
+    /// and this is checked when a call would read it.
+    pub fn admits(&self, name: &str) -> bool {
+        name.len() > RESOLVABLE_ENVIRONMENT_PREFIX.len()
+            && name.starts_with(RESOLVABLE_ENVIRONMENT_PREFIX)
+            && is_spelled_in(name, &self.caller_code)
+            && !self
+                .other_codes
+                .iter()
+                .any(|other| is_spelled_in(name, other))
+    }
 }
 
 /// The credential types a test call can attach (the product owner's answer 3).
@@ -546,13 +629,24 @@ mod tests {
         assert!(needles.contains(&"svc:a".to_owned()));
     }
 
+    /// The caller's namespaces with `others` as the other live tenants.
+    fn namespaces(caller: &str, others: &[&str]) -> TenantNamespaces {
+        let caller_id = uuid::Uuid::now_v7();
+        let mut live = vec![(caller_id, caller.to_owned())];
+        live.extend(
+            others
+                .iter()
+                .map(|code| (uuid::Uuid::now_v7(), (*code).to_owned())),
+        );
+        TenantNamespaces::for_caller(caller_id, live).expect("the caller is live")
+    }
+
     #[test]
     fn only_a_name_under_the_integration_prefix_is_resolvable() {
         assert_eq!(RESOLVABLE_ENVIRONMENT_PREFIX, "KELIR_INTEGRATION_SECRET_");
+        let system = namespaces("SYSTEM", &[]);
 
-        assert!(environment_name_is_resolvable(
-            "KELIR_INTEGRATION_SECRET_ERP_TOKEN"
-        ));
+        assert!(system.admits("KELIR_INTEGRATION_SECRET_SYSTEM__ERP_TOKEN"));
         for refused in [
             "KELIR_JWT_SECRET",
             "KELIR_STORAGE_SECRET_KEY",
@@ -562,11 +656,163 @@ mod tests {
             // The prefix alone names nothing.
             "KELIR_INTEGRATION_SECRET_",
             // Close is not enough.
-            "KELIR_INTEGRATION_SECRETS_X",
-            "X_KELIR_INTEGRATION_SECRET_Y",
+            "KELIR_INTEGRATION_SECRETS_SYSTEM__X",
+            "X_KELIR_INTEGRATION_SECRET_SYSTEM__Y",
             "",
         ] {
-            assert!(!environment_name_is_resolvable(refused), "{refused}");
+            assert!(!system.admits(refused), "{refused}");
         }
+    }
+
+    #[test]
+    fn a_name_under_the_bare_prefix_is_refused_with_one_tenant_too() {
+        // A1: #547's names, `KELIR_INTEGRATION_SECRET_ERP_TOKEN`, name no
+        // tenant, and a single-tenant deployment reads them no more than any.
+        let system = namespaces("SYSTEM", &[]);
+
+        assert!(!system.admits("KELIR_INTEGRATION_SECRET_ERP_TOKEN"));
+        assert!(!system.admits("KELIR_INTEGRATION_SECRET_SYSTEM_ERP_TOKEN"));
+        assert!(system.admits("KELIR_INTEGRATION_SECRET_SYSTEM__ERP_TOKEN"));
+    }
+
+    #[test]
+    fn a_tenant_prefix_is_its_code_upper_case_with_a_hyphen_as_an_underscore() {
+        assert_eq!(tenant_prefix("SYSTEM"), "KELIR_INTEGRATION_SECRET_SYSTEM__");
+        assert_eq!(
+            tenant_prefix("TNT-001"),
+            "KELIR_INTEGRATION_SECRET_TNT_001__"
+        );
+        // A code is stored upper case; one that is not is still spelled so.
+        assert_eq!(
+            tenant_prefix("tnt-001"),
+            "KELIR_INTEGRATION_SECRET_TNT_001__"
+        );
+        assert_eq!(namespace_segment("A-B_C-"), "A_B_C_");
+    }
+
+    #[test]
+    fn a_hyphenated_code_reads_its_names_with_an_underscore() {
+        let tenant = namespaces("TNT-001", &[]);
+
+        assert!(tenant.admits("KELIR_INTEGRATION_SECRET_TNT_001__ERP_TOKEN"));
+        // A hyphen is not legal in a variable name, so nothing is spelled so.
+        assert!(!tenant.admits("KELIR_INTEGRATION_SECRET_TNT-001__ERP_TOKEN"));
+    }
+
+    #[test]
+    fn a_name_is_matched_exactly_and_in_upper_case() {
+        let tenant = namespaces("ACME", &[]);
+
+        assert!(tenant.admits("KELIR_INTEGRATION_SECRET_ACME__ERP_TOKEN_2"));
+        for refused in [
+            // The code in another case.
+            "KELIR_INTEGRATION_SECRET_acme__ERP_TOKEN",
+            "KELIR_INTEGRATION_SECRET_Acme__ERP_TOKEN",
+            // The name in another case.
+            "KELIR_INTEGRATION_SECRET_ACME__erp_token",
+            "KELIR_INTEGRATION_SECRET_ACME__ERP_Token",
+            // The prefix in another case.
+            "kelir_integration_secret_ACME__ERP_TOKEN",
+            // A character outside A-Z 0-9 _.
+            "KELIR_INTEGRATION_SECRET_ACME__ERP-TOKEN",
+            "KELIR_INTEGRATION_SECRET_ACME__ERP.TOKEN",
+            "KELIR_INTEGRATION_SECRET_ACME__ERP TOKEN",
+            "KELIR_INTEGRATION_SECRET_ACME__ÉRP",
+        ] {
+            assert!(!tenant.admits(refused), "{refused}");
+        }
+
+        // A caller whose code arrived in lower case reads the upper-case names.
+        assert!(namespaces("acme", &[]).admits("KELIR_INTEGRATION_SECRET_ACME__ERP_TOKEN"));
+    }
+
+    #[test]
+    fn the_separator_is_two_underscores_and_the_name_after_it_is_not_empty() {
+        let tenant = namespaces("ACME", &[]);
+
+        for refused in [
+            // No separator.
+            "KELIR_INTEGRATION_SECRET_ACMEERP_TOKEN",
+            // One underscore.
+            "KELIR_INTEGRATION_SECRET_ACME_ERP_TOKEN",
+            // An empty name.
+            "KELIR_INTEGRATION_SECRET_ACME__",
+            "KELIR_INTEGRATION_SECRET_ACME",
+        ] {
+            assert!(!tenant.admits(refused), "{refused}");
+        }
+        // Underscores after the separator are the name's own.
+        assert!(tenant.admits("KELIR_INTEGRATION_SECRET_ACME___"));
+        assert!(tenant.admits("KELIR_INTEGRATION_SECRET_ACME__X__Y"));
+    }
+
+    #[test]
+    fn acme_acme2_and_acme_ltd_each_read_only_their_own() {
+        // Each alone, so what refuses is the separator, not the ambiguity rule.
+        let acme = namespaces("ACME", &[]);
+        let acme2 = namespaces("ACME2", &[]);
+        let acme_ltd = namespaces("ACME_LTD", &[]);
+
+        let of_acme = "KELIR_INTEGRATION_SECRET_ACME__TOKEN";
+        let of_acme2 = "KELIR_INTEGRATION_SECRET_ACME2__TOKEN";
+        let of_acme_ltd = "KELIR_INTEGRATION_SECRET_ACME_LTD__TOKEN";
+
+        assert!(acme.admits(of_acme));
+        assert!(!acme.admits(of_acme2));
+        assert!(!acme.admits(of_acme_ltd));
+
+        assert!(!acme2.admits(of_acme));
+        assert!(acme2.admits(of_acme2));
+        assert!(!acme2.admits(of_acme_ltd));
+
+        assert!(!acme_ltd.admits(of_acme));
+        assert!(!acme_ltd.admits(of_acme2));
+        assert!(acme_ltd.admits(of_acme_ltd));
+
+        // And together, each still reads its own.
+        let together = namespaces("ACME", &["ACME2", "ACME_LTD"]);
+        assert!(together.admits(of_acme));
+        assert!(!together.admits(of_acme2));
+        assert!(!together.admits(of_acme_ltd));
+    }
+
+    #[test]
+    fn another_tenants_name_is_refused() {
+        let tenant = namespaces("TNT-001", &["SYSTEM"]);
+
+        assert!(!tenant.admits("KELIR_INTEGRATION_SECRET_SYSTEM__ERP_TOKEN"));
+        assert!(!namespaces("SYSTEM", &["TNT-001"])
+            .admits("KELIR_INTEGRATION_SECRET_TNT_001__ERP_TOKEN"));
+        assert_eq!(tenant.caller_prefix(), "KELIR_INTEGRATION_SECRET_TNT_001__");
+    }
+
+    #[test]
+    fn a_name_two_live_tenants_map_to_is_refused_for_both() {
+        // Same mapped code.
+        let name = "KELIR_INTEGRATION_SECRET_A_B__TOKEN";
+        assert!(namespaces("A-B", &[]).admits(name), "alone, it is A-B's");
+        assert!(!namespaces("A-B", &["A_B"]).admits(name));
+        assert!(!namespaces("A_B", &["A-B"]).admits(name));
+
+        // A code holding the separator.
+        let nested = "KELIR_INTEGRATION_SECRET_ACME__X__TOKEN";
+        assert!(!namespaces("ACME", &["ACME__X"]).admits(nested));
+        assert!(!namespaces("ACME__X", &["ACME"]).admits(nested));
+        // ...and a code ending in an underscore.
+        let trailing = "KELIR_INTEGRATION_SECRET_ACME___TOKEN";
+        assert!(!namespaces("ACME", &["ACME_"]).admits(trailing));
+        assert!(!namespaces("ACME_", &["ACME"]).admits(trailing));
+
+        // The refusal is of the name: ACME's names ACME__X's prefix does not
+        // reach are still ACME's.
+        assert!(namespaces("ACME", &["ACME__X"]).admits("KELIR_INTEGRATION_SECRET_ACME__TOKEN"));
+        assert!(namespaces("ACME", &["ACME__X"]).admits("KELIR_INTEGRATION_SECRET_ACME__X"));
+    }
+
+    #[test]
+    fn a_caller_whose_tenant_is_not_live_has_no_namespace() {
+        let live = vec![(uuid::Uuid::now_v7(), "SYSTEM".to_owned())];
+
+        assert!(TenantNamespaces::for_caller(uuid::Uuid::now_v7(), live).is_none());
     }
 }

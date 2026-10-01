@@ -96,16 +96,26 @@ pub enum TestCallError {
     BaseUrlMissing,
     TargetUrlInvalid,
     NoUsableCredential,
-    AmbiguousCredential { count: usize },
+    AmbiguousCredential {
+        count: usize,
+    },
     CredentialTypeNotSupported(AuthType),
     SecretReferenceMalformed,
-    SecretNameNotPermitted,
+    /// `prefix` is the caller's own (`secret::tenant_prefix`), and the message
+    /// names nothing else: not the refused name, and no other tenant's code.
+    SecretNameNotPermitted {
+        prefix: String,
+    },
     SecretBackendNotConfigured,
-    SecretNotFound { name: String },
+    SecretNotFound {
+        name: String,
+    },
     SecretMalformed(&'static str),
     HostNotResolved,
     EgressRefused(AddressClass),
-    UpstreamTimeout { seconds: i32 },
+    UpstreamTimeout {
+        seconds: i32,
+    },
     UpstreamUnreachable,
 }
 
@@ -120,7 +130,7 @@ impl TestCallError {
             Self::AmbiguousCredential { .. } => "AMBIGUOUS_CREDENTIAL",
             Self::CredentialTypeNotSupported(_) => "CREDENTIAL_TYPE_NOT_SUPPORTED",
             Self::SecretReferenceMalformed => "SECRET_REFERENCE_MALFORMED",
-            Self::SecretNameNotPermitted => "SECRET_NAME_NOT_PERMITTED",
+            Self::SecretNameNotPermitted { .. } => "SECRET_NAME_NOT_PERMITTED",
             Self::SecretBackendNotConfigured => "SECRET_BACKEND_NOT_CONFIGURED",
             Self::SecretNotFound { .. } => "SECRET_NOT_FOUND",
             Self::SecretMalformed(_) => "SECRET_MALFORMED",
@@ -160,10 +170,10 @@ impl TestCallError {
                 "The credential's secretReference is not a reference a resolver can follow"
                     .to_owned()
             }
-            Self::SecretNameNotPermitted => format!(
-                "The credential's env:// reference names a variable outside {}*, which is the \
-                 only part of the environment a test call reads",
-                super::secret::RESOLVABLE_ENVIRONMENT_PREFIX
+            Self::SecretNameNotPermitted { prefix } => format!(
+                "The credential's env:// reference names a variable this tenant may not read. \
+                 A test call reads only {prefix}<NAME>, where NAME is upper-case letters, \
+                 digits and underscores, and no other tenant's prefix also covers the name"
             ),
             Self::SecretBackendNotConfigured => "The credential is a vault:// reference, and no \
                  Vault backend is configured in this release; use an env:// reference"
@@ -728,7 +738,9 @@ mod tests {
             TestCallError::AmbiguousCredential { count: 2 },
             TestCallError::CredentialTypeNotSupported(AuthType::ApiKey),
             TestCallError::SecretReferenceMalformed,
-            TestCallError::SecretNameNotPermitted,
+            TestCallError::SecretNameNotPermitted {
+                prefix: "KELIR_INTEGRATION_SECRET_SYSTEM__".to_owned(),
+            },
             TestCallError::SecretBackendNotConfigured,
             TestCallError::SecretNotFound {
                 name: "X".to_owned(),

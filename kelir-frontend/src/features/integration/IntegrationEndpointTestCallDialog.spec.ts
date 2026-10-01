@@ -233,7 +233,7 @@ describe('IntegrationEndpointTestCallDialog', () => {
     call.mockRejectedValue(
       new ApiError(
         'SECRET_NAME_NOT_PERMITTED',
-        `The credential's env:// reference names a variable outside KELIR_INTEGRATION_SECRET_*, which is the                  only part of the environment a test call reads (integration log ${LOG_ID})`,
+        `The credential's env:// reference names a variable this tenant may not read.                  A test call reads only KELIR_INTEGRATION_SECRET_TNT_001__<NAME>, where NAME is upper-case letters, digits and underscores, and no other tenant's prefix also covers the name (integration log ${LOG_ID})`,
         422,
       ),
     )
@@ -244,10 +244,16 @@ describe('IntegrationEndpointTestCallDialog', () => {
     expect(phase(wrapper)).toBe('failed')
     expect(wrapper.get('[data-testid="test-call-failure"]').attributes('data-kind')).toBe('refused')
     expect(text(wrapper, 'test-call-failure-title')).toBe('Refused before anything was sent')
+    // #618: the explanation says the name is the tenant's own, and the server's
+    // words carry the exact prefix.
     expect(text(wrapper, 'test-call-explanation')).toContain('KELIR_INTEGRATION_SECRET_')
+    expect(text(wrapper, 'test-call-explanation')).toContain("this tenant's")
+    expect(text(wrapper, 'test-call-explanation')).toContain('hyphen written as an underscore')
     expect(text(wrapper, 'test-call-failure-code')).toBe('SECRET_NAME_NOT_PERMITTED')
     // The server's words, its stray run of spaces collapsed.
-    expect(text(wrapper, 'test-call-failure-message')).toContain('which is the only part')
+    expect(text(wrapper, 'test-call-failure-message')).toContain(
+      'may not read. A test call reads only KELIR_INTEGRATION_SECRET_TNT_001__<NAME>',
+    )
     expect(text(wrapper, 'test-call-log-id')).toBe(LOG_ID)
   })
 

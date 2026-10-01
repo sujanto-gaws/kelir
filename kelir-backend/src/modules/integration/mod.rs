@@ -13,14 +13,17 @@
 //! # One function resolves a reference, for one call
 //!
 //! `integration_credentials.secret_reference` is a pointer —
-//! `vault://kelir/erp/api-key`, `env://KELIR_ERP_API_KEY`. **Only
+//! `vault://kelir/erp/api-key`,
+//! `env://KELIR_INTEGRATION_SECRET_SYSTEM__ERP_API_KEY`. **Only
 //! [`outbound::resolve_secret`] resolves one**, for an administrator's test
 //! call (FR-INT-002, #547; ADR-0043), and the value it returns is a
 //! [`domain::secret::Secret`]: no `Debug`, `Display` or `Serialize` that could
 //! carry it into a response, a log line, an `integration_logs` row or an audit
-//! row. `env://NAME` resolves when `NAME` starts with
-//! `KELIR_INTEGRATION_SECRET_`, and fails with `SECRET_NAME_NOT_PERMITTED`
-//! otherwise; `vault://` fails the call with `SECRET_BACKEND_NOT_CONFIGURED`. What the API checks about a reference's
+//! row. `env://NAME` resolves only when `NAME` is in the caller's tenant's
+//! namespace, `KELIR_INTEGRATION_SECRET_<CODE>__<NAME>`, and no other live
+//! tenant's (#618, [`domain::secret::TenantNamespaces`]), and fails with
+//! `SECRET_NAME_NOT_PERMITTED` otherwise; `vault://` fails the call with
+//! `SECRET_BACKEND_NOT_CONFIGURED`. What the API checks about a reference's
 //! shape at save is in [`domain::credential::validate_secret_reference`].
 //!
 //! # One route calls out
