@@ -115,6 +115,40 @@ log "Checking ${KELIR_APP_DIR}/.env"
 # shellcheck disable=SC1091
 set -a; . "${KELIR_APP_DIR}/.env"; set +a
 
+# ---------------------------------------------------------------------------
+# 1a. An overlay, when one is named
+# ---------------------------------------------------------------------------
+#
+# `KELIR_COMPOSE_OVERLAY` names a second compose file layered over the release
+# one, from the environment or from `.env` (which is why this comes after the
+# line above). **Unset is the release stack and nothing else**, which is what
+# every deployment runs.
+#
+# It exists for one file, `docker-compose.e2e.yml` (#593): the browser flows
+# need a system an integration test call can reach, and that system has no
+# business in the file a release is deployed from. Layering it here, rather
+# than starting it beside the stack by hand, keeps it inside everything below:
+# it comes up with `up`, the service check in 3b reads it, and a failed deploy
+# prints its logs.
+#
+# A name that is not a file stops the deploy. Carrying on without it would
+# bring up a stack that looks right and is missing what the caller asked for.
+compose_files=(-f "${COMPOSE_FILE}")
+
+if [[ -n "${KELIR_COMPOSE_OVERLAY:-}" ]]; then
+    case "${KELIR_COMPOSE_OVERLAY}" in
+        # Absolute, in either spelling: Git Bash on Windows writes `D:/…`.
+        /*|[A-Za-z]:[/\\]*) overlay_file="${KELIR_COMPOSE_OVERLAY}" ;;
+        *)  overlay_file="${KELIR_APP_DIR}/${KELIR_COMPOSE_OVERLAY}" ;;
+    esac
+
+    [[ -f "${overlay_file}" ]] \
+        || die "KELIR_COMPOSE_OVERLAY names ${KELIR_COMPOSE_OVERLAY}, and ${overlay_file} is not a file"
+
+    compose_files+=(-f "${overlay_file}")
+    log "Layering ${overlay_file} over the release stack"
+fi
+
 # `.env.staging.example` is the list, and this loop is what keeps the script and
 # the backend in step.
 #
@@ -260,7 +294,7 @@ cd "${KELIR_APP_DIR}"
 # diagnostic that fails when it is needed is worse than no diagnostic.
 export KELIR_VERSION="${VERSION}"
 
-docker compose -f "${COMPOSE_FILE}" up -d --remove-orphans
+docker compose "${compose_files[@]}" up -d --remove-orphans
 
 # ---------------------------------------------------------------------------
 # 3b. Every service the compose file declares is in the state it should be in
@@ -308,13 +342,13 @@ while read -r service state exit_code; do
   ${service}: ${state}"
             ;;
     esac
-done < <(docker compose -f "${COMPOSE_FILE}" ps -a --format '{{.Service}} {{.State}} {{.ExitCode}}')
+done < <(docker compose "${compose_files[@]}" ps -a --format '{{.Service}} {{.State}} {{.ExitCode}}')
 
 if [[ -n "${unhealthy}" ]]; then
     printf '\033[1;31merror:\033[0m the stack is not up. Services not in a good state:%s\n' \
         "${unhealthy}" >&2
     printf '\nRecent logs:\n' >&2
-    docker compose -f "${COMPOSE_FILE}" logs --tail 20 >&2
+    docker compose "${compose_files[@]}" logs --tail 20 >&2
     exit 1
 fi
 
@@ -336,7 +370,7 @@ done
 
 [[ -n "${ready}" ]] || {
     printf '\033[1;31merror:\033[0m readiness never came up. Recent backend logs:\n' >&2
-    docker compose -f "${COMPOSE_FILE}" logs --tail 40 backend >&2
+    docker compose "${compose_files[@]}" logs --tail 40 backend >&2
     exit 1
 }
 

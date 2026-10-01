@@ -270,10 +270,18 @@ npm run dev
 first, then point the harness at the address the deploy printed:
 
 ```bash
-cd deploy/staging && KELIR_BOOTSTRAP_ADMIN_PASSWORD='…' ./deploy-local.sh 0.3.0 8080
+cd deploy/staging && KELIR_BOOTSTRAP_ADMIN_PASSWORD='…' \
+  KELIR_COMPOSE_OVERLAY=docker-compose.e2e.yml KELIR_E2E_UPSTREAM_TOKEN='…' \
+  ./deploy-local.sh 0.3.0 8080
 cd ../../e2e && npm ci && npx playwright install --with-deps chromium
-KELIR_E2E_BASE_URL=http://127.0.0.1:8080 KELIR_E2E_PASSWORD='…' npm test
+KELIR_E2E_BASE_URL=http://127.0.0.1:8080 KELIR_E2E_PASSWORD='…' \
+  KELIR_E2E_UPSTREAM_TOKEN='…' npm test
 ```
+
+`KELIR_COMPOSE_OVERLAY` layers a stand-in external system over the release
+stack, which one flow needs: an integration test call that is answered
+([#593](https://github.com/sujanto-gaws/kelir/issues/593)). Both
+`KELIR_E2E_UPSTREAM_TOKEN` values are the same throwaway token.
 
 Details, including how to add a flow, are in [e2e/README.md](e2e/README.md).
 

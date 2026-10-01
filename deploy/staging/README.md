@@ -3,11 +3,12 @@
 This directory holds the release deployment: the compose file, the single-origin
 Caddy configuration, the host provisioning script and the deploy scripts.
 
-**Two of the five files run today. Three describe a host that does not exist.**
+**Three of the six files run today. Three describe a host that does not exist.**
 
 | File | State |
 |---|---|
 | `docker-compose.staging.yml` | **In use.** The release stack — Caddy, backend, MinIO, Mailpit — running the immutable `kelir-backend` / `kelir-frontend` images selected by `KELIR_VERSION` |
+| `docker-compose.e2e.yml` | **In use, by the browser flows only.** An overlay that `deploy.sh` layers over the release stack when `KELIR_COMPOSE_OVERLAY` names it: a stand-in external system on a private network, its one address in `KELIR_INTEGRATION_ALLOWED_CIDRS`, and the system tenant's secret ([#593](https://github.com/sujanto-gaws/kelir/issues/593), [`e2e/README.md`](../../e2e/README.md)). No deployment sets the variable |
 | `deploy-local.sh` | **In use.** Brings that stack up locally from release images and runs the smoke test. This is [release process](../../docs/standards/04.%20Release%20Process.md) §4 step 7, and the environment the Definition of Done names |
 | `Caddyfile` | In use by the compose file; TLS applies only to a hostname deployment |
 | `deploy.sh` | **Unused.** Per-release deploy to `kelir-staging-01` |

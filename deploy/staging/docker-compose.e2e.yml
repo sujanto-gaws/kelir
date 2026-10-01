@@ -1,0 +1,91 @@
+# The browser flows' overlay: one system a test call can reach (#593).
+#
+# **Not part of a deployment.** It is layered over docker-compose.staging.yml
+# only when the stack is brought up for `e2e/`, by naming it:
+#
+#   KELIR_COMPOSE_OVERLAY=docker-compose.e2e.yml \
+#   KELIR_E2E_UPSTREAM_TOKEN='a-throwaway-token' \
+#     ./deploy-local.sh 0.9.0 8080
+#
+# CI's `End-to-end (browser)` job does exactly that, through `.env`. Without
+# the variable, deploy.sh runs the release stack as it always has, and this
+# file is not read.
+#
+# **Why it exists.** An integration test call that is *answered* needs three
+# things the release stack does not have: a system to answer, an address the
+# egress guard lets the backend reach, and a secret in the backend's
+# environment. Until this file, every browser flow about a test call showed a
+# refusal, and a `SUCCESS` was proven only by the backend's own tests. The
+# three are added here and nowhere else, so the release compose file still
+# describes what a release runs.
+#
+# **What it changes on the backend**, and it is two variables, both through
+# the same settings a deployment would use. No product code knows this file
+# exists, and nothing here relaxes the guard:
+#
+#   * `KELIR_INTEGRATION_ALLOWED_CIDRS` — **one address, as a /32.** The guard
+#     refuses every private address unless a listed range holds it, and a
+#     compose network is private, so the upstream is unreachable without an
+#     entry. The entry is the upstream's own fixed address and not the
+#     network's range: the backend and the network's gateway (the host) are on
+#     that network too, and neither is something a test call should reach.
+#     Loopback, link-local and the metadata address stay refused; no setting
+#     opens them.
+#   * `KELIR_INTEGRATION_SECRET_SYSTEM__E2E_UPSTREAM_TOKEN` — the secret, under
+#     the **system tenant's** namespace, because the flows sign in as the
+#     bootstrap administrator and a tenant reads only its own names (#618,
+#     D-96 (4) as amended 2026-10-01). A stack whose `KELIR_DEFAULT_TENANT_CODE`
+#     is not `SYSTEM` needs the name changed with it.
+#
+# **Why a second network.** The upstream is on `e2e-upstream` only, and the
+# backend is on both. Were the upstream on the default network as well, its
+# name would resolve to two addresses, and the guard holds every address a
+# name resolves to: the unlisted one would refuse the call.
+#
+# **The subnet is a default, not a requirement.** `10.89.93.0/29` is outside
+# the pools Docker allocates from by itself, so it does not collide with a
+# network Docker made. A host that already routes that range sets
+# `KELIR_E2E_UPSTREAM_SUBNET` and `KELIR_E2E_UPSTREAM_ADDRESS` together.
+
+services:
+  backend:
+    environment:
+      KELIR_INTEGRATION_ALLOWED_CIDRS: ${KELIR_E2E_UPSTREAM_ADDRESS:-10.89.93.2}/32
+      KELIR_INTEGRATION_SECRET_SYSTEM__E2E_UPSTREAM_TOKEN: ${KELIR_E2E_UPSTREAM_TOKEN:?set KELIR_E2E_UPSTREAM_TOKEN to a throwaway token for the e2e upstream}
+    networks:
+      - default
+      - e2e-upstream
+
+  # A stand-in ERP: `e2e/upstream/server.mjs`, run from a bind mount in the
+  # Node image the frontend is built with, so nothing is built or installed
+  # for it. It answers only a call that carries the token, echoes what it was
+  # sent, and keeps a journal of every call (the file's header says why each).
+  e2e-upstream:
+    image: node:24.21.0-alpine
+    # Not `unless-stopped`: a stand-in that cannot start should be seen as
+    # `exited`, which deploy.sh's service check refuses, and not be restarted
+    # into a loop that looks like a running service.
+    restart: 'no'
+    user: node
+    read_only: true
+    command: ['node', '/upstream/server.mjs']
+    environment:
+      UPSTREAM_EXPECTED_TOKEN: ${KELIR_E2E_UPSTREAM_TOKEN:?set KELIR_E2E_UPSTREAM_TOKEN to a throwaway token for the e2e upstream}
+    volumes:
+      # Relative to the project directory, which is this file's own.
+      - ${KELIR_E2E_UPSTREAM_DIR:-../../e2e/upstream}:/upstream:ro
+    ports:
+      # **Loopback only, and only for the journal.** The harness runs on the
+      # host and has to read what the upstream received. The backend does not
+      # use this: it calls `e2e-upstream:8080` across the private network.
+      - '127.0.0.1:${KELIR_E2E_UPSTREAM_PORT:-8089}:8080'
+    networks:
+      e2e-upstream:
+        ipv4_address: ${KELIR_E2E_UPSTREAM_ADDRESS:-10.89.93.2}
+
+networks:
+  e2e-upstream:
+    ipam:
+      config:
+        # A /29: the gateway, the upstream, the backend, and three spare.
+        - subnet: ${KELIR_E2E_UPSTREAM_SUBNET:-10.89.93.0/29}

@@ -30,7 +30,11 @@ import { API_PREFIX, credentials } from '../support/env'
  *   never the reference.
  *
  * A success row is covered by the backend's integration tests and the page's
- * own component tests.
+ * own component tests, **and since #593 in the browser**, by
+ * `a-test-call-is-answered-and-its-secret-is-masked.spec.ts`, which runs
+ * against the overlay that gives the stack one system to call and shows the
+ * success beside a failure that system answered. That closes the part of AC6
+ * this flow left open; this flow is unchanged and needs no overlay.
  *
  * # What it proves that the component tests cannot
  *

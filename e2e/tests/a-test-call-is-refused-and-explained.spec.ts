@@ -17,7 +17,11 @@ import { API_PREFIX, credentials } from '../support/env'
  * is refused with `NO_USABLE_CREDENTIAL` after the endpoint is found and
  * before any secret is read or any address resolved, so the refusal is
  * deterministic on any stack and still writes its log row. The answered path
- * is covered by the backend's integration tests and the dialog's own.
+ * is covered by the backend's integration tests and the dialog's own, **and
+ * since #593 by a flow of its own**,
+ * `a-test-call-is-answered-and-its-secret-is-masked.spec.ts`, on a stack that
+ * brings the three with an overlay. This flow stays a refusal: it is the one
+ * that runs on a stack with nothing to call.
  *
  * # What it proves that the component tests cannot
  *
