@@ -459,6 +459,26 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **The kind-mismatch refusal reads as one sentence**
+  ([#558](https://github.com/sujanto-gaws/kelir/issues/558)). Publishing or
+  saving a workflow definition whose `actions` name a before-only handler is
+  refused with 422 `HANDLER_KIND_MISMATCH`, and the detail's `message` carried
+  three runs of 34 spaces mid-sentence: the source line's indentation, kept in
+  the text. The words are unchanged. The sentence for a `guards` entry naming
+  an after-only handler had one such run; no handler is after-only yet, so no
+  route returns it. Four more texts had the same defect and are fixed with it:
+  - 422 `INCOMPLETE_ENTITY_LINK` for an `entityId` sent without an
+    `entityType` carried a line break and thirteen spaces.
+  - The 409 from `PUT /api/v1/documents/{id}/status` on a document a workflow
+    is deciding carried two runs of nine spaces.
+  - The 200 descriptions of `GET /api/v1/identity/roles` and
+    `GET /api/v1/identity/roles/{id}` in the OpenAPI document carried runs of
+    twelve spaces.
+  - One error log line, for a workflow definition found in another tenant,
+    carried thirteen spaces.
+
+  A client that compares any of these messages byte for byte sees a change;
+  the codes, paths and statuses are the same.
 - **An admin dialog says why a save was refused when no input reads the
   reason** ([#576](https://github.com/sujanto-gaws/kelir/issues/576)). The
   User, Tenant, Role and Delegation dialogs placed a 422's `details` under

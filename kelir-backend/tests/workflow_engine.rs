@@ -430,6 +430,22 @@ async fn a_document_under_a_workflow_cannot_have_its_status_set_by_hand() {
         "a manual status change moved a document a workflow was deciding: {}",
         refused.body
     );
+
+    // The refusal names the instance in one line (#558's sweep): its literal
+    // carried two runs of nine spaces, as the kind-mismatch one carried 34.
+    let message = refused.body["error"]["message"]
+        .as_str()
+        .expect("a message");
+
+    assert!(
+        message.contains("is being decided by workflow instance"),
+        "{message:?}"
+    );
+    assert!(
+        !message.contains("  "),
+        "a run of two or more spaces: {message:?}"
+    );
+    assert!(!message.contains('\n'), "a line break: {message:?}");
     assert_eq!(
         stored_status(&app, id).await,
         "PENDING_APPROVAL",

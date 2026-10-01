@@ -517,7 +517,8 @@ pub async fn definition_of_instance<'e, E: PgExecutor<'e>>(
         tracing::error!(
             workflow_definition_id = %workflow_definition_id,
             tenant_id = %tenant_id,
-            "a row in this tenant points at a workflow definition in another;              the definition was not loaded"
+            "a row in this tenant points at a workflow definition in another; \
+             the definition was not loaded"
         );
 
         return Ok(None);

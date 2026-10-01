@@ -120,10 +120,14 @@ pub fn check_pair(
             entity_id,
         })),
         (None, None) => Ok(None),
-        (Some(_), None) => Err(half("entityId", "an entityType names no record without one")),
+        (Some(_), None) => Err(half(
+            "entityId",
+            "an entityType names no record without one",
+        )),
         (None, Some(_)) => Err(half(
             "entityType",
-            "an entityId alone could mean a party or a facility, and the two \n             are different records",
+            "an entityId alone could mean a party or a facility, and the two \
+             are different records",
         )),
     }
 }
