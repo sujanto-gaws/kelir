@@ -13,7 +13,8 @@
 //! # One function resolves a reference, for one call
 //!
 //! `integration_credentials.secret_reference` is a pointer —
-//! `vault://kelir/erp/api-key`, `env://KELIR_ERP_API_KEY`. **Only
+//! `vault://kelir/erp/api-key`,
+//! `env://KELIR_INTEGRATION_SECRET_SYSTEM__ERP_API_KEY`. **Only
 //! [`outbound::resolve_secret`] resolves one**, for an administrator's test
 //! call (FR-INT-002, #547; ADR-0043), and the value it returns is a
 //! [`domain::secret::Secret`]: no `Debug`, `Display` or `Serialize` that could
