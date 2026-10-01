@@ -367,9 +367,10 @@ While the major version is `0`, the public API may change in any release.
   *sessions end rather than merely failing to renew*, which is more than the
   code does. The product owner chose to state the limit rather than check the
   tenant on each request. **Nothing in behaviour changed.** Three
-  screens now state the limit: the tenant dialog, the user dialog, and the
-  tenant list's delete confirmation, which states what a signed-in user can
-  still do. So do the
+  screens then stated the limit: the tenant dialog, the user dialog, and the
+  tenant list's delete confirmation, which stated what a signed-in user could
+  still do (it now says they are signed out at once; the *Fixed* entry
+  below). So did the
   [SDD](docs/design/01.%20System%20Design%20Document.md) §11.1 (the rule, for
   tenant and user alike), §5.4 and §9.3.6, Database Schema §2.1,
   architectures/01 §18.1 and the
@@ -560,11 +561,12 @@ While the major version is `0`, the public API may change in any release.
     (decision **D-104**).
   - **An integration test call by such a caller answers 401, not 500**, and
     writes no `integration_logs` row (#648).
-  - **An access token is accepted for 15 minutes exactly.** Verification
-    allowed a further 60 seconds past expiry, the JWT library's default
-    leeway. It is now set to zero.
+  - **An access token is accepted for 15 minutes, to the second.** It is
+    accepted up to and including the second of its `exp`, and refused from
+    the next. Verification allowed a further 60 seconds past expiry, the JWT
+    library's default leeway. It is now set to zero.
   - **Unchanged**: a `SUSPENDED` or `INACTIVE` tenant's token, and an
-    `INACTIVE` user's, work until they expire (D-104), now at most 15 minutes.
+    `INACTIVE` or `LOCKED` user's, work until they expire (D-104), now at most 15 minutes.
     Refresh, logout and sign-in are not given the check
     ([#649](https://github.com/sujanto-gaws/kelir/issues/649) stays open). A
     password change does not end an access token already issued. Roles and
