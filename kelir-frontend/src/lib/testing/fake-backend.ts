@@ -85,6 +85,21 @@ export function errorBody(
   return { success: false, error: { code, message, details } }
 }
 
+/**
+ * A 422 `VALIDATION_ERROR` carrying one detail per `[path, message]`, in order.
+ * With no pairs it is a 422 that names no field at all.
+ */
+export function validationReply(...details: [path: string, message: string][]): FakeReply {
+  return {
+    status: 422,
+    body: errorBody(
+      'VALIDATION_ERROR',
+      'Validation failed',
+      details.map(([path, message]) => ({ path, rule: 'server', code: 'INVALID', message })),
+    ),
+  }
+}
+
 function parseBody(data: unknown): unknown {
   if (typeof data !== 'string') {
     return data

@@ -8,6 +8,7 @@ import {
   errorBody,
   installFakeBackend,
   itemBody,
+  validationReply,
   type FakeBackendHandle,
   type FakeHandler,
 } from '@/lib/testing/fake-backend'
@@ -228,5 +229,79 @@ describe('RoleFormDialog', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('permission catalogue could not be loaded')
+  })
+
+  describe('a 422 detail no input reads (#576)', () => {
+    const UNPLACED = '[data-testid="role-unplaced-errors"]'
+
+    function listed(wrapper: VueWrapper): string[] {
+      return wrapper
+        .find(UNPLACED)
+        .findAll('li')
+        .map((item) => item.text())
+    }
+
+    async function submitNew(wrapper: VueWrapper): Promise<void> {
+      await wrapper.find('#role-code').setValue('ROLE-CLERK')
+      await wrapper.find('#role-name').setValue('Clerk')
+      await wrapper.find('form').trigger('submit')
+      await flushPromises()
+    }
+
+    it('lists it on the form, and announces it', async () => {
+      // The description and the permissions have controls but nowhere for a
+      // message, and `colour` is no field of this form at all.
+      handler = () =>
+        validationReply(
+          ['name', 'Name is too long'],
+          ['description', 'Description is too long'],
+          ['permissionIds.1', 'No such permission'],
+          ['colour', 'Unknown field'],
+        )
+      const wrapper = mountDialog(null)
+
+      await submitNew(wrapper)
+
+      expect(listed(wrapper)).toEqual([
+        'description: Description is too long',
+        'permissionIds.1: No such permission',
+        'colour: Unknown field',
+      ])
+      expect(wrapper.find(UNPLACED).attributes('role')).toBe('alert')
+      // The detail an input reads is under that input, and only there.
+      expect(wrapper.find('#role-name-error').text()).toBe('Name is too long')
+      expect(wrapper.emitted('saved')).toBeUndefined()
+    })
+
+    it('does not list a detail an input shows', async () => {
+      handler = () => validationReply(['roleCode', 'Role code is too long'], ['name', 'Too long'])
+      const wrapper = mountDialog(null)
+
+      await submitNew(wrapper)
+
+      expect(wrapper.find('#role-code-error').text()).toBe('Role code is too long')
+      expect(wrapper.find('#role-name-error').text()).toBe('Too long')
+      expect(wrapper.find(UNPLACED).exists()).toBe(false)
+    })
+
+    it('keeps a 422 with no details, and a denial, as the one message on the form', async () => {
+      const wrapper = mountDialog(null)
+
+      handler = () => validationReply()
+      await submitNew(wrapper)
+
+      expect(wrapper.findAll('[role="alert"]').map((alert) => alert.text())).toEqual([
+        'Validation failed',
+      ])
+      expect(wrapper.find(UNPLACED).exists()).toBe(false)
+
+      handler = () => ({ status: 403, body: errorBody('FORBIDDEN', 'Access denied') })
+      await submitNew(wrapper)
+
+      expect(wrapper.findAll('[role="alert"]').map((alert) => alert.text())).toEqual([
+        'Access denied',
+      ])
+      expect(wrapper.find(UNPLACED).exists()).toBe(false)
+    })
   })
 })

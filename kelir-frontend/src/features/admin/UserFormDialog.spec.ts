@@ -9,6 +9,7 @@ import {
   errorBody,
   installFakeBackend,
   itemBody,
+  validationReply,
   type FakeBackendHandle,
   type FakeHandler,
 } from '@/lib/testing/fake-backend'
@@ -342,5 +343,89 @@ describe('UserFormDialog', () => {
     await flushPromises()
 
     expect(lastRequest(backend)?.body).toMatchObject({ roleIds: ['r-1'] })
+  })
+
+  describe('a 422 detail no input reads (#576)', () => {
+    const UNPLACED = '[data-testid="user-unplaced-errors"]'
+
+    function listed(wrapper: VueWrapper): string[] {
+      return wrapper
+        .find(UNPLACED)
+        .findAll('li')
+        .map((item) => item.text())
+    }
+
+    async function submit(wrapper: VueWrapper): Promise<void> {
+      await wrapper.find('form').trigger('submit')
+      await flushPromises()
+    }
+
+    it('lists it on the form, and announces it', async () => {
+      // `departmentId` has an input but nowhere under it for a message, and
+      // `colour` is no field of this form at all. Either way the save was
+      // refused, and before #576 nothing on the form said why.
+      handler = () =>
+        validationReply(
+          ['displayName', 'Display name is too long'],
+          ['departmentId', 'Department must be a UUID'],
+          ['colour', 'Unknown field'],
+        )
+      const wrapper = mountDialog(null)
+
+      await fillCreateForm(wrapper)
+      await submit(wrapper)
+
+      expect(listed(wrapper)).toEqual([
+        'departmentId: Department must be a UUID',
+        'colour: Unknown field',
+      ])
+      expect(wrapper.find(UNPLACED).attributes('role')).toBe('alert')
+      // The detail an input reads is under that input, and only there.
+      expect(wrapper.find('#user-display-name-error').text()).toBe('Display name is too long')
+      expect(wrapper.emitted('saved')).toBeUndefined()
+    })
+
+    it('lists a password detail when editing, where no password is asked for', async () => {
+      handler = () => validationReply(['password', 'Password is too short'])
+      const wrapper = mountDialog(existingUser)
+
+      await submit(wrapper)
+
+      expect(wrapper.find('#user-password-error').exists()).toBe(false)
+      expect(listed(wrapper)).toEqual(['password: Password is too short'])
+    })
+
+    it('does not list a detail an input shows', async () => {
+      handler = () =>
+        validationReply(['username', 'Username is taken'], ['password', 'Password is too short'])
+      const wrapper = mountDialog(null)
+
+      await fillCreateForm(wrapper)
+      await submit(wrapper)
+
+      expect(wrapper.find('#user-username-error').text()).toBe('Username is taken')
+      expect(wrapper.find('#user-password-error').text()).toBe('Password is too short')
+      expect(wrapper.find(UNPLACED).exists()).toBe(false)
+    })
+
+    it('keeps a 422 with no details, and a denial, as the one message on the form', async () => {
+      const wrapper = mountDialog(existingUser)
+
+      handler = () => validationReply()
+      await submit(wrapper)
+
+      expect(wrapper.findAll('[role="alert"]').map((alert) => alert.text())).toEqual([
+        'Validation failed',
+      ])
+      expect(wrapper.find(UNPLACED).exists()).toBe(false)
+
+      handler = () => ({ status: 403, body: errorBody('FORBIDDEN', 'Access denied') })
+      await submit(wrapper)
+
+      expect(wrapper.findAll('[role="alert"]').map((alert) => alert.text())).toEqual([
+        'Access denied',
+      ])
+      expect(wrapper.find(UNPLACED).exists()).toBe(false)
+    })
   })
 })

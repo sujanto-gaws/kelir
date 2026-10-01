@@ -7,8 +7,10 @@ import { registerSessionBridge } from '@/api/session'
 import {
   errorBody,
   installFakeBackend,
+  validationReply,
   type FakeBackendHandle,
   type FakeHandler,
+  type FakeReply,
 } from '@/lib/testing/fake-backend'
 import { filler, searchedPage } from '@/lib/testing/searched-page'
 import { useAuthStore } from '@/stores/auth'
@@ -366,5 +368,115 @@ describe('DelegationFormDialog', () => {
 
     expect(wrapper.emitted('saved')).toBeFalsy()
     expect(wrapper.text()).toContain('no active user with that id in this tenant')
+  })
+
+  describe('a 422 detail no input reads (#576)', () => {
+    const UNPLACED = '[data-testid="delegation-unplaced-errors"]'
+
+    function listed(wrapper: VueWrapper): string[] {
+      return wrapper
+        .find(UNPLACED)
+        .findAll('li')
+        .map((item) => item.text())
+    }
+
+    const travel = { id: 't-travel', typeCode: 'TRAVEL', name: 'Travel request', status: 'ACTIVE' }
+
+    /** Answers the save with `reply`, and every chooser read as before. */
+    function saveAnswers(reply: FakeReply): void {
+      handler = (request) =>
+        request.method === 'post'
+          ? reply
+          : request.url === '/document-types'
+            ? searchedPage(request, [travel], ['typeCode', 'name'])
+            : searchedPage(request, people, ['username', 'email', 'displayName'])
+    }
+
+    async function submitWindow(wrapper: VueWrapper): Promise<void> {
+      await fill(wrapper, {
+        'delegation-delegate': 'u-budi',
+        'delegation-starts': soon(1),
+        'delegation-ends': soon(8),
+      })
+      await wrapper.find('form').trigger('submit')
+      await flushPromises()
+    }
+
+    it('lists it on the form, and announces it', async () => {
+      // The scope and the reason have controls but nowhere for a message, and
+      // `colour` is no field of this form at all.
+      saveAnswers(
+        validationReply(
+          ['endsAt', 'The window is too long'],
+          ['scope', 'ROLE windows are not supported'],
+          ['reason', 'Reason is too long'],
+          ['colour', 'Unknown field'],
+        ),
+      )
+      const wrapper = await mountDialog()
+
+      await submitWindow(wrapper)
+
+      expect(listed(wrapper)).toEqual([
+        'scope: ROLE windows are not supported',
+        'reason: Reason is too long',
+        'colour: Unknown field',
+      ])
+      expect(wrapper.find(UNPLACED).attributes('role')).toBe('alert')
+      // The detail an input reads is under that input, and only there.
+      expect(wrapper.find('#delegation-ends-error').text()).toBe('The window is too long')
+      expect(wrapper.emitted('saved')).toBeFalsy()
+    })
+
+    it('lists a document type detail while the window covers everything', async () => {
+      // The type chooser is drawn only for a narrowed window, so while the
+      // scope is ALL nothing on screen would read this.
+      saveAnswers(validationReply(['documentTypeId', 'No such document type']))
+      const wrapper = await mountDialog()
+
+      await submitWindow(wrapper)
+
+      expect(wrapper.find('#delegation-type-error').exists()).toBe(false)
+      expect(listed(wrapper)).toEqual(['documentTypeId: No such document type'])
+    })
+
+    it('does not list a detail an input shows', async () => {
+      saveAnswers(
+        validationReply(
+          ['delegateUserId', 'No such user'],
+          ['documentTypeId', 'No such document type'],
+        ),
+      )
+      const wrapper = await mountDialog()
+
+      await fill(wrapper, { 'delegation-scope': 'DOCUMENT_TYPE' })
+      await flushPromises()
+      await wrapper.find('#delegation-type').setValue('t-travel')
+      await submitWindow(wrapper)
+
+      expect(wrapper.find('#delegation-delegate-error').text()).toBe('No such user')
+      expect(wrapper.find('#delegation-type-error').text()).toBe('No such document type')
+      expect(wrapper.find(UNPLACED).exists()).toBe(false)
+    })
+
+    it('keeps a 422 with no details, and a denial, as the one message on the form', async () => {
+      const wrapper = await mountDialog()
+
+      saveAnswers(validationReply())
+      await submitWindow(wrapper)
+
+      expect(wrapper.findAll('[role="alert"]').map((alert) => alert.text())).toEqual([
+        'Validation failed',
+      ])
+      expect(wrapper.find(UNPLACED).exists()).toBe(false)
+
+      saveAnswers({ status: 403, body: errorBody('FORBIDDEN', 'Access denied') })
+      await submitWindow(wrapper)
+
+      expect(wrapper.findAll('[role="alert"]').map((alert) => alert.text())).toEqual([
+        'Access denied',
+      ])
+      expect(wrapper.find(UNPLACED).exists()).toBe(false)
+    })
   })
 })
