@@ -181,8 +181,9 @@ pub async fn update_user(
 
     transaction.commit().await?;
 
-    // Deactivating an account must end its sessions, not merely block new
-    // sign-ins: an access token issued a minute ago is still valid otherwise.
+    // Deactivating an account must stop its sessions being renewed, not merely
+    // block new sign-ins. An access token already issued is not reached by
+    // this: it works until it expires (SDD §11.1, decision D-104).
     if matches!(request.status, Some(status) if !status.can_sign_in()) {
         let revoked = repo::revoke_all_for_user(&state.pool, id, "account deactivated").await?;
         tracing::info!(user_id = %id, revoked, "revoked sessions for a deactivated account");
@@ -282,8 +283,8 @@ pub async fn set_password(
         return Err(AppError::not_found("User"));
     }
 
-    // A password change ends every existing session: if the change was prompted
-    // by a suspected compromise, leaving sessions alive defeats the point.
+    // A password change revokes every refresh token: if the change was prompted
+    // by a suspected compromise, leaving sessions renewable defeats the point.
     repo::revoke_all_for_user(&state.pool, id, "password changed").await?;
 
     audit::record_or_warn(

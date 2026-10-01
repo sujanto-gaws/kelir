@@ -63,8 +63,8 @@ pub async fn find_by_code(
 /// worth knowing that this function offers none of its own.
 ///
 /// `user_count` counts live users only. A soft-deleted account is not somebody
-/// whose session suspension would end, and the number exists to answer exactly
-/// that question.
+/// whose session suspension would stop being renewed, and the number exists to
+/// answer exactly that question.
 pub async fn list(
     executor: impl PgExecutor<'_>,
     limit: i64,
@@ -239,12 +239,13 @@ pub async fn soft_delete(
 
 /// Revokes every refresh token belonging to a tenant, returning how many.
 ///
-/// Suspending or deleting a tenant has to end its users' sessions, not merely
-/// stop new sign-ins — the same rule `identity::service` applies to a
-/// deactivated account, for the same reason: a token issued a minute ago is
-/// still valid otherwise. Access tokens are stateless and live out their
-/// fifteen minutes (architecture 01 §18.1); this is the half that can be
-/// revoked, and it is what stops the session being extended.
+/// Suspending or deleting a tenant has to stop its users' sessions being
+/// renewed, not merely stop new sign-ins — the same rule `identity::service`
+/// applies to a deactivated account, for the same reason: a refresh token
+/// issued a minute ago is still valid otherwise. An access token already
+/// issued is not reached: it works until it stops being accepted, at most 16
+/// minutes from issue (SDD §11.1, decision D-104). This is the half that can
+/// be revoked, and it is what stops the session being extended.
 pub async fn revoke_sessions(
     executor: impl PgExecutor<'_>,
     tenant_id: Uuid,

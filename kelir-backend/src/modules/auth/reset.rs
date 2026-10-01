@@ -301,8 +301,9 @@ pub async fn reset_password(
 
     transaction.commit().await?;
 
-    // Sessions end after the commit, not inside it: a revoke that rolled back
-    // with a failed password change would sign somebody out for nothing.
+    // Refresh tokens are revoked after the commit, not inside it: a revoke that
+    // rolled back with a failed password change would cut sessions short for
+    // nothing.
     let revoked =
         identity_repo::revoke_all_for_user(&state.pool, stored.user_id, "password reset").await?;
 
