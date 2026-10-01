@@ -58,6 +58,10 @@ export function updateUser(id: string, request: UpdateUserRequest): Promise<User
  * Soft-delete: the backend sets `INACTIVE` plus `deleted_at`, so the row leaves
  * the list entirely rather than appearing as inactive. Answers 204.
  *
+ * The account is signed out at once (D-105): its next request is answered 401
+ * on every route. Changing a user's status through `updateUser` is the other
+ * case — an open session then runs on for up to fifteen minutes (D-104).
+ *
  * Deactivating yourself is refused with 400, not 403 — the permission check
  * passes first, then the self-check fails.
  */

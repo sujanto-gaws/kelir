@@ -67,13 +67,14 @@ function openDelete(tenant: Tenant): void {
  * The user count matters here and nowhere else on the screen: this is the
  * number of people the confirmation they are about to give shuts out.
  *
- * Not at once, and this is what the code does today rather than anything
- * decided: nobody can sign in or renew a session from then on, but somebody
- * already signed in can go on reading the tenant's data and creating records in
- * it until what they hold stops being accepted — 15 minutes from issue, plus
- * the 60 seconds verification allows. D-104 covers suspending and deactivating;
- * it does not decide deletion, and #650 is open on it. The text says what
- * happens rather than promising more.
+ * At once (D-105): nobody can sign in or renew a session from then on, and the
+ * backend refuses the next request from anybody already signed in to the
+ * tenant, on every route — so their browser clears the session and shows the
+ * login page. That is what separates deleting from suspending or deactivating,
+ * where an open session runs on for up to 15 minutes (D-104).
+ *
+ * The data is not erased: the delete is a soft one. It is out of reach because
+ * nobody can hold a session in the tenant any more.
  */
 const deleteDescription = computed(() => {
   const target = confirming.value
@@ -84,9 +85,8 @@ const deleteDescription = computed(() => {
 
   return (
     `${target.name} (${target.tenantCode}) will be removed. ` +
-    `Its ${target.userCount} user(s) can no longer sign in. ` +
-    'Anyone already signed in can keep working in it, including creating records, for up to 16 minutes. ' +
-    'Its data is left in place and cannot be reached by signing in afterwards.'
+    `Its ${target.userCount} user(s) are signed out at once and can no longer sign in. ` +
+    'Its data is left in place but can no longer be reached.'
   )
 })
 

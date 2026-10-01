@@ -324,7 +324,7 @@ async function submit(): Promise<void> {
         />
         <p id="user-status-hint" class="text-xs text-muted-foreground">
           Only an active account can sign in. With any other status, someone already signed in is
-          signed out within 16 minutes.
+          signed out within 15 minutes.
         </p>
       </div>
 
