@@ -546,10 +546,371 @@ async fn a_suspended_tenant_stops_admitting_the_administrator_it_was_created_wit
     );
 }
 
+// ---------------------------------------------------------------------------
+// D-104: what an access token already issued does after its tenant leaves.
+//
+// **A decision, not a defect** (D-104, answered A by the product owner on
+// 2026-10-01). Sign-in and refresh are refused the moment a tenant is
+// suspended, deactivated or deleted. An access token issued before that is
+// checked by signature and expiry only (`middleware::auth`), so it keeps
+// working until it stops being accepted: at most `ACCESS_TOKEN_TTL_MINUTES`
+// from issue plus the 60 seconds of leeway verification allows, 16 minutes.
+// That window is the stated limit for a suspended or inactive tenant; D-104
+// does not decide a deleted one (#650, open). The tests below send one read
+// and one write, not every route.
+//
+// The tests below pin both halves, so neither can move unnoticed: the token
+// works inside the window, and the window closes. A change that makes the
+// middleware look the tenant up turns the first two red, and that is them
+// working: such a change reverses D-104 and needs the decision reopened, not
+// these assertions edited.
+// ---------------------------------------------------------------------------
+
+const USERS: &str = "/api/v1/identity/users";
+const TENANT_PASSWORD: &str = "a-sufficiently-long-password";
+
+/// A created tenant and the session its administrator opened while it was
+/// still `ACTIVE`: both halves of the session, which `TestApp::sign_in_to`
+/// does not return.
+struct TenantSession {
+    tenant_id: uuid::Uuid,
+    access: String,
+    refresh: String,
+}
+
+async fn sign_in_attempt(app: &TestApp, code: &str, username: &str) -> common::TestResponse {
+    app.post(
+        "/api/v1/auth/login",
+        None,
+        json!({
+            "username": username,
+            "password": TENANT_PASSWORD,
+            "tenantCode": code,
+        }),
+    )
+    .await
+}
+
+async fn created_tenant_session(
+    app: &TestApp,
+    system_token: &str,
+    code: &str,
+    username: &str,
+) -> TenantSession {
+    let created = app
+        .post(TENANTS, Some(system_token), create_body(code, username))
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let tenant_id = created.data()["id"]
+        .as_str()
+        .expect("a created tenant has an id")
+        .parse()
+        .expect("a tenant id is a uuid");
+
+    let session = sign_in_attempt(app, code, username).await;
+    assert_eq!(session.status, StatusCode::OK, "{}", session.body);
+
+    let field = |name: &str| {
+        session.data()[name]
+            .as_str()
+            .unwrap_or_else(|| panic!("no {name} in {}", session.body))
+            .to_owned()
+    };
+
+    TenantSession {
+        tenant_id,
+        access: field("accessToken"),
+        refresh: field("refreshToken"),
+    }
+}
+
+async fn set_tenant_status(app: &TestApp, system_token: &str, tenant_id: uuid::Uuid, status: &str) {
+    let changed = app
+        .put(
+            &format!("{TENANTS}/{tenant_id}"),
+            Some(system_token),
+            json!({ "status": status }),
+        )
+        .await;
+    assert_eq!(changed.status, StatusCode::OK, "{}", changed.body);
+    assert_eq!(changed.data()["status"], status);
+}
+
+fn user_body(username: &str) -> serde_json::Value {
+    json!({
+        "username": username,
+        "email": format!("{username}@example.test"),
+        "password": TENANT_PASSWORD,
+        "displayName": "Created With An Outliving Token",
+    })
+}
+
+/// How many live users of that name the tenant holds, read past the API: the
+/// tenant's own administrator can no longer sign in to be asked.
+async fn users_named(app: &TestApp, tenant_id: uuid::Uuid, username: &str) -> i64 {
+    let (count,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM users \
+         WHERE tenant_id = $1 AND username = $2 AND deleted_at IS NULL",
+    )
+    .bind(tenant_id)
+    .bind(username)
+    .fetch_one(&app.pool)
+    .await
+    .expect("reads users");
+
+    count
+}
+
+fn usernames(listed: &common::TestResponse) -> Vec<&str> {
+    listed.body["data"]
+        .as_array()
+        .unwrap_or_else(|| panic!("not a list: {}", listed.body))
+        .iter()
+        .filter_map(|user| user["username"].as_str())
+        .collect()
+}
+
+/// The same claims under the same signature, as the token would be `seconds`
+/// later: `iat` and `exp` both moved back, nothing else touched.
+///
+/// The harness has no clock to advance and the lifetime is a constant, so the
+/// token is aged instead of the test waiting. With `seconds == 0` this is a
+/// re-signed copy of a live token, which is the control for every refusal an
+/// aged one gets.
+fn aged(access: &str, seconds: i64) -> String {
+    use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+
+    let mut claims = decode::<serde_json::Value>(
+        access,
+        &DecodingKey::from_secret(common::JWT_SECRET.as_bytes()),
+        &Validation::new(Algorithm::HS256),
+    )
+    .expect("the application's own token verifies under the test secret")
+    .claims;
+
+    for claim in ["iat", "exp"] {
+        let issued = claims[claim]
+            .as_i64()
+            .unwrap_or_else(|| panic!("no {claim} in {claims}"));
+        claims[claim] = json!(issued - seconds);
+    }
+
+    encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(common::JWT_SECRET.as_bytes()),
+    )
+    .expect("claims sign")
+}
+
+/// D-104 (A), the half inside the window, for one status.
+async fn an_access_token_outlives_its_tenant_becoming(status: &str) {
+    let app = multi_tenant_app().await;
+    let token = administering_token(&app).await;
+    let session = created_tenant_session(&app, &token, "ACME", "acme.admin").await;
+
+    set_tenant_status(&app, &token, session.tenant_id, status).await;
+
+    // The token issued before the change reads the tenant's own data...
+    let listed = app.get(USERS, Some(&session.access)).await;
+    assert_eq!(
+        listed.status,
+        StatusCode::OK,
+        "D-104 (A): a token issued before its tenant became {status} is good until it \
+         expires. If the middleware now refuses it, the decision was reversed; reopen \
+         D-104 rather than editing this assertion: {}",
+        listed.body
+    );
+    assert_eq!(usernames(&listed), ["acme.admin"], "{}", listed.body);
+
+    // ...and writes to it. Not merely answered 201: the row is there.
+    let written = app
+        .post(USERS, Some(&session.access), user_body("acme.late"))
+        .await;
+    assert_eq!(
+        written.status,
+        StatusCode::CREATED,
+        "D-104 (A): the limit covers writes as well as reads, for a {status} tenant: {}",
+        written.body
+    );
+    assert_eq!(
+        users_named(&app, session.tenant_id, "acme.late").await,
+        1,
+        "the write a {status} tenant's token was answered 201 for did not happen"
+    );
+
+    // What makes the limit a bound: the session cannot be started again...
+    let refused = sign_in_attempt(&app, "ACME", "acme.admin").await;
+    assert_eq!(
+        refused.status,
+        StatusCode::UNAUTHORIZED,
+        "a {status} tenant admitted a new sign-in: {}",
+        refused.body
+    );
+
+    // ...or extended, so the token above is the last one this tenant holds.
+    let rotated = app
+        .post(
+            "/api/v1/auth/refresh",
+            None,
+            json!({ "refreshToken": session.refresh }),
+        )
+        .await;
+    assert_eq!(
+        rotated.status,
+        StatusCode::UNAUTHORIZED,
+        "a {status} tenant's session could still be extended: {}",
+        rotated.body
+    );
+}
+
+#[tokio::test]
+async fn by_decision_d_104_an_access_token_outlives_its_tenants_suspension_until_it_expires() {
+    // **Intended, and bounded** (D-104, A). Do not "fix" this test: see the
+    // note above `USERS`.
+    an_access_token_outlives_its_tenant_becoming("SUSPENDED").await;
+}
+
+#[tokio::test]
+async fn by_decision_d_104_an_access_token_outlives_its_tenants_deactivation_until_it_expires() {
+    // **Intended, and bounded** (D-104, A). Do not "fix" this test: see the
+    // note above `USERS`.
+    an_access_token_outlives_its_tenant_becoming("INACTIVE").await;
+}
+
+#[tokio::test]
+async fn a_tenant_that_left_has_its_expired_access_token_refused_and_nothing_renews_it() {
+    // **The bound D-104 (A) rests on.** The limit is acceptable because it
+    // ends: the token above stops at its expiry, and a tenant that is not
+    // `ACTIVE` has no way to another one.
+    //
+    // Aged past `ACCESS_TOKEN_TTL_MINUTES` by two minutes rather than by a
+    // second: `jsonwebtoken`'s default `Validation` allows 60 seconds of
+    // leeway on `exp`, which `verify_access_token` does not turn off.
+    use kelir_backend::modules::auth::token::ACCESS_TOKEN_TTL_MINUTES;
+
+    let past_expiry = ACCESS_TOKEN_TTL_MINUTES * 60 + 120;
+
+    let app = multi_tenant_app().await;
+    let token = administering_token(&app).await;
+
+    for (status, code, username) in [
+        ("SUSPENDED", "ACME", "acme.admin"),
+        ("INACTIVE", "BETA", "beta.admin"),
+    ] {
+        let session = created_tenant_session(&app, &token, code, username).await;
+        set_tenant_status(&app, &token, session.tenant_id, status).await;
+
+        // Control: a re-signed copy with its expiry untouched is the token
+        // D-104 describes, so what refuses the aged one is its age and not
+        // that this test minted it.
+        let live = app.get(USERS, Some(&aged(&session.access, 0))).await;
+        assert_eq!(live.status, StatusCode::OK, "{status}: {}", live.body);
+
+        let expired = aged(&session.access, past_expiry);
+
+        let read = app.get(USERS, Some(&expired)).await;
+        assert_eq!(
+            read.status,
+            StatusCode::UNAUTHORIZED,
+            "a {status} tenant's token still read after its lifetime: {}",
+            read.body
+        );
+        assert_eq!(read.error_code(), Some("UNAUTHORIZED"));
+
+        let late = format!("{}.late", code.to_lowercase());
+        let written = app.post(USERS, Some(&expired), user_body(&late)).await;
+        assert_eq!(
+            written.status,
+            StatusCode::UNAUTHORIZED,
+            "a {status} tenant's token still wrote after its lifetime: {}",
+            written.body
+        );
+        assert_eq!(
+            users_named(&app, session.tenant_id, &late).await,
+            0,
+            "a refused write from a {status} tenant happened anyway"
+        );
+
+        // And there is no way back in: not the refresh token issued with it,
+        // and not the credentials.
+        let rotated = app
+            .post(
+                "/api/v1/auth/refresh",
+                None,
+                json!({ "refreshToken": session.refresh }),
+            )
+            .await;
+        assert_eq!(
+            rotated.status,
+            StatusCode::UNAUTHORIZED,
+            "{status}: {}",
+            rotated.body
+        );
+        assert!(
+            rotated.data()["accessToken"].is_null(),
+            "a refused refresh returned a token: {}",
+            rotated.body
+        );
+
+        let refused = sign_in_attempt(&app, code, username).await;
+        assert_eq!(
+            refused.status,
+            StatusCode::UNAUTHORIZED,
+            "{status}: {}",
+            refused.body
+        );
+        assert!(
+            refused.data()["accessToken"].is_null(),
+            "a refused sign-in returned a token: {}",
+            refused.body
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_deleted_tenants_access_token_still_reads_its_users_which_d_104_does_not_decide() {
+    // **Pinned as what the code does, not as a decision.** D-104 names
+    // suspension and deactivation of a tenant, and deactivation of a user; it
+    // does not say what a *deleted* tenant's token may do. The middleware
+    // checks no tenant at all, so today the answer is the same as for a
+    // suspended one. The integration test call is the open question for this
+    // case (#648) and is deliberately not asserted here.
+    //
+    // If this goes red because a deleted tenant's token is now refused, that
+    // may well be the better behaviour: change the assertion along with
+    // whatever records the decision.
+    let app = multi_tenant_app().await;
+    let token = administering_token(&app).await;
+    let session = created_tenant_session(&app, &token, "ACME", "acme.admin").await;
+
+    let deleted = app
+        .delete(&format!("{TENANTS}/{}", session.tenant_id), Some(&token))
+        .await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
+
+    let listed = app.get(USERS, Some(&session.access)).await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    assert_eq!(usernames(&listed), ["acme.admin"], "{}", listed.body);
+
+    // The same bound as the decided cases: nothing renews it.
+    let rotated = app
+        .post(
+            "/api/v1/auth/refresh",
+            None,
+            json!({ "refreshToken": session.refresh }),
+        )
+        .await;
+    assert_eq!(rotated.status, StatusCode::UNAUTHORIZED, "{}", rotated.body);
+
+    let refused = sign_in_attempt(&app, "ACME", "acme.admin").await;
+    assert_eq!(refused.status, StatusCode::UNAUTHORIZED, "{}", refused.body);
+}
+
 #[tokio::test]
 async fn the_administering_tenant_cannot_suspend_or_delete_itself() {
-    // Both would end the session making the request, and leave nobody able to
-    // undo it — the refusal `deactivate_user` already gives for your own
+    // Both would stop the session making the request being renewed, and leave
+    // nobody able to undo it — the refusal `deactivate_user` already gives for your own
     // account.
     let app = TestApp::spawn().await;
     let token = app.administrator_token().await;

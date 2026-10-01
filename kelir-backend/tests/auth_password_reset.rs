@@ -330,7 +330,8 @@ async fn an_expired_token_is_refused() {
     );
 }
 
-/// Redeeming a link ends every other session for that account.
+/// Redeeming a link revokes every refresh token for that account, so no other
+/// session can be renewed.
 #[tokio::test]
 async fn a_reset_signs_the_account_out_everywhere() {
     let app = TestApp::spawn().await;
