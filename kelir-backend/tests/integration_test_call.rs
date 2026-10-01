@@ -63,6 +63,38 @@
 //! | `NAMESPACE_SEPARATOR` is one underscore | `a_created_tenant_naming_the_system_tenants_variable_is_refused_and_sends_nothing`, `a_single_tenant_deployment_reads_only_its_tenants_namespace` |
 //! | The caller's own gate dropped, the ambiguity rule kept | `a_single_tenant_deployment_reads_only_its_tenants_namespace` |
 //! | The refusal names the bare prefix, not the caller's | `a_created_tenant_naming_the_system_tenants_variable_is_refused_and_sends_nothing`, `a_single_tenant_deployment_reads_only_its_tenants_namespace` |
+//!
+//! **The test-engineer campaign on #618, seen red 2026-10-01**: twenty-two
+//! mutations the table above does not list. A row that names tests was made,
+//! `--lib modules::integration`, this file and `integration_logs` run, the
+//! named tests observed red, and the mutation reverted; most also redden
+//! `domain::secret`'s or `outbound`'s unit tests. A row that says green left
+//! all three suites green, and says why.
+//!
+//! | Mutation | Reddened |
+//! |---|---|
+//! | `organization::repository::live_codes` drops `deleted_at IS NULL` | `a_deleted_tenants_open_session_resolves_no_secret_its_own_or_another`, `a_tenant_that_is_not_active_still_holds_its_names_and_a_deleted_one_does_not` |
+//! | `live_codes` adds `AND status = 'ACTIVE'` | `a_tenant_that_is_not_active_still_holds_its_names_and_a_deleted_one_does_not` |
+//! | `service::test_call` takes the first live tenant's code for the caller's | `a_created_tenant_naming_the_system_tenants_variable_is_refused_and_sends_nothing`, `another_tenants_variable_answers_the_same_set_or_unset`, `a_name_two_tenants_codes_both_map_to_is_refused_for_both`, `a_caller_in_another_tenant_calls_their_own_endpoint_and_neither_reaches_the_other` |
+//! | `-` admitted in a name after the separator | unit tests only. No request reaches it: `SecretReference::parse` refuses the shape first, which `a_stored_reference_outside_the_name_alphabet_is_malformed_and_reads_nothing` holds |
+//! | Lower case admitted in a name after the separator | unit tests only, for the same reason |
+//! | A tenant's prefix with no name after it admitted | `a_tenants_prefix_with_nothing_after_it_is_refused_set_or_not` |
+//! | The separator dropped from the match | `a_tenants_prefix_with_nothing_after_it_is_refused_set_or_not`, `a_code_ending_in_an_underscore_and_the_code_without_it_share_no_name` |
+//! | Ambiguity only between codes that map to the same segment | `a_name_two_tenants_codes_both_map_to_is_refused_for_both`, `a_code_ending_in_an_underscore_and_the_code_without_it_share_no_name` |
+//! | Ambiguity only against a code longer than the caller's | `a_name_two_tenants_codes_both_map_to_is_refused_for_both`, `a_code_ending_in_an_underscore_and_the_code_without_it_share_no_name`, `a_tenant_that_is_not_active_still_holds_its_names_and_a_deleted_one_does_not`, `a_code_no_route_stores_reads_upper_case_names_or_nothing` |
+//! | The refusal lists the other tenants' codes | `a_created_tenant_naming_the_system_tenants_variable_is_refused_and_sends_nothing` |
+//! | The refusal repeats the refused name | `a_created_tenant_naming_the_system_tenants_variable_is_refused_and_sends_nothing`, `another_tenants_variable_answers_the_same_set_or_unset` |
+//! | A refused name returns before its `integration_logs` row is written | `a_created_tenant_naming_the_system_tenants_variable_is_refused_and_sends_nothing`, `another_tenants_variable_answers_the_same_set_or_unset`, `a_name_two_tenants_codes_both_map_to_is_refused_for_both`, `a_single_tenant_deployment_reads_only_its_tenants_namespace`, `a_name_outside_the_integration_prefix_is_refused_and_its_value_goes_nowhere` |
+//! | A `vault://` reference refused as `SECRET_NAME_NOT_PERMITTED` | `a_vault_reference_fails_named_and_writes_one_log_row` |
+//! | `SECRET_NOT_FOUND` names the caller's prefix, not the variable | `another_tenants_variable_answers_the_same_set_or_unset` |
+//! | `admits`' length check on the #547 prefix removed | green — equivalent: the tenant prefix begins with the #547 prefix and is longer |
+//! | `admits`' `starts_with` on the #547 prefix removed | green — equivalent, for the same reason |
+//! | `std::env::var` called before `admits`, its answer dropped on a refusal | green — the answer is the same bytes, so no request observes it; the order is held by review of `outbound::resolve_secret` |
+//! | A caller whose tenant is not live is given the first live tenant's code | `a_deleted_tenants_open_session_resolves_no_secret_its_own_or_another` |
+//! | `SecretReference::parse` skips the shape check | `a_stored_reference_outside_the_name_alphabet_is_malformed_and_reads_nothing` |
+//! | An empty value is a secret (`outbound::resolve_secret`) | `a_variable_set_to_nothing_is_not_found_and_nothing_is_sent` |
+//! | `namespace_segment` does not upper-case the code | `a_code_no_route_stores_reads_upper_case_names_or_nothing` — the builder's row above, now reached through a code written past the route |
+//! | Ambiguity judged on the other tenant's prefix alone, its name allowed to be empty | green — refuses more, not less: only a name that is exactly another tenant's prefix differs |
 
 mod common;
 
@@ -852,8 +884,10 @@ async fn an_unset_environment_variable_is_named_and_logged() {
 
 #[tokio::test]
 async fn a_name_outside_the_integration_prefix_is_refused_and_its_value_goes_nowhere() {
-    // The product owner's decision on #547: only KELIR_INTEGRATION_SECRET_*
-    // is read. KELIR_JWT_SECRET is the case the rule exists for — a caller who
+    // The product owner's decision on #547, as #618 narrowed it: only the
+    // caller's tenant's KELIR_INTEGRATION_SECRET_<CODE>__* is read, so a name
+    // outside the prefix is outside every tenant's namespace.
+    // KELIR_JWT_SECRET is the case the rule exists for — a caller who
     // can write a reference and a baseUrl would otherwise be sent the key that
     // signs every session.
     let app = app_reaching_loopback().await;
@@ -2477,4 +2511,480 @@ async fn a_first_address_that_does_not_connect_falls_through_to_the_next() {
     assert_eq!(response.data()["status"], "SUCCESS");
     assert_eq!(mock.seen().len(), 1);
     assert_eq!(log_rows(&app, target.endpoint).await.len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Added by the test-engineer campaign (#618, 2026-10-01): the tests the
+// campaign's mutations called for. The header's campaign table names the
+// mutation each one reddens under.
+// ---------------------------------------------------------------------------
+
+/// A tenant's id, by its code.
+async fn tenant_id_of(app: &TestApp, code: &str) -> Uuid {
+    sqlx::query_scalar("SELECT id FROM tenants WHERE tenant_code = $1")
+        .bind(code)
+        .fetch_one(&app.pool)
+        .await
+        .expect("the tenant exists")
+}
+
+/// Writes a credential's reference past the API, which refuses these at save
+/// (`integration_external_systems` holds that): what a restored backup or a
+/// hand-run statement could leave in the column.
+async fn set_reference(app: &TestApp, credential: Uuid, reference: &str) {
+    sqlx::query("UPDATE integration_credentials SET secret_reference = $2 WHERE id = $1")
+        .bind(credential)
+        .bind(reference)
+        .execute(&app.pool)
+        .await
+        .expect("set the stored reference");
+}
+
+/// Writes a tenant's code past the API, which stores only upper-case
+/// `A-Z 0-9 - _`.
+async fn set_tenant_code(app: &TestApp, tenant: Uuid, code: &str) {
+    sqlx::query("UPDATE tenants SET tenant_code = $2 WHERE id = $1")
+        .bind(tenant)
+        .bind(code)
+        .execute(&app.pool)
+        .await
+        .expect("set the tenant's code");
+}
+
+#[tokio::test]
+async fn a_deleted_tenants_open_session_resolves_no_secret_its_own_or_another() {
+    // The access token outlives its tenant: deleting a tenant revokes its
+    // refresh sessions, not a token already issued. Such a caller has no
+    // live code, so nothing is resolved for it: not its own namespace, and
+    // not another live tenant's in place of the one it lost.
+    let app = multi_tenant_app_reaching_loopback().await;
+    let system_admin = app
+        .sign_in_to("SYSTEM", common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await;
+    let collector = Mock::start().await;
+    let tenant = created_tenant_administrator(&app, &system_admin, "TNT-GONE").await;
+
+    let (own_reference, own_value) = plant_in("TNT_GONE", "kelir-planted-deleted-own-2e2e");
+    let (system_reference, system_value) = plant_in("SYSTEM", "kelir-planted-deleted-foreign-3f3f");
+    let own = target(&app, &tenant, &collector.base_url(), "GET", "/echo").await;
+    bearer(&app, &tenant, own.system, &own_reference).await;
+    let foreign = target(&app, &tenant, &collector.base_url(), "GET", "/echo").await;
+    bearer(&app, &tenant, foreign.system, &system_reference).await;
+
+    // Control: before the deletion, its own variable resolves.
+    let response = call(&app, &tenant, &own).await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    assert_eq!(collector.seen().len(), 1);
+
+    let id = tenant_id_of(&app, "TNT-GONE").await;
+    let deleted = app
+        .delete(&format!("{TENANTS}/{id}"), Some(&system_admin))
+        .await;
+    assert!(deleted.status.is_success(), "{}", deleted.body);
+
+    for (target, value, rows_expected) in [(&own, &own_value, 2), (&foreign, &system_value, 1)] {
+        let response = call(&app, &tenant, target).await;
+        assert_ne!(response.status, StatusCode::OK, "{}", response.body);
+        assert!(!response.body.to_string().contains(value.as_str()));
+        // Which names exist is not said either: the answer is not one of the
+        // resolver's.
+        assert!(
+            !matches!(
+                response.error_code(),
+                Some("SECRET_NOT_FOUND" | "SECRET_NAME_NOT_PERMITTED")
+            ),
+            "{}",
+            response.body
+        );
+        assert!(
+            !response
+                .body
+                .to_string()
+                .contains("KELIR_INTEGRATION_SECRET_"),
+            "{}",
+            response.body
+        );
+        let rows = log_rows(&app, target.endpoint).await;
+        assert_eq!(
+            rows.len(),
+            rows_expected,
+            "the refused call still writes its row"
+        );
+        assert_eq!(rows[rows.len() - 1]["status"], "FAILED");
+    }
+    assert_eq!(
+        collector.seen().len(),
+        1,
+        "the collector received {:?}",
+        collector.seen()
+    );
+    assert!(!all_log_text(&app).await.contains(&system_value));
+    assert!(!all_log_text(&app).await.contains(&own_value));
+}
+
+#[tokio::test]
+async fn a_tenant_that_is_not_active_still_holds_its_names_and_a_deleted_one_does_not() {
+    // The ambiguity rule counts every tenant that is not deleted, whatever
+    // its status: a suspended or inactive tenant can be made active again,
+    // and its variables stay in the environment meanwhile. So `SUS_X` cannot
+    // read `..._SUS_X__...` while `SUS-X` is suspended or inactive.
+    let app = multi_tenant_app_reaching_loopback().await;
+    let system_admin = app
+        .sign_in_to("SYSTEM", common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await;
+    let collector = Mock::start().await;
+
+    let _hyphen = created_tenant_administrator(&app, &system_admin, "SUS-X").await;
+    let underscore = created_tenant_administrator(&app, &system_admin, "SUS_X").await;
+    let (shared, shared_value) = plant_in("SUS_X", "kelir-planted-suspended-4a4a");
+    let id = tenant_id_of(&app, "SUS-X").await;
+
+    for status in ["SUSPENDED", "INACTIVE"] {
+        let updated = app
+            .put(
+                &format!("{TENANTS}/{id}"),
+                Some(&system_admin),
+                json!({ "status": status }),
+            )
+            .await;
+        assert_eq!(updated.status, StatusCode::OK, "{}", updated.body);
+
+        let target = target(&app, &underscore, &collector.base_url(), "GET", "/echo").await;
+        bearer(&app, &underscore, target.system, &shared).await;
+        let response = call(&app, &underscore, &target).await;
+
+        assert_eq!(
+            response.error_code(),
+            Some("SECRET_NAME_NOT_PERMITTED"),
+            "{status}: {}",
+            response.body
+        );
+        assert!(!response.body.to_string().contains(shared_value.as_str()));
+    }
+    assert!(
+        collector.seen().is_empty(),
+        "the collector received {:?}",
+        collector.seen()
+    );
+
+    // The rule as decided: only a live tenant holds a name. Once `SUS-X` is
+    // deleted the name is `SUS_X`'s alone, and is read.
+    let deleted = app
+        .delete(&format!("{TENANTS}/{id}"), Some(&system_admin))
+        .await;
+    assert!(deleted.status.is_success(), "{}", deleted.body);
+
+    let target = target(&app, &underscore, &collector.base_url(), "GET", "/echo").await;
+    bearer(&app, &underscore, target.system, &shared).await;
+    let response = call(&app, &underscore, &target).await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    assert_eq!(
+        collector
+            .seen()
+            .last()
+            .and_then(|seen| seen.authorization.clone()),
+        Some(format!("Bearer {shared_value}"))
+    );
+}
+
+#[tokio::test]
+async fn a_tenants_prefix_with_nothing_after_it_is_refused_set_or_not() {
+    // `env://KELIR_INTEGRATION_SECRET_SYSTEM__` has a reference's shape, so the
+    // registry stores it, and a variable of that name can be set. It names
+    // nothing in the tenant's namespace, and neither does the code with one
+    // underscore, with none, or the bare prefix: each is refused by name, the
+    // variable set, and nothing is sent.
+    let app = app_reaching_loopback().await;
+    let token = app.administrator_token().await;
+    let collector = Mock::start().await;
+    let value = "kelir-planted-nameless-5b5b";
+
+    for name in [
+        "KELIR_INTEGRATION_SECRET_SYSTEM__",
+        "KELIR_INTEGRATION_SECRET_SYSTEM_",
+        "KELIR_INTEGRATION_SECRET_SYSTEM",
+        "KELIR_INTEGRATION_SECRET_",
+    ] {
+        std::env::set_var(name, value);
+
+        let target = target(&app, &token, &collector.base_url(), "GET", "/echo").await;
+        bearer(&app, &token, target.system, &format!("env://{name}")).await;
+        let response = call(&app, &token, &target).await;
+
+        assert_eq!(
+            response.error_code(),
+            Some("SECRET_NAME_NOT_PERMITTED"),
+            "{name}: {}",
+            response.body
+        );
+        assert!(!response.body.to_string().contains(value), "{name}");
+        assert_eq!(log_rows(&app, target.endpoint).await.len(), 1, "{name}");
+    }
+
+    assert!(
+        collector.seen().is_empty(),
+        "the collector received {:?}",
+        collector.seen()
+    );
+    assert!(!all_log_text(&app).await.contains(value));
+}
+
+#[tokio::test]
+async fn a_stored_reference_outside_the_name_alphabet_is_malformed_and_reads_nothing() {
+    // Why no request reaches `TenantNamespaces::admits`'s own alphabet check:
+    // a name outside `A-Z 0-9 _` is refused at save, and one written past the
+    // API is refused when the call parses it, before the tenant check and
+    // before the environment. Each variable below is set, in the system
+    // tenant's own namespace, and none is read.
+    let app = app_reaching_loopback().await;
+    let token = app.administrator_token().await;
+    let collector = Mock::start().await;
+    let value = "kelir-planted-off-alphabet-6c6c";
+    let unique = Uuid::now_v7().simple().to_string();
+
+    let names = [
+        format!("KELIR_INTEGRATION_SECRET_SYSTEM__test_{unique}"),
+        format!(
+            "KELIR_INTEGRATION_SECRET_SYSTEM__TEST-{}",
+            unique.to_uppercase()
+        ),
+        format!(
+            "KELIR_INTEGRATION_SECRET_SYSTEM__TEST.{}",
+            unique.to_uppercase()
+        ),
+        format!(
+            "KELIR_INTEGRATION_SECRET_SYSTEM__TEST {}",
+            unique.to_uppercase()
+        ),
+    ];
+
+    for name in &names {
+        std::env::set_var(name, value);
+        let reference = format!("env://{name}");
+
+        let target = target(&app, &token, &collector.base_url(), "GET", "/echo").await;
+        let refused = app
+            .post(
+                &format!("{BASE}/{}/credentials", target.system),
+                Some(&token),
+                json!({ "credentialType": "BEARER_TOKEN", "secretReference": reference }),
+            )
+            .await;
+        assert_eq!(
+            refused.body["error"]["details"][0]["code"], "NOT_A_SECRET_REFERENCE",
+            "{name}: {}",
+            refused.body
+        );
+
+        let credential = bearer(
+            &app,
+            &token,
+            target.system,
+            "env://KELIR_INTEGRATION_SECRET_SYSTEM__TO_BE_OVERWRITTEN",
+        )
+        .await;
+        set_reference(&app, credential, &reference).await;
+
+        let response = call(&app, &token, &target).await;
+
+        assert_eq!(
+            response.error_code(),
+            Some("SECRET_REFERENCE_MALFORMED"),
+            "{name}: {}",
+            response.body
+        );
+        assert!(!response.body.to_string().contains(value), "{name}");
+        assert_eq!(log_rows(&app, target.endpoint).await.len(), 1, "{name}");
+    }
+
+    assert!(
+        collector.seen().is_empty(),
+        "the collector received {:?}",
+        collector.seen()
+    );
+    assert!(!all_log_text(&app).await.contains(value));
+}
+
+#[tokio::test]
+async fn a_variable_set_to_nothing_is_not_found_and_nothing_is_sent() {
+    // An empty value is no secret: the call fails as it does for a variable
+    // that is not set, rather than sending `Authorization: Bearer ` or naming
+    // the value malformed.
+    let app = app_reaching_loopback().await;
+    let token = app.administrator_token().await;
+    let collector = Mock::start().await;
+    let (reference, _) = plant("");
+    let name = reference.trim_start_matches("env://").to_owned();
+
+    let target = target(&app, &token, &collector.base_url(), "GET", "/echo").await;
+    bearer(&app, &token, target.system, &reference).await;
+    let response = call(&app, &token, &target).await;
+
+    assert_eq!(
+        response.error_code(),
+        Some("SECRET_NOT_FOUND"),
+        "{}",
+        response.body
+    );
+    assert!(error_message(&response).contains(&name));
+    assert!(collector.seen().is_empty());
+    let rows = log_rows(&app, target.endpoint).await;
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0]["request_payload_json"]["headers"]["Authorization"].is_null());
+}
+
+#[tokio::test]
+async fn a_code_ending_in_an_underscore_and_the_code_without_it_share_no_name() {
+    // `TRL_` + `__` + `X` and `TRL` + `__` + `_X` are the same variable. The
+    // separator does not tell them apart, so the ambiguity rule must: every
+    // name of `TRL_`'s is also one of `TRL`'s, and is read by neither.
+    let app = multi_tenant_app_reaching_loopback().await;
+    let system_admin = app
+        .sign_in_to("SYSTEM", common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await;
+    let collector = Mock::start().await;
+
+    let short = created_tenant_administrator(&app, &system_admin, "TRL").await;
+    let long = created_tenant_administrator(&app, &system_admin, "TRL_").await;
+
+    let (shared, shared_value) = plant_in("TRL_", "kelir-planted-trailing-7d7d");
+    assert!(shared.contains("_TRL___TEST_"), "{shared}");
+    let (own, own_value) = plant_in("TRL", "kelir-planted-trl-own-8e8e");
+
+    for (token, reference, prefix) in [
+        (&short, &shared, "KELIR_INTEGRATION_SECRET_TRL__"),
+        (&long, &shared, "KELIR_INTEGRATION_SECRET_TRL___"),
+        // `TRL`'s own name is not under `TRL_`'s prefix at all.
+        (&long, &own, "KELIR_INTEGRATION_SECRET_TRL___"),
+    ] {
+        let target = target(&app, token, &collector.base_url(), "GET", "/echo").await;
+        bearer(&app, token, target.system, reference).await;
+        let response = call(&app, token, &target).await;
+
+        assert_eq!(
+            response.error_code(),
+            Some("SECRET_NAME_NOT_PERMITTED"),
+            "{reference}: {}",
+            response.body
+        );
+        // The refusal names the caller's own prefix, whole, and no more.
+        let message = error_message(&response);
+        assert!(message.contains(&format!("{prefix}<NAME>")), "{message}");
+        for value in [&shared_value, &own_value] {
+            assert!(!response.body.to_string().contains(value.as_str()));
+        }
+    }
+    assert!(
+        collector.seen().is_empty(),
+        "the collector received {:?}",
+        collector.seen()
+    );
+
+    // Control: `TRL`'s name that does not begin with an underscore is its own.
+    let target = target(&app, &short, &collector.base_url(), "GET", "/echo").await;
+    bearer(&app, &short, target.system, &own).await;
+    let response = call(&app, &short, &target).await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    assert_eq!(
+        collector
+            .seen()
+            .last()
+            .and_then(|seen| seen.authorization.clone()),
+        Some(format!("Bearer {own_value}"))
+    );
+}
+
+#[tokio::test]
+async fn a_code_no_route_stores_reads_upper_case_names_or_nothing() {
+    // The route stores a code upper case, of `A-Z 0-9 - _`, and refuses any
+    // other. A code written past it is still held to the rule: a lower-case
+    // one reads its upper-case namespace (variable names are upper case), two
+    // codes that differ only in case share every name and read none, and a
+    // code with a character no variable name holds reads nothing at all.
+    let app = multi_tenant_app_reaching_loopback().await;
+    let system_admin = app
+        .sign_in_to("SYSTEM", common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await;
+    let collector = Mock::start().await;
+
+    for code in ["ODD.CO", "ODD CO", "ODD/CO", "ÓDD-CO", "ODD__CO\n1"] {
+        let refused = app
+            .post(
+                TENANTS,
+                Some(&system_admin),
+                json!({
+                    "tenantCode": code,
+                    "name": "Odd",
+                    "administrator": {
+                        "username": "admin.odd",
+                        "email": "admin.odd@example.test",
+                        "displayName": "Tenant Administrator",
+                        "password": TENANT_PASSWORD,
+                    },
+                }),
+            )
+            .await;
+        assert!(
+            refused.status.is_client_error(),
+            "{code:?}: {}",
+            refused.body
+        );
+        assert_eq!(
+            refused.body["error"]["details"][0]["code"], "INVALID_FORMAT",
+            "{code:?}: {}",
+            refused.body
+        );
+    }
+
+    // Typed in lower case, the route stores it upper case.
+    let tenant = created_tenant_administrator(&app, &system_admin, "odd-co").await;
+    let id = tenant_id_of(&app, "ODD-CO").await;
+
+    let (reference, value) = plant_in("ODD_CO", "kelir-planted-odd-code-9f9f");
+    let target = target(&app, &tenant, &collector.base_url(), "GET", "/echo").await;
+    bearer(&app, &tenant, target.system, &reference).await;
+
+    // Lower case in the column: the same, upper-case, namespace.
+    set_tenant_code(&app, id, "odd-co").await;
+    let response = call(&app, &tenant, &target).await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    assert_eq!(
+        collector
+            .seen()
+            .last()
+            .and_then(|seen| seen.authorization.clone()),
+        Some(format!("Bearer {value}"))
+    );
+
+    // A second tenant whose code differs only in case: the name is both's,
+    // and neither's.
+    let twin = fixtures::create_tenant(&app.pool, "ODD-CO", "Odd twin").await;
+    let response = call(&app, &tenant, &target).await;
+    assert_eq!(
+        response.error_code(),
+        Some("SECRET_NAME_NOT_PERMITTED"),
+        "{}",
+        response.body
+    );
+    set_tenant_code(&app, twin, "ODD-CO-TWIN").await;
+
+    // A character no variable name can hold: nothing is this tenant's.
+    for code in ["ODD.CO", "ODD CO", "ÓDD_CO"] {
+        set_tenant_code(&app, id, code).await;
+        let response = call(&app, &tenant, &target).await;
+        assert_eq!(
+            response.error_code(),
+            Some("SECRET_NAME_NOT_PERMITTED"),
+            "{code}: {}",
+            response.body
+        );
+        assert!(!response.body.to_string().contains(&value), "{code}");
+    }
+
+    assert_eq!(
+        collector.seen().len(),
+        1,
+        "the collector received {:?}",
+        collector.seen()
+    );
 }
