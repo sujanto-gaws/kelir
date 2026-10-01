@@ -932,6 +932,81 @@ mod tests {
         );
     }
 
+    /// **No description in the published contract carries a run of spaces
+    /// inside a line** (#558's sweep).
+    ///
+    /// A `description = "..."` continued across source lines without `\` keeps
+    /// the next line's indentation in the text a client generator and the docs
+    /// page both print. Two of `identity`'s did. Read from the served document
+    /// rather than from the source, so it holds for an attribute literal and a
+    /// doc comment alike, and for a route added tomorrow.
+    ///
+    /// A line break is not refused here: a description may be several
+    /// paragraphs, and `master_data`'s role assignment is. Indentation at the
+    /// start of a line is not refused either, which is how a doc comment
+    /// nests a list. Nor is a fenced code block, where `WorkflowHistoryEntry`
+    /// aligns the members of its example.
+    #[tokio::test]
+    async fn no_published_description_carries_a_run_of_spaces_inside_a_line() {
+        /// Prose only: the lines outside a fenced code block.
+        fn has_a_run_of_spaces(text: &str) -> bool {
+            let mut fenced = false;
+
+            text.lines().any(|line| {
+                if line.trim_start().starts_with("```") {
+                    fenced = !fenced;
+
+                    return false;
+                }
+
+                !fenced && line.trim().contains("  ")
+            })
+        }
+
+        fn walk(value: &serde_json::Value, pointer: &str, found: &mut Vec<String>) {
+            match value {
+                serde_json::Value::Object(members) => {
+                    for (key, member) in members {
+                        let pointer = format!("{pointer}/{key}");
+
+                        match member.as_str() {
+                            Some(text) if key == "description" || key == "summary" => {
+                                if has_a_run_of_spaces(text) {
+                                    found.push(format!("{pointer}: {text:?}"));
+                                }
+                            }
+                            _ => walk(member, &pointer, found),
+                        }
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for (index, item) in items.iter().enumerate() {
+                        walk(item, &format!("{pointer}/{index}"), found);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let (_, body) = get("/api/docs/openapi.json").await;
+        let mut found = Vec::new();
+
+        walk(&body, "", &mut found);
+
+        assert!(
+            found.is_empty(),
+            "{} description(s) carry a run of two or more spaces inside a line:\n{}",
+            found.len(),
+            found.join("\n")
+        );
+        // Not vacuous: the walk reads the descriptions it claims to.
+        assert!(
+            body["paths"]["/api/v1/identity/roles"]["get"]["responses"]["200"]["description"]
+                .as_str()
+                .is_some_and(|text| text.contains("liveHolders"))
+        );
+    }
+
     #[tokio::test]
     async fn the_change_password_contract_does_not_promise_more_than_it_delivers() {
         // #60: the 204 read "every session for the account ends", while only

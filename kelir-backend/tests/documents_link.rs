@@ -107,6 +107,19 @@ async fn a_link_needs_both_of_its_halves() {
             "{}",
             refused.body
         );
+
+        // Each half's sentence is one line (#558's sweep). The `entityId` one
+        // carried a typed `\n` and thirteen spaces of indentation: a literal
+        // continued on the next source line with `\n` where `\` was meant.
+        let message = refused.body["error"]["details"][0]["message"]
+            .as_str()
+            .expect("a message");
+
+        assert!(
+            !message.contains("  "),
+            "a run of two or more spaces: {message:?}"
+        );
+        assert!(!message.contains('\n'), "a line break: {message:?}");
     }
 
     // And the whole thing is accepted, so the assertions above are not green

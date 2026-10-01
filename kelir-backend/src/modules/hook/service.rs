@@ -996,6 +996,101 @@ mod tests {
             .nth(1)
             .expect("the message offers a remedy");
         assert_eq!(offered, "`core:continue_always`");
+        // **The whole sentence, as the author reads it** (#558). The two
+        // assertions above read its tail, and a literal continued across
+        // source lines without `\` kept the next line's indentation in the
+        // middle: three runs of 34 spaces.
+        for detail in &details {
+            assert_reads_as_one_line(&detail.message);
+        }
+
+        assert_eq!(
+            details[0].message,
+            "`core:set_form_field` is a before-hook handler: its result is a veto or a change \
+             to the form, and once the transition has committed there is nothing left to \
+             refuse or change. An `actions` entry runs after commit; the handlers that can \
+             are `core:continue_always`"
+        );
+    }
+
+    /// A refusal is one line of prose: no run of two spaces, and no line break.
+    ///
+    /// Two assertions rather than one pattern, because they are two ways a
+    /// literal goes wrong. A source line that ends without `\` and continues
+    /// puts a newline and the indentation in the text; the same literal joined
+    /// onto one source line keeps the indentation alone, which is what #558
+    /// was.
+    fn assert_reads_as_one_line(message: &str) {
+        assert!(
+            !message.contains("  "),
+            "a run of two or more spaces: {message:?}"
+        );
+        assert!(!message.contains('\n'), "a line break: {message:?}");
+    }
+
+    /// **The other `HANDLER_KIND_MISMATCH` sentence** (#558), for a `guards`
+    /// entry naming an after-only handler.
+    ///
+    /// **No definition reaches it today**: `handlers::resolve` declares no
+    /// after-only handler, so `check_entry` never asks for it and no route
+    /// returns it. It is read here because the first after-only handler will
+    /// make it reachable, and it was written with the same runs of spaces.
+    #[test]
+    fn the_after_only_sentence_reads_as_one_line_though_nothing_reaches_it() {
+        let handler = HandlerReference::parse("core:continue_always").expect("parses");
+        let message = kind_mismatch_message(&handler, false);
+
+        assert_reads_as_one_line(&message);
+        assert_eq!(
+            message,
+            "`core:continue_always` is an after-hook handler and cannot guard a transition; \
+             the handlers that can are `core:continue_always`, `core:set_form_field`, \
+             `core:reject_when`"
+        );
+        // The premise, so this test says when it stops being true.
+        assert!(
+            handlers::NAMES
+                .iter()
+                .all(|name| handlers::resolve(name)
+                    .is_some_and(|handler| handler.kind.serves_before())),
+            "a handler is after-only now: cover this sentence through `registration_errors` \
+             and a route"
+        );
+    }
+
+    /// **Every refusal `check_entry` writes** reads as one line (#558).
+    ///
+    /// The class rather than the two instances: one definition that draws each
+    /// of the five codes, and the list of codes asserted, so a sixth refusal
+    /// added without an entry here fails on the list and not silently.
+    #[test]
+    fn every_registration_refusal_reads_as_one_line() {
+        let details = registration_errors(&json!({
+            "transitions": [{
+                "guards": [
+                    { "handler": "core:continue_always", "hook": "after_workflow_transition" },
+                    entry("Core:Not_A_Reference", None),
+                    entry("core:reserve_bugdet", None),
+                    entry("plugin:acme:reserve", None)
+                ],
+                "actions": [entry("core:set_form_field", None)]
+            }]
+        }));
+
+        assert_eq!(
+            codes(&details),
+            [
+                "HOOK_NAME_MISMATCH",
+                "HANDLER_REFERENCE_INVALID",
+                "HANDLER_NOT_FOUND",
+                "HANDLER_PLUGIN_UNKNOWN",
+                "HANDLER_KIND_MISMATCH"
+            ]
+        );
+
+        for detail in &details {
+            assert_reads_as_one_line(&detail.message);
+        }
     }
 
     /// The other side of the kind check: a handler serving both halves is

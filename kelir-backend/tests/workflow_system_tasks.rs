@@ -1324,6 +1324,7 @@ async fn an_actions_entry_naming_a_before_only_handler_is_refused_at_save() {
         .unwrap_or_else(|| panic!("{}", created.body));
 
     assert_eq!(detail["path"], "definition.transitions.0.actions.0.handler");
+    assert_reads_as_one_line(&detail);
 
     // The handler that serves after commit is accepted in the same position.
     let mut definition = workflow_with_a_service_state("kind_match", json!([]), None);
@@ -1334,4 +1335,104 @@ async fn an_actions_entry_naming_a_before_only_handler_is_refused_at_save() {
         create_definition(&app, &admin, definition).await.status,
         StatusCode::CREATED
     );
+}
+
+/// A refusal's message is one line of prose (#558): no run of two spaces, and
+/// no line break.
+///
+/// Two assertions, because they are two ways a string literal goes wrong. One
+/// continued across source lines without `\` carries a newline and the next
+/// line's indentation; the same literal on one source line carries the
+/// indentation alone, which is what the route answered.
+fn assert_reads_as_one_line(detail: &Value) {
+    let message = detail["message"].as_str().expect("a message");
+
+    assert!(
+        !message.contains("  "),
+        "a run of two or more spaces: {message:?}"
+    );
+    assert!(!message.contains('\n'), "a line break: {message:?}");
+}
+
+/// **The refusal as the publication route answers it** (#558; verification
+/// record 19, probe P3b, finding 8).
+///
+/// The save route refuses this definition first, so a draft carrying it is one
+/// an older release stored: `0.8.0` accepted a before-only handler in
+/// `actions`, and the upgraded binary refuses the draft when somebody publishes
+/// it. That is where record 19 read three runs of 34 spaces mid-sentence. The
+/// draft is planted as `outbox.rs` plants its own, by writing the row.
+#[tokio::test]
+async fn a_stored_draft_naming_a_before_only_handler_is_refused_at_publication_in_one_line() {
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+
+    let created = create_definition(
+        &app,
+        &admin,
+        workflow_with_a_service_state("kind_mismatch_stored", json!([]), None),
+    )
+    .await;
+
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+    let id = id_of(&created.body["data"]);
+
+    sqlx::query(
+        "UPDATE workflow_definitions
+         SET definition_json = jsonb_set(definition_json, '{transitions,0,actions}', $1)
+         WHERE id = $2",
+    )
+    .bind(json!([
+        { "handler": "core:set_form_field", "config": { "field": "stamped", "value": true } },
+        { "handler": "core:reject_when", "config": { "condition": { "==": [1, 1] } } }
+    ]))
+    .bind(id)
+    .execute(&app.pool)
+    .await
+    .expect("the draft as an older release stored it");
+
+    let publication = app
+        .post(
+            &format!("/api/v1/workflow/definitions/{id}/publication"),
+            Some(&admin),
+            json!({}),
+        )
+        .await;
+
+    assert_eq!(
+        publication.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        publication.body
+    );
+
+    let details = publication.body["error"]["details"]
+        .as_array()
+        .expect("details");
+
+    assert_eq!(
+        details
+            .iter()
+            .map(|detail| detail["code"].as_str().expect("a code"))
+            .collect::<Vec<_>>(),
+        ["HANDLER_KIND_MISMATCH", "HANDLER_KIND_MISMATCH"],
+        "{}",
+        publication.body
+    );
+
+    for detail in details {
+        assert_reads_as_one_line(detail);
+    }
+
+    // The sentence whole, as the author reads it.
+    assert_eq!(
+        details[0]["message"],
+        "`core:set_form_field` is a before-hook handler: its result is a veto or a change to \
+         the form, and once the transition has committed there is nothing left to refuse or \
+         change. An `actions` entry runs after commit; the handlers that can are \
+         `core:continue_always`"
+    );
+    // The envelope's own message is not where the spaces were, and is read too.
+    assert_reads_as_one_line(&publication.body["error"]);
 }
