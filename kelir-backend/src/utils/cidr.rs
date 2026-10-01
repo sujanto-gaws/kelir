@@ -165,6 +165,23 @@ mod tests {
     }
 
     #[test]
+    fn a_v4_network_contains_the_compatible_form_of_its_addresses() {
+        // #622: `::a.b.c.d`, the deprecated `::/96`.
+        assert!(cidr("10.0.0.0/8").contains(ip("::10.1.2.3")));
+        assert!(!cidr("10.0.0.0/8").contains(ip("::11.1.2.3")));
+        assert_eq!(canonical(ip("::127.0.0.1")), ip("127.0.0.1"));
+    }
+
+    #[test]
+    fn ipv6_loopback_and_unspecified_are_not_ipv4_compatible_addresses() {
+        assert_eq!(canonical(ip("::1")), ip("::1"));
+        assert_eq!(canonical(ip("::")), ip("::"));
+        // One bit above the /96 is an IPv6 address like any other.
+        assert_eq!(canonical(ip("::1:a00:1")), ip("::1:a00:1"));
+        assert!(!cidr("10.0.0.0/8").contains(ip("::1:a00:1")));
+    }
+
+    #[test]
     fn a_v6_network_contains_v6_addresses_only() {
         let net = cidr("fd00:1234::/32");
 

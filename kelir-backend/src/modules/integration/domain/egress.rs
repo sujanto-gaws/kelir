@@ -291,6 +291,112 @@ mod tests {
         assert!(policy.check(ip("10.0.0.1")).is_ok());
     }
 
+    /// What a refusal of `address` calls it, under a policy that lists
+    /// everything a list can hold.
+    fn refused_as(address: &str) -> Option<&'static str> {
+        let policy = EgressPolicy {
+            allowed_cidrs: vec![
+                cidr("fd00::/8"),
+                cidr("100.64.0.0/10"),
+                cidr("192.0.0.0/24"),
+                cidr("0.0.0.0/0"),
+                cidr("::/0"),
+            ],
+            allow_loopback: false,
+        };
+
+        policy
+            .check(ip(address))
+            .err()
+            .map(|refusal| refusal.class.describe())
+    }
+
+    #[test]
+    fn a_cloud_metadata_address_is_refused_whatever_is_listed() {
+        // #622. Alibaba Cloud ECS, Oracle Cloud Infrastructure Compute
+        // Classic, and AWS's IMDS over IPv6.
+        for metadata in [
+            "100.100.100.200",
+            "192.0.0.192",
+            "fd00:ec2::254",
+            "::ffff:100.100.100.200",
+            "::ffff:192.0.0.192",
+        ] {
+            assert_eq!(
+                refused_as(metadata),
+                Some("a cloud metadata address"),
+                "{metadata}"
+            );
+            assert!(
+                EgressPolicy::default().check(ip(metadata)).is_err(),
+                "{metadata}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_addresses_beside_a_metadata_address_keep_their_class() {
+        // The three are addresses and not ranges: CGNAT stays public
+        // (ADR-0043), and AWS's `fd00:ec2::/32` stays unique-local.
+        for (neighbour, class) in [
+            ("100.100.100.199", AddressClass::Public),
+            ("100.100.100.201", AddressClass::Public),
+            ("100.64.0.1", AddressClass::Public),
+            ("192.0.0.191", AddressClass::Public),
+            ("192.0.0.193", AddressClass::Public),
+            ("fd00:ec2::253", AddressClass::Private),
+            ("fd00:ec2::255", AddressClass::Private),
+            ("fd00:ec2:0:0:1::254", AddressClass::Private),
+        ] {
+            assert_eq!(classify(ip(neighbour)), class, "{neighbour}");
+            assert_eq!(refused_as(neighbour), None, "{neighbour}");
+        }
+    }
+
+    #[test]
+    fn an_ipv4_compatible_address_is_judged_as_the_address_it_carries() {
+        // #622: `::a.b.c.d`, the deprecated `::/96`.
+        for (address, class) in [
+            ("::127.0.0.1", AddressClass::Loopback),
+            ("::7f00:1", AddressClass::Loopback),
+            ("::169.254.169.254", AddressClass::LinkLocal),
+            ("::0.0.0.9", AddressClass::Unspecified),
+            ("::224.0.0.1", AddressClass::Multicast),
+            ("::255.255.255.255", AddressClass::Multicast),
+            ("::10.1.2.3", AddressClass::Private),
+            ("::8.8.8.8", AddressClass::Public),
+        ] {
+            assert_eq!(classify(ip(address)), class, "{address}");
+        }
+        assert_eq!(
+            refused_as("::100.100.100.200"),
+            Some("a cloud metadata address")
+        );
+
+        // IPv6's own loopback and unspecified addresses lie in the same /96
+        // and are not IPv4 addresses in it.
+        assert_eq!(classify(ip("::1")), AddressClass::Loopback);
+        assert_eq!(classify(ip("::")), AddressClass::Unspecified);
+        // One bit above the /96 is not in it.
+        assert_eq!(classify(ip("::1:7f00:1")), AddressClass::Public);
+    }
+
+    #[test]
+    fn an_ipv4_compatible_private_address_opens_with_its_ipv4_range_only() {
+        let policy = EgressPolicy {
+            allowed_cidrs: vec![cidr("10.20.0.0/16")],
+            allow_loopback: false,
+        };
+
+        assert!(policy.check(ip("::10.20.3.4")).is_ok());
+        assert_eq!(
+            policy.check(ip("::10.21.3.4")),
+            Err(EgressRefusal {
+                class: AddressClass::Private
+            })
+        );
+    }
+
     #[test]
     fn the_test_seam_opens_loopback_and_nothing_else() {
         let policy = EgressPolicy {

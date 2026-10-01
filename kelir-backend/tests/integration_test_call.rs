@@ -1250,6 +1250,195 @@ async fn a_listed_private_range_passes_the_guard() {
     );
 }
 
+/// The allow-list verification record 20's P4 used, and wider: Installation
+/// §7.1's own `fd00::/8` example, CGNAT, the IETF block Oracle's address sits
+/// in, and both whole families.
+async fn app_listing_everything() -> TestApp {
+    TestApp::spawn_with(|config| {
+        config.integration_allowed_cidrs = [
+            "fd00::/8",
+            "100.64.0.0/10",
+            "192.0.0.0/24",
+            "0.0.0.0/0",
+            "::/0",
+        ]
+        .iter()
+        .map(|cidr| cidr.parse().expect("a CIDR"))
+        .collect();
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_cloud_metadata_address_is_refused_whatever_is_listed() {
+    // #622: Alibaba's, Oracle Compute Classic's and AWS's IPv6 metadata
+    // addresses. The first two are public by range and the third is
+    // unique-local, so before #622 two went out with no setting and the third
+    // with the guide's example.
+    let app = app_listing_everything().await;
+    let token = app.administrator_token().await;
+    let (reference, secret) = plant("kelir-planted-metadata-2b7d");
+
+    for base in [
+        "http://100.100.100.200",
+        "http://192.0.0.192",
+        "http://[fd00:ec2::254]",
+        "http://[::ffff:100.100.100.200]",
+        "http://[::ffff:192.0.0.192]",
+    ] {
+        let target = target(&app, &token, base, "GET", "/latest/meta-data").await;
+        // Unrefused, the call waits out its budget: one second, not thirty.
+        set_timeout(&app, target.system, 1).await;
+        bearer(&app, &token, target.system, &reference).await;
+
+        let response = call(&app, &token, &target).await;
+
+        assert_eq!(
+            response.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{base}: {}",
+            response.body
+        );
+        assert_eq!(response.error_code(), Some("EGRESS_REFUSED"), "{base}");
+        let message = error_message(&response);
+        assert!(
+            message.contains("a cloud metadata address"),
+            "{base}: {message}"
+        );
+        assert!(
+            !message.contains("KELIR_INTEGRATION_ALLOWED_CIDRS"),
+            "{base}: no setting opens it, so none is offered: {message}"
+        );
+
+        let rows = log_rows(&app, target.endpoint).await;
+        assert_eq!(rows.len(), 1, "{base}");
+        assert!(rows[0]["error_message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("EGRESS_REFUSED")));
+        assert!(
+            rows[0]["request_payload_json"]["headers"]["Authorization"].is_null(),
+            "{base}: nothing was sent"
+        );
+        assert!(!rows[0].to_string().contains(&secret), "{base}");
+    }
+
+    // The same list does open the unique-local address next to AWS's, so the
+    // refusals above are the class and not a list that failed to match.
+    let neighbour = target(&app, &token, "http://[fd00:ec2::253]", "GET", "/x").await;
+    set_timeout(&app, neighbour.system, 1).await;
+    bearer(&app, &token, neighbour.system, &reference).await;
+    let response = call(&app, &token, &neighbour).await;
+
+    assert!(
+        matches!(
+            response.error_code(),
+            Some("UPSTREAM_TIMEOUT" | "UPSTREAM_UNREACHABLE")
+        ),
+        "a listed unique-local address is let through to the network: {}",
+        response.body
+    );
+}
+
+#[tokio::test]
+async fn an_ipv4_compatible_address_is_judged_as_the_ipv4_address_it_carries() {
+    // #622: `::a.b.c.d` (`::/96`) was read as a public IPv6 address, so
+    // `::127.0.0.1` went out wherever the host routed it. Everything is
+    // listed, so only the always-refused classes are left to refuse.
+    let app = app_listing_everything().await;
+    let token = app.administrator_token().await;
+    let (reference, _) = plant("kelir-planted-compatible-71ce");
+
+    for (base, class) in [
+        ("http://[::127.0.0.1]", "a loopback address"),
+        ("http://[::7f00:1]", "a loopback address"),
+        ("http://[::169.254.169.254]", "a link-local address"),
+        ("http://[::0.0.0.9]", "an unspecified address"),
+        ("http://[::100.100.100.200]", "a cloud metadata address"),
+    ] {
+        let target = target(&app, &token, base, "GET", "/x").await;
+        set_timeout(&app, target.system, 1).await;
+        bearer(&app, &token, target.system, &reference).await;
+
+        let response = call(&app, &token, &target).await;
+
+        assert_eq!(
+            response.error_code(),
+            Some("EGRESS_REFUSED"),
+            "{base}: {}",
+            response.body
+        );
+        assert!(
+            error_message(&response).contains(class),
+            "{base}: {}",
+            response.body
+        );
+        assert_eq!(log_rows(&app, target.endpoint).await.len(), 1, "{base}");
+    }
+
+    // With nothing listed, the private address it carries is refused as
+    // private, and the refusal offers the setting.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let private = target(&app, &token, "http://[::10.255.255.1]", "GET", "/x").await;
+    set_timeout(&app, private.system, 1).await;
+    bearer(&app, &token, private.system, &reference).await;
+    let response = call(&app, &token, &private).await;
+
+    assert_eq!(
+        response.error_code(),
+        Some("EGRESS_REFUSED"),
+        "{}",
+        response.body
+    );
+    let message = error_message(&response);
+    assert!(message.contains("a private address"), "{message}");
+    assert!(
+        message.contains("KELIR_INTEGRATION_ALLOWED_CIDRS"),
+        "{message}"
+    );
+}
+
+#[tokio::test]
+async fn a_name_resolving_to_a_metadata_address_is_refused() {
+    // The literal is one way in; a zone that answers the address is the
+    // other. 203.0.113.7 (TEST-NET-3) is public and first.
+    let app = app_resolving(
+        "metadata.kelir.test",
+        &["203.0.113.7", "100.100.100.200"],
+        false,
+    )
+    .await;
+    let token = app.administrator_token().await;
+    let (reference, _) = plant("kelir-planted-metadata-name-5e0a");
+
+    let target = target(&app, &token, "http://metadata.kelir.test", "GET", "/x").await;
+    set_timeout(&app, target.system, 1).await;
+    bearer(&app, &token, target.system, &reference).await;
+
+    let response = call(&app, &token, &target).await;
+
+    assert_eq!(
+        response.error_code(),
+        Some("EGRESS_REFUSED"),
+        "{}",
+        response.body
+    );
+    assert!(
+        error_message(&response).contains("a cloud metadata address"),
+        "{}",
+        response.body
+    );
+    for text in [
+        response.body.to_string(),
+        log_rows(&app, target.endpoint).await[0].to_string(),
+    ] {
+        assert!(
+            !text.contains("100.100.100.200"),
+            "no address is shown: {text}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_redirect_is_the_answer_and_its_location_is_not_requested() {
     let app = app_reaching_loopback().await;
