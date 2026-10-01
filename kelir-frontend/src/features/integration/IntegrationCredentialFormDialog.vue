@@ -9,6 +9,7 @@ import { Dialog } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select } from '@/components/ui/select'
+import FormUnplacedErrors from '@/components/FormUnplacedErrors.vue'
 import { useFormErrors } from '@/composables/useFormErrors'
 import {
   AUTH_TYPE_LABELS,
@@ -17,7 +18,7 @@ import {
   type IntegrationCredential,
 } from '@/types/integration'
 
-import { blankToNull, unplacedErrors } from './form-errors'
+import { blankToNull } from './form-errors'
 
 /**
  * Adding and editing a credential *reference* (FR-INT-001 AC-5, #520).
@@ -48,7 +49,6 @@ const isSaving = ref(false)
 const errors = useFormErrors()
 
 const PLACED = ['credentialType', 'secretReference', 'validFrom', 'validTo', 'isActive'] as const
-const unplaced = computed(() => unplacedErrors(errors.fieldErrors.value, PLACED))
 
 const typeOptions = optionsOf(AUTH_TYPE_LABELS)
 
@@ -122,15 +122,11 @@ async function save(): Promise<void> {
         {{ errors.formError.value }}
       </Alert>
 
-      <Alert
-        v-if="unplaced.length > 0"
-        variant="destructive"
+      <FormUnplacedErrors
+        :field-errors="errors.fieldErrors.value"
+        :placed="PLACED"
         data-testid="credential-unplaced-errors"
-      >
-        <ul class="list-disc pl-4">
-          <li v-for="item in unplaced" :key="item.path">{{ item.path }}: {{ item.message }}</li>
-        </ul>
-      </Alert>
+      />
 
       <div class="space-y-2">
         <Label for="credential-type">Credential type</Label>

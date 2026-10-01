@@ -9,6 +9,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
+import FormUnplacedErrors from '@/components/FormUnplacedErrors.vue'
 import { useFormErrors } from '@/composables/useFormErrors'
 import {
   AUTH_TYPE_LABELS,
@@ -21,7 +22,7 @@ import {
   type UpdateExternalSystemRequest,
 } from '@/types/integration'
 
-import { blankToNull, numberOrUndefined, unplacedErrors } from './form-errors'
+import { blankToNull, numberOrUndefined } from './form-errors'
 
 /**
  * Registering and editing an external system (FR-INT-001, #520).
@@ -82,8 +83,6 @@ const PLACED = [
   'description',
   'status',
 ] as const
-
-const unplaced = computed(() => unplacedErrors(errors.fieldErrors.value, PLACED))
 
 const typeOptions = optionsOf(EXTERNAL_SYSTEM_TYPE_LABELS)
 const authOptions = optionsOf(AUTH_TYPE_LABELS)
@@ -219,16 +218,12 @@ async function save(): Promise<void> {
         {{ errors.formError.value }}
       </Alert>
 
-      <Alert
-        v-if="unplaced.length > 0"
-        variant="destructive"
+      <FormUnplacedErrors
+        :field-errors="errors.fieldErrors.value"
+        :placed="PLACED"
         class="sm:col-span-2"
         data-testid="external-system-unplaced-errors"
-      >
-        <ul class="list-disc pl-4">
-          <li v-for="item in unplaced" :key="item.path">{{ item.path }}: {{ item.message }}</li>
-        </ul>
-      </Alert>
+      />
 
       <div class="space-y-2">
         <Label for="system-code">System code</Label>

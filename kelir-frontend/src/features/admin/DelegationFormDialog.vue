@@ -11,6 +11,7 @@ import { Select } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import { createDelegation, listUsers } from '@/api/identity'
 import { listDocumentTypes } from '@/api/document-types'
+import FormUnplacedErrors from '@/components/FormUnplacedErrors.vue'
 import { useFormErrors } from '@/composables/useFormErrors'
 import { useAuthStore } from '@/stores/auth'
 import type { DocumentTypeSummary } from '@/types/document-type'
@@ -132,6 +133,17 @@ const errors = computed<Record<string, string>>(() => ({
   ...fieldErrors.value,
 }))
 
+/**
+ * The paths a message is shown under, as the form is drawn now; a detail for
+ * any other path is listed on the form (#576). The type chooser is drawn only
+ * for a narrowed window, and the scope and reason have nowhere for a message.
+ */
+const placed = computed(() =>
+  scope.value === 'DOCUMENT_TYPE'
+    ? ['delegateUserId', 'startsAt', 'endsAt', 'documentTypeId']
+    : ['delegateUserId', 'startsAt', 'endsAt'],
+)
+
 function resetForm(): void {
   delegateUserId.value = ''
   startsAt.value = ''
@@ -196,6 +208,12 @@ async function submit(): Promise<void> {
   >
     <form id="delegation-form" class="space-y-4" novalidate @submit.prevent="submit">
       <Alert v-if="formError" variant="destructive">{{ formError }}</Alert>
+
+      <FormUnplacedErrors
+        :field-errors="fieldErrors"
+        :placed="placed"
+        data-testid="delegation-unplaced-errors"
+      />
 
       <div class="space-y-2">
         <SearchSelect

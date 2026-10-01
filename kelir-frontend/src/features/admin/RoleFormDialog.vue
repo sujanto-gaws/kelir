@@ -9,6 +9,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { createRole, updateRole } from '@/api/identity'
+import FormUnplacedErrors from '@/components/FormUnplacedErrors.vue'
 import { useFormErrors, type ConflictRule } from '@/composables/useFormErrors'
 import type { Permission, Role } from '@/types/identity'
 
@@ -95,6 +96,12 @@ const errors = computed<Record<string, string>>(() => ({
   ...fieldErrors.value,
 }))
 
+/**
+ * The paths a message is shown under; a detail for any other path is listed on
+ * the form (#576). The description and the permissions have nowhere for one.
+ */
+const placed = ['roleCode', 'name'] as const
+
 function loadFromProps(): void {
   const source = props.role
 
@@ -173,6 +180,12 @@ async function submit(): Promise<void> {
   >
     <form id="role-form" class="space-y-4" novalidate @submit.prevent="submit">
       <Alert v-if="formError" variant="destructive">{{ formError }}</Alert>
+
+      <FormUnplacedErrors
+        :field-errors="fieldErrors"
+        :placed="placed"
+        data-testid="role-unplaced-errors"
+      />
 
       <div class="space-y-2">
         <Label for="role-code">Role code</Label>
