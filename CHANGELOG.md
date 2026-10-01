@@ -47,15 +47,17 @@ While the major version is `0`, the public API may change in any release.
   `KELIR_INTEGRATION_SECRET_<TENANT CODE>__<NAME>`.** A test call resolves
   `env://NAME` only when `NAME` is in the calling tenant's namespace, and
   fails with `SECRET_NAME_NOT_PERMITTED` otherwise (decision **D-96**, amended
-  2026-09-30 by [#618](https://github.com/sujanto-gaws/kelir/issues/618)).
+  2026-10-01 by [#618](https://github.com/sujanto-gaws/kelir/issues/618),
+  decided 2026-09-30).
   `<TENANT CODE>` is the tenant's code in upper case with each `-` written as
   `_`; two underscores separate it from `<NAME>`, which is upper-case letters,
   digits and underscores. The system tenant's ERP token is
   `KELIR_INTEGRATION_SECRET_SYSTEM__ERP_TOKEN`, and tenant `TNT-001`'s is
   `KELIR_INTEGRATION_SECRET_TNT_001__ERP_TOKEN`. **A single-tenant deployment
-  follows the same rule**, with its one tenant's code. A name two tenants'
-  codes both cover, such as one under `A_B__` when tenants `A-B` and `A_B`
-  both exist, resolves for neither. A credential reference already saved under
+  follows the same rule**, with its one tenant's code. A name two live
+  tenants' codes both cover, such as one under `A_B__` when tenants `A-B` and
+  `A_B` both exist, resolves for neither; a tenant is live until it is
+  deleted, whatever its status. A credential reference already saved under
   another name, such as `env://ERP_API_KEY`, is still stored and fails when
   called: set the secret on the backend under the tenant's prefix and edit the
   reference to match. Put nothing under a tenant's prefix but secrets meant
@@ -461,7 +463,7 @@ While the major version is `0`, the public API may change in any release.
   was sent its token. A name now resolves only in the caller's own namespace,
   `KELIR_INTEGRATION_SECRET_<TENANT CODE>__<NAME>`, read from the caller's
   tenant before the environment is read, and in a single-tenant deployment
-  too. A name two tenants' codes both cover is refused for both. Another
+  too. A name two live tenants' codes both cover is refused for both. Another
   tenant's variable answers `SECRET_NAME_NOT_PERMITTED` with the same bytes
   whether it is set or not, and the message names only the caller's own
   prefix. See *Upgrade notes*.
