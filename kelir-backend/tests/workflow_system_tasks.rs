@@ -11,6 +11,49 @@
 //! row* — and it is made against a definition that would have produced one the
 //! day before.
 //!
+//! # A refusal is one line (#558): seen to fail (coding standard §2.9)
+//!
+//! Verification record 19 read three runs of 34 spaces in the
+//! `HANDLER_KIND_MISMATCH` message the publication route answered: the source
+//! line's indentation, kept in a string literal. The last two tests of this
+//! file read that message at the save route and at the publication route, and
+//! `hook::service`'s unit tests read every refusal `check_entry` writes.
+//!
+//! **Before the fix**, eight tests were red on the literals as they were: the
+//! two here, three in `hook::service`, `documents_link`'s
+//! `a_link_needs_both_of_its_halves`, `workflow_engine`'s
+//! `a_document_under_a_workflow_cannot_have_its_status_set_by_hand` and
+//! `router`'s `no_published_description_carries_a_run_of_spaces_inside_a_line`.
+//!
+//! Each mutation below was made alone, the named suites run, the named tests
+//! observed red, and the mutation reverted. **Seen red, 2026-10-01.** `save`
+//! is `an_actions_entry_naming_a_before_only_handler_is_refused_at_save`,
+//! `publication` is
+//! `a_stored_draft_naming_a_before_only_handler_is_refused_at_publication_in_one_line`,
+//! and the unit tests are `hook::service`'s: `wrong_kind` is
+//! `an_actions_entry_naming_a_before_only_handler_is_the_wrong_kind`,
+//! `after_only` is
+//! `the_after_only_sentence_reads_as_one_line_though_nothing_reaches_it`, and
+//! `every` is `every_registration_refusal_reads_as_one_line`.
+//!
+//! | Mutation | Suites run | Reddened |
+//! |---|---|---|
+//! | M1: the before-only literal back to three runs of 34 spaces | `--lib modules::hook`, this file | `wrong_kind`, `every`; `save`, `publication` |
+//! | M2: the after-only literal back to one run of 34 spaces | `--lib modules::hook`, this file | `after_only`. **This file stays green, 22 of 22: no route reaches that sentence** |
+//! | M3: the before-only literal carries a typed `\n` and no run of spaces | `--lib modules::hook`, this file | `wrong_kind`, `every`; `save`, `publication` |
+//! | M4: M1 and M2, and the unit helper's two-space assertion removed | `--lib modules::hook` | `wrong_kind` and `after_only`, on the sentence asserted whole. `every` goes green: that assertion is all that holds it |
+//! | M5: M3, and the unit helper's line-break assertion removed | `--lib modules::hook` | `wrong_kind`, on the whole sentence. `every` goes green |
+//! | M6: M1, and this file's two-space assertion removed | this file | `publication`, on the whole sentence. `save` goes green |
+//! | M7: M3, and this file's line-break assertion removed | this file | `publication`, on the whole sentence. `save` goes green |
+//! | M8: `continue_always` declared after-only | `--lib modules::hook` | seven tests, `after_only` among them on the handlers its sentence offers, and `every` on its list of codes. The sentence is then reachable, and both say so |
+//! | M9: the `entityId` literal back to a typed `\n` and thirteen spaces | `documents_link` | `a_link_needs_both_of_its_halves` |
+//! | M10: M9, and `documents_link`'s two-space assertion removed | `documents_link` | the same test, on the line break |
+//! | M11: the status refusal back to a run of ten spaces | `workflow_engine`, that test alone | `a_document_under_a_workflow_cannot_have_its_status_set_by_hand` |
+//! | M12: the roles list description back to a run of spaces | `--lib router::tests` | `no_published_description_carries_a_run_of_spaces_inside_a_line` |
+//! | M13: the one-role description back to a run of spaces | `--lib router::tests` | the same test |
+//! | M14: the description walk reads fenced code blocks too | `--lib router::tests` | the same test, on `WorkflowHistoryEntry`'s aligned example: the exclusion is needed |
+//! | M15: the `tracing::error!` line in `workflow::repository::definition` back to a run of spaces | `--lib modules::workflow` | green, 68 of 68. **Nothing reads that log line**, and it was fixed without a test |
+//!
 //! [#339]: https://github.com/sujanto-gaws/kelir/issues/339
 
 mod common;
