@@ -216,6 +216,49 @@ mod tests {
         assert!(verify_access_token(SECRET, &token).is_err());
     }
 
+    /// A token whose `exp` is `seconds` from now, correct in every other way.
+    fn expiring_in(seconds: i64) -> String {
+        let exp = Utc::now().timestamp() + seconds;
+        let claims = AccessClaims {
+            sub: Uuid::now_v7(),
+            tenant_id: Uuid::now_v7(),
+            username: "user.john".to_owned(),
+            roles: vec![],
+            permissions: vec![],
+            exp,
+            iat: exp - ACCESS_TOKEN_TTL_MINUTES * 60,
+        };
+
+        encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(SECRET.as_bytes()),
+        )
+        .expect("signs")
+    }
+
+    #[test]
+    fn a_token_one_second_past_its_expiry_is_refused() {
+        // #650 AC16. `jsonwebtoken` accepts a token for 60 seconds past its
+        // `exp` unless the leeway is set; with it left at the default this
+        // token verifies.
+        assert!(verify_access_token(SECRET, &expiring_in(-1)).is_err());
+    }
+
+    #[test]
+    fn a_token_two_seconds_before_its_expiry_is_accepted() {
+        // The control: no leeway does not mean an early refusal.
+        assert!(verify_access_token(SECRET, &expiring_in(2)).is_ok());
+    }
+
+    #[test]
+    fn a_fresh_token_expires_900_seconds_after_it_was_issued() {
+        let (token, _, _) = issue();
+        let claims = verify_access_token(SECRET, &token).expect("verifies");
+
+        assert_eq!(claims.exp - claims.iat, 900);
+    }
+
     #[test]
     fn rejects_nonsense() {
         assert!(verify_access_token(SECRET, "").is_err());

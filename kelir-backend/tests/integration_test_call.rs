@@ -2796,10 +2796,11 @@ async fn set_tenant_code(app: &TestApp, tenant: Uuid, code: &str) {
 
 #[tokio::test]
 async fn a_deleted_tenants_open_session_resolves_no_secret_its_own_or_another() {
-    // The access token outlives its tenant: deleting a tenant revokes its
-    // refresh sessions, not a token already issued. Such a caller has no
-    // live code, so nothing is resolved for it: not its own namespace, and
-    // not another live tenant's in place of the one it lost.
+    // A deleted tenant's access token is refused before the route is reached
+    // (#650, D-105; it answers #648): the call is a 401, not the 500 the
+    // missing namespace used to produce. Nothing is resolved, nothing is
+    // sent, and no `integration_logs` row is written, because no endpoint
+    // was found for a caller who was never admitted (SDD §9.3.6).
     let app = multi_tenant_app_reaching_loopback().await;
     let system_admin = app
         .sign_in_to("SYSTEM", common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
@@ -2825,20 +2826,24 @@ async fn a_deleted_tenants_open_session_resolves_no_secret_its_own_or_another() 
         .await;
     assert!(deleted.status.is_success(), "{}", deleted.body);
 
-    for (target, value, rows_expected) in [(&own, &own_value, 2), (&foreign, &system_value, 1)] {
+    let rows_before = all_log_text(&app).await;
+
+    for (target, value, rows_expected) in [(&own, &own_value, 1), (&foreign, &system_value, 0)] {
         let response = call(&app, &tenant, target).await;
-        assert_ne!(response.status, StatusCode::OK, "{}", response.body);
-        assert!(!response.body.to_string().contains(value.as_str()));
-        // Which names exist is not said either: the answer is not one of the
-        // resolver's.
-        assert!(
-            !matches!(
-                response.error_code(),
-                Some("SECRET_NOT_FOUND" | "SECRET_NAME_NOT_PERMITTED")
-            ),
+        assert_eq!(
+            response.status,
+            StatusCode::UNAUTHORIZED,
             "{}",
             response.body
         );
+        assert_eq!(
+            response.error_code(),
+            Some("UNAUTHORIZED"),
+            "{}",
+            response.body
+        );
+        assert!(!response.body.to_string().contains(value.as_str()));
+        // Which names exist is not said either.
         assert!(
             !response
                 .body
@@ -2847,14 +2852,18 @@ async fn a_deleted_tenants_open_session_resolves_no_secret_its_own_or_another() 
             "{}",
             response.body
         );
-        let rows = log_rows(&app, target.endpoint).await;
+        // The control's one row for its own endpoint, and no other.
         assert_eq!(
-            rows.len(),
+            log_rows(&app, target.endpoint).await.len(),
             rows_expected,
-            "the refused call still writes its row"
+            "a refused caller's call wrote a row"
         );
-        assert_eq!(rows[rows.len() - 1]["status"], "FAILED");
     }
+    assert_eq!(
+        all_log_text(&app).await,
+        rows_before,
+        "integration_logs changed under a refused caller"
+    );
     assert_eq!(
         collector.seen().len(),
         1,

@@ -177,35 +177,37 @@ async fn user_administering_users(app: &TestApp, username: &str) -> Uuid {
 }
 
 #[tokio::test]
-async fn a_deactivated_users_refresh_token_is_rejected_immediately() {
-    // The access token still works until it stops being accepted, at most
-    // sixteen minutes from issue — that is the documented trade of carrying
-    // permissions in the token. The refresh is the half that must not survive,
-    // because it is what would extend the session beyond that window.
+async fn a_deleted_users_access_token_and_refresh_token_are_both_refused_at_once() {
+    // The user list's Deactivate button is this route: `DELETE`, a soft
+    // delete. It is decision D-105's case and not D-104's, so the account is
+    // signed out at once (#650): the access token is refused on its next
+    // request, and the refresh token cannot start the session again.
+    //
+    // Until D-105 this test was `a_deactivated_users_refresh_token_is_
+    // rejected_immediately` and asserted the access token still got 200.
     let app = TestApp::spawn().await;
-    let id = user_administering_users(&app, "soon.deactivated").await;
-    let (access, refresh) = session_for(&app, "soon.deactivated").await;
+    let id = user_administering_users(&app, "soon.deleted").await;
+    let (access, refresh) = session_for(&app, "soon.deleted").await;
+
+    // Control: the token reads while its user is there.
+    let before = app.get("/api/v1/identity/users", Some(&access)).await;
+    assert_eq!(before.status, StatusCode::OK, "{}", before.body);
 
     let admin = app.administrator_token().await;
-    let deactivated = app
+    let deleted = app
         .delete(&format!("/api/v1/identity/users/{id}"), Some(&admin))
         .await;
 
-    assert_eq!(deactivated.status, StatusCode::NO_CONTENT);
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT);
 
-    // **D-104 (A), 2026-10-01.** The first sentence above was a comment and
-    // nothing more until this assertion: no test sent the token anywhere. It
-    // is a decision that this answers 200 — the token is checked by signature
-    // and expiry only, and outlives the account by at most its lifetime plus
-    // the 60 seconds of leeway verification allows. A refusal here means the decision was reversed; reopen D-104 rather than
-    // editing the assertion.
     let listed = app.get("/api/v1/identity/users", Some(&access)).await;
     assert_eq!(
         listed.status,
-        StatusCode::OK,
-        "D-104 (A): a deactivated user's access token is good until it expires: {}",
+        StatusCode::UNAUTHORIZED,
+        "D-105: a deleted user's access token is refused at once: {}",
         listed.body
     );
+    assert_eq!(listed.error_code(), Some("UNAUTHORIZED"));
 
     let response = app
         .post(
@@ -328,6 +330,77 @@ async fn by_decision_d_104_a_deactivated_users_access_token_works_until_it_expir
         "a deactivated user's token still read after its lifetime: {}",
         expired.body
     );
+}
+
+#[tokio::test]
+async fn by_decision_d_104_a_locked_users_access_token_works_until_it_expires() {
+    // **Intended** (D-104; #650's criteria name this status with `INACTIVE`).
+    // The per-request check D-105 added reads `deleted_at` and nothing else,
+    // so a status that stops sign-in does not stop a token already issued. A
+    // check that read `status` would turn this red, and that is it working.
+    //
+    // Both ways an account is locked: the status an administrator sets, and
+    // the `locked_until` that failed sign-ins set.
+    let app = TestApp::spawn().await;
+    let id = user_administering_users(&app, "status.locked").await;
+    let (access, refresh) = session_for(&app, "status.locked").await;
+
+    let admin = app.administrator_token().await;
+    let locked = app
+        .put(
+            &format!("/api/v1/identity/users/{id}"),
+            Some(&admin),
+            json!({ "status": "LOCKED" }),
+        )
+        .await;
+    assert_eq!(locked.status, StatusCode::OK, "{}", locked.body);
+    assert_eq!(locked.data()["status"], "LOCKED");
+    sqlx::query("UPDATE users SET locked_until = now() + interval '1 hour' WHERE id = $1")
+        .bind(id)
+        .execute(&app.pool)
+        .await
+        .expect("set locked_until");
+
+    let listed = app.get("/api/v1/identity/users", Some(&access)).await;
+    assert_eq!(
+        listed.status,
+        StatusCode::OK,
+        "D-104: a locked user's access token is good until it expires: {}",
+        listed.body
+    );
+
+    let written = app
+        .post(
+            "/api/v1/identity/users",
+            Some(&access),
+            json!({
+                "username": "made.while.locked",
+                "email": "made.while.locked@kelir.test",
+                "password": PASSWORD,
+                "displayName": "Made While Locked",
+            }),
+        )
+        .await;
+    assert_eq!(written.status, StatusCode::CREATED, "{}", written.body);
+
+    // The bound: nothing starts the session again or extends it.
+    let signed_in = app
+        .post(
+            "/api/v1/auth/login",
+            None,
+            json!({ "username": "status.locked", "password": PASSWORD }),
+        )
+        .await;
+    assert_ne!(signed_in.status, StatusCode::OK, "{}", signed_in.body);
+
+    let rotated = app
+        .post(
+            "/api/v1/auth/refresh",
+            None,
+            json!({ "refreshToken": refresh }),
+        )
+        .await;
+    assert_eq!(rotated.status, StatusCode::UNAUTHORIZED, "{}", rotated.body);
 }
 
 /// The same claims under the same signature, as the token would be `seconds`

@@ -869,20 +869,21 @@ async fn a_tenant_that_left_has_its_expired_access_token_refused_and_nothing_ren
 }
 
 #[tokio::test]
-async fn a_deleted_tenants_access_token_still_reads_its_users_which_d_104_does_not_decide() {
-    // **Pinned as what the code does, not as a decision.** D-104 names
-    // suspension and deactivation of a tenant, and deactivation of a user; it
-    // does not say what a *deleted* tenant's token may do. The middleware
-    // checks no tenant at all, so today the answer is the same as for a
-    // suspended one. The integration test call is the open question for this
-    // case (#648) and is deliberately not asserted here.
-    //
-    // If this goes red because a deleted tenant's token is now refused, that
-    // may well be the better behaviour: change the assertion along with
-    // whatever records the decision.
+async fn a_deleted_tenants_access_token_is_refused_at_once_and_nothing_renews_it() {
+    // **Decided** (D-105, answered A by the product owner on 2026-10-01;
+    // #650): a deleted tenant's access token is refused on its next request,
+    // on every route. D-104 named suspension and deactivation and did not
+    // decide this case; until D-105 this test pinned what the code did, a
+    // 200, under the name `a_deleted_tenants_access_token_still_reads_its_
+    // users_which_d_104_does_not_decide`.
     let app = multi_tenant_app().await;
     let token = administering_token(&app).await;
     let session = created_tenant_session(&app, &token, "ACME", "acme.admin").await;
+
+    // Control: the token reads its tenant's users while the tenant is there.
+    let before = app.get(USERS, Some(&session.access)).await;
+    assert_eq!(before.status, StatusCode::OK, "{}", before.body);
+    assert_eq!(usernames(&before), ["acme.admin"], "{}", before.body);
 
     let deleted = app
         .delete(&format!("{TENANTS}/{}", session.tenant_id), Some(&token))
@@ -890,10 +891,15 @@ async fn a_deleted_tenants_access_token_still_reads_its_users_which_d_104_does_n
     assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
 
     let listed = app.get(USERS, Some(&session.access)).await;
-    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
-    assert_eq!(usernames(&listed), ["acme.admin"], "{}", listed.body);
+    assert_eq!(
+        listed.status,
+        StatusCode::UNAUTHORIZED,
+        "D-105: a deleted tenant's access token is refused at once: {}",
+        listed.body
+    );
+    assert_eq!(listed.error_code(), Some("UNAUTHORIZED"));
 
-    // The same bound as the decided cases: nothing renews it.
+    // And nothing renews it.
     let rotated = app
         .post(
             "/api/v1/auth/refresh",
