@@ -95,6 +95,30 @@
 //! | An empty value is a secret (`outbound::resolve_secret`) | `a_variable_set_to_nothing_is_not_found_and_nothing_is_sent` |
 //! | `namespace_segment` does not upper-case the code | `a_code_no_route_stores_reads_upper_case_names_or_nothing` — the builder's row above, now reached through a code written past the route |
 //! | Ambiguity judged on the other tenant's prefix alone, its name allowed to be empty | green — refuses more, not less: only a name that is exactly another tenant's prefix differs |
+//!
+//! **#622's predicates, seen red 2026-10-01.** Before the fix, the three
+//! tests the first row names were red on the unchanged guard: `100.100.100.200`
+//! answered `UPSTREAM_TIMEOUT` and `::127.0.0.1` `UPSTREAM_UNREACHABLE`, as
+//! verification record 20's P4 found. Each mutation was made, `--lib
+//! modules::integration utils::cidr` and this file run, the named tests
+//! observed red, and the mutation reverted. `egress::` and `cidr::` name unit
+//! tests in `domain::egress` and `utils::cidr`.
+//!
+//! | Mutation | Reddened |
+//! |---|---|
+//! | The metadata arm removed from `egress::classify` | `a_cloud_metadata_address_is_refused_whatever_is_listed`, `a_name_resolving_to_a_metadata_address_is_refused`, `an_ipv4_compatible_address_is_judged_as_the_ipv4_address_it_carries`; two `egress::` tests |
+//! | `100.100.100.200` dropped from `METADATA_ADDRESSES` | the same three; two `egress::` tests |
+//! | `192.0.0.192` dropped from it | `a_cloud_metadata_address_is_refused_whatever_is_listed`; `egress::a_cloud_metadata_address_is_refused_whatever_is_listed` |
+//! | `fd00:ec2::254` dropped from it | the same two |
+//! | The arm reads the address before `canonical` unwraps it | `a_cloud_metadata_address_is_refused_whatever_is_listed`, `an_ipv4_compatible_address_is_judged_as_the_ipv4_address_it_carries`; two `egress::` tests |
+//! | `EgressPolicy::check` lets a listed range open `Metadata` as it opens `Private` | the same two; two `egress::` tests |
+//! | The arm widened to all of `fd00:ec2::/32` | `a_cloud_metadata_address_is_refused_whatever_is_listed`, at its `fd00:ec2::253` control; `egress::the_addresses_beside_a_metadata_address_keep_their_class` |
+//! | The arm widened to `100.100.100.0/24` and `192.0.0.0/24` | unit only: `egress::the_addresses_beside_a_metadata_address_keep_their_class`. No request here names an IPv4 neighbour |
+//! | `cidr::ipv4_compatible` answers `None` | `an_ipv4_compatible_address_is_judged_as_the_ipv4_address_it_carries`; two `egress::` tests and `cidr::a_v4_network_contains_the_compatible_form_of_its_addresses` |
+//! | `ipv4_compatible` unwraps `::1` | `loopback_is_refused_in_every_spelling_and_nothing_is_sent` (`localhost` and `[::1]` read as unspecified); three `egress::` tests, `outbound::localhost_is_resolved_and_refused_as_loopback`, `cidr::ipv6_loopback_and_unspecified_are_not_ipv4_compatible_addresses` |
+//! | `ipv4_compatible` unwraps `::` | unit only: `cidr::ipv6_loopback_and_unspecified_are_not_ipv4_compatible_addresses`. Equivalent to the guard: `0.0.0.0` is unspecified too |
+//! | `ipv4_compatible` reads `::/80`, not `::/96` | unit only: `egress::an_ipv4_compatible_address_is_judged_as_the_address_it_carries`, `cidr::ipv6_loopback_and_unspecified_are_not_ipv4_compatible_addresses` |
+//! | `TestCallError`'s message offers `KELIR_INTEGRATION_ALLOWED_CIDRS` for every class but loopback | `a_cloud_metadata_address_is_refused_whatever_is_listed`; no unit test |
 
 mod common;
 

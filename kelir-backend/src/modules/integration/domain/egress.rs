@@ -10,11 +10,20 @@
 //! | Class | Verdict |
 //! |---|---|
 //! | Loopback, link-local (`169.254.169.254` included), unspecified, multicast, IPv4 broadcast | **Always refused.** No setting opens them |
+//! | Cloud metadata outside link-local: `100.100.100.200`, `192.0.0.192`, `fd00:ec2::254` | **Always refused**, the same way (#622) |
 //! | Private: RFC 1918, IPv6 unique-local `fc00::/7` | Refused unless inside a CIDR in `KELIR_INTEGRATION_ALLOWED_CIDRS` |
 //! | Everything else | Allowed |
 //!
-//! **An IPv4-mapped IPv6 address is judged as the IPv4 address it carries**:
-//! `::ffff:127.0.0.1` is loopback, and `::ffff:10.0.0.1` is private.
+//! **An IPv4-mapped or IPv4-compatible IPv6 address is judged as the IPv4
+//! address it carries**: `::ffff:127.0.0.1` and `::127.0.0.1` are loopback,
+//! and `::ffff:10.0.0.1` is private. `::` and `::1` are IPv6's own.
+//!
+//! **The three metadata addresses are addresses, not ranges** (#622). Their
+//! ranges would otherwise class them: Alibaba's is in CGNAT `100.64.0.0/10`
+//! and Oracle Compute Classic's in `192.0.0.0/24`, both public here, and
+//! AWS's IPv6 one is unique-local, which `fd00::/8` in the allow-list would
+//! open. They are tested first, so no range and no list reaches them. The
+//! addresses beside them keep their class.
 //!
 //! Two readings that go slightly beyond the words of the decision, both in the
 //! refusing direction: **all of `0.0.0.0/8` is unspecified**, not only
@@ -36,7 +45,20 @@ pub enum AddressClass {
     LinkLocal,
     Unspecified,
     Multicast,
+    /// A cloud provider's instance metadata address that its range would
+    /// class as public or private ([`METADATA_ADDRESSES`]).
+    Metadata,
 }
+
+/// Instance metadata addresses outside link-local (#622), each from its
+/// provider's documentation: Alibaba Cloud ECS, Oracle Cloud Infrastructure
+/// Compute Classic, and AWS's IMDS over IPv6. `169.254.169.254` — AWS, Azure,
+/// GCP and present-day Oracle — is link-local and needs no entry.
+const METADATA_ADDRESSES: [IpAddr; 3] = [
+    IpAddr::V4(Ipv4Addr::new(100, 100, 100, 200)),
+    IpAddr::V4(Ipv4Addr::new(192, 0, 0, 192)),
+    IpAddr::V6(Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254)),
+];
 
 impl AddressClass {
     /// The words a refusal uses. No address in them: the class is what the
@@ -49,6 +71,7 @@ impl AddressClass {
             Self::LinkLocal => "a link-local address",
             Self::Unspecified => "an unspecified address",
             Self::Multicast => "a multicast or broadcast address",
+            Self::Metadata => "a cloud metadata address",
         }
     }
 }
@@ -62,6 +85,7 @@ impl fmt::Display for AddressClass {
 /// Classifies one address.
 pub fn classify(address: IpAddr) -> AddressClass {
     match canonical(address) {
+        address if METADATA_ADDRESSES.contains(&address) => AddressClass::Metadata,
         IpAddr::V4(v4) => classify_v4(v4),
         IpAddr::V6(v6) => classify_v6(v6),
     }

@@ -53,7 +53,7 @@ export const TEST_CALL_EXPLANATIONS: Record<string, string> = {
     'The secret was found but cannot be sent as it is. A Basic auth secret must be user:password.',
   HOST_NOT_RESOLVED: "The system's host name did not resolve. Check the base URL.",
   EGRESS_REFUSED:
-    "Kelir will not connect to the address the system's host resolves to. A private network range must be allowed by whoever runs Kelir; loopback and link-local addresses never are.",
+    "Kelir will not connect to the address the system's host resolves to. A private network range must be allowed by whoever runs Kelir; loopback, link-local and cloud metadata addresses never are.",
   UPSTREAM_UNREACHABLE:
     'The system could not be reached: the connection failed or was closed. Check that it is running and reachable from the Kelir server.',
   UPSTREAM_TIMEOUT:
