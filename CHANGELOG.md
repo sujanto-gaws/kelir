@@ -64,6 +64,18 @@ While the major version is `0`, the public API may change in any release.
   for that tenant's external systems
   ([Installation and Deployment](docs/operations/01.%20Installation%20and%20Deployment.md)
   §7.1).
+  - **When a tenant is deleted, remove its
+    `KELIR_INTEGRATION_SECRET_<TENANT CODE>__…` variables from the backend's
+    environment and restart** (decision **D-102**, answered B on 2026-10-01).
+    A deleted tenant's code does not block, so a tenant created later with a
+    code that maps to the same prefix, `A_B` after `A-B`, reads whatever is
+    still there. Nothing checks this: it is the operator's duty.
+  - **A new tenant whose code maps like a live tenant's is not refused yet**
+    (decision **D-102**). Creating one succeeds, and test calls for the names
+    the two share then answer `SECRET_NAME_NOT_PERMITTED` for both. The
+    refusal at creation is decided and not built: it is
+    [#655](https://github.com/sujanto-gaws/kelir/issues/655), placed after
+    `v0.9.0`.
   - **A deployment run from `main` during Sprint 22** may have used
     `KELIR_INTEGRATION_SECRET_<NAME>` without a tenant code, which #547
     allowed. Rename each such variable to its tenant's namespace, and edit the
@@ -88,6 +100,19 @@ While the major version is `0`, the public API may change in any release.
   Classic and AWS over IPv6
   ([#622](https://github.com/sujanto-gaws/kelir/issues/622)). **An entry that is not `address/prefix` stops the backend at
   startup**, a bare address included.
+  - **Five translated IPv6 forms are judged public whatever IPv4 address
+    they carry, as a decided limit**
+    ([#644](https://github.com/sujanto-gaws/kelir/issues/644), decision
+    **D-103**, option 1, 2026-10-01). They are NAT64 (`64:ff9b::/96` and
+    `64:ff9b:1::/48`), 6to4 (`2002::/16`), Teredo (`2001::/32`), ISATAP under
+    a public prefix, and IPv4-translated (`::ffff:0:a.b.c.d`). The guard is
+    not changed. On a network that has a NAT64 translator or DNS64, an
+    address in one of these forms that carries a private, loopback,
+    link-local or metadata IPv4 address is delivered to it, and
+    `KELIR_INTEGRATION_ALLOWED_CIDRS` does not govern it: do not rely on the
+    guard for those destinations on such a network
+    ([Installation and Deployment](docs/operations/01.%20Installation%20and%20Deployment.md)
+    §7.1).
 - **`0049` adds one permission, `integration:endpoint:call`**, and grants it
   to the system tenant's `ROLE-ADMIN`. A tenant created after the upgrade gets it on its
   `ROLE-ADMIN`. A tenant created before the upgrade does not: grant it to that
@@ -108,6 +133,21 @@ While the major version is `0`, the public API may change in any release.
     themselves. The same preview already reaches every holder of
     `integration:endpoint:call`, in the test call's own answer. And what an
     unlisted echo exposes is a secret the called system already had.
+- **A client holding an access token for a deleted tenant or a deleted user
+  now gets 401 where it got data** (decision **D-105**). The token is refused
+  on every authenticated route from the next request after the deletion, and
+  the refresh that follows is refused too. An access token is also refused
+  from the second it expires: the 60 seconds verification allowed past expiry
+  is gone, so a client that relied on it must refresh within the `expiresIn` it
+  was given.
+  - **A deployment that runs more than one backend must keep their clocks in
+    step**, well under a second apart. With no allowance past expiry, a
+    backend whose clock runs ahead of the one that issued a token refuses it
+    that much early. The compose files shipped here run one backend
+    ([Installation and Deployment](docs/operations/01.%20Installation%20and%20Deployment.md)
+    §7).
+  - **Each authenticated request makes one more database read** than it did,
+    before its handler runs. No migration and no setting.
 
 ### Added
 
@@ -310,16 +350,18 @@ While the major version is `0`, the public API may change in any release.
   code changes. The dynamic form renderer's client-side JFSS rules are not
   affected.
 - **The documents and three screens say how long a suspended tenant's
-  users keep working: at most 16 minutes** (decision **D-104**, answered
-  2026-10-01). Suspending or deactivating a tenant, or deactivating a user,
-  stops sign-in and revokes the refresh tokens, so no session is renewed. An
-  access token already issued is verified by signature and expiry only, so it
-  works until it stops being accepted. Its expiry is 15 minutes after issue,
-  and verification allows a further 60 seconds, the JWT library's default
-  leeway, which nothing in the code sets: 16 minutes from issue at most. The
-  lifetime is a constant, not a setting. Four tests pin the rule
-  (`by_decision_d_104_…` in `tests/organization_tenants.rs` and
-  `tests/auth_session.rs`).
+  users keep working: at most ~~16~~ 15 minutes** (decision **D-104**, answered
+  2026-10-01). **The number is 15 since the leeway was removed** (dated note,
+  2026-10-01): this entry was written at 16, the 15-minute lifetime plus the
+  JWT library's default 60 seconds of leeway, which nothing in the code set.
+  The *Fixed* entry for #650 below sets the leeway to zero, and the documents
+  and screens now say 15. What follows is this entry as it was true of #652.
+  Suspending or deactivating a tenant, or setting a user's status to
+  `INACTIVE`, stops sign-in and revokes the refresh tokens, so no session is
+  renewed. An access token already issued was verified by signature and expiry
+  only, so it worked until it stopped being accepted. The lifetime is a
+  constant, not a setting. Tests in `tests/organization_tenants.rs` and
+  `tests/auth_session.rs` hold the rule.
   `v0.4.0`'s entry and
   [Database Schema](docs/design/02.%20Database%20Schema.md) §2.1 said
   *sessions end rather than merely failing to renew*, which is more than the
@@ -332,18 +374,19 @@ While the major version is `0`, the public API may change in any release.
   tenant and user alike), §5.4 and §9.3.6, Database Schema §2.1,
   architectures/01 §18.1 and the
   [User Manual](docs/operations/03.%20User%20Manual.md) §11.4.
-  **D-104 does not decide a deleted tenant or a deleted user.** A token
-  issued before the tenant's deletion still reads the tenant's data, which a test pins, and was observed
-  to create a user in it, which no test asserts. A deleted user's token works
-  except where a route reads the user's own row: `GET /auth/me` answers 404.
-  Three related issues are open and not addressed here: a deleted tenant's
-  token reads and writes until it stops being accepted, and the 60 seconds of
-  leeway
-  ([#650](https://github.com/sujanto-gaws/kelir/issues/650)); such a token is
-  answered 500 by an integration test call
-  ([#648](https://github.com/sujanto-gaws/kelir/issues/648)); and a refresh
-  does not itself check the tenant's status but relies on the revocation
-  ([#649](https://github.com/sujanto-gaws/kelir/issues/649)).
+  **D-104 does not decide a deleted tenant or a deleted user.** When #652
+  merged, a token issued before the tenant's deletion still read the tenant's
+  data and was observed to create a user in it, and a deleted user's token
+  worked except where a route reads the user's own row. ~~Three related issues
+  are open and not addressed here~~ **Two of the three related issues are
+  answered since** (2026-10-01, decision **D-105**; the *Fixed* entry below):
+  a deleted tenant's or user's token is refused at once, and the 60 seconds
+  of leeway is gone (#650); and an integration test call answers such a token
+  401, not 500 (#648). **One stays open**: a refresh does not itself check the
+  tenant's status but relies on the revocation
+  ([#649](https://github.com/sujanto-gaws/kelir/issues/649)). The Deactivate
+  button on the user list deletes the account, so it is D-105's case and not
+  this entry's: only a change of a user's status is.
 
 - **A `Draft` ADR whose blocker this same tree delivers is refused**
   ([#545](https://github.com/sujanto-gaws/kelir/issues/545),
@@ -494,6 +537,47 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A deleted tenant's access token, and a deleted user's, are refused at
+  once on every route, and no token is accepted past its expiry**
+  ([#650](https://github.com/sujanto-gaws/kelir/issues/650),
+  [#648](https://github.com/sujanto-gaws/kelir/issues/648), decision
+  **D-105**,
+  [ADR-0045](docs/architectures/adr/0045.%20Every%20Authenticated%20Request%20Reads%20That%20Its%20Tenant%20and%20User%20Are%20Not%20Deleted,%20and%20a%20Token%20Has%20No%20Leeway.md)).
+  A token issued before its tenant was deleted read the tenant's data and
+  could create a user in the deleted tenant until the token expired. A deleted
+  user's token worked on every route that did not read the user's own row.
+  - **Every authenticated route now answers such a token 401 `UNAUTHORIZED`**,
+    from the next request after the deletion, with the envelope an expired
+    token gets and no reason in it. Each authenticated request reads that its
+    token's tenant and user are not deleted before the handler runs: 143
+    operations, counted 2026-10-01. A token naming a tenant or a user that
+    has no row, or a user of another tenant, is refused the same way. If that
+    read fails, the request is answered with a 5xx, never accepted and never
+    401.
+  - **The user list's Deactivate button signs that user out at once.** It
+    deletes the account. Setting a user's status to `INACTIVE` in the edit
+    dialog does not: that user stays signed in until the token expires
+    (decision **D-104**).
+  - **An integration test call by such a caller answers 401, not 500**, and
+    writes no `integration_logs` row (#648).
+  - **An access token is accepted for 15 minutes exactly.** Verification
+    allowed a further 60 seconds past expiry, the JWT library's default
+    leeway. It is now set to zero.
+  - **Unchanged**: a `SUSPENDED` or `INACTIVE` tenant's token, and an
+    `INACTIVE` user's, work until they expire (D-104), now at most 15 minutes.
+    Refresh, logout and sign-in are not given the check
+    ([#649](https://github.com/sujanto-gaws/kelir/issues/649) stays open). A
+    password change does not end an access token already issued. Roles and
+    permissions in a token stay a snapshot from its issue.
+
+  [SDD](docs/design/01.%20System%20Design%20Document.md) §11.1 states the
+  rule; §5.4 and §9.3.6,
+  [Database Schema](docs/design/02.%20Database%20Schema.md) §2.1,
+  architectures/01 §18.1, the
+  [User Manual](docs/operations/03.%20User%20Manual.md) §2, §11.1 and §11.4
+  and
+  [Installation and Deployment](docs/operations/01.%20Installation%20and%20Deployment.md)
+  §7 follow it.
 - **The kind-mismatch refusal reads as one sentence**
   ([#558](https://github.com/sujanto-gaws/kelir/issues/558)). Publishing or
   saving a workflow definition whose `actions` name a before-only handler is
