@@ -128,7 +128,8 @@ pub struct AppConfig {
     ///
     /// **Empty by default, and empty refuses every private address.** A private
     /// range (RFC 1918, IPv6 ULA) is reachable only inside a network listed
-    /// here. Loopback, link-local, unspecified and multicast addresses are
+    /// here. Loopback, link-local, unspecified and multicast addresses, and
+    /// three cloud metadata addresses outside link-local (#622), are
     /// refused whatever this says: listing `127.0.0.0/8` does not open it, see
     /// `integration::domain::egress`.
     pub integration_allowed_cidrs: Vec<Cidr>,

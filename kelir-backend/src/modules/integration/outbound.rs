@@ -374,6 +374,11 @@ mod tests {
                 AddressClass::LinkLocal,
             ),
             ("http://[fe80::1]/x", AddressClass::LinkLocal),
+            // #622: metadata addresses outside link-local, and `::a.b.c.d`.
+            ("http://100.100.100.200/x", AddressClass::Metadata),
+            ("http://192.0.0.192/x", AddressClass::Metadata),
+            ("http://[fd00:ec2::254]/x", AddressClass::Metadata),
+            ("http://[::127.0.0.1]/x", AddressClass::Loopback),
             ("http://10.0.0.1/x", AddressClass::Private),
             // WHATWG URL parsing normalises these to 127.0.0.1 before the
             // guard sees them.

@@ -7,10 +7,11 @@
 //! **An IPv4 network contains an IPv4-mapped IPv6 address of that network.**
 //! `::ffff:10.0.0.5` is `10.0.0.5` on the wire, so asking whether `10.0.0.0/8`
 //! contains it and answering *no* would make the allow-list depend on how the
-//! resolver chose to spell the answer.
+//! resolver chose to spell the answer. The IPv4-compatible form `::10.0.0.5`
+//! is read the same way (#622).
 
 use std::fmt;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,16 +103,29 @@ pub fn parse_list(raw: &str) -> Result<Vec<Cidr>, CidrParseError> {
         .collect()
 }
 
-/// An IPv4-mapped IPv6 address as the IPv4 address it carries; anything else
-/// unchanged.
+/// An IPv4-mapped (`::ffff:a.b.c.d`) or IPv4-compatible (`::a.b.c.d`) IPv6
+/// address as the IPv4 address it carries; anything else unchanged.
+///
+/// The compatible form is deprecated (RFC 4291 §2.5.5.1) and still parses,
+/// so it is read rather than trusted to be unroutable (#622). `::` and `::1`
+/// lie in the same `::/96` and are IPv6's own unspecified and loopback
+/// addresses, not IPv4 addresses.
 pub fn canonical(address: IpAddr) -> IpAddr {
     match address {
         IpAddr::V6(v6) => v6
             .to_ipv4_mapped()
+            .or_else(|| ipv4_compatible(v6))
             .map(IpAddr::V4)
             .unwrap_or(IpAddr::V6(v6)),
         v4 => v4,
     }
+}
+
+fn ipv4_compatible(address: Ipv6Addr) -> Option<Ipv4Addr> {
+    let bits = u128::from(address);
+
+    (bits >> 32 == 0 && !address.is_unspecified() && !address.is_loopback())
+        .then(|| Ipv4Addr::from(bits as u32))
 }
 
 fn mask32(prefix: u8) -> u32 {
@@ -162,6 +176,23 @@ mod tests {
     fn a_v4_network_contains_the_mapped_form_of_its_addresses() {
         assert!(cidr("10.0.0.0/8").contains(ip("::ffff:10.1.2.3")));
         assert!(!cidr("10.0.0.0/8").contains(ip("::ffff:11.1.2.3")));
+    }
+
+    #[test]
+    fn a_v4_network_contains_the_compatible_form_of_its_addresses() {
+        // #622: `::a.b.c.d`, the deprecated `::/96`.
+        assert!(cidr("10.0.0.0/8").contains(ip("::10.1.2.3")));
+        assert!(!cidr("10.0.0.0/8").contains(ip("::11.1.2.3")));
+        assert_eq!(canonical(ip("::127.0.0.1")), ip("127.0.0.1"));
+    }
+
+    #[test]
+    fn ipv6_loopback_and_unspecified_are_not_ipv4_compatible_addresses() {
+        assert_eq!(canonical(ip("::1")), ip("::1"));
+        assert_eq!(canonical(ip("::")), ip("::"));
+        // One bit above the /96 is an IPv6 address like any other.
+        assert_eq!(canonical(ip("::1:a00:1")), ip("::1:a00:1"));
+        assert!(!cidr("10.0.0.0/8").contains(ip("::1:a00:1")));
     }
 
     #[test]

@@ -314,8 +314,11 @@ pub async fn update_endpoint(
 /// a URL, a host or a header.
 ///
 /// The host is resolved once and every address it resolves to is checked:
-/// loopback, link-local, unspecified and multicast are always refused, and a
-/// private address unless `KELIR_INTEGRATION_ALLOWED_CIDRS` lists its range.
+/// loopback, link-local, unspecified and multicast are always refused, and so
+/// are the cloud metadata addresses `100.100.100.200`, `192.0.0.192` and
+/// `fd00:ec2::254` (#622), and a private address unless
+/// `KELIR_INTEGRATION_ALLOWED_CIDRS` lists its range. An IPv4-mapped or
+/// IPv4-compatible IPv6 address is judged as the IPv4 address it carries.
 /// The connection is pinned to the checked address, redirects are not
 /// followed, and the whole call is bounded by the system's `timeoutSeconds`.
 ///

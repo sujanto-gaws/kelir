@@ -82,8 +82,11 @@ While the major version is `0`, the public API may change in any release.
 - **A private-network system needs `KELIR_INTEGRATION_ALLOWED_CIDRS`.** A
   test call to an RFC 1918 or IPv6 unique-local address is refused unless the
   range is listed, for example `10.20.0.0/16`. Loopback, link-local (the cloud
-  metadata address included), unspecified and multicast addresses are always
-  refused. **An entry that is not `address/prefix` stops the backend at
+  metadata address `169.254.169.254` included), unspecified and multicast
+  addresses are always refused, and so are `100.100.100.200`, `192.0.0.192`
+  and `fd00:ec2::254`, the metadata addresses of Alibaba Cloud, Oracle Compute
+  Classic and AWS over IPv6
+  ([#622](https://github.com/sujanto-gaws/kelir/issues/622)). **An entry that is not `address/prefix` stops the backend at
   startup**, a bare address included.
 - **`0049` adds one permission, `integration:endpoint:call`**, and grants it
   to the system tenant's `ROLE-ADMIN`. A tenant created after the upgrade gets it on its
@@ -504,6 +507,24 @@ While the major version is `0`, the public API may change in any release.
   tenant's variable answers `SECRET_NAME_NOT_PERMITTED` with the same bytes
   whether it is set or not, and the message names only the caller's own
   prefix. See *Upgrade notes*.
+- **A test call no longer reaches three cloud metadata addresses, or an
+  IPv4-compatible address**
+  ([#622](https://github.com/sujanto-gaws/kelir/issues/622), verification
+  record 20, Finding 5). The egress guard refused `169.254.169.254` as
+  link-local, and classed `100.100.100.200` (Alibaba Cloud) and
+  `192.0.0.192` (Oracle Compute Classic) as public and `fd00:ec2::254` (AWS
+  over IPv6) as unique-local. The first two were reached with no setting,
+  and the third with `fd00::/8` in `KELIR_INTEGRATION_ALLOWED_CIDRS`, which
+  is the Installation guide's own example. On those platforms the call's
+  preview would have been the metadata service's answer. All three are now
+  refused with `EGRESS_REFUSED` as *a cloud metadata address*, whatever is
+  listed. They are refused as addresses and not as ranges: the rest of
+  CGNAT stays public, and the rest of `fd00:ec2::/32` stays unique-local.
+  **`::a.b.c.d` is judged as the IPv4 address it carries**, as
+  `::ffff:a.b.c.d` already was: `::127.0.0.1` was read as a public IPv6
+  address and is now refused as loopback, and `::10.1.2.3` needs its IPv4
+  range listed. No setting changes, and nothing that was refused is now
+  allowed.
 
 - **A decision, claim or hand-off arriving during a reassign no longer
   deadlocks and answers 500**
