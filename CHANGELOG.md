@@ -466,16 +466,16 @@ While the major version is `0`, the public API may change in any release.
   three runs of 34 spaces mid-sentence: the source line's indentation, kept in
   the text. The words are unchanged. The sentence for a `guards` entry naming
   an after-only handler had one such run; no handler is after-only yet, so no
-  route returns it. Four more texts had the same defect and are fixed with it:
+  route returns it. Five more texts had the same defect and are fixed with it:
   - 422 `INCOMPLETE_ENTITY_LINK` for an `entityId` sent without an
     `entityType` carried a line break and thirteen spaces.
   - The 409 from `PUT /api/v1/documents/{id}/status` on a document a workflow
-    is deciding carried two runs of nine spaces.
+    is deciding carried two runs of ten spaces.
   - The 200 descriptions of `GET /api/v1/identity/roles` and
     `GET /api/v1/identity/roles/{id}` in the OpenAPI document carried runs of
-    twelve spaces.
+    thirteen spaces: five in the first and one in the second.
   - One error log line, for a workflow definition found in another tenant,
-    carried thirteen spaces.
+    carried fourteen spaces.
 
   A client that compares any of these messages byte for byte sees a change;
   the codes, paths and statuses are the same.

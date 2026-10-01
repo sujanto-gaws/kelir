@@ -54,6 +54,16 @@
 //! | M14: the description walk reads fenced code blocks too | `--lib router::tests` | the same test, on `WorkflowHistoryEntry`'s aligned example: the exclusion is needed |
 //! | M15: the `tracing::error!` line in `workflow::repository::definition` back to a run of spaces | `--lib modules::workflow` | green, 68 of 68. **Nothing reads that log line**, and it was fixed without a test |
 //!
+//! **The independent campaign on the PR, after the table above.** `save` now
+//! reads the sentence whole and the rule it cites, as `publication` does, and
+//! `publication` reads each detail's path and rule. Seen red, 2026-10-01, each
+//! alone: the blank before the first `\` of the before-only literal removed
+//! ("a veto or achange") reddens `save` and `publication`, where `save` was
+//! green; the kind mismatch citing `LHCS-2` in place of `LHCS-3.2` reddens
+//! both, where this file was green, 22 of 22. M15's log line is read by
+//! `tests/refusals_read_as_one_line.rs`, with the rest of that campaign's
+//! record.
+//!
 //! [#339]: https://github.com/sujanto-gaws/kelir/issues/339
 
 mod common;
@@ -1368,6 +1378,11 @@ async fn an_actions_entry_naming_a_before_only_handler_is_refused_at_save() {
 
     assert_eq!(detail["path"], "definition.transitions.0.actions.0.handler");
     assert_reads_as_one_line(&detail);
+    // The same detail the publication route answers, member for member: the
+    // sentence whole, and the rule it cites (`LHCS-3.2` changed to `LHCS-2`
+    // left all 22 tests of this file green).
+    assert_eq!(detail["rule"], "LHCS-3.2");
+    assert_eq!(detail["message"], KIND_MISMATCH_OF_SET_FORM_FIELD);
 
     // The handler that serves after commit is accepted in the same position.
     let mut definition = workflow_with_a_service_state("kind_match", json!([]), None);
@@ -1379,6 +1394,13 @@ async fn an_actions_entry_naming_a_before_only_handler_is_refused_at_save() {
         StatusCode::CREATED
     );
 }
+
+/// The `HANDLER_KIND_MISMATCH` sentence for `core:set_form_field` in `actions`,
+/// as both routes answer it.
+const KIND_MISMATCH_OF_SET_FORM_FIELD: &str =
+    "`core:set_form_field` is a before-hook handler: its result is a veto or a change to the \
+     form, and once the transition has committed there is nothing left to refuse or change. An \
+     `actions` entry runs after commit; the handlers that can are `core:continue_always`";
 
 /// A refusal's message is one line of prose (#558): no run of two spaces, and
 /// no line break.
@@ -1469,12 +1491,29 @@ async fn a_stored_draft_naming_a_before_only_handler_is_refused_at_publication_i
     }
 
     // The sentence whole, as the author reads it.
+    assert_eq!(details[0]["message"], KIND_MISMATCH_OF_SET_FORM_FIELD);
+    // Each entry at its own path, under the rule the save route cites.
     assert_eq!(
-        details[0]["message"],
-        "`core:set_form_field` is a before-hook handler: its result is a veto or a change to \
-         the form, and once the transition has committed there is nothing left to refuse or \
-         change. An `actions` entry runs after commit; the handlers that can are \
-         `core:continue_always`"
+        details
+            .iter()
+            .map(|detail| (detail["path"].as_str(), detail["rule"].as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (
+                Some("definition.transitions.0.actions.0.handler"),
+                Some("LHCS-3.2")
+            ),
+            (
+                Some("definition.transitions.0.actions.1.handler"),
+                Some("LHCS-3.2")
+            ),
+        ],
+        "{}",
+        publication.body
+    );
+    assert_eq!(
+        details[1]["message"],
+        KIND_MISMATCH_OF_SET_FORM_FIELD.replace("core:set_form_field", "core:reject_when")
     );
     // The envelope's own message is not where the spaces were, and is read too.
     assert_reads_as_one_line(&publication.body["error"]);
