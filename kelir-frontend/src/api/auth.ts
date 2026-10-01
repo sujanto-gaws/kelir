@@ -49,8 +49,9 @@ export function fetchCurrentUser(): Promise<CurrentUser> {
  *
  * Every refresh token for the account is revoked, so no session can be
  * extended. An access token already issued stays valid until it expires — up
- * to fifteen minutes — because access tokens are stateless and checked against
- * no revocation list. The wording used to claim every session ended (#60).
+ * to sixteen minutes, fifteen to its expiry and the sixty seconds verification
+ * allows past it — because access tokens are stateless and checked against no
+ * revocation list. The wording used to claim every session ended (#60).
  */
 export function changePassword(request: ChangePasswordRequest): Promise<void> {
   return postVoid('/auth/change-password', request)

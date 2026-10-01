@@ -11,8 +11,10 @@
 
 /**
  * Tenant lifecycle. Only `ACTIVE` admits sign-in; moving a tenant to anything
- * else also revokes its refresh tokens server-side, so existing sessions end
- * rather than merely failing to renew.
+ * else also revokes its refresh tokens server-side, so no existing session can
+ * be renewed. An access token already issued is not recalled: it outlives the
+ * change by at most its lifetime, 15 minutes from issue, plus the 60 seconds
+ * verification allows past expiry — 16 minutes (D-104, a stated limit).
  */
 export type TenantStatus = 'ACTIVE' | 'SUSPENDED' | 'INACTIVE'
 
@@ -35,7 +37,10 @@ export interface Tenant {
    * controls are disabled rather than left to fail.
    */
   isDefault: boolean
-  /** Live users. Suspending or deleting the tenant ends all of their sessions. */
+  /**
+   * Live users. Suspending or deleting the tenant stops all of them signing in
+   * or renewing a session; one already signed in is out within 16 minutes.
+   */
   userCount: number
   createdAt: string
 }

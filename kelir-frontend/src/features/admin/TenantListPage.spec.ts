@@ -133,14 +133,24 @@ describe('TenantListPage', () => {
     expect(buttonLabelled(acmeRow.findAll('button'), 'Delete')?.element.disabled).toBe(false)
   })
 
-  it('says how many people a deletion signs out before it is confirmed', async () => {
+  it('says how many people a deletion shuts out, and how soon, before it is confirmed', async () => {
     // The one number on the screen that changes what the confirmation means.
+    // Somebody already signed in carries on for up to 16 minutes, and can still
+    // create records in the tenant until then (#650, open — D-104 does not
+    // decide deletion). So the text says neither that they are signed out at
+    // once nor that the data is out of reach.
     const wrapper = await mountPage(['organization:tenant:read', 'organization:tenant:manage'])
 
     await buttonLabelled(rowsOf(wrapper)[1].findAll('button'), 'Delete')?.trigger('click')
 
-    expect(wrapper.text()).toContain('Acme Limited (ACME) will be removed')
-    expect(wrapper.text()).toContain('Its 12 user(s) are signed out')
+    expect(wrapper.text()).toContain(
+      'Acme Limited (ACME) will be removed. ' +
+        'Its 12 user(s) can no longer sign in. ' +
+        'Anyone already signed in can keep working in it, including creating records, for up to 16 minutes. ' +
+        'Its data is left in place and cannot be reached by signing in afterwards.',
+    )
+    expect(wrapper.text()).not.toContain('are signed out')
+    expect(wrapper.text()).not.toContain('becomes unreachable')
   })
 
   it('deletes through the API and reloads the list', async () => {

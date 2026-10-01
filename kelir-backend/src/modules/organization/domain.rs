@@ -88,8 +88,8 @@ pub struct TenantView {
     /// being refused.
     pub is_default: bool,
     /// Live users in the tenant. Shown because suspending or deleting a tenant
-    /// ends their sessions, and the number of people that affects is the one
-    /// fact the confirmation needs.
+    /// stops their sessions being renewed, and the number of people that
+    /// affects is the one fact the confirmation needs.
     pub user_count: i64,
     pub created_at: DateTime<Utc>,
 }

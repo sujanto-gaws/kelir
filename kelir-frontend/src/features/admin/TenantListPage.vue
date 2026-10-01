@@ -65,8 +65,15 @@ function openDelete(tenant: Tenant): void {
  * What deleting a tenant actually does, said before it is done.
  *
  * The user count matters here and nowhere else on the screen: this is the
- * number of people who are signed out by the confirmation they are about to
- * give.
+ * number of people the confirmation they are about to give shuts out.
+ *
+ * Not at once, and this is what the code does today rather than anything
+ * decided: nobody can sign in or renew a session from then on, but somebody
+ * already signed in can go on reading the tenant's data and creating records in
+ * it until what they hold stops being accepted — 15 minutes from issue, plus
+ * the 60 seconds verification allows. D-104 covers suspending and deactivating;
+ * it does not decide deletion, and #650 is open on it. The text says what
+ * happens rather than promising more.
  */
 const deleteDescription = computed(() => {
   const target = confirming.value
@@ -77,8 +84,9 @@ const deleteDescription = computed(() => {
 
   return (
     `${target.name} (${target.tenantCode}) will be removed. ` +
-    `Its ${target.userCount} user(s) are signed out and can no longer sign in. ` +
-    'Its data is left in place but becomes unreachable.'
+    `Its ${target.userCount} user(s) can no longer sign in. ` +
+    'Anyone already signed in can keep working in it, including creating records, for up to 16 minutes. ' +
+    'Its data is left in place and cannot be reached by signing in afterwards.'
   )
 })
 

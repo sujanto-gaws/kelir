@@ -435,9 +435,10 @@ pub async fn update_tenant(
         .await?
         .ok_or_else(|| AppError::not_found("Tenant"))?;
 
-    // Suspending the tenant the request came from would end the session making
-    // the request, and there would then be nobody able to undo it — the same
-    // refusal `deactivate_user` gives for your own account, for the same reason.
+    // Suspending the tenant the request came from would stop the session making
+    // the request being renewed, and there would then be nobody able to undo it
+    // — the same refusal `deactivate_user` gives for your own account, for the
+    // same reason.
     if id == administering.id && matches!(request.status, Some(status) if !status.admits_sign_in())
     {
         return Err(AppError::bad_request(
@@ -458,10 +459,13 @@ pub async fn update_tenant(
         return Err(AppError::not_found("Tenant"));
     }
 
-    // Taking a tenant offline must end its users' sessions, not merely stop new
-    // sign-ins. `resolve_for_sign_in` already refuses a suspended tenant, but a
-    // refresh token issued a minute ago would otherwise keep a session alive
-    // indefinitely — the mirror of what `update_user` does for an account.
+    // Taking a tenant offline must stop its users' sessions being renewed, not
+    // merely stop new sign-ins. `resolve_for_sign_in` already refuses a
+    // suspended tenant, but a refresh token issued a minute ago would otherwise
+    // keep a session alive indefinitely — the mirror of what `update_user` does
+    // for an account. An access token already issued is not reached by this: it
+    // works until it stops being accepted, at most 16 minutes from issue
+    // (SDD §11.1, decision D-104).
     if matches!(request.status, Some(status) if !status.admits_sign_in()) {
         let revoked = repository::revoke_sessions(&state.pool, id, "tenant suspended").await?;
         tracing::info!(tenant_id = %id, revoked, "revoked sessions for a suspended tenant");
@@ -493,11 +497,14 @@ pub async fn update_tenant(
     get_tenant_unchecked(state, id, administering.id).await
 }
 
-/// Soft-deletes a tenant and ends its sessions.
+/// Soft-deletes a tenant and revokes its refresh tokens.
 ///
 /// Its users, roles and data are left in place rather than cascaded: a
 /// soft-deleted tenant resolves to nothing at sign-in, which is what makes the
-/// data unreachable, and hard-deleting it would take the audit trail with it.
+/// data unreachable to a new sign-in, and hard-deleting it would take the audit
+/// trail with it. A session already open is not ended: its access token still
+/// reads and writes until it stops being accepted, at most 16 minutes from
+/// issue. D-104 does not decide that for a deleted tenant (#650, open).
 pub async fn delete_tenant(
     state: &AppState,
     caller: &Authenticated,

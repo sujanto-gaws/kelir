@@ -303,8 +303,9 @@ pub async fn refresh(
     };
 
     if !user.status.can_sign_in() {
-        // Deactivating an account must end its sessions, not merely stop new
-        // sign-ins.
+        // Deactivating an account must stop its sessions being renewed, not
+        // merely stop new sign-ins. Only the user's status is read here: the
+        // tenant's is not, and a refresh relies on the revocation for it (#649).
         identity_repo::revoke_all_for_user(&state.pool, stored.user_id, "account not active")
             .await?;
         return Err(AppError::Unauthorized);
@@ -495,7 +496,8 @@ pub async fn change_own_password(
     // stateless JWTs checked against no revocation list — that is the trade
     // architecture 01 §18.1 makes to keep authorization off the database — so
     // one issued a moment before this call stays valid until it expires, up to
-    // `token::ACCESS_TOKEN_TTL_MINUTES`. What a password change guarantees is
+    // `token::ACCESS_TOKEN_TTL_MINUTES`, and is accepted for 60 seconds of
+    // leeway after that. What a password change guarantees is
     // that the session cannot be *extended*: the window is bounded and short,
     // not zero. The contract used to claim otherwise; #60 found it, and the
     // wording here and in the OpenAPI response now says what the code does.

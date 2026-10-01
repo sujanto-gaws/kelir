@@ -7,11 +7,13 @@ use uuid::Uuid;
 
 use crate::error::AppError;
 
-/// How long an access token stays valid.
+/// How long after issue an access token's `exp` falls.
 ///
-/// Short by design: an access token cannot be revoked, so its lifetime is the
-/// window in which a stolen one is useful. Continuity comes from the refresh
-/// token, which can be revoked.
+/// Short by design: an access token cannot be revoked, so the time it is
+/// accepted for is the window in which a stolen one is useful. That is this
+/// plus 60 seconds: [`verify_access_token`] leaves `jsonwebtoken`'s default
+/// leeway on `exp` in place, so a token is accepted for up to 16 minutes from
+/// issue. Continuity comes from the refresh token, which can be revoked.
 pub const ACCESS_TOKEN_TTL_MINUTES: i64 = 15;
 
 /// How long a refresh token stays valid. Rotated on every use.
@@ -21,7 +23,8 @@ pub const REFRESH_TOKEN_TTL_DAYS: i64 = 30;
 ///
 /// Permissions are embedded so authorisation does not query the database on
 /// every request. The cost is staleness: a permission revoked mid-session takes
-/// effect when the access token expires, within `ACCESS_TOKEN_TTL_MINUTES`.
+/// effect when the access token stops being accepted, within
+/// `ACCESS_TOKEN_TTL_MINUTES` plus the 60 seconds of leeway verification allows.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccessClaims {
     /// Subject — the user id.

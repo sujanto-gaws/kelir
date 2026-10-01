@@ -154,15 +154,37 @@ async fn a_refresh_token_rotates_and_the_old_one_is_refused_on_replay() {
     );
 }
 
+/// A user who may read and create users, so a token of theirs has one read
+/// route and one write route to be tried on. Returns the user's id.
+async fn user_administering_users(app: &TestApp, username: &str) -> Uuid {
+    let role = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        &format!("ROLE-{}", username.to_uppercase().replace('.', "-")),
+        &["identity:user:read", "identity:user:create"],
+    )
+    .await;
+
+    fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        username,
+        &format!("{username}@kelir.test"),
+        PASSWORD,
+        &[role],
+    )
+    .await
+}
+
 #[tokio::test]
 async fn a_deactivated_users_refresh_token_is_rejected_immediately() {
-    // The access token still lives out its fifteen minutes — that is the
-    // documented trade of carrying permissions in the token. The refresh is the
-    // half that must not survive, because it is what would extend the session
-    // beyond that window.
+    // The access token still works until it stops being accepted, at most
+    // sixteen minutes from issue — that is the documented trade of carrying
+    // permissions in the token. The refresh is the half that must not survive,
+    // because it is what would extend the session beyond that window.
     let app = TestApp::spawn().await;
-    let id = user(&app, "soon.deactivated").await;
-    let (_, refresh) = session_for(&app, "soon.deactivated").await;
+    let id = user_administering_users(&app, "soon.deactivated").await;
+    let (access, refresh) = session_for(&app, "soon.deactivated").await;
 
     let admin = app.administrator_token().await;
     let deactivated = app
@@ -170,6 +192,20 @@ async fn a_deactivated_users_refresh_token_is_rejected_immediately() {
         .await;
 
     assert_eq!(deactivated.status, StatusCode::NO_CONTENT);
+
+    // **D-104 (A), 2026-10-01.** The first sentence above was a comment and
+    // nothing more until this assertion: no test sent the token anywhere. It
+    // is a decision that this answers 200 — the token is checked by signature
+    // and expiry only, and outlives the account by at most its lifetime plus
+    // the 60 seconds of leeway verification allows. A refusal here means the decision was reversed; reopen D-104 rather than
+    // editing the assertion.
+    let listed = app.get("/api/v1/identity/users", Some(&access)).await;
+    assert_eq!(
+        listed.status,
+        StatusCode::OK,
+        "D-104 (A): a deactivated user's access token is good until it expires: {}",
+        listed.body
+    );
 
     let response = app
         .post(
@@ -180,6 +216,139 @@ async fn a_deactivated_users_refresh_token_is_rejected_immediately() {
         .await;
 
     assert_eq!(response.status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn by_decision_d_104_a_deactivated_users_access_token_works_until_it_expires() {
+    // **Intended, and bounded** (D-104, answered A by the product owner on
+    // 2026-10-01): an access token outlives the deactivation of its user by at
+    // most its lifetime, `ACCESS_TOKEN_TTL_MINUTES` from issue, plus the 60
+    // seconds of leeway verification allows: 16 minutes. Sign-in and
+    // refresh are refused at once; the token already issued is checked by
+    // signature and expiry only (`middleware::auth`).
+    //
+    // Do not "fix" this test. A change that makes the middleware look the
+    // user up turns it red, and that is it working: such a change reverses
+    // D-104 and needs the decision reopened, not these assertions edited.
+    //
+    // The test above deactivates by `DELETE`; this one by `status`, the other
+    // way an account is taken out of use, and it tries a write as well.
+    use kelir_backend::modules::auth::token::ACCESS_TOKEN_TTL_MINUTES;
+
+    let app = TestApp::spawn().await;
+    let id = user_administering_users(&app, "status.inactive").await;
+    let (access, refresh) = session_for(&app, "status.inactive").await;
+
+    let admin = app.administrator_token().await;
+    let deactivated = app
+        .put(
+            &format!("/api/v1/identity/users/{id}"),
+            Some(&admin),
+            json!({ "status": "INACTIVE" }),
+        )
+        .await;
+    assert_eq!(deactivated.status, StatusCode::OK, "{}", deactivated.body);
+    assert_eq!(deactivated.data()["status"], "INACTIVE");
+
+    // Inside the window: it reads...
+    let listed = app.get("/api/v1/identity/users", Some(&access)).await;
+    assert_eq!(
+        listed.status,
+        StatusCode::OK,
+        "D-104 (A): a deactivated user's access token is good until it expires: {}",
+        listed.body
+    );
+
+    // ...and writes. Not merely answered 201: the administrator sees the row.
+    let written = app
+        .post(
+            "/api/v1/identity/users",
+            Some(&access),
+            json!({
+                "username": "made.afterwards",
+                "email": "made.afterwards@kelir.test",
+                "password": PASSWORD,
+                "displayName": "Made Afterwards",
+            }),
+        )
+        .await;
+    assert_eq!(
+        written.status,
+        StatusCode::CREATED,
+        "D-104 (A): the limit covers writes as well as reads: {}",
+        written.body
+    );
+    let made = written.data()["id"]
+        .as_str()
+        .expect("a created user has an id");
+    let seen = app
+        .get(&format!("/api/v1/identity/users/{made}"), Some(&admin))
+        .await;
+    assert_eq!(seen.status, StatusCode::OK, "{}", seen.body);
+    assert_eq!(seen.data()["username"], "made.afterwards");
+
+    // The bound. Nothing starts the session again or extends it...
+    let signed_in = app
+        .post(
+            "/api/v1/auth/login",
+            None,
+            json!({ "username": "status.inactive", "password": PASSWORD }),
+        )
+        .await;
+    assert_eq!(signed_in.status, StatusCode::UNAUTHORIZED);
+
+    let rotated = app
+        .post(
+            "/api/v1/auth/refresh",
+            None,
+            json!({ "refreshToken": refresh }),
+        )
+        .await;
+    assert_eq!(rotated.status, StatusCode::UNAUTHORIZED);
+
+    // ...and the token itself ends. Its own claims under the same signature,
+    // as they will be two minutes after its lifetime: two minutes rather than
+    // a second because `jsonwebtoken` allows 60 seconds of leeway on `exp` by
+    // default, which `verify_access_token` does not turn off.
+    let past_expiry = ACCESS_TOKEN_TTL_MINUTES * 60 + 120;
+
+    // Control: re-signed with its expiry untouched it is still accepted, so
+    // what refuses the aged one is its age and not that this test minted it.
+    let live = app
+        .get("/api/v1/identity/users", Some(&aged(&access, 0)))
+        .await;
+    assert_eq!(live.status, StatusCode::OK, "{}", live.body);
+
+    let expired = app
+        .get("/api/v1/identity/users", Some(&aged(&access, past_expiry)))
+        .await;
+    assert_eq!(
+        expired.status,
+        StatusCode::UNAUTHORIZED,
+        "a deactivated user's token still read after its lifetime: {}",
+        expired.body
+    );
+}
+
+/// The same claims under the same signature, as the token would be `seconds`
+/// later: `iat` and `exp` both moved back, nothing else touched.
+fn aged(access: &str, seconds: i64) -> String {
+    let mut claims = jsonwebtoken::decode::<Value>(
+        access,
+        &jsonwebtoken::DecodingKey::from_secret(common::JWT_SECRET.as_bytes()),
+        &jsonwebtoken::Validation::new(Algorithm::HS256),
+    )
+    .expect("the application's own token verifies under the test secret")
+    .claims;
+
+    for claim in ["iat", "exp"] {
+        let issued = claims[claim]
+            .as_i64()
+            .unwrap_or_else(|| panic!("no {claim} in {claims}"));
+        claims[claim] = json!(issued - seconds);
+    }
+
+    signed_token(&claims)
 }
 
 #[tokio::test]

@@ -309,6 +309,41 @@ While the major version is `0`, the public API may change in any release.
   libraries, so the standard, the SDD and architectures/01 now say that. No
   code changes. The dynamic form renderer's client-side JFSS rules are not
   affected.
+- **The documents and three screens say how long a suspended tenant's
+  users keep working: at most 16 minutes** (decision **D-104**, answered
+  2026-10-01). Suspending or deactivating a tenant, or deactivating a user,
+  stops sign-in and revokes the refresh tokens, so no session is renewed. An
+  access token already issued is verified by signature and expiry only, so it
+  works until it stops being accepted. Its expiry is 15 minutes after issue,
+  and verification allows a further 60 seconds, the JWT library's default
+  leeway, which nothing in the code sets: 16 minutes from issue at most. The
+  lifetime is a constant, not a setting. Four tests pin the rule
+  (`by_decision_d_104_…` in `tests/organization_tenants.rs` and
+  `tests/auth_session.rs`).
+  `v0.4.0`'s entry and
+  [Database Schema](docs/design/02.%20Database%20Schema.md) §2.1 said
+  *sessions end rather than merely failing to renew*, which is more than the
+  code does. The product owner chose to state the limit rather than check the
+  tenant on each request. **Nothing in behaviour changed.** Three
+  screens now state the limit: the tenant dialog, the user dialog, and the
+  tenant list's delete confirmation, which states what a signed-in user can
+  still do. So do the
+  [SDD](docs/design/01.%20System%20Design%20Document.md) §11.1 (the rule, for
+  tenant and user alike), §5.4 and §9.3.6, Database Schema §2.1,
+  architectures/01 §18.1 and the
+  [User Manual](docs/operations/03.%20User%20Manual.md) §11.4.
+  **D-104 does not decide a deleted tenant or a deleted user.** A token
+  issued before the tenant's deletion still reads the tenant's data, which a test pins, and was observed
+  to create a user in it, which no test asserts. A deleted user's token works
+  except where a route reads the user's own row: `GET /auth/me` answers 404.
+  Three related issues are open and not addressed here: a deleted tenant's
+  token reads and writes until it stops being accepted, and the 60 seconds of
+  leeway
+  ([#650](https://github.com/sujanto-gaws/kelir/issues/650)); such a token is
+  answered 500 by an integration test call
+  ([#648](https://github.com/sujanto-gaws/kelir/issues/648)); and a refresh
+  does not itself check the tenant's status but relies on the revocation
+  ([#649](https://github.com/sujanto-gaws/kelir/issues/649)).
 
 - **A `Draft` ADR whose blocker this same tree delivers is refused**
   ([#545](https://github.com/sujanto-gaws/kelir/issues/545),
