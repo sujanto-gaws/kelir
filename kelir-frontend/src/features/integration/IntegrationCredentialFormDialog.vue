@@ -159,7 +159,7 @@ async function save(): Promise<void> {
           v-model="secretReference"
           type="text"
           data-testid="credential-secret-reference"
-          placeholder="vault://kelir/erp/api-key or env://ERP_API_KEY"
+          placeholder="vault://kelir/erp/api-key or env://KELIR_INTEGRATION_SECRET_SYSTEM__ERP_API_KEY"
           autocomplete="off"
           :invalid="!!fieldError('secretReference')"
           described-by="credential-secret-reference-hint"
@@ -170,8 +170,9 @@ async function save(): Promise<void> {
           data-testid="credential-secret-reference-hint"
         >
           Where the secret is kept, not the secret itself: a vault path such as
-          <code>vault://kelir/erp/api-key</code> or an environment variable such as
-          <code>env://ERP_API_KEY</code>. Never paste a password or key here.
+          <code>vault://kelir/erp/api-key</code> or an environment variable under your tenant's
+          prefix such as <code>env://KELIR_INTEGRATION_SECRET_SYSTEM__ERP_API_KEY</code> for tenant
+          <code>SYSTEM</code>. Never paste a password or key here.
         </p>
         <p
           v-if="fieldError('secretReference')"
