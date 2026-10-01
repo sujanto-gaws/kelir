@@ -3,7 +3,7 @@
 This directory holds the release deployment: the compose file, the single-origin
 Caddy configuration, the host provisioning script and the deploy scripts.
 
-**Three of the six files run today. Three describe a host that does not exist.**
+**Five of the six files run today. One has never run, and one of the five has never run the way it was written for: both describe a host that does not exist.** (Corrected 2026-10-01: this said two of five, and counted `deploy.sh` as unused although `deploy-local.sh` runs it.)
 
 | File | State |
 |---|---|
@@ -11,7 +11,7 @@ Caddy configuration, the host provisioning script and the deploy scripts.
 | `docker-compose.e2e.yml` | **In use, by the browser flows only.** An overlay that `deploy.sh` layers over the release stack when `KELIR_COMPOSE_OVERLAY` names it: a stand-in external system on a private network, its one address in `KELIR_INTEGRATION_ALLOWED_CIDRS`, and the system tenant's secret ([#593](https://github.com/sujanto-gaws/kelir/issues/593), [`e2e/README.md`](../../e2e/README.md)). No deployment sets the variable |
 | `deploy-local.sh` | **In use.** Brings that stack up locally from release images and runs the smoke test. This is [release process](../../docs/standards/04.%20Release%20Process.md) §4 step 7, and the environment the Definition of Done names |
 | `Caddyfile` | In use by the compose file; TLS applies only to a hostname deployment |
-| `deploy.sh` | **Unused.** Per-release deploy to `kelir-staging-01` |
+| `deploy.sh` | **In use through `deploy-local.sh`**, which sets the address and hands over to it: the secret checks, the image build, `compose up`, the overlay when `KELIR_COMPOSE_OVERLAY` names one, the service check and the smoke test are all this script. **Unused as a command of its own**, the per-release deploy to `kelir-staging-01` |
 | `provision-ubuntu-24.sh` | **Unused.** One-time setup of `kelir-staging-01` |
 
 ## Why the unused ones are still here
@@ -30,7 +30,14 @@ release checklist now name the compose stack above, which exists and which
 Staging is **unscheduled, not abandoned.** These two scripts are finished and
 reviewed, so if a host ever appears the work is a deploy rather than a redesign —
 which is the whole reason keeping them costs nothing. Until then, read them as a
-design. They have never run.
+design. ~~They have never run.~~ `provision-ubuntu-24.sh` has never run, and
+`deploy.sh` has never run against a host; it runs whenever `deploy-local.sh`
+does, CI's browser job included.
+
+**Taking the stack down when the overlay was layered takes both files**:
+`docker compose -f docker-compose.staging.yml -f docker-compose.e2e.yml down`,
+or `docker compose -p <project> down`. With the release file alone, the
+stand-in and its network are left behind ([`e2e/README.md`](../../e2e/README.md)).
 
 What would be needed: a host, DNS for `staging.kelir.gawshub.com`, and the
 secrets described in `.env.staging.example`. The procedure is

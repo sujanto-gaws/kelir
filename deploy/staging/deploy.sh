@@ -481,6 +481,20 @@ else
     die "/version.json carries no version, and ${VERSION} is not older than ${frontend_version_json_since}, whose bundle emits one — answered ${frontend_status} ${frontend_type}, which is the single-page fallback; an older frontend image is serving"
 fi
 
+# The harness command, as this stack needs it (#593). With an overlay layered,
+# one flow needs the upstream's token; without one, that flow has nothing to
+# call, and saying so here is cheaper than a flow somebody wonders about later.
+if [[ "${#compose_files[@]}" -gt 2 ]]; then
+    harness_command="KELIR_E2E_BASE_URL=${KELIR_PUBLIC_URL} KELIR_E2E_PASSWORD=... \\
+    KELIR_E2E_UPSTREAM_TOKEN=... npm test"
+    harness_note="KELIR_E2E_UPSTREAM_TOKEN is the token this stack was brought up with."
+else
+    harness_command="KELIR_E2E_BASE_URL=${KELIR_PUBLIC_URL} KELIR_E2E_PASSWORD=... npm test"
+    harness_note="One flow, an integration test call that is answered, needs the stack
+brought up with KELIR_COMPOSE_OVERLAY=docker-compose.e2e.yml. Without it that
+flow is skipped, and the report says so (e2e/README.md)."
+fi
+
 cat <<EOF
 
 $(printf '\033[1;32m==> %s is live at %s\033[0m' "${VERSION}" "${KELIR_PUBLIC_URL}")
@@ -489,7 +503,9 @@ Sign-in is covered by the browser harness — run it against this address rather
 than repeating the flow yourself (release process §4 step 7):
 
   cd e2e && npm ci
-  KELIR_E2E_BASE_URL=${KELIR_PUBLIC_URL} KELIR_E2E_PASSWORD=... npm test
+  ${harness_command}
+
+${harness_note}
 
 Still to verify by hand, as each phase delivers it:
   document submission · one workflow approval

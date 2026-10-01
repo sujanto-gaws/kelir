@@ -28,11 +28,17 @@ import {
  * stand-in ERP on a private network, that one address in
  * `KELIR_INTEGRATION_ALLOWED_CIDRS`, and the system tenant's secret.
  *
- * **Without the overlay this flow is red, and says which piece is missing**:
- * the call is refused with `SECRET_NOT_FOUND` (no variable, which is what a
- * release stack answers), `EGRESS_REFUSED` (the address is not listed) or
- * `HOST_NOT_RESOLVED` (no upstream), each of which the first assertion
- * prints. `e2e/README.md` has the runs.
+ * # Skipped in one case, and red in every other
+ *
+ * **With no `KELIR_E2E_UPSTREAM_TOKEN` and outside CI, the flow is skipped**,
+ * with the reason in the report: a harness pointed at a stack that was
+ * brought up without the overlay has nothing to call, and that is a stack
+ * somebody chose. **In CI it is never skipped**: a missing token there is a
+ * failure, so the job cannot go green without this flow. And with the token
+ * set it always runs: against a stack missing a piece it is red, and the
+ * first assertion prints which, `SECRET_NOT_FOUND` (no variable, which is
+ * what a release stack answers), `EGRESS_REFUSED` (the address is not listed)
+ * or `HOST_NOT_RESOLVED` (no upstream). `e2e/README.md` has the runs.
  *
  * # What only a real, answered call produces
  *
@@ -143,7 +149,16 @@ async function runTestCall(
   return { status: called.status(), text: await called.text() }
 }
 
+// The one case this flow does not run in; the header says why CI is excluded.
+test.skip(
+  !process.env.KELIR_E2E_UPSTREAM_TOKEN && !process.env.CI,
+  'KELIR_E2E_UPSTREAM_TOKEN is not set: this flow needs the stack brought up with ' +
+    'KELIR_COMPOSE_OVERLAY=docker-compose.e2e.yml and the same token given to the harness ' +
+    '(e2e/README.md, "The one system the stack can reach")',
+)
+
 test.beforeAll(async () => {
+  // Throws when the token is unset, which after the skip above is CI only.
   token = upstreamToken()
   session = await signInOverApi()
   const suffix = runSuffix()
@@ -186,7 +201,7 @@ test.afterAll(async () => {
   await session?.context.dispose()
 })
 
-test('a test call the system answers is shown as a success, logged beside a failure, and never shows its secret', async ({
+test('a test call the system answers is shown as a success, logged beside a failure, and its secret is masked in what the browser is given', async ({
   page,
 }) => {
   const { username, password } = credentials()
@@ -284,7 +299,9 @@ test('a test call the system answers is shown as a success, logged beside a fail
   expect(correlationId, 'the stored request names its correlation id').toBeDefined()
 
   const arrived = await upstreamCalls(correlationId ?? '')
-  expect(arrived, `calls the upstream received under ${correlationId}`).toHaveLength(1)
+  // The count, not the list: an entry holds the header as it arrived, and a
+  // failed assertion prints what it was given into the report.
+  expect(arrived.length, `calls the upstream received under ${correlationId}`).toBe(1)
   expect(arrived[0].method).toBe('GET')
   expect(arrived[0].path).toBe('/api/purchase-orders')
   expect(arrived[0].statusCode).toBe(200)

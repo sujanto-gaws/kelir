@@ -275,8 +275,9 @@ While the major version is `0`, the public API may change in any release.
   wherever the system echoed the credential, no response carrying the secret, and the call in the
   system's own journal. **No deployment changes**: the variable is unset everywhere but CI's
   browser job, the release compose file and both images are as they were, and no product code was
-  touched. **The harness needs `KELIR_E2E_UPSTREAM_TOKEN`**, and a smoke pass against a stack
-  without the overlay fails that one flow by name
+  touched. **The release smoke pass layers the overlay and gives the harness
+  `KELIR_E2E_UPSTREAM_TOKEN`.** Without the token and outside CI that one flow is skipped, and the
+  report says so; with the token, or in CI, it runs or fails
   ([Release Process](docs/standards/04.%20Release%20Process.md) §4 step 7,
   [`e2e/README.md`](e2e/README.md)).
 - **The release images are built from pinned releases, and a test holds every Dockerfile to it**

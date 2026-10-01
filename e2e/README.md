@@ -43,7 +43,7 @@ KELIR_E2E_UPSTREAM_TOKEN='a-throwaway-upstream-token' \
   npm test
 ```
 
-**The two `KELIR_E2E_UPSTREAM_TOKEN` lines must carry the same value, and `KELIR_COMPOSE_OVERLAY` is not optional for the whole suite** ([#593](https://github.com/sujanto-gaws/kelir/issues/593)). One flow needs a system that answers, and the overlay is what starts it; [*The one system the stack can reach*](#the-one-system-the-stack-can-reach) below says what it adds and why. A stack brought up without it runs every other flow, and fails `a-test-call-is-answered-and-its-secret-is-masked.spec.ts` on its first assertion, which prints the refusal.
+**The two `KELIR_E2E_UPSTREAM_TOKEN` lines must carry the same value, and `KELIR_COMPOSE_OVERLAY` is not optional for the whole suite** ([#593](https://github.com/sujanto-gaws/kelir/issues/593)). One flow needs a system that answers, and the overlay is what starts it; [*The one system the stack can reach*](#the-one-system-the-stack-can-reach) below says what it adds and why. A stack brought up without it runs every other flow. **That one flow is skipped when the harness is given no `KELIR_E2E_UPSTREAM_TOKEN` and is not in CI**, and the report lists it as skipped with the reason. Given the token it always runs, and against a stack without the overlay it fails on its first assertion, which prints the refusal. In CI it is never skipped: no token there is a failure.
 
 **`KELIR_E2E_USERNAME` is in that block even though it has a default**, and it is there because the default is a trap. It matches the `KELIR_BOOTSTRAP_ADMIN_USERNAME` three lines above it, so a stack whose administrator is called anything else signs in as an account that does not exist — and every flow fails on a `401` that reads like a product defect rather than a misconfigured harness. Naming both halves in one command is what keeps them equal. Found by the `v0.4.0` rehearsal ([release 04](../projects/releases/04.%20Release%20v0.4.0.md)).
 
@@ -52,7 +52,7 @@ KELIR_E2E_UPSTREAM_TOKEN='a-throwaway-upstream-token' \
 | `KELIR_E2E_BASE_URL` | `http://127.0.0.1:8080` | Where the deployed stack answers |
 | `KELIR_E2E_USERNAME` | `admin` | The account the flow signs in as. **Must equal the stack's `KELIR_BOOTSTRAP_ADMIN_USERNAME`** |
 | `KELIR_E2E_PASSWORD` | — **required** | That account's password. No default: a default password in a repository is a credential in a repository |
-| `KELIR_E2E_UPSTREAM_TOKEN` | — **required by one flow** | The token the stack's stand-in upstream was started with. **Must equal the stack's `KELIR_E2E_UPSTREAM_TOKEN`**. The flow never sends it; it checks that no screen shows it and that the upstream received it. No default, for the reason the password has none |
+| `KELIR_E2E_UPSTREAM_TOKEN` | — **required by one flow** | The token the stack's stand-in upstream was started with. **Must equal the stack's `KELIR_E2E_UPSTREAM_TOKEN`**. The flow never sends it; it checks that no screen shows it and that the upstream received it. No default, for the reason the password has none. **Unset outside CI, that flow is skipped; unset in CI, it fails** |
 | `KELIR_E2E_UPSTREAM_URL` | `http://127.0.0.1:8089` | Where the harness reads the upstream's journal: the loopback port the overlay publishes, `KELIR_E2E_UPSTREAM_PORT` on the stack's side |
 
 `npm run report` opens the HTML report of the last run. Traces, screenshots and
@@ -143,19 +143,34 @@ follow:
 |---|---|
 | A service `e2e-upstream`: [`upstream/server.mjs`](upstream/server.mjs), run from a bind mount in the Node image the frontend is built with | The system that answers. It answers `200` only to a call carrying the bearer token, and `401` otherwise, so a success in the browser means the secret was resolved and sent |
 | A network `e2e-upstream`, `10.89.93.0/29`, holding the upstream at `10.89.93.2` and the backend | The upstream is on this network **only**. On the default network as well, its name would resolve to two addresses, and the guard holds every address a name resolves to |
+| An `ip_range` on that network, `10.89.93.4/30` | Docker hands out addresses from the range only, and the backend's is handed out. So the upstream's address, which is the one the allow-list names, can never be given to the backend. See below |
 | `KELIR_INTEGRATION_ALLOWED_CIDRS=10.89.93.2/32` on the backend | See below |
 | `KELIR_INTEGRATION_SECRET_SYSTEM__E2E_UPSTREAM_TOKEN` on the backend, from `KELIR_E2E_UPSTREAM_TOKEN` | The secret. Registered by the flow as `env://KELIR_INTEGRATION_SECRET_SYSTEM__E2E_UPSTREAM_TOKEN` |
 | The upstream's port published on `127.0.0.1:8089` (`KELIR_E2E_UPSTREAM_PORT`) | So the harness, on the host, can read the journal. The backend does not use it |
 
 **Why `KELIR_INTEGRATION_ALLOWED_CIDRS` is set, and why it is one address.** The guard (`integration::domain::egress`, [ADR-0043](../docs/architectures/adr/0043.%20A%20Test%20Call%20Runs%20in%20the%20Request,%20Resolves%20Only%20env%20Secrets,%20and%20Connects%20Only%20to%20a%20Checked%20Address.md)) refuses every private address unless a listed range holds it, and a compose network is private. Loopback is always refused and no setting opens it, so the upstream cannot be reached on `127.0.0.1` either: this variable is the only knob a deployment has. The entry is the upstream's fixed address as a `/32` and not the network's `/29`, because the backend itself and the network's gateway, which is the host, are on that network too. **Nothing in the product is relaxed for the flow**: the guard, the secret rule and the redaction run as they do in a deployment, with the two settings a deployment with an on-premises system would set.
 
+**The listed address is reserved, because a `/32` allows whoever holds it.** The backend's address on the network is not fixed. Without the `ip_range`, a daemon restart could hand `10.89.93.2` to the backend, which restarts by itself, while the upstream, which does not, is down; the allow-list would then let a test call reach the backend's own port. With it, Docker hands out `10.89.93.4` to `.6` only. Checked on a stack, 2026-10-01: the backend held `10.89.93.5`, and kept it when it was restarted with the upstream stopped. The network is an ordinary bridge, so the upstream itself can open `backend:8080` and the host gateway; it is a stand-in this repository wrote and it calls nothing.
+
 **The secret is the system tenant's.** An `env://` name resolves only under the calling tenant's own prefix, `KELIR_INTEGRATION_SECRET_<CODE>__` ([#618](https://github.com/sujanto-gaws/kelir/issues/618), **D-96** (4) as amended 2026-10-01; [Installation](../docs/operations/01.%20Installation%20and%20Deployment.md) §7.1). The flows sign in as the bootstrap administrator, who is in tenant `SYSTEM`, so the variable is `KELIR_INTEGRATION_SECRET_SYSTEM__E2E_UPSTREAM_TOKEN`. The issue's own text names `KELIR_INTEGRATION_SECRET_E2E`, which was written before the amendment and resolves for nobody now. A stack whose `KELIR_DEFAULT_TENANT_CODE` is not `SYSTEM` needs the overlay's variable name and `support/upstream.ts` changed together.
 
 **What the upstream does, each because the flow asserts on it.** It echoes the `Authorization` header it received under the key `echo`, which is not a key Kelir masks by name, and the token again in base64 under `echoBase64`; and it returns a value of its own under `sessionToken`. So the body the backend reads holds the secret twice, and what a person sees must hold it nowhere. It also keeps a journal of every call, readable at `/__journal`, so the flow can check that the call shown in the browser is the call that arrived.
 
-**If the subnet is taken.** `10.89.93.0/29` is outside the pools Docker allocates from by itself. A host that already routes it sets `KELIR_E2E_UPSTREAM_SUBNET` and `KELIR_E2E_UPSTREAM_ADDRESS` together when bringing the stack up; the allowed range follows the address.
+**If the subnet is taken, or a second overlay stack runs on one host.** `10.89.93.0/29` is outside the pools Docker allocates from by itself. A host that already routes it sets three variables together when bringing the stack up: `KELIR_E2E_UPSTREAM_SUBNET`, `KELIR_E2E_UPSTREAM_POOL` (the `ip_range`, inside the subnet) and `KELIR_E2E_UPSTREAM_ADDRESS` (inside the subnet, outside the pool). The allowed range follows the address. Checked 2026-10-01 with `10.89.94.8/29`, `10.89.94.12/30` and `10.89.94.10`: the flow passed. **A second stack on the same host needs all three, its own `COMPOSE_PROJECT_NAME`, and its own `KELIR_E2E_UPSTREAM_PORT`**, with the harness's `KELIR_E2E_UPSTREAM_URL` set to match that port.
 
-**Seen to fail** (coding standard §2.9), 2026-10-01. The flow was run against the stack with one piece missing at a time, and went red each time on the piece that was missing:
+**From a copy of `deploy/staging/`**, as a release rehearsal runs it, set `KELIR_E2E_UPSTREAM_DIR` to this repository's `e2e/upstream`. The overlay's default is `../../e2e/upstream`, relative to the compose files, and beside a copy there is nothing at that path. A wrong path does not pass quietly: the upstream exits on a missing module, and `deploy.sh` refuses the stack and prints its log.
+
+**Taking it down takes both files.** `docker compose` reads the overlay only when it is named, so a `down` with the release file alone leaves the upstream and its network behind:
+
+```bash
+cd deploy/staging
+KELIR_VERSION=0.3.0 docker compose \
+  -f docker-compose.staging.yml -f docker-compose.e2e.yml down
+```
+
+`KELIR_VERSION` is there because the release file requires it to be set, and `.env` supplies the rest. `docker compose -p <project> down` does the same by project name, with no file named.
+
+**Seen to fail** (coding standard §2.9), 2026-10-01. The flow was run, with the token given to the harness, against the stack with one piece missing at a time, and went red each time on the piece that was missing:
 
 | Stack | What the flow printed |
 |---|---|
@@ -163,6 +178,8 @@ follow:
 | The overlay with `KELIR_INTEGRATION_ALLOWED_CIDRS` emptied | `422` `EGRESS_REFUSED`: *a private address, which a test call may not reach unless `KELIR_INTEGRATION_ALLOWED_CIDRS` lists its range* |
 | The overlay with the upstream expecting another token | The call is answered `401`, and the dialog says `Failed` where `Success` is expected |
 | The overlay with the upstream stopped | `422` `HOST_NOT_RESOLVED`: a stopped container's name leaves the network's DNS |
+
+**And the two paths with no token**, run the same day: outside CI the flow is listed as skipped (`1 skipped`, exit 0); with `CI` set it fails, naming `KELIR_E2E_UPSTREAM_TOKEN`.
 
 ## Where it runs
 

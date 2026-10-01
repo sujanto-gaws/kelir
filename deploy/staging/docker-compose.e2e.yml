@@ -42,10 +42,27 @@
 # name would resolve to two addresses, and the guard holds every address a
 # name resolves to: the unlisted one would refuse the call.
 #
+# **The allow-listed address is reserved for the upstream.** The backend's
+# address on this network is handed out by Docker, and the list names one
+# address. Were that address free to be handed out, a daemon restart could
+# give it to the backend (`unless-stopped`) while the upstream (`restart: 'no'`)
+# is down, and the `/32` would then allow a test call to the backend's own
+# port. So the network's `ip_range` is the upper half of the subnet, Docker
+# hands out addresses from there only, and the upstream's fixed address is in
+# the lower half, where nothing is handed out.
+#
+# **What the network does not do**: it is an ordinary bridge, so the upstream
+# can itself open `backend:8080` and the host gateway. It is a stand-in this
+# repository wrote, which calls nothing; the guard is on Kelir's calls out,
+# not on the stand-in's.
+#
 # **The subnet is a default, not a requirement.** `10.89.93.0/29` is outside
 # the pools Docker allocates from by itself, so it does not collide with a
-# network Docker made. A host that already routes that range sets
-# `KELIR_E2E_UPSTREAM_SUBNET` and `KELIR_E2E_UPSTREAM_ADDRESS` together.
+# network Docker made. A host that already routes that range, or runs a second
+# overlay stack, sets `KELIR_E2E_UPSTREAM_SUBNET`, `KELIR_E2E_UPSTREAM_POOL`
+# and `KELIR_E2E_UPSTREAM_ADDRESS` together: the pool inside the subnet, and
+# the address inside the subnet and outside the pool. A second stack also
+# needs its own `KELIR_E2E_UPSTREAM_PORT`.
 
 services:
   backend:
@@ -72,8 +89,19 @@ services:
     environment:
       UPSTREAM_EXPECTED_TOKEN: ${KELIR_E2E_UPSTREAM_TOKEN:?set KELIR_E2E_UPSTREAM_TOKEN to a throwaway token for the e2e upstream}
     volumes:
-      # Relative to the project directory, which is this file's own.
-      - ${KELIR_E2E_UPSTREAM_DIR:-../../e2e/upstream}:/upstream:ro
+      # Relative to the project directory, which is this file's own, so a
+      # stack run from a copy of `deploy/staging/` sets KELIR_E2E_UPSTREAM_DIR.
+      # `create_host_path: false` asks Docker not to make a missing directory,
+      # which the short syntax does, empty and root-owned. Docker Desktop on
+      # Windows made one all the same (seen 2026-10-01). Either way a wrong
+      # path does not pass: with nothing to run the upstream exits, and
+      # deploy.sh's service check refuses the stack and prints its log.
+      - type: bind
+        source: ${KELIR_E2E_UPSTREAM_DIR:-../../e2e/upstream}
+        target: /upstream
+        read_only: true
+        bind:
+          create_host_path: false
     ports:
       # **Loopback only, and only for the journal.** The harness runs on the
       # host and has to read what the upstream received. The backend does not
@@ -87,5 +115,8 @@ networks:
   e2e-upstream:
     ipam:
       config:
-        # A /29: the gateway, the upstream, the backend, and three spare.
+        # A /29. `.1` is the gateway and `.2` the upstream, by its fixed
+        # address. Docker hands out `.4` to `.6` and nothing below them, so
+        # the backend can never be given the allow-listed address.
         - subnet: ${KELIR_E2E_UPSTREAM_SUBNET:-10.89.93.0/29}
+          ip_range: ${KELIR_E2E_UPSTREAM_POOL:-10.89.93.4/30}

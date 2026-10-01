@@ -15,8 +15,9 @@ import { API_PREFIX, credentials } from '../support/env'
  * environment under its tenant's own prefix,
  * `KELIR_INTEGRATION_SECRET_SYSTEM__` for this flow's administrator (#618).
  * The release stack has none
- * of the three (`deploy/staging` sets no `KELIR_INTEGRATION_*` variable, so a
- * private or loopback upstream is refused and there is no secret to send), and
+ * of the three (the release compose file sets no `KELIR_INTEGRATION_*`
+ * variable, so a private or loopback upstream is refused and there is no
+ * secret to send; the browser flows' overlay sets two, for #593's flow), and
  * a public upstream would make the flow depend on the internet. The same
  * reasoning as #547's flow, `a-test-call-is-refused-and-explained.spec.ts`.
  *

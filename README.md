@@ -273,7 +273,7 @@ first, then point the harness at the address the deploy printed:
 cd deploy/staging && KELIR_BOOTSTRAP_ADMIN_PASSWORD='…' \
   KELIR_COMPOSE_OVERLAY=docker-compose.e2e.yml KELIR_E2E_UPSTREAM_TOKEN='…' \
   ./deploy-local.sh 0.3.0 8080
-cd ../../e2e && npm ci && npx playwright install --with-deps chromium
+cd ../../e2e && npm ci && npx playwright install --with-deps chromium firefox
 KELIR_E2E_BASE_URL=http://127.0.0.1:8080 KELIR_E2E_PASSWORD='…' \
   KELIR_E2E_UPSTREAM_TOKEN='…' npm test
 ```
