@@ -1,7 +1,7 @@
 import { ref } from 'vue'
 import { describe, expect, it } from 'vitest'
 
-import { useFormErrors } from './useFormErrors'
+import { unplacedErrors, useFormErrors } from './useFormErrors'
 import { ApiError } from '@/api/error'
 
 const duplicateRule = { match: /already in use/i, fields: ['username', 'email'] }
@@ -131,5 +131,48 @@ describe('useFormErrors', () => {
 
     expect(errors.formError.value).toBe('')
     expect(errors.fieldErrors.value).toEqual({})
+  })
+})
+
+describe('unplacedErrors', () => {
+  const fieldErrors = {
+    name: 'Too long',
+    colour: 'Unknown field',
+    'lines.2.sku': 'No such product',
+  }
+
+  it('returns the details whose path the form does not place, in order', () => {
+    expect(unplacedErrors(fieldErrors, ['name'])).toEqual([
+      { path: 'colour', message: 'Unknown field' },
+      { path: 'lines.2.sku', message: 'No such product' },
+    ])
+  })
+
+  it('matches a path whole, so a row path is not placed by its prefix', () => {
+    expect(unplacedErrors(fieldErrors, ['name', 'colour', 'lines'])).toEqual([
+      { path: 'lines.2.sku', message: 'No such product' },
+    ])
+  })
+
+  it('returns nothing when every detail is placed, or there is none', () => {
+    expect(unplacedErrors(fieldErrors, ['name', 'colour', 'lines.2.sku'])).toEqual([])
+    expect(unplacedErrors({}, ['name'])).toEqual([])
+  })
+
+  it('lists a 422 with details and nothing for a 422 without, or a denial', () => {
+    const errors = useFormErrors()
+    const detail = { path: 'colour', rule: 'unknown', code: 'UNKNOWN_FIELD', message: 'Unknown' }
+
+    errors.report(new ApiError('VALIDATION_ERROR', 'Validation failed', 422, [detail]))
+    expect(unplacedErrors(errors.fieldErrors.value, ['name'])).toHaveLength(1)
+
+    // No detail to place or list: the message is the form's, never dropped.
+    errors.report(new ApiError('VALIDATION_ERROR', 'Validation failed', 422))
+    expect(unplacedErrors(errors.fieldErrors.value, ['name'])).toEqual([])
+    expect(errors.formError.value).toBe('Validation failed')
+
+    errors.report(new ApiError('FORBIDDEN', 'Denied', 403, [detail]))
+    expect(unplacedErrors(errors.fieldErrors.value, ['name'])).toEqual([])
+    expect(errors.formError.value).toBe('Denied')
   })
 })

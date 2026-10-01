@@ -8,6 +8,7 @@ import {
   errorBody,
   installFakeBackend,
   itemBody,
+  validationReply,
   type FakeBackendHandle,
   type FakeHandler,
 } from '@/lib/testing/fake-backend'
@@ -217,6 +218,105 @@ describe('TenantFormDialog', () => {
 
       expect(wrapper.find('[role="alert"]').text()).toContain('Access denied')
       expect(buttonLabelled(wrapper.findAll('button'), 'Save changes')).toBeDefined()
+    })
+  })
+
+  describe('a 422 detail no input reads (#576)', () => {
+    const UNPLACED = '[data-testid="tenant-unplaced-errors"]'
+
+    function listed(wrapper: VueWrapper): string[] {
+      return wrapper
+        .find(UNPLACED)
+        .findAll('li')
+        .map((item) => item.text())
+    }
+
+    async function submitNew(wrapper: VueWrapper): Promise<void> {
+      await wrapper.find('#tenant-code').setValue('TNT-001')
+      await wrapper.find('#tenant-name').setValue('Acme Limited')
+      await fillAdministrator(wrapper)
+      await submit(wrapper)
+    }
+
+    it('lists it on the form, and announces it', async () => {
+      // `administrator.locale` and `colour` are no fields of this form, and
+      // before #576 the refused save left every input looking valid.
+      handler = () =>
+        validationReply(
+          ['administrator.email', 'Email is not valid'],
+          ['administrator.locale', 'Unknown field'],
+          ['colour', 'Unknown field'],
+        )
+      const wrapper = mountDialog(null)
+
+      await submitNew(wrapper)
+
+      expect(listed(wrapper)).toEqual([
+        'administrator.locale: Unknown field',
+        'colour: Unknown field',
+      ])
+      expect(wrapper.find(UNPLACED).attributes('role')).toBe('alert')
+      // The detail an input reads is under that input, and only there.
+      expect(wrapper.find('#tenant-admin-email-error').text()).toBe('Email is not valid')
+      expect(wrapper.emitted('saved')).toBeUndefined()
+    })
+
+    it('lists a status or an administrator detail when editing', async () => {
+      // The status has a control but nowhere for a message, and no
+      // administrator is asked for once the tenant exists.
+      handler = () =>
+        validationReply(
+          ['status', 'A tenant cannot be archived here'],
+          ['administrator.password', 'Password is too short'],
+        )
+      const wrapper = mountDialog(acme)
+
+      await submit(wrapper)
+
+      expect(wrapper.find('#tenant-admin-password-error').exists()).toBe(false)
+      expect(listed(wrapper)).toEqual([
+        'status: A tenant cannot be archived here',
+        'administrator.password: Password is too short',
+      ])
+    })
+
+    it('does not list a detail an input shows', async () => {
+      handler = () =>
+        validationReply(
+          ['tenantCode', 'Tenant code is reserved'],
+          ['name', 'Name is too long'],
+          ['administrator.username', 'Username is not valid'],
+          ['administrator.email', 'Email is not valid'],
+          ['administrator.displayName', 'Display name is too long'],
+          ['administrator.password', 'Password is too short'],
+        )
+      const wrapper = mountDialog(null)
+
+      await submitNew(wrapper)
+
+      expect(wrapper.find('#tenant-code-error').text()).toBe('Tenant code is reserved')
+      expect(wrapper.find('#tenant-admin-password-error').text()).toBe('Password is too short')
+      expect(wrapper.find(UNPLACED).exists()).toBe(false)
+    })
+
+    it('keeps a 422 with no details, and a denial, as the one message on the form', async () => {
+      const wrapper = mountDialog(acme)
+
+      handler = () => validationReply()
+      await submit(wrapper)
+
+      expect(wrapper.findAll('[role="alert"]').map((alert) => alert.text())).toEqual([
+        'Validation failed',
+      ])
+      expect(wrapper.find(UNPLACED).exists()).toBe(false)
+
+      handler = () => ({ status: 403, body: errorBody('FORBIDDEN', 'Access denied') })
+      await submit(wrapper)
+
+      expect(wrapper.findAll('[role="alert"]').map((alert) => alert.text())).toEqual([
+        'Access denied',
+      ])
+      expect(wrapper.find(UNPLACED).exists()).toBe(false)
     })
   })
 })

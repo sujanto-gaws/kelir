@@ -9,6 +9,7 @@ import { Label } from '@/components/ui/label'
 import { SearchSelect, type KnownOption, type SearchSource } from '@/components/ui/search-select'
 import { Select } from '@/components/ui/select'
 import { createUser, listRoles, updateUser } from '@/api/identity'
+import FormUnplacedErrors from '@/components/FormUnplacedErrors.vue'
 import { useFormErrors, type ConflictRule } from '@/composables/useFormErrors'
 import {
   USER_STATUS_LABELS,
@@ -110,6 +111,17 @@ const errors = computed<Record<string, string>>(() => ({
   ...localErrors.value,
   ...fieldErrors.value,
 }))
+
+/**
+ * The paths a message is shown under, as the form is drawn now; a detail for
+ * any other path is listed on the form (#576). No password is asked for when
+ * editing, and the status, department and roles have nowhere for a message.
+ */
+const placed = computed(() =>
+  isEditing.value
+    ? ['username', 'email', 'displayName']
+    : ['username', 'email', 'displayName', 'password'],
+)
 
 function loadFromProps(): void {
   const source = props.user
@@ -228,6 +240,12 @@ async function submit(): Promise<void> {
   >
     <form id="user-form" class="space-y-4" novalidate @submit.prevent="submit">
       <Alert v-if="formError" variant="destructive">{{ formError }}</Alert>
+
+      <FormUnplacedErrors
+        :field-errors="fieldErrors"
+        :placed="placed"
+        data-testid="user-unplaced-errors"
+      />
 
       <div class="space-y-2">
         <Label for="user-username">Username</Label>

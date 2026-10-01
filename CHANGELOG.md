@@ -436,6 +436,23 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **An admin dialog says why a save was refused when no input reads the
+  reason** ([#576](https://github.com/sujanto-gaws/kelir/issues/576)). The
+  User, Tenant, Role and Delegation dialogs placed a 422's `details` under
+  their inputs and dropped any detail addressed elsewhere: an unknown field,
+  an input with nowhere for a message (a user's department or status, a
+  role's description or permissions, a delegation's scope or reason), or a
+  field the dialog's mode does not draw. The save was refused and the form
+  looked valid. Such a detail is now listed on the form as `path: message`,
+  in an alert, as the integration dialogs and the reassign dialog already
+  did. Three paths the integration dialogs counted as shown and did not
+  show are shown too: a credential's `isActive` and an endpoint's
+  `description` under their inputs, and an external system's `status` in the
+  list when registering. A detail the server sends with no `path` is listed
+  as its message alone. All eight dialogs draw it with one component,
+  `FormUnplacedErrors`, and `unplacedErrors` moved beside `useFormErrors`
+  ([coding standard](docs/standards/01.%20Coding%20Standard.md) §3.4, which
+  now requires it of every form that uses `useFormErrors`).
 - **An `OWNER_DEPARTMENT` scope resolves**
   ([#579](https://github.com/sujanto-gaws/kelir/issues/579), **D-99**). A
   `DEPARTMENT_ROLE` rule with `departmentScope: "OWNER_DEPARTMENT"` published

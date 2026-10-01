@@ -9,10 +9,11 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
+import FormUnplacedErrors from '@/components/FormUnplacedErrors.vue'
 import { useFormErrors } from '@/composables/useFormErrors'
 import { HTTP_METHODS, type HttpMethod, type IntegrationEndpoint } from '@/types/integration'
 
-import { blankToNull, unplacedErrors } from './form-errors'
+import { blankToNull } from './form-errors'
 
 /**
  * Adding and editing one endpoint of a system (FR-INT-001, #520).
@@ -42,7 +43,6 @@ const errors = useFormErrors(() =>
 )
 
 const PLACED = ['endpointCode', 'name', 'method', 'path', 'description'] as const
-const unplaced = computed(() => unplacedErrors(errors.fieldErrors.value, PLACED))
 
 const METHOD_OPTIONS = HTTP_METHODS.map((value) => ({ value, label: value }))
 
@@ -104,15 +104,11 @@ async function save(): Promise<void> {
         {{ errors.formError.value }}
       </Alert>
 
-      <Alert
-        v-if="unplaced.length > 0"
-        variant="destructive"
+      <FormUnplacedErrors
+        :field-errors="errors.fieldErrors.value"
+        :placed="PLACED"
         data-testid="endpoint-unplaced-errors"
-      >
-        <ul class="list-disc pl-4">
-          <li v-for="item in unplaced" :key="item.path">{{ item.path }}: {{ item.message }}</li>
-        </ul>
-      </Alert>
+      />
 
       <div class="space-y-2">
         <Label for="endpoint-code">Endpoint code</Label>
@@ -192,6 +188,13 @@ async function save(): Promise<void> {
           data-testid="endpoint-description"
           :invalid="!!fieldError('description')"
         />
+        <p
+          v-if="fieldError('description')"
+          class="text-xs text-destructive"
+          data-testid="description-error"
+        >
+          {{ fieldError('description') }}
+        </p>
       </div>
 
       <div class="flex justify-end gap-2">

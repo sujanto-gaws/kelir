@@ -39,6 +39,30 @@ export interface FormErrors {
 }
 
 /**
+ * The field errors a form has no input for.
+ *
+ * `useFormErrors` binds a 422's details by `path`, and an input shows the one
+ * addressed to it. It does not know which paths a form renders, so **a detail
+ * addressed to a path the form does not show a message for would otherwise
+ * vanish** — the backend's `UNKNOWN_FIELD`, a rule on a field this build does
+ * not offer, or a field the form's current mode leaves out — and the form
+ * would refuse to save while every visible input looked valid. Those are
+ * listed on the form instead, by `FormUnplacedErrors`
+ * (`src/components/FormUnplacedErrors.vue`), which every form using this
+ * composable renders (coding standard §3.4, #576).
+ *
+ * `placed` is the paths the form shows a message for as it is drawn now.
+ */
+export function unplacedErrors(
+  fieldErrors: Record<string, string>,
+  placed: readonly string[],
+): { path: string; message: string }[] {
+  return Object.entries(fieldErrors)
+    .filter(([path]) => !placed.includes(path))
+    .map(([path, message]) => ({ path, message }))
+}
+
+/**
  * `conflictRules` is resolved at report time, not at setup, because which field
  * a conflict belongs to can depend on the form's mode: a duplicate on create
  * could be either the username or the email, while on edit only the email can

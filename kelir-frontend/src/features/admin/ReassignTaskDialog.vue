@@ -10,8 +10,8 @@ import { Textarea } from '@/components/ui/textarea'
 import { toApiError } from '@/api/client'
 import { listRoles, listUsers } from '@/api/identity'
 import { reassignTask } from '@/api/tasks'
+import FormUnplacedErrors from '@/components/FormUnplacedErrors.vue'
 import { useFormErrors } from '@/composables/useFormErrors'
-import { unplacedErrors } from '@/features/integration/form-errors'
 import type { Page, PageQuery } from '@/types/api'
 import type { OpenTaskNeedingRole, Role, User } from '@/types/identity'
 import type { ReassignTarget, WorkflowTask } from '@/types/workflow'
@@ -109,14 +109,11 @@ const errors = computed<Record<string, string>>(() => ({
 }))
 
 /**
- * Details for a path no input on screen reads. The target field not chosen is
- * not rendered, so a detail addressed to it is listed rather than lost.
+ * The paths an input on screen reads. The target field not chosen is not
+ * rendered, so a detail addressed to it is listed rather than lost.
  */
-const unplaced = computed(() =>
-  unplacedErrors(
-    fieldErrors.value,
-    PLACED.filter((path) => path !== (kind.value === 'user' ? 'roleCode' : 'userId')),
-  ),
+const placed = computed(() =>
+  PLACED.filter((path) => path !== (kind.value === 'user' ? 'roleCode' : 'userId')),
 )
 
 /**
@@ -239,11 +236,11 @@ async function submit(): Promise<void> {
         </Button>
       </Alert>
 
-      <Alert v-if="unplaced.length > 0" variant="destructive" data-testid="reassign-task-unplaced">
-        <ul class="list-disc pl-4">
-          <li v-for="item in unplaced" :key="item.path">{{ item.path }}: {{ item.message }}</li>
-        </ul>
-      </Alert>
+      <FormUnplacedErrors
+        :field-errors="fieldErrors"
+        :placed="placed"
+        data-testid="reassign-task-unplaced"
+      />
 
       <fieldset class="space-y-2">
         <legend class="text-sm font-medium">Reassign to</legend>
