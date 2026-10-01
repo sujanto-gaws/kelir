@@ -277,8 +277,11 @@ async fn attempt(
     // tenant's token is refused by `middleware::auth` before this is reached
     // (#650), so the caller's tenant is missing here only if it was deleted
     // between that read and this one. No request can stage it; it fails
-    // closed, as a 500 with a `FAILED` row, and resolves nothing.
-    // `domain::secret`'s unit test of `TenantNamespaces::for_caller` holds it.
+    // closed, as a 500 with a `FAILED` row, and resolves nothing. **No test
+    // holds this branch**: `domain::secret`'s unit test holds that
+    // `TenantNamespaces::for_caller` answers `None`, and what is done with
+    // that `None` here is held by review (`tests/integration_test_call.rs`'s
+    // header records the mutation that stays green).
     let live = organization::live_tenant_codes(&state.pool)
         .await
         .map_err(Failure::Internal)?;

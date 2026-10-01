@@ -39,7 +39,38 @@
 //!
 //! # Seen to fail under mutation
 //!
-//! The table is written with the fix, once there is something to mutate.
+//! Each mutation was made alone, `--lib modules::auth`, `--lib middleware`,
+//! this file, `auth_deleted_caller`, `auth_session`, `organization_tenants`
+//! and the two deleted-tenant tests of `integration_test_call` run, the named
+//! tests observed red, and the mutation reverted. **Seen red, 2026-10-01.**
+//! "The walk" is this file's one test. Unprefixed names are in
+//! `auth_deleted_caller.rs`; `session::` is `auth_session.rs`, `tenants::` is
+//! `organization_tenants.rs`, `call::` is `integration_test_call.rs`.
+//!
+//! | Mutation | Reddened |
+//! |---|---|
+//! | `TokenSubject::is_live` ignores the tenant | the walk, 143 of 429 cells (every deleted-tenant cell); `a_deleted_tenants_token_is_refused_on_a_read_exactly_as_an_expired_token_is`, `a_deleted_tenants_token_writes_nothing_and_its_upload_is_refused_unread`, `a_tenant_whose_deleted_at_is_set_by_sql_has_its_token_refused_and_no_other_tenants`, `the_current_user_route_refuses_a_deleted_tenants_token_and_a_deleted_users`; `tenants::a_deleted_tenants_access_token_is_refused_at_once_and_nothing_renews_it`; `call::a_deleted_tenants_open_session_resolves_no_secret_its_own_or_another` |
+//! | `is_live` ignores the user | the walk, 143 of 429 cells (every deleted-user cell); `a_user_deleted_through_the_route_has_their_token_refused_and_nobody_elses`, `a_user_whose_deleted_at_is_set_by_sql_has_their_token_refused_and_nobody_elses`, `the_current_user_route_refuses_a_deleted_tenants_token_and_a_deleted_users`, `a_token_naming_a_user_of_one_tenant_and_another_tenant_is_refused`, `a_token_naming_a_user_or_a_tenant_that_has_no_row_is_refused`; `session::a_deleted_users_access_token_and_refresh_token_are_both_refused_at_once` |
+//! | The tenant read as `t.status <> 'ACTIVE'`, not `t.deleted_at IS NOT NULL` | **The walk stays green, and so does every test that deletes a tenant through the route**: the soft delete also writes `INACTIVE`. Red: `a_tenant_whose_deleted_at_is_set_by_sql_has_its_token_refused_and_no_other_tenants`, and D-104's three: `tenants::by_decision_d_104_an_access_token_outlives_its_tenants_suspension_until_it_expires`, `tenants::by_decision_d_104_an_access_token_outlives_its_tenants_deactivation_until_it_expires`, `tenants::a_tenant_that_left_has_its_expired_access_token_refused_and_nothing_renews_it` (at its control) |
+//! | The user read as `u.status <> 'ACTIVE'` | **The walk stays green, and so does every test that deletes a user through the route.** Red: `a_user_whose_deleted_at_is_set_by_sql_has_their_token_refused_and_nobody_elses`, `session::by_decision_d_104_a_deactivated_users_access_token_works_until_it_expires`, `session::by_decision_d_104_a_locked_users_access_token_works_until_it_expires` |
+//! | `u.tenant_id = $1` dropped: the pairing of `sub` with `tenant_id` | `a_token_naming_a_user_of_one_tenant_and_another_tenant_is_refused` only. The walk is green: its tokens are the application's own |
+//! | A row that is not there read as live (`RowState::from_deleted(None)`) | `a_token_naming_a_user_or_a_tenant_that_has_no_row_is_refused`, `a_token_naming_a_user_of_one_tenant_and_another_tenant_is_refused`. The walk is green |
+//! | A failed lookup is a pass | `a_lookup_that_fails_is_a_500_and_neither_a_pass_nor_a_401` only (403) |
+//! | A failed lookup is a 401 | the same test only (401) |
+//! | `validation.leeway` not set: the library's 60 seconds | `token::a_token_one_second_past_its_expiry_is_refused` (unit); `a_token_one_second_past_its_lifetime_is_refused_on_a_read_and_a_write`; `session::by_decision_d_104_a_deactivated_users_access_token_works_until_it_expires` and `tenants::a_tenant_that_left_has_its_expired_access_token_refused_and_nothing_renews_it`, at their aged tokens |
+//! | `ACCESS_TOKEN_LEEWAY_SECONDS` is 1 | the library's unit tests do not compile: `the_leeway_is_a_named_zero` asserts it at compile time. Also `a_token_one_second_past_its_lifetime_is_refused_on_a_read_and_a_write` and `tenants::a_tenant_that_left_…` |
+//! | `validation.leeway = 1`, the constant left alone | `token::a_token_one_second_past_its_expiry_is_refused` (unit); `a_token_one_second_past_its_lifetime_is_refused_on_a_read_and_a_write`; `tenants::a_tenant_that_left_…`. **`session::by_decision_d_104_a_deactivated_users_…` stayed green**: a token aged by its lifetime plus one second is past a one-second leeway only once a second has ticked since it was issued. The first test's `exp = now - 1` cell is the one that does not depend on that |
+//! | `sign_out` takes `Authenticated` | `signing_out_still_answers_204_for_a_deleted_caller`; the walk, at its guard (143 operations, 144 arguments) |
+//! | The check applied to `GET` only | the walk, 152 of 429 cells; `a_deleted_tenants_token_writes_nothing_and_its_upload_is_refused_unread`, the three `…_has_…_token_refused_…` tests at their writes; `call::a_deleted_tenants_open_session_…` |
+//! | The upload reads its body before the caller is judged (`caller: Result<Authenticated, AppError>`, `?` after `read_file_part`) | `a_deleted_tenants_token_writes_nothing_and_its_upload_is_refused_unread`; the walk, at its guard (142 arguments) |
+//! | Every token is refused | the walk, in its setup (the live caller cannot create a tenant), and every test in every file run that holds a token |
+//! | One route refuses every caller: `GET /auth/me` answers 401 whoever asks | the walk, 1 of 429 cells: `GET /api/v1/auth/me: a live token was refused`. Its two refusal cells pass, which is what the live cell is for |
+//! | The refusal is `AppError::Forbidden` | the walk, 286 of 429 cells, and every refusal test, the byte-for-byte one among them |
+//! | The check dropped (`if false && …`) | the same as before the fix: the walk, 286 of 429 cells, and every refusal test |
+//!
+//! Not made, and why: the check given to sign-in or refresh. Both already
+//! refuse a deleted tenant and a deleted user by their own reads, so a second
+//! check there changes no answer a request can observe.
 
 mod common;
 

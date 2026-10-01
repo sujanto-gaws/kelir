@@ -73,7 +73,7 @@
 //!
 //! | Mutation | Reddened |
 //! |---|---|
-//! | `organization::repository::live_codes` drops `deleted_at IS NULL` | `a_deleted_tenants_open_session_resolves_no_secret_its_own_or_another`, `a_tenant_that_is_not_active_still_holds_its_names_and_a_deleted_one_does_not` |
+//! | `organization::repository::live_codes` drops `deleted_at IS NULL` | `a_tenant_that_is_not_active_still_holds_its_names_and_a_deleted_one_does_not`. Until #650 also `a_deleted_tenants_open_session_resolves_no_secret_its_own_or_another`; run again 2026-10-01 after it, that test is green under this mutation, because a deleted tenant's caller is now a 401 before the namespace is read |
 //! | `live_codes` adds `AND status = 'ACTIVE'` | `a_tenant_that_is_not_active_still_holds_its_names_and_a_deleted_one_does_not` |
 //! | `service::test_call` takes the first live tenant's code for the caller's | `a_created_tenant_naming_the_system_tenants_variable_is_refused_and_sends_nothing`, `another_tenants_variable_answers_the_same_set_or_unset`, `a_name_two_tenants_codes_both_map_to_is_refused_for_both`, `a_caller_in_another_tenant_calls_their_own_endpoint_and_neither_reaches_the_other` |
 //! | `-` admitted in a name after the separator | unit tests only. No request reaches it: `SecretReference::parse` refuses the shape first, which `a_stored_reference_outside_the_name_alphabet_is_malformed_and_reads_nothing` holds |
@@ -90,7 +90,7 @@
 //! | `admits`' length check on the #547 prefix removed | green — equivalent: the tenant prefix begins with the #547 prefix and is longer |
 //! | `admits`' `starts_with` on the #547 prefix removed | green — equivalent, for the same reason |
 //! | `std::env::var` called before `admits`, its answer dropped on a refusal | green — the answer is the same bytes, so no request observes it; the order is held by review of `outbound::resolve_secret` |
-//! | A caller whose tenant is not live is given the first live tenant's code | `a_deleted_tenants_open_session_resolves_no_secret_its_own_or_another` |
+//! | A caller whose tenant is not live is given the first live tenant's code | **green since #650**, run again 2026-10-01: all three suites. No request reaches the branch any more — a deleted tenant's token is refused by `middleware::auth` first — so it is left only to a tenant deleted between that read and the namespace read, which no test can stage. Held by review of `service::test_call`; `domain::secret`'s unit test holds only that `TenantNamespaces::for_caller` answers `None`. Until #650 this reddened `a_deleted_tenants_open_session_resolves_no_secret_its_own_or_another` |
 //! | `SecretReference::parse` skips the shape check | `a_stored_reference_outside_the_name_alphabet_is_malformed_and_reads_nothing` |
 //! | An empty value is a secret (`outbound::resolve_secret`) | `a_variable_set_to_nothing_is_not_found_and_nothing_is_sent` |
 //! | `namespace_segment` does not upper-case the code | `a_code_no_route_stores_reads_upper_case_names_or_nothing` — the builder's row above, now reached through a code written past the route |

@@ -27,6 +27,12 @@
 //! could not run did not exist to fail.
 //!
 //! The mutation table is in `deleted_caller_refusals.rs`'s header.
+//!
+//! One thing a reader of the leeway test should know: a token aged by its
+//! lifetime plus one second is a second past its `exp` only if no second has
+//! ticked since it was issued, so those cells cannot tell a leeway of zero
+//! from a leeway of one on every run. The cell that sets `exp` to one second
+//! before now can.
 
 mod common;
 
@@ -202,6 +208,23 @@ fn aged(access: &str, seconds: i64) -> String {
             .unwrap_or_else(|| panic!("no {claim} in {claims}"));
         claims[claim] = json!(issued - seconds);
     }
+
+    signed(&claims)
+}
+
+/// The same claims under the same signature with `exp` at a chosen instant,
+/// and `iat` a lifetime before it.
+fn expiring_at(access: &str, exp: i64) -> String {
+    let mut claims = decode::<Value>(
+        access,
+        &DecodingKey::from_secret(common::JWT_SECRET.as_bytes()),
+        &Validation::new(Algorithm::HS256),
+    )
+    .expect("the application's own token verifies under the test secret")
+    .claims;
+
+    claims["exp"] = json!(exp);
+    claims["iat"] = json!(exp - ACCESS_TOKEN_TTL_MINUTES * 60);
 
     signed(&claims)
 }
@@ -644,6 +667,20 @@ async fn a_token_one_second_past_its_lifetime_is_refused_on_a_read_and_a_write()
         .await;
     assert_refused(&written, "a token a second past its lifetime wrote");
     assert_eq!(users_named(&app, "made.late").await, 0);
+
+    // The same by the clock and not by the token's own `iat`: `exp` one
+    // second before now. An aged token is a second past its lifetime only
+    // if no second has ticked since it was issued, so a leeway of one second
+    // could pass the cells above; it cannot pass this one unless a second
+    // ticks between this line and the verification.
+    let just_expired = expiring_at(&held.access, chrono::Utc::now().timestamp() - 1);
+    let read = app.get(USERS, Some(&just_expired)).await;
+    assert_refused(&read, "a token whose `exp` was a second ago read");
+
+    // And one whose `exp` is five seconds ahead is served.
+    let nearly = expiring_at(&held.access, chrono::Utc::now().timestamp() + 5);
+    let served = app.get(USERS, Some(&nearly)).await;
+    assert_eq!(served.status, StatusCode::OK, "{}", served.body);
 }
 
 // ---------------------------------------------------------------------------
