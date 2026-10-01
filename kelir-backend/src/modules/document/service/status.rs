@@ -204,7 +204,9 @@ async fn refuse_while_a_workflow_is_deciding(
     };
 
     Err(AppError::conflict(format!(
-        "this document is being decided by workflow instance {instance_id}; its status          follows that process rather than being set directly. Act on the task instead —          a status written here would disagree with the process the moment it moved"
+        "this document is being decided by workflow instance {instance_id}; its status \
+         follows that process rather than being set directly. Act on the task instead — \
+         a status written here would disagree with the process the moment it moved"
     )))
 }
 

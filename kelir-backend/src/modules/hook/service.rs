@@ -692,12 +692,16 @@ fn check_entry(entry: &Value, path: &str, implied: &str, details: &mut Vec<Valid
 fn kind_mismatch_message(handler: &HandlerReference, after: bool) -> String {
     if after {
         format!(
-            "`{handler}` is a before-hook handler: its result is a veto or a                                  change to the form, and once the transition has committed there                                  is nothing left to refuse or change. An `actions` entry runs after                                  commit; the handlers that can are {}",
+            "`{handler}` is a before-hook handler: its result is a veto or a \
+             change to the form, and once the transition has committed there \
+             is nothing left to refuse or change. An `actions` entry runs after \
+             commit; the handlers that can are {}",
             handlers::available_for(super::domain::HandlerKind::serves_after)
         )
     } else {
         format!(
-            "`{handler}` is an after-hook handler and cannot guard a                                  transition; the handlers that can are {}",
+            "`{handler}` is an after-hook handler and cannot guard a \
+             transition; the handlers that can are {}",
             handlers::available_for(super::domain::HandlerKind::serves_before)
         )
     }
