@@ -445,8 +445,12 @@ While the major version is `0`, the public API may change in any release.
   field the dialog's mode does not draw. The save was refused and the form
   looked valid. Such a detail is now listed on the form as `path: message`,
   in an alert, as the integration dialogs and the reassign dialog already
-  did. All eight dialogs draw it with one component, `FormUnplacedErrors`,
-  and `unplacedErrors` moved beside `useFormErrors`
+  did. Three paths the integration dialogs counted as shown and did not
+  show are shown too: a credential's `isActive` and an endpoint's
+  `description` under their inputs, and an external system's `status` in the
+  list when registering. A detail the server sends with no `path` is listed
+  as its message alone. All eight dialogs draw it with one component,
+  `FormUnplacedErrors`, and `unplacedErrors` moved beside `useFormErrors`
   ([coding standard](docs/standards/01.%20Coding%20Standard.md) §3.4, which
   now requires it of every form that uses `useFormErrors`).
 - **An `OWNER_DEPARTMENT` scope resolves**

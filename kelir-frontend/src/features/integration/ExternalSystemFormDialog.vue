@@ -81,8 +81,14 @@ const PLACED = [
   'retryPolicy.backoffMultiplier',
   'retryPolicy.deadLetterAfterAttempts',
   'description',
-  'status',
 ] as const
+
+/**
+ * The paths a message is drawn for as the form stands. The status block is
+ * drawn only on an edit, so a `status` detail on a register is listed rather
+ * than lost.
+ */
+const placed = computed<readonly string[]>(() => (isEditing.value ? [...PLACED, 'status'] : PLACED))
 
 const typeOptions = optionsOf(EXTERNAL_SYSTEM_TYPE_LABELS)
 const authOptions = optionsOf(AUTH_TYPE_LABELS)
@@ -220,7 +226,7 @@ async function save(): Promise<void> {
 
       <FormUnplacedErrors
         :field-errors="errors.fieldErrors.value"
-        :placed="PLACED"
+        :placed="placed"
         class="sm:col-span-2"
         data-testid="external-system-unplaced-errors"
       />

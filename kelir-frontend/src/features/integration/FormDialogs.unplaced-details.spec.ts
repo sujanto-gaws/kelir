@@ -96,11 +96,11 @@ const SYSTEM_SLOTS = [
 
 const SYSTEM_ELSEWHERE = ['retryPolicy', 'retryPolicy.jitter', 'maxRetries', 'BaseUrl', 'colour']
 
-const CREDENTIAL_SLOTS = ['credentialType', 'secretReference', 'validFrom', 'validTo']
+const CREDENTIAL_SLOTS = ['credentialType', 'secretReference', 'validFrom', 'validTo', 'isActive']
 
 const CREDENTIAL_ELSEWHERE = ['externalSystemId', 'SecretReference', 'secretReference.0', 'colour']
 
-const ENDPOINT_SLOTS = ['endpointCode', 'name', 'method', 'path']
+const ENDPOINT_SLOTS = ['endpointCode', 'name', 'method', 'path', 'description']
 
 const ENDPOINT_ELSEWHERE = ['status', 'externalSystemId', 'Path', 'path.0', 'colour']
 
@@ -127,7 +127,8 @@ const harnesses: Harness[] = [
     testId: 'external-system-unplaced-errors',
     open: () => openSystem(null),
     slots: SYSTEM_SLOTS,
-    elsewhere: SYSTEM_ELSEWHERE,
+    // The status block is drawn only on an edit.
+    elsewhere: [...SYSTEM_ELSEWHERE, 'status'],
   },
   {
     name: 'ExternalSystemFormDialog, editing',
@@ -271,12 +272,12 @@ describe('a 422 detail in the integration dialogs: the independent campaign (#57
   })
 
   /**
-   * Three paths a dialog counts as placed and shows no message for. Each is
-   * written as the behaviour #576 asks for and marked `fails`: it is red today,
-   * and goes red again, as a passing test under `fails`, once the dialog is
-   * fixed, which is the cue to drop the marker.
+   * Three paths a dialog counted as placed and showed no message for, found by
+   * this campaign and pinned as `it.fails` until each dialog was fixed: the
+   * credential's `isActive` and the endpoint's `description` now have a message
+   * under the input, and the system's `status` is placed only on an edit.
    */
-  describe('a path counted as placed that no message is shown for (defects, open)', () => {
+  describe('a path that was counted as placed with no message shown (defects, fixed)', () => {
     async function refused(harness: Harness, path: string): Promise<VueWrapper> {
       saveReply = validationReply([path, 'The server refused this'])
       const wrapper = harness.open()
@@ -286,19 +287,19 @@ describe('a 422 detail in the integration dialogs: the independent campaign (#57
       return wrapper
     }
 
-    it.fails('credential: an `isActive` detail is shown', async () => {
+    it('credential: an `isActive` detail is shown', async () => {
       const wrapper = await refused(harnesses[2], 'isActive')
 
       expect(shown(wrapper, 'The server refused this')).toBe(1)
     })
 
-    it.fails('endpoint: a `description` detail is shown', async () => {
+    it('endpoint: a `description` detail is shown', async () => {
       const wrapper = await refused(harnesses[4], 'description')
 
       expect(shown(wrapper, 'The server refused this')).toBe(1)
     })
 
-    it.fails('external system: a `status` detail is shown when registering', async () => {
+    it('external system: a `status` detail is shown when registering', async () => {
       const wrapper = await refused(harnesses[0], 'status')
 
       expect(shown(wrapper, 'The server refused this')).toBe(1)

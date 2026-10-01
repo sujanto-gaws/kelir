@@ -188,6 +188,13 @@ async function save(): Promise<void> {
           data-testid="endpoint-description"
           :invalid="!!fieldError('description')"
         />
+        <p
+          v-if="fieldError('description')"
+          class="text-xs text-destructive"
+          data-testid="description-error"
+        >
+          {{ fieldError('description') }}
+        </p>
       </div>
 
       <div class="flex justify-end gap-2">

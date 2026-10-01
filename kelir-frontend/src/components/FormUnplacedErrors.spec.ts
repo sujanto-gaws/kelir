@@ -19,6 +19,16 @@ describe('FormUnplacedErrors', () => {
     ])
   })
 
+  it('lists a detail the server sent with no path as its message alone', () => {
+    // `ApiError.fieldErrors()` keys a detail by `detail.path`, so one without a
+    // path arrives under the key `undefined`.
+    const wrapper = mount(FormUnplacedErrors, {
+      props: { fieldErrors: { undefined: 'The request was refused' }, placed: [] },
+    })
+
+    expect(wrapper.findAll('li').map((item) => item.text())).toEqual(['The request was refused'])
+  })
+
   it('is announced, and carries the test id the form gives it', () => {
     // An alert, as the form's own message is: a refusal that is only drawn is
     // one a screen reader user never hears (NFR-USE-005).

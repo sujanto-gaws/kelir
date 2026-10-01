@@ -217,9 +217,25 @@ async function save(): Promise<void> {
         </div>
       </div>
 
-      <div class="flex items-center gap-2">
-        <Checkbox id="credential-active" v-model="isActive" data-testid="credential-active" />
-        <Label for="credential-active">Active</Label>
+      <div class="space-y-2">
+        <div class="flex items-center gap-2">
+          <Checkbox
+            id="credential-active"
+            v-model="isActive"
+            data-testid="credential-active"
+            :aria-invalid="fieldError('isActive') ? 'true' : undefined"
+            aria-describedby="credential-active-error"
+          />
+          <Label for="credential-active">Active</Label>
+        </div>
+        <p
+          v-if="fieldError('isActive')"
+          id="credential-active-error"
+          class="text-xs text-destructive"
+          data-testid="isActive-error"
+        >
+          {{ fieldError('isActive') }}
+        </p>
       </div>
 
       <div class="flex justify-end gap-2">

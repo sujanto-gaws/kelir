@@ -11,7 +11,8 @@ import { unplacedErrors } from '@/composables/useFormErrors'
  * A form passes what `useFormErrors` holds and the paths it shows a message
  * for **as drawn now**: a field its current mode leaves out is not placed.
  * Whatever is left is listed here as `path: message`, so a refused save always
- * says why. Nothing is drawn when every detail has a place, and a detail is
+ * says why. A detail the server sent with no `path` is keyed `undefined` by
+ * `ApiError.fieldErrors()`, and is listed as its message alone. Nothing is drawn when every detail has a place, and a detail is
  * never both under its input and here.
  *
  * It is an `Alert`, so it is announced when it appears, as the form's own
@@ -30,7 +31,9 @@ const unplaced = computed(() => unplacedErrors(props.fieldErrors, props.placed))
 <template>
   <Alert v-if="unplaced.length > 0" variant="destructive">
     <ul class="list-disc pl-4">
-      <li v-for="item in unplaced" :key="item.path">{{ item.path }}: {{ item.message }}</li>
+      <li v-for="item in unplaced" :key="item.path">
+        {{ item.path === 'undefined' ? item.message : `${item.path}: ${item.message}` }}
+      </li>
     </ul>
   </Alert>
 </template>
