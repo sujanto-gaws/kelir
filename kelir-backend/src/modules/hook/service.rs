@@ -662,17 +662,7 @@ fn check_entry(entry: &Value, path: &str, implied: &str, details: &mut Vec<Valid
                         format!("{path}.handler"),
                         "LHCS-3.2",
                         "HANDLER_KIND_MISMATCH",
-                        if after {
-                            format!(
-                                "`{handler}` is a before-hook handler: its result is a veto or a                                  change to the form, and once the transition has committed there                                  is nothing left to refuse or change. An `actions` entry runs after                                  commit; the handlers that can are {}",
-                                handlers::available_for(super::domain::HandlerKind::serves_after)
-                            )
-                        } else {
-                            format!(
-                                "`{handler}` is an after-hook handler and cannot guard a                                  transition; the handlers that can are {}",
-                                handlers::available_for(super::domain::HandlerKind::serves_before)
-                            )
-                        },
+                        kind_mismatch_message(&handler, after),
                     ));
                 }
             }
@@ -688,6 +678,28 @@ fn check_entry(entry: &Value, path: &str, implied: &str, details: &mut Vec<Valid
                 ),
             ));
         }
+    }
+}
+
+/// What a `HANDLER_KIND_MISMATCH` says (ADR-0041 §2), for the position the
+/// handler was registered in: `after` is an `actions` entry, otherwise a
+/// `guards` one.
+///
+/// A function of its own because **no handler is after-only today**, so no
+/// definition reaches the second sentence: [`check_entry`] cannot be made to
+/// produce it, and a sentence nothing can produce is a sentence nothing reads
+/// until an author does (#558).
+fn kind_mismatch_message(handler: &HandlerReference, after: bool) -> String {
+    if after {
+        format!(
+            "`{handler}` is a before-hook handler: its result is a veto or a                                  change to the form, and once the transition has committed there                                  is nothing left to refuse or change. An `actions` entry runs after                                  commit; the handlers that can are {}",
+            handlers::available_for(super::domain::HandlerKind::serves_after)
+        )
+    } else {
+        format!(
+            "`{handler}` is an after-hook handler and cannot guard a                                  transition; the handlers that can are {}",
+            handlers::available_for(super::domain::HandlerKind::serves_before)
+        )
     }
 }
 
