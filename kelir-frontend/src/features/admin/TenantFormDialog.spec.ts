@@ -192,12 +192,26 @@ describe('TenantFormDialog', () => {
       expect(updated?.body).toEqual({ name: 'Acme Holdings', status: 'ACTIVE' })
     })
 
-    it('says how many people a suspension signs out', async () => {
+    it('says what taking a tenant offline does, and how soon (D-104)', async () => {
+      // Read before the status is touched, so it must not promise more than
+      // happens: somebody already signed in carries on for up to 16 minutes.
+      const wrapper = mountDialog(acme)
+
+      expect(wrapper.text()).toContain(
+        'While it is offline its users cannot sign in, and anyone already signed in is signed out within 16 minutes.',
+      )
+      expect(wrapper.text()).not.toContain('ends its users’ sessions')
+    })
+
+    it('says how many people a suspension shuts out, and how soon (D-104)', async () => {
       const wrapper = mountDialog(acme)
 
       await wrapper.find('#tenant-status').setValue('SUSPENDED')
 
-      expect(wrapper.text()).toContain('Its 12 user(s) will be signed out')
+      expect(wrapper.text()).toContain(
+        'Its 12 user(s) cannot sign in until it is active. Anyone already signed in is signed out within 16 minutes.',
+      )
+      expect(wrapper.text()).not.toContain('will be signed out')
     })
 
     it('will not take the administering tenant offline', async () => {

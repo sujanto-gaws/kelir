@@ -219,7 +219,7 @@ async function submit(): Promise<void> {
     :title="isEditing ? 'Edit tenant' : 'New tenant'"
     :description="
       isEditing
-        ? 'Rename the tenant, or take it offline. Suspending it ends its users’ sessions.'
+        ? 'Rename the tenant, or take it offline. While it is offline its users cannot sign in, and anyone already signed in is signed out within 16 minutes.'
         : 'A tenant is created together with the administrator who can sign in to it.'
     "
   >
@@ -278,8 +278,8 @@ async function submit(): Promise<void> {
           This is the tenant you administer from, so it cannot be taken offline.
         </p>
         <p v-else-if="status !== 'ACTIVE'" class="text-xs text-muted-foreground">
-          Its {{ tenant?.userCount }} user(s) will be signed out and cannot sign in again until it
-          is active.
+          Its {{ tenant?.userCount }} user(s) cannot sign in until it is active. Anyone already
+          signed in is signed out within 16 minutes.
         </p>
       </div>
 

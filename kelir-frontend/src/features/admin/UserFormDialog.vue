@@ -323,7 +323,8 @@ async function submit(): Promise<void> {
           described-by="user-status-hint"
         />
         <p id="user-status-hint" class="text-xs text-muted-foreground">
-          Only an active account can sign in. Any other status ends the account’s sessions.
+          Only an active account can sign in. With any other status, someone already signed in is
+          signed out within 16 minutes.
         </p>
       </div>
 

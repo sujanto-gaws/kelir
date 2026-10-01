@@ -44,9 +44,10 @@ export function createTenant(request: CreateTenantRequest): Promise<Tenant> {
  * Rename, suspend or reactivate. 400 when the target is the tenant the request
  * came from and the change would take it offline.
  *
- * Suspending revokes the tenant's refresh tokens, so its users' sessions end
- * rather than merely failing to renew — an access token already issued stays
- * valid until it expires, up to fifteen minutes.
+ * Suspending revokes the tenant's refresh tokens, so none of its users'
+ * sessions can be renewed — an access token already issued stays accepted for
+ * up to fifteen minutes from issue, plus the 60 seconds verification allows
+ * past expiry (D-104, a stated limit).
  */
 export function updateTenant(id: string, request: UpdateTenantRequest): Promise<Tenant> {
   return putItem<Tenant>(`${TENANTS}/${id}`, request)
@@ -56,7 +57,9 @@ export function updateTenant(id: string, request: UpdateTenantRequest): Promise<
  * Soft-delete. Answers 204; 400 for the administering tenant.
  *
  * The tenant's users, roles and data stay in place — what makes them
- * unreachable is that the tenant no longer resolves at sign-in.
+ * unreachable to a new sign-in is that the tenant no longer resolves there. A
+ * session already open carries on, reading and writing, for up to 16 minutes
+ * (#650, open; D-104 does not decide deletion).
  */
 export function deleteTenant(id: string): Promise<void> {
   return deleteItem(`${TENANTS}/${id}`)
