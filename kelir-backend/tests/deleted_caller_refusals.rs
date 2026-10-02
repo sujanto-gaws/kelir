@@ -68,9 +68,14 @@
 //! | The refusal is `AppError::Forbidden` | the walk, 286 of 429 cells, and every refusal test, the byte-for-byte one among them |
 //! | The check dropped (`if false && …`) | the same as before the fix: the walk, 286 of 429 cells, and every refusal test |
 //!
-//! Not made, and why: the check given to sign-in or refresh. Both already
-//! refuse a deleted tenant and a deleted user by their own reads, so a second
-//! check there changes no answer a request can observe.
+//! Not made by the builder, and why: the check given to sign-in or refresh.
+//! Both already refuse a deleted tenant and a deleted user by their own reads,
+//! so a second check there changes no answer a deleted caller can observe.
+//! The `test-engineer` campaign made the refresh one on 2026-10-02
+//! (`refresh` takes `Authenticated`): red at this file's guard (143
+//! operations, 144 arguments), at `session::a_refresh_token_rotates_and_the_old_one_is_refused_on_replay`
+//! (a refresh sends no access token) and at two tests of
+//! `deleted_caller_campaign.rs`, whose header says what else it made.
 
 mod common;
 

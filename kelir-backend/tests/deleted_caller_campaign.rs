@@ -29,11 +29,14 @@
 //!
 //! # Mutations
 //!
-//! Each test says which mutations were **seen red** against it (made alone,
-//! this file and the builder's two run, reverted; 2026-10-02) and which were
-//! **planned and not run**: the campaign's cargo runs were stopped by the
-//! machine for memory before the second batch finished. A mutation listed as
-//! not run is a claim nobody has checked.
+//! Each test says which mutations were **seen red** against it: made alone,
+//! this file and the builder's two run, the named tests observed red, and the
+//! mutation reverted, 2026-10-02. Twenty-three were made against this file
+//! and every one reddened a test here; none is left unrun. The six that change
+//! the statement's text were built against the development database
+//! (`SQLX_OFFLINE=false`), since the offline entry is keyed by that text, and
+//! `auth_session` and `organization_tenants` were run with them. Two more,
+//! on `integration::service::test_call`, are in `integration_test_call.rs`.
 
 mod common;
 
@@ -607,9 +610,14 @@ async fn a_user_whose_row_is_removed_outright_is_refused_as_missing() {
 /// user, each asked with the one token issued while both were live and
 /// active. **The token is served exactly when neither `deleted_at` is set.**
 ///
-/// Planned and not run: the user's predicate widened by `status = 'LOCKED'`,
-/// by `locked_until > now()` or by `status = 'PENDING_ACTIVATION'`; the
-/// tenant's widened by `status = 'SUSPENDED'` or `'INACTIVE'`.
+/// Seen red, each alone: the user's predicate widened by
+/// `status = 'LOCKED'`, by `locked_until > now()` or by
+/// `status = 'PENDING_ACTIVATION'`; the tenant's widened by
+/// `status = 'SUSPENDED'` or `'INACTIVE'`. **A pending user refused is red
+/// here and nowhere else**: `auth_session`, `organization_tenants` and the
+/// builder's two stayed green under it. The two lock mutations also redden
+/// `session::by_decision_d_104_a_locked_users_…`; the two on the tenant also
+/// redden D-104's tenant tests and the restore test below.
 #[tokio::test]
 async fn a_token_is_served_exactly_when_neither_deleted_at_is_set_whatever_the_statuses() {
     let app = multi_tenant_app().await;
@@ -867,8 +875,10 @@ async fn read_for(stream: &mut tokio::net::TcpStream, wait: Duration) -> String 
 /// same head is left unanswered, because the handler is waiting for bytes
 /// that have not come, and is answered once they do.
 ///
-/// Planned and not run: the upload's caller judged after `read_file_part`
-/// (`caller: Result<Authenticated, AppError>`).
+/// Seen red: the upload's caller judged after `read_file_part`
+/// (`caller: Result<Authenticated, AppError>`), with the extractor walk (16
+/// of 3,036 cells), the source guard and the builder's two files; and the
+/// check applied to `GET` only.
 #[tokio::test]
 async fn a_deleted_callers_request_is_answered_before_any_of_its_body_is_sent() {
     const BOUNDARY: &str = "kelircampaignboundary";
@@ -1233,9 +1243,10 @@ const MALFORMATIONS: [Malformation; 8] = [
 ///
 /// Seen red: `PathParam` placed before `caller` in
 /// `identity::handlers::get_user` (6 of 3,036 cells, and the source guard
-/// below; the builder's walk and its count guard stayed green). Planned and
-/// not run: `QueryParams` placed before `caller` in `list_users`; the check
-/// applied to `GET` only.
+/// below; the builder's walk and its count guard stayed green);
+/// `QueryParams` placed before `caller` in `list_users` (2 of 3,036 cells,
+/// and the source guard; again nothing of the builder's); the check applied
+/// to `GET` only (1,120 of 3,036 cells).
 #[tokio::test]
 async fn a_deleted_caller_is_refused_before_a_malformed_path_body_or_query_is_judged() {
     let operations = authenticated_operations();
@@ -1457,6 +1468,12 @@ async fn a_method_the_document_does_not_list_reaches_no_handler() {
 /// reads `security: bearer`; an operation published without it is outside the
 /// walk and outside the check, so the set is written down. A new route that
 /// serves without a token has to be added here by somebody who meant it.
+///
+/// Seen red: `security(("bearer" = []))` taken from `GET /auth/me`'s
+/// annotation (eleven operations, not ten), with the source guard, the
+/// extractor walk and the builder's count guard. Also seen red: `refresh`
+/// taking `Authenticated`, at the source guard and at
+/// `a_token_issued_by_a_refresh_is_served_and_refused_once_its_user_is_deleted`.
 #[test]
 fn the_operations_that_take_no_access_token_are_the_ten_that_should_not() {
     let open: BTreeSet<String> = documented()
@@ -1818,8 +1835,11 @@ async fn a_burst_wider_than_the_pool_is_served_and_the_deleted_caller_in_it_refu
 /// connection comes back the caller is served.
 ///
 /// Seen red, and by no test of the builder's: a connection taken before
-/// `verify_access_token`. Planned and not run: a failed lookup answered as a
-/// pass; a failed lookup answered 401.
+/// `verify_access_token`. Seen red, with the builder's
+/// `a_lookup_that_fails_is_a_500_and_neither_a_pass_nor_a_401`: a failed
+/// lookup answered as a pass; a failed lookup answered 401. And the leeway
+/// left at the library's sixty seconds, which sends this test's expired token
+/// to wait for a connection.
 #[tokio::test]
 async fn a_pool_with_no_connection_to_give_fails_closed_and_refuses_bad_tokens_without_waiting() {
     let app = TestApp::spawn().await;
@@ -1901,8 +1921,10 @@ async fn a_pool_with_no_connection_to_give_fails_closed_and_refuses_bad_tokens_w
 /// This is a sample discarded for its precondition, not a retry of a failed
 /// assertion: nothing is asserted on a sample whose second moved.
 ///
-/// Planned and not run: `validation.leeway = 1`, and the leeway left at the
-/// library's sixty, each over twenty runs.
+/// Seen red: `validation.leeway = 1`, and the leeway left at the library's
+/// sixty, each in all of twenty runs. Under a leeway of one,
+/// `session::by_decision_d_104_a_deactivated_users_…` stayed green, as the
+/// builder's table says it does.
 #[tokio::test]
 async fn within_one_second_a_token_that_expired_the_second_before_is_refused() {
     let app = TestApp::spawn().await;

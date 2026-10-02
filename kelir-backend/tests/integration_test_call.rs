@@ -90,7 +90,7 @@
 //! | `admits`' length check on the #547 prefix removed | green — equivalent: the tenant prefix begins with the #547 prefix and is longer |
 //! | `admits`' `starts_with` on the #547 prefix removed | green — equivalent, for the same reason |
 //! | `std::env::var` called before `admits`, its answer dropped on a refusal | green — the answer is the same bytes, so no request observes it; the order is held by review of `outbound::resolve_secret` |
-//! | A caller whose tenant is not live is given the first live tenant's code | **green since #650**, run again 2026-10-01: all three suites. No request reaches the branch any more — a deleted tenant's token is refused by `middleware::auth` first — so it is left only to a tenant deleted between that read and the namespace read, which no test can stage. Held by review of `service::test_call`; `domain::secret`'s unit test holds only that `TenantNamespaces::for_caller` answers `None`. Until #650 this reddened `a_deleted_tenants_open_session_resolves_no_secret_its_own_or_another` |
+//! | A caller whose tenant is not live is given the first live tenant's code | Green from #650 until the campaign's test of 2026-10-02 (run 2026-10-01: all three suites). No request reaches the branch any more — a deleted tenant's token is refused by `middleware::auth` first — so it is left only to a tenant deleted between that read and the namespace read, which no request can stage. **Red since 2026-10-02**: `a_tenant_deleted_after_its_caller_was_admitted_resolves_nothing_and_fails_closed` stages it by calling the service with a caller admitted before the deletion, and reddens with `domain::secret`'s unit test when `TenantNamespaces::for_caller` is the function changed. Until #650 this reddened `a_deleted_tenants_open_session_resolves_no_secret_its_own_or_another` |
 //! | `SecretReference::parse` skips the shape check | `a_stored_reference_outside_the_name_alphabet_is_malformed_and_reads_nothing` |
 //! | An empty value is a secret (`outbound::resolve_secret`) | `a_variable_set_to_nothing_is_not_found_and_nothing_is_sent` |
 //! | `namespace_segment` does not upper-case the code | `a_code_no_route_stores_reads_upper_case_names_or_nothing` — the builder's row above, now reached through a code written past the route |
@@ -2906,11 +2906,13 @@ async fn admitted(app: &TestApp, token: &str) -> kelir_backend::middleware::auth
 /// variable and holds no value, nothing sent, and neither the tenant's own
 /// variable nor another tenant's read.
 ///
-/// Planned and not run (the campaign's cargo runs were stopped for memory):
-/// `TenantNamespaces::for_caller` answering the first live tenant's namespace
-/// when the caller's is not among them, which the builder's table records as
-/// green in every suite; and the branch answering with an empty namespace
-/// instead of failing.
+/// Seen red, 2026-10-02, each alone, with this file and
+/// `--lib modules::integration` run: `TenantNamespaces::for_caller` answering
+/// the first live tenant's namespace when the caller's is not among them,
+/// which the table at the head of this file recorded as green in every suite;
+/// and `for_caller` answering an empty namespace instead of `None`. Each
+/// reddened this test and `domain::secret`'s
+/// `a_caller_whose_tenant_is_not_live_has_no_namespace`, and nothing else.
 #[tokio::test]
 async fn a_tenant_deleted_after_its_caller_was_admitted_resolves_nothing_and_fails_closed() {
     use kelir_backend::modules::integration::service::test_call::test_call;
