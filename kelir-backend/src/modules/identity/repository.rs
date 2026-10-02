@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::utils::search::like_contains;
 
-use super::domain::{Permission, Role, RoleSummary, User, UserStatus};
+use super::domain::{Permission, Role, RoleSummary, RowState, TokenSubject, User, UserStatus};
 
 /// A user row including the password hash — repository-internal, so the hash
 /// cannot escape into a response by accident.
@@ -26,6 +26,49 @@ pub struct UserCredentials {
     /// past, means the account is not locked out; `status` carries the separate
     /// administrative lock.
     pub locked_until: Option<DateTime<Utc>>,
+}
+
+/// Whether the tenant and the user an access token names are deleted, in one
+/// statement (#650, decision D-105; ADR-0045).
+///
+/// Run by `middleware::auth::Authenticated` on **every authenticated
+/// request**, so it is two primary-key reads and nothing more: `tenants` by
+/// `id`, `users` by `id`. It reads `deleted_at` only. The user is read
+/// **within the tenant the token names** (`u.tenant_id = $1`), so a token
+/// pairing a user of one tenant with another tenant finds no user.
+///
+/// Always one row. Each column is `deleted_at IS NOT NULL` for the row found
+/// and SQL `NULL` where there is no row, which is what lets a refusal say
+/// which of the two it was in the operator's log. An inner join would answer
+/// no row for all four reasons alike.
+///
+/// **Not `status`.** Both soft deletes also write `status = 'INACTIVE'`, so
+/// a predicate on status would refuse a deleted caller and look right, and
+/// would also refuse the suspended tenant and the inactive user that
+/// decision D-104 keeps working until their token expires.
+pub async fn token_subject(
+    executor: impl PgExecutor<'_>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+) -> Result<TokenSubject, sqlx::Error> {
+    let row = sqlx::query!(
+        r#"
+        SELECT
+            (SELECT t.deleted_at IS NOT NULL FROM tenants t WHERE t.id = $1)
+                AS tenant_deleted,
+            (SELECT u.deleted_at IS NOT NULL FROM users u WHERE u.id = $2 AND u.tenant_id = $1)
+                AS user_deleted
+        "#,
+        tenant_id,
+        user_id
+    )
+    .fetch_one(executor)
+    .await?;
+
+    Ok(TokenSubject {
+        tenant: RowState::from_deleted(row.tenant_deleted),
+        user: RowState::from_deleted(row.user_deleted),
+    })
 }
 
 pub async fn find_credentials_by_username(

@@ -189,6 +189,22 @@ describe('UserListPage', () => {
     expect(other?.element.disabled).toBe(false)
   })
 
+  it('says what deactivating does, and how soon, before it is confirmed (D-105)', async () => {
+    // The button is `DELETE /identity/users/{id}`, a soft delete — not a status
+    // change. The account's next request is refused, so the person is signed
+    // out at once rather than within the minutes a status change allows.
+    const wrapper = await mountPage(['identity:user:read', 'identity:user:delete'])
+
+    await buttonLabelled(rowsOf(wrapper)[1].findAll('button'), 'Deactivate')?.trigger('click')
+
+    const dialog = wrapper.find('[role="dialog"]')
+
+    expect(dialog.text()).toContain(
+      'Bima Santoso is signed out at once, will no longer be able to sign in, and will be removed from this list.',
+    )
+    expect(dialog.text()).not.toContain('minutes')
+  })
+
   it('keeps the confirmation open and shows the refusal when deactivation fails', async () => {
     handler = (request) => {
       if (request.method === 'delete') {

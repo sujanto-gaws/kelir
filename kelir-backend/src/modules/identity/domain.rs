@@ -10,6 +10,57 @@ use crate::modules::workflow::domain::{DefinitionNamingRole, WorkflowDefinitionS
 use crate::response::Pagination;
 use crate::utils::serde::present_or_absent;
 
+/// Whether a row an access token names is there, and whether it is deleted
+/// (#650, decision D-105; ADR-0045).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowState {
+    Live,
+    /// `deleted_at` is set. Nothing else makes a row deleted: not `status`.
+    Deleted,
+    /// No such row. For a user, also a row that belongs to another tenant
+    /// than the one the token names.
+    Missing,
+}
+
+impl RowState {
+    /// From `deleted_at IS NOT NULL` read by primary key: `None` is no row.
+    pub fn from_deleted(deleted: Option<bool>) -> Self {
+        match deleted {
+            Some(false) => Self::Live,
+            Some(true) => Self::Deleted,
+            None => Self::Missing,
+        }
+    }
+
+    /// For the operator's log line. Never for a response.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::Deleted => "deleted",
+            Self::Missing => "missing",
+        }
+    }
+}
+
+/// The tenant and the user an access token names, as they are now.
+///
+/// **`deleted_at` and nothing else.** A status, a name, a role or a
+/// permission is not read: those stay what the token carried when it was
+/// issued, for the token's life (D-104).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenSubject {
+    pub tenant: RowState,
+    pub user: RowState,
+}
+
+impl TokenSubject {
+    /// Whether a token naming this pair is accepted: both rows there, and
+    /// neither deleted.
+    pub fn is_live(self) -> bool {
+        self.tenant == RowState::Live && self.user == RowState::Live
+    }
+}
+
 /// Account lifecycle (SRS FR-IDM-007).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]

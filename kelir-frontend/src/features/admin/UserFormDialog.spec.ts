@@ -92,12 +92,12 @@ describe('UserFormDialog', () => {
   })
 
   it('says what a status other than active does, and how soon (D-104)', async () => {
-    // Somebody already signed in carries on for up to 16 minutes, so the hint
+    // Somebody already signed in carries on for up to 15 minutes, so the hint
     // does not say their sessions end.
     const wrapper = mountDialog(existingUser)
 
     expect(wrapper.find('#user-status-hint').text()).toBe(
-      'Only an active account can sign in. With any other status, someone already signed in is signed out within 16 minutes.',
+      'Only an active account can sign in. With any other status, someone already signed in is signed out within 15 minutes.',
     )
   })
 

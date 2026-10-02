@@ -135,22 +135,21 @@ describe('TenantListPage', () => {
 
   it('says how many people a deletion shuts out, and how soon, before it is confirmed', async () => {
     // The one number on the screen that changes what the confirmation means.
-    // Somebody already signed in carries on for up to 16 minutes, and can still
-    // create records in the tenant until then (#650, open — D-104 does not
-    // decide deletion). So the text says neither that they are signed out at
-    // once nor that the data is out of reach.
+    // Deleting is not suspending (D-105): the next request from anybody signed
+    // in to the tenant is refused, so nobody carries on working in it. The text
+    // used to say they could, for a stated number of minutes, and must not now.
     const wrapper = await mountPage(['organization:tenant:read', 'organization:tenant:manage'])
 
     await buttonLabelled(rowsOf(wrapper)[1].findAll('button'), 'Delete')?.trigger('click')
 
     expect(wrapper.text()).toContain(
       'Acme Limited (ACME) will be removed. ' +
-        'Its 12 user(s) can no longer sign in. ' +
-        'Anyone already signed in can keep working in it, including creating records, for up to 16 minutes. ' +
-        'Its data is left in place and cannot be reached by signing in afterwards.',
+        'Its 12 user(s) are signed out at once and can no longer sign in. ' +
+        'Its data is left in place but can no longer be reached.',
     )
-    expect(wrapper.text()).not.toContain('are signed out')
-    expect(wrapper.text()).not.toContain('becomes unreachable')
+    expect(wrapper.text()).not.toContain('can keep working')
+    expect(wrapper.text()).not.toContain('16 minutes')
+    expect(wrapper.text()).not.toContain('15 minutes')
   })
 
   it('deletes through the API and reloads the list', async () => {

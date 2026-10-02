@@ -226,7 +226,7 @@ onMounted(async () => {
     <ConfirmDialog
       v-model:open="isConfirmOpen"
       title="Deactivate user"
-      :description="`${confirming?.displayName ?? 'This user'} will no longer be able to sign in, and will be removed from this list.`"
+      :description="`${confirming?.displayName ?? 'This user'} is signed out at once, will no longer be able to sign in, and will be removed from this list.`"
       confirm-label="Deactivate"
       :error="deactivateError"
       :pending="isDeactivating"

@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            (SELECT t.deleted_at IS NOT NULL FROM tenants t WHERE t.id = $1)\n                AS tenant_deleted,\n            (SELECT u.deleted_at IS NOT NULL FROM users u WHERE u.id = $2 AND u.tenant_id = $1)\n                AS user_deleted\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "tenant_deleted",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 1,
+        "name": "user_deleted",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "5b8444c3d1c6e70998ec9205cc8158b7514a5ccc705cdbca6117af9eb6bfa743"
+}

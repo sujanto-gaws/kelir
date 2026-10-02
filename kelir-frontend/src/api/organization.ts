@@ -46,8 +46,7 @@ export function createTenant(request: CreateTenantRequest): Promise<Tenant> {
  *
  * Suspending revokes the tenant's refresh tokens, so none of its users'
  * sessions can be renewed — an access token already issued stays accepted for
- * up to fifteen minutes from issue, plus the 60 seconds verification allows
- * past expiry (D-104, a stated limit).
+ * up to fifteen minutes from issue (D-104, a stated limit).
  */
 export function updateTenant(id: string, request: UpdateTenantRequest): Promise<Tenant> {
   return putItem<Tenant>(`${TENANTS}/${id}`, request)
@@ -58,8 +57,9 @@ export function updateTenant(id: string, request: UpdateTenantRequest): Promise<
  *
  * The tenant's users, roles and data stay in place — what makes them
  * unreachable to a new sign-in is that the tenant no longer resolves there. A
- * session already open carries on, reading and writing, for up to 16 minutes
- * (#650, open; D-104 does not decide deletion).
+ * session already open does not carry on (D-105): the next request it makes is
+ * answered 401 on every route, the refresh that follows is refused, and the
+ * browser clears the session.
  */
 export function deleteTenant(id: string): Promise<void> {
   return deleteItem(`${TENANTS}/${id}`)

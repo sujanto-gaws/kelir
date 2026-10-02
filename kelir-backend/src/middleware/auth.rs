@@ -5,6 +5,26 @@
 //! access token never reaches them. Authorisation is then an explicit call to
 //! [`Authenticated::require`] with a `module:resource:action` string.
 //!
+//! # A deleted tenant's token, and a deleted user's, is refused at once
+//!
+//! A token is checked by signature and expiry, and then the extractor asks the
+//! database one thing on every request: whether the tenant and the user the
+//! token names are deleted (#650, decision D-105; ADR-0045). If either is, or
+//! either has no row, or the user is not that tenant's, the answer is the 401
+//! an expired token gets, with no word of why; which of the two it was goes to
+//! the log. If the question cannot be asked, the answer is a 5xx: not a pass,
+//! which would fail open, and not a 401, which would sign every browser out
+//! on a database blip.
+//!
+//! **It reads `deleted_at` and nothing else.** Status, username, roles and
+//! permissions stay what the token carried when it was issued, for its
+//! 15-minute life, so a suspended or inactive tenant's token and an inactive
+//! or locked user's keep working until they expire (decision D-104). A
+//! password change does not end a token either.
+//!
+//! **Only routes behind [`Authenticated`] are reached.** Sign-in, refresh and
+//! sign-out take no access token and have their own checks.
+//!
 //! Permission checks belong in the service layer (coding standard §2.6). The
 //! guard here is what the service calls, not a substitute for it.
 
@@ -13,12 +33,14 @@ use axum::http::request::Parts;
 
 use crate::error::AppError;
 use crate::modules::auth::token::{verify_access_token, AccessClaims};
+use crate::modules::identity::service as identity;
 use crate::state::AppState;
 
 /// The authenticated caller, extracted from the `Authorization: Bearer` header.
 ///
 /// Its presence in a handler signature is what makes a route protected: there is
-/// no way to obtain one without a valid, unexpired, correctly signed token.
+/// no way to obtain one without a valid, unexpired, correctly signed token
+/// whose tenant and whose user are both there and not deleted.
 #[derive(Debug, Clone)]
 pub struct Authenticated {
     pub claims: AccessClaims,
@@ -124,6 +146,27 @@ impl FromRequestParts<AppState> for Authenticated {
 
         let token = bearer_token(header).ok_or(AppError::Unauthorized)?;
         let claims = verify_access_token(&state.config.jwt_secret, token)?;
+
+        // **Asked on every request, before anything else is read** (#650,
+        // D-105): one statement, both rows by primary key, and the connection
+        // is back in the pool before the handler runs. `?` on a failed lookup
+        // is `AppError::Internal`, a 5xx. Never a pass, and never the 401
+        // below, which would sign the caller out for the database's failure.
+        let subject = identity::token_subject(&state.pool, claims.tenant_id, claims.sub).await?;
+
+        if !subject.is_live() {
+            // The operator is told which; the caller is told nothing an
+            // expired token's holder is not.
+            tracing::warn!(
+                user_id = %claims.sub,
+                tenant_id = %claims.tenant_id,
+                tenant = subject.tenant.as_str(),
+                user = subject.user.as_str(),
+                "access token refused: its tenant or its user is deleted or missing"
+            );
+
+            return Err(AppError::Unauthorized);
+        }
 
         // **Resolved here, not at the call site** (#248 AC4). An address taken
         // from a header where it is used is an address the caller chose; this

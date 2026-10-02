@@ -73,7 +73,7 @@
 //!
 //! | Mutation | Reddened |
 //! |---|---|
-//! | `organization::repository::live_codes` drops `deleted_at IS NULL` | `a_deleted_tenants_open_session_resolves_no_secret_its_own_or_another`, `a_tenant_that_is_not_active_still_holds_its_names_and_a_deleted_one_does_not` |
+//! | `organization::repository::live_codes` drops `deleted_at IS NULL` | `a_tenant_that_is_not_active_still_holds_its_names_and_a_deleted_one_does_not`. Until #650 also `a_deleted_tenants_open_session_resolves_no_secret_its_own_or_another`; run again 2026-10-01 after it, that test is green under this mutation, because a deleted tenant's caller is now a 401 before the namespace is read |
 //! | `live_codes` adds `AND status = 'ACTIVE'` | `a_tenant_that_is_not_active_still_holds_its_names_and_a_deleted_one_does_not` |
 //! | `service::test_call` takes the first live tenant's code for the caller's | `a_created_tenant_naming_the_system_tenants_variable_is_refused_and_sends_nothing`, `another_tenants_variable_answers_the_same_set_or_unset`, `a_name_two_tenants_codes_both_map_to_is_refused_for_both`, `a_caller_in_another_tenant_calls_their_own_endpoint_and_neither_reaches_the_other` |
 //! | `-` admitted in a name after the separator | unit tests only. No request reaches it: `SecretReference::parse` refuses the shape first, which `a_stored_reference_outside_the_name_alphabet_is_malformed_and_reads_nothing` holds |
@@ -90,7 +90,7 @@
 //! | `admits`' length check on the #547 prefix removed | green — equivalent: the tenant prefix begins with the #547 prefix and is longer |
 //! | `admits`' `starts_with` on the #547 prefix removed | green — equivalent, for the same reason |
 //! | `std::env::var` called before `admits`, its answer dropped on a refusal | green — the answer is the same bytes, so no request observes it; the order is held by review of `outbound::resolve_secret` |
-//! | A caller whose tenant is not live is given the first live tenant's code | `a_deleted_tenants_open_session_resolves_no_secret_its_own_or_another` |
+//! | A caller whose tenant is not live is given the first live tenant's code | **green since #650**, run again 2026-10-01: all three suites. No request reaches the branch any more — a deleted tenant's token is refused by `middleware::auth` first — so it is left only to a tenant deleted between that read and the namespace read, which no test can stage. Held by review of `service::test_call`; `domain::secret`'s unit test holds only that `TenantNamespaces::for_caller` answers `None`. Until #650 this reddened `a_deleted_tenants_open_session_resolves_no_secret_its_own_or_another` |
 //! | `SecretReference::parse` skips the shape check | `a_stored_reference_outside_the_name_alphabet_is_malformed_and_reads_nothing` |
 //! | An empty value is a secret (`outbound::resolve_secret`) | `a_variable_set_to_nothing_is_not_found_and_nothing_is_sent` |
 //! | `namespace_segment` does not upper-case the code | `a_code_no_route_stores_reads_upper_case_names_or_nothing` — the builder's row above, now reached through a code written past the route |
@@ -2796,10 +2796,11 @@ async fn set_tenant_code(app: &TestApp, tenant: Uuid, code: &str) {
 
 #[tokio::test]
 async fn a_deleted_tenants_open_session_resolves_no_secret_its_own_or_another() {
-    // The access token outlives its tenant: deleting a tenant revokes its
-    // refresh sessions, not a token already issued. Such a caller has no
-    // live code, so nothing is resolved for it: not its own namespace, and
-    // not another live tenant's in place of the one it lost.
+    // A deleted tenant's access token is refused before the route is reached
+    // (#650, D-105; it answers #648): the call is a 401, not the 500 the
+    // missing namespace used to produce. Nothing is resolved, nothing is
+    // sent, and no `integration_logs` row is written, because no endpoint
+    // was found for a caller who was never admitted (SDD §9.3.6).
     let app = multi_tenant_app_reaching_loopback().await;
     let system_admin = app
         .sign_in_to("SYSTEM", common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
@@ -2825,20 +2826,24 @@ async fn a_deleted_tenants_open_session_resolves_no_secret_its_own_or_another() 
         .await;
     assert!(deleted.status.is_success(), "{}", deleted.body);
 
-    for (target, value, rows_expected) in [(&own, &own_value, 2), (&foreign, &system_value, 1)] {
+    let rows_before = all_log_text(&app).await;
+
+    for (target, value, rows_expected) in [(&own, &own_value, 1), (&foreign, &system_value, 0)] {
         let response = call(&app, &tenant, target).await;
-        assert_ne!(response.status, StatusCode::OK, "{}", response.body);
-        assert!(!response.body.to_string().contains(value.as_str()));
-        // Which names exist is not said either: the answer is not one of the
-        // resolver's.
-        assert!(
-            !matches!(
-                response.error_code(),
-                Some("SECRET_NOT_FOUND" | "SECRET_NAME_NOT_PERMITTED")
-            ),
+        assert_eq!(
+            response.status,
+            StatusCode::UNAUTHORIZED,
             "{}",
             response.body
         );
+        assert_eq!(
+            response.error_code(),
+            Some("UNAUTHORIZED"),
+            "{}",
+            response.body
+        );
+        assert!(!response.body.to_string().contains(value.as_str()));
+        // Which names exist is not said either.
         assert!(
             !response
                 .body
@@ -2847,14 +2852,18 @@ async fn a_deleted_tenants_open_session_resolves_no_secret_its_own_or_another() 
             "{}",
             response.body
         );
-        let rows = log_rows(&app, target.endpoint).await;
+        // The control's one row for its own endpoint, and no other.
         assert_eq!(
-            rows.len(),
+            log_rows(&app, target.endpoint).await.len(),
             rows_expected,
-            "the refused call still writes its row"
+            "a refused caller's call wrote a row"
         );
-        assert_eq!(rows[rows.len() - 1]["status"], "FAILED");
     }
+    assert_eq!(
+        all_log_text(&app).await,
+        rows_before,
+        "integration_logs changed under a refused caller"
+    );
     assert_eq!(
         collector.seen().len(),
         1,
@@ -2863,6 +2872,117 @@ async fn a_deleted_tenants_open_session_resolves_no_secret_its_own_or_another() 
     );
     assert!(!all_log_text(&app).await.contains(&system_value));
     assert!(!all_log_text(&app).await.contains(&own_value));
+}
+
+/// The caller as the extractor admits them: `Authenticated` cannot be built
+/// any other way, so this is the request's own admission, taken while the
+/// token's tenant and user are live.
+async fn admitted(app: &TestApp, token: &str) -> kelir_backend::middleware::auth::Authenticated {
+    use axum::extract::FromRequestParts;
+
+    let (mut parts, ()) = axum::http::Request::builder()
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(())
+        .expect("a request")
+        .into_parts();
+    parts
+        .extensions
+        .insert(axum::extract::ConnectInfo(common::TEST_PEER));
+
+    kelir_backend::middleware::auth::Authenticated::from_request_parts(&mut parts, &app.state)
+        .await
+        .expect("a live tenant's token is admitted")
+}
+
+/// **The race #650's criterion 8 leaves** (`test-engineer` campaign,
+/// 2026-10-02). A deleted tenant's token is a 401 before the route, so no
+/// request reaches `service::test_call`'s "the caller's tenant is not live"
+/// branch. A tenant deleted *between* the extractor's read and the namespace
+/// read does, and that is staged here as it happens: the caller is admitted
+/// by the extractor while the tenant is live, the tenant is deleted, and the
+/// service is called with the admitted caller.
+///
+/// It fails closed: an `INTERNAL_ERROR`, one `FAILED` row that names no
+/// variable and holds no value, nothing sent, and neither the tenant's own
+/// variable nor another tenant's read.
+///
+/// Planned and not run (the campaign's cargo runs were stopped for memory):
+/// `TenantNamespaces::for_caller` answering the first live tenant's namespace
+/// when the caller's is not among them, which the builder's table records as
+/// green in every suite; and the branch answering with an empty namespace
+/// instead of failing.
+#[tokio::test]
+async fn a_tenant_deleted_after_its_caller_was_admitted_resolves_nothing_and_fails_closed() {
+    use kelir_backend::modules::integration::service::test_call::test_call;
+
+    let app = multi_tenant_app_reaching_loopback().await;
+    let system_admin = app
+        .sign_in_to("SYSTEM", common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await;
+    let collector = Mock::start().await;
+    let tenant = created_tenant_administrator(&app, &system_admin, "TNT-RACE").await;
+
+    let (own_reference, own_value) = plant_in("TNT_RACE", "kelir-planted-raced-own-7a7a");
+    let (system_reference, system_value) = plant_in("SYSTEM", "kelir-planted-raced-foreign-8b8b");
+    let own = target(&app, &tenant, &collector.base_url(), "GET", "/echo").await;
+    bearer(&app, &tenant, own.system, &own_reference).await;
+    let foreign = target(&app, &tenant, &collector.base_url(), "GET", "/echo").await;
+    bearer(&app, &tenant, foreign.system, &system_reference).await;
+
+    // Admitted while live, and the service called directly serves them: the
+    // control for everything refused below.
+    let caller = admitted(&app, &tenant).await;
+    let served = test_call(&app.state, &caller, own.system, own.endpoint)
+        .await
+        .expect("a live tenant's call is made");
+    assert_eq!(served.status_code, 200);
+    assert_eq!(collector.seen().len(), 1);
+
+    // The tenant goes between the admission and the call.
+    let id = tenant_id_of(&app, "TNT-RACE").await;
+    let deleted = app
+        .delete(&format!("{TENANTS}/{id}"), Some(&system_admin))
+        .await;
+    assert!(deleted.status.is_success(), "{}", deleted.body);
+
+    for (target, rows_expected) in [(&own, 2), (&foreign, 1)] {
+        let error = test_call(&app.state, &caller, target.system, target.endpoint)
+            .await
+            .expect_err("a caller whose tenant is gone is not served");
+        assert_eq!(error.code(), "INTERNAL_ERROR", "{error:?}");
+
+        // Exactly one row for the call, and it says a call failed and no more.
+        let rows = log_rows(&app, target.endpoint).await;
+        assert_eq!(rows.len(), rows_expected, "{rows:?}");
+        let row = rows.last().expect("the failed call's row");
+        assert_eq!(row["status"], "FAILED", "{row}");
+        assert_eq!(
+            row["error_message"], "INTERNAL_ERROR: the call could not be completed",
+            "{row}"
+        );
+        assert_eq!(row["status_code"], Value::Null, "{row}");
+        assert_eq!(
+            row["request_payload_json"]["headers"]["Authorization"],
+            Value::Null,
+            "the row says a credential was attached: {row}"
+        );
+        assert!(
+            !row.to_string().contains("KELIR_INTEGRATION_SECRET_"),
+            "the row names a variable: {row}"
+        );
+    }
+
+    assert_eq!(
+        collector.seen().len(),
+        1,
+        "the collector received {:?}",
+        collector.seen()
+    );
+    let logged = all_log_text(&app).await;
+    for value in [&own_value, &system_value] {
+        assert!(!logged.contains(value.as_str()), "a row holds a secret");
+        assert_eq!(audit_rows_containing(&app, value).await, 0);
+    }
 }
 
 #[tokio::test]
