@@ -6022,9 +6022,73 @@ async fn statement_blocked_by(app: &TestApp, blocker: i32) -> Option<String> {
     .expect("read pg_stat_activity")
 }
 
-/// Whether `statement` is `instance_repo::lock_instance`'s.
+/// Whether `statement` is `instance_repo::lock_instance`'s: a `SELECT` whose
+/// one `FROM` is `workflow_instances` alone, ending in `FOR UPDATE`.
+///
+/// Read word by word, so that a statement locking another row while it joins
+/// the instance or reads it in a subquery is not mistaken for this one: its
+/// `FROM` would name another table first, or there would be two.
 fn locks_the_instance(statement: &str) -> bool {
-    statement.contains("FROM workflow_instances") && statement.contains("FOR UPDATE")
+    let words: Vec<&str> = statement.split_whitespace().collect();
+    let froms = words.iter().filter(|word| **word == "FROM").count();
+
+    words.first() == Some(&"SELECT")
+        && words.ends_with(&["FOR", "UPDATE"])
+        && froms == 1
+        && words
+            .windows(3)
+            .any(|three| three == ["FROM", "workflow_instances", "WHERE"])
+}
+
+/// **[`locks_the_instance`] knows `lock_instance` from its neighbours.** Every
+/// race test that says where a request waited rests on it, and the substring
+/// check it replaced would have passed a subquery that locks the document, or
+/// a join from the instance that locks the document with it.
+#[test]
+fn locks_the_instance_is_lock_instance_and_nothing_near_it() {
+    let lock_instance = "
+        SELECT id, workflow_definition_id, document_id, current_state, status
+        FROM workflow_instances
+        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+        FOR UPDATE
+        ";
+    assert!(locks_the_instance(lock_instance));
+
+    for (statement, why) in [
+        (
+            "SELECT id FROM workflow_tasks WHERE tenant_id = $1 AND id = $2 FOR UPDATE",
+            "the task's lock",
+        ),
+        (
+            "SELECT d.id FROM documents d JOIN workflow_instances i ON i.id = d.process_instance_id
+             WHERE d.id = $1 FOR UPDATE",
+            "a join locking the document",
+        ),
+        (
+            "SELECT i.id FROM workflow_instances i JOIN documents d ON d.id = i.document_id
+             WHERE i.id = $1 FOR UPDATE",
+            "a join from the instance, locking the document too",
+        ),
+        (
+            "SELECT id FROM documents WHERE process_instance_id =
+             (SELECT id FROM workflow_instances WHERE id = $1) FOR UPDATE",
+            "a subquery locking the document",
+        ),
+        (
+            "SELECT i.id FROM workflow_instances i WHERE i.id = $1 FOR UPDATE",
+            "an aliased read, which `lock_instance` is not",
+        ),
+        (
+            "SELECT id FROM workflow_instances WHERE id = $1 FOR KEY SHARE",
+            "a weaker lock",
+        ),
+        (
+            "SELECT id FROM workflow_instances WHERE id = $1 FOR NO KEY UPDATE",
+            "a weaker lock",
+        ),
+    ] {
+        assert!(!locks_the_instance(statement), "{why}: {statement}");
+    }
 }
 
 /// The deadlocks PostgreSQL has counted in this test's database so far.
