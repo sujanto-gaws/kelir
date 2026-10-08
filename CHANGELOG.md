@@ -584,7 +584,9 @@ While the major version is `0`, the public API may change in any release.
   now locks the instance before the document, so it waits and then answers
   what it would have answered alone. A resubmit into a state that raises a
   task while the correction task is open is still refused with a 409
-  ([#667](https://github.com/sujanto-gaws/kelir/issues/667)).
+  ([#667](https://github.com/sujanto-gaws/kelir/issues/667)). A submit whose
+  document starts a workflow between the submit's first read and its lock is
+  answered `409 CONFLICT`, and submitting again succeeds.
 - **A deleted tenant's access token, and a deleted user's, are refused at
   once on every route, and no token is accepted past its expiry**
   ([#650](https://github.com/sujanto-gaws/kelir/issues/650),
