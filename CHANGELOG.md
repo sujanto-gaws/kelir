@@ -538,6 +538,32 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **The API description, three screens and JWSS no longer claim more than
+  the code does**
+  ([#664](https://github.com/sujanto-gaws/kelir/issues/664),
+  [#665](https://github.com/sujanto-gaws/kelir/issues/665),
+  [#666](https://github.com/sujanto-gaws/kelir/issues/666), verification
+  record 21, Findings 2 to 4). Nothing the server or the screens do changed.
+  - **The test call's `EGRESS_REFUSED` explanation** claimed loopback,
+    link-local and cloud metadata addresses refused without a limit. It now
+    says no setting allows them. An IPv6 address in one of the five translated forms of
+    decision **D-103** is judged public whatever IPv4 address it carries, and
+    the test call's OpenAPI description and the
+    [User Manual](docs/operations/03.%20User%20Manual.md) §11.5 now say so.
+  - **The test call's OpenAPI description and three screens said every
+    secret is masked.** The description claimed the secret redacted in the
+    preview whatever its spelling, and the test-call dialog, the integration
+    log and a log row's detail claimed secrets masked without a limit. Each
+    now says an echo of the secret is masked only in the spellings ADR-0043
+    §R lists, and that any other spelling is shown or stored as the system
+    sent it. The description also named one pinned address: the connection is
+    pinned to every checked address.
+  - **[JWSS](docs/schema/JSON%20Workflow%20Schema.md) §5.3** said an `OWNER`
+    task goes to whoever submits the document. It goes to the document's
+    creator, as the entry on #579 below says. Its known limit for
+    `OWNER_DEPARTMENT` said a task whose assignment and `allowedBy` both use
+    the scope needs somebody in both departments. A grant of the role with no
+    department satisfies any department, so its holder decides the task.
 - **A deleted tenant's access token, and a deleted user's, are refused at
   once on every route, and no token is accepted past its expiry**
   ([#650](https://github.com/sujanto-gaws/kelir/issues/650),

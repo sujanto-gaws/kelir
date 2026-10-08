@@ -278,7 +278,9 @@ const systemLabel = computed(() => {
         </div>
 
         <p class="text-xs text-muted-foreground">
-          Secrets were masked when this row was written. It is shown as stored.
+          When this row was written, a secret the system echoed was masked only in the spellings
+          Kelir lists, and any other spelling was stored as the system sent it. The row is shown as
+          stored.
         </p>
       </template>
     </div>

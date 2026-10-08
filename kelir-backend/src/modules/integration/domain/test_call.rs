@@ -60,9 +60,9 @@ impl TestCallStatus {
 /// A test call's answer, for a call the system answered.
 ///
 /// **No headers**, the system's or the call's: the request's `Authorization`
-/// is the secret, and a response header can echo it. The body preview has the
-/// secret redacted in every form it was sent in, and sensitive JSON keys
-/// masked.
+/// is the secret, and a response header can echo it. The body preview has an
+/// echo of the secret redacted in the spellings ADR-0043 §R lists, and no
+/// other (#665), and sensitive JSON keys masked.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TestCallResponse {

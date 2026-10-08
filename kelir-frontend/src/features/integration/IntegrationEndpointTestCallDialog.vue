@@ -201,7 +201,8 @@ async function call(): Promise<void> {
             Truncated: only the first 2,048 characters of the body are shown.
           </p>
           <p class="text-xs text-muted-foreground">
-            Any secret Kelir sent is masked in the body. Headers are not shown.
+            If the system echoes the secret Kelir sent, only the spellings Kelir lists are masked,
+            and any other spelling is shown as the system sent it. Headers are not shown.
           </p>
         </div>
       </template>

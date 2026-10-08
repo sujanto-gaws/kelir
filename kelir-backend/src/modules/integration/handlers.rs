@@ -319,13 +319,19 @@ pub async fn update_endpoint(
 /// `fd00:ec2::254` (#622), and a private address unless
 /// `KELIR_INTEGRATION_ALLOWED_CIDRS` lists its range. An IPv4-mapped or
 /// IPv4-compatible IPv6 address is judged as the IPv4 address it carries.
-/// The connection is pinned to the checked address, redirects are not
-/// followed, and the whole call is bounded by the system's `timeoutSeconds`.
+/// **An address in one of five translated IPv6 forms — NAT64, 6to4, Teredo,
+/// ISATAP under a public prefix and IPv4-translated — is judged public
+/// whatever IPv4 address it carries** (D-103, #664), so one carrying a
+/// refused IPv4 address is called.
+/// The connection is pinned to the checked addresses, every one of which
+/// passed, redirects are not followed, and the whole call is bounded by the
+/// system's `timeoutSeconds`.
 ///
 /// **Every call from the moment the endpoint is found writes exactly one
 /// `integration_logs` row**, answered or not; its id is `logId` here, and in
-/// the message of a failure. No header is returned, and the body preview has
-/// the secret redacted in every form it was sent in.
+/// the message of a failure. No header is returned. An echo of the secret in
+/// the body preview is redacted only in the spellings ADR-0043 §R lists, and
+/// an echo in any other spelling is returned as the system sent it (#665).
 #[utoipa::path(
     post, path = "/api/v1/integration/external-systems/{id}/endpoints/{endpointId}/test-call", tag = "integration",
     responses(
