@@ -33,7 +33,13 @@
 //! deadlocked with them. The cost of the fix is that task paths now serialize
 //! per instance.
 //!
+//! **The same row takes the document too**, through its foreign key to
+//! `documents`, and a decision also updates the document. So a path that
+//! locks the document and the instance has to take the instance first; the
+//! submit does since [#663].
+//!
 //! [#619]: https://github.com/sujanto-gaws/kelir/issues/619
+//! [#663]: https://github.com/sujanto-gaws/kelir/issues/663
 //!
 //! # Permission, and then the row
 //!
@@ -638,13 +644,14 @@ pub async fn reassign(
 ///
 /// The instance is already locked: `reassign` takes it before the task, in
 /// `lock_instance_then_task` ([#619]), so the state read here cannot move
-/// meanwhile. A decision, the only thing that moves a state with an open task,
-/// waits on the same instance lock.
+/// meanwhile. A decision and a resubmit can each move a state with an open
+/// task, and both wait on the same instance lock ([#663]).
 /// `permits` and `names_role` read each edge's role `FOR KEY SHARE`, as a
 /// decision does.
 ///
 /// [#512]: https://github.com/sujanto-gaws/kelir/issues/512
 /// [#619]: https://github.com/sujanto-gaws/kelir/issues/619
+/// [#663]: https://github.com/sujanto-gaws/kelir/issues/663
 async fn refuse_unless_target_can_decide(
     transaction: &mut sqlx::PgTransaction<'_>,
     tenant_id: Uuid,
@@ -771,6 +778,10 @@ fn describe_rule(rule: &AssignmentRule) -> String {
 /// and wanted the task. Taking the instance explicitly and first makes the
 /// key's lock one this transaction already holds.
 ///
+/// The row's foreign key to `documents` takes `FOR KEY SHARE` on the document
+/// as well, after both locks here. A path that locks the document has to take
+/// the instance before it, as the submit does since [#663].
+///
 /// `instance_id` is the task's, read on the pool before the transaction,
 /// because the instance must be locked before the task can be read under a
 /// lock. A task never changes instance, so a mismatch under the lock is
@@ -781,6 +792,7 @@ fn describe_rule(rule: &AssignmentRule) -> String {
 /// "Task", as `decide` answers them.
 ///
 /// [#619]: https://github.com/sujanto-gaws/kelir/issues/619
+/// [#663]: https://github.com/sujanto-gaws/kelir/issues/663
 async fn lock_instance_then_task(
     transaction: &mut sqlx::PgTransaction<'_>,
     tenant_id: Uuid,
