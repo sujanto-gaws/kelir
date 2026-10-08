@@ -231,8 +231,9 @@ onMounted(() => {
     <div>
       <h2 class="text-xl font-semibold tracking-tight">Integration logs</h2>
       <p class="mt-1 text-sm text-muted-foreground">
-        Every call Kelir made to or received from an external system, newest first. Secrets are
-        masked when a call is logged.
+        Every call Kelir made to or received from an external system, newest first. When a call is
+        logged, a secret the system echoes is masked only in the spellings Kelir lists, and any
+        other spelling is stored as the system sent it.
       </p>
     </div>
 

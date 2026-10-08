@@ -529,9 +529,10 @@ fn refuse_unless_submittable(status: DocumentStatus) -> Result<(), AppError> {
 /// and the first caller to need it.
 ///
 /// **`owner_user_id` is the document's `created_by`, not the caller.** They
-/// coincide on a first submit and need not here: anybody holding
-/// `document:submit` can reach this path, and `allowedBy: "OWNER"` on the
-/// `RESUBMIT` edge has to refuse them. Reading the caller into the owner slot
+/// differ whenever somebody submits another user's document, here as on a
+/// first submit (`start_workflow`): anybody holding `document:submit` can
+/// reach this path, and `allowedBy: "OWNER"` on the `RESUBMIT` edge has to
+/// refuse them. Reading the caller into the owner slot
 /// would make that rule authorize everybody it was written to exclude.
 ///
 /// [#183]: https://github.com/sujanto-gaws/kelir/issues/183

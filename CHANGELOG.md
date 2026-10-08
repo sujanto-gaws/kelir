@@ -538,6 +538,42 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **The API description, three screens and JWSS no longer claim more than
+  the code does**
+  ([#664](https://github.com/sujanto-gaws/kelir/issues/664),
+  [#665](https://github.com/sujanto-gaws/kelir/issues/665),
+  [#666](https://github.com/sujanto-gaws/kelir/issues/666), verification
+  record 21, Findings 2 to 4). Nothing the server or the screens do changed.
+  - **The test call's `EGRESS_REFUSED` explanation** claimed loopback,
+    link-local and cloud metadata addresses refused without a limit. It now
+    says no setting allows them. An IPv6 address in one of the five translated forms of
+    decision **D-103** is judged public whatever IPv4 address it carries, and
+    the test call's OpenAPI description and the
+    [User Manual](docs/operations/03.%20User%20Manual.md) §11.5 now say so.
+    [ADR-0043](docs/architectures/adr/0043.%20A%20Test%20Call%20Runs%20in%20the%20Request,%20Resolves%20Only%20env%20Secrets,%20and%20Connects%20Only%20to%20a%20Checked%20Address.md)
+    §4 claimed the server could not be pointed at those addresses; it now
+    claims that only for an address the guard classes as one of them, and
+    states D-103's limit among the negatives. §2, §5 and §6 counted local-use
+    NAT64 as a form of its own beside the five; it is NAT64's second range,
+    and SDD §9.3.6 and Installation and Deployment §7.1 now count it so.
+  - **The test call's OpenAPI description and three screens said every
+    secret is masked.** The description claimed the secret redacted in the
+    preview whatever its spelling, and the test-call dialog, the integration
+    log and a log row's detail claimed secrets masked without a limit. Each
+    now says an echo of the secret is masked only in the spellings ADR-0043
+    §R lists, and that any other spelling is shown or stored as the system
+    sent it. The description also named one pinned address: the connection is
+    pinned to every checked address.
+  - **[JWSS](docs/schema/JSON%20Workflow%20Schema.md) §5.3** said an `OWNER`
+    task goes to the submitter. It goes to the document's
+    creator, as the entry on #579 below says. The row now also says that an
+    `allowedBy: "OWNER"` edge refuses anybody but the creator or the
+    creator's delegate on a task, and that no
+    `SUBMIT` edge is fired, so any holder of `document:submit` can submit
+    another user's draft. Its known limit for
+    `OWNER_DEPARTMENT` said a task whose assignment and `allowedBy` both use
+    the scope needs somebody in both departments. A grant of the role with no
+    department satisfies any department, so its holder decides the task.
 - **A deleted tenant's access token, and a deleted user's, are refused at
   once on every route, and no token is accepted past its expiry**
   ([#650](https://github.com/sujanto-gaws/kelir/issues/650),

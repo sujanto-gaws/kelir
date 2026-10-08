@@ -94,11 +94,12 @@ pub struct SubmissionSubject {
     pub document_number: Option<String>,
     /// Who owns the document, for an `OWNER` assignment rule.
     ///
-    /// **Not the caller.** The two coincide on a first submit and do not on a
-    /// resubmission, where anybody holding `document:submit` could be the one
-    /// sending it back up — and `allowedBy: "OWNER"` on the `RESUBMIT` edge must
-    /// refuse them. `workflow::service::task` reads the same column for the same
-    /// reason.
+    /// **Not the caller.** Anybody holding `document:submit` can submit another
+    /// user's document, on a first submit as on a resubmission, so the two
+    /// differ whenever they do: a first submit routes an `OWNER` assignment to
+    /// the creator (#579), and `allowedBy: "OWNER"` on the `RESUBMIT` edge must
+    /// refuse a caller who is not the creator. `workflow::service::task` reads
+    /// the same column for the same reason.
     pub created_by: Option<Uuid>,
     /// The process currently deciding it, when one is (FR-DOC-012).
     ///

@@ -172,8 +172,8 @@ export type TestCallStatus = 'SUCCESS' | 'FAILED'
  * **An answer is not a success**: a `500` from the system is a `200` from
  * Kelir with `status: 'FAILED'`. A call that got no answer, or was refused
  * before anything was sent, is an error instead, whose message names the
- * integration log row. No header is returned, and the preview has the secret
- * redacted.
+ * integration log row. No header is returned. The preview has an echo of the
+ * secret redacted in the spellings ADR-0043 §R lists, and no other (#665).
  */
 export interface TestCallResponse {
   /** The `integration_logs` row this call wrote. */
@@ -185,7 +185,10 @@ export interface TestCallResponse {
   /** The system's HTTP status. Redirects are not followed, so a `3xx` is returned as it came. */
   statusCode: number
   durationMs: number
-  /** The start of the response body, at most 2048 characters, masked. */
+  /**
+   * The start of the response body, at most 2048 characters. Sensitive keys are masked, and an
+   * echo of the secret is redacted only in the spellings ADR-0043 §R lists.
+   */
   bodyPreview: string
   /** Whether `bodyPreview` is shorter than the body. */
   bodyTruncated: boolean

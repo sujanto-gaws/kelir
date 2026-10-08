@@ -60,9 +60,9 @@ impl TestCallStatus {
 /// A test call's answer, for a call the system answered.
 ///
 /// **No headers**, the system's or the call's: the request's `Authorization`
-/// is the secret, and a response header can echo it. The body preview has the
-/// secret redacted in every form it was sent in, and sensitive JSON keys
-/// masked.
+/// is the secret, and a response header can echo it. The body preview has an
+/// echo of the secret redacted in the spellings ADR-0043 §R lists, and no
+/// other (#665), and sensitive JSON keys masked.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TestCallResponse {
@@ -302,10 +302,12 @@ pub struct BodyPreview {
 ///    [`MAX_BODY_BYTES`] — has every `"<key>": "<string>"` pair in its text
 ///    masked by the same list ([`mask_text`]; the product owner's decision on
 ///    #547).
-/// 2. **Every form of the secret is redacted**, JSON or not: `redactions` is
-///    [`super::secret::redactions`]' list — the literal forms and their
-///    base64, percent- and `\u`-escaped spellings — and a system that echoes
-///    the header it was sent (many test endpoints do) has it replaced here.
+/// 2. **Each spelling on the `redactions` list is redacted**, JSON or not:
+///    `redactions` is [`super::secret::redactions`]' list — the literal forms
+///    and their base64, percent- and `\u`-escaped spellings, as ADR-0043 §R
+///    lists them — and a system that echoes the header it was sent (many test
+///    endpoints do) has it replaced here. A spelling not on the list is left
+///    as the system sent it (#665).
 /// 3. **U+0000 becomes U+FFFD**: PostgreSQL stores neither a `text` nor a
 ///    `jsonb` string with it, and the preview is stored ([`without_nul`]).
 /// 4. The result is cut to [`PREVIEW_CHARACTERS`]. `read_was_cut` says the body
