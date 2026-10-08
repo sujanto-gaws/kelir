@@ -81,6 +81,10 @@ import {
 
 const SYSTEMS_PATH = `${API_PREFIX}/integration/external-systems`
 const LOGS_PATH = `${API_PREFIX}/integration/logs`
+/** The routes whose body could carry the secret. */
+const INTEGRATION_PREFIX = `${API_PREFIX}/integration`
+/** How long one body read may take before it counts as unread (#681). */
+const BODY_READ_LIMIT_MS = 5_000
 
 const ANSWERED_URL = `${UPSTREAM_BASE_URL}/purchase-orders`
 const NOT_SERVED_URL = `${UPSTREAM_BASE_URL}/retired-orders`
@@ -206,19 +210,26 @@ test('a test call the system answers is shown as a success, logged beside a fail
 }) => {
   const { username, password } = credentials()
 
-  // Every body the browser is given under /api/, read at the end. A response
-  // whose body cannot be read (a redirect, a page that navigated away) had no
-  // body a script could have read either.
-  const received: Promise<{ url: string; text: string }>[] = []
+  // Every body the browser is given under /api/, read at the end. A body that
+  // cannot be read (a redirect, a page that navigated away) is marked unread,
+  // not counted as empty. In Chromium such a read can also never settle, which
+  // hung this test once after every assertion had passed (#681), so each read
+  // is bounded and one that runs out is marked unread too.
+  const received: Promise<{ url: string; text: string; unread: boolean }>[] = []
   page.on('response', (response) => {
     const url = response.url()
 
     if (new URL(url).pathname.startsWith(API_PREFIX)) {
       received.push(
-        response.text().then(
-          (text) => ({ url, text }),
-          () => ({ url, text: '' }),
-        ),
+        Promise.race([
+          response.text().then(
+            (text) => ({ url, text, unread: false }),
+            () => ({ url, text: '', unread: true }),
+          ),
+          new Promise<{ url: string; text: string; unread: boolean }>((resolve) =>
+            setTimeout(() => resolve({ url, text: '', unread: true }), BODY_READ_LIMIT_MS),
+          ),
+        ]),
       )
     }
   })
@@ -362,6 +373,14 @@ test('a test call the system answers is shown as a success, logged beside a fail
 
   // --- Nothing the browser was given carries the secret ----------------------
   const bodies = await Promise.all(received)
+  // A body nobody could read is not checked below, so none of them may be one
+  // that could carry the secret: the integration routes are where it would be.
+  expect(
+    bodies
+      .filter(({ unread, url }) => unread && new URL(url).pathname.startsWith(INTEGRATION_PREFIX))
+      .map(({ url }) => url),
+    'integration responses whose body was not read',
+  ).toEqual([])
   // The two test calls, the two log reads and the filtered list are in there;
   // an empty list would make the loop below pass on nothing.
   expect(bodies.filter(({ text }) => text.includes(logOk)).length).toBeGreaterThanOrEqual(3)
