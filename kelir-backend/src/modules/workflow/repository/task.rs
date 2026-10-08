@@ -139,8 +139,8 @@ pub async fn insert_task(
 /// The open task of an instance, held for the rest of the transaction.
 ///
 /// **Taken after the instance, never before it** — see
-/// [`super::instance::lock_instance`], which states the ordering this module
-/// keeps on every path.
+/// [`super::instance::lock_instance`], which says what the task paths lock and
+/// in what order.
 pub async fn lock_open_task_of_instance(
     transaction: &mut sqlx::PgTransaction<'_>,
     tenant_id: Uuid,
