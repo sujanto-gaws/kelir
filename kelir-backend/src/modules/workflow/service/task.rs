@@ -15,15 +15,17 @@
 //! who both passed the check produce one update of one row and one update of
 //! none.
 //!
-//! # The lock ordering
+//! # The locks these paths take
 //!
-//! **Instance first, then task, then a role**, which is [`super::engine`]'s
-//! rule and applies to every path in this module: `claim_task`, `delegate`,
-//! `reassign` and `decide` all take the instance through `lock_instance_then_task`
-//! or `lock_instance`. The check reads the *instance's* state to choose a
+//! **The instance, then the task, then a role**: `claim_task`, `delegate`,
+//! `reassign` and `decide` all take the instance through
+//! `lock_instance_then_task` or `lock_instance`, as [`super::engine`] says of
+//! its callers. The check reads the *instance's* state to choose a
 //! transition, so §2.5 puts a lock on that too — and two paths taking the two
 //! rows in opposite orders is a deadlock at exactly the concurrency this
-//! feature is for.
+//! feature is for. **This says what these paths lock, not a complete lock
+//! order** (ADR-0042 §2): the rows they write take more through their foreign
+//! keys, as the next two paragraphs say.
 //!
 //! **A path takes the instance even when it never names it.** Each of them
 //! writes a `workflow_task_history` row, whose foreign key to

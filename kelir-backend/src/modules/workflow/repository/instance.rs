@@ -59,11 +59,12 @@ pub async fn insert_instance(
 
 /// The live instance of a document, held for the rest of the transaction.
 ///
-/// **`FOR UPDATE`, and it is taken before the task** — every path in this module
-/// takes the instance first and then the task, which
+/// **`FOR UPDATE`, and it is taken before the task**: the task paths and the
+/// engine's callers take the instance and then the task, which
 /// [`super::super::service::engine`] states at the top. Two paths taking them in
 /// opposite orders is a deadlock at exactly the concurrency the feature is for,
-/// and it is a defect no single-threaded test can see.
+/// and it is a defect no single-threaded test can see. That is what these paths
+/// lock, not a complete lock order (ADR-0042 §2).
 ///
 /// **A path that never calls this can still take the instance.** A
 /// `workflow_task_history` insert takes `FOR KEY SHARE` on it through the

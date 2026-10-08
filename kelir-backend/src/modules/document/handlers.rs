@@ -164,7 +164,7 @@ async fn delete_document(
         (status = 200, description = "Submitted, with its number assigned and the server's own form data stored", body = Document),
         (status = 403, description = "Missing document:submit"),
         (status = 404, description = "No such document"),
-        (status = 409, description = "The document is not a draft"),
+        (status = 409, description = "The document is not a draft or a returned document, or its workflow changed while it was being submitted"),
         (status = 422, description = "The form data does not satisfy its definition, or the type has no numbering rule")
     ),
     security(("bearer" = []))

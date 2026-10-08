@@ -17,19 +17,23 @@
 //! defect has been written in this codebase and the first time the type system
 //! declines to compile it.
 //!
-//! # The lock ordering, on every path in this module
+//! # The locks these paths take
 //!
-//! **The instance first, then the task.** [`fire`] takes them in that order and
-//! so does everything that calls it. Two paths taking them in opposite orders is
-//! a deadlock at exactly the concurrency the feature exists for, and it is a
-//! defect no single-threaded test can see — which is why it is a rule stated
-//! here rather than an observation about the current code.
+//! **The instance, then the task.** [`fire`] takes them in that order, and so
+//! does everything that calls it. Two paths taking them in opposite orders is a
+//! deadlock at exactly the concurrency the feature exists for, and it is a
+//! defect no single-threaded test can see.
 //!
 //! **A caller that also locks the document takes the instance before it.** The
 //! history and task rows written here reference the document, so their foreign
 //! keys take it after the instance; the submit locked the document first until
 //! [#663](https://github.com/sujanto-gaws/kelir/issues/663) and deadlocked with
 //! a task path.
+//!
+//! **This says what the paths lock. It is not a complete lock order.** Rows
+//! written here take further rows through their foreign keys, and a list of
+//! explicit locks has twice missed one ([#619](https://github.com/sujanto-gaws/kelir/issues/619),
+//! [#663](https://github.com/sujanto-gaws/kelir/issues/663)); ADR-0042 §2.
 //!
 //! # Every move through here is recorded, in the same transaction
 //!
