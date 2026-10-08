@@ -6926,6 +6926,681 @@ async fn a_resubmit_to_a_state_with_no_task_during_a_reassign_waits_and_moves() 
     );
 }
 
+// ---------------------------------------------------------------------------
+// #663 — the resubmit meets every task path (plan 18 row 18's campaign)
+// ---------------------------------------------------------------------------
+//
+// The two tests above race the resubmit against a reassign, parked at the
+// role it is moving the task to. A claim, a hand-off and a decision take no
+// lock between the instance and their history row that a test can hold, so
+// these park each of them **at its own `workflow_task_history` `INSERT`**: a
+// `BEFORE INSERT` row trigger waits on an advisory lock the test holds. A row
+// trigger fires before the row's foreign keys are checked, so the task path is
+// stopped holding the instance and the task, and not yet the document. That
+// is the moment record 21's P1 needed, reached on every path.
+//
+// # Seen red on main's code (`da594d5`'s `src/` and `.sqlx/`), 2026-10-08
+//
+// | Test | How it went red |
+// |---|---|
+// | *…during a claim of the correction…* | The claim answered 200; the resubmit answered 500 `INTERNAL_ERROR`, *deadlock detected* in the log |
+// | *…during a hand-off of the correction…* | The hand-off answered 200; the resubmit answered 500, *deadlock detected* |
+// | *…during a decision on the correction…* | The decision answered 200; the resubmit answered 500 rather than 409, *deadlock detected* |
+// | *a first submit overtaken by a submit and a return…* | 409, but from `start_workflow`'s *"this document already has a live approval"*: main has no instance check, so the overtaken submit took the first-submit path on a returned document, set a new number in its own transaction, and was refused only when it tried to start a second process. It rolled back |
+//
+// Each resubmit was seen blocked in `lock_instance`'s statement on main too: it
+// held the document there, which is the difference the deadlock shows. The two
+// reassign tests above went red on the same run, as their own header says.
+//
+// # Mutations of the fix, each applied alone and reverted, 2026-10-08
+//
+// The #663 tests above and below, and `workflow_engine`'s two resubmit
+// tests, run against each.
+//
+// | Mutation | Result |
+// |---|---|
+// | The old order: the instance locked after the document, the check kept | Red: the claim, hand-off and decision tests here and both reassign tests answer 500, *deadlock detected* |
+// | The instance check dropped | Red only in *a first submit overtaken…*, and **only by its message**: `start_workflow` refuses a second live process with a 409 of its own and the transaction rolls back. The check is a backstop that answers first and names the cause; nothing else observable changes |
+// | The instance locked after the document on a first submit only | Green, and no test can redden it: a document read as a draft has no process (only a first submit writes `process_instance_id`, and nothing moves a document back to `DRAFT`), so a first submit locks no instance in either place |
+// | `None` passed to `resubmit_workflow` for the instance | Red: every resubmit that reaches the workflow answers 500, *points at instance …, which does not exist*; the claim, hand-off and both reassign tests, and `workflow_engine`'s two resubmit tests. The decision test stays green, its resubmit refused as not editable before the workflow |
+
+/// A workflow whose `RETURN` sends the document to `RETURNED`, where a
+/// correction task is offered to `corrector`. A holder of `corrector` may claim
+/// it, hand it on, or `REJECT` the document from there. `RESUBMIT` goes to
+/// `RECHECK`, which raises no task, so [#667]'s refusal never decides the
+/// outcome.
+///
+/// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
+fn corrected_by_a_role(key: &str, queue: &str, corrector: &str) -> Value {
+    json!({
+        "workflowKey": key,
+        "version": "1.0.0",
+        "name": "Corrected by a role",
+        "initialState": "MANAGER_APPROVAL",
+        "states": [
+            { "code": "MANAGER_APPROVAL", "name": "Manager approval",
+              "mapsToDocumentStatus": "PENDING_APPROVAL",
+              "task": { "taskDefinitionKey": "manager_approval", "taskName": "Decide",
+                        "assignment": { "assigneeType": "ROLE", "roleCode": queue } } },
+            { "code": "RETURNED", "name": "Returned for correction",
+              "mapsToDocumentStatus": "RETURNED",
+              "task": { "taskDefinitionKey": "correct_it", "taskName": "Correct the request",
+                        "assignment": { "assigneeType": "ROLE", "roleCode": corrector } } },
+            { "code": "RECHECK", "name": "Rechecked without a task",
+              "mapsToDocumentStatus": "PENDING_APPROVAL" },
+            { "code": "REJECTED", "name": "Rejected", "mapsToDocumentStatus": "REJECTED",
+              "isFinal": true },
+            { "code": "COMPLETED", "name": "Completed", "mapsToDocumentStatus": "COMPLETED",
+              "isFinal": true }
+        ],
+        "transitions": [
+            { "from": "MANAGER_APPROVAL", "to": "COMPLETED", "action": "APPROVE",
+              "allowedBy": format!("ROLE:{queue}") },
+            { "from": "MANAGER_APPROVAL", "to": "RETURNED", "action": "RETURN",
+              "allowedBy": format!("ROLE:{queue}") },
+            { "from": "RETURNED", "to": "RECHECK", "action": "RESUBMIT",
+              "allowedBy": "OWNER" },
+            { "from": "RETURNED", "to": "REJECTED", "action": "REJECT",
+              "allowedBy": format!("ROLE:{corrector}") },
+            { "from": "RECHECK", "to": "COMPLETED", "action": "APPROVE",
+              "allowedBy": format!("ROLE:{queue}") }
+        ]
+    })
+}
+
+/// A document [`corrected_by_a_role`] has returned, and who can work its
+/// correction task.
+struct Correction {
+    document: Uuid,
+    task: Uuid,
+    role: Uuid,
+    corrector_id: Uuid,
+    corrector: String,
+    colleague_id: Uuid,
+}
+
+/// The administrator creates and submits the document, an approver returns
+/// it, and the correction task is offered to `<code>-C`, which a corrector and
+/// a colleague hold.
+async fn returned_to_a_role(app: &TestApp, token: &str, code: &str) -> Correction {
+    let roles = code.replace('_', "-");
+    let users = code.to_lowercase().replace('_', ".");
+    let key = code.to_lowercase();
+
+    let queue = worker_role(app, &format!("{roles}-Q")).await;
+    let role = worker_role(app, &format!("{roles}-C")).await;
+    let (_, approver) = worker(app, &format!("{users}.approver"), &[queue]).await;
+    let (corrector_id, corrector) = worker(app, &format!("{users}.corrector"), &[role]).await;
+    let (colleague_id, _) = worker(app, &format!("{users}.colleague"), &[role]).await;
+
+    let definition = corrected_by_a_role(&key, &format!("{roles}-Q"), &format!("{roles}-C"));
+    let workflow = publish_workflow_definition(app, token, &key, definition).await;
+    let type_id = document_type(app, token, code, workflow).await;
+    let document = submitted_document(app, token, type_id, "Returned to a role").await;
+    let manager = open_task_of(app, document).await;
+
+    let returned = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{manager}/decision"),
+            Some(&approver),
+            json!({ "action": "RETURN", "comment": "Fix the amount" }),
+        )
+        .await;
+    assert_eq!(returned.status, StatusCode::OK, "{}", returned.body);
+
+    let task = open_task_of(app, document).await;
+    assert_ne!(task, manager);
+
+    Correction {
+        document,
+        task,
+        role,
+        corrector_id,
+        corrector,
+        colleague_id,
+    }
+}
+
+/// Sends `first`, a task path on the correction task, and stops it at its
+/// `workflow_task_history` `INSERT`, holding the instance and the task. Then
+/// sends the owner's resubmit of `document`, and waits until it is seen
+/// blocked by `first` in `pg_stat_activity`. Then opens the gate. Answers the
+/// task path's response, the resubmit's, and the statement the resubmit
+/// waited in.
+///
+/// The gate is [`second_waits_on_first`]'s: a trigger that takes a shared
+/// advisory lock the test holds exclusively on a connection of its own, and
+/// the first request seen stopped in `pg_locks`. It is created after the
+/// staging, so only the raced requests meet it.
+async fn resubmit_during_a_held_task_path(
+    app: &Arc<TestApp>,
+    token: &str,
+    document: Uuid,
+    first: impl FnOnce() -> tokio::task::JoinHandle<common::TestResponse>,
+) -> (common::TestResponse, common::TestResponse, String) {
+    use sqlx::{Connection, PgConnection};
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    /// The advisory key the trigger waits on; the issue's number.
+    const GATE: i64 = 663;
+    const PATIENCE: Duration = Duration::from_secs(30);
+
+    sqlx::query(&format!(
+        "CREATE FUNCTION test_history_gate() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             PERFORM pg_advisory_xact_lock_shared({GATE});
+             RETURN NEW;
+         END
+         $$"
+    ))
+    .execute(&app.pool)
+    .await
+    .expect("the gate's function");
+    sqlx::query(
+        "CREATE TRIGGER test_history_gate BEFORE INSERT ON workflow_task_history
+         FOR EACH ROW EXECUTE FUNCTION test_history_gate()",
+    )
+    .execute(&app.pool)
+    .await
+    .expect("the gate's trigger");
+
+    let mut gate = PgConnection::connect_with(&app.pool.connect_options())
+        .await
+        .expect("the gate's connection");
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(GATE)
+        .execute(&mut gate)
+        .await
+        .expect("close the gate");
+
+    let first = first();
+
+    let deadline = Instant::now() + PATIENCE;
+    let held: i32 = loop {
+        let waiting: Option<i32> = sqlx::query_scalar(
+            "SELECT pid FROM pg_locks
+             WHERE locktype = 'advisory' AND objid::text::bigint = $1 AND objsubid = 1
+               AND NOT granted
+               AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
+        )
+        .bind(GATE)
+        .fetch_optional(&app.pool)
+        .await
+        .expect("read pg_locks");
+        if let Some(pid) = waiting {
+            break pid;
+        }
+        if first.is_finished() {
+            let answered = first.await.expect("the task path did not panic");
+            panic!(
+                "the task path finished without reaching its history row: {} {}",
+                answered.status, answered.body
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the task path never reached its history row"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let resubmitted = submission(app, token, document)();
+
+    let deadline = Instant::now() + PATIENCE;
+    let waited_in = loop {
+        if let Some(statement) = statement_blocked_by(app, held).await {
+            break statement;
+        }
+        if resubmitted.is_finished() {
+            let answered = resubmitted.await.expect("the resubmit did not panic");
+            panic!(
+                "the resubmit did not wait for the task path: {} {}",
+                answered.status, answered.body
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the resubmit was never seen waiting on the task path"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(GATE)
+        .execute(&mut gate)
+        .await
+        .expect("open the gate");
+    gate.close().await.expect("close the gate's connection");
+
+    let first = tokio::time::timeout(PATIENCE, first)
+        .await
+        .expect("the task path did not finish once the gate opened")
+        .expect("the task path did not panic");
+    let resubmitted = tokio::time::timeout(PATIENCE, resubmitted)
+        .await
+        .expect("the resubmit did not finish once the task path committed")
+        .expect("the resubmit did not panic");
+
+    (first, resubmitted, waited_in)
+}
+
+/// **A resubmit arriving during a claim of the correction task waits for it,
+/// and does not deadlock** ([#663]).
+///
+/// The claim is stopped at its history row by
+/// [`resubmit_during_a_held_task_path`], and the resubmit is seen blocked in
+/// `lock_instance`. Released, both answer 200: the corrector holds the task,
+/// and the process is at `RECHECK`.
+///
+/// [#663]: https://github.com/sujanto-gaws/kelir/issues/663
+#[tokio::test]
+async fn a_resubmit_arriving_during_a_claim_of_the_correction_waits_for_it() {
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let before = deadlocks_so_far(&app).await;
+
+    let correction = returned_to_a_role(&app, &token, "TI_RS_CL").await;
+    let task = correction.task;
+
+    let (claimed, resubmitted, waited_in) =
+        resubmit_during_a_held_task_path(&app, &token, correction.document, || {
+            let app = Arc::clone(&app);
+            let corrector = correction.corrector.clone();
+            tokio::spawn(async move {
+                app.post(
+                    &format!("/api/v1/workflow/tasks/{task}/claim"),
+                    Some(&corrector),
+                    json!({}),
+                )
+                .await
+            })
+        })
+        .await;
+
+    assert_eq!(claimed.status, StatusCode::OK, "{}", claimed.body);
+    assert_eq!(
+        resubmitted.status,
+        StatusCode::OK,
+        "the resubmit did not go through after the claim: {}",
+        resubmitted.body
+    );
+    assert!(
+        locks_the_instance(&waited_in),
+        "the resubmit waited somewhere other than the instance lock: {waited_in}"
+    );
+
+    assert_eq!(
+        task_holder(&app, task).await,
+        (
+            Some(correction.corrector_id),
+            Some(correction.role),
+            "ASSIGNED".to_owned()
+        ),
+        "the claim did not hold"
+    );
+    assert_eq!(
+        document_and_instance(&app, correction.document).await,
+        ("PENDING_APPROVAL".to_owned(), "RECHECK".to_owned())
+    );
+
+    assert_eq!(
+        deadlocks_once_settled(&app).await,
+        before,
+        "PostgreSQL counted a deadlock"
+    );
+}
+
+/// **A resubmit arriving during a hand-off of the correction task waits for
+/// it, and does not deadlock** ([#663]).
+///
+/// The corrector claims the task, then hands it to a colleague. The hand-off
+/// is stopped at its history row by [`resubmit_during_a_held_task_path`], and
+/// the resubmit is seen blocked in `lock_instance`. Released, both answer 200:
+/// the colleague holds the task, and the process is at `RECHECK`.
+///
+/// [#663]: https://github.com/sujanto-gaws/kelir/issues/663
+#[tokio::test]
+async fn a_resubmit_arriving_during_a_hand_off_of_the_correction_waits_for_it() {
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let before = deadlocks_so_far(&app).await;
+
+    let correction = returned_to_a_role(&app, &token, "TI_RS_HO").await;
+    let task = correction.task;
+    claim(&app, &correction.corrector, task).await;
+
+    let (handed, resubmitted, waited_in) =
+        resubmit_during_a_held_task_path(&app, &token, correction.document, || {
+            let app = Arc::clone(&app);
+            let corrector = correction.corrector.clone();
+            let colleague = correction.colleague_id;
+            tokio::spawn(async move {
+                app.post(
+                    &format!("/api/v1/workflow/tasks/{task}/delegation"),
+                    Some(&corrector),
+                    json!({ "delegateUserId": colleague }),
+                )
+                .await
+            })
+        })
+        .await;
+
+    assert_eq!(handed.status, StatusCode::OK, "{}", handed.body);
+    assert_eq!(
+        resubmitted.status,
+        StatusCode::OK,
+        "the resubmit did not go through after the hand-off: {}",
+        resubmitted.body
+    );
+    assert!(
+        locks_the_instance(&waited_in),
+        "the resubmit waited somewhere other than the instance lock: {waited_in}"
+    );
+
+    assert_eq!(
+        task_holder(&app, task).await,
+        (
+            Some(correction.colleague_id),
+            Some(correction.role),
+            "ASSIGNED".to_owned()
+        ),
+        "the hand-off did not hold"
+    );
+    assert_eq!(
+        document_and_instance(&app, correction.document).await,
+        ("PENDING_APPROVAL".to_owned(), "RECHECK".to_owned())
+    );
+
+    assert_eq!(
+        deadlocks_once_settled(&app).await,
+        before,
+        "PostgreSQL counted a deadlock"
+    );
+}
+
+/// **A resubmit arriving during a decision on the correction task waits for
+/// it, and is refused with a 409** ([#663]).
+///
+/// The corrector claims the task and rejects the document. The decision is
+/// stopped at its history row by [`resubmit_during_a_held_task_path`], before
+/// it updates the document, and the resubmit is seen blocked in
+/// `lock_instance`. Released, the decision answers 200 and the document is
+/// `REJECTED`. The resubmit then reads a document that is not editable, so it
+/// answers 409 and moves nothing.
+///
+/// [#663]: https://github.com/sujanto-gaws/kelir/issues/663
+#[tokio::test]
+async fn a_resubmit_arriving_during_a_decision_on_the_correction_waits_for_it() {
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let before = deadlocks_so_far(&app).await;
+
+    let correction = returned_to_a_role(&app, &token, "TI_RS_DE").await;
+    let task = correction.task;
+    claim(&app, &correction.corrector, task).await;
+
+    let (decided, resubmitted, waited_in) =
+        resubmit_during_a_held_task_path(&app, &token, correction.document, || {
+            let app = Arc::clone(&app);
+            let corrector = correction.corrector.clone();
+            tokio::spawn(async move {
+                app.post(
+                    &format!("/api/v1/workflow/tasks/{task}/decision"),
+                    Some(&corrector),
+                    json!({ "action": "REJECT", "comment": "Not worth correcting" }),
+                )
+                .await
+            })
+        })
+        .await;
+
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+    assert_eq!(
+        resubmitted.status,
+        StatusCode::CONFLICT,
+        "the resubmit was not judged after the decision: {}",
+        resubmitted.body
+    );
+    assert!(
+        resubmitted.body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("only a draft or a returned document")),
+        "the resubmit was refused for another reason: {}",
+        resubmitted.body
+    );
+    assert!(
+        locks_the_instance(&waited_in),
+        "the resubmit waited somewhere other than the instance lock: {waited_in}"
+    );
+
+    assert_eq!(
+        task_holder(&app, task).await,
+        (
+            Some(correction.corrector_id),
+            Some(correction.role),
+            "COMPLETED".to_owned()
+        ),
+        "the decision did not hold"
+    );
+    assert_eq!(
+        document_and_instance(&app, correction.document).await,
+        ("REJECTED".to_owned(), "REJECTED".to_owned()),
+        "a refused resubmit moved something"
+    );
+
+    assert_eq!(
+        deadlocks_once_settled(&app).await,
+        before,
+        "PostgreSQL counted a deadlock"
+    );
+}
+
+/// A draft of `type_id` requested for `department`.
+async fn draft_for(app: &TestApp, token: &str, type_id: Uuid, department: Uuid) -> Uuid {
+    let created = app
+        .post(
+            "/api/v1/documents",
+            Some(token),
+            json!({
+                "documentTypeId": type_id,
+                "title": "Requested for a department",
+                "requestedForDepartmentId": department,
+                "formData": { "amount": 1_000 },
+            }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+    id_of(&created.body["data"])
+}
+
+/// A document's status, number and instance, straight from the row.
+async fn status_number_and_instance(
+    app: &TestApp,
+    document: Uuid,
+) -> (String, Option<String>, Option<Uuid>) {
+    sqlx::query_as(
+        "SELECT status, document_number, process_instance_id FROM documents WHERE id = $1",
+    )
+    .bind(document)
+    .fetch_one(&app.pool)
+    .await
+    .expect("read the document")
+}
+
+/// **A first submit overtaken by another submit and a return is refused with
+/// a 409, not a 500** ([#663], the fix's instance check).
+///
+/// The fix locks the instance the pool read named, and refuses a document that,
+/// once locked, names another. Only a submit that starts a process between the
+/// two reads can make them differ, and two first submits alone never reach
+/// the check: the loser finds the document under approval and is refused as
+/// not editable first. The document has to be editable again with a process,
+/// which only a return makes it.
+///
+/// So the type numbers per department and tolerates gaps, and the test holds
+/// the first department's bucket. The owner's first submit reads the draft,
+/// with no process, and stops in `allocate_committed`, holding nothing on the
+/// document. The owner then moves the draft to a second department, submits
+/// it again, which takes the second department's number and starts a process,
+/// and an approver returns it. Released, the first submit takes a number from
+/// the first bucket, locks the document, finds it `RETURNED` on a process it
+/// did not lock, and answers **409**. The document keeps the number, the
+/// process and the status the overtaking submit and the return gave it.
+///
+/// [#663]: https://github.com/sujanto-gaws/kelir/issues/663
+#[tokio::test]
+async fn a_first_submit_overtaken_by_a_submit_and_a_return_is_refused_with_a_409() {
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let before = deadlocks_so_far(&app).await;
+
+    let queue = worker_role(&app, "TI-RS-OT-Q").await;
+    let (_, approver) = worker(&app, "ti.rs.ot.approver", &[queue]).await;
+    let definition = returned_for_correction("ti_rs_ot", "TI-RS-OT-Q", false);
+    let workflow = publish_workflow_definition(&app, &token, "ti_rs_ot", definition).await;
+    let type_id = document_type(&app, &token, "TI_RS_OT", workflow).await;
+    let rule = app
+        .put(
+            &format!("/api/v1/document-types/{type_id}/numbering-rule"),
+            Some(&token),
+            json!({
+                "ruleTemplate": "TI_RS_OT-{department}-{year}-{sequence}",
+                "sequenceScope": "DEPARTMENT_YEAR",
+                "gapPolicy": "ALLOW_GAPS",
+            }),
+        )
+        .await;
+    assert_eq!(rule.status, StatusCode::OK, "{}", rule.body);
+
+    let first_department = department(&app, "TI-RS-OT-1").await;
+    let second_department = department(&app, "TI-RS-OT-2").await;
+
+    // Another document opens the first department's bucket, so there is a
+    // row to hold.
+    let opener = draft_for(&app, &token, type_id, first_department).await;
+    let opened = submission(&app, &token, opener)()
+        .await
+        .expect("the opener did not panic");
+    assert_eq!(opened.status, StatusCode::OK, "{}", opened.body);
+
+    let document = draft_for(&app, &token, type_id, first_department).await;
+
+    let mut holding = app.pool.begin().await.expect("a transaction");
+    let holder: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holding)
+        .await
+        .expect("the holder's backend");
+    sqlx::query(
+        "SELECT id FROM document_type_sequence_buckets
+         WHERE document_type_id = $1 AND sequence_key LIKE $2 FOR UPDATE",
+    )
+    .bind(type_id)
+    .bind(format!("{first_department}:%"))
+    .fetch_one(&mut *holding)
+    .await
+    .expect("hold the first department's bucket");
+
+    let waiting = submission(&app, &token, document)();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let waited_in = loop {
+        if let Some(statement) = statement_blocked_by(&app, holder).await {
+            break statement;
+        }
+        if waiting.is_finished() {
+            let answered = waiting.await.expect("the first submit did not panic");
+            panic!(
+                "the first submit did not wait at the bucket: {} {}",
+                answered.status, answered.body
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the first submit was never seen waiting at the bucket"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert!(
+        waited_in.contains("document_type_sequence_buckets"),
+        "the first submit waited somewhere other than the bucket: {waited_in}"
+    );
+
+    let moved = app
+        .put(
+            &format!("/api/v1/documents/{document}"),
+            Some(&token),
+            json!({ "requestedForDepartmentId": second_department }),
+        )
+        .await;
+    assert_eq!(moved.status, StatusCode::OK, "{}", moved.body);
+
+    let overtaking = submission(&app, &token, document)()
+        .await
+        .expect("the overtaking submit did not panic");
+    assert_eq!(overtaking.status, StatusCode::OK, "{}", overtaking.body);
+
+    let manager = open_task_of(&app, document).await;
+    let returned = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{manager}/decision"),
+            Some(&approver),
+            json!({ "action": "RETURN", "comment": "Fix the amount" }),
+        )
+        .await;
+    assert_eq!(returned.status, StatusCode::OK, "{}", returned.body);
+
+    let (status, number, instance) = status_number_and_instance(&app, document).await;
+    assert_eq!(status, "RETURNED");
+    assert!(
+        instance.is_some(),
+        "the overtaking submit started no process"
+    );
+
+    holding.rollback().await.expect("release the bucket");
+
+    let refused = tokio::time::timeout(Duration::from_secs(30), waiting)
+        .await
+        .expect("the first submit did not finish once the bucket was released")
+        .expect("the first submit did not panic");
+    assert_eq!(
+        refused.status,
+        StatusCode::CONFLICT,
+        "the overtaken submit was not refused: {}",
+        refused.body
+    );
+    assert!(
+        refused.body["error"]["message"].as_str().is_some_and(
+            |message| message.contains("workflow changed while it was being submitted")
+        ),
+        "the overtaken submit was refused for another reason: {}",
+        refused.body
+    );
+
+    assert_eq!(
+        status_number_and_instance(&app, document).await,
+        ("RETURNED".to_owned(), number, instance),
+        "a refused submit moved the document"
+    );
+    let instances: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM workflow_instances WHERE document_id = $1")
+            .bind(document)
+            .fetch_one(&app.pool)
+            .await
+            .expect("count the document's instances");
+    assert_eq!(instances, 1, "a refused submit started a second process");
+
+    assert_eq!(
+        deadlocks_once_settled(&app).await,
+        before,
+        "PostgreSQL counted a deadlock"
+    );
+}
+
 /// **A reassign writes every holder column, clearing what it does not name**
 /// ([#512], ADR-0042 §2).
 ///
