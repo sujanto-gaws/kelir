@@ -2,7 +2,7 @@
 **Version:** 1.0.0
 **Status:** Draft Standard
 **Target Stack:** Rust (Hook Resolver / Engine), Plugin Runtimes
-**Last updated:** 2026-09-24
+**Last updated:** 2026-10-08
 
 ---
 
@@ -142,6 +142,7 @@ An `after_*` handler returns nothing meaningful to the chain — the action is a
 - **Success** is recorded in the execution log (§7) as `CONTINUE`.
 - **Failure or timeout** is recorded as `ERROR`, with the error message. A timeout is a retryable failure, not a `REJECT` (architectures/01 §12.5).
 - `MODIFY` and `REJECT` are never recorded for an after-hook. Nothing it returns can change or veto what has committed.
+- **An after-hook's payload (§4) is read at delivery, not at commit** ([SDD](../design/01.%20System%20Design%20Document.md) §8.5.4): `currentStatus`, `formData`, `metadata`, `workflowContext` and its `state` are the document and the instance as they stand when the event is delivered, which a later transition may already have moved, so `workflowContext` is present even for an instance that completed before delivery; only `workflowContext.transition` and `targetStatus` are the delivered transition's.
 
 The retry schedule, the dead letter and the circuit breaker are the outbox worker's, not the handler's; Kelir's are in [SDD](../design/01.%20System%20Design%20Document.md) §8.5.4.
 
@@ -210,6 +211,7 @@ This specification is a **`Draft Standard`** ([naming convention](../standards/0
 | Revision | Date | Change |
 | :--- | :--- | :--- |
 | **R-1** | 2026-09-24 | **§5.2 says how an after-hook's success and failure are logged, §5.3 gives a handler a kind, and §7 says the log feeds the circuit breaker** — [#519](https://github.com/sujanto-gaws/kelir/issues/519), [ADR-0041](../architectures/adr/0041.%20Every%20Workflow%20Transition%20Writes%20an%20Outbox%20Event,%20and%20After-Hooks%20Are%20Its%20First%20Consumer.md). **No change to the shape**: no property is added, removed or re-typed, and the meta-schema is untouched. §5.2 settles a mapping `document_hook_executions.result` could not express before (success is `CONTINUE`, failure `ERROR`). §5.3 is a **narrowing at registration**: `actions` naming a before-only handler was accepted and is now refused, and one stored before the rule logs `ERROR` rather than doing nothing silently. |
+| **R-2** | 2026-10-08 | **§5.2 says an after-hook's payload is read at delivery**: `currentStatus`, `formData`, `metadata`, `workflowContext` and `workflowContext.state` as they stand when the event is delivered, `workflowContext.transition` and `targetStatus` as the delivered transition's. It states what [ADR-0041](../architectures/adr/0041.%20Every%20Workflow%20Transition%20Writes%20an%20Outbox%20Event,%20and%20After-Hooks%20Are%20Its%20First%20Consumer.md) built and SDD §8.5.4 already said; found by the `v0.9.0` schema gate. **No change to the shape**: no property is added, removed or re-typed, and the meta-schema is untouched. §4's *`null` … after it completes* does not reach an after-hook delivered once its instance has completed: it is given the instance's context. |
 
 ---
 

@@ -2,7 +2,7 @@
 **Version:** 1.0.0
 **Status:** Draft Standard
 **Target Stack:** Rust (Outbox Worker / Webhook Dispatcher), External Consumers, Plugin Runtimes
-**Last updated:** 2026-09-24
+**Last updated:** 2026-10-08
 
 ---
 
@@ -52,7 +52,7 @@ Where this document and the Meta-Schema disagree, **the Meta-Schema is normative
 | `aggregateType` | `string` | Yes | Enum: `DOCUMENT`, `TASK`, `WORKFLOW_INSTANCE`, `ATTACHMENT`, `COMMENT`, `PARTY`, `FACILITY`, `PRODUCT`, `SERVICE`, `USER`, `PLUGIN`, `SYSTEM`. |
 | `aggregateId` | `string` | Yes | Id of the aggregate row. |
 | `sequence` | `integer` \| `null` | Yes | Monotonic per (`aggregateType`, `aggregateId`); `null` when the producer cannot sequence (e.g. `SYSTEM` events). |
-| `correlationId` | `string` | Yes | Propagated from the originating request; also present in `integration_logs` and `document_hook_executions`. |
+| `correlationId` | `string` | Yes | Propagated from the originating request; ~~also present in `integration_logs` and `document_hook_executions`.~~ also present in `integration_logs`; `document_hook_executions` does not carry it yet ([ADR-0041](../architectures/adr/0041.%20Every%20Workflow%20Transition%20Writes%20an%20Outbox%20Event,%20and%20After-Hooks%20Are%20Its%20First%20Consumer.md) §6). `Workflow.Transitioned` sets it to the workflow instance's id, because nothing upstream of the engine carries a request id (corrected 2026-10-08, R-2). |
 | `causationId` | `string` \| `null` | Yes | `eventId` of the causing event, `null` at the origin. |
 | `actor` | `object` | Yes | `{ "actorType": "USER" \| "SYSTEM" \| "WORKFLOW_ENGINE" \| "INTEGRATION" \| "SCHEDULER" \| "PLUGIN", "actorId": string \| null }`. |
 | `payload` | `object` | Yes | Event-type-specific body (Section 4). MAY be `{}` but MUST be present. |
@@ -220,6 +220,7 @@ This specification is a **`Draft Standard`** ([naming convention](../standards/0
 | Revision | Date | Change |
 | :--- | :--- | :--- |
 | **R-1** | 2026-09-24 | **§3.1 names the first event type Kelir writes, `Workflow.Transitioned`, with its payload** — [#519](https://github.com/sujanto-gaws/kelir/issues/519), [ADR-0041](../architectures/adr/0041.%20Every%20Workflow%20Transition%20Writes%20an%20Outbox%20Event,%20and%20After-Hooks%20Are%20Its%20First%20Consumer.md). **No change to the shape**: the envelope, the profiles and the meta-schema are untouched. The name was already in the catalogue §3 points at (architectures/01 §12.3), §3 already permits new types without a specification change, `fromState` and `toState` are producer additions on the `Workflow.*` profile, legal under §4.3, and `action` is the profile's own field. **§5.1 is read, not amended**: while the outbox has one consumer, an `outbox_events` row is the event plus the state of its in-process dispatch, and `DEAD_LETTER` marks the dispatch as exhausted while keeping the envelope ([Database Schema](../design/02.%20Database%20Schema.md) §12.8). |
+| **R-2** | 2026-10-08 | **§2's `correlationId` row no longer says `document_hook_executions` carries it**: the table has no such column ([Database Schema](../design/02.%20Database%20Schema.md) §6.12), which ADR-0041 §3 records against its revisit trigger in §6. `integration_logs` does carry one. The row also says what Kelir's one producer writes: `Workflow.Transitioned` sets `correlationId` to the instance's id, the value the before-chain hands its handlers. Found by the `v0.9.0` schema gate. **No change to the shape**: the envelope and the meta-schema are untouched. |
 
 ---
 
