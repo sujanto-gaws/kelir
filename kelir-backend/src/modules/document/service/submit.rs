@@ -27,8 +27,9 @@
 //!    refuse early if it is not a draft.
 //! 3. Read the rule's gap policy, and — **if it tolerates gaps** — allocate the
 //!    number now, committed, with nothing else held.
-//! 4. Begin. Read the document `FOR UPDATE`. Not a draft, refused (AC5) — this
-//!    is the answer that counts, because step 2's read was unlocked.
+//! 4. Begin. Lock the document's workflow instance, if it has one, then read
+//!    the document `FOR UPDATE` ([#663], below). Not a draft, refused (AC5) —
+//!    this is the answer that counts, because step 2's read was unlocked.
 //! 5. **Re-evaluate the payload at [`Strictness::Submit`]** — the full pipeline,
 //!    `required` and unenforced rules refusing as **D-28** says.
 //! 6. Allocate the number, if a gapless rule left it to be taken here.
@@ -90,10 +91,22 @@
 //! **D-35** is what this project paid to learn that a second pooled connection
 //! taken inside a transaction deadlocks at the concurrency the pool can serve.
 //!
+//! # The instance before the document ([#663])
+//!
+//! A task path locks the instance, then the task, and then writes a
+//! `workflow_task_history` row whose foreign key takes `FOR KEY SHARE` on the
+//! document; a decision also updates the document. A resubmit used to lock the
+//! document and then the instance, so one arriving while a task path held the
+//! instance held the document and waited, the task path waited for the
+//! document, and PostgreSQL aborted one of them with a 500. The submit now
+//! locks the instance first, so it waits for a task path while holding
+//! nothing.
+//!
 //! [#158]: https://github.com/sujanto-gaws/kelir/issues/158
 //! [#168]: https://github.com/sujanto-gaws/kelir/issues/168
 //! [#178]: https://github.com/sujanto-gaws/kelir/issues/178
 //! [#187]: https://github.com/sujanto-gaws/kelir/issues/187
+//! [#663]: https://github.com/sujanto-gaws/kelir/issues/663
 //! [start]: crate::modules::workflow::service::engine::start
 
 use chrono::Utc;
@@ -202,6 +215,18 @@ pub async fn submit_document(
 
     let mut transaction = state.pool.begin().await?;
 
+    // **The instance before the document** ([#663]). A task path takes the
+    // instance and then, through its history row's foreign key, the document;
+    // taking them the other way round here was a deadlock. The id is the pool
+    // read's, checked against the locked document below. A first submit of a
+    // document with no process locks nothing here.
+    let instance = match subject.workflow_instance_id {
+        Some(instance_id) => {
+            instance_repo::lock_instance(&mut transaction, tenant_id, instance_id).await?
+        }
+        None => None,
+    };
+
     let locked = repo::lock_document(&mut transaction, tenant_id, id)
         .await?
         .ok_or_else(|| AppError::not_found("Document"))?;
@@ -209,6 +234,16 @@ pub async fn submit_document(
     // AC5 again, and this time authoritatively: the read above was unlocked,
     // so a concurrent submit could have moved the document between the two.
     refuse_unless_submittable(locked.status)?;
+
+    // The instance locked above is the one the document points at. Only a
+    // submit that started a process between the two reads can make them
+    // differ, and then the lock covers the wrong instance.
+    if locked.workflow_instance_id != subject.workflow_instance_id {
+        return Err(AppError::conflict(
+            "this document's workflow changed while it was being submitted; \
+             reload it and submit again",
+        ));
+    }
 
     let pinned = form::pinned_form_of(&mut transaction, tenant_id, &locked).await?;
 
@@ -333,6 +368,7 @@ pub async fn submit_document(
             tenant_id,
             id,
             &subject,
+            instance,
             &engine::EvaluationContext {
                 document: engine::document_facts(
                     DocumentStatus::Submitted,
@@ -535,12 +571,18 @@ fn refuse_unless_submittable(status: DocumentStatus) -> Result<(), AppError> {
 /// refuse them. Reading the caller into the owner slot
 /// would make that rule authorize everybody it was written to exclude.
 ///
+/// **The instance is locked by [`submit_document`], before the document**
+/// ([#663]), and passed in. Locking it here, after the document, was the
+/// reverse of every task path's order.
+///
 /// [#183]: https://github.com/sujanto-gaws/kelir/issues/183
+/// [#663]: https://github.com/sujanto-gaws/kelir/issues/663
 async fn resubmit_workflow(
     transaction: &mut sqlx::PgTransaction<'_>,
     tenant_id: Uuid,
     document_id: Uuid,
     subject: &repo::SubmissionSubject,
+    instance: Option<instance_repo::LockedInstance>,
     evaluation: &engine::EvaluationContext,
     actor: Option<Uuid>,
 ) -> Result<(), AppError> {
@@ -551,16 +593,13 @@ async fn resubmit_workflow(
         return Ok(());
     };
 
-    // Instance first, then task — `engine`'s ordering rule, on every path. There
-    // is no open task to take second here, and taking the instance is still what
-    // makes the state this reads the state the transition fires against.
-    let instance = instance_repo::lock_instance(transaction, tenant_id, instance_id)
-        .await?
-        .ok_or_else(|| AppError::Internal {
-            source: anyhow::anyhow!(
-                "document {document_id} points at instance {instance_id}, which does not exist"
-            ),
-        })?;
+    // Held since before the document was locked, which is what makes the state
+    // this reads the state the transition fires against.
+    let instance = instance.ok_or_else(|| AppError::Internal {
+        source: anyhow::anyhow!(
+            "document {document_id} points at instance {instance_id}, which does not exist"
+        ),
+    })?;
 
     let definition = definition_repo::definition_of_instance(
         &mut **transaction,

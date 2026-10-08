@@ -6613,6 +6613,12 @@ async fn a_task_path_refuses_a_missing_task_or_instance_with_a_404() {
 // then waited for the document, and PostgreSQL aborted one of them. Record
 // 21's P1 caught it with a reassign of the owner's correction task, and the
 // resubmit answered 500.
+//
+// # Seen red on the unfixed code, 2026-10-08
+//
+// Both tests below: the reassign answered 200, and the resubmit answered 500
+// `INTERNAL_ERROR`, *deadlock detected* in the log. The submit now locks the
+// instance before the document, and both are green.
 
 /// A workflow whose `RETURN` sends the document to `RETURNED`, where the
 /// owner's correction task waits. Its `RESUBMIT` goes back to

@@ -25,6 +25,12 @@
 //! defect no single-threaded test can see — which is why it is a rule stated
 //! here rather than an observation about the current code.
 //!
+//! **A caller that also locks the document takes the instance before it.** The
+//! history and task rows written here reference the document, so their foreign
+//! keys take it after the instance; the submit locked the document first until
+//! [#663](https://github.com/sujanto-gaws/kelir/issues/663) and deadlocked with
+//! a task path.
+//!
 //! # Every move through here is recorded, in the same transaction
 //!
 //! [`history::record`] appends a row for the instance's first state and for

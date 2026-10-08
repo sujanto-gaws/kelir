@@ -70,6 +70,11 @@ pub struct LockedDocument {
     /// change (FR-MDM-010, #255) in the transaction it already holds.
     pub entity_type: Option<String>,
     pub entity_id: Option<Uuid>,
+    /// The process the document points at, read under the lock so the submit
+    /// can check it locked that instance and not another one ([#663]).
+    ///
+    /// [#663]: https://github.com/sujanto-gaws/kelir/issues/663
+    pub workflow_instance_id: Option<Uuid>,
 }
 
 /// What the submit has to know **before** it opens its transaction.
@@ -152,7 +157,8 @@ pub async fn lock_document(
     let row = sqlx::query!(
         r#"
         SELECT status, document_type_id, form_id, form_data_json,
-               requested_for_department_id, entity_type, entity_id
+               requested_for_department_id, entity_type, entity_id,
+               process_instance_id
         FROM documents
         WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
         FOR UPDATE
@@ -171,6 +177,7 @@ pub async fn lock_document(
         requested_for_department_id: row.requested_for_department_id,
         entity_type: row.entity_type,
         entity_id: row.entity_id,
+        workflow_instance_id: row.process_instance_id,
     }))
 }
 

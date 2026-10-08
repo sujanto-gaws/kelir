@@ -71,7 +71,12 @@ pub async fn insert_instance(
 /// second and deadlocked with a decision ([#619]). Every task path in
 /// `service::task` calls this before `task::lock_task`.
 ///
+/// **The submit calls this before it locks the document** ([#663]). The same
+/// history row takes the document through its other foreign key, so a submit
+/// that held the document and then waited here deadlocked with a task path.
+///
 /// [#619]: https://github.com/sujanto-gaws/kelir/issues/619
+/// [#663]: https://github.com/sujanto-gaws/kelir/issues/663
 pub async fn lock_instance(
     transaction: &mut sqlx::PgTransaction<'_>,
     tenant_id: Uuid,

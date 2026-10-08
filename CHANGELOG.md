@@ -574,6 +574,17 @@ While the major version is `0`, the public API may change in any release.
     `OWNER_DEPARTMENT` said a task whose assignment and `allowedBy` both use
     the scope needs somebody in both departments. A grant of the role with no
     department satisfies any department, so its holder decides the task.
+- **A resubmit arriving during a task action on the same document no longer
+  deadlocks and answers 500**
+  ([#663](https://github.com/sujanto-gaws/kelir/issues/663)). The resubmit
+  locked the document, then the workflow instance. A claim, hand-off,
+  reassign or decision locks the instance, then writes a
+  `workflow_task_history` row whose foreign key takes the document.
+  PostgreSQL aborted one side, and it answered `500 INTERNAL_ERROR`. A submit
+  now locks the instance before the document, so it waits and then answers
+  what it would have answered alone. A resubmit into a state that raises a
+  task while the correction task is open is still refused with a 409
+  ([#667](https://github.com/sujanto-gaws/kelir/issues/667)).
 - **A deleted tenant's access token, and a deleted user's, are refused at
   once on every route, and no token is accepted past its expiry**
   ([#650](https://github.com/sujanto-gaws/kelir/issues/650),
