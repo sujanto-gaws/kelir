@@ -9,40 +9,71 @@ While the major version is `0`, the public API may change in any release.
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-10-09
+
+Phase 9 closes its integration core: **Kelir knows the external systems it
+works with, and an administrator can prove a call to one before anything
+depends on it.** The external system registry records each system, its
+endpoints and where its secrets are kept. A test call resolves a secret for
+that call alone, connects only to an address it has checked, and writes one
+masked row to the integration log, which an administrator reads in the
+browser. Every committed workflow transition writes an event to a new outbox,
+and the after-hook chain is its first consumer, so a workflow's `actions` now
+run. And an administrator reassigns an open task, which gives a role that open
+tasks still need a way to be deleted. The phase ran three sprints, 20 to 22
+(**D-90**). **[SDD](docs/design/01.%20System%20Design%20Document.md) §14's
+plugin half is not in it** (**D-94**), and the Vault client, the outbox's
+dispatcher, FR-INT-003, FR-INT-004, FR-INT-010 and FR-MDM-011 come after
+`v1.0.0` (**D-98**).
+
 ### Upgrade notes
 
-- **Which administrators get the eight `integration:*` permissions depends on
+- **Eleven new permissions, and which administrators hold them depends on
   when their tenant was created.** `0046_integration.sql` adds eight
-  permissions and grants all eight to the system tenant's `ROLE-ADMIN`, as
-  `0010` and `0043` did.
-  - **A tenant created after the upgrade** gets the four
-    `integration:external-system:*` permissions on its `ROLE-ADMIN`, and **not**
-    the four `integration:credential:*` ones. Tenant provisioning withholds
-    them as it withholds `organization:tenant:*` (decision **D-18**, amended
-    2026-09-25, [#551](https://github.com/sujanto-gaws/kelir/issues/551)).
-  - **A tenant created before the upgrade** gets none of the eight. Grant the
-    external-system permissions to that tenant's administrator role, and to
-    any role that should manage integrations.
+  `integration:*` permissions, `0048` adds `workflow:task:reassign`, `0049`
+  adds `integration:endpoint:call` and `0050` adds `integration:log:read`.
+  Each grants what it adds to the system tenant's `ROLE-ADMIN`, as `0010` and
+  `0043` did.
+  - **A tenant created after the upgrade** gets them on its `ROLE-ADMIN`,
+    except the four `integration:credential:*` permissions. Tenant
+    provisioning withholds those as it withholds `organization:tenant:*`
+    (decision **D-18**, amended 2026-09-25,
+    [#551](https://github.com/sujanto-gaws/kelir/issues/551)).
+  - **A tenant created before the upgrade** gets none of them. Grant the four
+    `integration:external-system:*` permissions, `workflow:task:reassign`,
+    `integration:endpoint:call` and `integration:log:read` to that tenant's
+    administrator role, and to any role that should manage integrations,
+    reassign tasks or read the integration log.
   - **`integration:credential:read` shows where secrets are kept**, so no
     tenant but the system tenant starts with it. Grant the
     `integration:credential:*` permissions separately and deliberately
     ([User Manual](docs/operations/03.%20User%20Manual.md) §11.5).
+  - **`0050`'s comment gives the wrong reason for its grant**
+    ([#621](https://github.com/sujanto-gaws/kelir/issues/621)). It says a
+    reader of a log row's payloads sees nothing secret. A secret the called
+    system echoes in a spelling ADR-0043 §R does not list is stored as sent,
+    and a log reader sees it. Migrations are not edited, so the correction is
+    here and in
+    [Database Schema](docs/design/02.%20Database%20Schema.md) §12.10. **The
+    grant is kept**, for three reasons. The permission is not a boundary: a
+    tenant administrator holds `identity:role:update` and can grant it to
+    themselves. The same preview already reaches every holder of
+    `integration:endpoint:call`, in the test call's own answer. And what an
+    unlisted echo exposes is a secret the called system already had.
 - **`0046` creates eight tables and alters one table nobody writes.** It adds a
   foreign key to `master_data_source_references`, which is empty on every
   deployment, so the key validates instantly. Nothing existing changes in a way
   a reader can observe, and `v0.8.0` runs against the migrated schema
   (release process §6).
-- **`0047` changes two texts and nothing else.** It rewrites the column
-  comment on `integration_credentials.secret_reference` and the
-  `integration:credential:read` permission's description, which `0046` seeded
-  saying *never the secret*. Both now say *reference*, and that only its shape
-  is checked ([#552](https://github.com/sujanto-gaws/kelir/issues/552)). No
-  schema, grant or behaviour changes.
-- **`0048` adds one permission, `workflow:task:reassign`**, and grants it to
-  the system tenant's `ROLE-ADMIN`. A tenant created after the upgrade gets it
-  on its `ROLE-ADMIN`. A tenant created before the upgrade does not: grant it
-  to that tenant's administrator role. No schema changes, and `v0.8.0` runs
-  against the migrated schema.
+  - **`0047` changes two texts and nothing else.** It rewrites the column
+    comment on `integration_credentials.secret_reference` and the
+    `integration:credential:read` permission's description, which `0046`
+    seeded saying *never the secret*. Both now say *reference*, and that only
+    its shape is checked
+    ([#552](https://github.com/sujanto-gaws/kelir/issues/552)). No schema,
+    grant or behaviour changes.
+  - **`0048`, `0049` and `0050` each add one permission and its grants, and
+    change no schema.** `v0.8.0` runs against the schema `0048` leaves.
 - **An integration secret must be named for its tenant:
   `KELIR_INTEGRATION_SECRET_<TENANT CODE>__<NAME>`.** A test call resolves
   `env://NAME` only when `NAME` is in the calling tenant's namespace, and
@@ -70,27 +101,37 @@ While the major version is `0`, the public API may change in any release.
     A deleted tenant's code does not block, so a tenant created later with a
     code that maps to the same prefix, `A_B` after `A-B`, reads whatever is
     still there. Nothing checks this: it is the operator's duty.
-  - **A new tenant whose code maps like a live tenant's is not refused yet**
-    (decision **D-102**). Creating one succeeds, and test calls for the names
-    the two share then answer `SECRET_NAME_NOT_PERMITTED` for both. The
-    refusal at creation is decided and not built: it is
+  - **Two live tenants whose codes map alike fail closed, and a new one is not
+    refused yet** (decision **D-102**). Creating a tenant whose code maps like
+    a live tenant's succeeds, and test calls for the names the two share then
+    answer `SECRET_NAME_NOT_PERMITTED` for both. The refusal at creation is
+    decided and not built: it is
     [#655](https://github.com/sujanto-gaws/kelir/issues/655), placed after
-    `v0.9.0`.
+    this release.
   - **A deployment run from `main` during Sprint 22** may have used
     `KELIR_INTEGRATION_SECRET_<NAME>` without a tenant code, which #547
     allowed. Rename each such variable to its tenant's namespace, and edit the
     stored `env://` references to match. **No migration does this**: a
     reference is the operator's text, and Kelir cannot tell whose secret a
-    bare name was meant to be. v0.8.0 had no resolver, so a deployment
+    bare name was meant to be. `v0.8.0` had no resolver, so a deployment
     upgrading from a release has nothing to rename.
   - **Check `deploy/` and your compose files** for `KELIR_INTEGRATION_SECRET_`
     names without a tenant code. Kelir's own `deploy/` and compose files set
-    ~~none~~ none without one: the release compose file sets no integration
-    secret, and the browser flows' overlay sets one, under the system tenant.
-  - **The end-to-end stack's variable** ~~, when #593 adds one, is named~~ is
-    `KELIR_INTEGRATION_SECRET_SYSTEM__E2E_UPSTREAM_TOKEN`, under the system
+    none without one: the release compose file sets no integration secret,
+    and the browser flows' overlay sets one, under the system tenant.
+  - **The end-to-end stack's variable is
+    `KELIR_INTEGRATION_SECRET_SYSTEM__E2E_UPSTREAM_TOKEN`**, under the system
     tenant. Only `deploy/staging/docker-compose.e2e.yml` sets it
     ([#593](https://github.com/sujanto-gaws/kelir/issues/593)).
+- **A `vault://` reference resolves nowhere in this release.** A test call
+  that uses one fails with `SECRET_BACKEND_NOT_CONFIGURED` until the
+  HashiCorp Vault KV v2 client lands
+  ([#605](https://github.com/sujanto-gaws/kelir/issues/605), placed after
+  `v1.0.0` by decision **D-98**'s answer C). The registry still accepts a
+  `vault://` reference at save. Keep a secret a test call must reach in the
+  backend's environment, under its tenant's prefix
+  ([Installation and Deployment](docs/operations/01.%20Installation%20and%20Deployment.md)
+  §7.1).
 - **A private-network system needs `KELIR_INTEGRATION_ALLOWED_CIDRS`.** A
   test call to an RFC 1918 or IPv6 unique-local address is refused unless the
   range is listed, for example `10.20.0.0/16`. Loopback, link-local (the cloud
@@ -113,26 +154,6 @@ While the major version is `0`, the public API may change in any release.
     guard for those destinations on such a network
     ([Installation and Deployment](docs/operations/01.%20Installation%20and%20Deployment.md)
     §7.1).
-- **`0049` adds one permission, `integration:endpoint:call`**, and grants it
-  to the system tenant's `ROLE-ADMIN`. A tenant created after the upgrade gets it on its
-  `ROLE-ADMIN`. A tenant created before the upgrade does not: grant it to that
-  tenant's administrator role. No schema changes.
-- **`0050` adds one permission, `integration:log:read`**, and grants it to the
-  system tenant's `ROLE-ADMIN`. A tenant created after the upgrade gets it on
-  its `ROLE-ADMIN`. A tenant created before the upgrade does not: grant it to
-  that tenant's administrator role, or to whichever role should read the
-  integration log. No schema changes.
-  - **`0050`'s comment gives the wrong reason for that grant**
-    ([#621](https://github.com/sujanto-gaws/kelir/issues/621)). It says a
-    reader of a log row's payloads sees nothing secret. A secret the called
-    system echoes in a spelling ADR-0043 §R does not list is stored as sent,
-    and a log reader sees it. Migrations are not edited, so the correction is here and in
-    [Database Schema](docs/design/02.%20Database%20Schema.md) §12.10. **The
-    grant is kept**, for three reasons. The permission is not a boundary: a
-    tenant administrator holds `identity:role:update` and can grant it to
-    themselves. The same preview already reaches every holder of
-    `integration:endpoint:call`, in the test call's own answer. And what an
-    unlisted echo exposes is a secret the called system already had.
 - **A client holding an access token for a deleted tenant or a deleted user
   now gets 401 where it got data** (decision **D-105**). The token is refused
   on every authenticated route from the next request after the deletion, and
@@ -148,6 +169,25 @@ While the major version is `0`, the public API may change in any release.
     §7).
   - **Each authenticated request makes one more database read** than it did,
     before its handler runs. No migration and no setting.
+- **A role deleted before this release, with tasks still open, stays as it
+  was** ([#511](https://github.com/sujanto-gaws/kelir/issues/511)). Those
+  tasks are offered to nobody or refuse their decision, and no screen lists
+  them. Nothing repairs them automatically, because the obvious repair,
+  making the role live again, would silently re-grant its permissions to
+  everybody who held it. [Installation and Deployment
+  §9](docs/operations/01.%20Installation%20and%20Deployment.md#9-troubleshooting)
+  has a query that finds them and the steps to clear one by hand.
+- **A published definition whose edge names a role that no longer exists now
+  refuses at submit rather than at decision**
+  ([#509](https://github.com/sujanto-gaws/kelir/issues/509)). Publish a
+  revision naming a live role.
+- **A role whose tasks have all been decided no longer deletes while a
+  published definition names it**
+  ([#510](https://github.com/sujanto-gaws/kelir/issues/510)).
+- **A deployment on arm64 cannot use MinIO's images from
+  `ghcr.io/sujanto-gaws`** (decision **D-92**). They are MinIO's linux/amd64
+  filesystems. Pull MinIO's images with credentials there, or build them from
+  source.
 
 ### Added
 
@@ -303,13 +343,35 @@ While the major version is `0`, the public API may change in any release.
     Nothing receives a call yet (FR-INT-003). Four of the eight new tables
     have no writer yet: `integration_mappings`, `webhook_subscriptions`,
     `webhook_events` and `inbox_events`.
+- **Choosers search the server past their first 100 rows**
+  ([#525](https://github.com/sujanto-gaws/kelir/issues/525),
+  [#597](https://github.com/sujanto-gaws/kelir/pull/597)). The document
+  type on **New document**, the form, list and workflow of a document type,
+  the roles on a user, the person and type of a delegation window, and the
+  person a task is handed to each read one page of 100 rows, and the form and
+  list choosers then kept only the published or active ones, so a row that
+  sorted past the hundredth could not be picked. Each is now a searching
+  chooser (`SearchSelect`): it asks the server for the first 100 rows that
+  match what is typed, sends the status it needs as a filter rather than
+  applying it to a page, and says *Showing 100 of N* when there are more.
+  - **The list endpoints for document types, forms, lists, workflow
+    definitions, users and roles take `search`, and all but roles take
+    `status`.** `search` is a case-insensitive substring of the key and the
+    name (a user's username, email and display name), in which `%`, `_` and
+    `\` match themselves; a blank one is ignored. `status` is an exact match,
+    and one outside the resource's vocabulary is a 422. `meta.total` counts
+    the rows matching both, and the order is by key as before. The search is
+    an unindexed `ILIKE`, as the existing searches are.
+  - **A NUL in any list's search is now a 422** on the search field, where it
+    was a 500 on every searching list, the documents list and external
+    systems included.
 
 ### Changed
 
 - **The browser flows' stack has one system an integration test call can reach, and a flow sees
   it answer** ([#593](https://github.com/sujanto-gaws/kelir/issues/593)). #547's and #548's flows
-  each end in a refusal, because a release stack has no system to call, and #548's AC6 was accepted
-  as partial for it. `deploy/staging/docker-compose.e2e.yml` is an overlay that `deploy.sh` layers
+  each end in a refusal, because a release stack has no system to call, and #548's AC6 had been
+  accepted as partial for that reason. `deploy/staging/docker-compose.e2e.yml` is an overlay that `deploy.sh` layers
   over the release compose file when the new `KELIR_COMPOSE_OVERLAY` names it: a stand-in system
   (`e2e/upstream/server.mjs`) on a private network of its own, that one address as a `/32` in
   `KELIR_INTEGRATION_ALLOWED_CIDRS`, and `KELIR_INTEGRATION_SECRET_SYSTEM__E2E_UPSTREAM_TOKEN` on
@@ -349,45 +411,38 @@ While the major version is `0`, the public API may change in any release.
   libraries, so the standard, the SDD and architectures/01 now say that. No
   code changes. The dynamic form renderer's client-side JFSS rules are not
   affected.
-- **The documents and three screens say how long a suspended tenant's
-  users keep working: at most ~~16~~ 15 minutes** (decision **D-104**, answered
-  2026-10-01). **The number is 15 since the leeway was removed** (dated note,
-  2026-10-01): this entry was written at 16, the 15-minute lifetime plus the
-  JWT library's default 60 seconds of leeway, which nothing in the code set.
-  The *Fixed* entry for #650 below sets the leeway to zero, and the documents
-  and screens now say 15. What follows is this entry as it was true of #652.
-  Suspending or deactivating a tenant, or setting a user's status to
-  `INACTIVE`, stops sign-in and revokes the refresh tokens, so no session is
-  renewed. An access token already issued was verified by signature and expiry
-  only, so it worked until it stopped being accepted. The lifetime is a
-  constant, not a setting. Tests in `tests/organization_tenants.rs` and
+- **An access token outlives a tenant's suspension or deactivation, or a
+  change of a user's status, by at most 15 minutes, and the documents and
+  screens now say so** (decision **D-104**,
+  [#652](https://github.com/sujanto-gaws/kelir/pull/652)). Suspending or
+  deactivating a tenant, or setting a user's status to `INACTIVE`, stops
+  sign-in and revokes the refresh tokens, so no session is renewed. **An access token
+  already issued works until it expires**, 15 minutes after it was issued,
+  with no leeway on expiry (the *Fixed* entry for #650): no request checks the
+  tenant's or the user's status. The lifetime is a constant, not a setting.
+  The product owner chose to state the limit rather than check the status on
+  each request. Tests in `tests/organization_tenants.rs` and
   `tests/auth_session.rs` hold the rule.
-  `v0.4.0`'s entry and
-  [Database Schema](docs/design/02.%20Database%20Schema.md) §2.1 said
-  *sessions end rather than merely failing to renew*, which is more than the
-  code does. The product owner chose to state the limit rather than check the
-  tenant on each request. **Nothing in behaviour changed.** Three
-  screens then stated the limit: the tenant dialog, the user dialog, and the
-  tenant list's delete confirmation, which stated what a signed-in user could
-  still do (it now says they are signed out at once; the *Fixed* entry
-  below). So did the
-  [SDD](docs/design/01.%20System%20Design%20Document.md) §11.1 (the rule, for
-  tenant and user alike), §5.4 and §9.3.6, Database Schema §2.1,
-  architectures/01 §18.1 and the
-  [User Manual](docs/operations/03.%20User%20Manual.md) §11.4.
-  **D-104 does not decide a deleted tenant or a deleted user.** When #652
-  merged, a token issued before the tenant's deletion still read the tenant's
-  data and was observed to create a user in it, and a deleted user's token
-  worked except where a route reads the user's own row. ~~Three related issues
-  are open and not addressed here~~ **Two of the three related issues are
-  answered since** (2026-10-01, decision **D-105**; the *Fixed* entry below):
-  a deleted tenant's or user's token is refused at once, and the 60 seconds
-  of leeway is gone (#650); and an integration test call answers such a token
-  401, not 500 (#648). **One stays open**: a refresh does not itself check the
-  tenant's status but relies on the revocation
-  ([#649](https://github.com/sujanto-gaws/kelir/issues/649)). The Deactivate
-  button on the user list deletes the account, so it is D-105's case and not
-  this entry's: only a change of a user's status is.
+  - **This corrects `v0.4.0`'s entry**, and
+    [Database Schema](docs/design/02.%20Database%20Schema.md) §2.1, which
+    said *sessions end rather than merely failing to renew*. That was more
+    than the code did.
+  - **The tenant dialog and the user dialog state the limit**, and the tenant
+    list's delete confirmation says a deleted tenant's users are signed out
+    at once. So do the
+    [SDD](docs/design/01.%20System%20Design%20Document.md) §11.1 (the rule,
+    for tenant and user alike), §5.4 and §9.3.6, Database Schema §2.1,
+    architectures/01 §18.1 and the
+    [User Manual](docs/operations/03.%20User%20Manual.md) §11.4.
+  - **A deletion is not this limit's case.** A deleted tenant's or user's
+    token is refused at once, and the user list's Deactivate button deletes
+    the account (decision **D-105**, the *Fixed* entry for #650 and #648).
+    Only a change of a user's status is this entry's.
+  - **Beside the limit, a refresh does not itself check the tenant's status**
+    and relies on the revocation that follows a status change. It was found
+    by reading the code and has not been shown to happen
+    ([#649](https://github.com/sujanto-gaws/kelir/issues/649), open, placed
+    after this release).
 
 - **A `Draft` ADR whose blocker this same tree delivers is refused**
   ([#545](https://github.com/sujanto-gaws/kelir/issues/545),
@@ -395,8 +450,8 @@ While the major version is `0`, the public API may change in any release.
   §5.1). ADR-0041 merged `Draft`, blocked by #519, in the pull request that
   closed #519, and `adr_records_are_current.rs` accepted it because it named a
   blocker. It now also fails when every issue a `Draft` record's `Blocked by:`
-  names is cited in this section: named in the parenthesis right after an
-  entry's bold headline. An issue mentioned anywhere else does not count, and
+  names is cited in `CHANGELOG.md`'s `[Unreleased]` section: named in the
+  parenthesis right after an entry's bold headline. An issue mentioned anywhere else does not count, and
   neither does one under `### Known limitations`, which cites open issues. A
   `Draft` whose `Blocked by:` names no issue, such as a template copy with the
   commented `#NNN` left in, is refused too; it used to pass.
@@ -412,8 +467,8 @@ While the major version is `0`, the public API may change in any release.
   the release's tag, or to `HEAD` before the tag. A commit that changes only
   `projects/verifications/` is the reading's own record and does not count.
   Every verification record from record 19 on must name its reader; records
-  01–18 predate the field and are exempt. Every release record on `main`
-  still passes, and none of them cites record 19 or later yet.
+  01–18 predate the field and are exempt. Every release record up to
+  `v0.8.0`'s passes, and none of them cites record 19 or later.
 
 - **A release record's follow-up without an issue is refused under any list
   marker** ([#486](https://github.com/sujanto-gaws/kelir/issues/486)). Rule 10
@@ -469,9 +524,8 @@ While the major version is `0`, the public API may change in any release.
   `quay.io/minio/*`, where D-80 moved them, closed to anonymous pulls on
   2026-09-24. The copies are MinIO's own linux/amd64 filesystems, rebuilt
   unmodified with their original configuration and checked file by file. The
-  tags are unchanged and the digests are new. **Upgrade note:** a deployment on
-  arm64 cannot use them. Pull MinIO's images with credentials there, or build
-  them from source.
+  tags are unchanged and the digests are new. A deployment on arm64 cannot use
+  them (see *Upgrade notes*).
 - **A role that an open task still needs cannot be deleted**
   ([#487](https://github.com/sujanto-gaws/kelir/issues/487), decision **D-89**).
   `DELETE /api/v1/identity/roles/{id}` used to answer 204 whatever was
@@ -480,19 +534,16 @@ While the major version is `0`, the public API may change in any release.
   is offered to it **and unclaimed**, or when a decision it offers is
   `allowedBy` that role, claimed or not. A claimed task does not need the
   role it was offered to, because its assignee can decide it without that
-  role ([#529](https://github.com/sujanto-gaws/kelir/issues/529)). Once those
-  tasks are decided or reassigned that refusal goes away, though a published workflow definition naming the role still refuses it ([#510](https://github.com/sujanto-gaws/kelir/issues/510)). Deciding them or reassigning them clears the way (see *Added*,
-  [#512](https://github.com/sujanto-gaws/kelir/issues/512)); the 409 now ends
-  *decided or reassigned first*. No route cancels a task. A document submitted while a role is being
-  deleted waits for the delete, then is refused as `ASSIGNMENT_UNRESOLVED`
-  if the delete went through, with nothing written.
-  **Upgrade:** a role deleted before this release, with tasks still open,
-  stays as it was: those tasks are offered to nobody or refuse their
-  decision, and no screen lists them. Nothing repairs them automatically, because the obvious repair —
-  making the role live again — would silently re-grant its permissions to
-  everybody who held it. [Installation and Deployment
-  §9](docs/operations/01.%20Installation%20and%20Deployment.md#9-troubleshooting)
-  has a query that finds them and the steps to clear one by hand
+  role ([#529](https://github.com/sujanto-gaws/kelir/issues/529)). Deciding
+  those tasks or reassigning them clears this refusal (see *Added*,
+  [#512](https://github.com/sujanto-gaws/kelir/issues/512)), and the 409 ends
+  *decided or reassigned first*; a published workflow definition naming the
+  role still refuses the delete
+  ([#510](https://github.com/sujanto-gaws/kelir/issues/510), below). No route
+  cancels a task. A document submitted while a role is being deleted waits
+  for the delete, then is refused as `ASSIGNMENT_UNRESOLVED` if the delete
+  went through, with nothing written. For a role deleted before this release
+  with tasks still open, see *Upgrade notes*
   ([#511](https://github.com/sujanto-gaws/kelir/issues/511)).
 - **A task is not raised when a decision on it names a role that is gone**
   ([#509](https://github.com/sujanto-gaws/kelir/issues/509)). A task offered to one role, in a state
@@ -503,9 +554,8 @@ While the major version is `0`, the public API may change in any release.
   (`transitions.<state>.<action>.allowedBy.roleCode`), and nothing is
   written: a submit leaves the document in `DRAFT`. The roles an edge names
   are also held while the task is raised, so a role delete can no longer slip
-  between them and strand the task. **Upgrade:** a published definition
-  whose edge names a role that no longer exists now refuses at submit rather
-  than at decision. Publish a revision naming a live role.
+  between them and strand the task. A published definition whose edge names a
+  role that no longer exists now refuses at submit (see *Upgrade notes*).
 - **A role that a published workflow definition names cannot be deleted**
   ([#510](https://github.com/sujanto-gaws/kelir/issues/510), decision
   **D-91** (3)). `DELETE /api/v1/identity/roles/{id}` answered 204 for a role
@@ -533,8 +583,6 @@ While the major version is `0`, the public API may change in any release.
     ([#572](https://github.com/sujanto-gaws/kelir/issues/572)).
   - **`AppError::conflict_with_code`** answers a 409 with a code other than
     `CONFLICT`. Every other 409 keeps `CONFLICT`.
-  - **Upgrade:** a role whose tasks have all been decided no longer deletes
-    while a published definition names it.
 
 ### Fixed
 
@@ -615,7 +663,8 @@ While the major version is `0`, the public API may change in any release.
     the next. Verification allowed a further 60 seconds past expiry, the JWT
     library's default leeway. It is now set to zero.
   - **Unchanged**: a `SUSPENDED` or `INACTIVE` tenant's token, and an
-    `INACTIVE` or `LOCKED` user's, work until they expire (D-104), now at most 15 minutes.
+    `INACTIVE` or `LOCKED` user's, work until they expire (D-104), at most 15
+    minutes.
     Refresh, logout and sign-in are not given the check
     ([#649](https://github.com/sujanto-gaws/kelir/issues/649) stays open). A
     password change does not end an access token already issued. Roles and
@@ -739,7 +788,8 @@ While the major version is `0`, the public API may change in any release.
   an absent one is left as it is. Nothing is written on a refusal. The Roles
   dialog's own blank check stays as a pre-check.
 
-- **A value PostgreSQL cannot store is a 422 on every list route, not a 500**
+- **A value PostgreSQL cannot store, sent in a query parameter, is a 422 and
+  not a 500**
   ([#601](https://github.com/sujanto-gaws/kelir/issues/601),
   [#594](https://github.com/sujanto-gaws/kelir/issues/594),
   [ADR-0044](docs/architectures/adr/0044.%20A%20Value%20PostgreSQL%20Cannot%20Store%20Is%20Refused%20in%20One%20Shared%20Place,%20Never%20per%20Parameter.md)).
@@ -758,28 +808,15 @@ While the major version is `0`, the public API may change in any release.
     `GET /api/v1/rad/actions` and `GET /api/v1/rad/lists/{id}/rows` as query
     parameters.** It listed them as required path parameters, which a
     generated client would have followed.
-
-- **A chooser reaches every row, not the first 100**
-  ([#525](https://github.com/sujanto-gaws/kelir/issues/525)). The document
-  type on **New document**, the form, list and workflow of a document type,
-  the roles on a user, the person and type of a delegation window, and the
-  person a task is handed to each read one page of 100 rows, and the form and
-  list choosers then kept only the published or active ones. A row that
-  sorted past the hundredth could not be picked. Each is now a searching
-  chooser (`SearchSelect`): it asks the server for the first 100 rows that
-  match what is typed, sends the status it needs as a filter rather than
-  applying it to a page, and says *Showing 100 of N* when there are more.
-  The list endpoints for document types, forms, lists, workflow definitions,
-  users and roles take `search`, and all but roles take `status`. `search` is
-  a case-insensitive substring of the key and the name (a user's username,
-  email and display name), in which `%`, `_` and `\` match themselves; a
-  blank one is ignored. `status` is an exact match, and one outside the
-  resource's vocabulary is a 422. `meta.total` counts the rows matching both,
-  and the order is by key as before. The search is an unindexed `ILIKE`, as
-  the existing searches are.
-  **A NUL in any list's search is now a 422** on the search field, where it
-  was a 500 on every searching list, the documents list and external systems
-  included.
+  - **The rule covers query parameters, and the 33 list routes the test walks
+    are held to it.** A string in a path or a request body is not covered
+    (ADR-0044), and **these are still answered 500**: a NUL in a string path
+    parameter, such as `GET /api/v1/rad/lists/by-key/%00`
+    ([#657](https://github.com/sujanto-gaws/kelir/issues/657)); and a date
+    PostgreSQL cannot store in a request body on the credential route, which
+    is new in this release, a NUL in a role's code, and a NUL in the
+    party-role path ([#668](https://github.com/sujanto-gaws/kelir/issues/668)).
+    Both issues are placed after this release.
 
 - **Firefox no longer refuses a value because it gave up matching a pattern**
   ([#496](https://github.com/sujanto-gaws/kelir/issues/496)). On a pattern
