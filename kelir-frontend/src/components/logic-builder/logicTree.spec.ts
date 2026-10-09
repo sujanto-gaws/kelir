@@ -712,3 +712,190 @@ describe('evaluation agrees after a round trip (C14)', () => {
     expect(outcome({ '-': [10, 3] }, {})).not.toEqual(outcome({ '-': [3, 10] }, {}))
   })
 })
+
+// --- The test-engineer campaign, 2026-10-09 ------------------------------------
+
+/**
+ * Shapes the builder's own suite did not reach, found by the independent
+ * campaign on #686. Each names the section B or C rule it holds the seam to.
+ */
+describe('the seam at its edges (campaign, 2026-10-09)', () => {
+  /** What the seam emits for `expr` when every node is rebuilt, as JSON text. */
+  const rebuilt = (expr: unknown, tier: LogicTier = 'conditional') =>
+    JSON.stringify(rebuild(parseExpression(expr, tier)))
+
+  it.each([
+    ['negative zero', -0],
+    ['the largest double', Number.MAX_VALUE],
+    ['the smallest subnormal', Number.MIN_VALUE],
+    ['the largest safe integer', Number.MAX_SAFE_INTEGER],
+    ['a number JavaScript writes with an exponent', 1e21],
+    ['a small negative fraction', -1e-7],
+  ])('B5: %s stays the same number through a rebuild', (_name, literal) => {
+    const expr = { '+': [literal, { var: 'a' }] }
+    const operand = (rebuild(parseExpression(expr, 'calculate')) as { '+': unknown[] })['+'][0]
+
+    expect(Object.is(operand, literal)).toBe(true)
+    expect(rebuilt(expr, 'calculate')).toBe(JSON.stringify(expr))
+  })
+
+  it('B5: a string that reads as a number, boolean or null stays a string', () => {
+    for (const text of ['5', '-0', '1e3', '0x10', ' 5', 'true', 'false', 'null', 'NaN']) {
+      const expr = { '===': [{ var: 'a' }, text] }
+
+      expect(nodeAt(parseExpression(expr, 'conditional'), [1])).toEqual(
+        expect.objectContaining({ kind: 'literal', value: text }),
+      )
+      expect(rebuilt(expr)).toBe(JSON.stringify(expr))
+    }
+  })
+
+  it('B5: a number a host built that JSON cannot write is not rewritten by the seam', () => {
+    for (const literal of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      const tree = parseExpression({ '+': [literal, 1] }, 'calculate')
+      const edited = replaceAt(tree, [1], literalNode(2))
+
+      expect(Object.is((serialise(edited) as { '+': unknown[] })['+'][0], literal)).toBe(true)
+    }
+  })
+
+  it('B4: {"var": "a"} is a variable and {"var": ["a"]} is held as it was written', () => {
+    const wrapped = { var: ['a'] }
+    const tree = parseExpression({ '+': [{ var: 'a' }, wrapped] }, 'calculate')
+
+    expect(nodeAt(tree, [0])).toEqual(expect.objectContaining({ kind: 'var', path: 'a' }))
+    expect(nodeAt(tree, [1])).toEqual(expect.objectContaining({ kind: 'opaque' }))
+    // Not unwrapped into the bare form, which reads the same and is not what was written.
+    expect((rebuild(tree) as { '+': unknown[] })['+'][1]).toBe(wrapped)
+    expect(rebuilt(wrapped, 'calculate')).toBe('{"var":["a"]}')
+  })
+
+  it.each([
+    ['__proto__', JSON.parse('{"__proto__": [1, 2]}') as Record<string, unknown>],
+    ['constructor', { constructor: [1, 2] }],
+    ['toString', { toString: [1, 2] }],
+    ['hasOwnProperty', { hasOwnProperty: [1, 2] }],
+    ['valueOf', { valueOf: [1, 2] }],
+  ])('B3: an object keyed %s is an opaque leaf, held by reference', (key, operand) => {
+    expect(Object.keys(operand)).toEqual([key])
+
+    const expr = { and: [{ var: 'x' }, operand] }
+    const tree = parseExpression(expr, 'conditional')
+
+    expect(nodeAt(tree, [1]).kind).toBe('opaque')
+    expect((rebuild(tree) as { and: unknown[] }).and[1]).toBe(operand)
+    expect(rebuilt(expr)).toBe(JSON.stringify(expr))
+    expect(isRootRepresentable(parseExpression(operand, 'conditional'))).toBe(false)
+  })
+
+  it('B4: a var path named like an Object member is kept verbatim and is not offered', () => {
+    for (const name of ['__proto__', 'constructor', 'toString', 'hasOwnProperty']) {
+      expect(parseExpression({ var: name }, 'calculate')).toEqual(
+        expect.objectContaining({ kind: 'var', path: name }),
+      )
+      expect(isOfferedPath(name, [])).toBe(false)
+      expect(isOfferedPath(name, [{ path: 'amount', label: 'Amount' }])).toBe(false)
+    }
+  })
+
+  it.each([
+    ['upper case', 'AND'],
+    ['title case', 'Or'],
+    ['an upper-case var', 'VAR'],
+    ['a fullwidth plus', '＋'],
+    ['a fullwidth exclamation mark', '！'],
+    ['a trailing space', '+ '],
+    ['a leading space', ' +'],
+    ['a zero-width space', '​+'],
+    ['a fullwidth equals sign', '=＝='],
+    ['the greater-than-or-equal sign', '≥'],
+    ['a trailing NUL', 'and\u0000'],
+  ])('B3: an operator name with %s is opaque in both tiers', (_name, op) => {
+    for (const tier of ['calculate', 'conditional'] as const) {
+      const operand = { [op]: [1, 2] }
+      const tree = parseExpression({ '+': [operand, 3] }, tier)
+
+      expect(nodeAt(tree, [0])).toEqual(expect.objectContaining({ kind: 'opaque', value: operand }))
+      expect(isRootRepresentable(parseExpression(operand, tier))).toBe(false)
+    }
+  })
+
+  it('B6, B8: not holds an array or object operand opaque, in the form it was written', () => {
+    for (const expr of [{ '!': [[1]] }, { '!': {} }, { '!': { a: 1, b: 2 } }, { '!': [{}] }]) {
+      const tree = parseExpression(expr, 'conditional')
+
+      expect(tree.kind).toBe('operator')
+      expect(nodeAt(tree, [0]).kind).toBe('opaque')
+      expect(rebuilt(expr)).toBe(JSON.stringify(expr))
+    }
+  })
+
+  it('B8: changing not to not keeps the form it was written in', () => {
+    for (const expr of [{ '!': { var: 'a' } }, { '!': [{ var: 'a' }] }]) {
+      const changed = changeOperatorAt(parseExpression(expr, 'conditional'), [], '!')
+
+      expect(JSON.stringify(serialise(changed))).toBe(JSON.stringify(expr))
+    }
+  })
+
+  it('C1: a representable expression nested 500 deep round-trips', () => {
+    let expr: unknown = { var: 'a' }
+
+    for (let depth = 0; depth < 500; depth += 1) {
+      expr = [{ '!': expr }, { and: [expr, true] }, { '+': [expr, 1] }][depth % 3]
+    }
+
+    expect(containsOpaque(parseExpression(expr, 'conditional'))).toBe(false)
+    expect(rebuilt(expr)).toBe(JSON.stringify(expr))
+  })
+
+  it.fails(
+    // Defect, reported by the campaign: the doc comment promises "never throws",
+    // and a value deep enough overflows the recursive parse, so the builder
+    // throws while mounting. Real expressions are nowhere near this deep.
+    'never throws while parsing, even an expression nested 100,000 deep',
+    () => {
+      let expr: unknown = { var: 'a' }
+
+      for (let depth = 0; depth < 100_000; depth += 1) {
+        expr = { '!': expr }
+      }
+
+      expect(() => parseExpression(expr, 'conditional')).not.toThrow()
+    },
+  )
+
+  describe('C2, C5: an opaque subtree survives an edit by reference, at depth', () => {
+    const cat = { cat: ['INV-', { var: 'n' }], z: 0, a: 1 }
+    const deepNot = { '!': [cat] }
+    const expr = {
+      and: [{ or: [deepNot, { var: 'draft' }] }, { '>': [{ var: 'total' }, 0] }, { var: 'ok' }],
+    }
+
+    type Emitted = { and: [{ or: [{ '!': unknown[] }] }] }
+
+    it.each([
+      ['a sibling of its ancestor', [1, 1]],
+      ['its parent’s sibling', [0, 1]],
+      ['the root’s last operand', [2]],
+    ])('when the edit is at %s', (_where, path) => {
+      const edited = replaceAt(parseExpression(expr, 'conditional'), path, literalNode(7))
+      const emitted = serialise(edited) as Emitted
+
+      expect(emitted.and[0].or[0]['!'][0]).toBe(cat)
+      expect(JSON.stringify(emitted.and[0].or[0])).toBe(
+        '{"!":[{"cat":["INV-",{"var":"n"}],"z":0,"a":1}]}',
+      )
+    })
+
+    it('when the edit rebuilds every ancestor of the opaque leaf', () => {
+      const tree = parseExpression(expr, 'conditional')
+      const edited = changeOperatorAt(replaceAt(tree, [0, 1], literalNode(true)), [0], 'and')
+      type Changed = { and: [{ and: [{ '!': unknown[] }] }] }
+
+      // The untouched not is its original; rebuilt, it still holds the leaf itself.
+      expect((serialise(edited) as Changed).and[0].and[0]).toBe(deepNot)
+      expect((rebuild(edited) as Changed).and[0].and[0]['!'][0]).toBe(cat)
+    })
+  })
+})

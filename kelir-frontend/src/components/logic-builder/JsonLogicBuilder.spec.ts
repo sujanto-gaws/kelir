@@ -1,6 +1,6 @@
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { afterEach, describe, expect, it } from 'vitest'
-import { nextTick } from 'vue'
+import { defineComponent, h, nextTick, reactive } from 'vue'
 
 import { press, tabToLabel, type } from '@/lib/testing/keyboard'
 
@@ -503,6 +503,448 @@ describe('JsonLogicBuilder', () => {
       for (const box of wrapper.findAll('textarea')) {
         expect(wrapper.find(`label[for="${box.attributes('id')}"]`).exists()).toBe(true)
       }
+    })
+  })
+})
+
+// --- The test-engineer campaign, 2026-10-09 ------------------------------------
+
+function valueOf(wrapper: VueWrapper, name: string): string {
+  return (byLabel(wrapper, name).element as HTMLInputElement | HTMLSelectElement).value
+}
+
+function isValid(wrapper: VueWrapper): boolean {
+  return (wrapper.vm as unknown as { valid: boolean }).valid
+}
+
+/**
+ * What the builder's own suite did not reach, found by the independent
+ * campaign on #686, and the three gaps `requirements-analyst`'s trace named.
+ */
+describe('JsonLogicBuilder at its edges (campaign, 2026-10-09)', () => {
+  describe('a host’s reactive v-model', () => {
+    it('reads through the proxy, so a held subtree is the host’s own object', async () => {
+      const cat = { cat: ['INV-', { var: 'n' }] }
+      const state = reactive<{ expr: unknown }>({ expr: { and: [{ var: 'type' }, cat] } })
+      const values: unknown[] = []
+      const Host = defineComponent({
+        setup: () => () =>
+          h(JsonLogicBuilder, {
+            modelValue: state.expr,
+            tier: 'conditional',
+            variables: FORM_FIELDS,
+            'onUpdate:modelValue': (value: unknown) => {
+              values.push(value)
+              state.expr = value
+            },
+          }),
+      })
+      const wrapper = mount(Host)
+
+      mounted = wrapper
+
+      const control = byLabel(wrapper, 'Expression, operand 1: variable').element
+
+      await byLabel(wrapper, 'Expression, operand 1: variable').setValue('total')
+
+      expect((values[0] as { and: unknown[] }).and[1]).toBe(cat)
+      // The host's echo, a proxy of what was emitted, is known as the builder's own.
+      expect(byLabel(wrapper, 'Expression, operand 1: variable').element).toBe(control)
+
+      await byLabel(wrapper, 'Expression, operand 1: variable').setValue('quantity')
+
+      expect(values).toHaveLength(2)
+      expect((values[1] as { and: unknown[] }).and[1]).toBe(cat)
+    })
+  })
+
+  describe('a value the host changes', () => {
+    it.fails(
+      // Defect, reported by the campaign: `lastEmitted` outlives a load, so a
+      // host that undoes and then redoes hands back the very value the builder
+      // last emitted, the watcher takes it for its own echo, and the builder
+      // keeps showing the undone expression. The next edit then overwrites the
+      // host's value with one built from the stale tree.
+      'is re-read when the host hands back what the builder last emitted (undo, then redo)',
+      async () => {
+        const wrapper = mountBuilder({ var: 'unit_price' })
+
+        await byLabel(wrapper, 'Expression: variable').setValue('quantity')
+
+        const redo = wrapper.props('modelValue')
+
+        await wrapper.setProps({ modelValue: { var: 'unit_price' } })
+        expect(valueOf(wrapper, 'Expression: variable')).toBe('unit_price')
+
+        await wrapper.setProps({ modelValue: redo })
+        expect(valueOf(wrapper, 'Expression: variable')).toBe('quantity')
+      },
+    )
+  })
+
+  describe('the tier switching (C6)', () => {
+    it('re-reads the expression in the new tier, and emits nothing', async () => {
+      const wrapper = mountBuilder(
+        { '*': [{ '>': [{ var: 'total' }, 1] }, 2] },
+        { tier: 'calculate' },
+      )
+
+      expect(byLabel(wrapper, 'Expression, operand 1').find('textarea').exists()).toBe(true)
+
+      await wrapper.setProps({ tier: 'conditional' })
+
+      expect(valueOf(wrapper, 'Expression, operand 1: operator')).toBe('>')
+      expect(byLabel(wrapper, 'Expression, operand 1').find('textarea').exists()).toBe(false)
+
+      await wrapper.setProps({ tier: 'calculate' })
+
+      expect(byLabel(wrapper, 'Expression, operand 1').find('textarea').exists()).toBe(true)
+      expect(wrapper.emitted()).not.toHaveProperty('update:modelValue')
+    })
+
+    it('opens a root the new tier does not offer in the raw box, and back', async () => {
+      const wrapper = mountBuilder({ and: [{ var: 'type' }, true] })
+
+      await wrapper.setProps({ tier: 'calculate' })
+
+      expect(wrapper.text()).toContain('cannot show this expression')
+
+      await wrapper.setProps({ tier: 'conditional' })
+
+      expect(valueOf(wrapper, 'Expression: operator')).toBe('and')
+      expect(wrapper.emitted()).not.toHaveProperty('update:modelValue')
+    })
+
+    it('drops an unfinished edit and reloads the host’s value, which is valid', async () => {
+      const wrapper = mountBuilder({ '+': [{ var: 'unit_price' }, 1] }, { tier: 'calculate' })
+
+      await byLabel(wrapper, 'Add operand to Expression').trigger('click')
+      expect(isValid(wrapper)).toBe(false)
+
+      await wrapper.setProps({ tier: 'conditional' })
+
+      expect(wrapper.find('[aria-label="Expression, operand 3"]').exists()).toBe(false)
+      expect(isValid(wrapper)).toBe(true)
+      expect(wrapper.emitted('validityChanged')).toEqual([[false], [true]])
+      expect(wrapper.emitted()).not.toHaveProperty('update:modelValue')
+
+      // The tree is the host's value again: an edit changes only what it edits.
+      await byLabel(wrapper, 'Expression, operand 2: number').setValue('2')
+
+      expect(lastEmitted(wrapper)).toEqual({ '+': [{ var: 'unit_price' }, 2] })
+    })
+  })
+
+  describe('an advanced block (C11, C12)', () => {
+    it('stays raw when its text becomes an expression the builder could draw', async () => {
+      const wrapper = mountBuilder({ and: [{ var: 'type' }, { in: ['a', ['a', 'b']] }] })
+      const box = byLabel(wrapper, 'Expression, operand 2').get('textarea')
+
+      await box.setValue('{"var":  "total"}')
+
+      expect(byLabel(wrapper, 'Expression, operand 2').find('textarea').exists()).toBe(true)
+      expect((box.element as HTMLTextAreaElement).value).toBe('{"var":  "total"}')
+      expect(lastEmitted(wrapper)).toEqual({ and: [{ var: 'type' }, { var: 'total' }] })
+
+      // Opened afresh, the same value is drawn.
+      await wrapper.setProps({ modelValue: { and: [{ var: 'type' }, { var: 'total' }] } })
+
+      expect(valueOf(wrapper, 'Expression, operand 2: variable')).toBe('total')
+    })
+
+    it.each([
+      ['"5"', '"5"'],
+      ['5', '5'],
+      ['true', 'true'],
+      ['null', 'null'],
+      ['{"b": 1, "a": 2}', '{"b":1,"a":2}'],
+    ])('emits %s typed in it as JSON parses it, type and key order kept', async (typed, json) => {
+      const wrapper = mountBuilder({ and: [{ var: 'type' }, { in: ['a', ['a']] }] })
+
+      await byLabel(wrapper, 'Expression, operand 2').get('textarea').setValue(typed)
+
+      expect(JSON.stringify(lastEmitted(wrapper))).toBe(`{"and":[{"var":"type"},${json}]}`)
+    })
+
+    it('is unfilled, not emitted, when its text is emptied', async () => {
+      const wrapper = mountBuilder({ and: [{ var: 'type' }, { in: ['a', ['a']] }] })
+
+      await byLabel(wrapper, 'Expression, operand 2').get('textarea').setValue('  ')
+
+      expect(emitted(wrapper)).toEqual([])
+      expect(isValid(wrapper)).toBe(false)
+      expect(byLabel(wrapper, 'Expression, operand 2').text()).toContain('Enter valid JSON.')
+    })
+
+    it('keeps an opaque subtree three deep as the same object through an edit', async () => {
+      const cat = { cat: ['INV-', { var: 'n' }] }
+      const not = { '!': [cat] }
+      const sibling = { var: 'total' }
+      const wrapper = mountBuilder({ and: [{ or: [not, { var: 'type' }] }, sibling] })
+
+      await byLabel(wrapper, 'Expression, operand 1, operand 2: variable').setValue('quantity')
+
+      const value = lastEmitted(wrapper) as { and: [{ or: [{ '!': unknown[] }] }, unknown] }
+
+      expect(value.and[0].or[0]).toBe(not)
+      expect(value.and[0].or[0]['!'][0]).toBe(cat)
+      expect(value.and[1]).toBe(sibling)
+    })
+  })
+
+  describe('the root raw box (C11)', () => {
+    it('emptied, emits no expression, and can then be edited visually', async () => {
+      const wrapper = mountBuilder({ min: [1, 2] })
+
+      await wrapper.get('textarea').setValue(' ')
+
+      expect(emitted(wrapper)).toEqual([undefined])
+      expect(isValid(wrapper)).toBe(true)
+
+      await byLabel(wrapper, 'Edit Expression visually').trigger('click')
+
+      expect(optionLabels(wrapper, 'Expression: kind')).toContain('Variable')
+    })
+
+    it('cannot return to the visual view while its text is not JSON', async () => {
+      const wrapper = mountBuilder({ '===': [{ var: 'type' }, 'invoice'] })
+
+      await byLabel(wrapper, 'Edit Expression as JSON').trigger('click')
+      await wrapper.get('textarea').setValue('{"===": [')
+
+      expect(byLabel(wrapper, 'Edit Expression visually').attributes('disabled')).toBeDefined()
+
+      await wrapper.get('textarea').setValue('{"!==": [{"var": "type"}, "invoice"]}')
+
+      expect(byLabel(wrapper, 'Edit Expression visually').attributes('disabled')).toBeUndefined()
+    })
+
+    it('is not offered while an operand is unfilled', async () => {
+      const wrapper = mountBuilder({ '+': [1, 2] }, { tier: 'calculate' })
+
+      expect(byLabel(wrapper, 'Edit Expression as JSON').attributes('disabled')).toBeUndefined()
+
+      await byLabel(wrapper, 'Add operand to Expression').trigger('click')
+
+      expect(byLabel(wrapper, 'Edit Expression as JSON').attributes('disabled')).toBeDefined()
+    })
+  })
+
+  describe('literals keep their type (B5)', () => {
+    it('emits text that reads as a number or a boolean as text', async () => {
+      const wrapper = mountBuilder({ '===': [{ var: 'type' }, 'invoice'] })
+
+      for (const text of ['5', '-0', 'true', 'null']) {
+        await byLabel(wrapper, 'Expression, operand 2: text').setValue(text)
+
+        expect(lastEmitted(wrapper)).toEqual({ '===': [{ var: 'type' }, text] })
+      }
+    })
+
+    it('emits false as false, and true as true', async () => {
+      const wrapper = mountBuilder({ '===': [{ var: 'type' }, 'invoice'] })
+
+      await byLabel(wrapper, 'Expression, operand 2: kind').setValue('boolean')
+      expect(emitted(wrapper)).toEqual([])
+
+      await byLabel(wrapper, 'Expression, operand 2: true or false').setValue('false')
+      expect(JSON.stringify(lastEmitted(wrapper))).toBe('{"===":[{"var":"type"},false]}')
+
+      await byLabel(wrapper, 'Expression, operand 2: true or false').setValue('true')
+      expect(JSON.stringify(lastEmitted(wrapper))).toBe('{"===":[{"var":"type"},true]}')
+    })
+
+    it('shows and keeps numbers at the edges of what JavaScript writes', async () => {
+      const wrapper = mountBuilder(
+        { '+': [1e21, Number.MIN_VALUE, -0, { var: 'unit_price' }] },
+        { tier: 'calculate' },
+      )
+
+      expect(valueOf(wrapper, 'Expression, operand 1: number')).toBe('1e+21')
+      expect(valueOf(wrapper, 'Expression, operand 2: number')).toBe('5e-324')
+
+      await byLabel(wrapper, 'Expression, operand 4: variable').setValue('quantity')
+
+      const operands = (lastEmitted(wrapper) as { '+': unknown[] })['+']
+
+      expect(operands[0]).toBe(1e21)
+      expect(operands[1]).toBe(Number.MIN_VALUE)
+      expect(Object.is(operands[2], -0)).toBe(true)
+
+      await byLabel(wrapper, 'Expression, operand 3: number').setValue('-1.5E-3')
+
+      expect((lastEmitted(wrapper) as { '+': unknown[] })['+'][2]).toBe(-0.0015)
+    })
+
+    it('leaves a number unfilled until it is one, whatever Number() would make of it', async () => {
+      const wrapper = mountBuilder({ '+': [{ var: 'unit_price' }, 1] }, { tier: 'calculate' })
+
+      for (const unfinished of ['', '  ', 'Infinity', 'NaN', '+1', '1,5', '1e', '.', '1_000']) {
+        await byLabel(wrapper, 'Expression, operand 2: number').setValue(unfinished)
+
+        expect(emitted(wrapper)).toEqual([])
+        expect(isValid(wrapper)).toBe(false)
+      }
+    })
+
+    it('starts a number afresh when the kind is changed away and back', async () => {
+      const wrapper = mountBuilder({ '+': [{ var: 'unit_price' }, 5] }, { tier: 'calculate' })
+
+      await byLabel(wrapper, 'Expression, operand 2: kind').setValue('string')
+      await byLabel(wrapper, 'Expression, operand 2: kind').setValue('number')
+
+      expect(valueOf(wrapper, 'Expression, operand 2: number')).toBe('')
+      expect(byLabel(wrapper, 'Expression, operand 2').text()).toContain('Enter a number.')
+      expect(emitted(wrapper)).toEqual([])
+    })
+  })
+
+  describe('choosing what an operand is', () => {
+    it('re-choosing the kind a node already is changes nothing and emits nothing', async () => {
+      const wrapper = mountBuilder({ '===': [{ var: 'type' }, 'invoice'] })
+
+      await byLabel(wrapper, 'Expression: kind').setValue('comparison')
+      await byLabel(wrapper, 'Expression, operand 1: kind').setValue('var')
+
+      expect(valueOf(wrapper, 'Expression, operand 1: variable')).toBe('type')
+      expect(wrapper.emitted()).not.toHaveProperty('update:modelValue')
+      expect(wrapper.emitted()).not.toHaveProperty('validityChanged')
+    })
+  })
+
+  describe('the unknown-variable warning (B4)', () => {
+    it('shows only on a path not offered, and goes when an offered one is chosen', async () => {
+      const wrapper = mountBuilder(
+        { '*': [{ var: 'unit_price' }, { var: 'items.0.price' }] },
+        {
+          tier: 'calculate',
+        },
+      )
+
+      expect(byLabel(wrapper, 'Expression, operand 1').text()).not.toContain('Not in the offered')
+      expect(byLabel(wrapper, 'Expression, operand 2').text()).toContain('Not in the offered')
+
+      await byLabel(wrapper, 'Expression, operand 2: variable').setValue('quantity')
+
+      expect(byLabel(wrapper, 'Expression, operand 2').text()).not.toContain('Not in the offered')
+    })
+
+    it('leaves a variable unfilled, not emitted, when its free path is blanked', async () => {
+      const wrapper = mountBuilder(
+        { '<=': [{ var: 'document.amount' }, 10] },
+        { variables: JWSS_CONTEXT, allowFreePaths: true },
+      )
+
+      await byLabel(wrapper, 'Expression, operand 1: variable path').setValue('')
+
+      expect(emitted(wrapper)).toEqual([])
+      expect(isValid(wrapper)).toBe(false)
+      expect(byLabel(wrapper, 'Expression, operand 1').text()).toContain('Choose a variable.')
+      expect(
+        byLabel(wrapper, 'Expression, operand 1: variable path').attributes('aria-invalid'),
+      ).toBe('true')
+
+      await byLabel(wrapper, 'Expression, operand 1: variable path').setValue('formData.x')
+
+      expect(lastEmitted(wrapper)).toEqual({ '<=': [{ var: 'formData.x' }, 10] })
+    })
+  })
+
+  describe('arity in the view (section A)', () => {
+    it('offers no add or remove on a two-operand operator, or on not', () => {
+      const wrapper = mountBuilder({ and: [{ '-': [{ var: 'total' }, 1] }, { '!': true }] })
+
+      expect(wrapper.find('[aria-label="Add operand to Expression, operand 1"]').exists()).toBe(
+        false,
+      )
+      expect(wrapper.find('[aria-label="Remove Expression, operand 1, operand 1"]').exists()).toBe(
+        false,
+      )
+      expect(wrapper.find('[aria-label="Add operand to Expression, operand 2"]').exists()).toBe(
+        false,
+      )
+      expect(wrapper.find('[aria-label="Remove Expression, operand 2, operand 1"]').exists()).toBe(
+        false,
+      )
+      expect(wrapper.find('[aria-label="Expression, operand 2: operator"]').exists()).toBe(false)
+    })
+
+    it('offers remove on a variadic operand only above two', async () => {
+      const wrapper = mountBuilder({ '+': [1, 2] }, { tier: 'calculate' })
+
+      expect(wrapper.find('[aria-label="Remove Expression, operand 1"]').exists()).toBe(false)
+
+      await wrapper.setProps({ modelValue: { '+': [1, 2, 3] } })
+
+      expect(wrapper.find('[aria-label="Remove Expression, operand 1"]').exists()).toBe(true)
+    })
+
+    it('greys out an operator that cannot take the operands there are', () => {
+      const wrapper = mountBuilder({ '+': [1, 2, 3] }, { tier: 'calculate' })
+      const options = byLabel(wrapper, 'Expression: operator').findAll('option')
+      const disabled = Object.fromEntries(
+        options.map((option) => [
+          option.attributes('value'),
+          option.attributes('disabled') !== undefined,
+        ]),
+      )
+
+      expect(disabled).toEqual({ '+': false, '-': true, '*': false, '/': true, '%': true })
+    })
+  })
+
+  describe('disabled', () => {
+    it('disables every control that edits, and leaves expanding alone', () => {
+      const wrapper = mount(JsonLogicBuilder, {
+        props: {
+          modelValue: { and: [{ '+': [1, 2, { var: 'x' }] }, { cat: ['a'] }, { var: 'type' }] },
+          tier: 'conditional',
+          variables: FORM_FIELDS,
+          allowFreePaths: true,
+          disabled: true,
+        },
+      })
+
+      mounted = wrapper
+
+      for (const control of wrapper.findAll('select, input, textarea, button')) {
+        const name = control.attributes('aria-label') ?? control.attributes('id') ?? ''
+        const toggles = /^(Collapse|Expand) /.test(name)
+
+        expect({ name, disabled: control.attributes('disabled') !== undefined }).toEqual({
+          name,
+          disabled: !toggles,
+        })
+      }
+    })
+
+    it('disables the root raw box too', () => {
+      const wrapper = mount(JsonLogicBuilder, {
+        props: { modelValue: { min: [1, 2] }, tier: 'conditional', variables: [], disabled: true },
+      })
+
+      mounted = wrapper
+
+      expect(wrapper.get('textarea').attributes('disabled')).toBeDefined()
+    })
+  })
+
+  describe('clearing', () => {
+    it('starts over with the kinds the tier offers, and emits nothing until filled', async () => {
+      const wrapper = mountBuilder({ var: 'total' }, { tier: 'calculate' })
+
+      await byLabel(wrapper, 'Clear Expression').trigger('click')
+
+      expect(optionLabels(wrapper, 'Expression: kind')).toEqual([
+        'No expression',
+        'Variable',
+        'Arithmetic',
+      ])
+
+      await byLabel(wrapper, 'Expression: kind').setValue('var')
+
+      expect(emitted(wrapper)).toEqual([undefined])
+      expect(isValid(wrapper)).toBe(false)
     })
   })
 })
