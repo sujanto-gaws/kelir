@@ -222,9 +222,11 @@ describe('JsonLogicBuilder', () => {
 
       expect(emitted(wrapper)).toEqual([])
 
-      await byLabel(wrapper, 'Expression, operand 3: number').setValue('-')
-      expect(emitted(wrapper)).toEqual([])
-      expect(wrapper.text()).toContain('Enter a number.')
+      for (const unfinished of ['-', '1e400', '0x10', '12abc']) {
+        await byLabel(wrapper, 'Expression, operand 3: number').setValue(unfinished)
+        expect(emitted(wrapper)).toEqual([])
+        expect(wrapper.text()).toContain('Enter a number.')
+      }
 
       await byLabel(wrapper, 'Expression, operand 3: number').setValue('2.5')
 

@@ -207,8 +207,12 @@ function setNumber(next: string): void {
   numberText.value = next
 
   const trimmed = next.trim()
+  const value = Number(trimmed)
 
-  replace(NUMBER.test(trimmed) ? literalNode(Number(trimmed)) : holeNode('number', next))
+  // Finite as well as well-formed: `1e400` is `Infinity`, which JSON writes as `null`.
+  replace(
+    NUMBER.test(trimmed) && Number.isFinite(value) ? literalNode(value) : holeNode('number', next),
+  )
 }
 
 function setBoolean(next: string): void {
