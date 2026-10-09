@@ -19,6 +19,7 @@ CHECK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/check-pull-request-ready.sh
 LINE="**Not ready: the test-engineer campaign is still running. Do not merge yet.**"
 CR=$'\r'
 TAB=$'\t'
+BOM=$'\xef\xbb\xbf'
 
 failures=0
 
@@ -93,6 +94,23 @@ probe refused "a heading" "## Not ready"
 probe refused "a quote" "> Not ready, the campaign is open."
 probe refused "the phrase late in the line" "Row 8's campaign has three gaps open, so: do not merge yet."
 
+# Punctuation hard against the phrase, with no space before it. Seen red with
+# the boundary before the phrase narrowed to whitespace (test-engineer).
+probe refused "a bracket against the phrase" "[Not ready] the campaign is open."
+
+# A byte-order mark, which a body read from a file saved on Windows can open
+# with if nothing on the way strips it. Seen red with the phrase anchored to
+# the line's start (test-engineer). The body holds only the first phrase, so
+# the second cannot satisfy the probe on the first's behalf.
+probe refused "a byte-order mark before the line" "${BOM}Not ready: the campaign is open."
+
+# A trailing backslash is a markdown hard break, not a line continuation: the
+# line after it is the second line. Seen red with `read -r` loosened to `read`,
+# which joins the two (test-engineer). The backslash and newline are the body.
+# shellcheck disable=SC1004
+probe accepted "a hard break before the line" 'Closes #696 \
+Not ready: the campaign is open.'
+
 # **The line not first passes, and that is the rule, not a gap.** The
 # convention puts it first, where the merger reads it, and a body lower down
 # quotes it, explains it, or records its removal. Reading the whole body would
@@ -109,6 +127,8 @@ A body whose first line says not ready, or do not merge yet, is refused."
 # Whole words. Seen red without the boundaries around the phrase.
 probe accepted "a word that only contains the phrase" "The scanner cannot ready a file twice."
 probe accepted "'ready' without 'not'" "Ready to merge: the campaign section is below."
+# The boundary after the phrase. Seen red with it removed (test-engineer).
+probe accepted "a word that starts with the phrase" "The form is not readymade: the builder assembles it."
 
 # Nothing to read. Seen red with an empty first line refused.
 probe accepted "an empty body" ""
