@@ -9,6 +9,16 @@ While the major version is `0`, the public API may change in any release.
 
 ## [Unreleased]
 
+### Changed
+
+- **The SRS names the builder pair** ([#685](https://github.com/sujanto-gaws/kelir/issues/685)).
+  FR-RAD-013 (`Should`): a form definition is authored from the browser, with nested containers
+  and visually built expressions. FR-WF-018 (`Should`): a workflow definition is authored,
+  revised, published and explicitly retired from the browser. Both cite **D-86**, **D-95**,
+  **D-98** and **D-101**. SRS §10's two drag-and-drop lines are struck: the workflow builder is a
+  list editor with a read-only graph, not a drag-and-drop designer. SRS v0.10, 167 FRs; MVP scope
+  is unchanged. Decision **D-109**.
+
 ## [0.9.0] — 2026-10-09
 
 Phase 9 closes its integration core: **Kelir knows the external systems it

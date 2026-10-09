@@ -1,6 +1,6 @@
 # Kelir Software Requirements Specification
 
-**Status:** Draft · **Last updated:** 2026-09-26
+**Status:** Draft · **Last updated:** 2026-10-09
 
 The companion Solution Blueprint formerly bundled in this file now lives in the System Design Document: `docs/design/01. System Design Document.md`.
 
@@ -14,7 +14,7 @@ The companion Solution Blueprint formerly bundled in this file now lives in the 
 |---|---|
 | Document Name | Kelir Software Requirements Specification |
 | Framework Name | Kelir |
-| Version | 0.9 |
+| Version | 0.10 |
 | Status | Initial Draft |
 | Date | 2026-08-05 |
 | Document Type | SRS |
@@ -35,6 +35,7 @@ Revision history:
 0.7 (2026-08-20): re-scoped FR-IDM-008 to department assignment, leaving department management to FR-ORG-002 and positions to FR-ORG-003, which the three requirements had been claiming between them; recorded that multi-tenant mode (FR-IDM-009) is not exercised before 1.0 and that a deployment serves one tenant, added to §10. No requirement added or removed, and MVP scope is unchanged — §9 names neither departments nor tenants. Recorded as decisions D-7 and D-8 in projects/planning/02. Product Backlog.md.
 0.8 (2026-08-25): reversed the v0.7 tenancy entry. Multi-tenant mode is exercised: FR-IDM-009 is delivered in full and FR-ORG-001 with it, so the §10 line deferring multiple tenants past 1.0 is removed and the §4.2 and §4.3 notes are rewritten to say what was built rather than what was deferred. §2 gains the answer FR-IDM-009 had left open — roles are tenant-scoped, the permission catalogue is global. No requirement added or removed, and MVP scope is unchanged — §9 still names no tenant criterion, which is why this could be `Should` work at all. Recorded as decision D-18 in projects/planning/02. Product Backlog.md, superseding D-7.
 0.9 (2026-09-26): added FR-WF-017 (Should), an administrator's reassign of an open task to a live role or user under a dedicated permission. No existing requirement covered it: FR-WF-009 and FR-TASK-008 are delegation by the task's holder, and FR-WF-010 is escalation by the system. 164 FRs become 165. Not named by §9, so MVP scope is unchanged. Recorded as decision D-91, amended by the product owner on 2026-09-25, in projects/planning/02. Product Backlog.md; delivered by #512 and ADR-0042.
+0.10 (2026-10-09): added FR-RAD-013 (Should), a form definition authored from the browser with nested containers and visually built expressions, and FR-WF-018 (Should), a workflow definition authored, revised, published and explicitly retired from the browser. No existing requirement covered either: FR-RAD-002 and FR-WF-001 are met by the definitions, their API and their schemas, and no requirement retired a workflow revision. §10's "Drag-and-drop workflow designer" and "Drag-and-drop form builder with advanced logic" are struck with a dated note that says what is built instead: the workflow builder is a list editor with a read-only graph, not a drag-and-drop designer. 165 FRs become 167. Not named by §9, so MVP scope is unchanged. Recorded as decision D-109 in projects/planning/02. Product Backlog.md, each requirement citing D-86, D-95, D-98 and D-101; applied by #685, construction plan 19's row 1.
 ```
 
 > **Note:** As of v0.4 this file contains only the SRS. The Solution Blueprint has been split out into the System Design Document (`docs/design/01. System Design Document.md`), which is versioned independently.
@@ -346,6 +347,9 @@ Note: supplier, customer, and employee master data follow the OFBiz-style Party 
 | FR-RAD-010 | The system shall support dynamic rendering of forms and lists in frontend | Must |
 | FR-RAD-011 | The system shall support conditional field visibility | Should |
 | FR-RAD-012 | The system shall support metadata versioning | Could |
+| FR-RAD-013 | The system shall allow a form definition to be authored from the browser, with nested containers and visually built expressions | Should |
+
+Note: FR-RAD-013 was added in v0.10 (decision **D-109**). FR-RAD-002 is met by the definition, its API and the JFSS; this requirement is authoring one from the browser, which the flat builder of Sprint 15 did only for a list of fields with its expressions as raw JSON. **Nested containers** are panel, fieldset, columns and tabs, placed on a drag-and-drop canvas from a palette that offers only the types the renderer draws (**D-86**). **Visually built expressions** cover comparisons, `and`, `or` and `not`, arithmetic and `var`; an expression the builder cannot represent opens as raw JSON, marked advanced, and is never rewritten (**D-110**). The same expression builder edits workflow conditions under FR-WF-018 (**D-95**), and the pair comes before the hardening sprints (**D-98**), with the explicit retirement of a workflow revision (**D-101**). §10's *Drag-and-drop form builder with advanced logic* is struck in v0.10, and its note says what is built instead.
 
 ---
 
@@ -406,8 +410,11 @@ Note: supplier, customer, and employee master data follow the OFBiz-style Party 
 | FR-WF-015 | The system shall support conditional routing | Should |
 | FR-WF-016 | The system should support parallel approval | Could |
 | FR-WF-017 | The system shall allow an administrator to reassign an open task to a live role or user, under a dedicated permission | Should |
+| FR-WF-018 | The system shall allow a workflow definition to be authored, revised, published and explicitly retired from the browser | Should |
 
 Note: FR-WF-016 is planned for a later phase.
+
+Note: FR-WF-018 was added in v0.10 (decision **D-109**). FR-WF-001 is met by the definition API and the JWSS; this requirement is authoring a definition from the browser. **The editor is a list**: the definition's states, with a table of each state's transitions under it. A graph of the same definition is drawn read-only, laid out on every load, so no layout is stored and the JWSS is unchanged (**D-95**). **It is not a drag-and-drop designer**; editing on the graph would need its own decision on where a layout lives. Conditions are edited in the expression builder FR-RAD-013 describes (**D-86**). **Publishing a revision does not retire the one before it**: an administrator retires a revision explicitly, under its own permission, and instances already running keep the revision they started on (**D-101**, **D-108**). The pair comes before the hardening sprints (**D-98**). §10's *Drag-and-drop workflow designer* is struck in v0.10, and its note says what is built instead.
 
 ---
 
@@ -838,8 +845,15 @@ The following are not required for initial MVP unless specifically prioritized:
 ```text
 Full BPMN 2.0 engine
 Dynamic third-party plugin marketplace
-Drag-and-drop workflow designer
-Drag-and-drop form builder with advanced logic
+```
+
+~~Drag-and-drop workflow designer~~
+
+~~Drag-and-drop form builder with advanced logic~~
+
+> **Struck 2026-10-09, v0.10 (decision D-109).** Both were prioritized by **D-86**, **D-95** and **D-98**, and the builder pair is now FR-RAD-013 (§4.5) and FR-WF-018 (§4.8). **Neither struck line describes what is built.** The workflow builder is a **list editor**: a state list with a transition table under each state, beside a **read-only graph** laid out on every load, with no stored layout (**D-95**). **It is not a drag-and-drop designer**, and editing on the graph is not decided. The form builder does use drag-and-drop: a palette offering only the types the renderer draws, and a canvas that nests panel, fieldset, columns and tabs (**D-86**). Its logic is visual only for comparisons, `and`, `or` and `not`, arithmetic and `var`; any other expression opens as raw JSON, marked advanced, and is never rewritten (**D-110**). Retiring a workflow revision is an explicit action (**D-101**). §9 names neither requirement, so MVP scope is unchanged.
+
+```text
 Mobile native application
 Real-time WebSocket collaboration
 Advanced AI classification
