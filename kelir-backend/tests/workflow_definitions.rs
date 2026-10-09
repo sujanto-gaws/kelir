@@ -2233,11 +2233,33 @@ async fn a_role_edit_is_not_held_up_by_a_publish_in_flight() {
     let edit_waited = waited_on_a_lock(&app, 2, &editing).await;
     let edit_finished_first = editing.is_finished();
 
+    // **The pause point is sound only if the publish already holds its role
+    // lock there.** `LOCK TABLE workflow_transitions IN SHARE MODE` stops the
+    // publish at the projection's `DELETE`, which runs after `lock_live_roles`
+    // today. Were the projection moved before the role read, the publish would
+    // pause holding no role lock and the edit above would pass vacuously, so
+    // this asks PostgreSQL: a `FOR UPDATE NOWAIT` on the role must fail with
+    // `lock_not_available` (55P03) while the publish is paused.
+    let mut probe = app.pool.begin().await.expect("a transaction");
+    let probed = sqlx::query("SELECT id FROM roles WHERE id = $1 FOR UPDATE NOWAIT")
+        .bind(approver)
+        .execute(&mut *probe)
+        .await;
+    probe.rollback().await.expect("end the probe");
+    let held_by_the_publish = matches!(
+        &probed,
+        Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("55P03")
+    );
+
     holding.rollback().await.expect("release the projection");
 
     let edited = editing.await.expect("the edit finished");
     let published = publishing.await.expect("the publish finished");
 
+    assert!(
+        held_by_the_publish,
+        "the publish was paused before it locked its roles, so this proves          nothing about its lock: {probed:?}"
+    );
     assert!(
         !edit_waited && edit_finished_first,
         "a role edit waited on a publish naming the role: edit {} {}",
@@ -2246,4 +2268,82 @@ async fn a_role_edit_is_not_held_up_by_a_publish_in_flight() {
     );
     assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
     assert_eq!(published.status, StatusCode::OK, "{}", published.body);
+}
+
+/// **A draft edited before its publish takes the row is checked as edited**
+/// (#572, the fix in `efd60d7`).
+///
+/// `a_draft_edited_while_its_publish_is_in_flight_is_not_published_unchecked`
+/// pauses the publish at its role read, which is after `lock_for_publish`, so
+/// it cannot see a publish that reads the definition before it locks the row.
+/// This one opens that gap: the edit is made, uncommitted, by the transaction
+/// that holds the row, so the publish waits at `lock_for_publish`, and the
+/// edit, renaming the task's role to one no role has, commits while it waits.
+/// A publish that reads after it locks sees the edit and refuses it.
+///
+/// **Seen red** against `before` read with the pool before the transaction
+/// (the revision reaches `ACTIVE` naming `WF-GHOST`), against
+/// `lock_for_publish` removed, and against it without `FOR UPDATE`.
+#[tokio::test]
+async fn a_draft_edited_before_its_publish_takes_the_row_is_checked_as_edited() {
+    let app = std::sync::Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let tenant = common::fixtures::SYSTEM_TENANT_ID;
+
+    role(&app, "WF-APPROVER").await;
+    let id = saved(
+        &app,
+        &token,
+        "wf_edited_before_lock",
+        approval_workflow("wf_edited_before_lock"),
+    )
+    .await;
+
+    let mut ghost = approval_workflow("wf_edited_before_lock");
+    ghost["states"][0]["task"]["assignment"]["roleCode"] = json!("WF-GHOST");
+
+    let mut editing = app.pool.begin().await.expect("a transaction");
+    let edited = definition_repo::update_draft(
+        &mut *editing,
+        tenant,
+        id,
+        &definition_repo::DefinitionFields {
+            name: None,
+            description: None,
+            definition_json: Some(&ghost),
+            initial_state: None,
+            jwss_version: None,
+        },
+        None,
+    )
+    .await
+    .expect("the edit runs");
+    assert_eq!(edited, 1);
+
+    let publishing = {
+        let app = std::sync::Arc::clone(&app);
+        let token = token.clone();
+        tokio::spawn(async move { publish(&app, &token, id).await })
+    };
+
+    let waited = waited_on_a_lock(&app, 1, &publishing).await;
+    editing.commit().await.expect("the edit commits");
+    let published = publishing.await.expect("the publish finished");
+
+    assert!(
+        waited,
+        "the publish did not wait on the edit's row: {} {}",
+        published.status, published.body
+    );
+    assert_eq!(
+        published.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a publish checked a copy older than the one it published: {}",
+        published.body
+    );
+    assert_eq!(
+        refusals(&published),
+        not_live(&["definition.states.0.task.assignment.roleCode"])
+    );
+    assert_eq!(status_of(&app, id).await, "DRAFT");
 }
