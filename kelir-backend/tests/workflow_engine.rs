@@ -1323,8 +1323,6 @@ fn split_control_workflow(key: &str, edge_role: &str) -> Value {
     definition
 }
 
-/// A role that exists and grants nothing, so `allowedBy` resolves and the
-/// refusal is the check's rather than the resolver's.
 /// Soft-deletes a role behind the API's back, after a publish that named it.
 ///
 /// A publish refuses a definition naming a role that is not live (D-111,
@@ -1343,6 +1341,8 @@ async fn delete_role_behind_the_apis_back(app: &TestApp, code: &str) {
     .expect("delete the role behind the API's back");
 }
 
+/// A role that exists and grants nothing, so `allowedBy` resolves and the
+/// refusal is the check's rather than the resolver's.
 async fn given_bare_role(app: &TestApp, code: &str) -> Uuid {
     // A publish may have created it already (D-111, #572).
     match fixtures::live_role(&app.pool, fixtures::SYSTEM_TENANT_ID, code).await {

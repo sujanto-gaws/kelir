@@ -719,27 +719,55 @@ mod tests {
         assert_eq!(task.due_in_seconds(), Some(172_800.0));
     }
 
-    #[test]
-    fn role_references_name_every_role_rule_with_its_path() {
-        let definition = json!({
+    /// A valid JWSS definition naming a role in every place a rule may stand,
+    /// and in the forms the meta-schema allows there: `task.assignment` is
+    /// object-only, and only `allowedBy` takes the `"ROLE:X"` shorthand.
+    fn every_place_a_role_may_be_named() -> Value {
+        json!({
+            "workflowKey": "role_references", "version": "1.0.0", "name": "Role references",
+            "initialState": "A",
             "states": [
-                { "code": "A", "task": { "assignment": { "assigneeType": "ROLE", "roleCode": "R-OBJECT" } } },
-                { "code": "B", "task": { "assignment": "ROLE:R-SHORT",
-                                         "escalation": { "assignment": "ROLE:R-ESCALATION" } } },
-                { "code": "C", "task": { "assignment": { "assigneeType": "DEPARTMENT_ROLE",
-                                                         "roleCode": "R-DEPT",
-                                                         "departmentScope": "OWNER_DEPARTMENT" } } },
-                { "code": "D", "task": { "assignment": "OWNER" } },
-                { "code": "E" }
+                { "code": "A", "name": "A", "mapsToDocumentStatus": "PENDING_APPROVAL",
+                  "task": { "taskDefinitionKey": "a", "taskName": "A",
+                            "assignment": { "assigneeType": "ROLE", "roleCode": "R-OBJECT" } } },
+                { "code": "B", "name": "B", "mapsToDocumentStatus": "PENDING_APPROVAL",
+                  "task": { "taskDefinitionKey": "b", "taskName": "B",
+                            "assignment": { "assigneeType": "ROLE", "roleCode": "R-TASK-B" },
+                            "escalation": { "afterHours": 24,
+                                            "assignment": { "assigneeType": "ROLE",
+                                                            "roleCode": "R-ESCALATION" } } } },
+                { "code": "C", "name": "C", "mapsToDocumentStatus": "PENDING_APPROVAL",
+                  "task": { "taskDefinitionKey": "c", "taskName": "C",
+                            "assignment": { "assigneeType": "DEPARTMENT_ROLE",
+                                            "roleCode": "R-DEPT",
+                                            "departmentScope": "OWNER_DEPARTMENT" } } },
+                { "code": "D", "name": "D", "mapsToDocumentStatus": "IN_REVIEW",
+                  "task": { "taskDefinitionKey": "d", "taskName": "D",
+                            "assignment": { "assigneeType": "OWNER" } } },
+                { "code": "E", "name": "E", "mapsToDocumentStatus": "COMPLETED", "isFinal": true }
             ],
             "transitions": [
                 { "from": "A", "to": "B", "action": "APPROVE", "allowedBy": "ROLE:R-SHORT" },
                 { "from": "B", "to": "C", "action": "APPROVE", "allowedBy": "USER:someone" },
                 { "from": "C", "to": "D", "action": "APPROVE",
-                  "allowedBy": { "assigneeType": "DEPARTMENT_ROLE", "roleCode": "R-EDGE" } },
+                  "allowedBy": { "assigneeType": "DEPARTMENT_ROLE", "roleCode": "R-EDGE",
+                                 "departmentScope": "OWNER_DEPARTMENT" } },
                 { "from": "D", "to": "E", "action": "AUTO" }
             ]
-        });
+        })
+    }
+
+    #[test]
+    fn role_references_name_every_role_rule_with_its_path() {
+        let definition = every_place_a_role_may_be_named();
+
+        // The fixture is a definition save accepts, so the paths below are
+        // ones a publish can actually report.
+        assert_eq!(
+            super::super::jwss::validate_definition(&definition),
+            Vec::new(),
+            "the fixture must be valid JWSS"
+        );
 
         let found: Vec<(String, String)> = role_references(&definition)
             .into_iter()
@@ -748,7 +776,7 @@ mod tests {
 
         let expected = [
             ("definition.states.0.task.assignment.roleCode", "R-OBJECT"),
-            ("definition.states.1.task.assignment", "R-SHORT"),
+            ("definition.states.1.task.assignment.roleCode", "R-TASK-B"),
             ("definition.states.2.task.assignment.roleCode", "R-DEPT"),
             ("definition.transitions.0.allowedBy", "R-SHORT"),
             ("definition.transitions.2.allowedBy.roleCode", "R-EDGE"),
@@ -758,6 +786,29 @@ mod tests {
         // The escalation's role, the owner, the user and the `AUTO` edge name
         // no role the engine resolves.
         assert_eq!(found, expected);
+    }
+
+    #[test]
+    fn a_task_assignment_in_shorthand_is_invalid_input_and_still_read() {
+        // **Invalid JWSS**: `task.assignment` is object-only in the
+        // meta-schema, so save refuses this before a publish could see it. The
+        // reader tolerates it anyway, because `AssignmentRule::parse` is the
+        // engine's own reader and it accepts the shorthand everywhere: a row
+        // that reached the database another way is resolved as `ROLE:X`, so a
+        // liveness check that skipped it would let a dead role through.
+        let mut definition = every_place_a_role_may_be_named();
+        definition["states"][0]["task"]["assignment"] = json!("ROLE:R-SHORTHAND-TASK");
+
+        assert!(
+            !super::super::jwss::validate_definition(&definition).is_empty(),
+            "save must refuse a task assignment in shorthand"
+        );
+
+        let first = role_references(&definition).remove(0);
+        assert_eq!(
+            (first.path.as_str(), first.role_code.as_str()),
+            ("definition.states.0.task.assignment", "R-SHORTHAND-TASK")
+        );
     }
 
     #[test]
