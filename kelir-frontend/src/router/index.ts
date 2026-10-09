@@ -264,6 +264,36 @@ export const routes: RouteRecordRaw[] = [
         meta: { requiresAuth: true, permission: 'rad:list:read', title: 'List' },
       },
       {
+        // The workflow editor (FR-WF-018, #426). `workflow_definitions` has had
+        // a full write API since Sprint 10, and `e2e/support/workflow.ts`
+        // seeding every browser test's definition over it was the only writer.
+        path: 'admin/workflows',
+        name: 'admin-workflows',
+        component: () => import('@/features/workflow-builder/WorkflowListPage.vue'),
+        meta: { requiresAuth: true, permission: 'workflow:definition:read', title: 'Workflows' },
+      },
+      {
+        // A workflow not yet saved, under the permission that saves it: the
+        // screen exists only to create one. A static segment, so `new` is never
+        // read as an `:id`.
+        path: 'admin/workflows/new',
+        name: 'admin-workflow-new',
+        component: () => import('@/features/workflow-builder/WorkflowEditorPage.vue'),
+        meta: {
+          requiresAuth: true,
+          permission: 'workflow:definition:create',
+          title: 'New workflow',
+        },
+      },
+      {
+        // One revision. `read` opens it: a published revision is worth reading
+        // without holding `update`, and the screen refuses the edit, not the door.
+        path: 'admin/workflows/:id',
+        name: 'admin-workflow-editor',
+        component: () => import('@/features/workflow-builder/WorkflowEditorPage.vue'),
+        meta: { requiresAuth: true, permission: 'workflow:definition:read', title: 'Workflow' },
+      },
+      {
         // The configured navigation (FR-RAD-004, #341). `rad_menus` has been in
         // the schema since Sprint 7 with no surface whatever.
         path: 'admin/menus',

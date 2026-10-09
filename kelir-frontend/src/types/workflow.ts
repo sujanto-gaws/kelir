@@ -380,3 +380,129 @@ export interface WorkflowDefinitionSummary {
   createdAt: string
   updatedAt: string
 }
+
+/**
+ * A workflow definition with its JWSS document (`domain::WorkflowDefinition`),
+ * as the editor reads it (FR-WF-018, #426).
+ */
+export interface WorkflowDefinition extends WorkflowDefinitionSummary {
+  description: string | null
+  definition: JwssDefinition
+  publishedAt: string | null
+  publishedBy: string | null
+}
+
+/** `POST /workflow/definitions` (`domain::CreateWorkflowRequest`). */
+export interface CreateWorkflowRequest {
+  workflowKey: string
+  name: string
+  description?: string
+  definition: JwssDefinition
+}
+
+/**
+ * `PUT /workflow/definitions/{id}` and `POST …/revisions`
+ * (`domain::UpdateWorkflowRequest`): every field optional, and an absent one
+ * left as stored.
+ */
+export interface UpdateWorkflowRequest {
+  name?: string
+  description?: string
+  definition?: JwssDefinition
+}
+
+/**
+ * The JWSS v1.0.0 document (`docs/schema/jwss-meta-v1.0.0.json`).
+ *
+ * **Typed for what the editor reads and writes, and open for the rest.** The
+ * meta-schema sets `additionalProperties: false`, so nothing outside these
+ * names is valid; but `settings`, a variable's `source`, a task's `escalation`
+ * and a transition's `guards` and `actions` are carried through untouched, so a
+ * definition the editor opens and saves loses nothing it does not edit.
+ */
+export interface JwssDefinition {
+  workflowKey: string
+  version: string
+  name: string
+  description?: string
+  initialState: string
+  states: JwssState[]
+  transitions: JwssTransition[]
+  variables?: JwssVariable[]
+  settings?: Record<string, unknown>
+}
+
+export interface JwssState {
+  code: string
+  name: string
+  mapsToDocumentStatus: DocumentStatus
+  isFinal?: boolean
+  task?: JwssTask
+}
+
+/** JWSS §3.1's `taskType` vocabulary. Kelir performs a subset; the server says which. */
+export type JwssTaskType =
+  | 'USER_TASK'
+  | 'APPROVAL_TASK'
+  | 'REVIEW_TASK'
+  | 'SERVICE_TASK'
+  | 'SIGNATURE_TASK'
+  | 'DATA_ENTRY_TASK'
+
+export type JwssTaskPriority = 'LOW' | 'NORMAL' | 'HIGH' | 'URGENT'
+
+export interface JwssTask {
+  taskDefinitionKey: string
+  taskName: string
+  taskType?: JwssTaskType
+  assignment: AssignmentRule
+  dueInHours?: number
+  /** Stored and not executed: FR-WF-010 is unscheduled, so the editor has no field for it. */
+  escalation?: { afterHours: number; assignment: AssignmentRule }
+  priority?: JwssTaskPriority
+}
+
+/** JWSS §4's `action` vocabulary. */
+export type TransitionAction =
+  | 'SUBMIT'
+  | 'APPROVE'
+  | 'REJECT'
+  | 'RETURN'
+  | 'RESUBMIT'
+  | 'DELEGATE'
+  | 'ESCALATE'
+  | 'CANCEL'
+  | 'COMPLETE'
+  | 'AUTO'
+
+export interface JwssTransition {
+  from: string
+  to: string
+  action: TransitionAction
+  /** An assignment rule, or a §5.2 shorthand string (`OWNER`, `ROLE:X`, `USER:X`). */
+  allowedBy?: AssignmentRule | string
+  /** JSON Logic over the condition context (JWSS §6.1). */
+  condition?: unknown
+  requiresComment?: boolean
+  /** Hook registration entries, carried through untouched. */
+  guards?: unknown[]
+  actions?: unknown[]
+}
+
+/** JWSS §5.1's `assigneeType` vocabulary. Kelir resolves four of the six (§5.3). */
+export type AssigneeType =
+  'USER' | 'ROLE' | 'DEPARTMENT_ROLE' | 'OWNER' | 'MANAGER_OF_OWNER' | 'EXPRESSION'
+
+export interface AssignmentRule {
+  assigneeType: AssigneeType
+  userId?: string
+  roleCode?: string
+  departmentScope?: string
+  expression?: unknown
+}
+
+export interface JwssVariable {
+  key: string
+  dataType: 'STRING' | 'NUMBER' | 'BOOLEAN' | 'DATE' | 'JSON'
+  source?: unknown
+}

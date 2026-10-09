@@ -11,6 +11,21 @@ While the major version is `0`, the public API may change in any release.
 
 ### Added
 
+- **Workflows are authored in the browser** ([#426](https://github.com/sujanto-gaws/kelir/issues/426),
+  FR-WF-018, decision **D-95**). **Workflows** at `/admin/workflows` lists every
+  revision, and opening one is the editor: a list of states with a table of each
+  state's transitions under it. A state carries its task and who it is assigned
+  to. A transition carries its action, target, who may take it, whether it
+  requires a comment, and a condition built in the shared logic builder. The
+  builder offers only the context the engine fills in, not the amount or the
+  actor's roles that JWSS §6.1 names. **The server's verdict is the only one**:
+  a refusal at save or publish is drawn on the state or transition it names,
+  S12's on the comment checkbox, and anything else is listed on the form.
+  **A published revision opens read-only, says why, and offers a new
+  revision.** Publish saves unsaved changes first, and what the editor does not
+  show, such as guards, actions and an escalation, is saved back unchanged. It
+  uses the existing definition routes and adds none. Deprecating a revision
+  follows with #573's route.
 - **A shared builder edits a JSON Logic expression visually**
   ([#686](https://github.com/sujanto-gaws/kelir/issues/686), decision
   **D-110**). One component for a form's `calculate` and `conditional.logic`
