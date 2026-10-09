@@ -302,7 +302,7 @@ Done:
 - **Working repository** (Sprint 0) — protected `main`, CI running fmt, clippy, tests and builds on both stacks plus commit-message validation, and 29 tracked issues across two phase milestones
 
 - **Documentation set** — 26 documents: SRS v0.5, System Design Document v0.1, the column-level database schema (95 tables across 16 migrations), 8 JSON standards, 5 architecture documents, 5 engineering standards, 4 concept documents
-- **Planning** — sprint plan mapping SDD §14 onto 21 sprints, and a product backlog assigning all 165 functional requirements to epics, items and sprints (142 scheduled, 23 explicitly unscheduled)
+- **Planning** — sprint plan mapping SDD §14 onto 26 sprints, and a product backlog assigning all 167 functional requirements to epics, items and sprints (144 scheduled, 23 explicitly unscheduled)
 - **Scope decisions D-1…D-5 resolved** (2026-08-11) — MVP milestone moved to `v0.6.0` to satisfy SRS §9; RAD split so its metadata and form renderer land in Phase 4; priority separated from MVP scope in SRS v0.5; ClamAV chosen for attachment scanning; six proposed NFR targets baselined
 - Documentation consistency audit (2026-08-05): unified naming (Kelir), permission format `module:resource:action`, dotted event names, `mdm_*` tables, aligned health endpoints
 - Supplier, customer, and employee master data unified under the Party model (SRS v0.3): parties with roles, role-specific profiles, identifications, relationships, and contact mechanisms; facility, product, and service remain dedicated entities
