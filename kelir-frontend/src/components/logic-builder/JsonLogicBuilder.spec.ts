@@ -1,6 +1,6 @@
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { afterEach, describe, expect, it } from 'vitest'
-import { defineComponent, h, nextTick, reactive } from 'vue'
+import { defineComponent, h, nextTick, reactive, shallowRef } from 'vue'
 
 import { press, tabToLabel, type } from '@/lib/testing/keyboard'
 
@@ -518,6 +518,15 @@ function isValid(wrapper: VueWrapper): boolean {
 }
 
 /**
+ * Mounts the builder inside a host that renders it with `props()` on every
+ * render, as a parent component does: its reactive state, its own v-model, or
+ * a value too deep for Vue Test Utils, which walks mount props recursively.
+ */
+function mountInHost(props: () => InstanceType<typeof JsonLogicBuilder>['$props']): VueWrapper {
+  return mount(defineComponent({ setup: () => () => h(JsonLogicBuilder, props()) }))
+}
+
+/**
  * What the builder's own suite did not reach, found by the independent
  * campaign on #686, and the three gaps `requirements-analyst`'s trace named.
  */
@@ -527,19 +536,15 @@ describe('JsonLogicBuilder at its edges (campaign, 2026-10-09)', () => {
       const cat = { cat: ['INV-', { var: 'n' }] }
       const state = reactive<{ expr: unknown }>({ expr: { and: [{ var: 'type' }, cat] } })
       const values: unknown[] = []
-      const Host = defineComponent({
-        setup: () => () =>
-          h(JsonLogicBuilder, {
-            modelValue: state.expr,
-            tier: 'conditional',
-            variables: FORM_FIELDS,
-            'onUpdate:modelValue': (value: unknown) => {
-              values.push(value)
-              state.expr = value
-            },
-          }),
-      })
-      const wrapper = mount(Host)
+      const wrapper = mountInHost(() => ({
+        modelValue: state.expr,
+        tier: 'conditional',
+        variables: FORM_FIELDS,
+        'onUpdate:modelValue': (value: unknown) => {
+          values.push(value)
+          state.expr = value
+        },
+      }))
 
       mounted = wrapper
 
@@ -634,6 +639,91 @@ describe('JsonLogicBuilder at its edges (campaign, 2026-10-09)', () => {
 
       expect(valueOf(wrapper, 'Expression: variable')).toBe('quantity')
     })
+
+    // The campaign's addendum, 2026-10-09: the echo rule of 5305ab5.
+
+    it('reads afresh an equal value the host sets after its echo was consumed', async () => {
+      // A store that echoes, then sets an equal copy of its own: a reopened
+      // definition, or a second echo after a save. Either is the host's value.
+      const wrapper = mountBuilder({ '+': [{ var: 'unit_price' }, 1] }, { tier: 'calculate' })
+
+      await byLabel(wrapper, 'Expression, operand 2: number').setValue('2')
+
+      const copy = JSON.parse(JSON.stringify(lastEmitted(wrapper)))
+
+      await byLabel(wrapper, 'Add operand to Expression').trigger('click')
+      expect(isValid(wrapper)).toBe(false)
+
+      await wrapper.setProps({ modelValue: copy })
+
+      expect(wrapper.find('[aria-label="Expression, operand 3"]').exists()).toBe(false)
+      expect(isValid(wrapper)).toBe(true)
+      expect(emitted(wrapper)).toHaveLength(1)
+    })
+
+    it.fails(
+      // Defect, found by the campaign's addendum: an emission a host never
+      // echoes is matched, as equal JSON, against the next value the host sets.
+      // So a host without v-model that reloads a value equal to the last
+      // emission (a reset to what was just saved) is taken for an echo: the
+      // tree keeps the operand the user added since, and stays invalid. Under
+      // the identity rule before 5305ab5, a fresh copy was read. Every planned
+      // host binds v-model, whose echo consumes the match first.
+      'reads afresh an equal value a host that never echoes sets after an edit',
+      async () => {
+        const wrapper = mount(JsonLogicBuilder, {
+          props: {
+            modelValue: { '+': [{ var: 'unit_price' }, 1] },
+            tier: 'calculate',
+            variables: FORM_FIELDS,
+          },
+        })
+
+        mounted = wrapper
+
+        await byLabel(wrapper, 'Expression, operand 2: number').setValue('2')
+        await byLabel(wrapper, 'Add operand to Expression').trigger('click')
+        await wrapper.setProps({ modelValue: { '+': [{ var: 'unit_price' }, 2] } })
+
+        expect(wrapper.find('[aria-label="Expression, operand 3"]').exists()).toBe(false)
+        expect(isValid(wrapper)).toBe(true)
+      },
+    )
+
+    it('reads a value too deep to compare as a change, not as an echo', async () => {
+      let deep: unknown = { var: 'a' }
+
+      for (let depth = 0; depth < 100_000; depth += 1) {
+        deep = { '!': deep }
+      }
+
+      const model = shallowRef<unknown>({ var: 'unit_price' })
+      const wrapper = mountInHost(() => ({
+        modelValue: model.value,
+        tier: 'conditional',
+        variables: FORM_FIELDS,
+      }))
+
+      mounted = wrapper
+
+      await byLabel(wrapper, 'Expression: variable').setValue('quantity')
+
+      // An operator the builder does not offer at the root: opened raw, so the
+      // test renders no deep tree, only the box that cannot write it out.
+      model.value = { min: [deep, 1] }
+      await nextTick()
+
+      expect(wrapper.text()).toContain('Nested too deeply to show as text')
+    })
+
+    it('reads a host’s undefined as no expression, though nothing was emitted', async () => {
+      const wrapper = mountBuilder({ var: 'total' })
+
+      await wrapper.setProps({ modelValue: undefined })
+
+      expect(optionLabels(wrapper, 'Expression: kind')).toContain('Variable')
+      expect(wrapper.find('[aria-label="Clear Expression"]').exists()).toBe(false)
+    })
   })
 
   describe('an expression nested past the depth cap', () => {
@@ -651,12 +741,11 @@ describe('JsonLogicBuilder at its edges (campaign, 2026-10-09)', () => {
 
         // Through a host, not as a mount prop: Vue Test Utils walks mount props
         // recursively, which is the harness overflowing and not the builder.
-        const wrapper = mount(
-          defineComponent({
-            setup: () => () =>
-              h(JsonLogicBuilder, { modelValue: expr, tier: 'conditional', variables: [] }),
-          }),
-        )
+        const wrapper = mountInHost(() => ({
+          modelValue: expr,
+          tier: 'conditional',
+          variables: [],
+        }))
 
         mounted = wrapper
 

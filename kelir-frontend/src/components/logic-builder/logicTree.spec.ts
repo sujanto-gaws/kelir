@@ -32,6 +32,7 @@ import {
   replaceAt,
   serialise,
   varNode,
+  type LogicNode,
   type LogicTier,
 } from './logicTree'
 
@@ -859,7 +860,35 @@ describe('the seam at its edges (campaign, 2026-10-09)', () => {
     // Visual down to MAX_VISUAL_DEPTH and one opaque leaf below it, which is
     // still exact: the leaf is emitted by reference. (Until the cap, this
     // asserted the whole tree visual; Vue cannot render it past ~300 deep.)
-    expect(containsOpaque(parseExpression(expr, 'conditional'))).toBe(true)
+    const tree = parseExpression(expr, 'conditional')
+
+    /** Every opaque node's path, so the test says where the opacity starts. */
+    function opaquePaths(node: LogicNode, at: number[] = []): number[][] {
+      if (node.kind === 'opaque') {
+        return [at]
+      }
+
+      return node.kind === 'operator'
+        ? node.args.flatMap((arg, index) => opaquePaths(arg, [...at, index]))
+        : []
+    }
+
+    /** The input's own object at `path`, walked through `{op: arg}` and `{op: [args]}`. */
+    function inputAt(value: unknown, path: number[]): unknown {
+      return path.reduce<unknown>((into) => {
+        const argument = Object.values(into as Record<string, unknown>)[0]
+
+        return Array.isArray(argument) ? argument[0] : argument
+      }, value)
+    }
+
+    const capPath = Array<number>(MAX_VISUAL_DEPTH + 1).fill(0)
+
+    // Exactly one opaque node, one level past the cap, on the chain itself: the
+    // literal operands of `and` and `+` beside it stay literals.
+    expect(opaquePaths(tree)).toEqual([capPath])
+    expect(nodeAt(tree, capPath.slice(1)).kind).toBe('operator')
+    expect((nodeAt(tree, capPath) as { value: unknown }).value).toBe(inputAt(expr, capPath))
     expect(rebuilt(expr)).toBe(JSON.stringify(expr))
   })
 
