@@ -136,6 +136,23 @@ While the major version is `0`, the public API may change in any release.
   running at the same moment cannot slip past it. Revisions already
   published are not re-checked.
 
+### Fixed
+
+- **A refresh checks its tenant's status**
+  ([#649](https://github.com/sujanto-gaws/kelir/issues/649)). A refresh
+  read the user's status and not the tenant's, and relied on the revocation
+  that `update_tenant` and `delete_tenant` run after they change the row, as
+  a second statement. A revoke that failed, a sign-in that stored its
+  refresh token after the revoke ran, or a status set outside the API left a
+  session that renewed for up to 30 days in a tenant that refuses sign-in.
+  A refresh now reads its token's tenant, one lookup per refresh and none
+  per request, and a tenant that is `SUSPENDED`, `INACTIVE` or deleted is
+  refused with 401 and has that user's refresh tokens revoked, as an
+  inactive user's are. An `ACTIVE` tenant's refresh is unchanged. An access
+  token already issued is untouched: it still works until it expires
+  (decision **D-104**), or is refused at once when the tenant is deleted
+  (**D-105**).
+
 ## [0.9.0] — 2026-10-09
 
 Phase 9 closes its integration core: **Kelir knows the external systems it
