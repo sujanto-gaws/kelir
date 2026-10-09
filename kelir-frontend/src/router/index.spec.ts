@@ -80,6 +80,30 @@ describe('the shipped route table', () => {
     })
   })
 
+  it('has the workflow editor behind the workflow permissions, and new behind create', () => {
+    // #426, test-engineer campaign 2026-10-10. The generic rules below hold for
+    // any permission at all; these say which one, since reading a revision and
+    // starting a workflow are different grants.
+    const byName = new Map(all.map((route) => [route.name, route]))
+
+    expect(byName.get('admin-workflows')?.meta).toMatchObject({
+      requiresAuth: true,
+      permission: 'workflow:definition:read',
+    })
+    expect(byName.get('admin-workflow-new')?.meta).toMatchObject({
+      requiresAuth: true,
+      permission: 'workflow:definition:create',
+    })
+    expect(byName.get('admin-workflow-editor')?.meta).toMatchObject({
+      requiresAuth: true,
+      permission: 'workflow:definition:read',
+    })
+    // `new` is a static segment, so it is never read as a revision's id.
+    expect(all.findIndex((route) => route.name === 'admin-workflow-new')).toBeLessThan(
+      all.findIndex((route) => route.name === 'admin-workflow-editor'),
+    )
+  })
+
   it('has both external system pages behind the registry read permission', () => {
     // #520. The detail page is where edit, activate/deactivate and the
     // credential references live, each gated on the page; the door is `:read`.

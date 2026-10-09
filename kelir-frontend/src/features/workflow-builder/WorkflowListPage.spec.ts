@@ -208,4 +208,45 @@ describe('WorkflowListPage', () => {
 
     expect(wrapper.text()).not.toMatch(/Deprecate\b/)
   })
+
+  // --- The test-engineer campaign, 2026-10-10 ----------------------------------
+
+  it('offers a new revision of a deprecated revision too, and no deprecate on any row', async () => {
+    // AC5: a published revision's way forward is a new revision, whether it is
+    // ACTIVE or DEPRECATED; the editor's notice says the same of a deprecated one.
+    rows = [
+      summary({ status: 'ACTIVE' }),
+      summary({ id: 'old', version: 2, status: 'DEPRECATED' }),
+      summary({ id: 'draft', version: 3 }),
+    ]
+
+    const wrapper = await render()
+
+    expect(wrapper.find('[data-testid="revise-purchase_approval-1"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="revise-purchase_approval-2"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="revise-purchase_approval-3"]').exists()).toBe(false)
+
+    for (const control of wrapper.findAll('button, a')) {
+      expect(control.text()).not.toMatch(/deprecat|retire/i)
+    }
+
+    expect(backend.requests.some((request) => /deprecat/i.test(request.url))).toBe(false)
+  })
+
+  it('pages through the server, not through what it already has', async () => {
+    reply = {
+      status: 200,
+      body: { success: true, data: [summary()], meta: { page: 1, pageSize: 20, total: 45 } },
+    }
+
+    const wrapper = await render()
+
+    await wrapper.get('[data-testid="next-page"]').trigger('click')
+    await flushPromises()
+
+    const reads = backend.requests.filter((request) => request.url === '/workflow/definitions')
+
+    expect(reads).toHaveLength(2)
+    expect(reads[1].params).toMatchObject({ page: 2 })
+  })
 })

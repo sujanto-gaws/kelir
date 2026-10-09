@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
+import * as workflowApi from './workflow'
 import {
   createWorkflowDefinition,
   createWorkflowRevision,
@@ -47,5 +48,12 @@ describe('workflow definition client', () => {
     })
     // A revision seeded from its source sends nothing to change.
     expect(backend.requests[4].body).toEqual({})
+  })
+
+  it('has no deprecate call until #573’s route exists', () => {
+    // #426 AC5, test-engineer campaign 2026-10-10. A client function for a
+    // route that is not there is a 404 waiting for a caller. This flips when
+    // #573 merges and `deprecateWorkflowDefinition` lands with it.
+    expect(Object.keys(workflowApi).filter((name) => /deprecat|retire/i.test(name))).toEqual([])
   })
 })

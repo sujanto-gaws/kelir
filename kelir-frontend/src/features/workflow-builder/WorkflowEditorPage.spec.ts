@@ -1,9 +1,11 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
+import type { AxiosResponse, InternalAxiosRequestConfig } from 'axios'
 import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 
 import WorkflowEditorPage from './WorkflowEditorPage.vue'
+import { apiClient } from '@/api/client'
 import {
   errorBody,
   installFakeBackend,
@@ -718,5 +720,776 @@ describe('WorkflowEditorPage', () => {
       // Nothing was emitted for the unfinished one, so it is saved as it was loaded.
       expect(reject.condition).toEqual({ '!=': [{ var: 'document.status' }, 'DRAFT'] })
     })
+  })
+
+  // --- The test-engineer campaign, 2026-10-10 ----------------------------------
+  //
+  // What the builder's suite above did not reach, traced to #426's criteria.
+  // Three defects are pinned with `it.fails`, each saying what it would take
+  // to turn it into a plain `it`.
+
+  /**
+   * Every control a keyboard or pointer could operate that is not disabled,
+   * less the logic builder's *Collapse* and *Expand*: they change the view and
+   * not the definition, so they stay operable on a read-only revision.
+   */
+  function enabledControls(page: VueWrapper): string[] {
+    return page
+      .findAll('input, select, textarea, button')
+      .filter((control) => !(control.element as HTMLInputElement).disabled)
+      .filter((control) => !/^(Collapse|Expand) /.test(control.attributes('aria-label') ?? ''))
+      .map(
+        (control) =>
+          control.attributes('data-testid') ??
+          control.attributes('aria-label') ??
+          control.attributes('id') ??
+          control.text(),
+      )
+  }
+
+  /**
+   * Holds the next request until the returned function is called, as a slow
+   * network does: the fake backend answers synchronously otherwise, so there
+   * is never a moment between a click and its reply for a user to act in.
+   */
+  function holdNextRequest(): () => Promise<void> {
+    type Adapter = (config: InternalAxiosRequestConfig) => Promise<AxiosResponse>
+
+    const fake = apiClient.defaults.adapter as Adapter
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+
+    apiClient.defaults.adapter = (async (config: InternalAxiosRequestConfig) => {
+      apiClient.defaults.adapter = fake
+      await gate
+
+      return fake(config)
+    }) as Adapter
+
+    return async () => {
+      release()
+      await settle()
+    }
+  }
+
+  describe('the campaign: what is written (AC1, AC2)', () => {
+    it('writes back every field it has no input for, unknown future keys included, in their order', async () => {
+      const loaded = jwss() as JwssDefinition & Record<string, unknown>
+
+      loaded.description = 'Purchases over the threshold'
+      loaded.settings = { allowCancel: true, auditLevel: 'FULL' }
+      loaded.variables = [
+        { key: 'threshold', dataType: 'NUMBER', source: { var: 'formData.limit' } },
+      ]
+      loaded.transitions[1].guards = [
+        { hook: 'before_workflow_transition', handler: 'core:continue_always', priority: 100 },
+      ]
+      // A key a later JWSS minor might add: the meta-schema refuses it today, and
+      // that refusal is the server's to give, not the editor's to pre-empt by
+      // dropping it.
+      loaded.futureRootKey = { kept: true }
+      ;(loaded.states[0] as unknown as Record<string, unknown>).futureStateKey = 1
+      ;(loaded.states[0].task as unknown as Record<string, unknown>).futureTaskKey = 'x'
+      ;(loaded.transitions[0] as unknown as Record<string, unknown>).futureEdgeKey = [1]
+      stored = record({ definition: structuredClone(loaded) })
+
+      const page = await render()
+
+      await page.get('[data-testid="state-name-0"]').setValue('Line manager approval')
+      await byLabel(page, 'Transition 1: action').setValue('RETURN')
+      await save(page)
+
+      const expected = structuredClone(loaded)
+
+      expected.states[0].name = 'Line manager approval'
+      expected.transitions[0].action = 'RETURN'
+
+      // Serialised, so the order of every key is asserted as well as its value.
+      expect(JSON.stringify(lastWrite().definition)).toBe(JSON.stringify(expected))
+    })
+
+    it('writes a definition carrying every optional JWSS member the meta-schema accepts', async () => {
+      const loaded = jwss()
+
+      loaded.description = 'Purchases over the threshold'
+      loaded.settings = { allowCancel: true }
+      loaded.transitions[1].guards = [
+        { hook: 'before_workflow_transition', handler: 'core:continue_always', priority: 100 },
+      ]
+      stored = record({ definition: loaded })
+
+      const page = await render()
+
+      await page.get('[data-testid="requires-comment-0"]').setValue(true)
+      await save(page)
+
+      expect(jwssViolations(lastWrite().definition)).toEqual([])
+      expect(lastWrite().definition.settings).toEqual({ allowCancel: true })
+      expect(lastWrite().definition.transitions[1].guards).toHaveLength(1)
+    })
+
+    it('keeps the edges into a removed state, so S2 has something to name at their target', async () => {
+      const page = await render()
+
+      await page.get('[data-testid="remove-state-1"]').trigger('click')
+
+      const target = byLabel(page, 'Transition 1: to')
+
+      expect((target.element as HTMLSelectElement).value).toBe('COMPLETED')
+      expect(target.text()).toContain('COMPLETED (not declared)')
+
+      refuse = validationReply([
+        'definition.transitions.0.to',
+        '`COMPLETED` is not a declared state',
+      ])
+      await save(page)
+
+      expect(lastWrite().definition.transitions.map((transition) => transition.to)).toEqual([
+        'COMPLETED',
+        'REJECTED',
+      ])
+      expect(byLabel(page, 'Transition 1: to').attributes('aria-invalid')).toBe('true')
+      expect(page.get('[data-testid="transition-0"]').text()).toContain('is not a declared state')
+      expect(page.find('[data-testid="unplaced-errors"]').exists()).toBe(false)
+    })
+
+    it('keeps the initial state when its state is removed, and shows S1 at the chooser', async () => {
+      const page = await render()
+
+      await page.get('[data-testid="remove-state-0"]').trigger('click')
+
+      refuse = validationReply([
+        'definition.initialState',
+        '`MANAGER_APPROVAL` is not a declared state',
+      ])
+      await save(page)
+
+      const sent = lastWrite().definition
+
+      expect(sent.initialState).toBe('MANAGER_APPROVAL')
+      // The edges out of it went with it; nothing else was dropped.
+      expect(sent.transitions).toEqual([])
+      expect(sent.states.map((state) => state.code)).toEqual(['COMPLETED', 'REJECTED'])
+      expect(page.get('[data-testid="initial-state-error"]').text()).toContain('MANAGER_APPROVAL')
+    })
+
+    it('renames a state to a code another holds without moving edges, and S3 lands on its code', async () => {
+      const page = await render()
+      const code = page.get('[data-testid="state-code-2"]')
+
+      await code.setValue('COMPLETED')
+      await code.trigger('change')
+
+      refuse = validationReply([
+        'definition.states.2.code',
+        '`COMPLETED` is declared more than once; state codes are unique',
+      ])
+      await save(page)
+
+      const sent = lastWrite().definition
+
+      expect(sent.states.map((state) => state.code)).toEqual([
+        'MANAGER_APPROVAL',
+        'COMPLETED',
+        'COMPLETED',
+      ])
+      // Which COMPLETED the REJECT edge meant is the author's call.
+      expect(sent.transitions[1].to).toBe('REJECTED')
+      expect(page.get('[data-testid="state-code-2"]').attributes('aria-invalid')).toBe('true')
+      expect(page.get('[data-testid="state-2"]').text()).toContain('declared more than once')
+      expect(page.get('[data-testid="state-code-1"]').attributes('aria-invalid')).not.toBe('true')
+    })
+
+    it('takes a rename typed through another state’s code only once it is committed', async () => {
+      const page = await render({ attach: true })
+      const code = page.get('[data-testid="state-code-0"]').element as HTMLInputElement
+
+      code.focus()
+      code.value = ''
+      code.dispatchEvent(new Event('input', { bubbles: true }))
+
+      // On its way to COMPLETED_X the text spells COMPLETED, another state's code.
+      for (const character of 'COMPLETED_X') {
+        code.value += character
+        code.dispatchEvent(new Event('input', { bubbles: true }))
+        await settle()
+      }
+
+      code.dispatchEvent(new Event('change', { bubbles: true }))
+      await save(page)
+
+      const sent = lastWrite().definition
+
+      expect(sent.initialState).toBe('COMPLETED_X')
+      expect(sent.transitions.map((transition) => transition.from)).toEqual([
+        'COMPLETED_X',
+        'COMPLETED_X',
+      ])
+      expect(sent.states.map((state) => state.code)).toEqual([
+        'COMPLETED_X',
+        'COMPLETED',
+        'REJECTED',
+      ])
+    })
+
+    it('can empty a definition, and shows the server’s refusal of it at the state list', async () => {
+      const page = await render()
+
+      for (let round = 0; round < 3; round += 1) {
+        await page.get('[data-testid="remove-state-0"]').trigger('click')
+      }
+
+      expect(page.text()).toContain('No states.')
+
+      refuse = validationReply(['definition.states', '[] has less than 2 items'])
+      await save(page)
+
+      expect(lastWrite().definition.states).toEqual([])
+      expect(lastWrite().definition.transitions).toEqual([])
+      expect(page.get('[data-testid="states-error"]').text()).toContain('less than 2 items')
+      // Drawn once, at the list, and not listed a second time as unplaced.
+      expect(page.find('[data-testid="unplaced-errors"]').exists()).toBe(false)
+    })
+
+    it('writes the due hours as a number, leaves them out when blank, and sends other text as typed', async () => {
+      const page = await render()
+      // Re-read after each save: a save reloads the draft, and its rows remount.
+      const due = () => page.get('[data-testid="state-0"]').get('input[inputmode="decimal"]')
+
+      await due().setValue('12')
+      await save(page)
+      expect(lastWrite().definition.states[0].task?.dueInHours).toBe(12)
+
+      await due().setValue('soon')
+      await save(page)
+      // Sent as typed, so the meta-schema refuses it at this field rather than
+      // the editor dropping it.
+      expect(lastWrite().definition.states[0].task?.dueInHours).toBe('soon')
+
+      await due().setValue('')
+      await save(page)
+      expect(lastWrite().definition.states[0].task).not.toHaveProperty('dueInHours')
+    })
+
+    it('saves once for a double click', async () => {
+      const page = await render()
+      const button = page.get('[data-testid="save-workflow"]')
+
+      await button.trigger('click')
+      await button.trigger('click')
+      await settle()
+
+      expect(writes()).toHaveLength(1)
+    })
+
+    it('creates, then publishes, a new workflow from one click', async () => {
+      const page = await render({ path: '/admin/workflows/new' })
+
+      await page.get('[data-testid="workflow-key"]').setValue('purchase_approval')
+      await page.get('[data-testid="workflow-name"]').setValue('Purchase approval')
+      expect(page.get('[data-testid="publish-workflow"]').text()).toBe('Save and publish')
+
+      await page.get('[data-testid="publish-workflow"]').trigger('click')
+      await settle()
+
+      expect(writes().map((request) => `${request.method} ${request.url}`)).toEqual([
+        'post /workflow/definitions',
+        `post /workflow/definitions/${ID}/publication`,
+      ])
+      expect(page.get('[data-testid="status"]').text()).toBe('ACTIVE')
+    })
+
+    it.fails(
+      'clears the stored description when the author clears it (defect: an absent field is left as stored)',
+      async () => {
+        // `PUT` treats an absent `description` as *leave it* (`UpdateWorkflowRequest`,
+        // and `COALESCE($4, description)` in `repository/definition.rs`). The editor
+        // drops a blank description from the request, so the column keeps the old
+        // text while the JWSS it was taken from has none: the "two facts" the page's
+        // own `save()` comment says it prevents. Passes once a cleared description
+        // is sent as one that clears.
+        const loaded = jwss()
+
+        loaded.description = 'Old description'
+        stored = record({ description: 'Old description', definition: loaded })
+
+        const page = await render()
+
+        await page.get('#workflow-description').setValue('')
+        await save(page)
+
+        const body = writes()[0].body as Record<string, unknown>
+
+        expect(body).toHaveProperty('description')
+        expect(body.description).toBe('')
+      },
+    )
+  })
+
+  describe('the campaign: undo and redo', () => {
+    it('keeps the history through a refusal, and an undo clears the refusal’s messages', async () => {
+      const page = await render()
+      const name = page.get('[data-testid="workflow-name"]')
+
+      await name.setValue('Renamed')
+      refuse = validationReply(['name', 'name is taken'])
+      await save(page)
+
+      expect(page.get('[data-testid="workflow-name-error"]').text()).toBe('name is taken')
+      expect(page.get('[data-testid="undo"]').attributes('disabled')).toBeUndefined()
+
+      await page.get('[data-testid="undo"]').trigger('click')
+      await settle()
+
+      expect((name.element as HTMLInputElement).value).toBe('Purchase approval')
+      expect(page.find('[data-testid="workflow-name-error"]').exists()).toBe(false)
+
+      await page.get('[data-testid="redo"]').trigger('click')
+      await settle()
+      await save(page)
+
+      expect(lastWrite().name).toBe('Renamed')
+      expect(page.get('[data-testid="undo"]').attributes('disabled')).toBeDefined()
+    })
+
+    it('undoes a save’s edits no further than what the server stored', async () => {
+      const page = await render()
+      const name = page.get('[data-testid="workflow-name"]')
+
+      await name.setValue('Saved name')
+      await save(page)
+      await name.setValue('After the save')
+      await page.get('[data-testid="undo"]').trigger('click')
+      await settle()
+
+      expect((name.element as HTMLInputElement).value).toBe('Saved name')
+      expect(page.get('[data-testid="undo"]').attributes('disabled')).toBeDefined()
+      expect(page.get('[data-testid="publish-workflow"]').text()).toBe('Publish')
+    })
+
+    it('undoes and redoes a condition the logic builder is showing', async () => {
+      const page = await render()
+      const operand = () => byLabel(page, 'Transition 1 condition, operand 2: text')
+
+      await operand().setValue('PENDING_APPROVAL_X')
+      await operand().setValue('PENDING_APPROVAL_XY')
+
+      await page.get('[data-testid="undo"]').trigger('click')
+      await settle()
+
+      // Both keystrokes were one step, and the builder re-read the restored value.
+      expect((operand().element as HTMLInputElement).value).toBe('PENDING_APPROVAL')
+      expect(page.get('[data-testid="undo"]').attributes('disabled')).toBeDefined()
+
+      await page.get('[data-testid="redo"]').trigger('click')
+      await settle()
+
+      expect((operand().element as HTMLInputElement).value).toBe('PENDING_APPROVAL_XY')
+
+      await save(page)
+
+      expect(lastWrite().definition.transitions[0].condition).toEqual({
+        '==': [{ var: 'document.status' }, 'PENDING_APPROVAL_XY'],
+      })
+    })
+
+    it('keeps a condition’s unfilled operand through the undo of an edit elsewhere', async () => {
+      const page = await render()
+
+      await byLabel(page, 'Transition 2 condition, operand 2: kind').setValue('comparison')
+      await page.get('[data-testid="state-name-0"]').setValue('Line manager approval')
+      await page.get('[data-testid="undo"]').trigger('click')
+      await settle()
+
+      expect((page.get('[data-testid="state-name-0"]').element as HTMLInputElement).value).toBe(
+        'Manager approval',
+      )
+      expect(page.get('[data-testid="transition-1-detail"]').text()).toContain(
+        'Choose what this operand is.',
+      )
+      expect(page.get('[data-testid="unfilled-expressions"]').text()).toContain('1 expression')
+    })
+  })
+
+  describe('the campaign: the server’s verdict (AC3)', () => {
+    it('lists a detail addressed past the rows on screen, at the root, or with no path', async () => {
+      const page = await render()
+
+      refuse = {
+        status: 422,
+        body: errorBody('VALIDATION_ERROR', 'Validation failed', [
+          { path: 'definition.transitions.7.to', rule: 'S2', code: 'X', message: 'row seven' },
+          { path: 'definition', rule: 'shape', code: 'X', message: 'an unknown member' },
+          { path: 'definition.version', rule: 'shape', code: 'X', message: 'not 1.0.0' },
+          {
+            path: undefined as unknown as string,
+            rule: 'x',
+            code: 'X',
+            message: 'a detail with no path',
+          },
+        ]),
+      }
+      await save(page)
+
+      const unplaced = page.get('[data-testid="unplaced-errors"]').text()
+
+      expect(unplaced).toContain('definition.transitions.7.to: row seven')
+      expect(unplaced).toContain('definition: an unknown member')
+      expect(unplaced).toContain('definition.version: not 1.0.0')
+      expect(unplaced).toContain('a detail with no path')
+    })
+
+    it('draws a detail on a transition out of an undeclared state where that transition is drawn', async () => {
+      const loaded = jwss()
+
+      loaded.transitions.push({
+        from: 'GHOST',
+        to: 'COMPLETED',
+        action: 'APPROVE',
+        allowedBy: 'OWNER',
+      })
+      stored = record({ definition: loaded })
+
+      const page = await render()
+
+      refuse = validationReply(['definition.transitions.2.from', '`GHOST` is not a declared state'])
+      await save(page)
+
+      expect(page.get('[data-testid="unattached-transitions"]').text()).toContain(
+        '`GHOST` is not a declared state',
+      )
+      expect(page.find('[data-testid="unplaced-errors"]').exists()).toBe(false)
+    })
+
+    it('shows a message the request and the document both carry once, at the field', async () => {
+      const page = await render({ path: '/admin/workflows/new' })
+
+      refuse = validationReply(
+        ['workflowKey', 'must match ^[a-z][a-z0-9_]*$'],
+        ['definition.workflowKey', 'must match ^[a-z][a-z0-9_]*$'],
+      )
+      await save(page)
+
+      expect(page.get('[data-testid="workflow-key-error"]').text()).toBe(
+        'must match ^[a-z][a-z0-9_]*$',
+      )
+      expect(page.get('[data-testid="workflow-key"]').attributes('aria-invalid')).toBe('true')
+    })
+
+    it('puts S6 on a state whose code is not ASCII', async () => {
+      const loaded = jwss()
+
+      loaded.states.push({
+        code: 'ÜBERPRÜFUNG',
+        name: 'Prüfung',
+        mapsToDocumentStatus: 'IN_REVIEW',
+      })
+      stored = record({ definition: loaded })
+
+      const page = await render()
+
+      refuse = {
+        status: 422,
+        body: errorBody('VALIDATION_ERROR', 'Validation failed', [
+          {
+            path: 'definition.states.3.code',
+            rule: 'shape',
+            code: 'PATTERN',
+            message: '"ÜBERPRÜFUNG" does not match "^[A-Z][A-Z0-9_]*$"',
+          },
+          {
+            path: 'definition.states',
+            rule: 'S6',
+            code: 'UNREACHABLE_STATE',
+            message: '`ÜBERPRÜFUNG` cannot be reached from the initial state',
+          },
+        ]),
+      }
+      await save(page)
+
+      expect(page.get('[data-testid="state-3-messages"]').text()).toContain('cannot be reached')
+      expect(page.get('[data-testid="state-3"]').text()).toContain('does not match')
+      expect(page.find('[data-testid="states-error"]').exists()).toBe(false)
+    })
+
+    it('leaves S7 at the list when the state it names is not declared', async () => {
+      const page = await render()
+
+      refuse = {
+        status: 422,
+        body: errorBody('VALIDATION_ERROR', 'Validation failed', [
+          {
+            path: 'definition.transitions',
+            rule: 'S7',
+            code: 'AMBIGUOUS_FALLBACK',
+            message:
+              '2 transitions leave `GHOST` on APPROVE with no condition; at most one may be the fallback',
+          },
+        ]),
+      }
+      await save(page)
+
+      expect(page.get('[data-testid="states-error"]').text()).toContain('leave `GHOST`')
+      expect(page.find('[data-testid="unplaced-errors"]').exists()).toBe(false)
+    })
+
+    it.fails(
+      'puts S6 on the state it names when that code holds a backtick (defect: the first backtick pair is read)',
+      async () => {
+        // `namedCode` takes the text between the message's first two backticks.
+        // A code holding one (refused by the meta-schema at its own field, while
+        // S6 still runs and names it) is cut short, and when the cut text is
+        // another state's code the verdict lands on the wrong state. Passes once
+        // the message is matched against the declared codes rather than parsed.
+        const loaded = jwss()
+
+        loaded.states.push(
+          { code: 'A', name: 'A', mapsToDocumentStatus: 'IN_REVIEW' },
+          { code: 'A`B', name: 'A with a backtick', mapsToDocumentStatus: 'IN_REVIEW' },
+        )
+        stored = record({ definition: loaded })
+
+        const page = await render()
+
+        refuse = {
+          status: 422,
+          body: errorBody('VALIDATION_ERROR', 'Validation failed', [
+            {
+              path: 'definition.states',
+              rule: 'S6',
+              code: 'UNREACHABLE_STATE',
+              message: '`A`B` cannot be reached from the initial state',
+            },
+          ]),
+        }
+        await save(page)
+
+        expect(page.find('[data-testid="state-3-messages"]').exists()).toBe(false)
+        expect(page.get('[data-testid="state-4-messages"]').text()).toContain('cannot be reached')
+      },
+    )
+
+    it('says why when the revision was published under the author (NOT_A_DRAFT is a 422 at status)', async () => {
+      const page = await render()
+
+      await page.get('[data-testid="workflow-name"]').setValue('Renamed')
+      refuse = {
+        status: 422,
+        body: errorBody('VALIDATION_ERROR', 'Validation failed', [
+          {
+            path: 'status',
+            rule: 'immutable',
+            code: 'NOT_A_DRAFT',
+            message: 'revision 1 of `purchase_approval` is published and cannot be edited',
+          },
+        ]),
+      }
+      await save(page)
+
+      expect(page.get('[data-testid="unplaced-errors"]').text()).toContain(
+        'is published and cannot be edited',
+      )
+      // The edit is not lost: it can be carried to a new revision by hand.
+      expect((page.get('[data-testid="workflow-name"]').element as HTMLInputElement).value).toBe(
+        'Renamed',
+      )
+    })
+
+    it('shows a 409 on publish verbatim, and leaves the draft a draft that can still be edited', async () => {
+      const page = await render()
+
+      refuse = {
+        status: 409,
+        body: errorBody('CONFLICT', 'revision 1 of `purchase_approval` is ACTIVE, not DRAFT'),
+      }
+      await page.get('[data-testid="publish-workflow"]').trigger('click')
+      await settle()
+
+      expect(page.get('[data-testid="form-error"]').text()).toBe(
+        'revision 1 of `purchase_approval` is ACTIVE, not DRAFT',
+      )
+      expect(page.get('[data-testid="status"]').text()).toBe('DRAFT')
+      expect(page.find('[data-testid="save-workflow"]').exists()).toBe(true)
+      expect(page.find('[data-testid="unplaced-errors"]').exists()).toBe(false)
+    })
+
+    it('shows a 403 verbatim on the form and keeps the edit', async () => {
+      const page = await render()
+
+      await page.get('[data-testid="workflow-name"]').setValue('Renamed')
+      refuse = { status: 403, body: errorBody('FORBIDDEN', 'Missing workflow:definition:update') }
+      await save(page)
+
+      expect(page.get('[data-testid="form-error"]').text()).toBe(
+        'Missing workflow:definition:update',
+      )
+      expect((page.get('[data-testid="workflow-name"]').element as HTMLInputElement).value).toBe(
+        'Renamed',
+      )
+      expect(page.find('[data-testid="notice"]').exists()).toBe(false)
+    })
+
+    it('says a network failure is one, keeps the edits, and a retry sends them', async () => {
+      const page = await render()
+
+      await page.get('[data-testid="workflow-name"]').setValue('Renamed')
+      refuse = { status: 0, networkError: true }
+      await save(page)
+
+      expect(page.get('[data-testid="form-error"]').text()).toContain('Could not reach the server')
+      expect(page.get('[data-testid="status"]').text()).toBe('DRAFT')
+
+      await save(page)
+
+      expect(lastWrite().name).toBe('Renamed')
+      expect(page.find('[data-testid="form-error"]').exists()).toBe(false)
+      expect(page.get('[data-testid="notice"]').text()).toContain('Saved')
+    })
+
+    it.fails(
+      'keeps what is typed while a save is in flight (defect: the reply reloads the draft over it)',
+      async () => {
+        // The inputs stay enabled while a save is in flight, and `save()` answers
+        // with `draft.load(stored.definition)`, which replaces the draft and its
+        // history. Whatever was typed between the click and the reply is gone,
+        // with nothing said. "Save and publish" then publishes without it. Passes
+        // once the reply is applied only if the draft is still what was sent, or
+        // the editor is read-only while it waits.
+        const page = await render()
+        const release = holdNextRequest()
+
+        await page.get('[data-testid="save-workflow"]').trigger('click')
+        await page.get('[data-testid="state-name-0"]').setValue('Typed during the save')
+        await release()
+
+        expect((page.get('[data-testid="state-name-0"]').element as HTMLInputElement).value).toBe(
+          'Typed during the save',
+        )
+      },
+    )
+
+    it.fails(
+      'draws a refusal on the row it named when a row was removed while it was in flight (defect)',
+      async () => {
+        // The same window: the verdict addresses rows by their position in what
+        // was sent, and `reset()` from the removal runs before it lands, so a
+        // detail about the sent state 1 (COMPLETED) is drawn on whatever is
+        // state 1 now (REJECTED). Passes with the fix above.
+        const page = await render()
+        const release = holdNextRequest()
+
+        refuse = validationReply(['definition.states.1.name', 'about COMPLETED'])
+        await page.get('[data-testid="save-workflow"]').trigger('click')
+        await page.get('[data-testid="remove-state-0"]').trigger('click')
+        await release()
+
+        const shownOn = page
+          .findAll('section[aria-label]')
+          .filter((card) => card.text().includes('about COMPLETED'))
+          .map((card) => card.attributes('aria-label'))
+
+        expect(shownOn).not.toContain('State REJECTED')
+      },
+    )
+  })
+
+  describe('the campaign: a published revision is read-only (AC5)', () => {
+    it.each(['ACTIVE', 'DEPRECATED'])(
+      'leaves nothing but New revision operable on an %s revision, keyboard included',
+      async (status) => {
+        stored = record({ status })
+
+        const page = await render({ attach: true })
+
+        expect(enabledControls(page)).toEqual(['new-revision'])
+
+        // Nothing disabled takes focus, so Tab cannot reach it.
+        for (const control of page.findAll('input, select, textarea')) {
+          ;(control.element as HTMLElement).focus()
+          expect(document.activeElement).not.toBe(control.element)
+        }
+
+        // No shortcut edits, saves or undoes behind the disabled controls.
+        for (const key of ['z', 'y', 's', 'Enter', 'Delete']) {
+          for (const target of [document, page.get('[data-testid="state-0"]').element]) {
+            target.dispatchEvent(
+              new KeyboardEvent('keydown', { key, ctrlKey: key.length === 1, bubbles: true }),
+            )
+          }
+        }
+        // Collapsing a condition changes the view, and writes nothing.
+        for (const toggle of page.findAll('button[aria-label^="Collapse "]')) {
+          await toggle.trigger('click')
+        }
+        await settle()
+
+        expect(writes()).toEqual([])
+        expect((page.get('[data-testid="workflow-name"]').element as HTMLInputElement).value).toBe(
+          'Purchase approval',
+        )
+      },
+    )
+
+    it('becomes read-only the moment it is published from this screen', async () => {
+      const page = await render()
+
+      await page.get('[data-testid="publish-workflow"]').trigger('click')
+      await settle()
+
+      expect(page.get('[data-testid="status"]').text()).toBe('ACTIVE')
+      expect(enabledControls(page)).toEqual(['new-revision'])
+    })
+
+    it('offers no deprecate on an ACTIVE revision, and calls no deprecation route', async () => {
+      stored = record({ status: 'ACTIVE' })
+
+      const page = await render()
+
+      for (const control of page.findAll('button, a, [role="button"]')) {
+        expect(control.text()).not.toMatch(/deprecat|retire/i)
+        expect(control.attributes('aria-label') ?? '').not.toMatch(/deprecat|retire/i)
+      }
+
+      expect(backend.requests.some((request) => /deprecat/i.test(request.url))).toBe(false)
+    })
+  })
+
+  describe('the campaign: permissions', () => {
+    it('lets a creator start a new workflow, and not edit an existing draft', async () => {
+      const creator = ['workflow:definition:read', 'workflow:definition:create']
+      const fresh = await render({ path: '/admin/workflows/new', permissions: creator })
+
+      expect(fresh.find('[data-testid="save-workflow"]').exists()).toBe(true)
+      expect(fresh.get('[data-testid="workflow-key"]').attributes('disabled')).toBeUndefined()
+      fresh.unmount()
+      wrapper = null
+
+      const existing = await render({ permissions: creator })
+
+      expect(existing.find('[data-testid="read-only-notice"]').exists()).toBe(true)
+      expect(existing.find('[data-testid="save-workflow"]').exists()).toBe(false)
+      expect(enabledControls(existing)).toEqual([])
+    })
+
+    it.fails(
+      'offers publish to a caller who may publish and not update (defect or decision: publish is gated behind update)',
+      async () => {
+        // `workflow:definition:publish` is its own grant on the backend, and
+        // `publish_definition` checks only it. The Publish button sits inside
+        // the `!readOnly` block, and `readOnly` is true without `update`, so a
+        // caller holding publish alone — a reviewer who signs a workflow off but
+        // does not author it — cannot publish a saved draft from the screen.
+        // Passes once Publish is offered on a clean draft to anyone who holds
+        // publish; or, if that separation is not wanted, this test is deleted
+        // and the decision recorded.
+        const page = await render({
+          permissions: ['workflow:definition:read', 'workflow:definition:publish'],
+        })
+
+        expect(page.find('[data-testid="publish-workflow"]').exists()).toBe(true)
+      },
+    )
   })
 })
