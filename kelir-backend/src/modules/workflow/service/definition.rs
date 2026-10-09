@@ -275,7 +275,27 @@ pub async fn publish_definition(
     let tenant_id = caller.tenant_id();
     let actor = Some(caller.user_id());
 
-    let before = repo::find_definition(&state.pool, tenant_id, id)
+    let mut transaction = state.pool.begin().await?;
+
+    // **The revision checked is the revision published** (#572). The row is
+    // locked `FOR UPDATE` and read inside this transaction, so everything below
+    // checks, projects and publishes one copy of it. Read before the
+    // transaction, an edit committed in between was flipped to `ACTIVE` by the
+    // `WHERE status = 'DRAFT'` below without its roles or rules being checked,
+    // under the projection of the copy that was. Now `repo::update_draft` waits
+    // for this commit and then matches no draft, which `update_definition`
+    // refuses as `NOT_A_DRAFT`; or it committed first, and its JSON is what is read
+    // here. A second publish waits too, and then finds the revision `ACTIVE`.
+    //
+    // **The definition row first, then its roles** (`repo::lock_live_roles`).
+    // `identity::service::delete_role` locks a role and reads definitions
+    // without locking them, so it never waits on this row, and the order
+    // cannot close a cycle with it.
+    if !repo::lock_for_publish(&mut transaction, tenant_id, id).await? {
+        return Err(AppError::not_found("Workflow definition"));
+    }
+
+    let before = repo::find_definition(&mut *transaction, tenant_id, id)
         .await?
         .ok_or_else(|| AppError::not_found("Workflow definition"))?;
 
@@ -298,8 +318,6 @@ pub async fn publish_definition(
     }
 
     let graph = Graph::parse(&before.definition, before.version);
-
-    let mut transaction = state.pool.begin().await?;
 
     // **Every role it names is live, and stays live until this commits**
     // (**D-111**, #572; JWSS §5.3). At publish and not at save: liveness is a
@@ -329,8 +347,9 @@ pub async fn publish_definition(
     }
 
     if repo::publish(&mut *transaction, tenant_id, id, actor).await? == 0 {
-        // Somebody else published it first. Their name is on it, which is
-        // correct — the second call published nothing.
+        // Not reached while the row is locked above and was a draft; kept so
+        // the statement's own predicate is never the thing standing between
+        // a second publisher and a revision that is already `ACTIVE`.
         return Err(AppError::conflict(format!(
             "revision {} of `{}` was published by another request",
             before.version, before.workflow_key

@@ -258,12 +258,42 @@ pub async fn update_draft<'e, E: PgExecutor<'e>>(
     Ok(affected)
 }
 
+/// Locks a live definition row `FOR UPDATE` for a publish, answering whether
+/// there was one ([#572]).
+///
+/// The publish then reads, checks, projects and flips the row it holds, so an
+/// edit ([`update_draft`]) or a second publish waits for it to commit. Taken
+/// before the roles the definition names ([`lock_live_roles`]), which
+/// `service::definition::publish_definition` says is the order.
+///
+/// [#572]: https://github.com/sujanto-gaws/kelir/issues/572
+pub async fn lock_for_publish(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let found = sqlx::query_scalar!(
+        r#"
+        SELECT 1 AS "found!" FROM workflow_definitions
+        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+        FOR UPDATE
+        "#,
+        tenant_id,
+        id
+    )
+    .fetch_optional(&mut **transaction)
+    .await?;
+
+    Ok(found.is_some())
+}
+
 /// Publishes a draft revision, conditionally on it still being one.
 ///
 /// One statement, compare-and-swap: two callers who both read `DRAFT` produce
 /// one update of one row and one update of none, and the second is told that
 /// somebody else published it. Their name is on it, which is correct — the
-/// second call published nothing.
+/// second call published nothing. `publish_definition` also holds the row
+/// ([`lock_for_publish`]), so its second caller is refused before it gets here.
 pub async fn publish<'e, E: PgExecutor<'e>>(
     executor: E,
     tenant_id: Uuid,

@@ -845,12 +845,15 @@ async fn a_publish_that_lands_first_makes_the_edit_apply_to_nothing() {
 
 /// **Two publishes of one draft produce one publisher** (M07).
 ///
-/// `publish` carries `AND status = 'DRAFT'`, so the second `UPDATE` matches no
-/// row and the caller is told somebody else published it — their name is on it,
-/// which is correct, because the second call published nothing.
+/// `publish_definition` locks the row before it reads it (#572), so the second
+/// caller waits, finds the revision `ACTIVE` and is refused with a 409 — the
+/// first caller's name is on it, which is correct, because the second call
+/// published nothing. `publish` also carries `AND status = 'DRAFT'`, which no
+/// longer decides between them.
 ///
-/// **Seen red** against the predicate defeated: both callers are told they
-/// published it and `published_by` is whichever committed last.
+/// **Seen red** against the predicate defeated, before the lock: both callers
+/// were told they published it and `published_by` was whichever committed
+/// last.
 #[tokio::test]
 async fn two_publishes_of_one_draft_produce_one_publisher() {
     let app = std::sync::Arc::new(TestApp::spawn().await);
@@ -1967,8 +1970,11 @@ async fn a_publish_waits_on_an_uncommitted_role_delete_and_is_refused() {
 /// then refused** (#572's race, the publish first; D-91 (3)).
 ///
 /// The publish is held open after `lock_live_roles` by a transaction holding
-/// the definition's row `FOR UPDATE`, which its `UPDATE ... SET status =
-/// 'ACTIVE'` waits on. The delete is then sent through the API. It must wait
+/// `workflow_transitions` in `SHARE` mode, which the projection's `DELETE`
+/// waits on. (Holding the definition's row no longer works: the publish locks
+/// that row first, before its roles, #572.) The delete's own read of
+/// `workflow_transitions` is not blocked by `SHARE`. The delete is then sent
+/// through the API. It must wait
 /// on the publish's `FOR KEY SHARE`, then, once the publish commits, find the
 /// revision `ACTIVE` and refuse as `ROLE_NAMED_BY_PUBLISHED_DEFINITION`. The
 /// two cannot both succeed.
@@ -1992,11 +1998,10 @@ async fn a_role_delete_waits_on_a_publish_in_flight_and_is_refused() {
     .await;
 
     let mut holding = app.pool.begin().await.expect("a transaction");
-    sqlx::query("SELECT id FROM workflow_definitions WHERE id = $1 FOR UPDATE")
-        .bind(id)
+    sqlx::query("LOCK TABLE workflow_transitions IN SHARE MODE")
         .execute(&mut *holding)
         .await
-        .expect("hold the definition row");
+        .expect("hold the projection");
 
     let publishing = {
         let app = std::sync::Arc::clone(&app);
@@ -2006,7 +2011,7 @@ async fn a_role_delete_waits_on_a_publish_in_flight_and_is_refused() {
 
     assert!(
         waited_on_a_lock(&app, 1, &publishing).await,
-        "the publish did not reach its write"
+        "the publish did not reach its projection"
     );
 
     let deleting = {
@@ -2019,10 +2024,7 @@ async fn a_role_delete_waits_on_a_publish_in_flight_and_is_refused() {
     };
 
     let delete_waited = waited_on_a_lock(&app, 2, &deleting).await;
-    holding
-        .rollback()
-        .await
-        .expect("release the definition row");
+    holding.rollback().await.expect("release the projection");
 
     let published = publishing.await.expect("the publish finished");
     let deleted = deleting.await.expect("the delete finished");
@@ -2066,11 +2068,18 @@ async fn a_role_delete_waits_on_a_publish_in_flight_and_is_refused() {
 ///
 /// The gap is held open by a transaction holding the role row `FOR UPDATE`,
 /// which the publish's `FOR KEY SHARE` waits on after its read. The edit then
-/// renames the task's role to one no role has, and commits.
+/// renames the task's role to one no role has.
+///
+/// **The publish now holds the definition row `FOR UPDATE` before it reads
+/// it** (`repo::lock_for_publish`), so the edit waits behind the publish, finds
+/// the revision `ACTIVE` when it may go on, and is refused as `NOT_A_DRAFT` (422). The
+/// edit is sent from its own task for that reason: awaited here, it would wait
+/// on the publish, which waits on the role this test releases after it.
+///
+/// **Seen red** against the publish reading the definition with the pool
+/// before its transaction, as it did: the revision reaches `ACTIVE` naming
+/// `WF-GHOST`.
 #[tokio::test]
-#[ignore = "defect (#572): publish checks the definition it read before its \
-            transaction, and flips whatever the row holds by then to ACTIVE; an \
-            edit landing in between publishes a dead role unchecked"]
 async fn a_draft_edited_while_its_publish_is_in_flight_is_not_published_unchecked() {
     let app = std::sync::Arc::new(TestApp::spawn().await);
     let token = app.administrator_token().await;
@@ -2105,16 +2114,26 @@ async fn a_draft_edited_while_its_publish_is_in_flight_is_not_published_unchecke
     let mut edited_definition = approval_workflow("wf_edited_mid_publish");
     edited_definition["states"][0]["task"]["assignment"]["roleCode"] = json!("WF-GHOST");
 
-    let edited = app
-        .put(
-            &format!("{DEFINITIONS}/{id}"),
-            Some(&token),
-            json!({ "definition": edited_definition }),
-        )
-        .await;
+    let editing = {
+        let app = std::sync::Arc::clone(&app);
+        let token = token.clone();
+        tokio::spawn(async move {
+            app.put(
+                &format!("{DEFINITIONS}/{id}"),
+                Some(&token),
+                json!({ "definition": edited_definition }),
+            )
+            .await
+        })
+    };
+
+    // The edit waits on the definition row the publish holds; one that
+    // finishes instead edited the draft under the publish.
+    let edit_waited = waited_on_a_lock(&app, 2, &editing).await;
 
     holding.rollback().await.expect("release the role row");
     let published = publishing.await.expect("the publish finished");
+    let edited = editing.await.expect("the edit finished");
 
     let (status, named): (String, Option<String>) = sqlx::query_as(
         "SELECT status, definition_json #>> '{states,0,task,assignment,roleCode}' \
@@ -2132,6 +2151,26 @@ async fn a_draft_edited_while_its_publish_is_in_flight_is_not_published_unchecke
         edited.body,
         published.status,
         published.body
+    );
+
+    // And the order the lock gives: the revision it checked is published, and
+    // the edit is refused because that revision is no longer a draft.
+    assert!(edit_waited, "the edit did not wait on the publish");
+    assert_eq!(published.status, StatusCode::OK, "{}", published.body);
+    assert_eq!(
+        edited.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        edited.body
+    );
+    assert_eq!(
+        edited.body["error"]["details"][0]["code"], "NOT_A_DRAFT",
+        "{}",
+        edited.body
+    );
+    assert_eq!(
+        (status.as_str(), named.as_deref()),
+        ("ACTIVE", Some("WF-APPROVER"))
     );
 }
 
@@ -2162,11 +2201,10 @@ async fn a_role_edit_is_not_held_up_by_a_publish_in_flight() {
     .await;
 
     let mut holding = app.pool.begin().await.expect("a transaction");
-    sqlx::query("SELECT id FROM workflow_definitions WHERE id = $1 FOR UPDATE")
-        .bind(id)
+    sqlx::query("LOCK TABLE workflow_transitions IN SHARE MODE")
         .execute(&mut *holding)
         .await
-        .expect("hold the definition row");
+        .expect("hold the projection");
 
     let publishing = {
         let app = std::sync::Arc::clone(&app);
@@ -2176,7 +2214,7 @@ async fn a_role_edit_is_not_held_up_by_a_publish_in_flight() {
 
     assert!(
         waited_on_a_lock(&app, 1, &publishing).await,
-        "the publish did not reach its write"
+        "the publish did not reach its projection"
     );
 
     let editing = {
@@ -2195,10 +2233,7 @@ async fn a_role_edit_is_not_held_up_by_a_publish_in_flight() {
     let edit_waited = waited_on_a_lock(&app, 2, &editing).await;
     let edit_finished_first = editing.is_finished();
 
-    holding
-        .rollback()
-        .await
-        .expect("release the definition row");
+    holding.rollback().await.expect("release the projection");
 
     let edited = editing.await.expect("the edit finished");
     let published = publishing.await.expect("the publish finished");
