@@ -23,6 +23,7 @@ import {
   isOfferedPath,
   isRootRepresentable,
   literalNode,
+  MAX_VISUAL_DEPTH,
   nodeAt,
   OPERATOR_LABELS,
   parseExpression,
@@ -855,25 +856,71 @@ describe('the seam at its edges (campaign, 2026-10-09)', () => {
       expr = [{ '!': expr }, { and: [expr, true] }, { '+': [expr, 1] }][depth % 3]
     }
 
-    expect(containsOpaque(parseExpression(expr, 'conditional'))).toBe(false)
+    // Visual down to MAX_VISUAL_DEPTH and one opaque leaf below it, which is
+    // still exact: the leaf is emitted by reference. (Until the cap, this
+    // asserted the whole tree visual; Vue cannot render it past ~300 deep.)
+    expect(containsOpaque(parseExpression(expr, 'conditional'))).toBe(true)
     expect(rebuilt(expr)).toBe(JSON.stringify(expr))
   })
 
-  it.fails(
-    // Defect, reported by the campaign: the doc comment promises "never throws",
-    // and a value deep enough overflows the recursive parse, so the builder
-    // throws while mounting. Real expressions are nowhere near this deep.
-    'never throws while parsing, even an expression nested 100,000 deep',
-    () => {
-      let expr: unknown = { var: 'a' }
+  describe('the depth cap', () => {
+    /** `{"!": …}` wrapped `levels` times round `{"var": "a"}`; the var sits at depth `levels`. */
+    function notChain(levels: number): { expr: unknown; leaf: unknown } {
+      const leaf = { var: 'a' }
+      let expr: unknown = leaf
 
-      for (let depth = 0; depth < 100_000; depth += 1) {
+      for (let depth = 0; depth < levels; depth += 1) {
         expr = { '!': expr }
       }
 
-      expect(() => parseExpression(expr, 'conditional')).not.toThrow()
-    },
-  )
+      return { expr, leaf }
+    }
+
+    it('shows a node at MAX_VISUAL_DEPTH', () => {
+      const { expr } = notChain(MAX_VISUAL_DEPTH)
+      const tree = parseExpression(expr, 'conditional')
+
+      expect(containsOpaque(tree)).toBe(false)
+      expect(nodeAt(tree, Array(MAX_VISUAL_DEPTH).fill(0)).kind).toBe('var')
+      expect(rebuilt(expr)).toBe(JSON.stringify(expr))
+    })
+
+    it('holds a node one deeper as an opaque leaf, by reference', () => {
+      const { expr, leaf } = notChain(MAX_VISUAL_DEPTH + 1)
+      const tree = parseExpression(expr, 'conditional')
+      const below = nodeAt(tree, Array(MAX_VISUAL_DEPTH + 1).fill(0))
+
+      expect(nodeAt(tree, Array(MAX_VISUAL_DEPTH).fill(0)).kind).toBe('operator')
+      expect(below).toEqual(expect.objectContaining({ kind: 'opaque' }))
+      expect((below as { value: unknown }).value).toBe(leaf)
+      expect(serialise(tree)).toBe(expr)
+      expect(rebuilt(expr)).toBe(JSON.stringify(expr))
+    })
+
+    it('keeps a literal past the cap a literal: it has nothing below it', () => {
+      let expr: unknown = 5
+
+      for (let depth = 0; depth <= MAX_VISUAL_DEPTH; depth += 1) {
+        expr = { '!': expr }
+      }
+
+      expect(containsOpaque(parseExpression(expr, 'conditional'))).toBe(false)
+    })
+  })
+
+  it(// Was `it.fails`, the campaign's defect: the doc comment promised "never
+  // throws", and a value deep enough overflowed the recursive parse, so the
+  // builder threw while mounting. Fixed by MAX_VISUAL_DEPTH.
+  'never throws while parsing, even an expression nested 100,000 deep', () => {
+    let expr: unknown = { var: 'a' }
+
+    for (let depth = 0; depth < 100_000; depth += 1) {
+      expr = { '!': expr }
+    }
+
+    expect(() => parseExpression(expr, 'conditional')).not.toThrow()
+    expect(serialise(parseExpression(expr, 'conditional'))).toBe(expr)
+  })
 
   describe('C2, C5: an opaque subtree survives an edit by reference, at depth', () => {
     const cat = { cat: ['INV-', { var: 'n' }], z: 0, a: 1 }

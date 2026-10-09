@@ -104,6 +104,12 @@ function raw(value: unknown): unknown {
 function load(proxied: unknown): void {
   const value = raw(proxied)
 
+  // Whatever was emitted before is history once a host value is adopted. Kept,
+  // it made a redo — the host handing back the value this builder last emitted,
+  // after an undo loaded another — look like this builder's own echo, so the
+  // tree went on showing the undone expression and the next edit was built
+  // from it.
+  lastEmitted = NOTHING_EMITTED
   generation.value += 1
   rawValid.value = true
 
@@ -128,13 +134,48 @@ function load(proxied: unknown): void {
 
 load(props.modelValue)
 
+/**
+ * Whether a value from the host is this builder's last emission coming back.
+ *
+ * Compared **structurally**, not by identity: a host that clones on write
+ * (an undo stack, a store that copies) hands back an equal value that is not
+ * the same object, and an identity check would reload the tree on every
+ * keystroke — remounting every control under the user and dropping operands
+ * not yet filled in. A value too deep for `JSON.stringify` is treated as a
+ * change.
+ *
+ * **An emission is echoed once.** The watcher consumes the match, so a host
+ * that later sets an equal value of its own — reopening the definition — is
+ * read afresh, and a redo after an undo is read because `load` forgot the
+ * emission.
+ */
+function isOwnEcho(value: unknown): boolean {
+  if (lastEmitted === NOTHING_EMITTED) {
+    return false
+  }
+
+  const incoming = raw(value)
+
+  if (incoming === lastEmitted) {
+    return true
+  }
+
+  try {
+    return JSON.stringify(incoming) === JSON.stringify(lastEmitted)
+  } catch {
+    return false
+  }
+}
+
 // A value the host changed is loaded afresh. One this builder just emitted is
 // already what the tree says, and reloading it would throw away the tree's
 // unfinished operands and the user's place in it.
 watch(
   () => props.modelValue,
   (value) => {
-    if (raw(value) !== lastEmitted) {
+    if (isOwnEcho(value)) {
+      lastEmitted = NOTHING_EMITTED
+    } else {
       load(value)
     }
   },

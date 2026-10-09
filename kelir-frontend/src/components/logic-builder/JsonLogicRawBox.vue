@@ -38,7 +38,26 @@ const emit = defineEmits<{
 const id = useId()
 const hintId = `${id}-hint`
 
-const text = ref(props.modelValue === undefined ? '' : JSON.stringify(props.modelValue, null, 2))
+/**
+ * The value as text, or `undefined` when it cannot be written out: a value
+ * nested deeper than `JSON.stringify` can recurse (past `MAX_VISUAL_DEPTH`, a
+ * subtree is held whole). It is still held, and emitted, exactly as it is.
+ */
+function display(value: unknown): string | undefined {
+  if (value === undefined) {
+    return ''
+  }
+
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return undefined
+  }
+}
+
+const shown = display(props.modelValue)
+const unshowable = shown === undefined
+const text = ref(shown ?? '')
 const invalid = ref(false)
 
 function onInput(next: string): void {
@@ -77,15 +96,17 @@ function onInput(next: string): void {
       :rows="4"
       class="font-mono text-xs"
       :invalid="invalid"
-      :disabled="disabled"
+      :disabled="disabled || unshowable"
       :described-by="hintId"
       @update:model-value="onInput"
     />
     <p :id="hintId" class="text-xs" :class="invalid ? 'text-destructive' : 'text-muted-foreground'">
       {{
-        invalid
-          ? 'Not valid JSON yet. The expression keeps its last valid value until it is.'
-          : 'Kept exactly as written. The server checks it when the definition is saved.'
+        unshowable
+          ? 'Nested too deeply to show as text. It is kept exactly as it is.'
+          : invalid
+            ? 'Not valid JSON yet. The expression keeps its last valid value until it is.'
+            : 'Kept exactly as written. The server checks it when the definition is saved.'
       }}
     </p>
   </div>

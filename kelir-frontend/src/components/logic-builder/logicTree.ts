@@ -252,12 +252,24 @@ function opaque(value: unknown): OpaqueNode {
   return { kind: 'opaque', key: nextKey(), value }
 }
 
+/**
+ * How deep the builder shows an expression, counting the root as depth 0.
+ *
+ * Anything but a literal nested deeper is held as one opaque leaf, by
+ * reference, so the round trip stays exact and nothing below it is visited.
+ * The bound is the view's, not the seam's: the recursive parse overflows
+ * somewhere past 2,000 levels, and Vue's nested render past 300 (measured
+ * 2026-10-09 in vitest, jsdom on Node's default stack). No expression a person
+ * writes comes near either; the cap is what makes "never throws" true.
+ */
+export const MAX_VISUAL_DEPTH = 256
+
 /** An operand: a bare or nested array there is opaque (B6). */
-function parseOperand(value: unknown, tier: LogicTier): LogicNode {
-  return Array.isArray(value) ? opaque(value) : parseNode(value, tier)
+function parseOperand(value: unknown, tier: LogicTier, depth: number): LogicNode {
+  return Array.isArray(value) ? opaque(value) : parseNode(value, tier, depth)
 }
 
-function parseNode(value: unknown, tier: LogicTier): LogicNode {
+function parseNode(value: unknown, tier: LogicTier, depth: number): LogicNode {
   if (
     value === null ||
     typeof value === 'string' ||
@@ -267,7 +279,7 @@ function parseNode(value: unknown, tier: LogicTier): LogicNode {
     return { kind: 'literal', key: nextKey(), value }
   }
 
-  if (!isPlainObject(value)) {
+  if (depth > MAX_VISUAL_DEPTH || !isPlainObject(value)) {
     return opaque(value)
   }
 
@@ -300,7 +312,7 @@ function parseNode(value: unknown, tier: LogicTier): LogicNode {
       kind: 'operator',
       key: nextKey(),
       op,
-      args: [parseOperand(argument, tier)],
+      args: [parseOperand(argument, tier, depth + 1)],
       bare: true,
       original: value,
     }
@@ -320,15 +332,18 @@ function parseNode(value: unknown, tier: LogicTier): LogicNode {
     kind: 'operator',
     key: nextKey(),
     op,
-    args: argument.map((operand) => parseOperand(operand, tier)),
+    args: argument.map((operand) => parseOperand(operand, tier, depth + 1)),
     bare: false,
     original: value,
   }
 }
 
-/** Parses a JSON Logic value into a tree. Never throws: what it cannot show is opaque. */
+/**
+ * Parses a JSON Logic value into a tree. Never throws: what it cannot show is
+ * opaque, and so is anything nested past {@link MAX_VISUAL_DEPTH}.
+ */
 export function parseExpression(value: unknown, tier: LogicTier): LogicNode {
-  return parseNode(value, tier)
+  return parseNode(value, tier, 0)
 }
 
 /**

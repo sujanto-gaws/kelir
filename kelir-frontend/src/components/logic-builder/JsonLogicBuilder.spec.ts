@@ -559,25 +559,113 @@ describe('JsonLogicBuilder at its edges (campaign, 2026-10-09)', () => {
   })
 
   describe('a value the host changes', () => {
-    it.fails(
-      // Defect, reported by the campaign: `lastEmitted` outlives a load, so a
-      // host that undoes and then redoes hands back the very value the builder
-      // last emitted, the watcher takes it for its own echo, and the builder
-      // keeps showing the undone expression. The next edit then overwrites the
-      // host's value with one built from the stale tree.
-      'is re-read when the host hands back what the builder last emitted (undo, then redo)',
-      async () => {
-        const wrapper = mountBuilder({ var: 'unit_price' })
+    it(// Was `it.fails`, the campaign's defect: `lastEmitted` outlived a load, so
+    // a host that undid and then redid handed back the very value the builder
+    // last emitted, the watcher took it for its own echo, and the builder kept
+    // showing the undone expression. Fixed by forgetting it on every load.
+    'is re-read when the host hands back what the builder last emitted (undo, then redo)', async () => {
+      const wrapper = mountBuilder({ var: 'unit_price' })
 
-        await byLabel(wrapper, 'Expression: variable').setValue('quantity')
+      await byLabel(wrapper, 'Expression: variable').setValue('quantity')
 
-        const redo = wrapper.props('modelValue')
+      const redo = wrapper.props('modelValue')
 
-        await wrapper.setProps({ modelValue: { var: 'unit_price' } })
-        expect(valueOf(wrapper, 'Expression: variable')).toBe('unit_price')
+      await wrapper.setProps({ modelValue: { var: 'unit_price' } })
+      expect(valueOf(wrapper, 'Expression: variable')).toBe('unit_price')
 
-        await wrapper.setProps({ modelValue: redo })
-        expect(valueOf(wrapper, 'Expression: variable')).toBe('quantity')
+      await wrapper.setProps({ modelValue: redo })
+      expect(valueOf(wrapper, 'Expression: variable')).toBe('quantity')
+    })
+
+    it('is re-read on a redo when the host never echoed the emission', async () => {
+      // No v-model echo: the emission is still pending when the host undoes.
+      // Only forgetting it on load tells the redo apart from an echo.
+      const wrapper = mount(JsonLogicBuilder, {
+        props: { modelValue: { var: 'unit_price' }, tier: 'conditional', variables: FORM_FIELDS },
+      })
+
+      mounted = wrapper
+
+      await byLabel(wrapper, 'Expression: variable').setValue('quantity')
+      await wrapper.setProps({ modelValue: { var: 'unit_price' } })
+
+      expect(valueOf(wrapper, 'Expression: variable')).toBe('unit_price')
+
+      await wrapper.setProps({ modelValue: { var: 'quantity' } })
+
+      expect(valueOf(wrapper, 'Expression: variable')).toBe('quantity')
+    })
+
+    it('is not re-read when a host that clones on write hands back an equal copy', async () => {
+      // An undo stack or a copying store echoes an equal value that is not the
+      // same object. Re-reading it would remount every control and drop the
+      // operand the user has not filled in yet.
+      const wrapper = mount(JsonLogicBuilder, {
+        props: {
+          modelValue: { and: [{ var: 'type' }, { var: 'quantity' }] },
+          tier: 'conditional' as const,
+          variables: FORM_FIELDS,
+          'onUpdate:modelValue': (value: unknown) =>
+            wrapper.setProps({ modelValue: JSON.parse(JSON.stringify(value)) }),
+        },
+      })
+
+      mounted = wrapper
+
+      await byLabel(wrapper, 'Add operand to Expression').trigger('click')
+
+      const control = byLabel(wrapper, 'Expression, operand 1: variable').element
+
+      await byLabel(wrapper, 'Expression, operand 1: variable').setValue('total')
+
+      // Unfilled, so nothing was emitted: the host still holds its first value.
+      expect(emitted(wrapper)).toEqual([])
+
+      await byLabel(wrapper, 'Expression, operand 3: kind').setValue('null')
+      await byLabel(wrapper, 'Expression, operand 2: variable').setValue('type')
+
+      expect(emitted(wrapper)).toHaveLength(2)
+      expect(lastEmitted(wrapper)).toEqual({ and: [{ var: 'total' }, { var: 'type' }, null] })
+      // The echoes were copies, and the tree was kept: the same control is there.
+      expect(byLabel(wrapper, 'Expression, operand 1: variable').element).toBe(control)
+
+      // An undo to a different value is still read.
+      await wrapper.setProps({ modelValue: { var: 'quantity' } })
+
+      expect(valueOf(wrapper, 'Expression: variable')).toBe('quantity')
+    })
+  })
+
+  describe('an expression nested past the depth cap', () => {
+    // Rendering 256 nested levels takes about a second alone and several under
+    // the full suite's load, so it gets a timeout of its own.
+    it(
+      'mounts, shows it visual to the cap, and holds the rest as an advanced block',
+      { timeout: 30_000 },
+      () => {
+        let expr: unknown = { var: 'a' }
+
+        for (let depth = 0; depth < 100_000; depth += 1) {
+          expr = { '!': expr }
+        }
+
+        // Through a host, not as a mount prop: Vue Test Utils walks mount props
+        // recursively, which is the harness overflowing and not the builder.
+        const wrapper = mount(
+          defineComponent({
+            setup: () => () =>
+              h(JsonLogicBuilder, { modelValue: expr, tier: 'conditional', variables: [] }),
+          }),
+        )
+
+        mounted = wrapper
+
+        expect(wrapper.text()).toContain('Advanced')
+        expect(wrapper.text()).toContain('Nested too deeply to show as text')
+        expect(wrapper.get('textarea').attributes('disabled')).toBeDefined()
+        expect(wrapper.findComponent(JsonLogicBuilder).emitted()).not.toHaveProperty(
+          'update:modelValue',
+        )
       },
     )
   })
