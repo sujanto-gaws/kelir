@@ -482,6 +482,20 @@ async fn a_suspended_tenant_stops_admitting_the_administrator_it_was_created_wit
     // it: a refresh token issued a minute earlier would otherwise keep a
     // session alive indefinitely. The same rule `update_user` applies to a
     // deactivated account.
+    a_tenant_that_left_stops_admitting_the_administrator_it_was_created_with("SUSPENDED").await;
+}
+
+#[tokio::test]
+async fn an_inactive_tenant_stops_admitting_the_administrator_it_was_created_with() {
+    // The same through the API for `INACTIVE` (#649's second criterion): the
+    // two statuses are treated alike, and until #649 only `SUSPENDED` was
+    // asserted here.
+    a_tenant_that_left_stops_admitting_the_administrator_it_was_created_with("INACTIVE").await;
+}
+
+/// A tenant set to `status` through the API refuses its administrator's
+/// sign-in and the refresh token issued before the change.
+async fn a_tenant_that_left_stops_admitting_the_administrator_it_was_created_with(status: &str) {
     let app = multi_tenant_app().await;
     let token = administering_token(&app).await;
 
@@ -506,15 +520,15 @@ async fn a_suspended_tenant_stops_admitting_the_administrator_it_was_created_wit
         .expect("a refresh token")
         .to_owned();
 
-    let suspended = app
+    let changed = app
         .put(
             &format!("{TENANTS}/{tenant_id}"),
             Some(&token),
-            json!({ "status": "SUSPENDED" }),
+            json!({ "status": status }),
         )
         .await;
-    assert_eq!(suspended.status, StatusCode::OK, "{}", suspended.body);
-    assert_eq!(suspended.data()["status"], "SUSPENDED");
+    assert_eq!(changed.status, StatusCode::OK, "{}", changed.body);
+    assert_eq!(changed.data()["status"], status);
 
     // No new sign-in...
     let refused = app
@@ -528,7 +542,7 @@ async fn a_suspended_tenant_stops_admitting_the_administrator_it_was_created_wit
             }),
         )
         .await;
-    assert_eq!(refused.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(refused.status, StatusCode::UNAUTHORIZED, "{status}");
 
     // ...and no extending the one that already existed.
     let rotated = app
@@ -541,7 +555,7 @@ async fn a_suspended_tenant_stops_admitting_the_administrator_it_was_created_wit
     assert_eq!(
         rotated.status,
         StatusCode::UNAUTHORIZED,
-        "a suspended tenant's session could still be extended: {}",
+        "a {status} tenant's session could still be extended: {}",
         rotated.body
     );
 }
