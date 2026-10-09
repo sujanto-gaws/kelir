@@ -1479,6 +1479,24 @@ async fn a_colliding_tenant_committed_while_the_check_waits_is_seen() {
 // the edges the four tests above do not reach, and the lock from the sides
 // they do not. Plan 19 §7's gate for row 12 names case, the hyphen, `__`, each
 // direction of *covers*, and live against deleted.
+//
+// Each mutation was applied by script, this file run in full, and the
+// mutation reverted (2026-10-10). The second column names this file's tests
+// that went red.
+//
+// | Mutation | Red here |
+// |---|---|
+// | `live_codes` without `deleted_at IS NULL` (built online) | `..._deleted_tenants_is_accepted_...`, `a_deleted_tenants_identical_code_...` |
+// | `namespace_segment` not upper-casing | `a_code_typed_or_stored_in_any_case_is_one_namespace`, where the table above had none |
+// | The identical-code skip made case-blind | `a_code_typed_or_stored_in_any_case_is_one_namespace` |
+// | `-` dropped rather than written `_` | eight, the leading-hyphen and all-digit tests among them |
+// | The check moved after the insert | `a_deleted_tenants_identical_code_is_the_indexs_409_...` alone |
+// | `lock_tenant_codes` not taken | both arranged races, `parallel_creations_..._admit_exactly_one` |
+// | The lock taken after the read | both arranged races, `parallel_creations_..._admit_exactly_one` |
+// | The lock's class made `DEPT`'s | both arranged races, by their copy of the key; the department test survives, as it should, since the second key still differs |
+// | `namespaces_overlap` one direction only | eight |
+// | An identical live code compared too | `a_tenant_code_is_one_tenant_...`, `the_system_tenant_blocks_...` |
+// | Segments compared without the `__` | seven |
 // ---------------------------------------------------------------------------
 
 /// Posts a creation of `code` with an administrator named `username`, given
