@@ -4,6 +4,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::error::{AppError, ValidationDetail};
+use crate::modules::integration::domain::secret::namespaces_overlap;
 
 /// Lifecycle state of a tenant (`tenants.status`, database schema §1.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -233,6 +234,45 @@ fn validate_tenant_code(raw: &str, details: &mut Vec<ValidationDetail>) {
     }
 }
 
+/// Refuses a new tenant code that shares an integration secret name with a
+/// live tenant's (#655, decision **D-102** B).
+///
+/// A secret is read from `KELIR_INTEGRATION_SECRET_<CODE>__<NAME>`, `<CODE>`
+/// being the code upper case with each `-` written `_`. Two codes share a name
+/// when their prefixes are equal or one starts with the other
+/// ([`namespaces_overlap`]): `A_B` beside `A-B`, `ACME__X` beside `ACME` and
+/// the other way round, `ACME_` beside `ACME`. The resolver refuses every such
+/// name for both while both are live, so this refuses the second code instead
+/// of letting it fail closed silently. `live` is every tenant not deleted,
+/// whatever its status; a deleted tenant's code does not block.
+///
+/// **A code identical to a live one is skipped**: that is the unique index's
+/// 409, which names the code the caller typed, and keeps its meaning.
+///
+/// The detail names the field and not the other tenant's code. The caller can
+/// list tenants anyway, but the refusal has no need to say which one.
+pub fn refuse_shared_secret_namespace<'a>(
+    code: &str,
+    live: impl IntoIterator<Item = &'a str>,
+) -> Result<(), AppError> {
+    let shares = live
+        .into_iter()
+        .any(|other| other != code && namespaces_overlap(code, other));
+
+    if shares {
+        Err(AppError::validation(vec![ValidationDetail::new(
+            "tenantCode",
+            "secretNamespace",
+            "SECRET_NAMESPACE_IN_USE",
+            "Tenant code would share integration secret names with an existing tenant's. \
+             Compared in upper case with each dash as an underscore, its secret prefix \
+             would match, contain or be contained in that tenant's. Choose another code",
+        )]))
+    } else {
+        Ok(())
+    }
+}
+
 fn validate_tenant_name(raw: &str, path: &str, details: &mut Vec<ValidationDetail>) {
     let trimmed = raw.trim();
 
@@ -256,6 +296,36 @@ fn validate_tenant_name(raw: &str, path: &str, details: &mut Vec<ValidationDetai
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_code_sharing_a_live_tenants_secret_names_is_refused_on_the_code_field() {
+        for (code, live) in [
+            ("A_B", "A-B"),
+            ("ACME__X", "ACME"),
+            ("ACME", "ACME__X"),
+            ("ACME_", "ACME"),
+        ] {
+            let details = details_of(
+                refuse_shared_secret_namespace(code, ["SYSTEM", live]).expect_err("shares a name"),
+            );
+
+            assert_eq!(details.len(), 1, "{code}");
+            assert_eq!(details[0].path, "tenantCode");
+            assert_eq!(details[0].rule, "secretNamespace");
+            assert_eq!(details[0].code, "SECRET_NAMESPACE_IN_USE");
+            assert!(!details[0].message.contains(live), "{}", details[0].message);
+        }
+    }
+
+    #[test]
+    fn a_code_sharing_no_name_passes_and_an_identical_one_is_left_to_the_index() {
+        assert!(refuse_shared_secret_namespace("ACME_X", ["SYSTEM", "ACME"]).is_ok());
+        assert!(refuse_shared_secret_namespace("ACME", []).is_ok());
+        // The unique index answers an identical code, as 409.
+        assert!(refuse_shared_secret_namespace("ACME", ["ACME"]).is_ok());
+        // ...but not when another live code also shares its names.
+        assert!(refuse_shared_secret_namespace("ACME", ["ACME", "ACME__X"]).is_err());
+    }
 
     #[test]
     fn only_active_tenants_admit_sign_in() {

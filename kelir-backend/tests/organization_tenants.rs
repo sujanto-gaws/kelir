@@ -1196,3 +1196,280 @@ async fn the_deployment_endpoint_reports_the_mode_without_a_token() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// #655, decision D-102 B: a code that maps like a live tenant's is refused.
+//
+// An integration secret is read from `KELIR_INTEGRATION_SECRET_<CODE>__<NAME>`,
+// `<CODE>` being the tenant code upper case with each `-` written `_`. Two
+// live tenants whose prefixes match, or one of whose prefixes starts with the
+// other's, share names that the resolver refuses for both (#618's gate 3).
+// The route refuses such a code instead. A deleted tenant's code does not
+// block. An identical code stays the unique index's 409, above.
+//
+// Case is held here by codes typed in lower case, which the route upper-cases
+// before it compares, and by `integration::domain::secret`'s unit tests for a
+// stored code that is not upper case, which no route writes.
+//
+// The four tests below were red against the unchanged route (each created
+// the second tenant, 201). Each mutation was then applied by script, this
+// file and the unit tests run, and the mutation reverted (2026-10-10):
+//
+// | Mutation | Red here | Red in unit tests |
+// |---|---|---|
+// | `lock_tenant_codes` not taken | `a_colliding_tenant_committed_while_the_check_waits_is_seen` | none |
+// | `namespaces_overlap` one direction only | `..._covers_or_is_covered_by_...`, `..._a_deleted_tenants_is_accepted_...` | 2 in `domain::secret`, 2 in `organization::domain` |
+// | `NAMESPACE_SEPARATOR` one `_` | `..._covers_or_is_covered_by_...` | 6 in `domain::secret`, 1 in `organization::domain` |
+// | `-` not written `_` | all four | 5 in `domain::secret`, 1 in `organization::domain` |
+// | The code not upper-cased | none: the route upper-cases first | 3 in `domain::secret` |
+// | An identical live code compared too | `a_tenant_code_is_one_tenant_however_it_is_spelled` (422, not 409) | 1 in `organization::domain` |
+//
+// Live against deleted rests on `repository::live_codes`'s
+// `deleted_at IS NULL`, which #618's mutation table in
+// `integration_test_call.rs` already holds; here the third test creates each
+// pair's second code only after the first is deleted, and refuses it while a
+// suspended or inactive one is not.
+// ---------------------------------------------------------------------------
+
+/// The detail code the refusal names (`ValidationDetail::code`).
+const SECRET_NAMESPACE_IN_USE: &str = "SECRET_NAMESPACE_IN_USE";
+
+/// Asserts a creation was refused as #655 says: 422 `VALIDATION_ERROR` with
+/// one detail, on `tenantCode`, coded `SECRET_NAMESPACE_IN_USE`, and naming
+/// none of `others`.
+fn assert_refused_as_a_shared_namespace(
+    response: &common::TestResponse,
+    code: &str,
+    others: &[&str],
+) {
+    assert_eq!(
+        response.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{code} was not refused: {}",
+        response.body
+    );
+    assert_eq!(response.error_code(), Some("VALIDATION_ERROR"), "{code}");
+
+    let details = response.body["error"]["details"]
+        .as_array()
+        .expect("details is an array");
+    assert_eq!(details.len(), 1, "{code}: {details:?}");
+    assert_eq!(details[0]["path"], "tenantCode", "{code}");
+    assert_eq!(details[0]["rule"], "secretNamespace", "{code}");
+    assert_eq!(details[0]["code"], SECRET_NAMESPACE_IN_USE, "{code}");
+
+    let said = response.body.to_string();
+    for other in others {
+        assert!(
+            !said.contains(other),
+            "{code}'s refusal names {other}: {said}"
+        );
+    }
+}
+
+async fn tenant_rows(app: &TestApp, code: &str) -> i64 {
+    let (count,): (i64,) = sqlx::query_as("SELECT count(*) FROM tenants WHERE tenant_code = $1")
+        .bind(code)
+        .fetch_one(&app.pool)
+        .await
+        .expect("reads tenants");
+    count
+}
+
+fn administrator_of(code: &str) -> String {
+    format!("admin.{}", code.trim().to_lowercase())
+}
+
+/// Creates `code` through the route and returns its id.
+async fn created(app: &TestApp, token: &str, code: &str) -> uuid::Uuid {
+    let response = app
+        .post(
+            TENANTS,
+            Some(token),
+            create_body(code, &administrator_of(code)),
+        )
+        .await;
+    assert_eq!(
+        response.status,
+        StatusCode::CREATED,
+        "{code}: {}",
+        response.body
+    );
+    uuid::Uuid::parse_str(response.data()["id"].as_str().expect("an id")).expect("a uuid")
+}
+
+/// Asserts the route refuses `code` as a shared namespace, naming none of
+/// `others`, and leaves neither a tenant nor an administrator behind.
+async fn refused(app: &TestApp, token: &str, code: &str, others: &[&str]) {
+    let response = app
+        .post(
+            TENANTS,
+            Some(token),
+            create_body(code, &administrator_of(code)),
+        )
+        .await;
+    assert_refused_as_a_shared_namespace(&response, code, others);
+
+    assert_eq!(
+        tenant_rows(app, &code.trim().to_uppercase()).await,
+        0,
+        "the refused {code} left a tenant row"
+    );
+    let (users,): (i64,) = sqlx::query_as("SELECT count(*) FROM users WHERE username = $1")
+        .bind(administrator_of(code))
+        .fetch_one(&app.pool)
+        .await
+        .expect("reads users");
+    assert_eq!(users, 0, "the refused {code} left its administrator");
+}
+
+#[tokio::test]
+async fn a_code_that_maps_like_a_live_tenants_is_refused_and_names_no_other_code() {
+    // `A-B` and `A_B` both map to `A_B`. Each way round, and typed in lower
+    // case.
+    let app = multi_tenant_app().await;
+    let token = administering_token(&app).await;
+
+    created(&app, &token, "A-B").await;
+    refused(&app, &token, "A_B", &["A-B"]).await;
+    refused(&app, &token, "a_b", &["A-B"]).await;
+
+    created(&app, &token, "C_D").await;
+    refused(&app, &token, "C-D", &["C_D"]).await;
+    refused(&app, &token, "c-d", &["C_D"]).await;
+
+    // Two hyphens are two underscores, which is the separator: `EF--G` is
+    // `EF__G`, which `EF` covers.
+    created(&app, &token, "EF").await;
+    refused(&app, &token, "EF--G", &[]).await;
+
+    // The system tenant is live like any other.
+    refused(&app, &token, "SYSTEM__X", &[]).await;
+    refused(&app, &token, "system-", &[]).await;
+}
+
+#[tokio::test]
+async fn a_code_that_covers_or_is_covered_by_a_live_tenants_is_refused() {
+    let app = multi_tenant_app().await;
+    let token = administering_token(&app).await;
+
+    // `ACME` covers every code spelled `ACME__…`, however its underscores
+    // are typed, and `ACME_` and `ACME-`, whose prefix `…ACME___` starts
+    // with `ACME`'s `…ACME__`.
+    created(&app, &token, "ACME").await;
+    for code in [
+        "ACME__X",
+        "acme__x",
+        "ACME-_X",
+        "ACME_-X",
+        "ACME--X",
+        "ACME__X__Y",
+        "ACME_",
+        "ACME-",
+    ] {
+        refused(&app, &token, code, &["ACME"]).await;
+    }
+
+    // ...and the other way round: `LONG__X` is covered by `LONG`.
+    created(&app, &token, "LONG__X").await;
+    for code in ["LONG", "long", "LONG__X__Y"] {
+        refused(&app, &token, code, &["LONG__X"]).await;
+    }
+
+    // Neighbours that share characters and no name. One underscore is not the
+    // separator, and `LONG__Y` is `LONG__X`'s sibling, not its cover.
+    for code in ["ACME_X", "ACMEX", "ACME2", "XACME", "LONG_X", "LONG__Y"] {
+        created(&app, &token, code).await;
+    }
+}
+
+#[tokio::test]
+async fn a_code_that_maps_like_a_deleted_tenants_is_accepted_and_a_suspended_one_still_blocks() {
+    // D-102 B: live means not deleted, whatever the status. A deleted
+    // tenant's prefix is free again, and the variables it left are the
+    // operator's to clear (Installation and Deployment §7.1). #690's case is
+    // `ACME__X` after `ACME`.
+    let app = multi_tenant_app().await;
+    let token = administering_token(&app).await;
+
+    for (first, second) in [("A-B", "A_B"), ("ACME", "ACME__X"), ("LONG__X", "LONG")] {
+        let id = created(&app, &token, first).await;
+        refused(&app, &token, second, &[]).await;
+
+        let deleted = app.delete(&format!("{TENANTS}/{id}"), Some(&token)).await;
+        assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
+
+        created(&app, &token, second).await;
+    }
+
+    for (first, second, status) in [
+        ("SUS-S", "SUS_S", "SUSPENDED"),
+        ("SUS-I", "SUS_I", "INACTIVE"),
+    ] {
+        let id = created(&app, &token, first).await;
+        set_tenant_status(&app, &token, id, status).await;
+
+        refused(&app, &token, second, &[first]).await;
+    }
+}
+
+/// `organization::repository::lock_tenant_codes`'s key, repeated so that the
+/// test below can hold the lock the route waits on. A change there that is
+/// not made here turns that test red.
+const TENANT_CODE_LOCK_CLASS: i32 = 0x544E_4344;
+const TENANT_CODE_LOCK_KEY: &str = "tenant_code";
+
+#[tokio::test]
+async fn a_colliding_tenant_committed_while_the_check_waits_is_seen() {
+    // Two creations racing: `RACE-A` is inserted and not yet committed when
+    // `RACE_A` is requested. Without a lock, the second reads the live codes,
+    // does not see the first, and is inserted beside it; the unique index
+    // does not stop it, because the codes differ. The interleaving is
+    // arranged, not raced for: this transaction holds the lock the route
+    // takes before its read, and commits once the route is waiting on it.
+    let app = multi_tenant_app().await;
+    let token = administering_token(&app).await;
+
+    let mut holder = app.pool.begin().await.expect("begins");
+    sqlx::query("SELECT pg_advisory_xact_lock($1, hashtext($2::text))")
+        .bind(TENANT_CODE_LOCK_CLASS)
+        .bind(TENANT_CODE_LOCK_KEY)
+        .execute(&mut *holder)
+        .await
+        .expect("takes the tenant-code lock");
+    sqlx::query(
+        "INSERT INTO tenants (id, tenant_code, name, status) \
+         VALUES ($1, 'RACE-A', 'Race A', 'ACTIVE')",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .execute(&mut *holder)
+    .await
+    .expect("inserts the first tenant");
+
+    let request = app.post(TENANTS, Some(&token), create_body("RACE_A", "race.admin"));
+    let release = async {
+        // Commit once the route is queued on the lock. If it never queues,
+        // commit after ten seconds anyway, and the assertions below say what
+        // the route did without it.
+        for _ in 0..200 {
+            let (waiting,): (i64,) = sqlx::query_as(
+                "SELECT count(*) FROM pg_locks \
+                 WHERE locktype = 'advisory' AND NOT granted \
+                 AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
+            )
+            .fetch_one(&app.pool)
+            .await
+            .expect("reads pg_locks");
+            if waiting > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        holder.commit().await.expect("commits the first tenant");
+    };
+    let (response, ()) = tokio::join!(request, release);
+
+    assert_refused_as_a_shared_namespace(&response, "RACE_A", &["RACE-A"]);
+    assert_eq!(tenant_rows(&app, "RACE-A").await, 1);
+    assert_eq!(tenant_rows(&app, "RACE_A").await, 0);
+}

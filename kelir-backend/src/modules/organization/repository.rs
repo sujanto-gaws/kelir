@@ -105,10 +105,11 @@ pub async fn list(
 /// Every live tenant's id and code, in one statement (#618).
 ///
 /// Unscoped for the reason [`find_by_code`] is: `tenants` defines the
-/// partition. A deployment's tenants are few, and the one caller — an
-/// integration test call — is an administrator's action, so reading them all
-/// keeps the rule deciding which names a tenant may read in one place, in
-/// Rust (`integration::domain::secret`), rather than half in this `WHERE`.
+/// partition. A deployment's tenants are few, and both callers — an
+/// integration test call, and creating a tenant (#655) — are an
+/// administrator's action, so reading them all keeps the rule deciding which
+/// names a tenant may read in one place, in Rust
+/// (`integration::domain::secret`), rather than half in this `WHERE`.
 pub async fn live_codes(executor: impl PgExecutor<'_>) -> Result<Vec<(Uuid, String)>, sqlx::Error> {
     let rows = sqlx::query!("SELECT id, tenant_code FROM tenants WHERE deleted_at IS NULL")
         .fetch_all(executor)
@@ -119,6 +120,39 @@ pub async fn live_codes(executor: impl PgExecutor<'_>) -> Result<Vec<(Uuid, Stri
         .map(|row| (row.id, row.tenant_code))
         .collect())
 }
+
+/// Serialises tenant creation, for the secret-namespace check (#655).
+///
+/// The check reads every live tenant's code and refuses a new one that shares
+/// an integration secret name with any of them. The unique index cannot
+/// enforce that, since the codes differ (`A-B` and `A_B`), so two creations
+/// racing would each read the codes without the other's and both insert. The
+/// lock is taken before the read, in the creating transaction, and held until
+/// it commits: a creation that waits on it reads the codes the one before it
+/// committed. Creating a tenant is a rare administrative act, so one lock for
+/// the whole deployment costs nothing anybody will measure. Deleting a tenant
+/// does not take it: a delete can only make a later check pass that would have
+/// failed, never the reverse.
+///
+/// The two-argument form, keyed like [`super::department_repository`]'s, and
+/// the same statement, so it shares that statement's offline query data.
+pub async fn lock_tenant_codes(connection: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        "SELECT pg_advisory_xact_lock($1, hashtext($2::text))",
+        TENANT_CODE_LOCK_CLASS,
+        TENANT_CODE_LOCK_KEY
+    )
+    .execute(connection)
+    .await
+    .map(|_| ())
+}
+
+/// Lock class for [`lock_tenant_codes`]: the ASCII of `TNCD`.
+/// `tests/organization_tenants.rs` repeats it to hold the lock in a test.
+const TENANT_CODE_LOCK_CLASS: i32 = 0x544E_4344;
+
+/// The key within the class. One, since the lock is deployment-wide.
+const TENANT_CODE_LOCK_KEY: &str = "tenant_code";
 
 pub async fn count(executor: impl PgExecutor<'_>) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar!("SELECT count(*) FROM tenants WHERE deleted_at IS NULL")
