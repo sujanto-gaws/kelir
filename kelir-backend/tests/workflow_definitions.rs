@@ -2134,3 +2134,81 @@ async fn a_draft_edited_while_its_publish_is_in_flight_is_not_published_unchecke
         published.body
     );
 }
+
+/// **A role edit is not held up by a publish in flight**: the publish's lock
+/// is `FOR KEY SHARE`, which keeps the row from being deleted and nothing
+/// else.
+///
+/// The publish is held after `lock_live_roles` as in
+/// `a_role_delete_waits_on_a_publish_in_flight_and_is_refused`. A rename of
+/// the role it holds takes `FOR NO KEY UPDATE`, which `FOR KEY SHARE` does not
+/// conflict with, so the rename finishes while the publish is still open.
+///
+/// **Seen red** against `lock_live_roles` taking `FOR SHARE`, which also
+/// stops the delete but makes every edit of a named role wait on every
+/// publish naming it.
+#[tokio::test]
+async fn a_role_edit_is_not_held_up_by_a_publish_in_flight() {
+    let app = std::sync::Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+
+    let approver = role(&app, "WF-APPROVER").await;
+    let id = saved(
+        &app,
+        &token,
+        "wf_edit_not_held",
+        approval_workflow("wf_edit_not_held"),
+    )
+    .await;
+
+    let mut holding = app.pool.begin().await.expect("a transaction");
+    sqlx::query("SELECT id FROM workflow_definitions WHERE id = $1 FOR UPDATE")
+        .bind(id)
+        .execute(&mut *holding)
+        .await
+        .expect("hold the definition row");
+
+    let publishing = {
+        let app = std::sync::Arc::clone(&app);
+        let token = token.clone();
+        tokio::spawn(async move { publish(&app, &token, id).await })
+    };
+
+    assert!(
+        waited_on_a_lock(&app, 1, &publishing).await,
+        "the publish did not reach its write"
+    );
+
+    let editing = {
+        let app = std::sync::Arc::clone(&app);
+        let token = token.clone();
+        tokio::spawn(async move {
+            app.put(
+                &format!("/api/v1/identity/roles/{approver}"),
+                Some(&token),
+                json!({ "name": "Approver, renamed" }),
+            )
+            .await
+        })
+    };
+
+    let edit_waited = waited_on_a_lock(&app, 2, &editing).await;
+    let edit_finished_first = editing.is_finished();
+
+    holding
+        .rollback()
+        .await
+        .expect("release the definition row");
+
+    let edited = editing.await.expect("the edit finished");
+    let published = publishing.await.expect("the publish finished");
+
+    assert!(
+        !edit_waited && edit_finished_first,
+        "a role edit waited on a publish naming the role: edit {} {}",
+        edited.status,
+        edited.body
+    );
+    assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
+    assert_eq!(published.status, StatusCode::OK, "{}", published.body);
+}
