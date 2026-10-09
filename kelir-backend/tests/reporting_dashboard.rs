@@ -402,6 +402,17 @@ async fn publish_workflow_definition(
     key: &str,
     definition: Value,
 ) -> Uuid {
+    // A publish refuses a definition naming a role that is not live (D-111,
+    // #572), and most tests here publish before they create the role's holder.
+    // `holder_party` takes over a role created here.
+    fixtures::roles_named_by(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        &definition,
+        HOLDER_PERMISSIONS,
+    )
+    .await;
+
     let created = app
         .post(
             "/api/v1/workflow/definitions",
@@ -579,13 +590,26 @@ async fn holder_party(
     let mut permissions = HOLDER_PERMISSIONS.to_vec();
     permissions.extend_from_slice(extra);
 
-    let role = fixtures::create_role_with_permissions(
-        &app.pool,
-        fixtures::SYSTEM_TENANT_ID,
-        role_code,
-        &permissions,
-    )
-    .await;
+    // A role a publish created already holds `HOLDER_PERMISSIONS`, and nothing
+    // more, so only a holder asking for nothing extra takes it over.
+    let existing = if extra.is_empty() {
+        fixtures::live_role(&app.pool, fixtures::SYSTEM_TENANT_ID, role_code).await
+    } else {
+        None
+    };
+
+    let role = match existing {
+        Some(role) => role,
+        None => {
+            fixtures::create_role_with_permissions(
+                &app.pool,
+                fixtures::SYSTEM_TENANT_ID,
+                role_code,
+                &permissions,
+            )
+            .await
+        }
+    };
 
     let id = fixtures::create_user(
         &app.pool,

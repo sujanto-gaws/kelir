@@ -626,12 +626,12 @@ pub async fn delete_role(
     // Asked only once no open task needs the role, so each refusal has one
     // reason and its own code.
     //
-    // This refuses the delete while a published revision names the role; it
-    // does not stop a later publish naming the deleted role, because
-    // publishing checks that a definition's roles are well-formed, not that
-    // they exist (JWSS §5.3; #572). So no lock holds this list against a
-    // publish in flight: one racing the delete reaches the state that one
-    // arriving after it does.
+    // The other direction is the publish's (D-111, #572; JWSS §5.3): it
+    // refuses a definition naming a role that is not live, and holds the roles
+    // it names `FOR KEY SHARE` until it commits. The `FOR UPDATE` above
+    // conflicts with that lock. A publish in flight makes this wait, and this
+    // list then sees its revision `ACTIVE`; a publish arriving while this
+    // holds the lock waits, and then finds the role gone.
     let definitions =
         workflow_definition::definitions_naming_role(&mut transaction, tenant_id, id).await?;
 

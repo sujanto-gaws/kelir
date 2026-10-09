@@ -183,6 +183,45 @@ pub async fn create_role_with_permissions(
     id
 }
 
+/// The live role with this code in the tenant, if there is one.
+pub async fn live_role(pool: &PgPool, tenant_id: Uuid, role_code: &str) -> Option<Uuid> {
+    sqlx::query_scalar(
+        "SELECT id FROM roles WHERE tenant_id = $1 AND role_code = $2 AND deleted_at IS NULL",
+    )
+    .bind(tenant_id)
+    .bind(role_code)
+    .fetch_optional(pool)
+    .await
+    .unwrap_or_else(|error| harness_failure("look a role up", &error.to_string(), role_code))
+}
+
+/// Creates, holding `permission_codes`, each role `definition` names that is
+/// not live in the tenant, and leaves the live ones alone.
+///
+/// A publish refuses a workflow definition naming a role that is not live
+/// (**D-111**, [#572](https://github.com/sujanto-gaws/kelir/issues/572)). A
+/// test that publishes a definition before it creates the people holding its
+/// roles calls this first; the roles it creates are ordinary ones, which
+/// nobody holds until the test grants them.
+pub async fn roles_named_by(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    definition: &serde_json::Value,
+    permission_codes: &[&str],
+) {
+    let references = kelir_backend::modules::workflow::domain::role_references(definition);
+
+    for reference in references {
+        if live_role(pool, tenant_id, &reference.role_code)
+            .await
+            .is_none()
+        {
+            create_role_with_permissions(pool, tenant_id, &reference.role_code, permission_codes)
+                .await;
+        }
+    }
+}
+
 /// Creates a second tenant, so tenant-scoped queries can be probed with another
 /// tenant's data actually present rather than assumed absent.
 pub async fn create_tenant(pool: &PgPool, tenant_code: &str, name: &str) -> Uuid {

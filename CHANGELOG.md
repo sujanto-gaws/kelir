@@ -19,6 +19,19 @@ While the major version is `0`, the public API may change in any release.
   list editor with a read-only graph, not a drag-and-drop designer. SRS v0.10, 167 FRs; MVP scope
   is unchanged. Decision **D-109**.
 
+- **Publishing a workflow definition refuses one that names a role that is
+  not live** ([#572](https://github.com/sujanto-gaws/kelir/issues/572),
+  **D-111**). A definition naming a deleted role, or a role code no role
+  has, as `ROLE` or `DEPARTMENT_ROLE` in a task's `assignment` (an object)
+  or a transition's `allowedBy` (an object, or the shorthand `"ROLE:X"`,
+  which only `allowedBy` takes), published, and the first document submitted
+  to it was refused as `ASSIGNMENT_UNRESOLVED`. The publish now answers 422
+  with a `ROLE_NOT_LIVE` detail at each path that names such a role, and the
+  definition stays a draft. Saving a draft does not check its roles. The
+  publish holds the roles it names until it commits, so a role delete
+  running at the same moment cannot slip past it. Revisions already
+  published are not re-checked.
+
 ## [0.9.0] — 2026-10-09
 
 Phase 9 closes its integration core: **Kelir knows the external systems it

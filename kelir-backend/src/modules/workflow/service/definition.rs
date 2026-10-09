@@ -24,18 +24,31 @@
 //! reaches it, so `tests/workflow_definitions.rs` writes an invalid definition
 //! through the pool and publishes it through the API.
 //!
+//! # Publish asks one question save does not: are its roles live
+//!
+//! **D-111** ([#572]). Whether a role exists is a fact about the tenant, not
+//! the document, so save does not ask it (ADR-0019 narrows a save by what the
+//! document alone resolves), and an answer at save would be stale by the
+//! publish. [`publish_definition`] reads every role the definition names, holds
+//! them `FOR KEY SHARE` until it commits, and refuses one that is not live as
+//! `ROLE_NOT_LIVE` at its path. Without it, the first submission routed to the
+//! revision was refused as `ASSIGNMENT_UNRESOLVED`, in front of the submitter.
+//!
 //! [#174]: https://github.com/sujanto-gaws/kelir/issues/174
+//! [#572]: https://github.com/sujanto-gaws/kelir/issues/572
+
+use std::collections::BTreeSet;
 
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use super::super::domain::jwss;
 use super::super::domain::{
     definition::{initial_state, jwss_version},
     validate_create, validate_update, CreateWorkflowRequest, DefinitionNamingRole, Graph,
     UpdateWorkflowRequest, WorkflowDefinition, WorkflowDefinitionQuery, WorkflowDefinitionStatus,
     WorkflowDefinitionSummary,
 };
+use super::super::domain::{graph, jwss};
 use super::super::repository::{definition as repo, projection};
 use super::super::{
     DEFINITION_CREATE, DEFINITION_DELETE, DEFINITION_PUBLISH, DEFINITION_READ, DEFINITION_UPDATE,
@@ -262,7 +275,27 @@ pub async fn publish_definition(
     let tenant_id = caller.tenant_id();
     let actor = Some(caller.user_id());
 
-    let before = repo::find_definition(&state.pool, tenant_id, id)
+    let mut transaction = state.pool.begin().await?;
+
+    // **The revision checked is the revision published** (#572). The row is
+    // locked `FOR UPDATE` and read inside this transaction, so everything below
+    // checks, projects and publishes one copy of it. Read before the
+    // transaction, an edit committed in between was flipped to `ACTIVE` by the
+    // `WHERE status = 'DRAFT'` below without its roles or rules being checked,
+    // under the projection of the copy that was. Now `repo::update_draft` waits
+    // for this commit and then matches no draft, which `update_definition`
+    // refuses as `NOT_A_DRAFT`; or it committed first, and its JSON is what is read
+    // here. A second publish waits too, and then finds the revision `ACTIVE`.
+    //
+    // **The definition row first, then its roles** (`repo::lock_live_roles`).
+    // `identity::service::delete_role` locks a role and reads definitions
+    // without locking them, so it never waits on this row, and the order
+    // cannot close a cycle with it.
+    if !repo::lock_for_publish(&mut transaction, tenant_id, id).await? {
+        return Err(AppError::not_found("Workflow definition"));
+    }
+
+    let before = repo::find_definition(&mut *transaction, tenant_id, id)
         .await?
         .ok_or_else(|| AppError::not_found("Workflow definition"))?;
 
@@ -286,11 +319,37 @@ pub async fn publish_definition(
 
     let graph = Graph::parse(&before.definition, before.version);
 
-    let mut transaction = state.pool.begin().await?;
+    // **Every role it names is live, and stays live until this commits**
+    // (**D-111**, #572; JWSS §5.3). At publish and not at save: liveness is a
+    // fact about the tenant, not the document (ADR-0019), and a check at save
+    // would be stale by the publish anyway. Read before the publish is written,
+    // so a refusal writes nothing. `repo::lock_live_roles` says why its lock
+    // holds against `identity::service::delete_role`.
+    let references = graph::role_references(&before.definition);
+
+    if !references.is_empty() {
+        let codes: BTreeSet<String> = references
+            .iter()
+            .map(|reference| reference.role_code.clone())
+            .collect();
+        let codes: Vec<String> = codes.into_iter().collect();
+
+        let live: BTreeSet<String> = repo::lock_live_roles(&mut transaction, tenant_id, &codes)
+            .await?
+            .into_iter()
+            .collect();
+
+        let dead = jwss::dead_role_errors(&references, &live);
+
+        if !dead.is_empty() {
+            return Err(AppError::validation(dead));
+        }
+    }
 
     if repo::publish(&mut *transaction, tenant_id, id, actor).await? == 0 {
-        // Somebody else published it first. Their name is on it, which is
-        // correct — the second call published nothing.
+        // Not reached while the row is locked above and was a draft; kept so
+        // the statement's own predicate is never the thing standing between
+        // a second publisher and a revision that is already `ACTIVE`.
         return Err(AppError::conflict(format!(
             "revision {} of `{}` was published by another request",
             before.version, before.workflow_key
@@ -486,9 +545,11 @@ pub async fn delete_definition(
 /// or the next step of an approval running on it, refused as
 /// `ASSIGNMENT_UNRESOLVED` until somebody published another.
 ///
-/// **This refuses the delete while a published revision names the role; it does
-/// not stop a later publish from naming the deleted role** ([#572]), because
-/// [`publish_definition`] does not check that the roles a definition names exist.
+/// This refuses the delete while a published revision names the role. **The
+/// other direction is [`publish_definition`]'s** ([#572], **D-111**): it
+/// refuses a definition naming a role that is not live, holding the roles it
+/// names `FOR KEY SHARE`, which the delete's `FOR UPDATE` conflicts with. So a
+/// publish and a delete of one role do not both succeed.
 ///
 /// [#510]: https://github.com/sujanto-gaws/kelir/issues/510
 /// [#572]: https://github.com/sujanto-gaws/kelir/issues/572

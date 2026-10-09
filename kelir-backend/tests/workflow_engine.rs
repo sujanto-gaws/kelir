@@ -80,12 +80,18 @@ async fn publish_workflow(app: &TestApp, token: &str, definition: Value) -> Uuid
         .post(
             "/api/v1/workflow/definitions",
             Some(token),
-            json!({ "workflowKey": key, "name": "Standard approval", "definition": definition }),
+            json!({ "workflowKey": key, "name": "Standard approval", "definition": &definition }),
         )
         .await;
     assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
 
     let id = id_of(&created.body["data"]);
+
+    // A publish refuses a definition naming a role that is not live (D-111,
+    // #572). `APPROVER_ROLE` is created as [`approver`] would create it, and any
+    // other role bare, which [`given_bare_role`] then takes over.
+    approver_role(app).await;
+    fixtures::roles_named_by(&app.pool, fixtures::SYSTEM_TENANT_ID, &definition, &[]).await;
 
     let publication = app
         .post(
@@ -721,7 +727,8 @@ async fn a_role_task_is_unassigned_and_names_the_role_it_is_offered_to() {
 ///
 /// The role the definition names does not exist in this tenant, so the submit is
 /// refused with the whole transaction rolled back — no document number burned,
-/// no instance, no task.
+/// no instance, no task. It existed when the definition was published, which
+/// a publish now requires (D-111, #572).
 #[tokio::test]
 async fn a_workflow_naming_a_role_nobody_holds_refuses_the_submit() {
     let app = TestApp::spawn().await;
@@ -731,6 +738,7 @@ async fn a_workflow_naming_a_role_nobody_holds_refuses_the_submit() {
     definition["states"][0]["task"]["assignment"]["roleCode"] = json!("ROLE-THAT-IS-NOT-THERE");
 
     let workflow = publish_workflow(&app, &token, definition).await;
+    delete_role_behind_the_apis_back(&app, "ROLE-THAT-IS-NOT-THERE").await;
     let type_id = document_type(&app, &token, "PR_NO_ROLE", Some(workflow)).await;
     let id = draft(&app, &token, type_id).await;
 
@@ -1315,10 +1323,35 @@ fn split_control_workflow(key: &str, edge_role: &str) -> Value {
     definition
 }
 
+/// Soft-deletes a role behind the API's back, after a publish that named it.
+///
+/// A publish refuses a definition naming a role that is not live (D-111,
+/// #572), and the API refuses to delete a role a published definition names
+/// (D-91 (3)). So a test of the run-time refusal publishes with the role live
+/// and deletes it here, the state a role deleted before those releases is in.
+async fn delete_role_behind_the_apis_back(app: &TestApp, code: &str) {
+    sqlx::query(
+        "UPDATE roles SET deleted_at = now() WHERE tenant_id = $1 AND role_code = $2 \
+         AND deleted_at IS NULL",
+    )
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .bind(code)
+    .execute(&app.pool)
+    .await
+    .expect("delete the role behind the API's back");
+}
+
 /// A role that exists and grants nothing, so `allowedBy` resolves and the
 /// refusal is the check's rather than the resolver's.
 async fn given_bare_role(app: &TestApp, code: &str) -> Uuid {
-    fixtures::create_role_with_permissions(&app.pool, fixtures::SYSTEM_TENANT_ID, code, &[]).await
+    // A publish may have created it already (D-111, #572).
+    match fixtures::live_role(&app.pool, fixtures::SYSTEM_TENANT_ID, code).await {
+        Some(role) => role,
+        None => {
+            fixtures::create_role_with_permissions(&app.pool, fixtures::SYSTEM_TENANT_ID, code, &[])
+                .await
+        }
+    }
 }
 
 /// **A transition the task permits and `allowedBy` does not is refused** (#226).
@@ -3622,6 +3655,9 @@ async fn an_edge_naming_a_role_that_is_gone_refuses_the_submit() {
         split_control_workflow("wf_edge_gone", "WF-EDGE-NOT-THERE"),
     )
     .await;
+    // Live at the publish, which requires it (D-111, #572), and gone by the
+    // submit.
+    delete_role_behind_the_apis_back(&app, "WF-EDGE-NOT-THERE").await;
     let type_id = document_type(&app, &token, "PR_EDGE_GONE", Some(workflow)).await;
     let id = draft(&app, &token, type_id).await;
 
