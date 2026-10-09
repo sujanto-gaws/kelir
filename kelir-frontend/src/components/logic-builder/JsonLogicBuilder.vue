@@ -199,10 +199,23 @@ function emitValue(value: unknown): void {
   emit('update:modelValue', value)
 }
 
+/**
+ * Records that the user changed something, emitted or not.
+ *
+ * Once the tree has changed since the last emission, a value equal to that
+ * emission is no longer an echo of what is shown: it is the host setting it,
+ * a reset to what was saved, and it is read.
+ */
+function edited(): void {
+  lastEmitted = NOTHING_EMITTED
+}
+
 function onEdit(edit: LogicEdit): void {
   if (!tree.value) {
     return
   }
+
+  edited()
 
   const next = applyEdit(tree.value, edit)
 
@@ -228,6 +241,7 @@ function start(choice: string): void {
 
   const node = createNode(choice as NodeChoice)
 
+  edited()
   tree.value = node
 
   if (isComplete(node)) {
@@ -262,6 +276,11 @@ function editVisually(): void {
   load(rawHeld.value)
 }
 
+function onRawUnparsed(): void {
+  edited()
+  rawValid.value = false
+}
+
 function onRawParsed(value: unknown): void {
   rawHeld.value = value
   rawValid.value = true
@@ -279,7 +298,7 @@ function onRawParsed(value: unknown): void {
         allow-empty
         :disabled="disabled"
         @parsed="onRawParsed"
-        @unparsed="rawValid = false"
+        @unparsed="onRawUnparsed"
       />
       <p v-if="!canEditVisually && rawValid" class="text-xs text-muted-foreground">
         The visual builder cannot show this expression, so it is edited as JSON.

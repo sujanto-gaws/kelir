@@ -257,12 +257,16 @@ function opaque(value: unknown): OpaqueNode {
  *
  * Anything but a literal nested deeper is held as one opaque leaf, by
  * reference, so the round trip stays exact and nothing below it is visited.
- * The bound is the view's, not the seam's: the recursive parse overflows
- * somewhere past 2,000 levels, and Vue's nested render past 300 (measured
- * 2026-10-09 in vitest, jsdom on Node's default stack). No expression a person
- * writes comes near either; the cap is what makes "never throws" true.
+ * The bound is the view's, not the seam's. The recursive parse overflows
+ * somewhere past 2,000 levels; Vue's nested render overflows far sooner, and
+ * soonest **cold**, on a page whose first render is the deep expression: from
+ * about 248 levels in a fresh spec file, against 300–400 once earlier tests
+ * have warmed the render path (measured 2026-10-09 in vitest, jsdom on Node's
+ * default stack). A browser's stack is not Node's, and no browser test covers
+ * this, so the cap sits well clear of the cold limit rather than near it. An
+ * expression a person writes is a handful of levels deep.
  */
-export const MAX_VISUAL_DEPTH = 256
+export const MAX_VISUAL_DEPTH = 64
 
 /** An operand: a bare or nested array there is opaque (B6). */
 function parseOperand(value: unknown, tier: LogicTier, depth: number): LogicNode {

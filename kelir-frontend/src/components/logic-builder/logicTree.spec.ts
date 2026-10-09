@@ -937,10 +937,10 @@ describe('the seam at its edges (campaign, 2026-10-09)', () => {
     })
   })
 
-  it(// Was `it.fails`, the campaign's defect: the doc comment promised "never
+  // Was `it.fails`, the campaign's defect: the doc comment promised "never
   // throws", and a value deep enough overflowed the recursive parse, so the
   // builder threw while mounting. Fixed by MAX_VISUAL_DEPTH.
-  'never throws while parsing, even an expression nested 100,000 deep', () => {
+  it('never throws while parsing, even an expression nested 100,000 deep', () => {
     let expr: unknown = { var: 'a' }
 
     for (let depth = 0; depth < 100_000; depth += 1) {

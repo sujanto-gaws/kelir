@@ -564,11 +564,11 @@ describe('JsonLogicBuilder at its edges (campaign, 2026-10-09)', () => {
   })
 
   describe('a value the host changes', () => {
-    it(// Was `it.fails`, the campaign's defect: `lastEmitted` outlived a load, so
+    // Was `it.fails`, the campaign's defect: `lastEmitted` outlived a load, so
     // a host that undid and then redid handed back the very value the builder
     // last emitted, the watcher took it for its own echo, and the builder kept
     // showing the undone expression. Fixed by forgetting it on every load.
-    'is re-read when the host hands back what the builder last emitted (undo, then redo)', async () => {
+    it('is re-read when the host hands back what the builder last emitted (undo, then redo)', async () => {
       const wrapper = mountBuilder({ var: 'unit_price' })
 
       await byLabel(wrapper, 'Expression: variable').setValue('quantity')
@@ -661,34 +661,32 @@ describe('JsonLogicBuilder at its edges (campaign, 2026-10-09)', () => {
       expect(emitted(wrapper)).toHaveLength(1)
     })
 
-    it.fails(
-      // Defect, found by the campaign's addendum: an emission a host never
-      // echoes is matched, as equal JSON, against the next value the host sets.
-      // So a host without v-model that reloads a value equal to the last
-      // emission (a reset to what was just saved) is taken for an echo: the
-      // tree keeps the operand the user added since, and stays invalid. Under
-      // the identity rule before 5305ab5, a fresh copy was read. Every planned
-      // host binds v-model, whose echo consumes the match first.
-      'reads afresh an equal value a host that never echoes sets after an edit',
-      async () => {
-        const wrapper = mount(JsonLogicBuilder, {
-          props: {
-            modelValue: { '+': [{ var: 'unit_price' }, 1] },
-            tier: 'calculate',
-            variables: FORM_FIELDS,
-          },
-        })
+    // Was `it.fails`. Fixed by clearing the pending echo on every edit,
+    // emitting or not. The campaign's note: an emission a host never
+    // echoes is matched, as equal JSON, against the next value the host sets.
+    // So a host without v-model that reloads a value equal to the last
+    // emission (a reset to what was just saved) is taken for an echo: the
+    // tree keeps the operand the user added since, and stays invalid. Under
+    // the identity rule before 5305ab5, a fresh copy was read. Every planned
+    // host binds v-model, whose echo consumes the match first.
+    it('reads afresh an equal value a host that never echoes sets after an edit', async () => {
+      const wrapper = mount(JsonLogicBuilder, {
+        props: {
+          modelValue: { '+': [{ var: 'unit_price' }, 1] },
+          tier: 'calculate',
+          variables: FORM_FIELDS,
+        },
+      })
 
-        mounted = wrapper
+      mounted = wrapper
 
-        await byLabel(wrapper, 'Expression, operand 2: number').setValue('2')
-        await byLabel(wrapper, 'Add operand to Expression').trigger('click')
-        await wrapper.setProps({ modelValue: { '+': [{ var: 'unit_price' }, 2] } })
+      await byLabel(wrapper, 'Expression, operand 2: number').setValue('2')
+      await byLabel(wrapper, 'Add operand to Expression').trigger('click')
+      await wrapper.setProps({ modelValue: { '+': [{ var: 'unit_price' }, 2] } })
 
-        expect(wrapper.find('[aria-label="Expression, operand 3"]').exists()).toBe(false)
-        expect(isValid(wrapper)).toBe(true)
-      },
-    )
+      expect(wrapper.find('[aria-label="Expression, operand 3"]').exists()).toBe(false)
+      expect(isValid(wrapper)).toBe(true)
+    })
 
     it('reads a value too deep to compare as a change, not as an echo', async () => {
       let deep: unknown = { var: 'a' }
@@ -758,36 +756,30 @@ describe('JsonLogicBuilder at its edges (campaign, 2026-10-09)', () => {
   })
 
   describe('an expression nested past the depth cap', () => {
-    // Rendering 256 nested levels takes about a second alone and several under
-    // the full suite's load, so it gets a timeout of its own.
-    it(
-      'mounts, shows it visual to the cap, and holds the rest as an advanced block',
-      { timeout: 30_000 },
-      () => {
-        let expr: unknown = { var: 'a' }
+    it('mounts, shows it visual to the cap, and holds the rest as an advanced block', () => {
+      let expr: unknown = { var: 'a' }
 
-        for (let depth = 0; depth < 100_000; depth += 1) {
-          expr = { '!': expr }
-        }
+      for (let depth = 0; depth < 100_000; depth += 1) {
+        expr = { '!': expr }
+      }
 
-        // Through a host, not as a mount prop: Vue Test Utils walks mount props
-        // recursively, which is the harness overflowing and not the builder.
-        const wrapper = mountInHost(() => ({
-          modelValue: expr,
-          tier: 'conditional',
-          variables: [],
-        }))
+      // Through a host, not as a mount prop: Vue Test Utils walks mount props
+      // recursively, which is the harness overflowing and not the builder.
+      const wrapper = mountInHost(() => ({
+        modelValue: expr,
+        tier: 'conditional',
+        variables: [],
+      }))
 
-        mounted = wrapper
+      mounted = wrapper
 
-        expect(wrapper.text()).toContain('Advanced')
-        expect(wrapper.text()).toContain('Nested too deeply to show as text')
-        expect(wrapper.get('textarea').attributes('disabled')).toBeDefined()
-        expect(wrapper.findComponent(JsonLogicBuilder).emitted()).not.toHaveProperty(
-          'update:modelValue',
-        )
-      },
-    )
+      expect(wrapper.text()).toContain('Advanced')
+      expect(wrapper.text()).toContain('Nested too deeply to show as text')
+      expect(wrapper.get('textarea').attributes('disabled')).toBeDefined()
+      expect(wrapper.findComponent(JsonLogicBuilder).emitted()).not.toHaveProperty(
+        'update:modelValue',
+      )
+    })
   })
 
   describe('the tier switching (C6)', () => {

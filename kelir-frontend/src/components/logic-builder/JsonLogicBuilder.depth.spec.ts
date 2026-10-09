@@ -40,19 +40,14 @@ function mountCold(expr: unknown) {
 }
 
 describe('JsonLogicBuilder mounted cold at its depth cap', () => {
-  it.fails(
-    // Defect, found by the campaign's addendum: MAX_VISUAL_DEPTH (256) is
-    // above what a cold render fits in the stack, so an expression the cap
-    // still draws throws `RangeError: Maximum call stack size exceeded` on
-    // mount. The 100,000-deep test in JsonLogicBuilder.spec.ts passes only
-    // because the tests before it warmed the render path: run alone (`-t`),
-    // it fails the same way. A cap with margin under the cold limit, such as
-    // 128, would close it.
-    'mounts an expression as deep as the cap still draws',
-    () => {
-      expect(() => mountCold(notChain(MAX_VISUAL_DEPTH)).unmount()).not.toThrow()
-    },
-  )
+  // Was `it.fails`: MAX_VISUAL_DEPTH was 256, above what a cold render fits
+  // in the stack (overflow from about 248), so an expression the cap still
+  // drew threw `RangeError: Maximum call stack size exceeded` on mount, and
+  // the 100,000-deep test in JsonLogicBuilder.spec.ts passed only warm.
+  // Fixed by a cap of 64, well clear of the cold limit.
+  it('mounts an expression as deep as the cap still draws', () => {
+    expect(() => mountCold(notChain(MAX_VISUAL_DEPTH)).unmount()).not.toThrow()
+  })
 
   it('mounts an expression half as deep as the cap', () => {
     // The control: the render itself works cold, well inside the stack.
