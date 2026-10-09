@@ -41,6 +41,11 @@ While the major version is `0`, the public API may change in any release.
 
 ### Changed
 
+- **The pull-request title check no longer writes the title into its shell step**
+  ([#702](https://github.com/sujanto-gaws/kelir/issues/702)). GitHub substitutes an expression in
+  `run:` before the shell parses it, so a title holding `"` and `$(…)` would have run as shell in the
+  job, which had a read-only token and no secrets. The title and number now reach
+  `check-pull-request-title.sh` through `env:`, so a title is only ever data.
 - **The SRS names the builder pair** ([#685](https://github.com/sujanto-gaws/kelir/issues/685)).
   FR-RAD-013 (`Should`): a form definition is authored from the browser, with nested containers
   and visually built expressions. FR-WF-018 (`Should`): a workflow definition is authored,
