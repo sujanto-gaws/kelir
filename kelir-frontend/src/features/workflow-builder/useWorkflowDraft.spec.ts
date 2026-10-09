@@ -243,4 +243,39 @@ describe('useWorkflowDraft', () => {
     expect(draft.canUndo.value).toBe(false)
     expect(draft.isDirty.value).toBe(false)
   })
+
+  // --- The test-engineer campaign, 2026-10-10 ----------------------------------
+
+  it('renames only the state when another state already has its old code', () => {
+    const start = definition()
+
+    start.states[2] = { ...start.states[2], code: 'REVIEW' }
+
+    const draft = useWorkflowDraft(start)
+
+    draft.renameState(0, 'MANAGER_REVIEW')
+
+    const after = draft.definition.value
+
+    // Two states were REVIEW, so which one the edges and the initial state
+    // meant is the author's call, and none of them moves.
+    expect(after.states.map((state) => state.code)).toEqual(['MANAGER_REVIEW', 'DONE', 'REVIEW'])
+    expect(after.initialState).toBe('REVIEW')
+    expect(after.transitions).toEqual(start.transitions)
+  })
+
+  it('records an edit to the field an undo just restored as a step of its own', async () => {
+    const draft = useWorkflowDraft(definition())
+
+    draft.setRoot('name', 'P')
+    draft.setRoot('name', 'Pu')
+    await draft.undo()
+    draft.setRoot('name', 'X')
+
+    expect(draft.canUndo.value).toBe(true)
+
+    await draft.undo()
+
+    expect(draft.definition.value.name).toBe('Purchase approval')
+  })
 })

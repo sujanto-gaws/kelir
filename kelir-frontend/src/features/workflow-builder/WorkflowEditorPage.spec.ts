@@ -725,8 +725,57 @@ describe('WorkflowEditorPage', () => {
   // --- The test-engineer campaign, 2026-10-10 ----------------------------------
   //
   // What the builder's suite above did not reach, traced to #426's criteria.
-  // Three defects are pinned with `it.fails`, each saying what it would take
-  // to turn it into a plain `it`.
+  // Four defects are pinned with `it.fails` (five tests), each saying what it
+  // would take to turn it into a plain `it`.
+  //
+  // Seen to fail (coding standard §2.9): forty mutations the builder did not
+  // list, run 2026-10-10 against this suite, the list and draft specs, the
+  // route table and the layout. Thirty-nine went red; M35 survives as
+  // equivalent. Eighteen survived the first run and were killed by tests
+  // added here; they are marked *.
+  //
+  // | # | Mutation | Reddened |
+  // |---|---|---|
+  // | M01 | A detail past the rows on screen counted as placed | *lists a detail addressed past the rows…* |
+  // | M02 | `definition.states` dropped from the root paths | *can empty a definition…* |
+  // | M03 | Only `ACTIVE` counts as published | *leaves nothing but New revision operable on an DEPRECATED…* |
+  // | M04 | Create alone may edit an existing draft | *lets a creator start a new workflow…* |
+  // | M05* | Publish on a never-saved, untouched workflow skips the save | *tries to save an untouched new workflow…* |
+  // | M06 | The list offers New revision on `ACTIVE` only | `WorkflowListPage.spec.ts` *offers a new revision of a deprecated…* |
+  // | M07 | The nav entry gated on update, not read | `AppLayout.spec.ts` *links to the workflows only…* |
+  // | M08 | The `new` route gated on read, not create | `router/index.spec.ts` *has the workflow editor behind…* |
+  // | M09 | Save not disabled while saving | *saves once for a double click* |
+  // | M10 | A state code renamed per keystroke, not on commit | *takes a rename typed through another state’s code…* |
+  // | M11 | Non-numeric due hours sent as `NaN` | *writes the due hours as a number…* |
+  // | M12 | An undeclared target not offered as itself | *keeps the edges into a removed state…* |
+  // | M13 | Transitions out of an undeclared state not drawn | *draws a detail on a transition out of an undeclared state…* |
+  // | M14 | One message at the request and document path shown twice | *shows a message the request and the document both carry once…* |
+  // | M15* | Transition move buttons always enabled | *offers a move only where there is a neighbour…* |
+  // | M16* | The last state’s Move down enabled | *offers a move only where there is a neighbour…* |
+  // | M17* | A stored unresolved assignee type not shown | *shows a stored assignee type Kelir does not resolve…* |
+  // | M18* | A rename follows edges when another state shares the old code | `useWorkflowDraft.spec.ts` *renames only the state when another state already has its old code* |
+  // | M19* | Undo leaves the coalescing key set | `useWorkflowDraft.spec.ts` *records an edit to the field an undo just restored…* |
+  // | M20 | Load leaves the coalescing key set | *undoes a save’s edits no further than…* |
+  // | M21* | A root edit leaves the document-path message | *clears a message at the field it names…* |
+  // | M22* | A state field edit leaves its message | *clears a message at the field it names…* |
+  // | M23* | An allowed-by edit leaves its message | *clears a message at the field it names…* |
+  // | M24* | The unfilled count keeps removed rows | *stops counting an unfilled operand…* |
+  // | M25* | The editor’s New revision failure swallowed | *says why a new revision could not be opened…* |
+  // | M26* | Loading a revision keeps the last one’s messages | *drops one revision’s messages when another is opened…* |
+  // | M27* | An unticked Final written as `isFinal: false` | *writes an unticked Final and a cleared department as absent…* |
+  // | M28* | A blank department scope written as `''` | *writes an unticked Final and a cleared department as absent…* |
+  // | M29 | S6/S7 never placed on state 0 | `workflowVerdict.spec.ts` *moves an S7 detail…* |
+  // | M30 | A save’s refusal not placed | *puts S6’s list-wide refusal…*; *puts S6 on a state whose code is not ASCII* |
+  // | M31* | A publish’s refusal not placed | *places a publish’s list-wide refusal…* |
+  // | M32 | A reader may edit a draft | *lets a reader read a draft…* and two more |
+  // | M33 | New revision offered without create | *offers no new revision to a caller who cannot create one* |
+  // | M34* | Removing a transition drops the last row key, not its own | *keeps a later transition’s unfilled operand…* |
+  // | M35 | Publish keeps the local draft, not what was published | **Survives, equivalent**: publish stores no change to `definition_json`, and the draft it keeps is the one just saved or loaded |
+  // | M36 | The AC2 helper accepts everything | `jwssRegistry.spec.ts` *…S12 on an AUTO edge* |
+  // | M37 | The key stays editable after the first save | *is created from the starter…* |
+  // | M38 | A cleared description sent as `''` | the pinned *clears the stored description…* passes: a candidate fix |
+  // | M39* | A state card lists drawn fields again at its top | *draws a message at the input it names and not again…* |
+  // | M40* | A transition row lists drawn fields again | *draws a message at the input it names and not again…* |
 
   /**
    * Every control a keyboard or pointer could operate that is not disabled,
@@ -973,6 +1022,74 @@ describe('WorkflowEditorPage', () => {
       expect(lastWrite().definition.states[0].task).not.toHaveProperty('dueInHours')
     })
 
+    it('offers a move only where there is a neighbour to swap with', async () => {
+      const page = await render()
+      const disabled = (label: string) => byLabel(page, label).attributes('disabled') !== undefined
+
+      expect(disabled('Move State MANAGER_APPROVAL up')).toBe(true)
+      expect(disabled('Move State MANAGER_APPROVAL down')).toBe(false)
+      expect(disabled('Move State REJECTED down')).toBe(true)
+      // The two edges out of MANAGER_APPROVAL swap with each other and nothing else.
+      expect(disabled('Move Transition 1 up')).toBe(true)
+      expect(disabled('Move Transition 1 down')).toBe(false)
+      expect(disabled('Move Transition 2 up')).toBe(false)
+      expect(disabled('Move Transition 2 down')).toBe(true)
+    })
+
+    it('shows a stored assignee type Kelir does not resolve as itself, and offers it to no other rule', async () => {
+      const loaded = jwss()
+
+      loaded.states[0].task!.assignment = { assigneeType: 'MANAGER_OF_OWNER' }
+      stored = record({ definition: loaded })
+
+      const page = await render()
+      const stored0 = byLabel(page, 'State MANAGER_APPROVAL task assigned to: who')
+
+      expect((stored0.element as HTMLSelectElement).value).toBe('MANAGER_OF_OWNER')
+      expect(stored0.text()).toContain('not resolved by Kelir')
+
+      const other = byLabel(page, 'Transition 1 allowed by: who')
+        .findAll('option')
+        .map((option) => option.attributes('value'))
+
+      expect(other).not.toContain('MANAGER_OF_OWNER')
+      expect(other).not.toContain('EXPRESSION')
+
+      await page.get('[data-testid="workflow-name"]').setValue('Renamed')
+      await save(page)
+
+      expect(lastWrite().definition.states[0].task?.assignment).toEqual({
+        assigneeType: 'MANAGER_OF_OWNER',
+      })
+    })
+
+    it('writes an unticked Final and a cleared department as absent, as JWSS defaults them', async () => {
+      const page = await render()
+
+      await page.get('[data-testid="state-1"]').get('input[type="checkbox"]').setValue(false)
+      await byLabel(page, 'State MANAGER_APPROVAL task assigned to: who').setValue(
+        'DEPARTMENT_ROLE',
+      )
+
+      const scope = byLabel(page, 'State MANAGER_APPROVAL task assigned to: department')
+
+      await scope.setValue('OWNER_DEPARTMENT')
+      await scope.setValue('')
+      await save(page)
+
+      const sent = lastWrite().definition
+
+      expect(sent.states[1]).toEqual({
+        code: 'COMPLETED',
+        name: 'Completed',
+        mapsToDocumentStatus: 'COMPLETED',
+      })
+      expect(sent.states[0].task?.assignment).toEqual({
+        assigneeType: 'DEPARTMENT_ROLE',
+        roleCode: 'APPROVER',
+      })
+    })
+
     it('saves once for a double click', async () => {
       const page = await render()
       const button = page.get('[data-testid="save-workflow"]')
@@ -999,6 +1116,20 @@ describe('WorkflowEditorPage', () => {
         `post /workflow/definitions/${ID}/publication`,
       ])
       expect(page.get('[data-testid="status"]').text()).toBe('ACTIVE')
+    })
+
+    it('tries to save an untouched new workflow before publishing, and says why it cannot', async () => {
+      const page = await render({ path: '/admin/workflows/new' })
+
+      // Nothing is edited, so the draft is clean; it has still never been saved.
+      refuse = validationReply(['workflowKey', 'workflowKey is required'])
+      await page.get('[data-testid="publish-workflow"]').trigger('click')
+      await settle()
+
+      expect(writes().map((request) => `${request.method} ${request.url}`)).toEqual([
+        'post /workflow/definitions',
+      ])
+      expect(page.get('[data-testid="workflow-key-error"]').text()).toBe('workflowKey is required')
     })
 
     it.fails(
@@ -1114,6 +1245,132 @@ describe('WorkflowEditorPage', () => {
   })
 
   describe('the campaign: the server’s verdict (AC3)', () => {
+    it('clears a message at the field it names when that field is edited, and only that one', async () => {
+      const page = await render()
+
+      refuse = validationReply(
+        ['definition.name', 'name is too long'],
+        ['definition.states.0.name', 'the state name is blank'],
+        ['definition.transitions.0.allowedBy.roleCode', '`APPROVER` is not a live role'],
+        ['definition.states.1.name', 'untouched'],
+      )
+      await save(page)
+
+      await page.get('[data-testid="workflow-name"]').setValue('Shorter')
+      expect(page.find('[data-testid="workflow-name-error"]').exists()).toBe(false)
+
+      await page.get('[data-testid="state-name-0"]').setValue('Manager approval, again')
+      expect(page.get('[data-testid="state-0"]').text()).not.toContain('the state name is blank')
+
+      await byLabel(page, 'Transition 1 allowed by: role code').setValue('MANAGER')
+      expect(page.get('[data-testid="transition-0"]').text()).not.toContain('is not a live role')
+      expect(
+        byLabel(page, 'Transition 1 allowed by: role code').attributes('aria-invalid'),
+      ).not.toBe('true')
+
+      expect(page.get('[data-testid="state-1"]').text()).toContain('untouched')
+    })
+
+    it('keeps a later transition’s unfilled operand when an earlier one is removed', async () => {
+      const page = await render()
+
+      await byLabel(page, 'Transition 2 condition, operand 2: kind').setValue('comparison')
+      await byLabel(page, 'Remove Transition 1').trigger('click')
+      await settle()
+
+      // The REJECT edge is transition 1 now, and its builder is the one that held
+      // the unfilled operand, not a neighbour's reused under it.
+      expect(byLabel(page, 'Transition 1: action').element).toHaveProperty('value', 'REJECT')
+      expect(page.get('[data-testid="transition-0-detail"]').text()).toContain(
+        'Choose what this operand is.',
+      )
+    })
+
+    it('stops counting an unfilled operand once its transition is removed', async () => {
+      const page = await render()
+
+      await byLabel(page, 'Transition 2 condition, operand 2: kind').setValue('comparison')
+      expect(page.find('[data-testid="unfilled-expressions"]').exists()).toBe(true)
+
+      await byLabel(page, 'Remove Transition 2').trigger('click')
+      await settle()
+
+      expect(page.find('[data-testid="unfilled-expressions"]').exists()).toBe(false)
+    })
+
+    it('says why a new revision could not be opened, and stays on the published one', async () => {
+      stored = record({ status: 'ACTIVE' })
+
+      const page = await render()
+
+      refuse = { status: 403, body: errorBody('FORBIDDEN', 'Missing workflow:definition:create') }
+      await page.get('[data-testid="new-revision"]').trigger('click')
+      await settle()
+
+      expect(page.get('[data-testid="form-error"]').text()).toBe(
+        'Missing workflow:definition:create',
+      )
+      expect(router.currentRoute.value.params.id).toBe(ID)
+      expect(page.get('[data-testid="status"]').text()).toBe('ACTIVE')
+    })
+
+    it('drops one revision’s messages when another is opened in the same screen', async () => {
+      const page = await render()
+
+      refuse = validationReply(['definition.states.1.name', 'about revision 1'])
+      await save(page)
+      expect(page.text()).toContain('about revision 1')
+
+      stored = record({ id: NEXT_ID, version: 2 })
+      await router.push(`/admin/workflows/${NEXT_ID}`)
+      await settle()
+
+      expect(page.text()).toContain('Revision 2')
+      expect(page.text()).not.toContain('about revision 1')
+    })
+
+    it('places a publish’s list-wide refusal on the state it names, as a save’s is', async () => {
+      const page = await render()
+
+      refuse = {
+        status: 422,
+        body: errorBody('VALIDATION_ERROR', 'Validation failed', [
+          {
+            path: 'definition.states',
+            rule: 'S6',
+            code: 'DEAD_END_STATE',
+            message: 'no final state is reachable from `MANAGER_APPROVAL`, so a document…',
+          },
+        ]),
+      }
+      await page.get('[data-testid="publish-workflow"]').trigger('click')
+      await settle()
+
+      expect(page.get('[data-testid="state-0-messages"]').text()).toContain(
+        'no final state is reachable',
+      )
+      expect(page.find('[data-testid="states-error"]').exists()).toBe(false)
+    })
+
+    it('draws a message at the input it names and not again in its row’s list', async () => {
+      const page = await render()
+
+      refuse = validationReply(
+        ['definition.states.0.name', 'the state name is blank'],
+        ['definition.states.0.task.assignment.roleCode', 'the role is blank'],
+        ['definition.transitions.0.to', 'not declared'],
+        ['definition.transitions.0.allowedBy.roleCode', 'the role is dead'],
+      )
+      await save(page)
+
+      expect(page.find('[data-testid="state-0-messages"]').exists()).toBe(false)
+      expect(page.find('[data-testid="transition-0-messages"]').exists()).toBe(false)
+      expect(
+        page.get('[data-testid="state-0"]').text().split('the state name is blank'),
+      ).toHaveLength(2)
+      expect(page.get('[data-testid="state-0"]').text().split('the role is dead')).toHaveLength(2)
+    })
+
     it('lists a detail addressed past the rows on screen, at the root, or with no path', async () => {
       const page = await render()
 
