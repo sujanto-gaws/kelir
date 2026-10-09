@@ -53,6 +53,26 @@ pub async fn find_by_code(
     }))
 }
 
+/// A live tenant's status, by id (#649).
+///
+/// For a refresh, which knows its tenant by the token's `tenant_id` and not by
+/// a code. Unscoped for the reason [`find_by_code`] is. A soft-deleted tenant
+/// reads as `None`, exactly like an unknown one, and the statement reads the
+/// primary key and nothing else, so it is one index lookup per refresh.
+pub async fn find_live_status(
+    executor: impl PgExecutor<'_>,
+    id: Uuid,
+) -> Result<Option<TenantStatus>, sqlx::Error> {
+    let status = sqlx::query_scalar!(
+        "SELECT status FROM tenants WHERE id = $1 AND deleted_at IS NULL",
+        id
+    )
+    .fetch_optional(executor)
+    .await?;
+
+    Ok(status.map(|status| TenantStatus::from_db(&status)))
+}
+
 /// Live tenants, newest first, with the users each one holds.
 ///
 /// **The one list in the system that is not scoped by `tenant_id`**, for the

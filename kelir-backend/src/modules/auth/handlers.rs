@@ -162,7 +162,7 @@ async fn sign_in(
     request_body = RefreshRequest,
     responses(
         (status = 200, description = "Rotated", body = SessionResponse),
-        (status = 401, description = "Unknown, expired or already-used token"),
+        (status = 401, description = "Unknown, expired or already-used token, or one whose user or tenant can no longer sign in"),
         (status = 429, description = "Too many failed attempts from this address; see Retry-After")
     )
 )]

@@ -194,6 +194,24 @@ pub async fn live_tenant_codes(
     Ok(repository::live_codes(executor).await?)
 }
 
+/// Whether the tenant a session belongs to still admits it (#649).
+///
+/// A refresh asks this by its token's `tenant_id`: one lookup per refresh, and
+/// none per request. The rule is sign-in's ([`TenantStatus::admits_sign_in`]),
+/// and a deleted tenant admits nothing. So renewal does not rest on the
+/// revocation `update_tenant` and `delete_tenant` run after they change the
+/// row, which is a second statement and can fail, race a sign-in, or not run
+/// at all when the row is changed outside the API. A database error is an
+/// error, never a refusal: an outage must not look like a signed-out session.
+pub async fn admits_session(
+    executor: impl PgExecutor<'_>,
+    tenant_id: Uuid,
+) -> Result<bool, AppError> {
+    let status = repository::find_live_status(executor, tenant_id).await?;
+
+    Ok(super::domain::admits_renewal(status))
+}
+
 /// Shared lookup. Infrastructure errors are not resolution outcomes, so a
 /// database failure is surfaced rather than folded into "unknown tenant" —
 /// otherwise an outage would look to every caller like bad credentials.
@@ -469,13 +487,14 @@ pub async fn update_tenant(
     }
 
     // Taking a tenant offline must stop its users' sessions being renewed, not
-    // merely stop new sign-ins. `resolve_for_sign_in` already refuses a
-    // suspended tenant, but a refresh token issued a minute ago would otherwise
-    // keep a session alive indefinitely — the mirror of what `update_user` does
-    // for an account. An access token already issued is not reached by this: it
-    // works until it expires, at most 15 minutes from issue (SDD §11.1,
-    // decision D-104). Suspension and deactivation are a status; only deletion
-    // ends a token at once (D-105).
+    // merely stop new sign-ins. `resolve_for_sign_in` refuses a suspended
+    // tenant, and a refresh reads the tenant's status itself (`admits_session`,
+    // #649), so a refusal does not rest on this revoke: it ends the sessions
+    // now rather than at each one's next refresh, the mirror of what
+    // `update_user` does for an account. An access token already issued is not
+    // reached by this: it works until it expires, at most 15 minutes from issue
+    // (SDD §11.1, decision D-104). Suspension and deactivation are a status;
+    // only deletion ends a token at once (D-105).
     if matches!(request.status, Some(status) if !status.admits_sign_in()) {
         let revoked = repository::revoke_sessions(&state.pool, id, "tenant suspended").await?;
         tracing::info!(tenant_id = %id, revoked, "revoked sessions for a suspended tenant");

@@ -304,10 +304,30 @@ pub async fn refresh(
 
     if !user.status.can_sign_in() {
         // Deactivating an account must stop its sessions being renewed, not
-        // merely stop new sign-ins. Only the user's status is read here: the
-        // tenant's is not, and a refresh relies on the revocation for it (#649).
+        // merely stop new sign-ins.
         identity_repo::revoke_all_for_user(&state.pool, stored.user_id, "account not active")
             .await?;
+        return Err(AppError::Unauthorized);
+    }
+
+    // And the tenant's, by the token's `tenant_id`: one lookup per refresh,
+    // none per request (#649). `update_tenant` and `delete_tenant` revoke a
+    // tenant's refresh tokens after they change its row, in a second
+    // statement, and a refresh that relied on that revoke renewed the session
+    // whenever it did not run. A tenant that refuses sign-in ends the user's
+    // sessions here, as an inactive account does.
+    if !organization::admits_session(&state.pool, stored.tenant_id).await? {
+        let revoked =
+            identity_repo::revoke_all_for_user(&state.pool, stored.user_id, "tenant not active")
+                .await?;
+
+        tracing::warn!(
+            tenant_id = %stored.tenant_id,
+            user_id = %stored.user_id,
+            revoked,
+            "refresh refused: tenant is not active"
+        );
+
         return Err(AppError::Unauthorized);
     }
 
