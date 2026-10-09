@@ -1,6 +1,6 @@
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { afterEach, describe, expect, it } from 'vitest'
-import { defineComponent, h, nextTick, reactive, shallowRef } from 'vue'
+import { defineComponent, h, nextTick, reactive, shallowRef, toRaw } from 'vue'
 
 import { press, tabToLabel, type } from '@/lib/testing/keyboard'
 
@@ -723,6 +723,37 @@ describe('JsonLogicBuilder at its edges (campaign, 2026-10-09)', () => {
 
       expect(optionLabels(wrapper, 'Expression: kind')).toContain('Variable')
       expect(wrapper.find('[aria-label="Clear Expression"]').exists()).toBe(false)
+    })
+
+    it('knows the echo of a value too deep to compare as its own, through the proxy', async () => {
+      // The echo of an emission holding a subtree JSON cannot write out is
+      // only recognised by identity, and a reactive host hands it back as a
+      // proxy: without both, every edit would reload the tree under the user.
+      let deep: unknown = { var: 'a' }
+
+      for (let depth = 0; depth < 100_000; depth += 1) {
+        deep = { '!': deep }
+      }
+
+      const held = { min: [deep, 1] }
+      const state = reactive<{ expr: unknown }>({ expr: { and: [{ var: 'type' }, held] } })
+      const wrapper = mountInHost(() => ({
+        modelValue: state.expr,
+        tier: 'conditional',
+        variables: FORM_FIELDS,
+        'onUpdate:modelValue': (value: unknown) => {
+          state.expr = value
+        },
+      }))
+
+      mounted = wrapper
+
+      const control = byLabel(wrapper, 'Expression, operand 1: variable').element
+
+      await byLabel(wrapper, 'Expression, operand 1: variable').setValue('total')
+
+      expect(byLabel(wrapper, 'Expression, operand 1: variable').element).toBe(control)
+      expect((toRaw(state.expr) as { and: unknown[] }).and[1]).toBe(held)
     })
   })
 
