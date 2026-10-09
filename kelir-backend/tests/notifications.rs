@@ -122,6 +122,10 @@ async fn publish_workflow(app: &TestApp, token: &str, definition: Value) -> Uuid
 
     let id = id_of(&created.body["data"]);
 
+    // A publish refuses a definition naming a role that is not live (D-111,
+    // #572), and `role_workflow` names this one.
+    approver_role(app).await;
+
     let published = app
         .post(
             &format!("/api/v1/workflow/definitions/{id}/publication"),
@@ -547,6 +551,12 @@ async fn deciding_your_own_document_tells_you_nothing() {
 /// transaction goes back and takes the instance, the task and anything that
 /// would have been said about them with it.
 ///
+/// **The role is live at publish and deleted after it**, because a publish
+/// refuses a definition naming a role that is not live (D-111, #572), and the
+/// API refuses to delete a role a published definition names (D-91 (3)). The
+/// delete is therefore SQL, the state a role deleted before those releases is
+/// left in.
+///
 /// **The role has to be absent rather than unheld**, which cost two attempts.
 /// A role nobody holds still resolves to a `candidate_role_id` and the task is
 /// created unassigned, so the submit succeeds; and *unheld* is not even
@@ -562,7 +572,20 @@ async fn a_submit_that_failed_told_nobody() {
     let mut definition = role_workflow("wf_ntf_rollback");
     definition["states"][0]["task"]["assignment"]["roleCode"] = json!("NTF-ROLE-THAT-IS-NOT-THERE");
 
+    let missing = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "NTF-ROLE-THAT-IS-NOT-THERE",
+        &[],
+    )
+    .await;
     let workflow = publish_workflow(&app, &token, definition).await;
+    sqlx::query("UPDATE roles SET deleted_at = now() WHERE id = $1")
+        .bind(missing)
+        .execute(&app.pool)
+        .await
+        .expect("delete the role behind the API's back");
+
     let type_id = document_type(&app, &token, "PR_NTF_ROLLBACK", Some(workflow)).await;
     let document = draft(&app, &token, type_id).await;
 

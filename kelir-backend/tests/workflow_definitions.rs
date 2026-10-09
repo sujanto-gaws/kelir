@@ -60,6 +60,31 @@ async fn create(app: &TestApp, token: &str, key: &str, definition: Value) -> com
     .await
 }
 
+/// Creates `WF-APPROVER`, the role [`approval_workflow`] names, in the tenant
+/// that owns definition `id`, unless it is live there already: a publish
+/// refuses a definition naming a role that is not live (D-111, #572).
+async fn approver_role_for(app: &TestApp, id: Uuid) {
+    let tenant: Uuid =
+        sqlx::query_scalar("SELECT tenant_id FROM workflow_definitions WHERE id = $1")
+            .bind(id)
+            .fetch_one(&app.pool)
+            .await
+            .expect("read the definition's tenant");
+
+    let live: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM roles WHERE tenant_id = $1 AND role_code = 'WF-APPROVER' \
+         AND deleted_at IS NULL",
+    )
+    .bind(tenant)
+    .fetch_optional(&app.pool)
+    .await
+    .expect("look for the approver role");
+
+    if live.is_none() {
+        common::fixtures::create_role_with_permissions(&app.pool, tenant, "WF-APPROVER", &[]).await;
+    }
+}
+
 /// Creates and publishes a workflow, failing here rather than at the next
 /// assertion if either half was refused.
 pub async fn published(app: &TestApp, token: &str, key: &str) -> Uuid {
@@ -67,6 +92,7 @@ pub async fn published(app: &TestApp, token: &str, key: &str) -> Uuid {
     assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
 
     let id = id_of(&created.body["data"]);
+    approver_role_for(app, id).await;
 
     let publication = app
         .post(
@@ -838,6 +864,7 @@ async fn two_publishes_of_one_draft_produce_one_publisher() {
     )
     .await;
     let id = id_of(&created.body["data"]);
+    approver_role_for(&app, id).await;
 
     let mut handles = Vec::new();
 
@@ -1095,4 +1122,338 @@ async fn a_retired_workflow_is_not_readable_or_bindable() {
         refused.body
     );
     assert_eq!(refused.body["error"]["details"][0]["code"], "NOT_FOUND");
+}
+
+// ---------------------------------------------------------------------------
+// D-111 (#572) — publish refuses a definition naming a role that is not live
+// ---------------------------------------------------------------------------
+
+async fn publish(app: &TestApp, token: &str, id: Uuid) -> common::TestResponse {
+    app.post(
+        &format!("{DEFINITIONS}/{id}/publication"),
+        Some(token),
+        json!({}),
+    )
+    .await
+}
+
+/// Saves a definition, which must succeed: save does no role lookup (D-111).
+async fn saved(app: &TestApp, token: &str, key: &str, definition: Value) -> Uuid {
+    let created = create(app, token, key, definition).await;
+    assert_eq!(
+        created.status,
+        StatusCode::CREATED,
+        "save must not check that roles are live: {}",
+        created.body
+    );
+    id_of(&created.body["data"])
+}
+
+/// Creates a live role in the system tenant, the one every test here signs in to.
+async fn role(app: &TestApp, code: &str) -> Uuid {
+    common::fixtures::create_role_with_permissions(
+        &app.pool,
+        common::fixtures::SYSTEM_TENANT_ID,
+        code,
+        &[],
+    )
+    .await
+}
+
+/// The `(path, code)` of every detail a refusal carries.
+fn refusals(response: &common::TestResponse) -> Vec<(String, String)> {
+    response.body["error"]["details"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a refusal with details: {}", response.body))
+        .iter()
+        .map(|detail| {
+            (
+                detail["path"].as_str().unwrap_or_default().to_owned(),
+                detail["code"].as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect()
+}
+
+fn not_live(paths: &[&str]) -> Vec<(String, String)> {
+    paths
+        .iter()
+        .map(|path| ((*path).to_owned(), "ROLE_NOT_LIVE".to_owned()))
+        .collect()
+}
+
+async fn status_of(app: &TestApp, id: Uuid) -> String {
+    sqlx::query_scalar("SELECT status FROM workflow_definitions WHERE id = $1")
+        .bind(id)
+        .fetch_one(&app.pool)
+        .await
+        .expect("read the status back")
+}
+
+/// **A deleted role is refused at publish, at every path that names it.**
+///
+/// `approval_workflow` names `WF-APPROVER` three times: the task's assignment in
+/// object form, and both edges as `ROLE:WF-APPROVER`. Each is a detail, so the
+/// author is told about all three at once.
+///
+/// **Seen red** against `publish_definition` without the role read: the
+/// definition reaches `ACTIVE`, and its first submission would be refused as
+/// `ASSIGNMENT_UNRESOLVED` in front of the submitter.
+#[tokio::test]
+async fn a_definition_naming_a_deleted_role_is_refused_at_publish() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let approver = role(&app, "WF-APPROVER").await;
+    let id = saved(
+        &app,
+        &token,
+        "wf_dead_role",
+        approval_workflow("wf_dead_role"),
+    )
+    .await;
+
+    // Through the API: a draft does not hold its roles (D-91 (3)).
+    let deleted = app
+        .delete(&format!("/api/v1/identity/roles/{approver}"), Some(&token))
+        .await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
+
+    let refused = publish(&app, &token, id).await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+    assert_eq!(
+        refusals(&refused),
+        not_live(&[
+            "definition.states.0.task.assignment.roleCode",
+            "definition.transitions.0.allowedBy",
+            "definition.transitions.1.allowedBy",
+        ])
+    );
+    assert!(
+        refused.body.to_string().contains("`WF-APPROVER`"),
+        "the refusal must name the role: {}",
+        refused.body
+    );
+    assert_eq!(status_of(&app, id).await, "DRAFT");
+
+    let projected: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM workflow_states WHERE workflow_definition_id = $1",
+    )
+    .bind(id)
+    .fetch_one(&app.pool)
+    .await
+    .expect("count the projection");
+    assert_eq!(projected, 0, "a refused publish wrote its projection");
+}
+
+/// **A code no role has ever had is refused the same way**, and a role that is
+/// live is not reported beside it.
+#[tokio::test]
+async fn a_role_code_no_role_has_is_refused_at_publish() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    role(&app, "WF-APPROVER").await;
+
+    let mut definition = approval_workflow("wf_unknown_role");
+    definition["states"][0]["task"]["assignment"] =
+        json!({ "assigneeType": "ROLE", "roleCode": "WF-NEVER-EXISTED" });
+
+    let id = saved(&app, &token, "wf_unknown_role", definition).await;
+    let refused = publish(&app, &token, id).await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+    assert_eq!(
+        refusals(&refused),
+        not_live(&["definition.states.0.task.assignment.roleCode"])
+    );
+    assert_eq!(status_of(&app, id).await, "DRAFT");
+}
+
+/// **The `"ROLE:X"` shorthand is checked as the object form is**, and its path
+/// ends at the rule, because the shorthand is a string with no `roleCode`.
+///
+/// **Seen red** against `role_references` reading object-form rules only: the
+/// `REJECT` edge names a role nobody has, and the definition publishes.
+#[tokio::test]
+async fn a_shorthand_role_that_is_not_live_is_refused_at_its_path() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    role(&app, "WF-APPROVER").await;
+
+    let mut definition = approval_workflow("wf_shorthand_role");
+    definition["transitions"][1]["allowedBy"] = json!("ROLE:WF-NOBODY");
+
+    let id = saved(&app, &token, "wf_shorthand_role", definition).await;
+    let refused = publish(&app, &token, id).await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+    assert_eq!(
+        refusals(&refused),
+        not_live(&["definition.transitions.1.allowedBy"])
+    );
+    assert_eq!(status_of(&app, id).await, "DRAFT");
+}
+
+/// **A `DEPARTMENT_ROLE` names a role too**, in an `assignment` and in an
+/// `allowedBy`, and once its role exists the same draft publishes.
+#[tokio::test]
+async fn a_department_role_that_is_not_live_is_refused_until_it_is() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    role(&app, "WF-APPROVER").await;
+
+    let scoped = json!({
+        "assigneeType": "DEPARTMENT_ROLE",
+        "roleCode": "WF-DEPT-HEAD",
+        "departmentScope": "REQUESTED_DEPARTMENT"
+    });
+    let mut definition = approval_workflow("wf_department_role");
+    definition["states"][0]["task"]["assignment"] = scoped.clone();
+    definition["transitions"][0]["allowedBy"] = scoped;
+
+    let id = saved(&app, &token, "wf_department_role", definition).await;
+    let refused = publish(&app, &token, id).await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+    assert_eq!(
+        refusals(&refused),
+        not_live(&[
+            "definition.states.0.task.assignment.roleCode",
+            "definition.transitions.0.allowedBy.roleCode",
+        ])
+    );
+
+    role(&app, "WF-DEPT-HEAD").await;
+
+    let published = publish(&app, &token, id).await;
+    assert_eq!(published.status, StatusCode::OK, "{}", published.body);
+    assert_eq!(status_of(&app, id).await, "ACTIVE");
+}
+
+/// **A role is live in its own tenant only.** Another tenant's role with the
+/// code is not one this tenant's tasks can be offered to.
+///
+/// **Seen red** against `lock_live_roles` without its `tenant_id` predicate:
+/// the definition publishes on the strength of a role in `TNT-572`.
+#[tokio::test]
+async fn a_role_live_only_in_another_tenant_is_refused_at_publish() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let elsewhere = common::fixtures::create_tenant(&app.pool, "TNT-572", "Elsewhere").await;
+    common::fixtures::create_role_with_permissions(&app.pool, elsewhere, "WF-APPROVER", &[]).await;
+
+    let id = saved(
+        &app,
+        &token,
+        "wf_foreign_role",
+        approval_workflow("wf_foreign_role"),
+    )
+    .await;
+    let refused = publish(&app, &token, id).await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+    assert_eq!(refusals(&refused).len(), 3, "{}", refused.body);
+    assert_eq!(status_of(&app, id).await, "DRAFT");
+}
+
+/// **A publish racing a role delete is refused** (#572's race).
+///
+/// The delete is `identity::service::delete_role`'s own statements, held
+/// uncommitted: the role row locked `FOR UPDATE`, then soft-deleted. The
+/// publish is sent while that transaction is open, and the delete commits
+/// after.
+///
+/// **This proves the refusal, not the serialisation.** Whether the publish's
+/// `FOR KEY SHARE` waits on the delete's lock and then finds the row no longer
+/// live, or runs after the commit and finds it gone, the answer is the same, so
+/// the test does not depend on how the two interleave. What it rules out is the
+/// publish taking the role as live while its delete is in flight, which a read
+/// without the lock does: it sees the row as it was before the uncommitted
+/// delete, and the publish commits naming a role that is gone a moment later.
+///
+/// **Seen red** against `lock_live_roles` without `FOR KEY SHARE`: the
+/// publish answers 200.
+#[tokio::test]
+async fn a_publish_racing_a_role_delete_is_refused() {
+    use kelir_backend::modules::identity::repository as identity_repo;
+
+    let app = std::sync::Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let tenant = common::fixtures::SYSTEM_TENANT_ID;
+
+    let approver = role(&app, "WF-APPROVER").await;
+    let id = saved(
+        &app,
+        &token,
+        "wf_race_role",
+        approval_workflow("wf_race_role"),
+    )
+    .await;
+
+    let mut deleting = app.pool.begin().await.expect("a transaction");
+    let is_system = identity_repo::lock_role_for_delete(&mut deleting, tenant, approver)
+        .await
+        .expect("the lock runs");
+    assert_eq!(is_system, Some(false), "the role is live and deletable");
+    let deleted = identity_repo::soft_delete_role(&mut *deleting, tenant, approver, None)
+        .await
+        .expect("the delete runs");
+    assert_eq!(deleted, 1);
+
+    let publishing = {
+        let app = std::sync::Arc::clone(&app);
+        let token = token.clone();
+        tokio::spawn(async move { publish(&app, &token, id).await })
+    };
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    deleting.commit().await.expect("the delete commits");
+
+    let refused = publishing.await.expect("the publish finished");
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a publish racing the delete of its role reached ACTIVE: {}",
+        refused.body
+    );
+    assert_eq!(
+        refusals(&refused),
+        not_live(&[
+            "definition.states.0.task.assignment.roleCode",
+            "definition.transitions.0.allowedBy",
+            "definition.transitions.1.allowedBy",
+        ])
+    );
+    assert_eq!(status_of(&app, id).await, "DRAFT");
 }

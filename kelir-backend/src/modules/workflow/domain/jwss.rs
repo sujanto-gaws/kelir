@@ -86,6 +86,7 @@ use std::sync::OnceLock;
 
 use serde_json::Value;
 
+use super::graph::RoleReference;
 use super::task_type;
 use crate::error::ValidationDetail;
 use crate::modules::rad::domain::jfss::{check_operators, CONDITIONAL_OPERATORS};
@@ -140,6 +141,10 @@ const DOCUMENT_STATUSES: &[&str] = &[
 /// vocabulary, the same relationship `domain::lookup::LookupSource` has to
 /// JFSS's open component `type`.
 pub const RESOLVABLE_ASSIGNEE_TYPES: &[&str] = &["USER", "ROLE", "DEPARTMENT_ROLE", "OWNER"];
+
+/// The detail code a publish refuses a role that is not live with
+/// ([`dead_role_errors`]).
+pub const ROLE_NOT_LIVE: &str = "ROLE_NOT_LIVE";
 
 /// The compiled meta-schema. Compiled once — compiling it per request would put
 /// ~6 KB of JSON Schema on the save path of every workflow.
@@ -369,6 +374,45 @@ fn check_assignee_type(rule: &Value, path: &str, details: &mut Vec<ValidationDet
             RESOLVABLE_ASSIGNEE_TYPES.join(", ")
         ),
     ));
+}
+
+/// The refusal a publish gives for each role reference that is not live
+/// ([JWSS §5.3](../../../../../docs/schema/JSON%20Workflow%20Schema.md),
+/// **D-111**, [#572]).
+///
+/// **Pure, and the read is the caller's.** `live` is the role codes
+/// `service::definition::publish_definition` found live in the tenant, read
+/// `FOR KEY SHARE` in the publish's transaction. Each reference whose code is
+/// not among them is one detail, in the shape the S-rule details use, so a
+/// definition naming one dead role in three places is told about all three.
+///
+/// A live role is a `roles` row in the tenant whose `deleted_at` is `NULL`.
+/// A role has no other state that stops it resolving: it has no status, and a
+/// role nobody holds still resolves, its tasks waiting for a holder.
+///
+/// [#572]: https://github.com/sujanto-gaws/kelir/issues/572
+pub fn dead_role_errors(
+    references: &[RoleReference],
+    live: &BTreeSet<String>,
+) -> Vec<ValidationDetail> {
+    references
+        .iter()
+        .filter(|reference| !live.contains(&reference.role_code))
+        .map(|reference| {
+            detail(
+                reference.path.clone(),
+                "liveRole",
+                ROLE_NOT_LIVE,
+                format!(
+                    "`{}` is not a live role in this tenant: it was deleted, or no role has \
+                     that code. Every task or decision it decides would be refused as \
+                     ASSIGNMENT_UNRESOLVED, so the definition is not published. Create the \
+                     role, or name a live one (JWSS §5.3)",
+                    reference.role_code
+                ),
+            )
+        })
+        .collect()
 }
 
 /// JWSS §8's structural rules, in order, less the four this function does not own.
@@ -701,4 +745,58 @@ fn array<'a>(definition: &'a Value, key: &str) -> &'a [Value] {
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or(&[])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reference(path: &str, role_code: &str) -> RoleReference {
+        RoleReference {
+            path: path.to_owned(),
+            role_code: role_code.to_owned(),
+        }
+    }
+
+    #[test]
+    fn every_reference_to_a_role_that_is_not_live_is_refused_at_its_path() {
+        let references = [
+            reference("definition.states.0.task.assignment.roleCode", "LIVE"),
+            reference("definition.transitions.0.allowedBy", "GONE"),
+            reference("definition.transitions.1.allowedBy.roleCode", "GONE"),
+        ];
+        let live = BTreeSet::from(["LIVE".to_owned()]);
+
+        let details = dead_role_errors(&references, &live);
+
+        let paths: Vec<&str> = details.iter().map(|detail| detail.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "definition.transitions.0.allowedBy",
+                "definition.transitions.1.allowedBy.roleCode"
+            ]
+        );
+        assert!(details
+            .iter()
+            .all(|detail| detail.code == ROLE_NOT_LIVE && detail.rule == "liveRole"));
+        assert!(
+            details[0].message.contains("`GONE`"),
+            "{}",
+            details[0].message
+        );
+    }
+
+    #[test]
+    fn a_role_code_is_matched_exactly() {
+        // As `assignment::direct` resolves it: a code differing in case is
+        // another role, and would be refused at run time.
+        let live = BTreeSet::from(["APPROVER".to_owned()]);
+
+        assert_eq!(
+            dead_role_errors(&[reference("p", "approver")], &live).len(),
+            1
+        );
+        assert!(dead_role_errors(&[reference("p", "APPROVER")], &live).is_empty());
+    }
 }

@@ -376,6 +376,68 @@ impl Graph {
     }
 }
 
+/// A role a definition names, and where (**D-111**, [#572]).
+///
+/// [#572]: https://github.com/sujanto-gaws/kelir/issues/572
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoleReference {
+    /// The request path a refusal names: `definition.states.<i>.task.assignment`
+    /// or `definition.transitions.<i>.allowedBy`, then `.roleCode` in object
+    /// form. The `"ROLE:X"` shorthand is a string, so its path ends at the rule.
+    pub path: String,
+    pub role_code: String,
+}
+
+/// Every `ROLE` and `DEPARTMENT_ROLE` a definition names, in document order,
+/// once per place it names one.
+///
+/// **The places the engine resolves**: a state's `task.assignment` and a
+/// transition's `allowedBy`, in either of §5.2's forms. A task's
+/// `escalation.assignment` is not read, because nothing executes it (JWSS
+/// §3.1), which is `repository::definition::definitions_naming_role`'s rule
+/// too. A rule that does not parse, or a role rule with no `roleCode`, names
+/// nothing here: the validator has already refused it.
+pub fn role_references(definition: &Value) -> Vec<RoleReference> {
+    let rules = array(definition, "states")
+        .iter()
+        .enumerate()
+        .filter_map(|(index, state)| {
+            let rule = state.get("task")?.get("assignment")?;
+            Some((format!("definition.states.{index}.task.assignment"), rule))
+        })
+        .chain(
+            array(definition, "transitions")
+                .iter()
+                .enumerate()
+                .filter_map(|(index, transition)| {
+                    let rule = transition.get("allowedBy")?;
+                    Some((format!("definition.transitions.{index}.allowedBy"), rule))
+                }),
+        );
+
+    rules
+        .filter_map(|(path, value)| {
+            let rule = AssignmentRule::parse(value)?;
+
+            if !matches!(
+                rule.assignee_type,
+                AssigneeType::Role | AssigneeType::DepartmentRole
+            ) {
+                return None;
+            }
+
+            Some(RoleReference {
+                path: if value.is_string() {
+                    path
+                } else {
+                    format!("{path}.roleCode")
+                },
+                role_code: rule.role_code?,
+            })
+        })
+        .collect()
+}
+
 fn parse_state(value: &Value) -> Option<State> {
     Some(State {
         code: string(value, "code")?,
@@ -655,5 +717,57 @@ mod tests {
 
         assert_eq!(task.due_in_hours, Some(48.0));
         assert_eq!(task.due_in_seconds(), Some(172_800.0));
+    }
+
+    #[test]
+    fn role_references_name_every_role_rule_with_its_path() {
+        let definition = json!({
+            "states": [
+                { "code": "A", "task": { "assignment": { "assigneeType": "ROLE", "roleCode": "R-OBJECT" } } },
+                { "code": "B", "task": { "assignment": "ROLE:R-SHORT",
+                                         "escalation": { "assignment": "ROLE:R-ESCALATION" } } },
+                { "code": "C", "task": { "assignment": { "assigneeType": "DEPARTMENT_ROLE",
+                                                         "roleCode": "R-DEPT",
+                                                         "departmentScope": "OWNER_DEPARTMENT" } } },
+                { "code": "D", "task": { "assignment": "OWNER" } },
+                { "code": "E" }
+            ],
+            "transitions": [
+                { "from": "A", "to": "B", "action": "APPROVE", "allowedBy": "ROLE:R-SHORT" },
+                { "from": "B", "to": "C", "action": "APPROVE", "allowedBy": "USER:someone" },
+                { "from": "C", "to": "D", "action": "APPROVE",
+                  "allowedBy": { "assigneeType": "DEPARTMENT_ROLE", "roleCode": "R-EDGE" } },
+                { "from": "D", "to": "E", "action": "AUTO" }
+            ]
+        });
+
+        let found: Vec<(String, String)> = role_references(&definition)
+            .into_iter()
+            .map(|reference| (reference.path, reference.role_code))
+            .collect();
+
+        let expected = [
+            ("definition.states.0.task.assignment.roleCode", "R-OBJECT"),
+            ("definition.states.1.task.assignment", "R-SHORT"),
+            ("definition.states.2.task.assignment.roleCode", "R-DEPT"),
+            ("definition.transitions.0.allowedBy", "R-SHORT"),
+            ("definition.transitions.2.allowedBy.roleCode", "R-EDGE"),
+        ]
+        .map(|(path, code)| (path.to_owned(), code.to_owned()));
+
+        // The escalation's role, the owner, the user and the `AUTO` edge name
+        // no role the engine resolves.
+        assert_eq!(found, expected);
+    }
+
+    #[test]
+    fn a_role_rule_without_a_code_names_nothing() {
+        // The meta-schema refuses it first; this must not invent an empty code
+        // that a liveness check would then report a second time.
+        let definition = json!({
+            "states": [{ "code": "A", "task": { "assignment": { "assigneeType": "ROLE" } } }]
+        });
+
+        assert!(role_references(&definition).is_empty());
     }
 }

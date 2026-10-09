@@ -917,7 +917,8 @@ pub async fn update_role_fields(
 ///
 /// `FOR UPDATE` rather than the `FOR NO KEY UPDATE` the delete's own `UPDATE`
 /// would take, because only `FOR UPDATE` conflicts with the `FOR KEY SHARE` a
-/// transition holds on the role it is offering a task to (**D-89**). `None`
+/// transition holds on the role it is offering a task to (**D-89**), and a
+/// workflow publish holds on each role its definition names (**D-111**). `None`
 /// when there is no live role by that id in the tenant.
 pub async fn lock_role_for_delete(
     transaction: &mut sqlx::PgTransaction<'_>,

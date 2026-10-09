@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT role_code FROM roles\n        WHERE tenant_id = $1 AND role_code = ANY($2) AND deleted_at IS NULL\n        ORDER BY id\n        FOR KEY SHARE\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "role_code",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ffb7d2d6112ddbe015557caaa2c0152757ed2e450ed5e906a89ca0e0079b664c"
+}

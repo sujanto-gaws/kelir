@@ -411,6 +411,39 @@ pub async fn definitions_naming_role<'e, E: PgExecutor<'e>>(
         .collect())
 }
 
+/// The codes among `role_codes` that are live roles in the tenant, each row
+/// held `FOR KEY SHARE` until the caller's transaction ends (**D-111**, [#572]).
+///
+/// Publish's one role read. `identity::service::delete_role` locks the role
+/// row `FOR UPDATE`, which conflicts with this lock, before it asks
+/// [`definitions_naming_role`]. So a delete that locked first makes this wait,
+/// and its row no longer matches `deleted_at IS NULL` when the wait ends: the
+/// code is missing from the answer and the publish is refused. A delete that
+/// arrives second waits for the publish to commit, then finds the revision
+/// `ACTIVE` and is refused. Key-share locks do not conflict with one another, so
+/// two publishes naming one role do not wait on each other. A code with no live
+/// row has nothing to lock and is simply absent.
+///
+/// [#572]: https://github.com/sujanto-gaws/kelir/issues/572
+pub async fn lock_live_roles(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    role_codes: &[String],
+) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar!(
+        r#"
+        SELECT role_code FROM roles
+        WHERE tenant_id = $1 AND role_code = ANY($2) AND deleted_at IS NULL
+        ORDER BY id
+        FOR KEY SHARE
+        "#,
+        tenant_id,
+        role_codes
+    )
+    .fetch_all(&mut **transaction)
+    .await
+}
+
 /// Whether any instance is still running against this revision.
 ///
 /// A retirement is refused over it, for `delete_type`'s reason one module over:
