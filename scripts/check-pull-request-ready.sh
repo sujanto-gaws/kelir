@@ -35,7 +35,21 @@
 # the whole body would refuse those, and the remedy would be to stop writing
 # the words, which is a convention nobody keeps.
 #
-# An empty body passes: it says nothing about readiness.
+# **HTML comments are not read.** GitHub renders `<!-- ... -->` as nothing, so
+# a pull-request template that opens with one leaves the not-ready line as the
+# first line the merger sees. Every comment is removed from the body before
+# the first line is chosen: a line that is wholly a comment, or wholly inside a
+# comment spanning lines, is skipped like a blank one, and a line with text
+# outside a comment is read for that text. A comment opened and never closed
+# hides the rest of the body, as it does when GitHub renders it.
+#
+# **So a comment cannot refuse either.** `<!-- Not ready -->` on its own says
+# nothing the merger can see, and the check is about what the merger is told.
+# A comment-looking string inside a code span is removed as well; nothing in
+# the convention puts one there.
+#
+# An empty body passes: it says nothing about readiness. So does one that is
+# only comments.
 #
 # Usage: PR_BODY="<pull-request body>" scripts/check-pull-request-ready.sh
 #
@@ -57,6 +71,22 @@ BODY="${PR_BODY?usage: PR_BODY=<pull-request body> check-pull-request-ready.sh}"
 PHRASES='not ready|do not merge yet'
 PATTERN="(^|[^[:alnum:]])(${PHRASES})([^[:alnum:]]|$)"
 
+# What GitHub shows: the body with every `<!-- ... -->` taken out. A comment
+# spanning lines takes its line breaks with it, so the text after its `-->`
+# stays on the line that `-->` closes, which is where the merger sees it.
+visible=''
+rest="${BODY}"
+while [[ "${rest}" == *'<!--'* ]]; do
+  visible+="${rest%%'<!--'*}"
+  rest="${rest#*'<!--'}"
+  if [[ "${rest}" == *'-->'* ]]; then
+    rest="${rest#*'-->'}"
+  else
+    rest=''
+  fi
+done
+visible+="${rest}"
+
 first_line=''
 while IFS= read -r line || [[ -n "${line}" ]]; do
   line="${line//$'\r'/}"
@@ -64,12 +94,12 @@ while IFS= read -r line || [[ -n "${line}" ]]; do
     first_line="${line}"
     break
   fi
-done <<< "${BODY}"
+done <<< "${visible}"
 
 echo "Checking the pull-request body's first line for a not-ready marker"
 
 if [[ -z "${first_line}" ]]; then
-  echo "  The body is empty, so it says nothing about readiness."
+  echo "  The body is empty, or only comments, so it says nothing about readiness."
   exit 0
 fi
 

@@ -130,6 +130,29 @@ probe accepted "'ready' without 'not'" "Ready to merge: the campaign section is 
 # The boundary after the phrase. Seen red with it removed (test-engineer).
 probe accepted "a word that starts with the phrase" "The form is not readymade: the builder assembles it."
 
+# HTML comments, which GitHub renders as nothing: a template that opens with
+# one leaves the line as the first the merger sees (#703). The first four were
+# seen red against the check before comments were removed; the next two with
+# the text after a closing `-->` dropped; the last with an unclosed comment
+# ended at its own line. **A comment does not refuse**: the merger cannot see
+# it, and the check is about what the merger is told.
+probe refused "a template comment, then the line" "<!-- Say what changed and why. -->
+${LINE}"
+probe refused "a multi-line comment, then the line" "<!--
+Template: say what changed and why.
+-->
+
+${LINE}"
+probe accepted "'not ready' alone in a comment, then a normal line" "<!-- Not ready -->
+Closes #696"
+probe accepted "'not ready' in a comment after visible text" "Closes #696 <!-- not ready -->"
+probe refused "the phrase after a comment on its line" "<!-- template --> Not ready: the campaign is open."
+probe refused "the phrase after a multi-line comment closes" "<!--
+template
+--> Do not merge yet."
+probe accepted "the line inside an unclosed comment" "<!-- template
+${LINE}"
+
 # Nothing to read. Seen red with an empty first line refused.
 probe accepted "an empty body" ""
 probe accepted "a whitespace-only body" "  ${CR}

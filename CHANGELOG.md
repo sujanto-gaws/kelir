@@ -31,8 +31,11 @@ While the major version is `0`, the public API may change in any release.
   **D-112**). `Pull-request ready` fails while the body's first non-blank
   line contains *not ready* or *do not merge yet*, ignoring case, bold and
   italic markers, CRLF endings and runs of whitespace, and passes once the
-  line is removed. It re-runs when the body is edited. The body reaches the
-  script through an environment variable, never pasted into the shell. Only
+  line is removed. HTML comments are removed first, as GitHub hides them, so
+  a template that opens with one cannot hide the line, and a comment saying
+  *not ready* does not refuse. It re-runs when the body is edited. The body
+  reaches the script through an environment variable, never pasted into the
+  shell. Neither pull-request workflow leaves the token in the checkout. Only
   the first line is read, so a body can still quote the line lower down. The
   [git workflow](docs/standards/05.%20Git%20Workflow.md) §4 now states the
   convention it enforces: a feature row's pull request carries the line until
