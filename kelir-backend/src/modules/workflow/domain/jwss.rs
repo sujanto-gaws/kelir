@@ -34,19 +34,19 @@
 //!
 //! # Which operator set a condition is bounded by, and why it is not `calculate`'s
 //!
-//! JWSS §6.2 says conditions use "only operators registered in the Calculation
-//! Rule Registry". Read literally that forbids `<=`, which §2.3 of the registry
-//! excludes from `calculate` — and the JWSS's **own worked example** in §10 uses
-//! `{"<=": [...]}` in a transition condition. The specification contradicts
-//! itself on this point.
+//! Since R-11 (2026-10-09), JWSS §6.2 names the registry's **§2.5 conditional
+//! tier**: the tier a form's `conditional.logic` uses, §2.1 and §2.2 plus the
+//! comparison, logical, membership and presence operators that §2.3 forbids in
+//! `calculate`. That is what lets the JWSS's own worked example in §10 put
+//! `{"<=": [...]}` in a transition condition.
 //!
-//! It is resolved the way `jfss.rs` already resolved the identical question for
-//! `conditional.logic`, and by importing that answer rather than writing a
-//! second one: a condition returns a boolean, §2.3's stated reason for
-//! forbidding comparisons in `calculate` is that they return booleans rather
-//! than numbers, and that reason makes them exactly what a condition wants. So
-//! the bound here is [`CONDITIONAL_OPERATORS`], the same constant, and when
-//! **D-15** makes that tier normative it moves for both consumers at once.
+//! The reason is the one `jfss.rs` gives for `conditional.logic`, and this file
+//! imports that answer rather than writing a second one: a condition returns a
+//! boolean, §2.3 forbids comparisons in `calculate` because they return
+//! booleans rather than numbers, and that makes them exactly what a condition
+//! wants. So the bound here is [`CONDITIONAL_OPERATORS`], the same constant,
+//! and it holds every `condition`, assignment `expression` and variable
+//! `source` to §2.5. A change to that tier moves both consumers at once.
 //!
 //! # S8 emits nothing, and S11 is not implemented
 //!
