@@ -830,6 +830,16 @@ describe('the seam at its edges (campaign, 2026-10-09)', () => {
     }
   })
 
+  it('A: the seam refuses an operand past an operator’s maximum, whatever the view offers', () => {
+    for (const expr of [{ '-': [{ var: 'a' }, 1] }, { '<': [1, 2] }, { '!': [true] }, { '!': 1 }]) {
+      expect(() => addOperandAt(parseExpression(expr, 'conditional'), [])).toThrow(RangeError)
+    }
+
+    expect(
+      isComplete(addOperandAt(parseExpression({ or: [true, false] }, 'conditional'), [])),
+    ).toBe(false)
+  })
+
   it('B8: changing not to not keeps the form it was written in', () => {
     for (const expr of [{ '!': { var: 'a' } }, { '!': [{ var: 'a' }] }]) {
       const changed = changeOperatorAt(parseExpression(expr, 'conditional'), [], '!')
