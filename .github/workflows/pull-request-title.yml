@@ -49,7 +49,12 @@ jobs:
           fetch-depth: 1
 
       - name: Validate the pull-request title as the squashed header
+        # The title reaches the script through the environment, never the
+        # script text: an expression in `run:` is substituted before the shell
+        # parses it, so a title holding `"` and `$(...)` would run as shell
+        # (#702).
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          ./scripts/check-pull-request-title.sh \
-            "${{ github.event.pull_request.title }}" \
-            "${{ github.event.pull_request.number }}"
+          ./scripts/check-pull-request-title.sh "$PR_TITLE" "$PR_NUMBER"
