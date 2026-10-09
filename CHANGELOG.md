@@ -31,14 +31,18 @@ While the major version is `0`, the public API may change in any release.
   **D-110**). One component for a form's `calculate` and `conditional.logic`
   and a workflow transition's `condition`, built from comparisons, `and`,
   `or`, `!`, arithmetic and `var`. The tier and the offered variables are
-  inputs, so a form passes its field keys and a workflow its JWSS §6.1
-  context. **What it cannot show is kept, not rewritten.** It decides per
+  inputs, so a form passes its field keys and a workflow the part of the
+  JWSS §6.1 context the engine builds. **What it cannot show is kept, not
+  rewritten.** It decides per
   node: a subtree it cannot represent stays in the tree as a raw-JSON block
   marked *Advanced*, held as the original value, and only an unrepresentable
   root opens the whole expression raw. It emits only on an edit, never a
   half-filled operand, and an untouched node goes back exactly as it came.
-  It evaluates nothing itself and adds no dependency. **No screen uses it
-  yet**: the workflow editor and the form builder take it in their own rows.
+  It evaluates nothing itself and adds no dependency. **The workflow editor
+  is its first host** (#426, above), for a transition's `condition`; it shows
+  an `EXPRESSION` assignment rule's `expression` there too, but only for a
+  stored rule that already uses one, because `EXPRESSION` is refused at save
+  (JWSS §5.3) and is not offered. The form builder takes it in its own row.
   JWSS §6.2 now names the Calculation Rule Registry's §2.5 tier for
   conditions, which is what the save-time check already applied.
 
