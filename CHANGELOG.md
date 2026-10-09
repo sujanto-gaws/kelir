@@ -26,6 +26,18 @@ While the major version is `0`, the public API may change in any release.
   yet**: the workflow editor and the form builder take it in their own rows.
   JWSS §6.2 now names the Calculation Rule Registry's §2.5 tier for
   conditions, which is what the save-time check already applied.
+- **A pull request marked not ready fails a check**
+  ([#696](https://github.com/sujanto-gaws/kelir/issues/696), decision
+  **D-112**). `Pull-request ready` fails while the body's first non-blank
+  line contains *not ready* or *do not merge yet*, ignoring case, bold and
+  italic markers, CRLF endings and runs of whitespace, and passes once the
+  line is removed. It re-runs when the body is edited. The body reaches the
+  script through an environment variable, never pasted into the shell. Only
+  the first line is read, so a body can still quote the line lower down. The
+  [git workflow](docs/standards/05.%20Git%20Workflow.md) §4 now states the
+  convention it enforces: a feature row's pull request carries the line until
+  its campaign section is written. **It binds nothing until the product owner
+  makes it required on `main`.**
 
 ### Changed
 
