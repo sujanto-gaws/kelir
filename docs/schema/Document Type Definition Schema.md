@@ -2,7 +2,7 @@
 **Version:** 1.0.0
 **Status:** Draft Standard
 **Target Stack:** Rust (Document Type Service), Vue.js (Document Type Builder)
-**Last updated:** 2026-08-11
+**Last updated:** 2026-10-09
 
 ---
 
@@ -16,7 +16,7 @@ Like the Party aggregate (architectures/05), the DTDS document is an **exchange 
 
 - **Configuration Is the Application:** A complete business application (form + list + numbering + workflow + attachments + hooks) is one DTDS document. Creating a new document-based application means authoring one of these, not writing code.
 - **Bind by Key, Pin at Use:** The aggregate references forms, lists, and workflows by their stable keys. Revision pinning happens at runtime — a document pins its form revision at creation; workflow selection resolves to the latest `ACTIVE` workflow revision at submit time.
-- **One Condition Language:** All conditions (`workflowSelectionRules[].condition`, `attachmentRules[].requiredIf`) are JSON Logic restricted to the [JFSS Calculation Rule Registry](JFSS%20Calculation%20Rule%20Registry.md), evaluated against the same context as JWSS conditions. String expressions in older examples are superseded.
+- **One Condition Language:** All conditions (`workflowSelectionRules[].condition`, `attachmentRules[].requiredIf`) are JSON Logic restricted to ~~the [JFSS Calculation Rule Registry](JFSS%20Calculation%20Rule%20Registry.md)~~ the [JFSS Calculation Rule Registry](JFSS%20Calculation%20Rule%20Registry.md)'s **§2.5 conditional tier** (S6; corrected 2026-10-09), evaluated against the same context as JWSS conditions. String expressions in older examples are superseded.
 - **Hooks, Not Switches:** Behavior beyond configuration attaches through Hook Registration Entries ([Lifecycle Hook Contract](Lifecycle%20Hook%20Contract.md) §3) in the document-type priority band.
 
 ### 1.2 Definitions
@@ -37,7 +37,7 @@ An implementation is **conformant** if it:
 
 1. Accepts every aggregate that validates against the DTDS Meta-Schema for its declared `version`, and rejects every one that does not.
 2. Enforces every rule of Section 8 before activating a document type.
-3. Evaluates selection and attachment conditions with registry operators only, producing identical outcomes to any other conformant implementation.
+3. Evaluates selection and attachment conditions with ~~registry operators only~~ only the operators of the registry's §2.5 conditional tier (S6; corrected 2026-10-09), producing identical outcomes to any other conformant implementation.
 4. Round-trips the aggregate: normalizing to tables and re-projecting yields a semantically identical document.
 
 Where this document and the Meta-Schema disagree, **the Meta-Schema is normative**.
@@ -173,7 +173,7 @@ A document type failing any ERROR rule MUST remain `DRAFT`.
 | **S3** | ERROR | Every `workflowSelectionRules[].workflowKey` references a workflow with an `ACTIVE` revision; exactly one rule omits `condition`. |
 | **S4** | ERROR | Every `attachmentRules[].category` and `retentionPolicyCode` (if present) exists. |
 | **S5** | ERROR | Numbering template: `{sequence}` exactly once, all tokens recognized, `{department}` present iff `sequenceScope` is `DEPARTMENT_YEAR`. |
-| **S6** | ERROR | All `condition` / `requiredIf` logic uses registry operators only, and every `{"var": ...}` path resolves within the condition context or the bound form's data keys. |
+| **S6** | ERROR | All `condition` / `requiredIf` logic uses ~~registry operators only~~ only the operators of the registry's **§2.5 conditional tier**, as JWSS §6.2 does (corrected 2026-10-09: *registry operators* read literally as §2.1 and §2.2, the `calculate` sections, which forbid the `<=` and `>` of §4, §5 and §9's examples), and every `{"var": ...}` path resolves within the condition context or the bound form's data keys. |
 | **S7** | ERROR | Every `hooks[].hook` is in the lifecycle hook catalogue; handler references resolve (unknown plugin = ERROR, disabled = WARNING). |
 | **S8** | ERROR | `masterData` present iff the type writes master data; `category: "MASTER_DATA"` without a `masterData` block is an ERROR. |
 | **S9** | WARNING | `hooks[].priority` outside the document-type band 100–299. |
@@ -225,7 +225,7 @@ A document type failing any ERROR rule MUST remain `DRAFT`.
 | [JSON Form Schema (JFSS)](JSON%20Form%20Schema.md) | The bound form definition (`formKey`) |
 | [JSON Workflow Schema (JWSS)](JSON%20Workflow%20Schema.md) | The selectable workflows and the shared condition context |
 | [Lifecycle Hook Contract (LHCS)](Lifecycle%20Hook%20Contract.md) | `hooks` entry shape |
-| [JFSS Calculation Rule Registry](JFSS%20Calculation%20Rule%20Registry.md) | Permitted condition operators |
+| [JFSS Calculation Rule Registry](JFSS%20Calculation%20Rule%20Registry.md) | Permitted condition operators: its §2.5 conditional tier (S6) |
 | [architectures/01 §10.4, §12](../architectures/01.%20Basic%20Framework%20Concept%20and%20Architecture.md) | Document type concept and lifecycle |
 | [Database Schema §6](../design/02.%20Database%20Schema.md) | Normalized storage tables |
 
