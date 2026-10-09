@@ -11,11 +11,13 @@ import { loadEvaluator, type RuleEvaluator } from '@/lib/jsonlogic'
 
 import {
   addOperandAt,
+  applyEdit,
   CALCULATE_TIER_OPERATORS,
   changeOperatorAt,
   CONDITIONAL_TIER_OPERATORS,
   containsOpaque,
   createNode,
+  familiesIn,
   IncompleteExpressionError,
   isComplete,
   isOfferedPath,
@@ -508,7 +510,9 @@ describe('the tier (C6)', () => {
     const tree = parseExpression({ '*': [comparison, 2] }, 'calculate')
 
     expect(tree.kind).toBe('operator')
-    expect(nodeAt(tree, [0])).toEqual(expect.objectContaining({ kind: 'opaque', value: comparison }))
+    expect(nodeAt(tree, [0])).toEqual(
+      expect.objectContaining({ kind: 'opaque', value: comparison }),
+    )
   })
 
   it('offers every section A operator in the conditional tier', () => {
@@ -579,6 +583,32 @@ describe('editing a tree', () => {
 
     expect(isComplete(changed)).toBe(false)
     expect(nodeAt(changed, [0])).toEqual(expect.objectContaining({ kind: 'var', path: 'a' }))
+  })
+
+  it('applies each edit the view reports', () => {
+    const tree = parseExpression({ and: [{ var: 'a' }, { var: 'b' }] }, 'conditional')
+
+    const added = applyEdit(tree, { type: 'add', path: [] })
+    const filled = applyEdit(added, { type: 'replace', path: [2], node: literalNode(true) })
+    const changed = applyEdit(filled, { type: 'operator', path: [], op: 'or' })
+    const removed = applyEdit(changed, { type: 'remove', path: [0] })
+
+    expect(JSON.stringify(serialise(removed))).toBe('{"or":[{"var":"b"},true]}')
+    // Each step left the tree before it alone.
+    expect(serialise(tree)).toEqual({ and: [{ var: 'a' }, { var: 'b' }] })
+  })
+
+  it('keeps a slot’s key through a replacement, so the view keeps its place', () => {
+    const tree = parseExpression({ '+': [{ var: 'a' }, 1] }, 'calculate')
+    const replaced = replaceAt(tree, [1], literalNode(2))
+
+    expect(nodeAt(replaced, [1]).key).toBe(nodeAt(tree, [1]).key)
+    expect(nodeAt(replaced, [0])).toBe(nodeAt(tree, [0]))
+  })
+
+  it('offers a calculation arithmetic alone, and a conditional every family', () => {
+    expect(familiesIn('calculate')).toEqual(['arithmetic'])
+    expect(familiesIn('conditional')).toEqual(['comparison', 'arithmetic', 'logical', 'not'])
   })
 
   it('creates a new comparison as "is", ===', () => {
