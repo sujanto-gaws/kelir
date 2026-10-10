@@ -46,6 +46,15 @@ impl TenantStatus {
     }
 }
 
+/// Whether a session in a tenant read as `status` may be renewed (#649).
+///
+/// `None` is a tenant no live row has: deleted, or never there. Only a live
+/// tenant that admits sign-in admits renewal, so a refresh applies sign-in's
+/// rule and not a weaker one of its own.
+pub fn admits_renewal(status: Option<TenantStatus>) -> bool {
+    status.is_some_and(TenantStatus::admits_sign_in)
+}
+
 /// A tenant, as the resolver needs it. Not an API type — nothing here is
 /// serialised to a caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -350,6 +359,16 @@ mod tests {
         // Schema drift must fail closed, never open.
         assert!(!TenantStatus::from_db("PROVISIONING").admits_sign_in());
         assert!(!TenantStatus::from_db("").admits_sign_in());
+    }
+
+    #[test]
+    fn only_a_live_active_tenant_admits_renewal() {
+        // #649: a refresh applies sign-in's rule, and a tenant no live row
+        // has (deleted, or never there) admits nothing.
+        assert!(admits_renewal(Some(TenantStatus::Active)));
+        assert!(!admits_renewal(Some(TenantStatus::Suspended)));
+        assert!(!admits_renewal(Some(TenantStatus::Inactive)));
+        assert!(!admits_renewal(None));
     }
 
     #[test]

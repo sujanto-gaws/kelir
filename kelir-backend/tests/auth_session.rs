@@ -462,6 +462,509 @@ async fn signing_out_invalidates_the_refresh_token() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// #649: a refresh reads its tenant's status itself.
+//
+// `update_tenant` and `delete_tenant` revoke a tenant's refresh tokens after
+// they change its row, in a second statement. Until #649 a refresh read only
+// the user's status and relied on that revoke for the tenant's, so a status
+// that changed without it left a session that renewed for up to the refresh
+// token's 30 days: a revoke that failed after the row changed, a sign-in that
+// inserted its token after the revoke ran, or a status set outside the API.
+// Each test below sets the status by SQL, so no revoke has run, and asserts
+// that none has before it refreshes.
+// ---------------------------------------------------------------------------
+
+/// Signs in to the tenant `tenant_code` names and returns the refresh token.
+async fn refresh_token_in(app: &TestApp, tenant_code: &str, username: &str) -> String {
+    let response = app
+        .post(
+            "/api/v1/auth/login",
+            None,
+            json!({
+                "username": username,
+                "password": PASSWORD,
+                "tenantCode": tenant_code,
+            }),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+
+    response.data()["refreshToken"]
+        .as_str()
+        .expect("refreshToken is a string")
+        .to_owned()
+}
+
+async fn refreshed(app: &TestApp, refresh_token: &str) -> common::TestResponse {
+    app.post(
+        "/api/v1/auth/refresh",
+        None,
+        json!({ "refreshToken": refresh_token }),
+    )
+    .await
+}
+
+/// How many of the user's refresh tokens are not revoked, read past the API.
+async fn live_refresh_tokens(app: &TestApp, user_id: Uuid) -> i64 {
+    let (count,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM refresh_tokens WHERE user_id = $1 AND revoked_at IS NULL",
+    )
+    .bind(user_id)
+    .fetch_one(&app.pool)
+    .await
+    .expect("reads refresh_tokens");
+
+    count
+}
+
+/// #649 for one way a tenant leaves `ACTIVE`: `change` is an `UPDATE` of
+/// `tenants` whose `$1` is the tenant's id, and `became` names the result.
+async fn a_refresh_is_refused_once_its_tenant_left_by_sql(change: &str, became: &str) {
+    let app = TestApp::spawn_with(|config| config.multi_tenant = true).await;
+
+    let acme = fixtures::create_tenant(&app.pool, "ACME", "Acme Limited").await;
+    let beta = fixtures::create_tenant(&app.pool, "BETA", "Beta Limited").await;
+    let leaving = fixtures::create_user(
+        &app.pool,
+        acme,
+        "acme.user",
+        "acme.user@kelir.test",
+        PASSWORD,
+        &[],
+    )
+    .await;
+    fixtures::create_user(
+        &app.pool,
+        beta,
+        "beta.user",
+        "beta.user@kelir.test",
+        PASSWORD,
+        &[],
+    )
+    .await;
+
+    // Two sessions for the user whose tenant leaves, and one in a tenant that
+    // stays.
+    let first = refresh_token_in(&app, "ACME", "acme.user").await;
+    let second = refresh_token_in(&app, "ACME", "acme.user").await;
+    let staying = refresh_token_in(&app, "BETA", "beta.user").await;
+
+    // Control: while its tenant is `ACTIVE`, the token rotates (#649's third
+    // criterion), so what refuses it below is the change and not the setup.
+    let rotated = refreshed(&app, &first).await;
+    assert_eq!(rotated.status, StatusCode::OK, "{}", rotated.body);
+    let current = rotated.data()["refreshToken"]
+        .as_str()
+        .expect("refreshToken is a string")
+        .to_owned();
+    assert_ne!(current, first, "the control refresh did not rotate");
+
+    let changed = sqlx::query(change)
+        .bind(acme)
+        .execute(&app.pool)
+        .await
+        .expect("the tenant's row changes");
+    assert_eq!(changed.rows_affected(), 1, "{change} changed no tenant");
+
+    // What makes this #649's case: the change revoked nothing.
+    assert_eq!(
+        live_refresh_tokens(&app, leaving).await,
+        2,
+        "setting the tenant {became} by SQL revoked a refresh token, so this \
+         test no longer shows a refresh deciding for itself"
+    );
+
+    let refused = refreshed(&app, &current).await;
+    assert_eq!(
+        refused.status,
+        StatusCode::UNAUTHORIZED,
+        "a refresh renewed the session of a tenant that became {became}: {}",
+        refused.body
+    );
+    assert_eq!(
+        refused.error_code(),
+        Some("UNAUTHORIZED"),
+        "{}",
+        refused.body
+    );
+    assert!(
+        refused.data()["accessToken"].is_null(),
+        "a refused refresh returned a token: {}",
+        refused.body
+    );
+
+    // The refusal ends every session the user holds, as an inactive user's
+    // does: the token never presented is revoked as well.
+    assert_eq!(
+        live_refresh_tokens(&app, leaving).await,
+        0,
+        "a refresh refused for a {became} tenant left the user's refresh tokens live"
+    );
+    let other_session = refreshed(&app, &second).await;
+    assert_eq!(
+        other_session.status,
+        StatusCode::UNAUTHORIZED,
+        "{}",
+        other_session.body
+    );
+
+    // Only the token's own tenant is read: another tenant's session renews.
+    let other_tenant = refreshed(&app, &staying).await;
+    assert_eq!(
+        other_tenant.status,
+        StatusCode::OK,
+        "a {became} tenant stopped another tenant's refresh: {}",
+        other_tenant.body
+    );
+}
+
+#[tokio::test]
+async fn a_refresh_is_refused_and_ends_the_users_sessions_when_its_tenant_is_suspended() {
+    a_refresh_is_refused_once_its_tenant_left_by_sql(
+        "UPDATE tenants SET status = 'SUSPENDED' WHERE id = $1",
+        "SUSPENDED",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_refresh_is_refused_and_ends_the_users_sessions_when_its_tenant_is_inactive() {
+    a_refresh_is_refused_once_its_tenant_left_by_sql(
+        "UPDATE tenants SET status = 'INACTIVE' WHERE id = $1",
+        "INACTIVE",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_refresh_is_refused_and_ends_the_users_sessions_when_its_tenant_is_deleted() {
+    // `status` stays `ACTIVE`: a deleted tenant is refused for its
+    // `deleted_at`, which the tenant lookup reads as no tenant at all.
+    a_refresh_is_refused_once_its_tenant_left_by_sql(
+        "UPDATE tenants SET deleted_at = now() WHERE id = $1",
+        "deleted",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_refresh_is_refused_when_its_tenant_is_both_deleted_and_suspended() {
+    // The two ways out at once: neither hides the other.
+    a_refresh_is_refused_once_its_tenant_left_by_sql(
+        "UPDATE tenants SET deleted_at = now(), status = 'SUSPENDED' WHERE id = $1",
+        "deleted and suspended",
+    )
+    .await;
+}
+
+/// Signs in to `tenant_code` and returns `(access token, refresh token)`.
+async fn session_in(app: &TestApp, tenant_code: &str, username: &str) -> (String, String) {
+    let response = app
+        .post(
+            "/api/v1/auth/login",
+            None,
+            json!({ "username": username, "password": PASSWORD, "tenantCode": tenant_code }),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+
+    let token = |name: &str| {
+        response.data()[name]
+            .as_str()
+            .unwrap_or_else(|| panic!("{name} is a string"))
+            .to_owned()
+    };
+    (token("accessToken"), token("refreshToken"))
+}
+
+/// Runs `statement` against the test's private database.
+async fn execute(app: &TestApp, statement: &str) {
+    sqlx::query(statement)
+        .execute(&app.pool)
+        .await
+        .unwrap_or_else(|error| panic!("{statement}: {error}"));
+}
+
+/// #649: a refresh that cannot read its tenant is an error, never a refusal.
+///
+/// An outage must not look like a signed-out session, and must not end one:
+/// `admits_session` answers the read's failure as an error, and the refresh
+/// revokes nothing. Only the tenant read is made to fail. `find_user` reads
+/// `users` alone, so the user check before it still passes.
+///
+/// Seen red (2026-10-10), and by no test of the builder's: the failed read
+/// answered as a refusal, in `admits_session` and again in `refresh`.
+#[tokio::test]
+async fn a_refresh_that_cannot_read_its_tenant_is_an_error_and_ends_no_session() {
+    let app = TestApp::spawn().await;
+    let user_id = user(&app, "tenant.unread").await;
+    let (_, refresh_token) = session_for(&app, "tenant.unread").await;
+
+    execute(
+        &app,
+        "ALTER TABLE tenants RENAME COLUMN status TO status_away",
+    )
+    .await;
+
+    let failed = refreshed(&app, &refresh_token).await;
+    assert_eq!(
+        failed.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a tenant read that failed was answered as a refusal: {}",
+        failed.body
+    );
+    assert_eq!(failed.error_code(), Some("INTERNAL_ERROR"));
+    assert_eq!(
+        live_refresh_tokens(&app, user_id).await,
+        1,
+        "a tenant read that failed ended the user's session"
+    );
+
+    // With the column back, the same token renews: nothing was revoked.
+    execute(
+        &app,
+        "ALTER TABLE tenants RENAME COLUMN status_away TO status",
+    )
+    .await;
+    let renewed = refreshed(&app, &refresh_token).await;
+    assert_eq!(renewed.status, StatusCode::OK, "{}", renewed.body);
+}
+
+/// #649: a tenant no row has at all is refused, as a deleted one is.
+///
+/// The foreign keys keep this out of a real database, so the test lifts them
+/// in its own and moves the user and their token to an id no tenant has.
+/// Without that, `find_user` would refuse first and the tenant check would
+/// never be reached.
+#[tokio::test]
+async fn a_refresh_is_refused_and_ends_the_users_sessions_when_its_tenant_has_no_row() {
+    let app = TestApp::spawn_with(|config| config.multi_tenant = true).await;
+    let acme = fixtures::create_tenant(&app.pool, "ACME", "Acme Limited").await;
+    let orphan = fixtures::create_user(
+        &app.pool,
+        acme,
+        "acme.orphan",
+        "acme.orphan@kelir.test",
+        PASSWORD,
+        &[],
+    )
+    .await;
+    let token = refresh_token_in(&app, "ACME", "acme.orphan").await;
+
+    execute(
+        &app,
+        "DO $$ DECLARE fk record; BEGIN
+           FOR fk IN SELECT conrelid::regclass AS tbl, conname FROM pg_constraint
+                     WHERE contype = 'f' AND confrelid = 'tenants'::regclass
+                       AND conrelid IN ('users'::regclass, 'refresh_tokens'::regclass)
+           LOOP EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I', fk.tbl, fk.conname);
+           END LOOP;
+         END $$",
+    )
+    .await;
+    let nowhere = Uuid::now_v7();
+    for table in ["users", "refresh_tokens"] {
+        let column = if table == "users" { "id" } else { "user_id" };
+        sqlx::query(&format!(
+            "UPDATE {table} SET tenant_id = $1 WHERE {column} = $2"
+        ))
+        .bind(nowhere)
+        .bind(orphan)
+        .execute(&app.pool)
+        .await
+        .expect("moves the row to no tenant");
+    }
+
+    let refused = refreshed(&app, &token).await;
+    assert_eq!(
+        refused.status,
+        StatusCode::UNAUTHORIZED,
+        "a refresh renewed a session whose tenant has no row: {}",
+        refused.body
+    );
+    assert_eq!(live_refresh_tokens(&app, orphan).await, 0);
+}
+
+/// #649: a refusal for the tenant reads exactly as one for the user.
+///
+/// A caller holding a refresh token learns nothing about which of the two
+/// stopped it, so the refresh is not a way to read a tenant's status. When
+/// both refuse, the user check runs first, and only the revocation's reason
+/// in `refresh_tokens` records which one did.
+#[tokio::test]
+async fn a_refresh_refused_for_its_tenant_reads_as_one_refused_for_its_user() {
+    let app = TestApp::spawn_with(|config| config.multi_tenant = true).await;
+
+    let mut refusals = Vec::new();
+    for (code, tenant_leaves, user_leaves, reason) in [
+        ("ACME", true, false, "tenant not active"),
+        ("BETA", false, true, "account not active"),
+        ("GAMA", true, true, "account not active"),
+    ] {
+        let tenant = fixtures::create_tenant(&app.pool, code, "Some Limited").await;
+        let username = format!("{}.user", code.to_lowercase());
+        let user_id = fixtures::create_user(
+            &app.pool,
+            tenant,
+            &username,
+            &format!("{username}@kelir.test"),
+            PASSWORD,
+            &[],
+        )
+        .await;
+        let token = refresh_token_in(&app, code, &username).await;
+
+        if tenant_leaves {
+            sqlx::query("UPDATE tenants SET status = 'SUSPENDED' WHERE id = $1")
+                .bind(tenant)
+                .execute(&app.pool)
+                .await
+                .expect("suspends the tenant");
+        }
+        if user_leaves {
+            sqlx::query("UPDATE users SET status = 'INACTIVE' WHERE id = $1")
+                .bind(user_id)
+                .execute(&app.pool)
+                .await
+                .expect("deactivates the user");
+        }
+
+        let refused = refreshed(&app, &token).await;
+        assert_eq!(
+            refused.status,
+            StatusCode::UNAUTHORIZED,
+            "{code}: {}",
+            refused.body
+        );
+        refusals.push(refused.body);
+
+        let reasons: Vec<Option<String>> =
+            sqlx::query_scalar("SELECT revoked_reason FROM refresh_tokens WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_all(&app.pool)
+                .await
+                .expect("reads refresh_tokens");
+        assert_eq!(reasons, vec![Some(reason.to_owned())], "{code}");
+    }
+
+    assert_eq!(
+        refusals[0], refusals[1],
+        "a tenant's refusal reads apart from a user's"
+    );
+    assert_eq!(refusals[1], refusals[2]);
+}
+
+/// #649: a session the refresh ended stays ended, and D-104 is untouched.
+///
+/// The refusal revokes the user's refresh tokens; it does not pause them. So
+/// presenting the token again is refused, and still is once the tenant is
+/// `ACTIVE` again. The access token issued before the refusal is not reached:
+/// it works until it expires, as D-104 states, and #649 does not change that.
+#[tokio::test]
+async fn a_session_a_refresh_ended_for_its_tenant_stays_ended_when_the_tenant_returns() {
+    let app = TestApp::spawn_with(|config| config.multi_tenant = true).await;
+    let acme = fixtures::create_tenant(&app.pool, "ACME", "Acme Limited").await;
+    let user_id = fixtures::create_user(
+        &app.pool,
+        acme,
+        "acme.user",
+        "acme.user@kelir.test",
+        PASSWORD,
+        &[],
+    )
+    .await;
+    let (access, refresh_token) = session_in(&app, "ACME", "acme.user").await;
+
+    let pool = &app.pool;
+    let set_status = move |status: &'static str| {
+        sqlx::query("UPDATE tenants SET status = $2 WHERE id = $1")
+            .bind(acme)
+            .bind(status)
+            .execute(pool)
+    };
+    set_status("SUSPENDED").await.expect("suspends the tenant");
+
+    let refused = refreshed(&app, &refresh_token).await;
+    assert_eq!(refused.status, StatusCode::UNAUTHORIZED, "{}", refused.body);
+
+    // D-104, as it stood before #649.
+    let me = app.get("/api/v1/auth/me", Some(&access)).await;
+    assert_eq!(
+        me.status,
+        StatusCode::OK,
+        "a refused refresh reached the access token D-104 lets live: {}",
+        me.body
+    );
+
+    let again = refreshed(&app, &refresh_token).await;
+    assert_eq!(again.status, StatusCode::UNAUTHORIZED, "{}", again.body);
+
+    set_status("ACTIVE").await.expect("reactivates the tenant");
+    let revived = refreshed(&app, &refresh_token).await;
+    assert_eq!(
+        revived.status,
+        StatusCode::UNAUTHORIZED,
+        "reactivating the tenant revived a session its refresh had ended: {}",
+        revived.body
+    );
+    assert_eq!(live_refresh_tokens(&app, user_id).await, 0);
+
+    // Control: the tenant is back, so a new sign-in is how back in is.
+    session_in(&app, "ACME", "acme.user").await;
+}
+
+/// #649 in a single-tenant deployment: the `SYSTEM` tenant is not exempt.
+#[tokio::test]
+async fn a_refresh_is_refused_and_ends_the_users_sessions_when_the_system_tenant_is_suspended() {
+    let app = TestApp::spawn().await;
+    let user_id = user(&app, "system.user").await;
+    let (_, refresh_token) = session_for(&app, "system.user").await;
+
+    sqlx::query("UPDATE tenants SET status = 'SUSPENDED' WHERE id = $1")
+        .bind(fixtures::SYSTEM_TENANT_ID)
+        .execute(&app.pool)
+        .await
+        .expect("suspends the system tenant");
+
+    let refused = refreshed(&app, &refresh_token).await;
+    assert_eq!(refused.status, StatusCode::UNAUTHORIZED, "{}", refused.body);
+    assert_eq!(live_refresh_tokens(&app, user_id).await, 0);
+}
+
+/// #649: a status this code does not know refuses, as `from_db` promises.
+///
+/// The `CHECK` keeps such a value out today. A later migration that adds a
+/// status, run ahead of the code that knows it, is the case: the test drops
+/// the `CHECK` in its own database and writes a status no variant names.
+#[tokio::test]
+async fn a_refresh_is_refused_when_its_tenants_status_is_one_the_code_does_not_know() {
+    let app = TestApp::spawn().await;
+    let user_id = user(&app, "unknown.status").await;
+    let (_, refresh_token) = session_for(&app, "unknown.status").await;
+
+    execute(
+        &app,
+        "DO $$ DECLARE c record; BEGIN
+           FOR c IN SELECT conname FROM pg_constraint
+                    WHERE contype = 'c' AND conrelid = 'tenants'::regclass
+                      AND pg_get_constraintdef(oid) LIKE '%status%'
+           LOOP EXECUTE format('ALTER TABLE tenants DROP CONSTRAINT %I', c.conname);
+           END LOOP;
+         END $$",
+    )
+    .await;
+    sqlx::query("UPDATE tenants SET status = 'ARCHIVED' WHERE id = $1")
+        .bind(fixtures::SYSTEM_TENANT_ID)
+        .execute(&app.pool)
+        .await
+        .expect("writes an unknown status");
+
+    let refused = refreshed(&app, &refresh_token).await;
+    assert_eq!(refused.status, StatusCode::UNAUTHORIZED, "{}", refused.body);
+    assert_eq!(live_refresh_tokens(&app, user_id).await, 0);
+}
+
 #[tokio::test]
 async fn an_expired_access_token_is_unauthorized() {
     // `verify_access_token` sets `validate_exp`, and nothing proved it was
