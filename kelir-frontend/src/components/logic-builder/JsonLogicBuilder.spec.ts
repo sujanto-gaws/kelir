@@ -45,6 +45,7 @@ function mountBuilder(
     tier?: LogicTier
     variables?: LogicVariable[]
     allowFreePaths?: boolean
+    freePrefixes?: string[]
     attach?: boolean
   } = {},
 ) {
@@ -54,6 +55,7 @@ function mountBuilder(
       tier: options.tier ?? 'conditional',
       variables: options.variables ?? FORM_FIELDS,
       allowFreePaths: options.allowFreePaths ?? false,
+      freePrefixes: options.freePrefixes,
       // A host binds v-model; without this the builder's own emission would
       // never come back to it as a prop, which is not how it is used.
       'onUpdate:modelValue': (value: unknown) => wrapper.setProps({ modelValue: value }),
@@ -1027,6 +1029,25 @@ describe('JsonLogicBuilder at its edges (campaign, 2026-10-09)', () => {
       await byLabel(wrapper, 'Expression, operand 2: variable').setValue('quantity')
 
       expect(byLabel(wrapper, 'Expression, operand 2').text()).not.toContain('Not in the offered')
+    })
+
+    it('counts a path under a free prefix as offered, and still flags one outside it', () => {
+      const wrapper = mountBuilder(
+        { '<=': [{ var: 'formData.amount' }, { var: 'foo.bar' }] },
+        { variables: JWSS_CONTEXT, allowFreePaths: true, freePrefixes: ['formData.'] },
+      )
+
+      expect(byLabel(wrapper, 'Expression, operand 1').text()).not.toContain('Not in the offered')
+      expect(byLabel(wrapper, 'Expression, operand 2').text()).toContain('Not in the offered')
+    })
+
+    it('does not count the bare prefix as a path under it', () => {
+      const wrapper = mountBuilder(
+        { '!': { var: 'formData.' } },
+        { variables: JWSS_CONTEXT, allowFreePaths: true, freePrefixes: ['formData.'] },
+      )
+
+      expect(byLabel(wrapper, 'Expression, operand 1').text()).toContain('Not in the offered')
     })
 
     it('leaves a variable unfilled, not emitted, when its free path is blanked', async () => {

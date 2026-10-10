@@ -108,6 +108,21 @@ const outgoing = computed(() =>
     .filter(({ transition }) => transition.from === state.value.code),
 )
 
+/**
+ * Whether unticking the task would drop more than the task's name and
+ * assignment: an escalation, which has no field, or a due time or priority,
+ * which are easy to miss. Said beside the checkbox, so it is not silent.
+ */
+const carriesUnshown = computed(() => {
+  const task = state.value.task
+
+  return (
+    !editor.readOnly.value &&
+    task !== undefined &&
+    (task.escalation !== undefined || task.dueInHours !== undefined || task.priority !== undefined)
+  )
+})
+
 const statusOptions = (Object.keys(DOCUMENT_STATUS_LABELS) as DocumentStatus[]).map((value) => ({
   value,
   label: DOCUMENT_STATUS_LABELS[value],
@@ -401,6 +416,14 @@ function move(direction: -1 | 1): void {
         Entering this state creates a task
       </label>
       <p v-if="errors.task" class="text-xs text-destructive">{{ errors.task }}</p>
+      <p
+        v-if="carriesUnshown"
+        class="text-xs text-muted-foreground"
+        :data-testid="`state-task-unshown-${index}`"
+      >
+        Unticking this also removes the stored escalation, due hours and priority.
+        <em>Undo</em> restores them.
+      </p>
 
       <div v-if="state.task" class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <div class="space-y-1">

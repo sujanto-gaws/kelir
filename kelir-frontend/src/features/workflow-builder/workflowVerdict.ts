@@ -40,9 +40,29 @@ export function addressOf(path: string): Addressed | null {
   }
 }
 
-/** The first `` `CODE` `` a message names, which is how S6 and S7 name their state. */
-function namedCode(message: string): string | undefined {
-  return /`([^`]+)`/.exec(message)?.[1]
+/**
+ * The declared state a message names in backticks, as S6 and S7 do.
+ *
+ * **Matched against the declared codes, not parsed**: a code may itself hold
+ * a backtick (refused at its own field, while S6 still names it), and reading
+ * the first backtick pair would cut it short, onto another state's code. When
+ * several declared codes appear backticked — `` `A` `` inside `` `A`B` `` —
+ * the longest is the one the message names.
+ */
+function namedState(message: string, definition: JwssDefinition): number {
+  let best = -1
+
+  definition.states.forEach((state, index) => {
+    if (
+      state.code !== '' &&
+      message.includes(`\`${state.code}\``) &&
+      (best < 0 || state.code.length > definition.states[best].code.length)
+    ) {
+      best = index
+    }
+  })
+
+  return best
 }
 
 /**
@@ -53,8 +73,8 @@ function namedCode(message: string): string | undefined {
  * (`UNREACHABLE_STATE`, `DEAD_END_STATE`) and S7 (`AMBIGUOUS_FALLBACK`) report
  * at `definition.states` and `definition.transitions`, because what they find
  * is a property of the graph, and say which state in backticks. AC3 asks for
- * the verdict *at the state it names*, so a detail whose first backticked
- * token is a declared state code is placed at that state. One whose message
+ * the verdict *at the state it names*, so a detail whose message names a
+ * declared state code in backticks is placed at that state. One whose message
  * names no declared state — S9's *no state maps to COMPLETED* — stays at the
  * list.
  *
@@ -71,8 +91,7 @@ export function placeDetails(
     let path = detail.path
 
     if (path === 'definition.states' || path === 'definition.transitions') {
-      const code = namedCode(detail.message)
-      const index = definition.states.findIndex((state) => state.code === code)
+      const index = namedState(detail.message, definition)
 
       if (index >= 0) {
         path = `definition.states.${index}`

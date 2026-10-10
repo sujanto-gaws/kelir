@@ -142,7 +142,9 @@ const bounds = computed(() =>
 
 const varPath = computed(() => (props.node.kind === 'var' ? props.node.path : ''))
 
-const offered = computed(() => isOfferedPath(varPath.value, props.context.variables))
+const offered = computed(() =>
+  isOfferedPath(varPath.value, props.context.variables, props.context.freePrefixes),
+)
 
 const variableOptions = computed(() => {
   const options = props.context.variables.map((variable) => ({

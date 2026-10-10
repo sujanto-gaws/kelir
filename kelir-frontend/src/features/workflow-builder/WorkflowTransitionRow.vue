@@ -13,7 +13,7 @@ import type { AssignmentRule, JwssTransition, TransitionAction } from '@/types/w
 import AssignmentRuleEditor from './AssignmentRuleEditor.vue'
 import { drawnRuleFields } from './assignmentRule'
 import { useWorkflowEditorContext } from './editorContext'
-import { optionsOf, TRANSITION_ACTIONS } from './jwssRegistry'
+import { CONDITION_FREE_PREFIXES, optionsOf, TRANSITION_ACTIONS } from './jwssRegistry'
 import { rowErrors } from './workflowVerdict'
 
 /**
@@ -294,6 +294,7 @@ function move(direction: -1 | 1): void {
           tier="conditional"
           :variables="editor.variables.value"
           allow-free-paths
+          :free-prefixes="CONDITION_FREE_PREFIXES"
           :label="`${label} condition`"
           :disabled="editor.readOnly.value"
           @update:model-value="setCondition"
