@@ -5,6 +5,7 @@ import type { JwssDefinition, JwssTransition } from '@/types/workflow'
 import { starterDefinition } from './jwssRegistry'
 import {
   CONDITION_MARKER,
+  drawnPartsOf,
   FALLBACK_MARKER,
   workflowGraphOf,
   type WorkflowGraph,
@@ -529,5 +530,42 @@ describe('workflowGraphOf', () => {
     it('maps the same definition to the same graph every time', () => {
       expect(workflowGraphOf(purchase())).toEqual(workflowGraphOf(purchase()))
     })
+  })
+})
+
+describe('drawnPartsOf', () => {
+  /** What the graph is derived from, as `WorkflowGraph.vue` derives it: through JSON. */
+  function throughKey(definition: JwssDefinition): WorkflowGraph {
+    return workflowGraphOf(JSON.parse(JSON.stringify(drawnPartsOf(definition))))
+  }
+
+  it('keeps everything the graph draws: the graph of the parts is the graph of the whole', () => {
+    const odd = purchase()
+
+    odd.initialState = 'NOWHERE'
+    odd.states.push({ ...odd.states[0], name: '' })
+    odd.transitions.push(
+      { from: 'GHOST', to: 'DONE', action: 'AUTO' },
+      { from: 'DONE', to: 'DONE', action: 'APPROVE', condition: false },
+    )
+
+    for (const definition of [purchase(), starterDefinition(), odd]) {
+      expect(throughKey(definition)).toEqual(workflowGraphOf(definition))
+    }
+  })
+
+  it('keeps nothing the graph does not draw', () => {
+    const before = JSON.stringify(drawnPartsOf(purchase()))
+    const edited = purchase()
+
+    edited.name = 'Renamed'
+    edited.workflowKey = 'renamed'
+    edited.description = 'Typed'
+    edited.states[0].mapsToDocumentStatus = 'IN_REVIEW'
+    edited.states[0].task!.dueInHours = 48
+    edited.transitions[0].condition = { '<': [{ var: 'formData.amount' }, 5] }
+    edited.transitions[1].requiresComment = true
+
+    expect(JSON.stringify(drawnPartsOf(edited))).toBe(before)
   })
 })

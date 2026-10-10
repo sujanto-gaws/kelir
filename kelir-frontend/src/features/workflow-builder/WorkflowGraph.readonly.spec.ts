@@ -262,47 +262,79 @@ describe('WorkflowGraph, whatever Vue Flow emits', () => {
       expect(flow.fitView).toHaveBeenCalledTimes(1)
     })
 
-    // DEFECT (#719 campaign, 2026-10-10): the draft builds a new definition
-    // on every edit, and the graph recomputes its nodes for any new object,
-    // then refits. The workflow's name, key and description sit above the
-    // tabs and stay editable while the graph shows, so each keystroke there
-    // throws away a reader's zoom and pan though nothing drawn has changed.
-    it.fails(
-      'keeps the reader’s zoom while a field the graph does not draw is edited',
-      async () => {
-        const page = render(definition())
+    // The draft builds a new definition on every edit, and the graph
+    // recomputed its nodes for any new object, then refitted (the #719
+    // campaign). The workflow's name, key and description sit above the tabs
+    // and stay editable while the graph shows, so each keystroke there threw
+    // away a reader's zoom and pan though nothing drawn had changed.
+    it('keeps the reader’s zoom while a field the graph does not draw is edited', async () => {
+      const page = render(definition())
 
+      await flushPromises()
+      await page.get('[aria-label="Zoom in"]').trigger('click')
+      flow.fitView.mockClear()
+
+      for (const name of ['P', 'Pu', 'Pur']) {
+        await page.setProps({ definition: { ...definition(), name, description: name } })
         await flushPromises()
-        await page.get('[aria-label="Zoom in"]').trigger('click')
-        flow.fitView.mockClear()
+      }
 
-        for (const name of ['P', 'Pu', 'Pur']) {
-          await page.setProps({ definition: { ...definition(), name, description: name } })
-          await flushPromises()
-        }
+      expect(flow.zoomIn).toHaveBeenCalledTimes(1)
+      expect(flow.fitView).not.toHaveBeenCalled()
+    })
 
-        expect(flow.zoomIn).toHaveBeenCalledTimes(1)
-        expect(flow.fitView).not.toHaveBeenCalled()
-      },
-    )
-
-    // DEFECT (#719 campaign, 2026-10-10), the same cause at a cost: the layout
-    // is recomputed for a change it does not draw. dagre's time grows faster
-    // than the definition (measured in jsdom, one layout: 20 states and 55
-    // transitions 0.2 s, 40 and 115 0.8 s, 80 and 235 3.0 s, 150 and 441
-    // 5.1 s), and JWSS sets no maximum, so typing a name beside a large
-    // graph stalls the page on every keystroke.
-    it.fails('does not lay the graph out again for a change it does not draw', async () => {
+    // The same cause at a cost: the layout was recomputed for a change it does
+    // not draw. dagre's time grows faster than the definition (measured in
+    // jsdom, one layout: 20 states and 55 transitions 0.2 s, 40 and 115 0.8 s,
+    // 80 and 235 3.0 s, 150 and 441 5.1 s), and JWSS sets no maximum, so typing
+    // a name beside a large graph stalled the page on every keystroke. One
+    // layout of a large definition is still that slow: #721.
+    it('does not lay the graph out again for a change it does not draw', async () => {
       const page = render(definition())
 
       await flushPromises()
 
       const once = vi.mocked(layoutWorkflowGraph).mock.calls.length
+      const undrawn: JwssDefinition[] = [
+        { ...definition(), name: 'Renamed' },
+        { ...definition(), workflowKey: 'renamed', version: '1.0.1', description: 'Typed' },
+        { ...definition(), settings: { anything: true }, variables: [] },
+      ]
+      const restated = definition()
 
-      await page.setProps({ definition: { ...definition(), name: 'Renamed' } })
-      await flushPromises()
+      restated.states[0].mapsToDocumentStatus = 'IN_REVIEW'
+      restated.transitions[0].allowedBy = 'role:MANAGER'
+      undrawn.push(restated)
+
+      for (const next of undrawn) {
+        await page.setProps({ definition: next })
+        await flushPromises()
+      }
 
       expect(vi.mocked(layoutWorkflowGraph).mock.calls.length).toBe(once)
+    })
+
+    it('lays the graph out again when a condition is added, which the graph marks', async () => {
+      const page = render(definition())
+
+      await flushPromises()
+
+      const once = vi.mocked(layoutWorkflowGraph).mock.calls.length
+      const conditioned = definition()
+
+      conditioned.transitions[0].condition = { '>': [{ var: 'formData.amount' }, 10] }
+      await page.setProps({ definition: conditioned })
+      await flushPromises()
+
+      expect(vi.mocked(layoutWorkflowGraph).mock.calls.length).toBe(once + 1)
+
+      const reworded = definition()
+
+      reworded.transitions[0].condition = { '>': [{ var: 'formData.amount' }, 99] }
+      await page.setProps({ definition: reworded })
+      await flushPromises()
+
+      expect(vi.mocked(layoutWorkflowGraph).mock.calls.length).toBe(once + 1)
     })
   })
 })

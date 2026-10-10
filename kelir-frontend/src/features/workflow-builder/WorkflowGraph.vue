@@ -19,9 +19,11 @@ import { cn } from '@/lib/utils'
 import type { JwssDefinition } from '@/types/workflow'
 
 import {
+  drawnPartsOf,
   workflowGraphOf,
   type WorkflowGraphEdge,
   type WorkflowGraphNode,
+  type WorkflowGraphSource,
 } from './workflowGraphMapping'
 import {
   layoutWorkflowGraph,
@@ -40,9 +42,12 @@ import {
  * position — goes back into the definition. The list beside it is where a
  * workflow is edited, and the list is this picture's text alternative.
  *
- * **Laid out on every load**, by `workflowGraphLayout`, and again whenever the
- * definition changes: an undo, a redo, or the server's copy after a save. No
- * layout is stored, so `jwss-meta-v1.0.0.json` is unchanged.
+ * **Laid out on every load**, by `workflowGraphLayout`, and again whenever
+ * what it draws changes: a state or transition edited, an undo, a redo, or the
+ * server's copy after a save. An edit to the name, the key or the description
+ * draws nothing, so it neither lays the graph out again nor refits the
+ * reader's zoom (`drawnPartsOf`). No layout is stored, so
+ * `jwss-meta-v1.0.0.json` is unchanged.
  *
  * **Off the first-load path** ([ADR-0046]): this component is the only module
  * that imports `@vue-flow/*` and `@dagrejs/dagre`, and the editor reaches it
@@ -65,7 +70,11 @@ const props = defineProps<{ definition: JwssDefinition }>()
 const flowId = `workflow-graph-${useId()}`
 const { fitView, zoomIn, zoomOut } = useVueFlow(flowId)
 
-const graph = computed(() => workflowGraphOf(props.definition))
+// The graph is derived from the key alone, and a computed whose value is the
+// same string does not trigger what reads it: an edit to anything the graph
+// does not draw neither lays it out again nor fits the view.
+const drawingKey = computed(() => JSON.stringify(drawnPartsOf(props.definition)))
+const graph = computed(() => workflowGraphOf(JSON.parse(drawingKey.value) as WorkflowGraphSource))
 const layout = computed(() => layoutWorkflowGraph(graph.value))
 
 const nodes = computed<Node<WorkflowGraphNode>[]>(() =>
@@ -146,7 +155,7 @@ function fit(): void {
   void fitView({ padding: 0.15 })
 }
 
-// Re-laid out on every change of the definition; fitted again once drawn.
+// Re-laid out on every change to what is drawn; fitted again once drawn.
 watch(nodes, async () => {
   await nextTick()
   fit()

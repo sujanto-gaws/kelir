@@ -1,4 +1,4 @@
-import type { JwssDefinition, TransitionAction } from '@/types/workflow'
+import type { TransitionAction } from '@/types/workflow'
 
 import { TRANSITION_ACTIONS } from './jwssRegistry'
 
@@ -85,8 +85,55 @@ function labelOf(action: TransitionAction): string {
   return TRANSITION_ACTIONS[action]?.label ?? action
 }
 
+/**
+ * The parts of a definition the graph reads, and nothing else: a full
+ * `JwssDefinition` is one, and so is what `drawnPartsOf` keeps of it.
+ */
+export interface WorkflowGraphSource {
+  initialState?: string
+  states?: {
+    code: string
+    name?: string
+    isFinal?: boolean
+    task?: { taskName: string; taskDefinitionKey: string }
+  }[]
+  transitions?: { from: string; to: string; action: TransitionAction; condition?: unknown }[]
+}
+
+/**
+ * What of a definition the graph draws, copied out of it: the initial state,
+ * each state's code, name, finality and task name, and each transition's ends,
+ * action and whether it has a condition (not the condition itself, which is
+ * drawn only as a marker).
+ *
+ * **The graph is laid out again only when this changes** (#719). The draft is
+ * a new object on every edit, the name's and the description's included, and
+ * a layout grows faster than the definition; `JSON.stringify` of this is the
+ * key the graph is derived from, so an edit the graph does not draw neither
+ * lays it out again nor fits the view.
+ */
+export function drawnPartsOf(definition: WorkflowGraphSource): WorkflowGraphSource {
+  return {
+    initialState: definition.initialState,
+    states: (definition.states ?? []).map((state) => ({
+      code: state.code,
+      name: state.name,
+      isFinal: state.isFinal,
+      task: state.task
+        ? { taskName: state.task.taskName, taskDefinitionKey: state.task.taskDefinitionKey }
+        : undefined,
+    })),
+    transitions: (definition.transitions ?? []).map((transition) => ({
+      from: transition.from,
+      to: transition.to,
+      action: transition.action,
+      condition: hasCondition(transition) ? true : undefined,
+    })),
+  }
+}
+
 /** The graph a definition draws. Pure: the definition is read, never changed. */
-export function workflowGraphOf(definition: JwssDefinition): WorkflowGraph {
+export function workflowGraphOf(definition: WorkflowGraphSource): WorkflowGraph {
   const states = definition.states ?? []
   const transitions = definition.transitions ?? []
 
