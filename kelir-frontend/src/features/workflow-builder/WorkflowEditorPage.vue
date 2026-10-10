@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, provide, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Plus, Redo2, Undo2 } from 'lucide-vue-next'
+import { Plus, Redo2, Undo2 } from '@lucide/vue'
 
 import { toApiError } from '@/api/client'
 import { ApiError } from '@/api/error'

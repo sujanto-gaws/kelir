@@ -8,6 +8,7 @@ import { registerSessionBridge } from '@/api/session'
 import {
   installFakeBackend,
   itemBody,
+  pageBody,
   type FakeBackendHandle,
   type FakeReply,
 } from '@/lib/testing/fake-backend'
@@ -29,6 +30,7 @@ function profileBody(permissions: string[]): unknown {
 describe('AppLayout', () => {
   let backend: FakeBackendHandle
   let permissions: string[]
+  let menus: unknown[]
   let router: Router
 
   beforeEach(() => {
@@ -36,7 +38,12 @@ describe('AppLayout', () => {
     window.localStorage.clear()
 
     permissions = []
+    menus = []
     backend = installFakeBackend((request): FakeReply => {
+      if (request.url.startsWith('/rad/menus')) {
+        return { status: 200, body: pageBody(menus) }
+      }
+
       if (request.url === '/auth/login') {
         return {
           status: 200,
@@ -76,6 +83,9 @@ describe('AppLayout', () => {
         { path: '/admin/external-systems', name: 'admin-external-systems', component: blank },
         { path: '/admin/integration-logs', name: 'admin-integration-logs', component: blank },
         { path: '/admin/workflows', name: 'admin-workflows', component: blank },
+        { path: '/admin/menus', name: 'admin-menus', component: blank },
+        { path: '/forms', component: blank },
+        { path: '/mystery', component: blank },
       ],
     })
   })
@@ -155,6 +165,46 @@ describe('AppLayout', () => {
     permissions = ['workflow:definition:read']
 
     expect((await renderSignedIn()).find('a[href="/admin/workflows"]').exists()).toBe(true)
+  })
+
+  /**
+   * **#698: a configured entry's `icon` is looked up by name in `@lucide/vue`.**
+   * The swap from `lucide-vue-next` kept `import * as` and the kebab-to-Pascal
+   * lookup, so a renamed export in the successor would turn every tenant's
+   * icon into the fallback with nothing failing but this.
+   */
+  it('draws a configured entry with the Lucide icon its name gives', async () => {
+    const entry = (id: string, label: string, icon: string, sortOrder: number) => ({
+      id,
+      menuKey: id,
+      label,
+      icon,
+      parentMenuId: null,
+      routePath: `/${id}`,
+      requiredPermission: null,
+      source: 'CONFIG',
+      sortOrder,
+      isEnabled: true,
+      createdAt: '2026-10-10T00:00:00Z',
+      updatedAt: '2026-10-10T00:00:00Z',
+    })
+
+    menus = [
+      entry('forms', 'Forms', 'file-cog', 900),
+      entry('mystery', 'Mystery', 'not-an-icon-anywhere', 910),
+    ]
+    permissions = ['rad:menu:read']
+
+    const wrapper = await renderSignedIn()
+
+    await flushPromises()
+
+    const named = wrapper.find('[data-testid="nav-config:forms"] svg')
+    const unknown = wrapper.find('[data-testid="nav-config:mystery"] svg')
+
+    expect(named.classes()).toContain('lucide-file-cog')
+    // An unknown name falls back to the neutral icon rather than to nothing.
+    expect(unknown.classes()).toContain('lucide-circle')
   })
 
   it('names the signed-in user', async () => {

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { ArrowDown, ArrowUp, Trash2 } from 'lucide-vue-next'
+import { ArrowDown, ArrowUp, Trash2 } from '@lucide/vue'
 
 import JsonLogicBuilder from '@/components/logic-builder/JsonLogicBuilder.vue'
 import { Alert } from '@/components/ui/alert'

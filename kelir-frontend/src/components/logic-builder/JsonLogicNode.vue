@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, useId } from 'vue'
-import { ChevronDown, ChevronRight, Plus, Trash2, TriangleAlert } from 'lucide-vue-next'
+import { ChevronDown, ChevronRight, Plus, Trash2, TriangleAlert } from '@lucide/vue'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
