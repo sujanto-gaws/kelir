@@ -189,6 +189,13 @@ While the major version is `0`, the public API may change in any release.
   `@types/web-bluetooth` 0.0.20, all MIT. None of them is on the first-load
   path; the graph's chunk is 218.12 kB, 72.47 kB gzipped, with a 4.11 kB
   stylesheet. Kelir code does not import `@vueuse/core` itself.
+- **ADR-0046 is adopted, and lint refuses the packages it turned down**
+  ([#687](https://github.com/sujanto-gaws/kelir/issues/687), the first of plan
+  19's rows 10 and 11 to add a dependency it names). `eslint.config.js` gains
+  its first `no-restricted-imports` rule. It names zod, `@vueuse/core`,
+  `reka-ui`, `vue-sonner`, `@lucide/vue`, `json-logic-js`, `vuedraggable`,
+  `elkjs` and `dagre`, each with its subpaths and a message citing the record.
+  `@dagrejs/dagre` is not caught by the `dagre` entry.
 
 ### Changed
 
