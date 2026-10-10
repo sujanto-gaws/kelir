@@ -29,11 +29,17 @@ const graph = {
   imports: 0,
   /** Whether the next import rejects, as a chunk rotated away by a deploy does. */
   fail: false,
+  /** While set, the import waits for it, as a chunk on a slow network does. */
+  hold: null as Promise<void> | null,
 }
 
 function mockGraph(): void {
   vi.doMock('./WorkflowGraph.vue', async () => {
     graph.imports += 1
+
+    if (graph.hold) {
+      await graph.hold
+    }
 
     if (graph.fail) {
       throw new Error('the graph chunk is gone')
@@ -153,6 +159,7 @@ describe('WorkflowEditorPage, the graph view', () => {
     mockGraph()
     graph.imports = 0
     graph.fail = false
+    graph.hold = null
     wrapper = null
     stored = record()
     refuse = null
@@ -427,6 +434,85 @@ describe('WorkflowEditorPage, the graph view', () => {
       expect(listPanel(page).hidden).toBe(false)
       expect(page.get('[data-testid="view-list"]').attributes('aria-selected')).toBe('true')
       expect(page.get('[data-testid="state-0"]').text()).toContain('A state needs a name.')
+    })
+  })
+
+  // The test-engineer campaign over PR #719 (2026-10-10).
+  describe('when the graph’s chunk is slow or fails', () => {
+    it('says the graph is being drawn while its chunk is fetched, then draws it', async () => {
+      let arrive!: () => void
+
+      graph.hold = new Promise<void>((resolve) => {
+        arrive = resolve
+      })
+
+      const page = await render()
+
+      await page.get('[data-testid="view-graph"]').trigger('click')
+      // defineAsyncComponent shows the loading component after its 200 ms delay.
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      await settle()
+
+      expect(page.get('[data-testid="workflow-graph-loading"]').text()).toBe('Drawing the graph…')
+      expect(page.find('[data-testid="graph-stub"]').exists()).toBe(false)
+
+      arrive()
+      await settle()
+
+      expect(page.find('[data-testid="workflow-graph-loading"]').exists()).toBe(false)
+      expect(page.find('[data-testid="graph-stub"]').exists()).toBe(true)
+    })
+
+    it('leaves the draft as it was when the chunk fails: a save sends what was loaded', async () => {
+      graph.fail = true
+
+      const page = await render()
+
+      await openGraph(page)
+      expect(page.find('[data-testid="workflow-graph-error"]').exists()).toBe(true)
+
+      await page.get('[data-testid="save-workflow"]').trigger('click')
+      await settle()
+
+      const sent = backend.requests.find((request) => request.method === 'put')!.body as {
+        definition: JwssDefinition
+      }
+
+      expect(sent.definition).toEqual(jwss())
+      expect(page.get('[data-testid="undo"]').attributes('disabled')).toBeDefined()
+    })
+
+    it('keeps the list editable after the chunk fails', async () => {
+      graph.fail = true
+
+      const page = await render()
+
+      await openGraph(page)
+      await page.get('[data-testid="view-list"]').trigger('click')
+      await page.get('[data-testid="workflow-name"]').setValue('Edited after the failure')
+      await settle()
+
+      expect(page.get('[data-testid="undo"]').attributes('disabled')).toBeUndefined()
+      expect(listPanel(page).hidden).toBe(false)
+    })
+
+    // Vue 3.5 clears a failed request (`pendingRequest = null` in its
+    // `onError`), so the tab is a retry: a dropped connection is recovered
+    // from by opening it again, without leaving the page.
+    it('fetches the chunk again when the Graph tab is opened after a failure', async () => {
+      graph.fail = true
+
+      const page = await render()
+
+      await openGraph(page)
+      expect(page.find('[data-testid="workflow-graph-error"]').exists()).toBe(true)
+
+      graph.fail = false
+      await page.get('[data-testid="view-list"]').trigger('click')
+      await openGraph(page)
+
+      expect(graph.imports).toBe(2)
+      expect(page.find('[data-testid="graph-stub"]').exists()).toBe(true)
     })
   })
 })
