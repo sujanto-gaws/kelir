@@ -989,3 +989,942 @@ async fn a_deprecate_sent_while_a_publish_is_in_flight_waits_and_deprecates_it()
     assert_eq!(response.status, StatusCode::OK, "{}", response.body);
     assert_eq!(status_of(&app, id).await, "DEPRECATED");
 }
+
+// ===========================================================================
+// The independent campaign (test-engineer, PR #711, 2026-10-10)
+// ===========================================================================
+//
+// What the builder's tests above did not hold, found by reading the route
+// against #573's criteria and plan 19 row 5: the routing of a type bound at
+// two priorities, the columns a deprecation stamps, a revision soft-deleted
+// under the route, the races with a delete and a submit, a key with several
+// revisions, RESUBMIT on a deprecated revision, and who holds the permission
+// on either side of `0051`. Each test names the mutations seen red against it;
+// the campaign's table is in the PR.
+
+/// A document type with a numbering rule and the given `workflows` bindings.
+async fn document_type_bound(app: &TestApp, token: &str, code: &str, workflows: Value) -> Uuid {
+    let form = published_form(app, token, &code.to_lowercase().replace('_', "-")).await;
+
+    let created = app
+        .post(
+            "/api/v1/document-types",
+            Some(token),
+            json!({
+                "typeCode": code,
+                "name": code,
+                "formId": form,
+                "workflows": workflows,
+            }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+    let type_id = id_of(&created.body["data"]);
+
+    let rule = app
+        .put(
+            &format!("/api/v1/document-types/{type_id}/numbering-rule"),
+            Some(token),
+            json!({
+                "ruleTemplate": format!("{code}-{{year}}-{{sequence}}"),
+                "sequenceScope": "YEAR",
+                "gapPolicy": "GAPLESS",
+            }),
+        )
+        .await;
+    assert_eq!(rule.status, StatusCode::OK, "{}", rule.body);
+
+    type_id
+}
+
+/// The next revision of `from`, as a draft.
+async fn revision_of(app: &TestApp, token: &str, from: Uuid) -> Uuid {
+    let revision = app
+        .post(
+            &format!("{DEFINITIONS}/{from}/revisions"),
+            Some(token),
+            json!({}),
+        )
+        .await;
+    assert_eq!(revision.status, StatusCode::CREATED, "{}", revision.body);
+
+    id_of(&revision.body["data"])
+}
+
+async fn user_id(app: &TestApp, username: &str) -> Uuid {
+    sqlx::query_scalar("SELECT id FROM users WHERE username = $1")
+        .bind(username)
+        .fetch_one(&app.pool)
+        .await
+        .expect("the user")
+}
+
+/// The revisions of `key` in the system tenant, by number: `(version, status)`.
+async fn revisions_of_key(app: &TestApp, key: &str) -> Vec<(i32, String)> {
+    sqlx::query_as(
+        "SELECT version, status FROM workflow_definitions \
+         WHERE workflow_key = $1 AND deleted_at IS NULL ORDER BY version",
+    )
+    .bind(key)
+    .fetch_all(&app.pool)
+    .await
+    .expect("read the key's revisions")
+}
+
+/// The columns a deprecation may and may not stamp.
+#[derive(Debug, PartialEq, sqlx::FromRow)]
+struct Stamps {
+    status: String,
+    published_at: Option<chrono::DateTime<chrono::Utc>>,
+    published_by: Option<Uuid>,
+    updated_by: Option<Uuid>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+async fn stamps(app: &TestApp, id: Uuid) -> Stamps {
+    sqlx::query_as(
+        "SELECT status, published_at, published_by, updated_by, updated_at, deleted_at \
+         FROM workflow_definitions WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(&app.pool)
+    .await
+    .expect("read the revision's stamps")
+}
+
+/// A workflow whose approver can send the document back, and whose owner
+/// resubmits it (`workflow_engine.rs`'s `returnable_workflow`, on this file's
+/// role).
+fn returnable_workflow(key: &str) -> Value {
+    json!({
+        "workflowKey": key,
+        "version": "1.0.0",
+        "name": "Approval that can send back",
+        "initialState": "MANAGER_APPROVAL",
+        "states": [
+            { "code": "MANAGER_APPROVAL", "name": "Manager approval",
+              "mapsToDocumentStatus": "PENDING_APPROVAL",
+              "task": { "taskDefinitionKey": "manager_approval", "taskName": "Decide",
+                        "assignment": { "assigneeType": "ROLE", "roleCode": APPROVER_ROLE } } },
+            { "code": "RETURNED", "name": "Sent back", "mapsToDocumentStatus": "RETURNED" },
+            { "code": "COMPLETED", "name": "Completed", "mapsToDocumentStatus": "COMPLETED",
+              "isFinal": true },
+            { "code": "REJECTED", "name": "Rejected", "mapsToDocumentStatus": "REJECTED",
+              "isFinal": true }
+        ],
+        "transitions": [
+            { "from": "MANAGER_APPROVAL", "to": "COMPLETED", "action": "APPROVE",
+              "allowedBy": format!("ROLE:{APPROVER_ROLE}") },
+            { "from": "MANAGER_APPROVAL", "to": "REJECTED", "action": "REJECT",
+              "allowedBy": format!("ROLE:{APPROVER_ROLE}"), "requiresComment": true },
+            { "from": "MANAGER_APPROVAL", "to": "RETURNED", "action": "RETURN",
+              "allowedBy": format!("ROLE:{APPROVER_ROLE}"), "requiresComment": true },
+            { "from": "RETURNED", "to": "MANAGER_APPROVAL", "action": "RESUBMIT",
+              "allowedBy": "OWNER" }
+        ]
+    })
+}
+
+async fn decide(app: &TestApp, token: &str, task: Uuid, body: Value) -> common::TestResponse {
+    app.post(
+        &format!("/api/v1/workflow/tasks/{task}/decision"),
+        Some(token),
+        body,
+    )
+    .await
+}
+
+/// **A deprecated first-priority binding refuses the submit; it does not fall
+/// through to the binding below it** (#573 criterion 4, the requirements
+/// trace's gap on #711).
+///
+/// `document_type::repository::workflow_binding` takes `ORDER BY priority,
+/// created_at LIMIT 1` without reading the revision's status, and
+/// `engine::start` refuses what it took. So a type bound at priority 1 to a
+/// deprecated revision and at priority 2 to an `ACTIVE` one refuses with 422
+/// `WORKFLOW_NOT_PUBLISHED` at `documentTypeId`, writes no instance, and
+/// leaves the draft a draft. The administrator rebinds; routing does not
+/// quietly change under them.
+///
+/// The converse is held on a second type: deprecating the priority-2 revision
+/// changes nothing for a submit, which still starts on priority 1.
+///
+/// **Seen red** against `workflow_binding` joining `workflow_definitions` and
+/// filtering `d.status = 'ACTIVE'` (the fall-through): the first submit
+/// started an approval on the priority-2 revision.
+#[tokio::test]
+async fn a_deprecated_first_priority_binding_refuses_the_submit_without_falling_through() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let first = published(&app, &token, "dep_prio_first").await;
+    let second = published(&app, &token, "dep_prio_second").await;
+
+    let type_id = document_type_bound(
+        &app,
+        &token,
+        "PR_DEP_PRIO",
+        json!([
+            { "workflowDefinitionId": first, "priority": 1 },
+            { "workflowDefinitionId": second, "priority": 2 },
+        ]),
+    )
+    .await;
+
+    assert_eq!(deprecate(&app, &token, first).await.status, StatusCode::OK);
+
+    let document = draft(&app, &token, type_id).await;
+    let refused = submit(&app, &token, document).await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "the submit fell through to the priority-2 binding: {}",
+        refused.body
+    );
+    assert_eq!(
+        refused.body["error"]["details"][0]["code"], "WORKFLOW_NOT_PUBLISHED",
+        "{}",
+        refused.body
+    );
+    assert_eq!(
+        refused.body["error"]["details"][0]["path"], "documentTypeId",
+        "{}",
+        refused.body
+    );
+    assert!(instance_of(&app, document).await.is_none());
+    assert_eq!(document_status(&app, document).await, "DRAFT");
+
+    let numbered: Option<String> =
+        sqlx::query_scalar("SELECT document_number FROM documents WHERE id = $1")
+            .bind(document)
+            .fetch_one(&app.pool)
+            .await
+            .expect("read the number");
+    assert_eq!(numbered, None, "a refused submit kept a number");
+
+    // The converse: the lower priority deprecated, the higher one still routes.
+    let upper = published(&app, &token, "dep_prio_upper").await;
+    let lower = published(&app, &token, "dep_prio_lower").await;
+    let other_type = document_type_bound(
+        &app,
+        &token,
+        "PR_DEP_PRIO_LOW",
+        json!([
+            { "workflowDefinitionId": upper, "priority": 1 },
+            { "workflowDefinitionId": lower, "priority": 2 },
+        ]),
+    )
+    .await;
+
+    assert_eq!(deprecate(&app, &token, lower).await.status, StatusCode::OK);
+
+    let routed = draft(&app, &token, other_type).await;
+    let submitted = submit(&app, &token, routed).await;
+    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+    assert_eq!(
+        instance_of(&app, routed).await.expect("an instance").0,
+        upper
+    );
+}
+
+/// **The deprecator is stamped as the updater, and the publisher stays the
+/// publisher.** The builder's facts test publishes and deprecates as one user,
+/// so a deprecation that wrote `published_by` would not move it; here a second
+/// user, holding only `read` and `deprecate`, deprecates.
+///
+/// Also held: `updated_at` moves, the envelope's `publishedBy` and
+/// `publishedAt` are the publisher's, and the audit row's actor and tenant are
+/// the deprecator's.
+///
+/// **Seen red** against `repo::deprecate` setting `published_by = $3`, and
+/// against it without `updated_by = $3` (both built online against a
+/// throwaway database, since the statement's text keys the offline entry).
+#[tokio::test]
+async fn the_deprecator_is_stamped_as_the_updater_and_the_publisher_is_kept() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let id = published(&app, &token, "dep_stamps").await;
+    let administrator = user_id(&app, common::ADMIN_USERNAME).await;
+
+    let deprecator_token = caller_holding(
+        &app,
+        fixtures::SYSTEM_TENANT_ID,
+        None,
+        "dep.stamper",
+        &["workflow:definition:read", "workflow:definition:deprecate"],
+    )
+    .await;
+    let deprecator = user_id(&app, "dep.stamper").await;
+
+    let before = stamps(&app, id).await;
+    assert_eq!(before.published_by, Some(administrator));
+
+    let response = deprecate(&app, &deprecator_token, id).await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+
+    let after = stamps(&app, id).await;
+
+    assert_eq!(after.status, "DEPRECATED");
+    assert_eq!(
+        after.published_by,
+        Some(administrator),
+        "the deprecator was recorded as the publisher"
+    );
+    assert_eq!(after.published_at, before.published_at);
+    assert_eq!(
+        after.updated_by,
+        Some(deprecator),
+        "the updater is not the deprecator"
+    );
+    assert!(
+        after.updated_at > before.updated_at,
+        "updated_at did not move: {:?} then {:?}",
+        before.updated_at,
+        after.updated_at
+    );
+    assert_eq!(after.deleted_at, None);
+
+    assert_eq!(
+        response.body["data"]["publishedBy"],
+        administrator.to_string(),
+        "{}",
+        response.body
+    );
+
+    let records = deprecation_records(&app, id).await;
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].2, Some(deprecator));
+
+    let tenant: Uuid = sqlx::query_scalar(
+        "SELECT tenant_id FROM audit_events \
+         WHERE object_id = $1 AND event_type = 'Workflow.Deprecated'",
+    )
+    .bind(id)
+    .fetch_one(&app.pool)
+    .await
+    .expect("the audit row's tenant");
+    assert_eq!(tenant, fixtures::SYSTEM_TENANT_ID);
+}
+
+/// **A soft-deleted revision is not found**, whatever its status was: a
+/// published revision with no running approval is deleted, and deprecating
+/// it then answers 404, writes no audit row, and leaves the row as the delete
+/// left it.
+#[tokio::test]
+async fn a_soft_deleted_revision_cannot_be_deprecated() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let id = published(&app, &token, "dep_deleted").await;
+
+    let deleted = app
+        .delete(&format!("{DEFINITIONS}/{id}"), Some(&token))
+        .await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
+
+    let before = stamps(&app, id).await;
+
+    let refused = deprecate(&app, &token, id).await;
+    assert_eq!(refused.status, StatusCode::NOT_FOUND, "{}", refused.body);
+
+    assert_eq!(stamps(&app, id).await, before, "a deleted revision moved");
+    assert_eq!(before.status, "ACTIVE");
+    assert!(deprecation_records(&app, id).await.is_empty());
+}
+
+/// **A deprecate that waits on a delete in flight finds nothing**: 404, no
+/// audit row, and the row stays `ACTIVE` as the delete left it.
+///
+/// The delete is held uncommitted (`repo::soft_delete` in an open
+/// transaction). The deprecate's `FOR UPDATE` waits on it and, once it
+/// commits, re-reads the row, which no longer matches `deleted_at IS NULL`.
+///
+/// **Seen red** against the service without `repo::lock_for_publish`: the
+/// deprecate read the committed live row, `repo::deprecate` waited and then
+/// matched nothing, and the caller was told 409 "deprecated by another
+/// request" about a revision nobody deprecated.
+#[tokio::test]
+async fn a_deprecate_waiting_on_a_delete_in_flight_finds_nothing() {
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let tenant = fixtures::SYSTEM_TENANT_ID;
+
+    let id = published(&app, &token, "dep_mid_delete").await;
+
+    let mut deleting = app.pool.begin().await.expect("a transaction");
+    let removed = definition_repo::soft_delete(&mut *deleting, tenant, id, None)
+        .await
+        .expect("the delete runs");
+    assert_eq!(removed, 1);
+
+    let deprecating = {
+        let app = Arc::clone(&app);
+        let token = token.clone();
+        tokio::spawn(async move { deprecate(&app, &token, id).await })
+    };
+
+    let waited = waited_on_a_lock(&app, &deprecating).await;
+
+    deleting.commit().await.expect("the delete commits");
+    let response = deprecating.await.expect("the deprecate finished");
+
+    assert!(waited, "the deprecate did not wait on the delete in flight");
+    assert_eq!(
+        response.status,
+        StatusCode::NOT_FOUND,
+        "a deprecate deprecated, or misreported, a deleted revision: {}",
+        response.body
+    );
+
+    let after = stamps(&app, id).await;
+    assert_eq!(after.status, "ACTIVE");
+    assert!(after.deleted_at.is_some());
+    assert!(deprecation_records(&app, id).await.is_empty());
+}
+
+/// **A delete sent while a deprecate is in flight waits for it, then
+/// deletes**: the revision ends `DEPRECATED` and deleted, and each act wrote
+/// its own audit row. Neither is lost and neither fails.
+///
+/// `delete_definition` takes no row lock of its own; its `UPDATE` waits on the
+/// deprecate's `FOR UPDATE` and, the row still live when it ends, matches it.
+#[tokio::test]
+async fn a_delete_sent_while_a_deprecate_is_in_flight_waits_then_deletes() {
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let tenant = fixtures::SYSTEM_TENANT_ID;
+
+    let id = published(&app, &token, "dep_then_delete").await;
+
+    let mut deprecating = app.pool.begin().await.expect("a transaction");
+    assert!(
+        definition_repo::lock_for_publish(&mut deprecating, tenant, id)
+            .await
+            .expect("the lock")
+    );
+    assert_eq!(
+        definition_repo::deprecate(&mut *deprecating, tenant, id, None)
+            .await
+            .expect("the deprecate runs"),
+        1
+    );
+
+    let deleting = {
+        let app = Arc::clone(&app);
+        let token = token.clone();
+        tokio::spawn(async move {
+            app.delete(&format!("{DEFINITIONS}/{id}"), Some(&token))
+                .await
+        })
+    };
+
+    let waited = waited_on_a_lock(&app, &deleting).await;
+
+    deprecating.commit().await.expect("the deprecate commits");
+    let response = deleting.await.expect("the delete finished");
+
+    assert!(waited, "the delete did not wait on the deprecate in flight");
+    assert_eq!(response.status, StatusCode::NO_CONTENT, "{}", response.body);
+
+    let after = stamps(&app, id).await;
+    assert_eq!(after.status, "DEPRECATED");
+    assert!(after.deleted_at.is_some());
+
+    let deleted_records: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_events \
+         WHERE object_id = $1 AND event_type = 'Workflow.Deleted'",
+    )
+    .bind(id)
+    .fetch_one(&app.pool)
+    .await
+    .expect("count the delete's audit rows");
+    assert_eq!(deleted_records, 1);
+}
+
+/// **A submit that read the revision `ACTIVE` before a deprecate committed
+/// starts on it, and that approval is an ordinary running approval**: it is
+/// decided to the end. The next submit of the type is refused.
+///
+/// The builder said a submit racing a deprecate may start an instance on the
+/// revision. It does: `engine::start` reads the revision's status without a
+/// lock, and the instance's foreign key to the revision then waits on the
+/// deprecate's `FOR UPDATE` and is satisfied once it commits. The result is
+/// the state `running_approvals_carry_on_after_their_revision_is_deprecated`
+/// reaches in order, an instance pinned to a deprecated revision, so it is
+/// harmless: this holds that it runs.
+#[tokio::test]
+async fn a_submit_racing_a_deprecate_starts_an_approval_that_runs_to_the_end() {
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let tenant = fixtures::SYSTEM_TENANT_ID;
+    let approver = approver(&app, "dep.race.approver").await;
+
+    let workflow = published(&app, &token, "dep_submit_race").await;
+    let type_id = document_type(&app, &token, "PR_DEP_RACE", workflow).await;
+    let document = draft(&app, &token, type_id).await;
+
+    let mut deprecating = app.pool.begin().await.expect("a transaction");
+    assert!(
+        definition_repo::lock_for_publish(&mut deprecating, tenant, workflow)
+            .await
+            .expect("the lock")
+    );
+    assert_eq!(
+        definition_repo::deprecate(&mut *deprecating, tenant, workflow, None)
+            .await
+            .expect("the deprecate runs"),
+        1
+    );
+
+    let submitting = {
+        let app = Arc::clone(&app);
+        let token = token.clone();
+        tokio::spawn(async move { submit(&app, &token, document).await })
+    };
+
+    let waited = waited_on_a_lock(&app, &submitting).await;
+
+    deprecating.commit().await.expect("the deprecate commits");
+    let submitted = submitting.await.expect("the submit finished");
+
+    assert!(waited, "the submit did not wait on the deprecate in flight");
+    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+    assert_eq!(status_of(&app, workflow).await, "DEPRECATED");
+
+    let (pinned, state, status) = instance_of(&app, document).await.expect("an instance");
+    assert_eq!(pinned, workflow);
+    assert_eq!(state, "MANAGER_APPROVAL");
+    assert_eq!(status, "RUNNING");
+
+    let task = open_task_of(&app, document).await;
+    let decided = decide(&app, &approver, task, json!({ "action": "APPROVE" })).await;
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+    assert_eq!(document_status(&app, document).await, "COMPLETED");
+
+    let next = draft(&app, &token, type_id).await;
+    let refused = submit(&app, &token, next).await;
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+}
+
+/// **One revision of several is deprecated, and only that one.** Publishing
+/// revision 2 leaves revision 1 `ACTIVE` (User Manual §10.6, Database Schema
+/// §7.1), so a key can hold two; deprecating revision 1 leaves revision 2 as
+/// it was. Then **a new revision is created from the deprecated one**, which
+/// `create_revision` allows: it takes number 3, opens as a draft carrying the
+/// deprecated revision's document, and publishes. Revision 1 stays deprecated.
+///
+/// **Seen red** against `repo::deprecate` matching the key's `ACTIVE`
+/// revisions rather than the one id (built online): revision 2 was deprecated
+/// beside revision 1.
+#[tokio::test]
+async fn one_revision_of_several_is_deprecated_and_a_revision_can_be_made_from_it() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let first = published(&app, &token, "dep_several").await;
+    let second = revision_of(&app, &token, first).await;
+    assert_eq!(publish(&app, &token, second).await.status, StatusCode::OK);
+
+    assert_eq!(
+        revisions_of_key(&app, "dep_several").await,
+        vec![(1, "ACTIVE".to_owned()), (2, "ACTIVE".to_owned())],
+        "publishing revision 2 deprecated revision 1, which no document says it does"
+    );
+
+    let second_before = stamps(&app, second).await;
+
+    assert_eq!(deprecate(&app, &token, first).await.status, StatusCode::OK);
+
+    assert_eq!(
+        revisions_of_key(&app, "dep_several").await,
+        vec![(1, "DEPRECATED".to_owned()), (2, "ACTIVE".to_owned())]
+    );
+    assert_eq!(stamps(&app, second).await, second_before);
+
+    // A revision made from the deprecated one.
+    let revived = app
+        .post(
+            &format!("{DEFINITIONS}/{first}/revisions"),
+            Some(&token),
+            json!({}),
+        )
+        .await;
+    assert_eq!(revived.status, StatusCode::CREATED, "{}", revived.body);
+    assert_eq!(revived.body["data"]["version"], 3);
+    assert_eq!(revived.body["data"]["status"], "DRAFT");
+    let third = id_of(&revived.body["data"]);
+
+    let copied: (Value, Value) = sqlx::query_as(
+        "SELECT (SELECT definition_json FROM workflow_definitions WHERE id = $1), \
+                (SELECT definition_json FROM workflow_definitions WHERE id = $2)",
+    )
+    .bind(first)
+    .bind(third)
+    .fetch_one(&app.pool)
+    .await
+    .expect("read both documents");
+    assert_eq!(
+        copied.0, copied.1,
+        "the revision did not carry the deprecated one's document"
+    );
+
+    assert_eq!(publish(&app, &token, third).await.status, StatusCode::OK);
+    assert_eq!(
+        revisions_of_key(&app, "dep_several").await,
+        vec![
+            (1, "DEPRECATED".to_owned()),
+            (2, "ACTIVE".to_owned()),
+            (3, "ACTIVE".to_owned()),
+        ]
+    );
+}
+
+/// **Revision 1 deprecated while revision 2 is a draft; revision 2 then
+/// published: the key ends with exactly one `ACTIVE` revision**, the new one.
+/// Publishing does not revive the deprecated one, and deprecating did not
+/// touch the draft.
+#[tokio::test]
+async fn deprecating_while_the_next_revision_is_a_draft_leaves_one_active_once_it_publishes() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let first = published(&app, &token, "dep_handover").await;
+    let second = revision_of(&app, &token, first).await;
+
+    let draft_before = stamps(&app, second).await;
+    assert_eq!(deprecate(&app, &token, first).await.status, StatusCode::OK);
+    assert_eq!(
+        stamps(&app, second).await,
+        draft_before,
+        "deprecating moved the draft"
+    );
+
+    assert_eq!(publish(&app, &token, second).await.status, StatusCode::OK);
+
+    assert_eq!(
+        revisions_of_key(&app, "dep_handover").await,
+        vec![(1, "DEPRECATED".to_owned()), (2, "ACTIVE".to_owned())]
+    );
+}
+
+/// **RESUBMIT and decisions on a deprecated revision's running approval carry
+/// on, and the revision keeps holding its role while they do** (D-91 (3)).
+///
+/// A document is submitted and returned, so its instance sits in `RETURNED`
+/// with no open task. The revision is deprecated. The role it names cannot be
+/// deleted, because a deprecated revision with a running instance still holds
+/// it, and with no open task that is the refusal that answers. The owner
+/// resubmits, which `resubmit_workflow` fires on the pinned revision without
+/// asking its status, and the approver approves to the end.
+///
+/// **Seen red** against `definitions_naming_role` reduced to `d.status =
+/// 'ACTIVE'` (built online): the role was deleted under the running approval.
+#[tokio::test]
+async fn resubmit_and_decisions_on_a_deprecated_revisions_running_approval_carry_on() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let approver = approver(&app, "dep.resubmit.approver").await;
+    let role = approver_role(&app, fixtures::SYSTEM_TENANT_ID).await;
+
+    let saved_return = app
+        .post(
+            DEFINITIONS,
+            Some(&token),
+            json!({ "workflowKey": "dep_return", "name": "Approval that can send back",
+                    "definition": returnable_workflow("dep_return") }),
+        )
+        .await;
+    assert_eq!(
+        saved_return.status,
+        StatusCode::CREATED,
+        "{}",
+        saved_return.body
+    );
+    let workflow = id_of(&saved_return.body["data"]);
+    assert_eq!(publish(&app, &token, workflow).await.status, StatusCode::OK);
+
+    let type_id = document_type(&app, &token, "PR_DEP_RETURN", workflow).await;
+    let document = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, document).await.status, StatusCode::OK);
+
+    let task = open_task_of(&app, document).await;
+    let returned = decide(
+        &app,
+        &approver,
+        task,
+        json!({ "action": "RETURN", "comment": "The quotation is for 12 desks, not 2." }),
+    )
+    .await;
+    assert_eq!(returned.status, StatusCode::OK, "{}", returned.body);
+    assert_eq!(document_status(&app, document).await, "RETURNED");
+
+    assert_eq!(
+        deprecate(&app, &token, workflow).await.status,
+        StatusCode::OK
+    );
+
+    // Held by the deprecated revision while its approval runs.
+    let role_refused = app
+        .delete(&format!("/api/v1/identity/roles/{role}"), Some(&token))
+        .await;
+    assert_eq!(
+        role_refused.status,
+        StatusCode::CONFLICT,
+        "{}",
+        role_refused.body
+    );
+    assert_eq!(
+        role_refused.body["error"]["code"], "ROLE_NAMED_BY_PUBLISHED_DEFINITION",
+        "{}",
+        role_refused.body
+    );
+
+    // The owner resubmits on the deprecated revision.
+    let resubmitted = submit(&app, &token, document).await;
+    assert_eq!(resubmitted.status, StatusCode::OK, "{}", resubmitted.body);
+
+    let (pinned, state, status) = instance_of(&app, document).await.expect("the instance");
+    assert_eq!(
+        pinned, workflow,
+        "the resubmission moved to another revision"
+    );
+    assert_eq!(state, "MANAGER_APPROVAL");
+    assert_eq!(status, "RUNNING");
+
+    let task = open_task_of(&app, document).await;
+    let approved = decide(&app, &approver, task, json!({ "action": "APPROVE" })).await;
+    assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
+    assert_eq!(document_status(&app, document).await, "COMPLETED");
+    assert_eq!(status_of(&app, workflow).await, "DEPRECATED");
+}
+
+/// **A tenant provisioned after `0051` has an administrator who deprecates**,
+/// because provisioning grants the catalogue minus the withheld families and
+/// `workflow:definition:*` is not one. That administrator deprecates a
+/// revision in their own tenant, and the audit row is filed under it.
+///
+/// **Across tenants, 403 comes before 404**: a user of that tenant without the
+/// permission is refused 403 on the system tenant's revision, as on an id
+/// nothing has, so a refusal says nothing about what exists elsewhere; the
+/// administrator, holding it, is told 404.
+///
+/// **Seen red** against `WITHHELD_FROM_A_PROVISIONED_TENANT` gaining
+/// `"workflow:definition:deprecate"`: the provisioned administrator did not
+/// hold the code and was refused.
+#[tokio::test]
+async fn a_tenant_provisioned_after_0051_has_an_administrator_who_deprecates() {
+    let app = TestApp::spawn_with(|config| config.multi_tenant = true).await;
+    let system = app
+        .sign_in_to("SYSTEM", common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await;
+
+    let systems_revision = published(&app, &system, "dep_system_side").await;
+
+    let created = app
+        .post(
+            "/api/v1/organization/tenants",
+            Some(&system),
+            json!({
+                "tenantCode": "TNT-DEP",
+                "name": "TNT-DEP Limited",
+                "administrator": {
+                    "username": "tntdep.admin",
+                    "email": "tntdep.admin@example.test",
+                    "displayName": "Tenant Administrator",
+                    "password": "a-sufficiently-long-password",
+                },
+            }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let tenant: Uuid = created.body["data"]["id"]
+        .as_str()
+        .expect("an id")
+        .parse()
+        .expect("a uuid");
+
+    let administrator = app
+        .sign_in_to("TNT-DEP", "tntdep.admin", "a-sufficiently-long-password")
+        .await;
+
+    let profile = app.get("/api/v1/auth/me", Some(&administrator)).await;
+    assert_eq!(profile.status, StatusCode::OK, "{}", profile.body);
+    assert!(
+        profile.body["data"]["permissions"]
+            .as_array()
+            .expect("permissions")
+            .iter()
+            .any(|code| code == "workflow:definition:deprecate"),
+        "a provisioned tenant's administrator does not hold the code: {}",
+        profile.body
+    );
+
+    approver_role(&app, tenant).await;
+    let theirs = saved(&app, &administrator, "dep_provisioned").await;
+    assert_eq!(
+        publish(&app, &administrator, theirs).await.status,
+        StatusCode::OK
+    );
+
+    let accepted = deprecate(&app, &administrator, theirs).await;
+    assert_eq!(accepted.status, StatusCode::OK, "{}", accepted.body);
+    assert_eq!(status_of(&app, theirs).await, "DEPRECATED");
+
+    let filed_under: Uuid = sqlx::query_scalar(
+        "SELECT tenant_id FROM audit_events \
+         WHERE object_id = $1 AND event_type = 'Workflow.Deprecated'",
+    )
+    .bind(theirs)
+    .fetch_one(&app.pool)
+    .await
+    .expect("the audit row");
+    assert_eq!(filed_under, tenant);
+
+    // 403 before 404, across tenants.
+    let reader = caller_holding(
+        &app,
+        tenant,
+        Some("TNT-DEP"),
+        "tntdep.reader",
+        &["workflow:definition:read"],
+    )
+    .await;
+    let forbidden = deprecate(&app, &reader, systems_revision).await;
+    assert_eq!(
+        forbidden.status,
+        StatusCode::FORBIDDEN,
+        "{}",
+        forbidden.body
+    );
+
+    let not_found = deprecate(&app, &administrator, systems_revision).await;
+    assert_eq!(
+        not_found.status,
+        StatusCode::NOT_FOUND,
+        "{}",
+        not_found.body
+    );
+    assert_eq!(status_of(&app, systems_revision).await, "ACTIVE");
+}
+
+/// **`0051` grants the code to the system tenant's `ROLE-ADMIN` alone, so a
+/// tenant provisioned before it runs does not hold it**, and rewords
+/// `workflow:definition:delete`.
+///
+/// The upgrade is replayed: the catalogue row and its grant are removed, a
+/// tenant is provisioned (by the API, so its administrator holds the catalogue
+/// as it then stood), and `0051`'s own text is run again. The system
+/// administrator then holds the code and the old tenant's does not, and is
+/// refused the route, as the migration's header says. That is the precedent
+/// `0049` and `0050` set; the release notes owe operators the grant.
+#[tokio::test]
+async fn migration_0051_grants_the_system_administrator_and_not_an_older_tenants() {
+    let app = TestApp::spawn_with(|config| config.multi_tenant = true).await;
+    let system = app
+        .sign_in_to("SYSTEM", common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await;
+
+    // As migrated: one row, one grant, the delete reworded.
+    let (id, module, holders): (Uuid, String, Vec<Uuid>) = sqlx::query_as(
+        "SELECT p.id, p.module, \
+                array(SELECT rp.role_id FROM role_permissions rp \
+                      WHERE rp.permission_id = p.id AND rp.deleted_at IS NULL) \
+         FROM permissions p WHERE p.permission_code = 'workflow:definition:deprecate'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .expect("the catalogue row");
+    assert_eq!(id, uuid::uuid!("00000000-0000-0000-0001-000000000078"));
+    assert_eq!(module, "workflow");
+    assert_eq!(holders, vec![fixtures::ADMIN_ROLE_ID]);
+
+    let delete_text: String = sqlx::query_scalar(
+        "SELECT description FROM permissions WHERE permission_code = 'workflow:definition:delete'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .expect("the delete code's text");
+    assert_eq!(
+        delete_text,
+        "Delete a workflow revision that no running approval uses"
+    );
+
+    // Back to before 0051, with a tenant provisioned then.
+    sqlx::query("DELETE FROM role_permissions WHERE permission_id = $1")
+        .bind(id)
+        .execute(&app.pool)
+        .await
+        .expect("remove the grant");
+    sqlx::query("DELETE FROM permissions WHERE id = $1")
+        .bind(id)
+        .execute(&app.pool)
+        .await
+        .expect("remove the catalogue row");
+
+    let created = app
+        .post(
+            "/api/v1/organization/tenants",
+            Some(&system),
+            json!({
+                "tenantCode": "TNT-OLD",
+                "name": "TNT-OLD Limited",
+                "administrator": {
+                    "username": "tntold.admin",
+                    "email": "tntold.admin@example.test",
+                    "displayName": "Tenant Administrator",
+                    "password": "a-sufficiently-long-password",
+                },
+            }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let old_tenant: Uuid = created.body["data"]["id"]
+        .as_str()
+        .expect("an id")
+        .parse()
+        .expect("a uuid");
+
+    sqlx::raw_sql(include_str!(
+        "../migrations/0051_workflow_definition_deprecate_permission.sql"
+    ))
+    .execute(&app.pool)
+    .await
+    .expect("0051 runs again");
+
+    let holders: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT rp.tenant_id, rp.role_id FROM role_permissions rp \
+         JOIN permissions p ON p.id = rp.permission_id \
+         WHERE p.permission_code = 'workflow:definition:deprecate' AND rp.deleted_at IS NULL",
+    )
+    .fetch_all(&app.pool)
+    .await
+    .expect("the grants");
+    assert_eq!(
+        holders,
+        vec![(fixtures::SYSTEM_TENANT_ID, fixtures::ADMIN_ROLE_ID)],
+        "0051 granted beyond the system administrator"
+    );
+
+    let old_administrator = app
+        .sign_in_to("TNT-OLD", "tntold.admin", "a-sufficiently-long-password")
+        .await;
+    approver_role(&app, old_tenant).await;
+    let theirs = saved(&app, &old_administrator, "dep_old_tenant").await;
+    assert_eq!(
+        publish(&app, &old_administrator, theirs).await.status,
+        StatusCode::OK
+    );
+
+    let refused = deprecate(&app, &old_administrator, theirs).await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+    assert_eq!(status_of(&app, theirs).await, "ACTIVE");
+}
