@@ -53,11 +53,16 @@ const revisingId = ref('')
 const deprecation = useWorkflowDeprecation()
 const deprecationError = ref('')
 const deprecationNotice = ref('')
-const deprecatingId = ref('')
+/**
+ * Every row whose deprecation is in flight. **A set, not one id**: a second
+ * row can be deprecated while the first is still out, and the first's answer
+ * must not free the second's actions (corrected 2026-10-10, PR #715's campaign).
+ */
+const deprecatingIds = ref(new Set<string>())
 
 /** Whether a row's actions wait: its new revision or its deprecation is in flight. */
 function busy(row: WorkflowDefinitionSummary): boolean {
-  return revisingId.value === row.id || deprecatingId.value === row.id
+  return revisingId.value === row.id || deprecatingIds.value.has(row.id)
 }
 
 function open(row: WorkflowDefinitionSummary): void {
@@ -92,6 +97,10 @@ async function revise(row: WorkflowDefinitionSummary): Promise<void> {
  * **The list is read again after it succeeds, and after a 409**, which the
  * route answers only for a revision that is no longer `ACTIVE`, so the row
  * shows what it now is. A 403 or a 404 reads nothing again.
+ *
+ * **The latest answer is the one shown.** Two deprecations can overlap; each
+ * answer replaces the notice or error before it, both of which name the
+ * revision, and the rows read again show what became of the other.
  */
 async function deprecate(): Promise<void> {
   const target = deprecation.confirm()
@@ -102,22 +111,24 @@ async function deprecate(): Promise<void> {
 
   deprecationError.value = ''
   deprecationNotice.value = ''
-  deprecatingId.value = target.id
+  deprecatingIds.value.add(target.id)
 
   try {
     await deprecateWorkflowDefinition(target.id)
+    deprecationError.value = ''
     deprecationNotice.value = `Revision ${target.version} of ${target.workflowKey} is deprecated.`
     await workflows.load()
   } catch (failure) {
     const error = toApiError(failure)
 
+    deprecationNotice.value = ''
     deprecationError.value = error.message
 
     if (error.status === 409) {
       await workflows.load()
     }
   } finally {
-    deprecatingId.value = ''
+    deprecatingIds.value.delete(target.id)
   }
 }
 

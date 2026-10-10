@@ -514,8 +514,9 @@ describe('WorkflowListPage', () => {
   // Two rows at once, a stale read, and the no-read path carried through to
   // the request. Seen to fail: the ticket dropped from `readBound` (*shows the
   // reopened row’s types…*), and `busy()` holding every row while any one is
-  // deprecating (*leaves another row’s actions free…*). One defect is pinned
-  // with `it.fails`.
+  // deprecating (*leaves another row’s actions free…*). One defect was pinned
+  // with `it.fails`, and is fixed (2026-10-10): see *holds a second row’s
+  // actions…*.
 
   describe('deprecating, adversarially (#713)', () => {
     type Adapter = (config: InternalAxiosRequestConfig) => Promise<AxiosResponse>
@@ -625,14 +626,12 @@ describe('WorkflowListPage', () => {
       expect(wrapper.get('[data-testid="workflow-purchase_approval-2"]').text()).toContain('ACTIVE')
     })
 
-    // DEFECT (test-engineer, 2026-10-10, PR #715): `deprecatingId` holds one
+    // DEFECT (test-engineer, 2026-10-10, PR #715): `deprecatingId` held one
     // row. Deprecate row 1, then row 2 while row 1 is still out: when row 1
-    // returns, its `finally` clears the id, and row 2's actions come back
-    // while row 2's own deprecation is still in flight. A second click then
-    // posts again and is answered 409 "already deprecated" for a revision
-    // this screen just deprecated. Flip to `it` when the list tracks every
-    // in-flight row (a Set, as `busy()` implies).
-    it.fails('holds a second row’s actions until its own deprecation returns', async () => {
+    // returned, its `finally` cleared the id, and row 2's actions came back
+    // while row 2's own deprecation was still in flight. Fixed the same day:
+    // the list holds every in-flight row in a set, and this is a plain `it`.
+    it('holds a second row’s actions until its own deprecation returns', async () => {
       rows = [FIRST, SECOND]
 
       const wrapper = await render(DEPRECATOR)
@@ -670,6 +669,98 @@ describe('WorkflowListPage', () => {
       } finally {
         await releaseSecond()
       }
+    })
+
+    it('shows the latest answer when two deprecations overlap, and frees each row on its own', async () => {
+      // PR #715's campaign: two overlapping deprecations' notice and error
+      // could stand together, each about a different row. The latest answer
+      // replaces the one before; both name their revision, and the rows read
+      // again show what became of the other.
+      rows = [FIRST, SECOND]
+
+      const wrapper = await render(DEPRECATOR)
+
+      await wrapper.get('[data-testid="deprecate-purchase_approval-1"]').trigger('click')
+      await settle()
+
+      const releaseFirst = hold(deprecationOf(FIRST.id))
+
+      await wrapper.get('[data-testid="confirm-action"]').trigger('click')
+      await settle()
+      await wrapper.get('[data-testid="deprecate-purchase_approval-2"]').trigger('click')
+      await settle()
+
+      const releaseSecond = hold(deprecationOf(SECOND.id))
+
+      await wrapper.get('[data-testid="confirm-action"]').trigger('click')
+      await settle()
+
+      try {
+        await releaseFirst()
+
+        expect(wrapper.get('[data-testid="deprecation-notice"]').text()).toBe(
+          'Revision 1 of purchase_approval is deprecated.',
+        )
+        expect(wrapper.find('[data-testid="deprecation-error"]').exists()).toBe(false)
+
+        deprecateReply = {
+          status: 409,
+          body: errorBody('CONFLICT', 'revision 2 of `purchase_approval` is already deprecated'),
+        }
+      } finally {
+        await releaseSecond()
+      }
+
+      expect(wrapper.get('[data-testid="deprecation-error"]').text()).toBe(
+        'revision 2 of `purchase_approval` is already deprecated',
+      )
+      expect(wrapper.find('[data-testid="deprecation-notice"]').exists()).toBe(false)
+      expect(wrapper.get('[data-testid="workflow-purchase_approval-1"]').text()).toContain(
+        'DEPRECATED',
+      )
+      expect(disabled(wrapper, 'revise-purchase_approval-2')).toBe(false)
+    })
+
+    it('shows a later success over an earlier refusal', async () => {
+      rows = [FIRST, SECOND]
+
+      const wrapper = await render(DEPRECATOR)
+
+      await wrapper.get('[data-testid="deprecate-purchase_approval-1"]').trigger('click')
+      await settle()
+
+      const releaseFirst = hold(deprecationOf(FIRST.id))
+
+      await wrapper.get('[data-testid="confirm-action"]').trigger('click')
+      await settle()
+      await wrapper.get('[data-testid="deprecate-purchase_approval-2"]').trigger('click')
+      await settle()
+
+      const releaseSecond = hold(deprecationOf(SECOND.id))
+
+      await wrapper.get('[data-testid="confirm-action"]').trigger('click')
+      await settle()
+
+      try {
+        deprecateReply = {
+          status: 403,
+          body: errorBody('FORBIDDEN', 'Missing workflow:definition:deprecate'),
+        }
+        await releaseFirst()
+
+        expect(wrapper.get('[data-testid="deprecation-error"]').text()).toBe(
+          'Missing workflow:definition:deprecate',
+        )
+
+        deprecateReply = null
+      } finally {
+        await releaseSecond()
+      }
+
+      expect(wrapper.get('[data-testid="deprecation-notice"]').text()).toBe(
+        'Revision 2 of purchase_approval is deprecated.',
+      )
+      expect(wrapper.find('[data-testid="deprecation-error"]').exists()).toBe(false)
     })
 
     it('shows the reopened row’s types, not a late answer for the row first asked', async () => {
