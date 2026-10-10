@@ -41,8 +41,9 @@ import { tabTo } from '../support/keyboard'
  * so the drag's own handler is what `FormBuilderPage.canvas.spec.ts` proves.
  * **Driven reliably only as written**: a single move from the handle straight
  * to the list failed two runs in five, because the browser had not started a
- * drag; the short first move fixes that, and the flow then passed fifteen
- * runs of fifteen in Chromium (2026-10-10).
+ * drag, and the short first move fixes that. And the drop is aimed at the list
+ * where it is during the drag, not where it was before it: the test below says
+ * why, and what CI showed.
  */
 
 let session: ApiSession
@@ -230,18 +231,38 @@ test('a card is dragged by its handle with the pointer', async ({ page }) => {
   const target = page.getByTestId('list-components.1.components')
 
   const from = await handle.boundingBox()
-  const box = await target.boundingBox()
 
   expect(from).not.toBeNull()
-  expect(box).not.toBeNull()
 
-  // Down on the handle, a short move so the browser starts a drag, then the
-  // travel to the empty list in steps, so Sortable sees the pointer arrive.
+  // Down on the handle, and a short move so the browser starts a drag.
   await page.mouse.move(from!.x + from!.width / 2, from!.y + from!.height / 2)
   await page.mouse.down()
   await page.mouse.move(from!.x + from!.width / 2 + 8, from!.y + from!.height / 2 + 8, { steps: 4 })
-  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2, { steps: 16 })
-  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2 + 2, { steps: 4 })
+
+  // Then to the panel's empty list, **aimed where it is now, not where it was
+  // before the drag**. Sortable reorders the form's own list while the card
+  // passes the panel, which moves the panel, and its list, up by the card's
+  // height and animates the move over 150 ms. Aimed once, at the list's place
+  // before the drag, the drop lands where the list was: on a fast run that is
+  // still the list, mid-animation, and once the move has settled it is the
+  // panel's foot, so the card is dropped in the form's list after the panel.
+  // CI's runner reached the settled layout every time (#720, run 38070707064);
+  // a pause before the release reproduced it locally, 3 runs of 3.
+  //
+  // So the pointer is moved to the list's current centre until Sortable has
+  // put the dragged card in that list, its placeholder marked
+  // `sortable-ghost`, and only then released. The release is the one drop;
+  // nothing is retried after it.
+  const ghostInPanel = target.locator(':scope > li.sortable-ghost')
+
+  await expect(async () => {
+    const box = await target.boundingBox()
+
+    expect(box).not.toBeNull()
+    await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2, { steps: 6 })
+    await expect(ghostInPanel).toHaveCount(1, { timeout: 500 })
+  }).toPass({ timeout: 10_000 })
+
   await page.mouse.up()
 
   await expect(page.getByTestId('component-panel_1').getByTestId('component-field_1')).toBeVisible()
