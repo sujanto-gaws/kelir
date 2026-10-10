@@ -1001,6 +1001,15 @@ async fn a_deprecate_sent_while_a_publish_is_in_flight_waits_and_deprecates_it()
 // revisions, RESUBMIT on a deprecated revision, and who holds the permission
 // on either side of `0051`. Each test names the mutations seen red against it;
 // the campaign's table is in the PR.
+//
+// **Three mutations survived, all equivalent** (2026-10-10, built online
+// against a throwaway database): `deleted_at IS NULL` dropped from
+// `repo::lock_for_publish`, and `deleted_at IS NULL` or `status = 'ACTIVE'`
+// dropped from `repo::deprecate`. The first is masked by `find_definition`
+// re-reading the locked row with its own filter; the other two by that read
+// and the service's status `match` running under the lock, which is what
+// `repo::deprecate`'s documentation calls its second line. No test can tell
+// them apart while the lock is taken.
 
 /// A document type with a numbering rule and the given `workflows` bindings.
 async fn document_type_bound(app: &TestApp, token: &str, code: &str, workflows: Value) -> Uuid {
@@ -1151,9 +1160,10 @@ async fn decide(app: &TestApp, token: &str, task: Uuid, body: Value) -> common::
 /// The converse is held on a second type: deprecating the priority-2 revision
 /// changes nothing for a submit, which still starts on priority 1.
 ///
-/// **Seen red** against `workflow_binding` joining `workflow_definitions` and
-/// filtering `d.status = 'ACTIVE'` (the fall-through): the first submit
-/// started an approval on the priority-2 revision.
+/// **Seen red** against `workflow_binding` also requiring the bound revision
+/// to be `ACTIVE` (the fall-through, built online): the first submit started
+/// an approval on the priority-2 revision and the document went to
+/// `PENDING_APPROVAL`.
 #[tokio::test]
 async fn a_deprecated_first_priority_binding_refuses_the_submit_without_falling_through() {
     let app = TestApp::spawn().await;
@@ -1628,6 +1638,8 @@ async fn deprecating_while_the_next_revision_is_a_draft_leaves_one_active_once_i
 ///
 /// **Seen red** against `definitions_naming_role` reduced to `d.status =
 /// 'ACTIVE'` (built online): the role was deleted under the running approval.
+/// And against `resubmit_workflow` refusing a revision that is not `ACTIVE`:
+/// the owner's resubmission was refused.
 #[tokio::test]
 async fn resubmit_and_decisions_on_a_deprecated_revisions_running_approval_carry_on() {
     let app = TestApp::spawn().await;
@@ -1719,7 +1731,9 @@ async fn resubmit_and_decisions_on_a_deprecated_revisions_running_approval_carry
 ///
 /// **Seen red** against `WITHHELD_FROM_A_PROVISIONED_TENANT` gaining
 /// `"workflow:definition:deprecate"`: the provisioned administrator did not
-/// hold the code and was refused.
+/// hold the code and was refused. Against the audit entry filed under the
+/// system tenant rather than the caller's. And against the service checking
+/// the permission after the lookup: the reader was told 404.
 #[tokio::test]
 async fn a_tenant_provisioned_after_0051_has_an_administrator_who_deprecates() {
     let app = TestApp::spawn_with(|config| config.multi_tenant = true).await;
@@ -1825,7 +1839,10 @@ async fn a_tenant_provisioned_after_0051_has_an_administrator_who_deprecates() {
 /// as it then stood), and `0051`'s own text is run again. The system
 /// administrator then holds the code and the old tenant's does not, and is
 /// refused the route, as the migration's header says. That is the precedent
-/// `0049` and `0050` set; the release notes owe operators the grant.
+/// `0049` and `0050` set, and `CHANGELOG.md`'s upgrade note tells operators.
+///
+/// **Seen red** against `0051` granting every tenant's `ROLE-ADMIN`, and
+/// against it leaving the delete code's description as it was.
 #[tokio::test]
 async fn migration_0051_grants_the_system_administrator_and_not_an_older_tenants() {
     let app = TestApp::spawn_with(|config| config.multi_tenant = true).await;
