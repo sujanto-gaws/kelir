@@ -9,12 +9,14 @@ import { apiClient } from '@/api/client'
 import {
   errorBody,
   installFakeBackend,
+  pageBody,
   validationReply,
   type FakeBackendHandle,
   type FakeReply,
   type RecordedRequest,
 } from '@/lib/testing/fake-backend'
 import { jwssViolations } from '@/lib/testing/jwss-meta-schema'
+import { press, tabTo } from '@/lib/testing/keyboard'
 import { useAuthStore } from '@/stores/auth'
 import type { CurrentUser } from '@/types/auth'
 import type { JwssDefinition } from '@/types/workflow'
@@ -151,11 +153,20 @@ const EVERY_PERMISSION = [
   'workflow:definition:publish',
 ]
 
+/** Every permission above, the deprecation (**D-108**), and the read its warning makes (#713). */
+const DEPRECATOR = [...EVERY_PERMISSION, 'workflow:definition:deprecate', 'document-type:read']
+
 describe('WorkflowEditorPage', () => {
   let backend: FakeBackendHandle
   let stored: ReturnType<typeof record>
   /** What the next write answers instead of succeeding, when set. */
   let refuse: FakeReply | null
+  /** The document types the list's `workflowDefinitionId` filter answers (#713). */
+  let boundTypes: unknown[]
+  /** How many there are in all, when more than the page holds. */
+  let boundTotal: number | null
+  /** What the bound-types read answers instead, when set. */
+  let typesReply: FakeReply | null
   let router: Router
   let wrapper: VueWrapper | null
 
@@ -165,6 +176,9 @@ describe('WorkflowEditorPage', () => {
 
     stored = record()
     refuse = null
+    boundTypes = []
+    boundTotal = null
+    typesReply = null
     wrapper = null
 
     backend = installFakeBackend((request: RecordedRequest) => {
@@ -172,6 +186,15 @@ describe('WorkflowEditorPage', () => {
         definition?: JwssDefinition
         name?: string
         description?: string
+      }
+
+      if (request.url === '/document-types') {
+        return (
+          typesReply ?? {
+            status: 200,
+            body: pageBody(boundTypes, { pageSize: 100, total: boundTotal ?? boundTypes.length }),
+          }
+        )
       }
 
       if (request.method !== 'get' && refuse) {
@@ -211,6 +234,12 @@ describe('WorkflowEditorPage', () => {
 
       if (request.url.endsWith('/publication')) {
         stored = { ...stored, status: 'ACTIVE' }
+
+        return { status: 200, body: { success: true, data: stored } }
+      }
+
+      if (request.url.endsWith('/deprecation')) {
+        stored = { ...stored, status: 'DEPRECATED' }
 
         return { status: 200, body: { success: true, data: stored } }
       }
@@ -648,14 +677,22 @@ describe('WorkflowEditorPage', () => {
       expect(page.get('[data-testid="workflow-name"]').attributes('disabled')).toBeUndefined()
     })
 
-    it('says a deprecated revision is not bindable, and offers no deprecate yet', async () => {
+    it('says a deprecated revision is not bindable, and offers Deprecate only on an active one', async () => {
+      // Inverted 2026-10-10 (#713): this asserted no Deprecate anywhere until
+      // #573's route merged. The route is #711's, and the action is here.
       stored = record({ status: 'DEPRECATED' })
 
-      const page = await render()
+      const deprecated = await render({ permissions: DEPRECATOR })
 
-      expect(page.get('[data-testid="published-notice"]').text()).toContain('deprecated')
-      // #573's route is not merged; there is no button for it rather than a dead one.
-      expect(page.text()).not.toMatch(/Deprecate\b/)
+      expect(deprecated.get('[data-testid="published-notice"]').text()).toContain('deprecated')
+      expect(deprecated.text()).not.toMatch(/Deprecate\b/)
+
+      deprecated.unmount()
+      stored = record({ status: 'ACTIVE' })
+
+      const active = await render({ permissions: DEPRECATOR })
+
+      expect(active.get('[data-testid="deprecate-workflow"]').text()).toMatch(/Deprecate\b/)
     })
 
     it('offers no new revision to a caller who cannot create one', async () => {
@@ -1869,17 +1906,32 @@ describe('WorkflowEditorPage', () => {
       expect(enabledControls(page)).toEqual(['new-revision'])
     })
 
-    it('offers no deprecate on an ACTIVE revision, and calls no deprecation route', async () => {
+    it('offers Deprecate on an ACTIVE revision, and calls the route only once it is confirmed', async () => {
+      // Inverted 2026-10-10 (#713): this asserted no deprecate control and no
+      // deprecation route on an ACTIVE revision, until #573's route merged.
       stored = record({ status: 'ACTIVE' })
 
-      const page = await render()
+      const page = await render({ permissions: DEPRECATOR })
 
-      for (const control of page.findAll('button, a, [role="button"]')) {
-        expect(control.text()).not.toMatch(/deprecat|retire/i)
-        expect(control.attributes('aria-label') ?? '').not.toMatch(/deprecat|retire/i)
-      }
+      const controls = page
+        .findAll('button, a, [role="button"]')
+        .filter((control) => /deprecat|retire/i.test(control.text()))
+
+      expect(controls.map((control) => control.attributes('data-testid'))).toEqual([
+        'deprecate-workflow',
+      ])
+
+      await page.get('[data-testid="deprecate-workflow"]').trigger('click')
+      await settle()
 
       expect(backend.requests.some((request) => /deprecat/i.test(request.url))).toBe(false)
+
+      await page.get('[data-testid="confirm-action"]').trigger('click')
+      await settle()
+
+      expect(writes().map((request) => `${request.method} ${request.url}`)).toEqual([
+        `post /workflow/definitions/${ID}/deprecation`,
+      ])
     })
   })
 
@@ -2530,6 +2582,501 @@ describe('WorkflowEditorPage', () => {
       expect(writes().map((request) => request.method)).toEqual(['put'])
       expect(page.get('[data-testid="status"]').text()).toBe('ACTIVE')
       expect(page.find('[data-testid="new-revision"]').exists()).toBe(true)
+    })
+  })
+
+  // --- Deprecating a revision (#713, plan 19 row 6b; D-101 B, D-108) ---------
+  //
+  // Seen to fail (coding standard §2.9): the twenty-six mutations run over this
+  // row on 2026-10-10, and the tests each reddened here, are tabled in
+  // `useWorkflowDeprecation.spec.ts`'s header.
+
+  describe('deprecating a revision (#713)', () => {
+    const TYPES = [
+      {
+        id: 'dt-1',
+        typeCode: 'PURCHASE_REQUEST',
+        name: 'Purchase request',
+        category: null,
+        formId: null,
+        status: 'ACTIVE',
+        createdAt: '2026-10-09T00:00:00Z',
+        updatedAt: '2026-10-09T00:00:00Z',
+      },
+      {
+        id: 'dt-2',
+        typeCode: 'CAPEX_REQUEST',
+        name: 'Capital expense',
+        category: null,
+        formId: null,
+        status: 'DRAFT',
+        createdAt: '2026-10-09T00:00:00Z',
+        updatedAt: '2026-10-09T00:00:00Z',
+      },
+    ]
+
+    async function ask(page: VueWrapper): Promise<void> {
+      await page.get('[data-testid="deprecate-workflow"]').trigger('click')
+      await settle()
+    }
+
+    function typeReads(): RecordedRequest[] {
+      return backend.requests.filter((request) => request.url === '/document-types')
+    }
+
+    function definitionReads(): RecordedRequest[] {
+      return backend.requests.filter(
+        (request) => request.method === 'get' && request.url === `/workflow/definitions/${ID}`,
+      )
+    }
+
+    function cancelButton(page: VueWrapper) {
+      return page.findAll('button').find((button) => button.text() === 'Cancel')!
+    }
+
+    it.each([
+      ['on an ACTIVE revision to a holder of deprecate', 'ACTIVE', DEPRECATOR, true],
+      [
+        'not on an ACTIVE revision to a caller without deprecate',
+        'ACTIVE',
+        EVERY_PERMISSION,
+        false,
+      ],
+      ['not on a DRAFT revision', 'DRAFT', DEPRECATOR, false],
+      ['not on a DEPRECATED revision', 'DEPRECATED', DEPRECATOR, false],
+    ])('offers Deprecate %s', async (_case, status, permissions, offered) => {
+      stored = record({ status })
+
+      const page = await render({ permissions })
+
+      expect(page.find('[data-testid="deprecate-workflow"]').exists()).toBe(offered)
+    })
+
+    it('warns before it deprecates, naming the document types still bound, read in one call', async () => {
+      stored = record({ status: 'ACTIVE' })
+      boundTypes = TYPES
+
+      const page = await render({ permissions: DEPRECATOR })
+
+      await ask(page)
+
+      expect(typeReads()).toHaveLength(1)
+      expect(typeReads()[0].params).toEqual({ workflowDefinitionId: ID, pageSize: 100 })
+      expect(page.get('[data-testid="bound-types"]').text()).toContain(
+        'may block their submissions until each is bound to a published revision, unless another binding routes them first or theirs has lapsed',
+      )
+      expect(page.findAll('[data-testid="bound-type"]').map((item) => item.text())).toEqual([
+        'Purchase request (PURCHASE_REQUEST)',
+        'Capital expense (CAPEX_REQUEST)',
+      ])
+      expect(page.find('[data-testid="bound-types-more"]').exists()).toBe(false)
+      // Nothing is deprecated by the warning itself.
+      expect(writes()).toEqual([])
+      expect(page.get('[data-testid="status"]').text()).toBe('ACTIVE')
+    })
+
+    it('names the first hundred and says how many more there are', async () => {
+      stored = record({ status: 'ACTIVE' })
+      boundTypes = TYPES
+      boundTotal = 130
+
+      const page = await render({ permissions: DEPRECATOR })
+
+      await ask(page)
+
+      expect(page.findAll('[data-testid="bound-type"]')).toHaveLength(2)
+      expect(page.get('[data-testid="bound-types-more"]').text()).toBe('and 128 more, 130 in all.')
+    })
+
+    it('says no document type is bound when none is, and deprecates once confirmed', async () => {
+      stored = record({ status: 'ACTIVE' })
+
+      const page = await render({ permissions: DEPRECATOR })
+
+      await ask(page)
+
+      expect(page.get('[data-testid="bound-types-none"]').text()).toBe(
+        'No document type is bound to this revision.',
+      )
+      expect(page.find('[data-testid="bound-types"]').exists()).toBe(false)
+
+      await page.get('[data-testid="confirm-action"]').trigger('click')
+      await settle()
+
+      expect(writes().map((request) => request.url)).toEqual([
+        `/workflow/definitions/${ID}/deprecation`,
+      ])
+    })
+
+    it('says it could not check without document-type:read, reads nothing, and still deprecates', async () => {
+      stored = record({ status: 'ACTIVE' })
+
+      const page = await render({
+        permissions: DEPRECATOR.filter((permission) => permission !== 'document-type:read'),
+      })
+
+      await ask(page)
+
+      expect(typeReads()).toEqual([])
+      expect(page.get('[data-testid="bound-types-unchecked"]').text()).toContain(
+        'You cannot read document types, so whether any is still bound to this revision could not be checked.',
+      )
+      expect(page.get('[data-testid="bound-types-unchecked"]').text()).toContain(
+        'Deprecating may block submissions for any document type still bound to it',
+      )
+      expect(page.get('[data-testid="confirm-action"]').attributes('disabled')).toBeUndefined()
+
+      await page.get('[data-testid="confirm-action"]').trigger('click')
+      await settle()
+
+      expect(page.get('[data-testid="status"]').text()).toBe('DEPRECATED')
+    })
+
+    it.each([
+      [
+        'refused',
+        { status: 403, body: errorBody('FORBIDDEN', 'Missing document-type:read') },
+        'You cannot read document types',
+      ],
+      [
+        'failing',
+        { status: 500, body: errorBody('INTERNAL_ERROR', 'The database is unreachable') },
+        'could not be checked: The database is unreachable',
+      ],
+    ])(
+      'says it could not check when the read is %s, and leaves cancel and confirm to the caller',
+      async (_case, reply, says) => {
+        stored = record({ status: 'ACTIVE' })
+        typesReply = reply as FakeReply
+
+        const page = await render({ permissions: DEPRECATOR })
+
+        await ask(page)
+
+        expect(page.get('[data-testid="bound-types-unchecked"]').text()).toContain(says)
+        expect(page.find('[data-testid="bound-type"]').exists()).toBe(false)
+        expect(page.get('[data-testid="confirm-action"]').attributes('disabled')).toBeUndefined()
+        expect(cancelButton(page).attributes('disabled')).toBeUndefined()
+      },
+    )
+
+    it('holds the confirm button, not Cancel, while the bound types are being read', async () => {
+      stored = record({ status: 'ACTIVE' })
+      boundTypes = TYPES
+
+      const page = await render({ permissions: DEPRECATOR })
+      const release = holdRequest((config) => config.url === '/document-types')
+
+      await ask(page)
+
+      expect(page.find('[data-testid="bound-types-checking"]').exists()).toBe(true)
+      expect(page.get('[data-testid="confirm-action"]').attributes('disabled')).toBeDefined()
+      expect(cancelButton(page).attributes('disabled')).toBeUndefined()
+
+      await page.get('[data-testid="confirm-action"]').trigger('click')
+      await release()
+
+      expect(writes()).toEqual([])
+      expect(page.findAll('[data-testid="bound-type"]')).toHaveLength(2)
+      expect(page.get('[data-testid="confirm-action"]').attributes('disabled')).toBeUndefined()
+    })
+
+    it('does nothing when cancelled', async () => {
+      stored = record({ status: 'ACTIVE' })
+      boundTypes = TYPES
+
+      const page = await render({ permissions: DEPRECATOR })
+
+      await ask(page)
+      await cancelButton(page).trigger('click')
+      await settle()
+
+      expect(page.find('[data-testid="confirm-action"]').exists()).toBe(false)
+      expect(writes()).toEqual([])
+      expect(page.get('[data-testid="status"]').text()).toBe('ACTIVE')
+      expect(page.get('[data-testid="published-notice"]').text()).toContain('is published')
+      expect(page.find('[data-testid="deprecate-workflow"]').exists()).toBe(true)
+    })
+
+    it('turns the screen read-only and says it is deprecated once it succeeds', async () => {
+      stored = record({ status: 'ACTIVE' })
+      boundTypes = TYPES
+
+      const page = await render({ permissions: DEPRECATOR })
+
+      await ask(page)
+      await page.get('[data-testid="confirm-action"]').trigger('click')
+      await settle()
+
+      expect(page.find('[data-testid="confirm-action"]').exists()).toBe(false)
+      expect(page.get('[data-testid="status"]').text()).toBe('DEPRECATED')
+      expect(page.get('[data-testid="published-notice"]').text()).toContain(
+        'This revision is deprecated and cannot be edited',
+      )
+      expect(page.get('[data-testid="notice"]').text()).toContain(
+        'New documents no longer route to revision 1',
+      )
+      expect(page.find('[data-testid="deprecate-workflow"]').exists()).toBe(false)
+      expect(enabledControls(page)).toEqual(['new-revision'])
+    })
+
+    it.each([
+      [
+        'already deprecated',
+        'DEPRECATED',
+        'revision 1 of `purchase_approval` is already deprecated',
+      ],
+      [
+        'a draft',
+        'DRAFT',
+        'revision 1 of `purchase_approval` is a draft, and only a published revision can be deprecated; nothing routes to a draft, so delete it instead',
+      ],
+    ])('reads the revision again when the route answers 409, %s', async (_case, now, message) => {
+      stored = record({ status: 'ACTIVE' })
+
+      const page = await render({ permissions: DEPRECATOR })
+
+      await ask(page)
+      stored = record({ status: now })
+      refuse = { status: 409, body: errorBody('CONFLICT', message) }
+      await page.get('[data-testid="confirm-action"]').trigger('click')
+      await settle()
+
+      expect(definitionReads()).toHaveLength(2)
+      expect(page.get('[data-testid="form-error"]').text()).toBe(message)
+      expect(page.get('[data-testid="status"]').text()).toBe(now)
+      expect(page.find('[data-testid="deprecate-workflow"]').exists()).toBe(false)
+    })
+
+    it.each([
+      [
+        '403',
+        { status: 403, body: errorBody('FORBIDDEN', 'Missing workflow:definition:deprecate') },
+      ],
+      ['404', { status: 404, body: errorBody('NOT_FOUND', 'Workflow definition not found') }],
+    ])('reads nothing again after a %s, and says why', async (_case, reply) => {
+      stored = record({ status: 'ACTIVE' })
+
+      const page = await render({ permissions: DEPRECATOR })
+
+      await ask(page)
+      // Were it read again, the screen would say DEPRECATED.
+      stored = record({ status: 'DEPRECATED' })
+      refuse = reply as FakeReply
+      await page.get('[data-testid="confirm-action"]').trigger('click')
+      await settle()
+
+      expect(definitionReads()).toHaveLength(1)
+      expect(page.get('[data-testid="form-error"]').text()).toContain(
+        (reply.body as { error: { message: string } }).error.message,
+      )
+      expect(page.get('[data-testid="status"]').text()).toBe('ACTIVE')
+      expect(page.find('[data-testid="deprecate-workflow"]').exists()).toBe(true)
+    })
+
+    it('leaves no control operable while the deprecation is in flight', async () => {
+      stored = record({ status: 'ACTIVE' })
+      boundTypes = TYPES
+
+      const page = await render({ permissions: DEPRECATOR, attach: true })
+
+      await ask(page)
+
+      const release = holdRequest((config) => (config.url ?? '').endsWith('/deprecation'))
+
+      await page.get('[data-testid="confirm-action"]').trigger('click')
+      await settle()
+
+      expect(enabledControls(page)).toEqual([])
+
+      tryEverything(page)
+      await settle()
+
+      expect(page.find('[data-testid="confirm-action"]').exists()).toBe(false)
+
+      await release()
+
+      expect(writes()).toHaveLength(1)
+      expect(page.get('[data-testid="status"]').text()).toBe('DEPRECATED')
+      expect(enabledControls(page)).toEqual(['new-revision'])
+    })
+
+    it('leaves no control operable while a 409’s re-read is in flight', async () => {
+      stored = record({ status: 'ACTIVE' })
+
+      const page = await render({ permissions: DEPRECATOR, attach: true })
+
+      await ask(page)
+      stored = record({ status: 'DEPRECATED' })
+      refuse = {
+        status: 409,
+        body: errorBody('CONFLICT', 'revision 1 of `purchase_approval` is already deprecated'),
+      }
+
+      const release = holdRequest(
+        (config) =>
+          (config.method ?? 'get').toLowerCase() === 'get' &&
+          config.url === `/workflow/definitions/${ID}`,
+      )
+
+      await page.get('[data-testid="confirm-action"]').trigger('click')
+      await settle()
+
+      expect(writes()).toHaveLength(1)
+      expect(enabledControls(page)).toEqual([])
+
+      await release()
+
+      expect(page.get('[data-testid="status"]').text()).toBe('DEPRECATED')
+    })
+  })
+
+  // --- The test-engineer campaign on #713, 2026-10-10 --------------------------
+  //
+  // Past the builder's tests: what the success path shows, the hundred-type
+  // boundary, and the warning by keyboard. Seen to fail: the screen keeping
+  // its own definition after a success (*shows the revision the route
+  // answers…*), and `unnamed >= 0` (*names exactly a hundred…*). Focus was not
+  // handed back when the warning closed: pinned with `it.fails` below, and
+  // fixed in `Dialog` the same day.
+
+  describe('deprecating a revision, adversarially (#713)', () => {
+    function hundred(): unknown[] {
+      return Array.from({ length: 100 }, (_, index) => ({
+        id: `dt-${index}`,
+        typeCode: `TYPE_${String(index).padStart(3, '0')}`,
+        name: `Type ${index}`,
+        category: null,
+        formId: null,
+        status: index % 2 === 0 ? 'ACTIVE' : 'DEPRECATED',
+        createdAt: '2026-10-09T00:00:00Z',
+        updatedAt: '2026-10-09T00:00:00Z',
+      }))
+    }
+
+    function opener(page: VueWrapper): HTMLButtonElement {
+      return page.get('[data-testid="deprecate-workflow"]').element as HTMLButtonElement
+    }
+
+    it('shows the revision the route answers, not the one it had on screen', async () => {
+      stored = record({ status: 'ACTIVE' })
+
+      const page = await render({ permissions: DEPRECATOR })
+
+      await page.get('[data-testid="deprecate-workflow"]').trigger('click')
+      await settle()
+
+      // The route reads the revision back after the change; here its name as
+      // stored differs from what this screen loaded, so only taking the answer
+      // shows it.
+      const answered = jwss()
+
+      answered.name = 'Purchase approval, as stored'
+      stored = record({ status: 'ACTIVE', definition: answered, updatedAt: '2026-10-10T09:00:00Z' })
+
+      await page.get('[data-testid="confirm-action"]').trigger('click')
+      await settle()
+
+      expect(page.get('[data-testid="status"]').text()).toBe('DEPRECATED')
+      expect(page.get('[data-testid="workflow-name"]').element).toHaveProperty(
+        'value',
+        'Purchase approval, as stored',
+      )
+      // Taken from the answer, not read again.
+      expect(
+        backend.requests.filter(
+          (request) => request.method === 'get' && request.url === `/workflow/definitions/${ID}`,
+        ),
+      ).toHaveLength(1)
+    })
+
+    it.each([
+      [100, null],
+      [101, 'and 1 more, 101 in all.'],
+    ])(
+      'names exactly a hundred of %i bound types, and says what is past them',
+      async (total, more) => {
+        stored = record({ status: 'ACTIVE' })
+        boundTypes = hundred()
+        boundTotal = total
+
+        const page = await render({ permissions: DEPRECATOR })
+
+        await page.get('[data-testid="deprecate-workflow"]').trigger('click')
+        await settle()
+
+        expect(page.findAll('[data-testid="bound-type"]')).toHaveLength(100)
+        expect(page.get('[data-testid="bound-types"]').text()).toContain('These document types are')
+
+        if (more === null) {
+          expect(page.find('[data-testid="bound-types-more"]').exists()).toBe(false)
+        } else {
+          expect(page.get('[data-testid="bound-types-more"]').text()).toBe(more)
+        }
+
+        // A bound type is named, not linked: deprecated or not, the warning
+        // offers nothing to open, so nothing the caller cannot open is offered.
+        expect(page.get('[data-testid="bound-types"]').findAll('a, button')).toHaveLength(0)
+      },
+    )
+
+    it('is operated by keyboard alone: Escape cancels, Enter on Deprecate confirms', async () => {
+      stored = record({ status: 'ACTIVE' })
+
+      const page = await render({ permissions: DEPRECATOR, attach: true })
+
+      opener(page).focus()
+      press('Enter')
+      await settle()
+
+      const panel = page.get('[role="dialog"]').element
+
+      expect(panel.contains(document.activeElement)).toBe(true)
+
+      document.activeElement!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      )
+      await settle()
+
+      expect(page.find('[role="dialog"]').exists()).toBe(false)
+      expect(writes()).toEqual([])
+
+      opener(page).focus()
+      press('Enter')
+      await settle()
+
+      tabTo((element) => element.getAttribute('data-testid') === 'confirm-action')
+      press('Enter')
+      await settle()
+
+      expect(writes().map((request) => `${request.method} ${request.url}`)).toEqual([
+        `post /workflow/definitions/${ID}/deprecation`,
+      ])
+      expect(page.get('[data-testid="status"]').text()).toBe('DEPRECATED')
+    })
+
+    // DEFECT (test-engineer, 2026-10-10, PR #715): closing the warning left
+    // focus on `<body>`, not on the *Deprecate* button that opened it. The
+    // shared `Dialog` moved focus in on open and never handed it back (WAI-ARIA
+    // dialog pattern). Fixed the same day in `Dialog`, for every
+    // `ConfirmDialog`; a plain `it` since.
+    it('hands focus back to Deprecate when the warning is cancelled', async () => {
+      stored = record({ status: 'ACTIVE' })
+
+      const page = await render({ permissions: DEPRECATOR, attach: true })
+
+      opener(page).focus()
+      press('Enter')
+      await settle()
+
+      await page
+        .findAll('button')
+        .find((button) => button.text() === 'Cancel')!
+        .trigger('click')
+      await settle()
+
+      expect(page.find('[role="dialog"]').exists()).toBe(false)
+      expect(document.activeElement).toBe(opener(page))
     })
   })
 })

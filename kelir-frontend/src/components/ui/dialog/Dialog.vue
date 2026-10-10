@@ -35,14 +35,47 @@ function close(): void {
   open.value = false
 }
 
-// Move focus into the panel so Escape and the tab order start inside the dialog.
-// No focus trap: tabbing past the last control escapes the panel.
+/** What held focus when the dialog opened, to be handed it back on close. */
+let opener: HTMLElement | null = null
+
+/**
+ * Hands focus back to what opened the dialog (WAI-ARIA dialog pattern; added
+ * 2026-10-10, PR #715's campaign): without it a keyboard user is left on
+ * `<body>` and restarts from the top of the page.
+ *
+ * **Only when nothing else has taken focus since**: a dialog that closes as
+ * another opens leaves focus with the one opening. And only to an element
+ * still in the document, since what opened it may be gone, as *Deprecate* is
+ * once its revision is deprecated.
+ */
+function restoreFocus(): void {
+  const target = opener
+
+  opener = null
+
+  const active = document.activeElement
+
+  if (target?.isConnected && (active === null || active === document.body)) {
+    target.focus()
+  }
+}
+
+// Move focus into the panel so Escape and the tab order start inside the
+// dialog, and hand it back on close. No focus trap: tabbing past the last
+// control escapes the panel.
 watch(
   open,
   async (isOpen) => {
     if (!isOpen) {
+      await nextTick()
+      restoreFocus()
+
       return
     }
+
+    const active = document.activeElement
+
+    opener = active instanceof HTMLElement && active !== document.body ? active : null
 
     await nextTick()
     panel.value?.focus()

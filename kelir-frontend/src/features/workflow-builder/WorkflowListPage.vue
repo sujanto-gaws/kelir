@@ -3,7 +3,11 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { toApiError } from '@/api/client'
-import { createWorkflowRevision, listWorkflowDefinitions } from '@/api/workflow'
+import {
+  createWorkflowRevision,
+  deprecateWorkflowDefinition,
+  listWorkflowDefinitions,
+} from '@/api/workflow'
 import { Alert } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -19,6 +23,9 @@ import { usePaginatedList } from '@/composables/usePaginatedList'
 import { useAuthStore } from '@/stores/auth'
 import type { WorkflowDefinitionSummary } from '@/types/workflow'
 
+import { useWorkflowDeprecation } from './useWorkflowDeprecation'
+import WorkflowDeprecateDialog from './WorkflowDeprecateDialog.vue'
+
 /**
  * Workflow definitions (FR-WF-018; #426 AC1, AC5).
  *
@@ -29,16 +36,34 @@ import type { WorkflowDefinitionSummary } from '@/types/workflow'
  *
  * Gated as the other admin screens are: `workflow:definition:read` opens it,
  * and each action is offered only to a caller holding its own permission.
+ * *Deprecate* joined the rows on 2026-10-10 (#713, plan 19 row 6b), with the
+ * editor's warning naming the document types still bound to the revision.
  */
 const auth = useAuthStore()
 const router = useRouter()
 
 const canCreate = computed(() => auth.can('workflow:definition:create'))
+const canDeprecate = computed(() => auth.can('workflow:definition:deprecate'))
 
 const workflows = usePaginatedList<WorkflowDefinitionSummary>(listWorkflowDefinitions)
 
 const revisionError = ref('')
 const revisingId = ref('')
+
+const deprecation = useWorkflowDeprecation()
+const deprecationError = ref('')
+const deprecationNotice = ref('')
+/**
+ * Every row whose deprecation is in flight. **A set, not one id**: a second
+ * row can be deprecated while the first is still out, and the first's answer
+ * must not free the second's actions (corrected 2026-10-10, PR #715's campaign).
+ */
+const deprecatingIds = ref(new Set<string>())
+
+/** Whether a row's actions wait: its new revision or its deprecation is in flight. */
+function busy(row: WorkflowDefinitionSummary): boolean {
+  return revisingId.value === row.id || deprecatingIds.value.has(row.id)
+}
 
 function open(row: WorkflowDefinitionSummary): void {
   void router.push({ name: 'admin-workflow-editor', params: { id: row.id } })
@@ -61,6 +86,49 @@ async function revise(row: WorkflowDefinitionSummary): Promise<void> {
     revisionError.value = toApiError(failure).message
   } finally {
     revisingId.value = ''
+  }
+}
+
+/**
+ * Deprecates a row's revision once its warning is confirmed (#713, **D-101** B).
+ * Offered on an `ACTIVE` row only, to a holder of `workflow:definition:deprecate`
+ * (**D-108**).
+ *
+ * **The list is read again after it succeeds, and after a 409**, which the
+ * route answers only for a revision that is no longer `ACTIVE`, so the row
+ * shows what it now is. A 403 or a 404 reads nothing again.
+ *
+ * **The latest answer is the one shown.** Two deprecations can overlap; each
+ * answer replaces the notice or error before it, both of which name the
+ * revision, and the rows read again show what became of the other.
+ */
+async function deprecate(): Promise<void> {
+  const target = deprecation.confirm()
+
+  if (!target) {
+    return
+  }
+
+  deprecationError.value = ''
+  deprecationNotice.value = ''
+  deprecatingIds.value.add(target.id)
+
+  try {
+    await deprecateWorkflowDefinition(target.id)
+    deprecationError.value = ''
+    deprecationNotice.value = `Revision ${target.version} of ${target.workflowKey} is deprecated.`
+    await workflows.load()
+  } catch (failure) {
+    const error = toApiError(failure)
+
+    deprecationNotice.value = ''
+    deprecationError.value = error.message
+
+    if (error.status === 409) {
+      await workflows.load()
+    }
+  } finally {
+    deprecatingIds.value.delete(target.id)
   }
 }
 
@@ -107,6 +175,14 @@ onMounted(() => {
       {{ revisionError }}
     </Alert>
 
+    <Alert v-if="deprecationError" variant="destructive" data-testid="deprecation-error">
+      {{ deprecationError }}
+    </Alert>
+
+    <Alert v-if="deprecationNotice" data-testid="deprecation-notice">
+      {{ deprecationNotice }}
+    </Alert>
+
     <p v-if="workflows.isLoading.value" class="text-sm text-muted-foreground">Loading…</p>
 
     <Table data-testid="workflows">
@@ -148,16 +224,23 @@ onMounted(() => {
               v-if="canCreate && row.status !== 'DRAFT'"
               size="sm"
               variant="secondary"
-              :disabled="revisingId === row.id"
+              :disabled="busy(row)"
               :data-testid="`revise-${row.workflowKey}-${row.version}`"
               @click="revise(row)"
             >
               New revision
             </Button>
-            <!-- Deprecate (#573, D-101 B) goes here: on an ACTIVE row, for a
-                 holder of workflow:definition:deprecate (D-108), then a
-                 refresh. Plan 19 merges it after #573's route, so until then
-                 there is no button rather than one that cannot work. -->
+            <!-- Deprecate (#713, D-101 B, D-108): an ACTIVE row only. -->
+            <Button
+              v-if="canDeprecate && row.status === 'ACTIVE'"
+              size="sm"
+              variant="destructive"
+              :disabled="busy(row)"
+              :data-testid="`deprecate-${row.workflowKey}-${row.version}`"
+              @click="deprecation.ask(row)"
+            >
+              Deprecate
+            </Button>
           </TableCell>
         </TableRow>
 
@@ -192,5 +275,7 @@ onMounted(() => {
         </Button>
       </div>
     </div>
+
+    <WorkflowDeprecateDialog :deprecation="deprecation" @confirm="deprecate" />
   </section>
 </template>

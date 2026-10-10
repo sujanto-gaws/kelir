@@ -47,6 +47,7 @@ pub async fn list_types(
     let filter = repo::DocumentTypeFilter {
         search: search_term(query.search.as_deref())?,
         status: query.status.map(DocumentTypeStatus::as_db),
+        workflow_definition_id: query.workflow_definition_id,
     };
 
     let total = repo::count_types(&state.pool, tenant_id, filter).await?;

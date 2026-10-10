@@ -8,6 +8,7 @@ import { ApiError } from '@/api/error'
 import {
   createWorkflowDefinition,
   createWorkflowRevision,
+  deprecateWorkflowDefinition,
   getWorkflowDefinition,
   publishWorkflowDefinition,
   updateWorkflowDefinition,
@@ -27,7 +28,9 @@ import type { WorkflowDefinition } from '@/types/workflow'
 
 import { WORKFLOW_EDITOR } from './editorContext'
 import { conditionVariables, STATE_KINDS, starterDefinition, type StateKind } from './jwssRegistry'
+import { useWorkflowDeprecation } from './useWorkflowDeprecation'
 import { useWorkflowDraft } from './useWorkflowDraft'
+import WorkflowDeprecateDialog from './WorkflowDeprecateDialog.vue'
 import WorkflowStateCard from './WorkflowStateCard.vue'
 import WorkflowTransitionRow from './WorkflowTransitionRow.vue'
 import { addressOf, placeVerdict } from './workflowVerdict'
@@ -49,8 +52,11 @@ import { addressOf, placeVerdict } from './workflowVerdict'
  *    standard §3.4). Nothing here checks a definition itself.
  * 2. **A published revision is not edited in place** (AC5). `ACTIVE` and
  *    `DEPRECATED` open read-only and say why, and the way forward is a new
- *    revision. *Deprecate* joins it after #573's route merges (plan 19 §4
- *    row 6): see the comment in the header's actions.
+ *    revision. ~~*Deprecate* joins it after #573's route merges (plan 19 §4
+ *    row 6): see the comment in the header's actions.~~ *Deprecate* sits
+ *    beside it on an `ACTIVE` revision since 2026-10-10 (#713, plan 19 row 6b,
+ *    **D-101** B, **D-108**), and warns first, naming the document types still
+ *    bound to the revision (`useWorkflowDeprecation`).
  * 3. **What it writes is JWSS v1.0.0** (AC2): it edits the document in place
  *    of a model of its own, so what it does not edit — guards, actions,
  *    variables, settings, an escalation — goes back as it came.
@@ -64,6 +70,7 @@ const isNew = computed(() => route.name === 'admin-workflow-new')
 const canCreate = computed(() => auth.can('workflow:definition:create'))
 const canUpdate = computed(() => auth.can('workflow:definition:update'))
 const canPublish = computed(() => auth.can('workflow:definition:publish'))
+const canDeprecate = computed(() => auth.can('workflow:definition:deprecate'))
 
 /** The revision as the server holds it, or `null` for a workflow not yet saved. */
 const record = ref<WorkflowDefinition | null>(null)
@@ -101,6 +108,17 @@ const readOnly = computed(() => !editable.value || isSaving.value)
 const offerPublish = computed(
   () => canPublish.value && status.value === 'DRAFT' && (editable.value || record.value !== null),
 )
+
+/**
+ * Whether *Deprecate* is offered: **on an `ACTIVE` revision only**, to a holder
+ * of `workflow:definition:deprecate` (**D-108**). A draft is deleted, not
+ * deprecated, and nothing writes `ACTIVE` back to a deprecated one.
+ */
+const offerDeprecate = computed(
+  () => canDeprecate.value && record.value !== null && status.value === 'ACTIVE',
+)
+
+const deprecation = useWorkflowDeprecation()
 
 /** Which logic builders hold an unfilled operand, by row key and field. */
 const validity = ref<Record<string, boolean>>({})
@@ -286,13 +304,22 @@ async function save(): Promise<boolean> {
  * route, not the message, which is prose and not a contract. A publish's 422
  * (a dead role, a rule) or 403 is about the draft or the caller, and reads
  * nothing again.
+ *
+ * **A deprecation's 409 re-reads the same way** (#713): that route answers 409
+ * only for a revision that is not `ACTIVE` (*is a draft*, *is already
+ * deprecated*, `deprecate_definition`), so the screen shows what it now is. Its
+ * 403 and 404 are about the caller and a revision that is gone, and read
+ * nothing again.
  */
-async function refreshIfPublished(failure: unknown, by: 'save' | 'publish'): Promise<void> {
+async function refreshIfPublished(
+  failure: unknown,
+  by: 'save' | 'publish' | 'deprecate',
+): Promise<void> {
   const published =
     failure instanceof ApiError &&
-    (by === 'publish'
-      ? failure.status === 409
-      : failure.details.some((detail) => detail.code === 'NOT_A_DRAFT'))
+    (by === 'save'
+      ? failure.details.some((detail) => detail.code === 'NOT_A_DRAFT')
+      : failure.status === 409)
 
   if (!published || !record.value) {
     return
@@ -336,6 +363,43 @@ async function publish(): Promise<void> {
   } catch (failure) {
     report(placeVerdict(failure, draft.definition.value))
     await refreshIfPublished(failure, 'publish')
+  } finally {
+    isSaving.value = false
+  }
+}
+
+function askDeprecate(): void {
+  if (record.value) {
+    deprecation.ask(record.value)
+  }
+}
+
+/**
+ * Deprecates the revision on screen, once its warning is confirmed (#713).
+ *
+ * **What the route answers is the revision as stored after the change**, read
+ * back by `deprecate_definition`, so the screen takes it as publish takes its
+ * own: the status turns `DEPRECATED`, the notice says so, and nothing but *New
+ * revision* is left to press. Read-only while it is in flight, as a save is.
+ */
+async function deprecate(): Promise<void> {
+  const target = deprecation.confirm()
+
+  if (!target || !record.value) {
+    return
+  }
+
+  reset()
+  notice.value = ''
+  isSaving.value = true
+
+  try {
+    record.value = await deprecateWorkflowDefinition(target.id)
+    draft.load(record.value.definition)
+    notice.value = `Deprecated. New documents no longer route to revision ${record.value.version}; approvals already running on it carry on.`
+  } catch (failure) {
+    formError.value = toApiError(failure).message
+    await refreshIfPublished(failure, 'deprecate')
   } finally {
     isSaving.value = false
   }
@@ -449,11 +513,16 @@ onMounted(() => {
           >
             New revision
           </Button>
-          <!-- Deprecate (#573, D-101 B) goes here, beside New revision: on an
-               ACTIVE revision, for a holder of workflow:definition:deprecate
-               (D-108), calling deprecateWorkflowDefinition, which api/workflow.ts
-               gains with the route. Plan 19 merges it after #573, so until then
-               there is no button rather than one that cannot work. -->
+          <!-- Deprecate (#713, D-101 B, D-108), beside New revision. -->
+          <Button
+            v-if="offerDeprecate"
+            variant="destructive"
+            :disabled="isSaving"
+            data-testid="deprecate-workflow"
+            @click="askDeprecate"
+          >
+            Deprecate
+          </Button>
         </div>
       </div>
 
@@ -624,6 +693,8 @@ onMounted(() => {
           </Table>
         </div>
       </div>
+
+      <WorkflowDeprecateDialog :deprecation="deprecation" @confirm="deprecate" />
     </template>
   </section>
 </template>

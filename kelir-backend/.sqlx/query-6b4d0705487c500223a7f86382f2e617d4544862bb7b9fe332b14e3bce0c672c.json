@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, type_code, name, category, form_id, status, created_at, updated_at\n        FROM document_types\n        WHERE tenant_id = $1\n          AND deleted_at IS NULL\n          AND ($2::text IS NULL OR type_code ILIKE $2 OR name ILIKE $2)\n          AND ($3::text IS NULL OR status = $3)\n        ORDER BY type_code\n        LIMIT $4 OFFSET $5\n        ",
+  "query": "\n        SELECT id, type_code, name, category, form_id, status, created_at, updated_at\n        FROM document_types\n        WHERE tenant_id = $1\n          AND deleted_at IS NULL\n          AND ($2::text IS NULL OR type_code ILIKE $2 OR name ILIKE $2)\n          AND ($3::text IS NULL OR status = $3)\n          AND ($4::uuid IS NULL OR EXISTS (\n                SELECT 1\n                FROM document_type_workflows w\n                WHERE w.tenant_id = $1\n                  AND w.document_type_id = document_types.id\n                  AND w.workflow_definition_id = $4\n                  AND w.deleted_at IS NULL\n                  AND w.status = 'ACTIVE'\n              ))\n        ORDER BY type_code\n        LIMIT $5 OFFSET $6\n        ",
   "describe": {
     "columns": [
       {
@@ -49,6 +49,7 @@
         "Uuid",
         "Text",
         "Text",
+        "Uuid",
         "Int8",
         "Int8"
       ]
@@ -64,5 +65,5 @@
       false
     ]
   },
-  "hash": "5a3f925f4a260a378778351a532314c405f1bd2fdb273f748403e2df69939957"
+  "hash": "6b4d0705487c500223a7f86382f2e617d4544862bb7b9fe332b14e3bce0c672c"
 }

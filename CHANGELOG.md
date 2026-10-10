@@ -68,8 +68,10 @@ While the major version is `0`, the public API may change in any release.
   show, such as guards, actions and an escalation, is saved back unchanged. It
   uses the existing definition routes and adds none. ~~Deprecating a revision
   follows with #573's route.~~ The route that deprecates a revision is in the
-  entry below ([#573](https://github.com/sujanto-gaws/kelir/issues/573)); the
-  editor's *Deprecate* action follows (row 6b; corrected 2026-10-10). **Follow-up
+  entry below ([#573](https://github.com/sujanto-gaws/kelir/issues/573)); ~~the
+  editor's *Deprecate* action follows (row 6b; corrected 2026-10-10)~~ the
+  editor's *Deprecate* action is built, in the entry below (row 6b, corrected
+  again 2026-10-10). **Follow-up
   ([#709](https://github.com/sujanto-gaws/kelir/pull/709))**:
   `workflow:definition:publish` alone may publish a saved draft as it is
   stored. The editor takes no edits while a save or publish is in flight. A
@@ -129,8 +131,40 @@ While the major version is `0`, the public API may change in any release.
   Once its running approvals finish, a deprecated revision no longer keeps a
   role it names from being deleted. Each deprecation writes a
   `Workflow.Deprecated` audit record, and no outbox event. Publishing a new
-  revision still leaves the previous one `ACTIVE`, and the workflow editor's
-  *Deprecate* action follows.
+  revision still leaves the previous one `ACTIVE`, and ~~the workflow editor's
+  *Deprecate* action follows~~ the workflow editor's *Deprecate* action is in
+  the entry below (corrected 2026-10-10).
+- **The document-type list filters by a bound workflow revision**
+  ([#713](https://github.com/sujanto-gaws/kelir/issues/713),
+  [#715](https://github.com/sujanto-gaws/kelir/pull/715), row 6b).
+  `GET /api/v1/document-types?workflowDefinitionId={id}` lists only the types
+  with a live binding to that revision: in the caller's tenant, not deleted,
+  and `ACTIVE`. Its validity window is not considered, so a binding that has not
+  opened yet is listed. It names one revision, not a workflow key, and composes
+  with `search`, `status` and paging, with `meta.total` counting the same rows.
+  An id that names nothing is an empty page, and one that is not a uuid is a 422
+  naming `workflowDefinitionId`. It is for the workflow editor's *Deprecate*
+  warning, which lists the types still bound in one call. It needs
+  `document-type:read`, as the list always did, and adds no route or permission.
+- **A workflow revision is deprecated from the browser**
+  ([#713](https://github.com/sujanto-gaws/kelir/issues/713),
+  [#715](https://github.com/sujanto-gaws/kelir/pull/715), #426 AC1 and AC5,
+  decisions **D-101** B and **D-108**). *Deprecate* sits beside *New revision*
+  in the workflow editor's header and on the workflow list's rows, on an
+  `ACTIVE` revision only, for a holder of `workflow:definition:deprecate`.
+  **Before it does anything it warns, and lists the document types still bound
+  to the revision**, read through the filter above, because deprecating may block
+  their submissions until each is rebound. It names the first hundred and says
+  how many more. A caller without `document-type:read`, or a list that cannot
+  be read, is told the check could not be made, and may still go on or
+  cancel. After it succeeds the editor shows the revision as deprecated and
+  offers only *New revision*, and the list reads its rows again. **A 409 from the route** (a
+  draft, or already deprecated) makes the editor read the revision again, as a
+  publish's 409 does, and the list read its page again; a 403 or 404 reads
+  nothing again. Nothing in the editor takes an edit
+  while the deprecation is in flight. `api/workflow.ts` gains
+  `deprecateWorkflowDefinition`, and the shared confirmation dialog takes a
+  slot for what one sentence cannot say.
 
 ### Changed
 
@@ -186,6 +220,14 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A dialog hands focus back to what opened it when it closes**
+  (PR [#715](https://github.com/sujanto-gaws/kelir/pull/715)'s campaign on
+  [#713](https://github.com/sujanto-gaws/kelir/issues/713)). The shared
+  dialog moved focus into its panel on open and never returned it, so after
+  a confirmation was cancelled or answered a keyboard user was left on the
+  page's body. It now restores focus to the element that held it, as the
+  WAI-ARIA dialog pattern asks, unless focus has moved elsewhere since or
+  that element is gone. Every confirmation dialog takes it.
 - **A refresh checks its tenant's status**
   ([#649](https://github.com/sujanto-gaws/kelir/issues/649)). A refresh
   read the user's status and not the tenant's, and relied on the revocation
