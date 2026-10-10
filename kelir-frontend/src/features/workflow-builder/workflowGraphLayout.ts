@@ -76,7 +76,18 @@ export function layoutWorkflowGraph(graph: WorkflowGraph): WorkflowGraphLayout {
   })
   layout.setDefaultEdgeLabel(() => ({}))
 
-  for (const node of graph.nodes) {
+  // The initial state first, then the rest as declared. dagre breaks a cycle
+  // by a depth-first walk from the first node it was given, so a `RETURN` to
+  // the initial state is the edge it reverses only when the walk starts there;
+  // started from a state declared earlier, the way forward is reversed and the
+  // initial state is drawn below the states it leads to. The edges keep their
+  // declared order, which is the order the walk takes a state's way out.
+  const initialFirst = [
+    ...graph.nodes.filter((node) => node.initial),
+    ...graph.nodes.filter((node) => !node.initial),
+  ]
+
+  for (const node of initialFirst) {
     layout.setNode(node.id, { width: NODE_WIDTH, height: NODE_HEIGHT })
   }
 

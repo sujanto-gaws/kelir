@@ -181,23 +181,24 @@ describe('a workflow graph of an unusual definition', () => {
       expect(y('REVIEW')).toBeLessThan(y('DONE'))
     })
 
-    // DEFECT (#719 campaign, 2026-10-10): dagre breaks a cycle by a depth-first
-    // walk that starts from the first node it was given, which is the first
-    // state in the list, not the initial one. With the initial state declared
-    // last, the return edge is kept and the way forward is reversed, so START
-    // is drawn on DONE's rank, below REVIEW: the graph reads against the path.
-    // The list's order is the author's (move up, move down), so this is a
-    // draft a user makes by reordering. Measured: DONE@170 REVIEW@16 START@170.
-    it.fails(
-      'draws the initial state at the top when a cycle returns to it, wherever it is declared',
-      () => {
-        const { graph, layout } = drawn(definition(['DONE', 'REVIEW', 'START'], 'START', cycle))
-        const y = (code: string) => layout.nodes.get(idOf(graph, code))!.y
+    // dagre breaks a cycle by a depth-first walk from the first node it was
+    // given. Given the states as declared, the initial one declared last, it
+    // kept the return and reversed the way forward, drawing START on DONE's
+    // rank below REVIEW (the #719 campaign measured DONE@170 REVIEW@16
+    // START@170). The list's order is the author's, so a reorder made this.
+    it('draws the initial state at the top when a cycle returns to it, wherever it is declared', () => {
+      const { graph, layout } = drawn(definition(['DONE', 'REVIEW', 'START'], 'START', cycle))
+      const y = (code: string) => layout.nodes.get(idOf(graph, code))!.y
 
-        expect(y('START')).toBeLessThan(y('REVIEW'))
-        expect(y('REVIEW')).toBeLessThan(y('DONE'))
-      },
-    )
+      expect(y('START')).toBeLessThan(y('REVIEW'))
+      expect(y('REVIEW')).toBeLessThan(y('DONE'))
+    })
+
+    it('lays the same definition out the same way every time, the initial state declared last', () => {
+      const given = definition(['DONE', 'REVIEW', 'START'], 'START', cycle)
+
+      expect(drawn(given).layout).toEqual(drawn(structuredClone(given)).layout)
+    })
   })
 
   describe('two transitions with one action between the same two states', () => {
