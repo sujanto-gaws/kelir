@@ -10,7 +10,20 @@ import type { JfssAdvancedRule, JfssComponent, JfssDataComponent } from '@/types
 import type { LookupSource } from '@/types/rad'
 
 /**
- * One component of a form definition, edited (#373 AC1).
+ * One component of a form definition, edited (#373 AC1); since #688, the one
+ * the canvas has selected.
+ *
+ * **It edits only what the node's role allows** (#688 A3): a data node its
+ * key, label, value type, options, rules and expressions; a display node its
+ * content; a panel or fieldset its `title`; a button its `label`, with the
+ * action fixed at `submit`; columns and tabs nothing, since their slots are
+ * managed on the canvas. **Moving and removing are the canvas's** (A4), so
+ * this component no longer knows where its node sits.
+ *
+ * **The type is switched within its kind**: one data type for another
+ * (`datagrid` excluded, whose row template another type cannot hold), one
+ * display type for another. A layout node, a button and a data grid show
+ * their type and do not change it.
  *
  * **Every type here is one the renderer can draw.** `SUPPORTED` in
  * `features/rad/renderer/registry.ts` is the list, and offering a type outside
@@ -27,8 +40,6 @@ import type { LookupSource } from '@/types/rad'
  */
 const props = defineProps<{
   component: JfssComponent
-  index: number
-  count: number
   disabled: boolean
   /** The S10.3 details whose `path` addresses this component. */
   details: ValidationDetail[]
@@ -39,8 +50,6 @@ const props = defineProps<{
 const emit = defineEmits<{
   (event: 'update', component: JfssComponent): void
   (event: 'update:lookupSource', source: string): void
-  (event: 'move', direction: -1 | 1): void
-  (event: 'remove'): void
 }>()
 
 /** The data types the renderer draws, in the order an author meets them. */
@@ -82,7 +91,33 @@ const LOOKUP_SOURCES: LookupSource[] = ['supplier', 'customer', 'employee', 'fac
 const ENFORCEABLE_RULES = ['matchesField', 'notMatchesField', 'regex', 'oneOf', 'notOneOf'] as const
 
 const isData = computed(() => props.component.role === 'data')
+const isDisplay = computed(() => props.component.role === 'display')
+const isGrid = computed(() => isData.value && props.component.type === 'datagrid')
 const data = computed(() => props.component as JfssDataComponent)
+const record = computed(() => props.component as unknown as Record<string, unknown>)
+
+/** A panel or fieldset: its `title` is all this editor writes. */
+const hasTitle = computed(
+  () => props.component.type === 'panel' || props.component.type === 'fieldset',
+)
+const isButton = computed(() => props.component.role === 'action')
+/** Display types that render text; a divider has none (JFSS §4.4). */
+const hasContent = computed(() => isDisplay.value && props.component.type !== 'divider')
+/** `conditional` is offered where the flat builder offered it: data and display. */
+const hasConditional = computed(() => isData.value || isDisplay.value)
+
+/** Columns and tabs: nothing to edit here, since their slots live on the canvas. */
+const hasSlots = computed(
+  () => props.component.type === 'columns' || props.component.type === 'tabs',
+)
+const slotNote = computed(() =>
+  props.component.type === 'tabs'
+    ? 'Its tabs are added, removed and titled on the canvas.'
+    : 'Its columns are added and removed on the canvas.',
+)
+
+/** Data types switch among themselves, display among theirs; the rest are fixed. */
+const switchable = computed(() => (isData.value && !isGrid.value) || isDisplay.value)
 
 const types = computed(() =>
   (isData.value ? DATA_TYPES : DISPLAY_TYPES).map((value) => ({ value, label: value })),
@@ -107,7 +142,7 @@ function messageFor(suffix: string): string | undefined {
 /** Every message about this component, so nothing the server said is dropped. */
 const allMessages = computed(() => props.details.map((detail) => detail.message))
 
-function patch(changes: Partial<JfssDataComponent>): void {
+function patch(changes: Record<string, unknown>): void {
   emit('update', { ...props.component, ...changes } as JfssComponent)
 }
 
@@ -206,10 +241,17 @@ function setConditionalAction(action: string): void {
   })
 }
 
+/**
+ * A new rule, **with the `params` and `message` the meta-schema requires**
+ * (#688 E7). `{rule, scope}` alone was refused at save: measured on
+ * 2026-10-10, a save carrying it came back 422 with `"params" is a required
+ * property` and `"message" is a required property`, and with both present it
+ * was stored.
+ */
 function addRule(): void {
   const rules: JfssAdvancedRule[] = [
     ...(data.value.rules ?? []),
-    { rule: ENFORCEABLE_RULES[0], scope: 'both' },
+    { rule: ENFORCEABLE_RULES[0], scope: 'both', params: {}, message: 'This value is not valid.' },
   ]
 
   patch({ rules })
@@ -227,7 +269,8 @@ function setRuleParams(at: number, text: string): void {
   const { ok, value } = parsed(text)
 
   if (ok) {
-    updateRule(at, { params: value as Record<string, unknown> | undefined })
+    // Emptied, the box means no parameters: `{}`, which the meta-schema requires.
+    updateRule(at, { params: (value as Record<string, unknown> | undefined) ?? {} })
   }
 }
 
@@ -237,44 +280,12 @@ function removeRule(at: number): void {
 </script>
 
 <template>
-  <div class="rounded-lg border p-4" :data-testid="`component-${component.id}`">
-    <div class="flex items-start justify-between gap-3">
-      <div>
-        <p class="text-sm font-medium">
-          {{ isData ? data.label || data.key || component.id : component.id }}
-        </p>
-        <p class="text-xs text-muted-foreground">{{ component.role }} · {{ component.type }}</p>
-      </div>
-
-      <div class="space-x-1">
-        <Button
-          size="sm"
-          variant="secondary"
-          :disabled="disabled || index === 0"
-          :data-testid="`up-${component.id}`"
-          @click="emit('move', -1)"
-        >
-          Up
-        </Button>
-        <Button
-          size="sm"
-          variant="secondary"
-          :disabled="disabled || index === count - 1"
-          :data-testid="`down-${component.id}`"
-          @click="emit('move', 1)"
-        >
-          Down
-        </Button>
-        <Button
-          size="sm"
-          variant="destructive"
-          :disabled="disabled"
-          :data-testid="`remove-${component.id}`"
-          @click="emit('remove')"
-        >
-          Remove
-        </Button>
-      </div>
+  <div class="rounded-lg border p-4" :data-testid="`editor-${component.id}`">
+    <div>
+      <p class="text-sm font-medium">
+        {{ isData ? data.label || data.key || component.id : component.id }}
+      </p>
+      <p class="text-xs text-muted-foreground">{{ component.role }} · {{ component.type }}</p>
     </div>
 
     <!-- Everything the server said about this component, whether or not a
@@ -283,7 +294,7 @@ function removeRule(at: number): void {
     <ul
       v-if="allMessages.length > 0"
       class="mt-3 space-y-1"
-      :data-testid="`component-errors-${component.id}`"
+      :data-testid="`editor-errors-${component.id}`"
     >
       <li v-for="message in allMessages" :key="message" class="text-xs text-destructive">
         {{ message }}
@@ -294,12 +305,22 @@ function removeRule(at: number): void {
       <div class="space-y-2">
         <Label :for="`type-${component.id}`">Type</Label>
         <Select
+          v-if="switchable"
           :id="`type-${component.id}`"
           :model-value="component.type"
           :disabled="disabled"
           :options="types"
           :data-testid="`type-${component.id}`"
           @update:model-value="patch({ type: String($event) })"
+        />
+        <!-- A layout node, a button and a data grid keep their type: what
+             they hold, or do, is not something another type has. -->
+        <Input
+          v-else
+          :id="`type-${component.id}`"
+          :model-value="component.type"
+          disabled
+          :data-testid="`type-${component.id}`"
         />
       </div>
 
@@ -329,7 +350,7 @@ function removeRule(at: number): void {
           />
         </div>
 
-        <div class="space-y-2">
+        <div v-if="!isGrid" class="space-y-2">
           <Label :for="`vtype-${component.id}`">Value type</Label>
           <Select
             :id="`vtype-${component.id}`"
@@ -397,7 +418,7 @@ function removeRule(at: number): void {
           </p>
         </div>
 
-        <div class="space-y-2 sm:col-span-2">
+        <div v-if="!isGrid" class="space-y-2 sm:col-span-2">
           <Label :for="`calculate-${component.id}`">Calculate (JSON Logic)</Label>
           <textarea
             :id="`calculate-${component.id}`"
@@ -414,18 +435,57 @@ function removeRule(at: number): void {
         </div>
       </template>
 
-      <div v-else class="space-y-2 sm:col-span-2">
+      <div v-if="hasContent" class="space-y-2 sm:col-span-2">
         <Label :for="`content-${component.id}`">Content</Label>
         <Input
           :id="`content-${component.id}`"
-          :model-value="(component as { content?: string }).content ?? ''"
+          :model-value="String(record.content ?? '')"
           :disabled="disabled"
           :data-testid="`content-${component.id}`"
-          @update:model-value="patch({ content: String($event) } as never)"
+          @update:model-value="patch({ content: String($event) })"
         />
       </div>
 
-      <div class="space-y-2 sm:col-span-2">
+      <div v-if="hasTitle" class="space-y-2 sm:col-span-2">
+        <Label :for="`title-${component.id}`">Title</Label>
+        <Input
+          :id="`title-${component.id}`"
+          :model-value="String(record.title ?? '')"
+          :disabled="disabled"
+          :data-testid="`title-${component.id}`"
+          @update:model-value="patch({ title: String($event) })"
+        />
+      </div>
+
+      <template v-if="isButton">
+        <div class="space-y-2">
+          <Label :for="`button-label-${component.id}`">Label</Label>
+          <Input
+            :id="`button-label-${component.id}`"
+            :model-value="String(record.label ?? '')"
+            :disabled="disabled"
+            :data-testid="`button-label-${component.id}`"
+            @update:model-value="patch({ label: String($event) })"
+          />
+        </div>
+        <div class="space-y-2">
+          <Label :for="`button-action-${component.id}`">Action</Label>
+          <!-- `submit` is the one action part 1 offers. One loaded with
+               another is shown and kept, not offered. -->
+          <Input
+            :id="`button-action-${component.id}`"
+            :model-value="String(record.action ?? '')"
+            disabled
+            :data-testid="`button-action-${component.id}`"
+          />
+        </div>
+      </template>
+
+      <p v-if="hasSlots" class="text-xs text-muted-foreground sm:col-span-2">
+        {{ slotNote }}
+      </p>
+
+      <div v-if="hasConditional" class="space-y-2 sm:col-span-2">
         <Label :for="`conditional-${component.id}`">Conditional (JSON Logic)</Label>
         <div class="flex gap-2">
           <Select
