@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import DocumentTypeFormDialog from './DocumentTypeFormDialog.vue'
 import {
+  errorBody,
   installFakeBackend,
   itemBody,
   type FakeBackendHandle,
@@ -278,5 +279,253 @@ describe('DocumentTypeFormDialog choosers', () => {
     expect(wrapper.get('[data-testid="type-workflow-status"]').text()).toContain(
       'Nothing matches “retired”.',
     )
+  })
+
+  /*
+   * #625's verification campaign. The tests above prove the two cases the fix
+   * names; these probe the seams around them: a read that fails, a value the
+   * first page already names, create, clearing, reopening, two bindings and the
+   * save that a deprecated binding refuses.
+   */
+
+  /** Reads by id of a workflow definition, as opposed to the list. */
+  function workflowReads(): string[] {
+    return backend.requests
+      .filter((request) => /^\/workflow\/definitions\/.+$/.test(request.url))
+      .map((request) => request.url)
+  }
+
+  /** The route above, with `override` answering first wherever it answers. */
+  function replaceBackend(override: (request: RecordedRequest) => FakeReply | undefined): void {
+    backend.restore()
+    backend = installFakeBackend((request) => override(request) ?? route(request))
+  }
+
+  /** An edit's `PUT`, answered as the endpoint answers a successful one. */
+  function acceptingPut(request: RecordedRequest): FakeReply | undefined {
+    return request.method === 'put' ? { status: 200, body: itemBody({ id: 't-1' }) } : undefined
+  }
+
+  function putBody(): Record<string, unknown> | undefined {
+    return backend.requests.find((request) => request.method === 'put')?.body as
+      Record<string, unknown> | undefined
+  }
+
+  it('reads no workflow by id when creating a type', async () => {
+    const wrapper = await open()
+    await flushPromises()
+
+    expect(selectedValue(wrapper, 'type-workflow')).toBe('')
+    expect(optionsOf(wrapper, 'type-workflow')[1]).toBe('Filler flow 001 (r1)')
+    expect(workflowReads()).toEqual([])
+  })
+
+  it('reads no workflow by id when the first page already names the bound one', async () => {
+    const onFirstPage = flows[0]
+    const wrapper = await open(boundType(onFirstPage.id))
+    await flushPromises()
+
+    expect(selectedValue(wrapper, 'type-workflow')).toBe(onFirstPage.id)
+    // Named once, where the page put it, rather than again above the results.
+    expect(optionsOf(wrapper, 'type-workflow').slice(0, 3)).toEqual([
+      'No workflow',
+      'Filler flow 001 (r1)',
+      'Filler flow 002 (r1)',
+    ])
+    expect(workflowReads()).toEqual([])
+  })
+
+  it('names a resolved revision as a search names it, and lists it once', async () => {
+    const wrapper = await open(boundType(wantedFlow.id))
+    await flushPromises()
+
+    const resolved = optionsOf(wrapper, 'type-workflow')[1]
+
+    await search(wrapper, 'type-workflow', 'zz_approval')
+
+    expect(optionsOf(wrapper, 'type-workflow')).toEqual(['No workflow', resolved])
+    expect(resolved).toBe('Approval (r1)')
+    expect(selectedValue(wrapper, 'type-workflow')).toBe(wantedFlow.id)
+  })
+
+  it.each([
+    ['deleted since it was bound (404)', { status: 404 }],
+    ['not readable by this caller (403)', { status: 403 }],
+    ['unreachable', { status: 0, networkError: true }],
+  ] as const)(
+    'keeps a bound revision whose read fails, %s, and saves it back unchanged',
+    async (_, reply) => {
+      replaceBackend((request) =>
+        request.url === `/workflow/definitions/${wantedFlow.id}` ? reply : acceptingPut(request),
+      )
+      const wrapper = await open(boundType(wantedFlow.id))
+      await flushPromises()
+
+      // Not named, but still chosen, and nothing thrown or announced as broken.
+      expect(selectedValue(wrapper, 'type-workflow')).toBe(wantedFlow.id)
+      expect(optionsOf(wrapper, 'type-workflow')[1]).toBe(
+        'The current choice, outside these results',
+      )
+      expect(wrapper.find('[data-testid="type-workflow-error"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="document-type-error"]').exists()).toBe(false)
+      // The other choosers are untouched by it.
+      expect(optionsOf(wrapper, 'type-form')[1]).toBe('Requisition (r1)')
+
+      await wrapper.get('[data-testid="type-name"]').setValue('Requisition (renamed)')
+      await wrapper.get('form').trigger('submit')
+      await flushPromises()
+
+      // The server, not the dialog, decides whether it still binds.
+      expect(putBody()?.workflows).toEqual([{ workflowDefinitionId: wantedFlow.id }])
+      expect(wrapper.emitted('saved')).toHaveLength(1)
+    },
+  )
+
+  it('unbinds a deprecated revision when the chooser is cleared, and cannot offer it again', async () => {
+    replaceBackend(acceptingPut)
+    const wrapper = await open(boundType(retiredFlow.id))
+    await flushPromises()
+
+    await wrapper.get('[data-testid="type-workflow"]').setValue('')
+
+    expect(selectedValue(wrapper, 'type-workflow')).toBe('')
+    expect(optionsOf(wrapper, 'type-workflow')).not.toContain('Retired approval (r2, deprecated)')
+
+    await search(wrapper, 'type-workflow', 'retired')
+
+    expect(optionsOf(wrapper, 'type-workflow')).toEqual(['No workflow'])
+
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(putBody()?.workflows).toEqual([])
+    expect(wrapper.emitted('saved')).toHaveLength(1)
+  })
+
+  it('starts each opening from what it is opening, between edit and create', async () => {
+    const wrapper = await open(boundType(retiredFlow.id))
+    await flushPromises()
+
+    expect(optionsOf(wrapper, 'type-workflow')[1]).toBe('Retired approval (r2, deprecated)')
+
+    // As the list page does it: close, then open with what is to be edited.
+    await wrapper.setProps({ open: false })
+    await wrapper.setProps({ editing: null })
+    await wrapper.setProps({ open: true })
+    await flushPromises()
+
+    expect(selectedValue(wrapper, 'type-workflow')).toBe('')
+    expect(optionsOf(wrapper, 'type-workflow')).not.toContain('Retired approval (r2, deprecated)')
+    expect(workflowReads()).toEqual([`/workflow/definitions/${retiredFlow.id}`])
+
+    await wrapper.setProps({ open: false })
+    await wrapper.setProps({ editing: boundType(wantedFlow.id) })
+    await wrapper.setProps({ open: true })
+    await flushPromises()
+
+    expect(selectedValue(wrapper, 'type-workflow')).toBe(wantedFlow.id)
+    expect(optionsOf(wrapper, 'type-workflow').slice(0, 2)).toEqual([
+      'No workflow',
+      'Approval (r1)',
+    ])
+    expect(optionsOf(wrapper, 'type-workflow')).not.toContain('Retired approval (r2, deprecated)')
+  })
+
+  it('shows the first of two bindings, in the order the server gave them', async () => {
+    const wrapper = await open({
+      ...boundType(retiredFlow.id),
+      workflows: [
+        { workflowDefinitionId: retiredFlow.id, priority: 10, condition: null },
+        { workflowDefinitionId: wantedFlow.id, priority: 20, condition: { '==': [1, 1] } },
+      ],
+    })
+    await flushPromises()
+
+    expect(selectedValue(wrapper, 'type-workflow')).toBe(retiredFlow.id)
+    expect(optionsOf(wrapper, 'type-workflow')[1]).toBe('Retired approval (r2, deprecated)')
+    expect(workflowReads()).toEqual([`/workflow/definitions/${retiredFlow.id}`])
+  })
+
+  // DEFECT (#625 campaign, 2026-10-10): an edit that leaves the workflow chooser
+  // alone still sends `workflows: [{ workflowDefinitionId }]`, built from the
+  // chooser alone. The array replaces the stored set (`replace_workflows`), so
+  // renaming a type with two bindings deletes the second, and drops the first
+  // one's priority and condition. Remove `.fails` when it is fixed.
+  it.fails(
+    'keeps every stored binding when an edit leaves the workflow chooser alone',
+    async () => {
+      const stored = [
+        { workflowDefinitionId: wantedFlow.id, priority: 10, condition: { '==': [1, 1] } },
+        { workflowDefinitionId: flows[0].id, priority: 20, condition: null },
+      ]
+      replaceBackend(acceptingPut)
+      const wrapper = await open({ ...boundType(wantedFlow.id), workflows: stored })
+      await flushPromises()
+
+      await wrapper.get('[data-testid="type-name"]').setValue('Requisition (renamed)')
+      await wrapper.get('form').trigger('submit')
+      await flushPromises()
+
+      // Either left off the wire, which leaves the stored set alone, or sent whole.
+      const sent = putBody()
+
+      expect(sent).toBeDefined()
+      expect(sent?.workflows ?? stored).toEqual(stored)
+    },
+  )
+
+  /** The refusal `check_workflow_bindings` gives a binding to a deprecated revision. */
+  const notPublished =
+    `workflow definition ${retiredFlow.id} is DEPRECATED and only a published revision may ` +
+    'be bound — a running approval executes the revision it started against'
+
+  function refusingDeprecated(request: RecordedRequest): FakeReply | undefined {
+    return request.method === 'put'
+      ? {
+          status: 422,
+          body: errorBody('VALIDATION_ERROR', 'Validation failed', [
+            {
+              path: 'workflows.0.workflowDefinitionId',
+              rule: 'reference',
+              code: 'NOT_PUBLISHED',
+              message: notPublished,
+            },
+          ]),
+        }
+      : undefined
+  }
+
+  it('stays open when a save keeping a deprecated binding is refused', async () => {
+    replaceBackend(refusingDeprecated)
+    const wrapper = await open(boundType(retiredFlow.id))
+    await flushPromises()
+
+    await wrapper.get('[data-testid="type-name"]').setValue('Requisition (renamed)')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(putBody()?.workflows).toEqual([{ workflowDefinitionId: retiredFlow.id }])
+    expect(wrapper.emitted('saved')).toBeUndefined()
+    expect(wrapper.get('[data-testid="document-type-error"]').text()).toContain('Validation failed')
+    // The choice and its name survive the refusal, so it can be changed.
+    expect(selectedValue(wrapper, 'type-workflow')).toBe(retiredFlow.id)
+    expect(optionsOf(wrapper, 'type-workflow')[1]).toBe('Retired approval (r2, deprecated)')
+  })
+
+  // DEFECT (#625 campaign, 2026-10-10): the dialog shows a field's message only
+  // for `typeCode`, `name` and `targetEntityType`. The refusal of a deprecated
+  // binding names `workflows.0.workflowDefinitionId`, so the screen says only
+  // "Validation failed" and drops the reason the server gave. Remove `.fails`
+  // when it is fixed.
+  it.fails('says why a save keeping a deprecated binding was refused', async () => {
+    replaceBackend(refusingDeprecated)
+    const wrapper = await open(boundType(retiredFlow.id))
+    await flushPromises()
+
+    await wrapper.get('[data-testid="type-name"]').setValue('Requisition (renamed)')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="document-type-dialog"]').text()).toContain(notPublished)
   })
 })
