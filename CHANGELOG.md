@@ -9,6 +9,38 @@ While the major version is `0`, the public API may change in any release.
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- **Tenants that already share integration secret names are not repaired**
+  ([#655](https://github.com/sujanto-gaws/kelir/issues/655), decision
+  **D-102** B). Creation now refuses such a code, but two live tenants created
+  before the upgrade may still map alike, and the names they share stay
+  refused for both (`SECRET_NAME_NOT_PERMITTED`). This query lists every such
+  pair:
+
+  ```sql
+  SELECT a.tenant_code, b.tenant_code
+  FROM tenants a
+  JOIN tenants b ON a.id < b.id
+  WHERE a.deleted_at IS NULL AND b.deleted_at IS NULL
+    AND (starts_with(upper(replace(a.tenant_code, '-', '_')) || '__',
+                     upper(replace(b.tenant_code, '-', '_')) || '__')
+      OR starts_with(upper(replace(b.tenant_code, '-', '_')) || '__',
+                     upper(replace(a.tenant_code, '-', '_')) || '__'));
+  ```
+
+  A tenant's code cannot be changed, so a pair that maps alike is separated
+  only by deleting the tenant created by mistake
+  ([Installation and Deployment](docs/operations/01.%20Installation%20and%20Deployment.md)
+  §7.1).
+- **A deleted tenant's variables are read by a later tenant whose code covers
+  its prefix, or is covered by it, as well as by one whose code maps alike**
+  ([#690](https://github.com/sujanto-gaws/kelir/issues/690)). After `ACME` is
+  deleted, a new `ACME__X` reads `ACME`'s `KELIR_INTEGRATION_SECRET_ACME__X__…`
+  variables; after `ACME__X` is deleted, a new `ACME` reads all of its. The
+  operator's duty under **D-102** covers this: when a tenant is deleted, remove
+  every variable under its prefix and restart the backend.
+
 ### Added
 
 - **Workflows are authored in the browser** ([#426](https://github.com/sujanto-gaws/kelir/issues/426),
@@ -68,6 +100,21 @@ While the major version is `0`, the public API may change in any release.
   `run:` before the shell parses it, so a title holding `"` and `$(…)` would have run as shell in the
   job, which had a read-only token and no secrets. The title and number now reach
   `check-pull-request-title.sh` through `env:`, so a title is only ever data.
+- **Creating a tenant refuses a code whose integration secrets would share
+  names with a live tenant's** ([#655](https://github.com/sujanto-gaws/kelir/issues/655),
+  decision **D-102** B). `POST /api/v1/organization/tenants` answers 422
+  `VALIDATION_ERROR` with one detail on `tenantCode`, coded
+  `SECRET_NAMESPACE_IN_USE`, when the new code's
+  `KELIR_INTEGRATION_SECRET_<CODE>__` prefix equals a live tenant's or one
+  starts with the other: `A_B` beside `A-B`, `ACME__X` beside `ACME` and the
+  other way round, `ACME_` beside `ACME`. The detail does not name the other
+  tenant. A deleted tenant's code does not block; a code identical to any
+  tenant's, live or deleted, is still 409 `CONFLICT` from the unique index, as
+  before, unless a live tenant's prefix overlaps it, which is answered 422
+  first: with `GONE` deleted and `GONE__X` live, creating `GONE` again is the
+  422. Until now such a tenant was created,
+  and the names the two shared answered `SECRET_NAME_NOT_PERMITTED` for both.
+
 - **The SRS names the builder pair** ([#685](https://github.com/sujanto-gaws/kelir/issues/685)).
   FR-RAD-013 (`Should`): a form definition is authored from the browser, with nested containers
   and visually built expressions. FR-WF-018 (`Should`): a workflow definition is authored,

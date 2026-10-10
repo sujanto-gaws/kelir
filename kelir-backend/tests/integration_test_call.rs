@@ -455,13 +455,40 @@ fn plant_in(code_segment: &str, value: &str) -> (String, String) {
 /// their own `ROLE-ADMIN` (`organization::service` says the withholding "is
 /// not a boundary"). Returns a token carrying the grant.
 async fn created_tenant_administrator(app: &TestApp, system_admin: &str, code: &str) -> String {
+    tenant_administrator(app, system_admin, code, code).await
+}
+
+/// [`created_tenant_administrator`] for a code that maps like a live tenant's,
+/// which the route has refused since #655 (decision **D-102** B). Two tenants
+/// created before that may still map alike, and nothing repairs them, so the
+/// resolver's ambiguity gate is still tested against such a pair. The tenant
+/// is created under a code that maps like nobody's, and its code is then
+/// rewritten in the table, which no route can do.
+async fn tenant_administrator_mapped_alike(
+    app: &TestApp,
+    system_admin: &str,
+    code: &str,
+) -> String {
+    let provisional = format!(
+        "PRE-{}",
+        &Uuid::now_v7().simple().to_string().to_uppercase()[20..]
+    );
+    tenant_administrator(app, system_admin, &provisional, code).await
+}
+
+async fn tenant_administrator(
+    app: &TestApp,
+    system_admin: &str,
+    created_as: &str,
+    code: &str,
+) -> String {
     let username = format!("admin.{}", code.to_lowercase().replace('_', "-"));
     let created = app
         .post(
             TENANTS,
             Some(system_admin),
             json!({
-                "tenantCode": code,
+                "tenantCode": created_as,
                 "name": format!("{code} Limited"),
                 "administrator": {
                     "username": username,
@@ -473,6 +500,16 @@ async fn created_tenant_administrator(app: &TestApp, system_admin: &str, code: &
         )
         .await;
     assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+    if created_as != code {
+        let rewritten = sqlx::query("UPDATE tenants SET tenant_code = $1 WHERE tenant_code = $2")
+            .bind(code)
+            .bind(created_as)
+            .execute(&app.pool)
+            .await
+            .expect("rewrites the provisional code");
+        assert_eq!(rewritten.rows_affected(), 1);
+    }
 
     let token = app.sign_in_to(code, &username, TENANT_PASSWORD).await;
 
@@ -2316,9 +2353,9 @@ async fn a_name_two_tenants_codes_both_map_to_is_refused_for_both() {
     let collector = Mock::start().await;
 
     let hyphen = created_tenant_administrator(&app, &system_admin, "AMB-X").await;
-    let underscore = created_tenant_administrator(&app, &system_admin, "AMB_X").await;
+    let underscore = tenant_administrator_mapped_alike(&app, &system_admin, "AMB_X").await;
     let short = created_tenant_administrator(&app, &system_admin, "DBL").await;
-    let long = created_tenant_administrator(&app, &system_admin, "DBL__X").await;
+    let long = tenant_administrator_mapped_alike(&app, &system_admin, "DBL__X").await;
 
     let (shared, shared_value) = plant_in("AMB_X", "kelir-planted-ambiguous-7f7f");
     let (nested, nested_value) = plant_in("DBL__X", "kelir-planted-nested-8a8a");
@@ -3000,7 +3037,7 @@ async fn a_tenant_that_is_not_active_still_holds_its_names_and_a_deleted_one_doe
     let collector = Mock::start().await;
 
     let _hyphen = created_tenant_administrator(&app, &system_admin, "SUS-X").await;
-    let underscore = created_tenant_administrator(&app, &system_admin, "SUS_X").await;
+    let underscore = tenant_administrator_mapped_alike(&app, &system_admin, "SUS_X").await;
     let (shared, shared_value) = plant_in("SUS_X", "kelir-planted-suspended-4a4a");
     let id = tenant_id_of(&app, "SUS-X").await;
 
@@ -3210,7 +3247,7 @@ async fn a_code_ending_in_an_underscore_and_the_code_without_it_share_no_name() 
     let collector = Mock::start().await;
 
     let short = created_tenant_administrator(&app, &system_admin, "TRL").await;
-    let long = created_tenant_administrator(&app, &system_admin, "TRL_").await;
+    let long = tenant_administrator_mapped_alike(&app, &system_admin, "TRL_").await;
 
     let (shared, shared_value) = plant_in("TRL_", "kelir-planted-trailing-7d7d");
     assert!(shared.contains("_TRL___TEST_"), "{shared}");

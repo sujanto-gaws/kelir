@@ -35,8 +35,9 @@ use sqlx::PgExecutor;
 use uuid::Uuid;
 
 use super::domain::{
-    normalize_tenant_code, validate_create_tenant, validate_update_tenant, CreateTenantRequest,
-    Tenant, TenantStatus, TenantView, UpdateTenantRequest, MAX_TENANT_CODE_LEN,
+    normalize_tenant_code, refuse_shared_secret_namespace, validate_create_tenant,
+    validate_update_tenant, CreateTenantRequest, Tenant, TenantStatus, TenantView,
+    UpdateTenantRequest, MAX_TENANT_CODE_LEN,
 };
 use super::repository::{self, TenantRecord};
 use crate::config::AppConfig;
@@ -359,6 +360,14 @@ pub async fn create_tenant(
     let tenant_code = normalize_tenant_code(&request.tenant_code);
     let id = Uuid::now_v7();
     let mut transaction = state.pool.begin().await?;
+
+    // #655, D-102 B: a code that would share an integration secret name with
+    // a live tenant's is refused. The read is in this transaction, behind a
+    // lock every creation takes first, so a creation racing this one is
+    // either committed and read, or waits for this one to commit.
+    repository::lock_tenant_codes(&mut transaction).await?;
+    let live = repository::live_codes(&mut *transaction).await?;
+    refuse_shared_secret_namespace(&tenant_code, live.iter().map(|(_, code)| code.as_str()))?;
 
     repository::insert(
         &mut *transaction,

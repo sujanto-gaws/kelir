@@ -118,6 +118,26 @@ pub fn tenant_prefix(tenant_code: &str) -> String {
     )
 }
 
+/// Whether two tenant codes share an `env://` name: whether some name is
+/// spelled as one of each's ([`is_spelled_in`]), so that gate 3 of
+/// [`TenantNamespaces::admits`] refuses it for both while both are live
+/// (#655, decision **D-102** B).
+///
+/// **It is exactly when one code's prefix starts with the other's.** A name
+/// spelled in both starts with both prefixes, so the longer starts with the
+/// shorter. And when the longer prefix starts with the shorter, the longer's
+/// prefix followed by any name is also the shorter's: what lies between the
+/// two prefixes is `A–Z 0–9 _`, because a mapped code holds nothing else. So
+/// the codes overlap when they map alike (`A-B` and `A_B`), when one covers
+/// the other (`ACME` and `ACME__X`, in either order), and when one is the
+/// other with a trailing `_` or `-` (`TRL` and `TRL_`), since `TRL_`'s prefix
+/// `…TRL___` starts with `TRL`'s `…TRL__`. `ACME` and `ACME_X` do not: one
+/// underscore is not the separator.
+pub fn namespaces_overlap(code: &str, other: &str) -> bool {
+    let (code, other) = (tenant_prefix(code), tenant_prefix(other));
+    code.starts_with(other.as_str()) || other.starts_with(code.as_str())
+}
+
 /// Whether `name` is spelled as one of `tenant_code`'s names: its prefix,
 /// then one or more of `A–Z 0–9 _`. Exact, and case-sensitive.
 fn is_spelled_in(name: &str, tenant_code: &str) -> bool {
@@ -809,6 +829,105 @@ mod tests {
         // reach are still ACME's.
         assert!(namespaces("ACME", &["ACME__X"]).admits("KELIR_INTEGRATION_SECRET_ACME__TOKEN"));
         assert!(namespaces("ACME", &["ACME__X"]).admits("KELIR_INTEGRATION_SECRET_ACME__X"));
+    }
+
+    #[test]
+    fn codes_overlap_when_they_map_alike_or_one_covers_the_other() {
+        // #655: the comparison tenant creation refuses by. Each pair both
+        // ways round, since the rule has no first and second code.
+        for (code, other) in [
+            // The same code.
+            ("ACME", "ACME"),
+            // Case: a code is compared upper case.
+            ("acme", "ACME"),
+            ("a-b", "A_B"),
+            // The hyphen: written `_`.
+            ("A-B", "A_B"),
+            ("A--B", "A__B"),
+            ("TNT-001", "TNT_001"),
+            // `__`: a code holding the separator is covered by the code
+            // before it, however its underscores are spelled.
+            ("ACME", "ACME__X"),
+            ("ACME", "ACME-_X"),
+            ("ACME", "ACME--X"),
+            ("ACME", "ACME__X__Y"),
+            ("ACME__X", "ACME__X__Y"),
+            // A trailing `_` or `-`: `…TRL___` starts with `…TRL__`.
+            ("TRL", "TRL_"),
+            ("TRL", "TRL-"),
+            ("TRL", "TRL___"),
+        ] {
+            assert!(namespaces_overlap(code, other), "{code} and {other}");
+            assert!(namespaces_overlap(other, code), "{other} and {code}");
+        }
+    }
+
+    #[test]
+    fn codes_that_share_only_characters_do_not_overlap() {
+        for (code, other) in [
+            // One underscore is not the separator.
+            ("ACME", "ACME_X"),
+            ("ACME", "ACME-X"),
+            ("A_B", "A__B"),
+            // A prefix of the code, not of its namespace.
+            ("ACME", "ACMEX"),
+            ("ACME", "ACME2"),
+            ("ACME", "XACME"),
+            ("A", "AB"),
+            // A covering code's other neighbours.
+            ("ACME__X", "ACME__Y"),
+            ("ACME__X", "ACME__XY"),
+        ] {
+            assert!(!namespaces_overlap(code, other), "{code} and {other}");
+            assert!(!namespaces_overlap(other, code), "{other} and {code}");
+        }
+    }
+
+    #[test]
+    fn creation_refuses_exactly_the_pairs_whose_shared_names_gate_three_refuses() {
+        // The comparison at creation and the ambiguity gate at resolution are
+        // one rule. For every pair: if they overlap, a name exists that each
+        // alone admits and that each is refused beside the other; if they do
+        // not, neither's names are the other's.
+        let codes = [
+            "ACME", "acme", "ACME_", "ACME-", "ACME__X", "ACME--X", "ACME_X", "ACMEX", "A-B",
+            "A_B", "A__B", "A", "AB", "TRL", "TRL___", "SYSTEM", "TNT-001",
+        ];
+        for code in codes {
+            for other in codes {
+                let longer = if namespace_segment(code).len() >= namespace_segment(other).len() {
+                    code
+                } else {
+                    other
+                };
+                let witness = format!("{}T", tenant_prefix(longer));
+
+                if namespaces_overlap(code, other) {
+                    assert!(namespaces(code, &[]).admits(&witness), "{code}: {witness}");
+                    assert!(
+                        namespaces(other, &[]).admits(&witness),
+                        "{other}: {witness}"
+                    );
+                    assert!(
+                        !namespaces(code, &[other]).admits(&witness),
+                        "{code}/{other}"
+                    );
+                    assert!(
+                        !namespaces(other, &[code]).admits(&witness),
+                        "{other}/{code}"
+                    );
+                } else {
+                    let own = format!("{}T", tenant_prefix(code));
+                    let theirs = format!("{}T", tenant_prefix(other));
+                    assert!(
+                        namespaces(code, &[other]).admits(&own),
+                        "{code} beside {other}"
+                    );
+                    assert!(!is_spelled_in(&own, other), "{own} is {other}'s");
+                    assert!(!is_spelled_in(&theirs, code), "{theirs} is {code}'s");
+                }
+            }
+        }
     }
 
     #[test]
