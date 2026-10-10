@@ -26,9 +26,29 @@ While the major version is `0`, the public API may change in any release.
   yet**: the workflow editor and the form builder take it in their own rows.
   JWSS §6.2 now names the Calculation Rule Registry's §2.5 tier for
   conditions, which is what the save-time check already applied.
+- **A pull request marked not ready fails a check**
+  ([#696](https://github.com/sujanto-gaws/kelir/issues/696), decision
+  **D-112**). `Pull-request ready` fails while the body's first non-blank
+  line contains *not ready* or *do not merge yet*, ignoring case, bold and
+  italic markers, CRLF endings and runs of whitespace, and passes once the
+  line is removed. HTML comments are removed first, as GitHub hides them, so
+  a template that opens with one cannot hide the line, and a comment saying
+  *not ready* does not refuse. It re-runs when the body is edited. The body
+  reaches the script through an environment variable, never pasted into the
+  shell. Neither pull-request workflow leaves the token in the checkout. Only
+  the first line is read, so a body can still quote the line lower down. The
+  [git workflow](docs/standards/05.%20Git%20Workflow.md) §4 now states the
+  convention it enforces: a feature row's pull request carries the line until
+  its campaign section is written. **It binds nothing until the product owner
+  makes it required on `main`.**
 
 ### Changed
 
+- **The pull-request title check no longer writes the title into its shell step**
+  ([#702](https://github.com/sujanto-gaws/kelir/issues/702)). GitHub substitutes an expression in
+  `run:` before the shell parses it, so a title holding `"` and `$(…)` would have run as shell in the
+  job, which had a read-only token and no secrets. The title and number now reach
+  `check-pull-request-title.sh` through `env:`, so a title is only ever data.
 - **The SRS names the builder pair** ([#685](https://github.com/sujanto-gaws/kelir/issues/685)).
   FR-RAD-013 (`Should`): a form definition is authored from the browser, with nested containers
   and visually built expressions. FR-WF-018 (`Should`): a workflow definition is authored,

@@ -1,0 +1,62 @@
+name: Pull-request ready
+
+# **A pull request whose body opens by saying it is not ready fails this
+# check** (#696, decision D-112). A feature row's pull request carries
+# `**Not ready: <gate> is still running. Do not merge yet.**` as its first line
+# until its campaign section is written (Git Workflow §4), and three Sprint 22
+# rows and #693 were merged while theirs said so. The rule itself, and why it
+# reads only the first line, are in `scripts/check-pull-request-ready.sh`.
+#
+# **A workflow of its own, for the reason `pull-request-title.yml` is one**
+# (D-65): it must re-run on `edited`, which `ci.yml` does not listen for, and
+# a body edit must not cost a backend suite.
+#
+# **Making it required is the product owner's**, in branch protection on
+# `main`: the context is this job's name, `Pull-request ready`. Until then it
+# reports and does not block.
+
+on:
+  pull_request:
+    # `edited` is the one that clears it: removing the line is a body edit.
+    # The rest keep a result on every head commit, since branch protection
+    # reads required checks per commit and a push would otherwise leave the new
+    # head with none. `ready_for_review` re-reads the body when a draft is
+    # marked ready, which is the moment the line is most likely still there.
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+
+# A body edited twice in quick succession only needs its last state checked.
+concurrency:
+  group: pr-ready-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  ready:
+    name: Pull-request ready
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          # Neither script needs the token, so it is not left in `.git/config`
+          # for the steps after the checkout to read.
+          persist-credentials: false
+
+      # **The body reaches the script through `env`, never through `${{ }}` in
+      # `run:`.** An expression in `run:` is pasted into the shell before it
+      # runs, so a body holding `$(…)` or a closing quote would execute. An
+      # environment variable is data to the shell, whatever it holds. A pull
+      # request with no body gives an empty string, which passes.
+      - name: Refuse a body whose first line says not ready
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: ./scripts/check-pull-request-ready.sh
+
+      # The rule's shapes, each a body expected to be refused or accepted.
+      # Seconds of bash, and run even when the step above is red: a pull
+      # request that changes the rule is usually one still marked not ready.
+      - name: Probe the first-line rule
+        if: ${{ !cancelled() }}
+        run: ./scripts/check-pull-request-ready.probe.sh
