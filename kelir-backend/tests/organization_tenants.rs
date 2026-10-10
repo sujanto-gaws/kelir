@@ -568,6 +568,10 @@ async fn a_tenant_that_left_stops_admitting_the_administrator_it_was_created_wit
 /// is the race's bound: whatever the interleaving, every token is refused at
 /// its next refresh, because that refresh reads the status itself. Four
 /// refreshes run at once with the suspension, on a multi-threaded runtime.
+///
+/// **A property, not a detector.** A refresh won the race in 1 of 10 runs
+/// (2026-10-10), so with the tenant check removed this test stays green in
+/// most runs. The SQL-set tests in `auth_session.rs` are the detectors.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_refresh_racing_its_tenants_suspension_renews_no_session_past_it() {
     let app = multi_tenant_app().await;

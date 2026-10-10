@@ -692,6 +692,9 @@ async fn execute(app: &TestApp, statement: &str) {
 /// `admits_session` answers the read's failure as an error, and the refresh
 /// revokes nothing. Only the tenant read is made to fail. `find_user` reads
 /// `users` alone, so the user check before it still passes.
+///
+/// Seen red (2026-10-10), and by no test of the builder's: the failed read
+/// answered as a refusal, in `admits_session` and again in `refresh`.
 #[tokio::test]
 async fn a_refresh_that_cannot_read_its_tenant_is_an_error_and_ends_no_session() {
     let app = TestApp::spawn().await;
