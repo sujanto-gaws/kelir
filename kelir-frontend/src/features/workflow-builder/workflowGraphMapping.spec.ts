@@ -386,14 +386,24 @@ describe('workflowGraphOf', () => {
       ])
     })
 
-    it('reads a condition of null as none', () => {
+    // Read as none until the #719 schema gate: the server reads a `null`
+    // condition as present (S7 counts a fallback only where the key is
+    // missing, and the meta-schema refuses `null` as not an object), so a
+    // graph drawing it as the fallback showed a branch the server does not.
+    it('reads a condition of null as a condition, as the server does', () => {
       const definition = purchase()
 
       definition.transitions = [
         { from: 'MANAGER', to: 'FINANCE', action: 'APPROVE', condition: null },
+        { from: 'MANAGER', to: 'DONE', action: 'APPROVE' },
       ]
 
-      expect(workflowGraphOf(definition).edges[0].conditional).toBe(false)
+      expect(
+        workflowGraphOf(definition).edges.map((edge) => [edge.conditional, edge.fallback]),
+      ).toEqual([
+        [true, false],
+        [false, true],
+      ])
     })
   })
 

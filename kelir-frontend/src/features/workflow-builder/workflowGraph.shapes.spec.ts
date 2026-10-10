@@ -271,6 +271,7 @@ describe('a workflow graph of an unusual definition', () => {
       ['an empty array', []],
       ['an empty object', {}],
       ['an empty string', ''],
+      ['null', null],
       ['true', true],
       ['an array of rules', [{ '==': [1, 1] }, { '!': [false] }]],
       [

@@ -76,8 +76,18 @@ export const CONDITION_MARKER = 'if…'
 /** The marker S7's fallback edge carries. */
 export const FALLBACK_MARKER = 'otherwise'
 
+/**
+ * Whether a transition carries a `condition`: whether the key is there, as
+ * the server reads it. **`null` is a condition**, not its absence: S7's
+ * fallback is the sibling that *omits* `condition`, `workflow/domain/jwss.rs`
+ * counts a fallback only where the key is missing, the engine keeps `null` as
+ * a condition, and the meta-schema refuses it as not an object. A draft
+ * holding one is wrong, and the graph draws it as the server reads it.
+ * `undefined` is absent: JSON has no such value, so it never reaches the
+ * server.
+ */
 function hasCondition(transition: { condition?: unknown }): boolean {
-  return transition.condition !== undefined && transition.condition !== null
+  return transition.condition !== undefined
 }
 
 function labelOf(action: TransitionAction): string {
