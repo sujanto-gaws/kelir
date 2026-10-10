@@ -190,7 +190,11 @@ describe('FormBuilderPage', () => {
     const wrapper = await render(['rad:form:read'])
 
     expect(wrapper.find('[data-testid="save-definition"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="add-field"]').attributes('disabled')).toBeDefined()
+    // #688 D7 retargets this: the flat builder's *Add field* was disabled; the
+    // palette that replaces it is absent on a read-only canvas, as are Add,
+    // Move and Remove. Absent is the stronger of the two claims.
+    expect(wrapper.find('[data-testid="form-palette"]').exists()).toBe(false)
+    expect(wrapper.find('[data-list-add]').exists()).toBe(false)
   })
 
   /**
@@ -201,9 +205,10 @@ describe('FormBuilderPage', () => {
   it('shows a refusal against the component the server named', async () => {
     saveResponse = {
       status: 422,
-      body: errorBody('VALIDATION_FAILED', 'The definition is not valid', [
+      // The server's real shape (#688 E6): every path carries `definition.`.
+      body: errorBody('VALIDATION_ERROR', 'Validation failed', [
         {
-          path: 'components.1.rules.0',
+          path: 'definition.components.1.rules.0',
           rule: 'rule',
           code: 'RULE_NOT_REGISTERED',
           message: '`totallyMadeUp` is not a rule in the JFSS Validation Rule Registry',
@@ -231,9 +236,9 @@ describe('FormBuilderPage', () => {
   it('shows a refusal that names no component rather than dropping it', async () => {
     saveResponse = {
       status: 422,
-      body: errorBody('VALIDATION_FAILED', 'The definition is not valid', [
+      body: errorBody('VALIDATION_ERROR', 'Validation failed', [
         {
-          path: 'settings.lookups.field_9',
+          path: 'definition.settings.lookups.field_9',
           rule: 'lookup',
           code: 'LOOKUP_BINDING_UNKNOWN_COMPONENT',
           message: 'settings.lookups names no component `field_9`',

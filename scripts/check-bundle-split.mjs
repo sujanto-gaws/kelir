@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Two libraries' bundle conditions, as a build assertion (issue #163 AC4; #447
- * AC4).
+ * Three libraries' bundle conditions, as a build assertion (issue #163 AC4; #447
+ * AC4; #688 G3, ADR-0046).
  *
  * **D-10 bought a 588 KB gzipped evaluator on one condition: it stays off the
  * first-load path.** `lib/jsonlogic.ts` reaches for it through a dynamic
@@ -15,6 +15,10 @@
  * the chart through `defineAsyncComponent`, and a static `import` of
  * `@unovis/vue` on the page, the layout or anything they share puts d3 in front
  * of every sign-in the same silent way.
+ *
+ * **#688 took the form builder's drag-and-drop library on the same condition**
+ * (ADR-0046 §5): `vue-draggable-plus`, with the Sortable it carries, is
+ * imported by the canvas components alone, on the builder's lazy route.
  *
  * **No unit test can see that.** A chunk graph is a property of the build, and
  * the module a test imports is reachable either way. So the condition is
@@ -87,6 +91,18 @@ const SUBJECTS = [
       '  for it — and the chart is on the home route. Reach it through\n' +
       '  src/features/dashboard/DocumentStatusChart.vue, which DashboardPage.vue loads with\n' +
       '  `defineAsyncComponent` — never by importing `@unovis/*` on a page or layout.',
+  },
+  {
+    // #688 G3, ADR-0046 §5. vue-draggable-plus 0.6.1 inlines Sortable 1.15.2 in
+    // its own dist, so `sortablejs` is listed for a build that ever resolves it
+    // as a package of its own; today the first name is the one that matches.
+    name: "the form builder's drag-and-drop library",
+    packages: ['vue-draggable-plus', 'sortablejs'],
+    howToFix:
+      '  ADR-0046 took vue-draggable-plus on the basis that only the form builder pays for\n' +
+      '  it. Import it from src/features/admin/form-builder/FormCanvasList.vue and\n' +
+      '  FormBuilderPalette.vue alone, which only FormBuilderPage.vue reaches, on a\n' +
+      '  router-lazy route — never from a store, the layout, or anything they share.',
   },
 ]
 

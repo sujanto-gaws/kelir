@@ -15,10 +15,14 @@ import type { ValidationDetail } from '@/types/api'
 import type { JfssComponent, JfssDefinition } from '@/types/jfss'
 import type { Form } from '@/types/rad'
 
+import FormBuilderCanvas from './form-builder/FormBuilderCanvas.vue'
+import FormBuilderPalette from './form-builder/FormBuilderPalette.vue'
+import { locate, pathOf, replaceNode, setLookup } from './form-builder/formTree'
+import { createFormBuilder, provideFormBuilder } from './form-builder/useFormBuilder'
 import FormComponentEditor from './FormComponentEditor.vue'
 
 /**
- * The form builder (FR-RAD-004; #373).
+ * The form builder (FR-RAD-004, #373; nested since FR-RAD-013, #688).
  *
  * **Three properties this screen holds, and none of them is that it renders.**
  *
@@ -34,8 +38,18 @@ import FormComponentEditor from './FormComponentEditor.vue'
  *    server's answer, not computing a second one. A rule catalogue in the
  *    browser would be a third opinion about a question already answered twice.
  * 3. **What the server refuses is shown against the component it named.** The
- *    S10.3 `path` is dot-notation — `components.2.rules.0` — so a detail lands
- *    on the component it is about rather than in a banner above forty fields.
+ *    S10.3 `path` is dot-notation — `definition.components.0.columns.1.components.2`
+ *    — and `formTree.resolveDetail` walks it into the nested node it names, so
+ *    a detail lands on that node's card rather than in a banner above forty
+ *    fields. One no node claims stays in the list at the top.
+ *
+ * **The canvas is a tree** (#688, **D-86** A): a palette of what the renderer
+ * draws, a recursive canvas that nests panels, fieldsets, columns, tabs and a
+ * data grid's row template, by pointer and by keyboard, and the shipped
+ * `FormComponentEditor` mounted for the one node selected. The drag-and-drop
+ * library is imported by the canvas components alone, which this page alone
+ * imports, and the route is lazy, so a session that never opens a builder
+ * never fetches it ([ADR-0046]; `check:bundle`).
  *
  * **The preview is the editor's own claim, checked.** It renders the definition
  * being edited through the same `JfssForm` a document uses, so a definition
@@ -64,28 +78,49 @@ const saved = ref(false)
 const isPublished = computed(() => form.value?.status === 'PUBLISHED')
 const isReadOnly = computed(() => isPublished.value || !canUpdate.value)
 
-const components = computed<JfssComponent[]>(() => definition.value?.components ?? [])
+const builder = createFormBuilder({ definition, readOnly: isReadOnly, details })
+
+provideFormBuilder(builder)
 
 /** `settings.lookups`, which is where a lookup's source lives (**D-23**). */
 const lookups = computed<Record<string, string>>(
   () => (definition.value?.settings?.lookups as Record<string, string> | undefined) ?? {},
 )
 
-/**
- * The details that address one component, by its position in `components`.
- *
- * The server addresses a component by index — `components.2.…` — so this is a
- * prefix match on that index rather than on the component's `id`. A detail
- * whose path names no component stays in the page-level list below, because a
- * message nobody claims is a message the author never sees.
- */
-function detailsFor(index: number): ValidationDetail[] {
-  return details.value.filter((detail) => detail.path.startsWith(`components.${index}`))
+/** The node the properties region edits (A2): one at a time. */
+const selected = computed<{ path: string; node: JfssComponent } | null>(() => {
+  const id = builder.selectedId.value
+  const path = definition.value && id ? pathOf(definition.value, id) : null
+  const at = definition.value && path ? locate(definition.value, path) : null
+
+  return path && at ? { path, node: at.node } : null
+})
+
+/** The details no node claims. A message nobody claims is a message the author never sees. */
+const unclaimedDetails = computed(() => builder.unplacedDetails.value)
+
+function replaceSelected(component: JfssComponent): void {
+  const current = selected.value
+
+  if (!definition.value || !current || isReadOnly.value) {
+    return
+  }
+
+  definition.value = replaceNode(definition.value, current.path, component) ?? definition.value
 }
 
-const unclaimedDetails = computed(() =>
-  details.value.filter((detail) => !/^components\.\d+/.test(detail.path)),
-)
+function setLookupSource(componentId: string, source: string): void {
+  if (!definition.value || isReadOnly.value) {
+    return
+  }
+
+  definition.value = setLookup(definition.value, componentId, source)
+}
+
+/** On load, the first root component is selected (A2). */
+function selectFirst(): void {
+  builder.select(definition.value?.components[0]?.id ?? null)
+}
 
 async function load(): Promise<void> {
   isLoading.value = true
@@ -99,122 +134,12 @@ async function load(): Promise<void> {
     // A copy: the editor mutates it, and the last saved state stays in `form`
     // so the header keeps telling the truth about what is stored.
     definition.value = structuredClone(loaded.definition)
+    selectFirst()
   } catch (failure) {
     loadError.value = toApiError(failure).message
   } finally {
     isLoading.value = false
   }
-}
-
-function nextComponentId(): string {
-  // `id` is unique per component *instance* (JFSS §4.1) and `settings.lookups`
-  // binds on it, so a duplicate would bind two components to one source.
-  const taken = new Set(components.value.map((component) => component.id))
-
-  for (let n = components.value.length + 1; ; n += 1) {
-    const candidate = `field_${n}`
-
-    if (!taken.has(candidate)) {
-      return candidate
-    }
-  }
-}
-
-function addField(): void {
-  if (!definition.value) {
-    return
-  }
-
-  const id = nextComponentId()
-
-  definition.value.components = [
-    ...components.value,
-    {
-      id,
-      role: 'data',
-      type: 'textfield',
-      key: id,
-      label: 'New field',
-      validation: { type: 'string' },
-    },
-  ]
-}
-
-function addDisplay(): void {
-  if (!definition.value) {
-    return
-  }
-
-  const id = nextComponentId()
-
-  definition.value.components = [
-    ...components.value,
-    { id, role: 'display', type: 'paragraph', content: 'Text' },
-  ]
-}
-
-function replaceComponent(index: number, component: JfssComponent): void {
-  if (!definition.value) {
-    return
-  }
-
-  definition.value.components = components.value.map((existing, at) =>
-    at === index ? component : existing,
-  )
-}
-
-function moveComponent(index: number, direction: -1 | 1): void {
-  const target = index + direction
-
-  if (!definition.value || target < 0 || target >= components.value.length) {
-    return
-  }
-
-  const next = [...components.value]
-  const [moved] = next.splice(index, 1)
-
-  next.splice(target, 0, moved)
-  definition.value.components = next
-}
-
-/**
- * Removes a component, and its lookup binding with it.
- *
- * **A binding naming no component is refused at save** (`rad::domain::jfss`),
- * so leaving the entry behind would make the next save fail with a message
- * about a field that is no longer on screen.
- */
-function removeComponent(index: number): void {
-  if (!definition.value) {
-    return
-  }
-
-  const [removed] = components.value.slice(index, index + 1)
-
-  definition.value.components = components.value.filter((_, at) => at !== index)
-
-  if (removed && definition.value.settings?.lookups) {
-    const remaining = { ...(definition.value.settings.lookups as Record<string, string>) }
-
-    delete remaining[removed.id]
-    definition.value.settings = { ...definition.value.settings, lookups: remaining }
-  }
-}
-
-function setLookupSource(componentId: string, source: string): void {
-  if (!definition.value) {
-    return
-  }
-
-  const remaining = { ...lookups.value }
-
-  if (source === '') {
-    delete remaining[componentId]
-  } else {
-    remaining[componentId] = source
-  }
-
-  definition.value.settings = { ...(definition.value.settings ?? {}), lookups: remaining }
 }
 
 async function save(): Promise<void> {
@@ -238,6 +163,8 @@ async function save(): Promise<void> {
     // is entitled to normalise, and a screen that kept its own version would be
     // showing something no document will ever be filled against.
     definition.value = structuredClone(updated.definition)
+    // The selection survives when its node did.
+    builder.select(builder.selectedId.value)
     saved.value = true
   } catch (failure) {
     const failed = toApiError(failure)
@@ -364,7 +291,11 @@ onMounted(() => {
       </Alert>
 
       <ul v-if="unclaimedDetails.length > 0" class="space-y-1" data-testid="form-errors">
-        <li v-for="detail in unclaimedDetails" :key="detail.path" class="text-sm text-destructive">
+        <li
+          v-for="(detail, at) in unclaimedDetails"
+          :key="`${detail.path}-${at}`"
+          class="text-sm text-destructive"
+        >
           <span class="font-mono text-xs">{{ detail.path }}</span> — {{ detail.message }}
         </li>
       </ul>
@@ -379,60 +310,48 @@ onMounted(() => {
         />
       </div>
 
-      <div class="grid gap-6 lg:grid-cols-2">
-        <div class="space-y-4">
-          <div class="flex items-center justify-between">
-            <h3 class="text-sm font-semibold">Components</h3>
-            <div class="space-x-2">
-              <Button
-                size="sm"
-                variant="secondary"
-                :disabled="isReadOnly"
-                data-testid="add-field"
-                @click="addField"
-              >
-                Add field
-              </Button>
-              <Button
-                size="sm"
-                variant="secondary"
-                :disabled="isReadOnly"
-                data-testid="add-text"
-                @click="addDisplay"
-              >
-                Add text
-              </Button>
-            </div>
-          </div>
+      <div
+        class="grid gap-6"
+        :class="isReadOnly ? 'lg:grid-cols-2' : 'lg:grid-cols-[12rem_minmax(0,1fr)_minmax(0,1fr)]'"
+      >
+        <!-- Absent, not disabled, on a read-only canvas (D7). -->
+        <FormBuilderPalette v-if="!isReadOnly" />
 
-          <FormComponentEditor
-            v-for="(component, index) in components"
-            :key="component.id"
-            :component="component"
-            :index="index"
-            :count="components.length"
-            :disabled="isReadOnly"
-            :details="detailsFor(index)"
-            :lookup-source="lookups[component.id] ?? ''"
-            @update="replaceComponent(index, $event)"
-            @update:lookup-source="setLookupSource(component.id, $event)"
-            @move="moveComponent(index, $event)"
-            @remove="removeComponent(index)"
-          />
-
-          <p v-if="components.length === 0" class="text-sm text-muted-foreground">
+        <div class="space-y-2">
+          <h3 class="text-sm font-semibold">Components</h3>
+          <FormBuilderCanvas />
+          <p v-if="definition.components.length === 0" class="text-sm text-muted-foreground">
             No components. A form with none is a document nobody can fill in.
           </p>
         </div>
 
-        <div class="space-y-2">
-          <h3 class="text-sm font-semibold">Preview</h3>
-          <div class="rounded-lg border p-4" data-testid="form-preview">
-            <!-- The same renderer a document uses. A definition this screen
-                 produces that the preview cannot draw is a definition no
-                 document could be filled against either. -->
-            <JfssForm :definition="definition" />
-          </div>
+        <div class="space-y-6">
+          <section class="space-y-2" aria-labelledby="properties-heading" data-testid="properties">
+            <h3 id="properties-heading" class="text-sm font-semibold">Properties</h3>
+            <FormComponentEditor
+              v-if="selected"
+              :key="selected.node.id"
+              :component="selected.node"
+              :disabled="isReadOnly"
+              :details="builder.detailsFor(selected.node.id)"
+              :lookup-source="lookups[selected.node.id] ?? ''"
+              @update="replaceSelected"
+              @update:lookup-source="setLookupSource(selected.node.id, $event)"
+            />
+            <p v-else class="text-sm text-muted-foreground">
+              Select a component on the canvas to edit it.
+            </p>
+          </section>
+
+          <section class="space-y-2">
+            <h3 class="text-sm font-semibold">Preview</h3>
+            <div class="rounded-lg border p-4" data-testid="form-preview">
+              <!-- The same renderer a document uses. A definition this screen
+                   produces that the preview cannot draw is a definition no
+                   document could be filled against either. -->
+              <JfssForm :definition="definition" />
+            </div>
+          </section>
         </div>
       </div>
     </template>
