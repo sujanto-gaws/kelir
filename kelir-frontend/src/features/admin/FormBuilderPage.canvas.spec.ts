@@ -1,11 +1,12 @@
 import { flushPromises, mount, type DOMWrapper, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { nextTick } from 'vue'
+import { nextTick, ref } from 'vue'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 
 import FormBuilderPage from './FormBuilderPage.vue'
 import FormComponentEditor from './FormComponentEditor.vue'
+import { createFormBuilder } from './form-builder/useFormBuilder'
 import {
   errorBody,
   installFakeBackend,
@@ -915,5 +916,456 @@ describe('FormBuilderPage, the nesting canvas', () => {
     await drop(wrapper, 'components', 0, 'components', 1)
 
     expect(wrapper.find('[data-testid="form-canvas"]').html()).toBe(before)
+  })
+
+  // --- test-engineer campaign, 2026-10-10 (#688 row 11) ---------------------------------
+  //
+  // The seams between the canvas, the selection and the editor, a refusal as the
+  // server really cascades it, and what a load-then-save must not change.
+
+  it('moves the selection to the next sibling when the selected node is removed, and edits that one (A2, D6)', async () => {
+    current = form(definition([field('a'), field('b'), field('c')]))
+
+    const wrapper = await render()
+
+    await wrapper.find('[data-testid="select-b"]').trigger('click')
+    await wrapper.find('[data-testid="label-b"]').setValue('Being edited')
+    await wrapper.find('[data-testid="remove-b"]').trigger('click')
+    await settle()
+
+    expect(wrapper.find('[data-testid="editor-b"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="editor-c"]').exists()).toBe(true)
+
+    // An edit now lands on the node the editor shows, and the removed one stays gone.
+    await wrapper.find('[data-testid="label-c"]').setValue('Edited after')
+
+    const { definition: sent } = await saved(wrapper)
+
+    expect(sent.components.map((node) => [node.id, (node as { label?: string }).label])).toEqual([
+      ['a', 'Label a'],
+      ['c', 'Edited after'],
+    ])
+  })
+
+  it('drops a selection inside a removed container, and edits no node that has gone (A2, C3)', async () => {
+    current = form(
+      definition([
+        {
+          id: 'panel_1',
+          role: 'layout',
+          type: 'panel',
+          title: 'Details',
+          components: [field('inner')],
+        },
+        field('after'),
+      ]),
+    )
+
+    const wrapper = await render()
+
+    await wrapper.find('[data-testid="select-inner"]').trigger('click')
+    expect(wrapper.find('[data-testid="editor-inner"]').exists()).toBe(true)
+
+    await wrapper.find('[data-testid="remove-panel_1"]').trigger('click')
+    await settle()
+    document.querySelector<HTMLButtonElement>('[data-testid="confirm-action"]')?.click()
+    await settle()
+
+    expect(wrapper.find('[data-testid="editor-inner"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="editor-after"]').exists()).toBe(true)
+    expect(document.activeElement?.getAttribute('data-testid')).toBe('select-after')
+
+    const { definition: sent } = await saved(wrapper)
+
+    expect(sent.components.map((node) => node.id)).toEqual(['after'])
+  })
+
+  it.each([
+    [
+      'columns whose only child is in column 2',
+      {
+        id: 'holder',
+        role: 'layout',
+        type: 'columns',
+        columns: [{ components: [] }, { components: [field('x')] }],
+      },
+    ],
+    [
+      'tabs whose only child is on tab 2',
+      {
+        id: 'holder',
+        role: 'layout',
+        type: 'tabs',
+        tabs: [
+          { title: 'One', components: [] },
+          { title: 'Two', components: [field('x')] },
+        ],
+      },
+    ],
+  ])('asks before removing %s, and takes its bindings (C3, C4)', async (_case, holder) => {
+    current = form(definition([holder, field('field_1')], { lookups: { x: 'supplier' } }))
+
+    const wrapper = await render()
+
+    await wrapper.find('[data-testid="remove-holder"]').trigger('click')
+    await settle()
+
+    expect(document.querySelector('[data-testid="confirm-action"]')).not.toBeNull()
+    expect(wrapper.find('[data-testid="component-holder"]').exists()).toBe(true)
+
+    document.querySelector<HTMLButtonElement>('[data-testid="confirm-action"]')?.click()
+    await settle()
+
+    const { definition: sent } = await saved(wrapper)
+
+    expect(sent.components.map((node) => node.id)).toEqual(['field_1'])
+    expect(sent.settings?.lookups).toEqual({})
+  })
+
+  it.each([
+    ['a published revision', EVERY_PERMISSION, 'PUBLISHED'],
+    ['a caller without rad:form:update', ['rad:form:read'], 'DRAFT'],
+  ])(
+    'draws no slot control for %s, and keeps its tab titles disabled (D7)',
+    async (_case, permissions, status) => {
+      const loaded = definition([
+        {
+          id: 'columns_1',
+          role: 'layout',
+          type: 'columns',
+          columns: [{ components: [field('a')] }, { components: [] }],
+        },
+        {
+          id: 'tabs_1',
+          role: 'layout',
+          type: 'tabs',
+          tabs: [{ title: 'General', components: [] }],
+        },
+      ])
+
+      current = form(loaded, { status })
+
+      const wrapper = await render(permissions)
+
+      expect(wrapper.find('[data-testid^="add-slot-"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid^="remove-slot-"]').exists()).toBe(false)
+      expect(
+        wrapper.find('[data-testid="tab-title-tabs_1-0"]').attributes('disabled'),
+      ).toBeDefined()
+    },
+  )
+
+  it('places each detail of the server’s cascading refusal on its own card, and drops none (E6)', async () => {
+    // Verbatim from row 11's probe against a running backend (2026-10-10): one
+    // stray property four levels down, and `unevaluatedProperties` reports every
+    // ancestor as well, each at its own path.
+    current = form(
+      definition([
+        {
+          id: 'panel_1',
+          role: 'layout',
+          type: 'panel',
+          title: 'P',
+          components: [
+            {
+              id: 'tabs_1',
+              role: 'layout',
+              type: 'tabs',
+              tabs: [
+                {
+                  title: 'T',
+                  components: [
+                    {
+                      id: 'columns_1',
+                      role: 'layout',
+                      type: 'columns',
+                      columns: [{ components: [] }, { components: [field('deep')] }],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ]),
+    )
+    saveResponse = {
+      status: 422,
+      body: errorBody('VALIDATION_ERROR', 'Validation failed', [
+        {
+          code: 'INVALID_DEFINITION',
+          message: "Unevaluated properties are not allowed ('bogus' was unexpected)",
+          path: 'definition.components.0.components.0.tabs.0.components.0.columns.1.components.0',
+          rule: 'jfss',
+        },
+        {
+          code: 'INVALID_DEFINITION',
+          message: "Unevaluated properties are not allowed ('columns' was unexpected)",
+          path: 'definition.components.0.components.0.tabs.0.components.0',
+          rule: 'jfss',
+        },
+        {
+          code: 'INVALID_DEFINITION',
+          message: "Unevaluated properties are not allowed ('tabs' was unexpected)",
+          path: 'definition.components.0.components.0',
+          rule: 'jfss',
+        },
+        {
+          code: 'INVALID_DEFINITION',
+          message: "Unevaluated properties are not allowed ('components', 'title' were unexpected)",
+          path: 'definition.components.0',
+          rule: 'jfss',
+        },
+      ]),
+    }
+
+    const wrapper = await render()
+
+    await wrapper.find('[data-testid="save-definition"]').trigger('click')
+    await settle()
+
+    const own = (id: string) =>
+      wrapper
+        .findAll(`[data-testid="component-errors-${id}"]`)
+        .map((list) => list.findAll('li').map((item) => item.text()))
+
+    expect(own('deep')).toEqual([
+      ["Unevaluated properties are not allowed ('bogus' was unexpected)"],
+    ])
+    expect(own('columns_1')).toEqual([
+      ["Unevaluated properties are not allowed ('columns' was unexpected)"],
+    ])
+    expect(own('tabs_1')).toEqual([
+      ["Unevaluated properties are not allowed ('tabs' was unexpected)"],
+    ])
+    expect(own('panel_1')).toEqual([
+      ["Unevaluated properties are not allowed ('components', 'title' were unexpected)"],
+    ])
+    expect(wrapper.find('[data-testid="form-errors"]').exists()).toBe(false)
+  })
+
+  it('saves what it cannot fully draw exactly as loaded, after edits around it (B5, E1)', async () => {
+    // Unsupported nodes deep inside supported ones, with properties the builder
+    // never writes, and settings it does not own.
+    const loaded = definition(
+      [
+        {
+          id: 'panel_1',
+          role: 'layout',
+          type: 'panel',
+          title: 'Outer',
+          grid: { gap: 2 },
+          components: [
+            {
+              id: 'tabs_1',
+              role: 'layout',
+              type: 'tabs',
+              tabs: [
+                {
+                  title: 'General',
+                  components: [
+                    {
+                      id: 'steps_1',
+                      role: 'layout',
+                      type: 'steps',
+                      tabs: [{ title: 'S1', components: [field('in_steps', { readOnly: true })] }],
+                    },
+                    {
+                      id: 'columns_1',
+                      role: 'layout',
+                      type: 'columns',
+                      columns: [
+                        {
+                          components: [
+                            {
+                              id: 'rep',
+                              role: 'data',
+                              type: 'repeater',
+                              key: 'rep',
+                              label: 'Rep',
+                              validation: { type: 'array', minLength: 1 },
+                              components: [field('rep_child')],
+                            },
+                          ],
+                        },
+                        { components: [] },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+            {
+              id: 'grid_1',
+              role: 'data',
+              type: 'datagrid',
+              key: 'lines',
+              label: 'Lines',
+              validation: { type: 'array' },
+              sequenceKey: 'line_no',
+              defaultItems: 2,
+              components: [
+                field('sku', { calculateMode: 'generated', calculate: { var: 'x' } }),
+                {
+                  id: 'row_tabs',
+                  role: 'layout',
+                  type: 'tabs',
+                  tabs: [{ title: 'R', components: [field('row_inner')] }],
+                },
+              ],
+            },
+          ],
+        },
+        field('field_1'),
+      ],
+      { lookups: {}, theme: { dense: true } },
+    )
+
+    current = form(loaded)
+
+    const wrapper = await render()
+
+    for (const id of ['steps_1', 'rep', 'row_tabs']) {
+      expect(wrapper.find(`[data-testid="unsupported-${id}"]`).exists(), id).toBe(true)
+    }
+
+    // Add a field at the root and take it away again, and move the root field
+    // up and back down: every structural path runs, and nothing should change.
+    await wrapper.find('[data-testid="palette-number"]').trigger('click')
+    await settle()
+    await wrapper.find('[data-testid="remove-field_2"]').trigger('click')
+    await settle()
+    await wrapper.find('[data-testid="up-field_1"]').trigger('click')
+    await settle()
+    await wrapper.find('[data-testid="down-field_1"]').trigger('click')
+    await settle()
+
+    const { definition: sent } = await saved(wrapper)
+
+    expect(sent).toEqual(loaded)
+  })
+
+  it('moves by keyboard into an empty column and into a row template that was never written (D3, C1)', async () => {
+    current = form(
+      definition([
+        {
+          id: 'columns_1',
+          role: 'layout',
+          type: 'columns',
+          columns: [{ components: [] }, { components: [] }],
+        },
+        {
+          id: 'grid_1',
+          role: 'data',
+          type: 'datagrid',
+          key: 'lines',
+          label: 'Lines',
+          validation: { type: 'array' },
+        },
+        field('a'),
+        field('b'),
+      ]),
+    )
+
+    const wrapper = await render()
+
+    await wrapper.find('[data-testid="move-to-a"]').trigger('click')
+
+    expect(
+      wrapper.findAll('[data-destination]').map((button) => button.attributes('data-destination')),
+    ).toEqual([
+      'components.0.columns.0.components',
+      'components.0.columns.1.components',
+      'components.1.components',
+    ])
+
+    await wrapper.find('[data-destination="components.0.columns.1.components"]').trigger('click')
+    await settle()
+    await wrapper.find('[data-testid="move-to-b"]').trigger('click')
+    await wrapper.find('[data-destination="components.1.components"]').trigger('click')
+    await settle()
+
+    const { definition: sent } = await saved(wrapper)
+
+    expect(jfssViolations(sent)).toEqual([])
+    expect(sent.components).toMatchObject([
+      { id: 'columns_1', columns: [{ components: [] }, { components: [{ id: 'a' }] }] },
+      { id: 'grid_1', components: [{ id: 'b' }] },
+    ])
+    expect(sent.components).toHaveLength(2)
+  })
+
+  // DEFECT (test-engineer, 2026-10-10): selection is by `id`, and `pathOf`
+  // returns the first node with it, so on a loaded definition that repeats an
+  // id the editor edits the first node whichever card was selected. The canvas
+  // draws both (formTree's own note), and the server stores such a definition
+  // (no duplicate-id refusal outside `settings.lookups`). Flip to `it` when fixed.
+  it.fails(
+    'edits the card that was selected when a loaded definition repeats an id (A2)',
+    async () => {
+      current = form(
+        definition([
+          field('dup', { label: 'First' }),
+          {
+            id: 'panel_1',
+            role: 'layout',
+            type: 'panel',
+            title: 'Details',
+            components: [field('dup', { key: 'dup_2', label: 'Second' })],
+          },
+        ]),
+      )
+
+      const wrapper = await render()
+      const second = wrapper.find('[data-testid="component-panel_1"] [data-testid="select-dup"]')
+
+      await second.trigger('click')
+
+      expect(wrapper.find<HTMLInputElement>('[data-testid="label-dup"]').element.value).toBe(
+        'Second',
+      )
+    },
+  )
+
+  it('refuses every change on a read-only builder, by whatever path reaches it (D7)', () => {
+    // The page hides the controls; the builder is what must refuse. Each call
+    // below is one a hidden control, a Sortable `put` or a stray drop reaches.
+    const loaded = definition([
+      { id: 'columns_1', role: 'layout', type: 'columns', columns: [{ components: [field('a')] }] },
+      { id: 'tabs_1', role: 'layout', type: 'tabs', tabs: [{ title: 'One', components: [] }] },
+      { id: 'panel_1', role: 'layout', type: 'panel', title: 'P', components: [] },
+      field('b'),
+    ]) as unknown as JfssDefinition
+    const state = ref<JfssDefinition | null>(structuredClone(loaded))
+    const builder = createFormBuilder({ definition: state, readOnly: ref(true), details: ref([]) })
+
+    builder.dragging.value = { kind: 'move', nodePath: 'components.3', node: loaded.components[3] }
+    expect(builder.canDropInto('components.2.components')).toBe(false)
+    builder.dragging.value = { kind: 'new', type: 'textfield' }
+    expect(builder.canDropInto('components.2.components')).toBe(false)
+    expect(builder.canAddTo('textfield', 'components')).toBe(false)
+
+    expect(builder.add('textfield', 'components')).toBe(false)
+    expect(builder.dropNew('textfield', 'components', 0)).toBe(false)
+    expect(builder.move('components.3', 'components.2.components', 0)).toBe(false)
+    expect(
+      builder.drop({
+        fromListPath: 'components',
+        oldIndex: 3,
+        toListPath: 'components',
+        newIndex: 0,
+      }),
+    ).toBe(false)
+    expect(builder.moveBy('components.3', -1)).toBe(false)
+    expect(builder.renameSlot('components.1', 0, 'Two')).toBe(false)
+    builder.addSlot('components.0')
+    builder.addSlot('components.1')
+    builder.requestRemoveSlot('components.0', 0)
+    builder.requestRemove('components.3')
+    builder.requestRemove('components.0')
+    builder.confirmRemoval()
+
+    expect(builder.pendingRemoval.value).toBeNull()
+    expect(state.value).toEqual(loaded)
   })
 })
