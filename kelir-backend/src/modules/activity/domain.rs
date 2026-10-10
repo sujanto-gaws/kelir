@@ -220,7 +220,8 @@ pub fn disclosable(event_type: &str, details: Value) -> Value {
 /// list rather than in it looking load-bearing.
 ///
 /// The workflow *definition* events — `Workflow.Created`, `Workflow.Updated`,
-/// `Workflow.Published`, `Workflow.RevisionCreated`, `Workflow.Deleted` — are
+/// `Workflow.Published`, `Workflow.Deprecated`, `Workflow.RevisionCreated`,
+/// `Workflow.Deleted` — are
 /// absent because they carry no `document_id` at all. They are things that
 /// happened to a workflow, and this list is read through a join on the document.
 ///
@@ -327,6 +328,7 @@ mod tests {
             "Workflow.Created",
             "Workflow.Updated",
             "Workflow.Published",
+            "Workflow.Deprecated",
             "Workflow.RevisionCreated",
             "Workflow.Deleted",
         ] {

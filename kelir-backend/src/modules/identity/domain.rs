@@ -633,15 +633,17 @@ pub fn published_definitions_refusal(definitions: &[DefinitionNamingRole]) -> Op
         format!(
             "This role is named by 1 published workflow definition: {named}. Deleting the \
              role would leave it unable to raise its tasks. Publish a revision that does \
-             not name the role, bind its document types to that revision, and delete this \
-             one once its running approvals are finished"
+             not name the role, bind its document types to that revision, and deprecate \
+             it if it is still published. A deprecated revision stops holding the role \
+             once its running approvals are finished"
         )
     } else {
         format!(
             "This role is named by {} published workflow definitions: {named}. Deleting \
              the role would leave them unable to raise their tasks. Publish revisions that \
              do not name the role, bind their document types to those revisions, and \
-             delete these once their running approvals are finished",
+             deprecate any still published. A deprecated revision stops holding the role \
+             once its running approvals are finished",
             definitions.len()
         )
     })
@@ -699,8 +701,9 @@ mod tests {
                 "This role is named by 1 published workflow definition: purchase_requisition \
                  (\"Standard approval\", revision 1). Deleting the role would leave it unable \
                  to raise its tasks. Publish a revision that does not name the role, bind its \
-                 document types to that revision, and delete this one once its running \
-                 approvals are finished"
+                 document types to that revision, and deprecate it if it is still published. \
+                 A deprecated revision stops holding the role once its running approvals are \
+                 finished"
             )
         );
     }
@@ -719,8 +722,8 @@ mod tests {
                  (\"Standard approval\", revision 3), travel_request (\"Standard approval\", \
                  revision 1, deprecated). Deleting the role would leave them unable to raise \
                  their tasks. Publish revisions that do not name the role, bind their document \
-                 types to those revisions, and delete these once their running approvals are \
-                 finished"
+                 types to those revisions, and deprecate any still published. A deprecated \
+                 revision stops holding the role once its running approvals are finished"
             )
         );
     }

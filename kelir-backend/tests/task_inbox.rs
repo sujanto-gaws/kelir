@@ -2168,8 +2168,9 @@ fn named_by(definition: &str) -> String {
     format!(
         "This role is named by 1 published workflow definition: {definition}. Deleting the \
          role would leave it unable to raise its tasks. Publish a revision that does not name \
-         the role, bind its document types to that revision, and delete this one once its \
-         running approvals are finished"
+         the role, bind its document types to that revision, and deprecate it if it is still \
+         published. A deprecated revision stops holding the role once its running approvals \
+         are finished"
     )
 }
 
@@ -2754,7 +2755,8 @@ async fn several_definitions_are_named_in_key_then_revision_order() {
          approval\", revision 1), ti_order_a (\"Standard approval\", revision 2), ti_order_b \
          (\"Standard approval\", revision 1). Deleting the role would leave them unable to \
          raise their tasks. Publish revisions that do not name the role, bind their document \
-         types to those revisions, and delete these once their running approvals are finished",
+         types to those revisions, and deprecate any still published. A deprecated revision \
+         stops holding the role once its running approvals are finished",
         "{}",
         refused.body
     );

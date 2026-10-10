@@ -154,6 +154,18 @@ pub const DEFINITION_DELETE: &str = "workflow:definition:delete";
 /// an approval chain and who may make one binding are different questions.
 pub const DEFINITION_PUBLISH: &str = "workflow:definition:publish";
 
+/// Deprecating a published revision, so new documents stop routing to it
+/// (**D-101** B, **D-108**, [#573]; `0051`).
+///
+/// **Not `workflow:definition:update`**, whose seed text is *Edit a draft
+/// workflow revision* and which the service refuses on anything but a draft;
+/// nor `:publish`, which fixes a revision, the opposite act; nor `:delete`,
+/// which removes one. Deprecating changes which revisions new documents route
+/// to without editing or removing any, so D-108 gave it a code of its own.
+///
+/// [#573]: https://github.com/sujanto-gaws/kelir/issues/573
+pub const DEFINITION_DEPRECATE: &str = "workflow:definition:deprecate";
+
 pub const INSTANCE_READ: &str = "workflow:instance:read";
 
 /// Reading tasks — the inbox and one task's detail.

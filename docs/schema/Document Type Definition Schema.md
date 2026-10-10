@@ -2,7 +2,7 @@
 **Version:** 1.0.0
 **Status:** Draft Standard
 **Target Stack:** Rust (Document Type Service), Vue.js (Document Type Builder)
-**Last updated:** 2026-10-09
+**Last updated:** 2026-10-10
 
 ---
 
@@ -15,7 +15,7 @@ Like the Party aggregate (architectures/05), the DTDS document is an **exchange 
 ### 1.1 Core Philosophy
 
 - **Configuration Is the Application:** A complete business application (form + list + numbering + workflow + attachments + hooks) is one DTDS document. Creating a new document-based application means authoring one of these, not writing code.
-- **Bind by Key, Pin at Use:** The aggregate references forms, lists, and workflows by their stable keys. Revision pinning happens at runtime — a document pins its form revision at creation; workflow selection resolves to the latest `ACTIVE` workflow revision at submit time.
+- **Bind by Key, Pin at Use:** The aggregate references forms, lists, and workflows by their stable keys. Revision pinning happens at runtime — a document pins its form revision at creation; workflow selection resolves to the latest `ACTIVE` workflow revision at submit time. *Kelir note (2026-10-10):* Kelir binds a specific workflow revision id rather than the key, and refuses a submission whose selected binding names a `DEPRECATED` revision with `WORKFLOW_NOT_PUBLISHED`, without trying the next rule (§4; [JWSS](JSON%20Workflow%20Schema.md) §9, [#573](https://github.com/sujanto-gaws/kelir/issues/573)).
 - **One Condition Language:** All conditions (`workflowSelectionRules[].condition`, `attachmentRules[].requiredIf`) are JSON Logic restricted to ~~the [JFSS Calculation Rule Registry](JFSS%20Calculation%20Rule%20Registry.md)~~ the [JFSS Calculation Rule Registry](JFSS%20Calculation%20Rule%20Registry.md)'s **§2.5 conditional tier** (S6; corrected 2026-10-09), evaluated against the same context as JWSS conditions. String expressions in older examples are superseded.
 - **Hooks, Not Switches:** Behavior beyond configuration attaches through Hook Registration Entries ([Lifecycle Hook Contract](Lifecycle%20Hook%20Contract.md) §3) in the document-type priority band.
 
@@ -96,7 +96,7 @@ Evaluated at submit by the `before_workflow_select` stage: ascending `priority`,
 
 | Property | Type | Required | Description |
 | :--- | :--- | :--- | :--- |
-| `workflowKey` | `string` | Yes | JWSS `workflowKey`. Resolves to the latest `ACTIVE` revision at submit time. |
+| `workflowKey` | `string` | Yes | JWSS `workflowKey`. Resolves to the latest `ACTIVE` revision at submit time. *Kelir note (2026-10-10):* Kelir binds a specific revision id, not the key (`document_type_workflows.workflow_definition_id`, [Database Schema](../design/02.%20Database%20Schema.md) §6.4), so nothing resolves at submit. A binding to a `DEPRECATED` revision is refused at submit with `WORKFLOW_NOT_PUBLISHED`, and the next rule is not tried ([JWSS](JSON%20Workflow%20Schema.md) §9, [#573](https://github.com/sujanto-gaws/kelir/issues/573)). |
 | `condition` | `object` | No | JSON Logic over the condition context (JWSS §6.1). Absent = fallback rule. |
 | `priority` | `integer` | No (default `100`) | Lower evaluated first. |
 

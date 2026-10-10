@@ -40,6 +40,16 @@ While the major version is `0`, the public API may change in any release.
   variables; after `ACME__X` is deleted, a new `ACME` reads all of its. The
   operator's duty under **D-102** covers this: when a tenant is deleted, remove
   every variable under its prefix and restart the backend.
+- **A tenant created before the upgrade, other than the system tenant, does
+  not hold `workflow:definition:deprecate`**
+  ([#573](https://github.com/sujanto-gaws/kelir/issues/573), decision
+  **D-108**). `0051_workflow_definition_deprecate_permission.sql` grants it to
+  the system tenant's `ROLE-ADMIN`, as `0048`, `0049` and `0050` granted
+  theirs, and a tenant created after the upgrade gets it on its `ROLE-ADMIN`.
+  Grant it to an earlier tenant's administrator role, and to any role that should
+  deprecate workflow revisions. `0051` adds one permission and its grant,
+  rewords `workflow:definition:delete`'s description, and changes no schema,
+  so the previous image runs against the schema it leaves (release process §6).
 
 ### Added
 
@@ -56,8 +66,10 @@ While the major version is `0`, the public API may change in any release.
   **A published revision opens read-only, says why, and offers a new
   revision.** Publish saves unsaved changes first, and what the editor does not
   show, such as guards, actions and an escalation, is saved back unchanged. It
-  uses the existing definition routes and adds none. Deprecating a revision
-  follows with #573's route. **Follow-up
+  uses the existing definition routes and adds none. ~~Deprecating a revision
+  follows with #573's route.~~ The route that deprecates a revision is in the
+  entry below ([#573](https://github.com/sujanto-gaws/kelir/issues/573)); the
+  editor's *Deprecate* action follows (row 6b; corrected 2026-10-10). **Follow-up
   ([#709](https://github.com/sujanto-gaws/kelir/pull/709))**:
   `workflow:definition:publish` alone may publish a saved draft as it is
   stored. The editor takes no edits while a save or publish is in flight. A
@@ -100,9 +112,37 @@ While the major version is `0`, the public API may change in any release.
   convention it enforces: a feature row's pull request carries the line until
   its campaign section is written. **It binds nothing until the product owner
   makes it required on `main`.**
+- **A published workflow revision can be deprecated**
+  ([#573](https://github.com/sujanto-gaws/kelir/issues/573), decisions
+  **D-101** B and **D-108**). `POST /api/v1/workflow/definitions/{id}/deprecation`
+  moves an `ACTIVE` revision to `DEPRECATED` and changes nothing else about it.
+  It answers 409 `CONFLICT` on a draft or on a revision already deprecated, and
+  nothing moves a revision back to `ACTIVE`; revise it, and the new revision,
+  once published, takes its place. It needs the new permission
+  `workflow:definition:deprecate`, which migration `0051` seeds and grants to
+  the system tenant's administrator; a tenant provisioned afterwards is granted
+  it too, because provisioning grants the whole catalogue except the families
+  it withholds. A tenant provisioned before it is not (see *Upgrade notes*). **Approvals already running on the revision carry on**,
+  because an instance keeps the revision it started on. **A document type
+  still bound to it stays bound, and its next submission is refused** with 422
+  `WORKFLOW_NOT_PUBLISHED` until the type is bound to a published revision.
+  Once its running approvals finish, a deprecated revision no longer keeps a
+  role it names from being deleted. Each deprecation writes a
+  `Workflow.Deprecated` audit record, and no outbox event. Publishing a new
+  revision still leaves the previous one `ACTIVE`, and the workflow editor's
+  *Deprecate* action follows.
 
 ### Changed
 
+- **The texts that told an administrator to retire a workflow revision now
+  name what does it** ([#573](https://github.com/sujanto-gaws/kelir/issues/573)).
+  Deleting a revision that approvals still run on is refused, as before, and
+  the message now names the deprecation route for that revision.
+  The `ROLE_NAMED_BY_PUBLISHED_DEFINITION` refusal on a role delete says to
+  deprecate the old revision rather than delete it. Migration `0051` rewords
+  `workflow:definition:delete`'s description from *Retire a workflow
+  definition* to *Delete a workflow revision that no running approval uses*;
+  the code is unchanged.
 - **The pull-request title check no longer writes the title into its shell step**
   ([#702](https://github.com/sujanto-gaws/kelir/issues/702)). GitHub substitutes an expression in
   `run:` before the shell parses it, so a title holding `"` and `$(…)` would have run as shell in the
