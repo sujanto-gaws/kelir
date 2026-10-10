@@ -921,13 +921,16 @@ describe('WorkflowEditorPage', () => {
   /**
    * Every control a keyboard or pointer could operate that is not disabled,
    * less the logic builder's *Collapse* and *Expand*: they change the view and
-   * not the definition, so they stay operable on a read-only revision.
+   * not the definition, so they stay operable on a read-only revision. The
+   * *List* and *Graph* tabs are left out for the same reason (#687), and only
+   * they: a `role="tab"` elsewhere would still be counted.
    */
   function enabledControls(page: VueWrapper): string[] {
     return page
       .findAll('input, select, textarea, button')
       .filter((control) => !(control.element as HTMLInputElement).disabled)
       .filter((control) => !/^(Collapse|Expand) /.test(control.attributes('aria-label') ?? ''))
+      .filter((control) => !/^view-(list|graph)$/.test(control.attributes('data-testid') ?? ''))
       .map(
         (control) =>
           control.attributes('data-testid') ??
@@ -2117,7 +2120,12 @@ describe('WorkflowEditorPage', () => {
     }
 
     for (const button of page.findAll('button')) {
-      if (!/^(Collapse|Expand) /.test(button.attributes('aria-label') ?? '')) {
+      // The view tabs (#687) change the view and not the definition, as
+      // Collapse and Expand do, so pressing them proves nothing here.
+      if (
+        !/^(Collapse|Expand) /.test(button.attributes('aria-label') ?? '') &&
+        !/^view-(list|graph)$/.test(button.attributes('data-testid') ?? '')
+      ) {
         ;(button.element as HTMLButtonElement).click()
       }
     }
