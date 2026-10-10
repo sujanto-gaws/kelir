@@ -264,7 +264,7 @@ async function save(): Promise<boolean> {
     return true
   } catch (failure) {
     report(placeVerdict(failure, sent))
-    await refreshIfPublished(failure)
+    await refreshIfPublished(failure, 'save')
 
     return false
   } finally {
@@ -273,14 +273,26 @@ async function save(): Promise<boolean> {
 }
 
 /**
- * After a save refused as `NOT_A_DRAFT` — somebody published the revision
- * first — reads the revision's status again, so the screen turns read-only
- * and offers *New revision*. **The draft is kept**: the refused edits stay on
- * screen, read-only, for the author to carry into the new revision by hand.
+ * After a refusal that means somebody published the revision first, reads its
+ * status again, so the screen turns read-only and offers *New revision*.
+ * **The draft is kept**: the refused edits stay on screen, read-only, for the
+ * author to carry into the new revision by hand.
+ *
+ * **What says so differs by route.** A save says it as a 422 whose detail is
+ * `NOT_A_DRAFT` at `status`. A publish says it as a 409 `CONFLICT`, and a 409
+ * is the only thing that route answers when the revision is not a draft and
+ * for nothing else (`publish_definition`: *only a draft can be published*, or
+ * *was published by another request*). The trigger is that status from that
+ * route, not the message, which is prose and not a contract. A publish's 422
+ * (a dead role, a rule) or 403 is about the draft or the caller, and reads
+ * nothing again.
  */
-async function refreshIfPublished(failure: unknown): Promise<void> {
+async function refreshIfPublished(failure: unknown, by: 'save' | 'publish'): Promise<void> {
   const published =
-    failure instanceof ApiError && failure.details.some((detail) => detail.code === 'NOT_A_DRAFT')
+    failure instanceof ApiError &&
+    (by === 'publish'
+      ? failure.status === 409
+      : failure.details.some((detail) => detail.code === 'NOT_A_DRAFT'))
 
   if (!published || !record.value) {
     return
@@ -323,6 +335,7 @@ async function publish(): Promise<void> {
     notice.value = `Published. Revision ${record.value.version} can now be bound to a document type.`
   } catch (failure) {
     report(placeVerdict(failure, draft.definition.value))
+    await refreshIfPublished(failure, 'publish')
   } finally {
     isSaving.value = false
   }

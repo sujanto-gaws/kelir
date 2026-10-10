@@ -1945,7 +1945,13 @@ describe('WorkflowEditorPage', () => {
   // control while a request is in flight (not a sample of five), a publisher
   // without update on every status, the description column across saves, the
   // `formData.` prefix at its edges, and the NOT_A_DRAFT re-read when it fails.
-  // One defect is pinned `it.fails`: a publish's 409 does not re-read.
+  // One defect was pinned `it.fails`: a publish's 409 did not re-read. Fixed
+  // 2026-10-10, and the test is a plain `it`. Seen red, 2026-10-10, three
+  // mutations over the fix: no re-read in publish's catch (*reads the revision
+  // again when a publish is refused…*, *offers an editor New revision after a
+  // publish refused…*); a re-read after any publish refusal (*reads nothing
+  // again after a 422…*, *…after a 403…*); publish keyed on NOT_A_DRAFT as a
+  // save is (the first two again).
   //
   // Seen to fail (coding standard §2.9): twenty-eight mutations over #709's
   // fixes, run 2026-10-10. Twenty-five red, three survive as equivalent. Rows
@@ -2264,28 +2270,73 @@ describe('WorkflowEditorPage', () => {
 
     // Defect, low: a 409 on publish (somebody published first) is shown, and
     // the screen still says DRAFT and still offers Publish. A save's
-    // NOT_A_DRAFT re-reads the revision (#709 item 8); a publish's CONFLICT does
+    // NOT_A_DRAFT re-reads the revision (#709 item 8); a publish's CONFLICT did
     // not, and a caller without update has no save to reach that re-read
-    // through, so every press refuses again. Turn into `it` when publish
-    // re-reads on its 409.
-    it.fails(
-      'reads the revision again when a publish is refused because it was published first',
-      async () => {
-        const page = await render({ permissions: PUBLISHER })
+    // through, so every press refused again. Pinned `it.fails` by #709's
+    // verification; a plain `it` since publish re-reads on its 409 (2026-10-10).
+    it('reads the revision again when a publish is refused because it was published first', async () => {
+      const page = await render({ permissions: PUBLISHER })
 
-        stored = record({ status: 'ACTIVE' })
-        refuse = {
-          status: 409,
-          body: errorBody('CONFLICT', 'revision 1 of `purchase_approval` is ACTIVE, not DRAFT'),
-        }
-        await page.get('[data-testid="publish-workflow"]').trigger('click')
-        await settle()
+      stored = record({ status: 'ACTIVE' })
+      refuse = {
+        status: 409,
+        body: errorBody('CONFLICT', 'revision 1 of `purchase_approval` is ACTIVE, not DRAFT'),
+      }
+      await page.get('[data-testid="publish-workflow"]').trigger('click')
+      await settle()
 
-        expect(page.get('[data-testid="form-error"]').text()).toContain('is ACTIVE, not DRAFT')
-        expect(page.get('[data-testid="status"]').text()).toBe('ACTIVE')
-        expect(page.find('[data-testid="publish-workflow"]').exists()).toBe(false)
-      },
-    )
+      expect(page.get('[data-testid="form-error"]').text()).toContain('is ACTIVE, not DRAFT')
+      expect(page.get('[data-testid="status"]').text()).toBe('ACTIVE')
+      expect(page.find('[data-testid="publish-workflow"]').exists()).toBe(false)
+      expect(page.find('[data-testid="published-notice"]').exists()).toBe(true)
+    })
+
+    it('offers an editor New revision after a publish refused because it was published first', async () => {
+      const page = await render()
+
+      await page.get('[data-testid="workflow-name"]').setValue('Renamed')
+      // The save goes through; the publish after it finds the revision taken.
+      await save(page)
+
+      stored = { ...stored, status: 'ACTIVE' }
+      refuse = {
+        status: 409,
+        body: errorBody(
+          'CONFLICT',
+          'revision 1 of `purchase_approval` was published by another request',
+        ),
+      }
+      await page.get('[data-testid="publish-workflow"]').trigger('click')
+      await settle()
+
+      expect(page.get('[data-testid="status"]').text()).toBe('ACTIVE')
+      expect(page.find('[data-testid="save-workflow"]').exists()).toBe(false)
+      expect(page.find('[data-testid="new-revision"]').exists()).toBe(true)
+      expect(page.get('[data-testid="form-error"]').text()).toContain(
+        'published by another request',
+      )
+    })
+
+    it.each([
+      ['a 422 about the draft', 422],
+      ['a 403', 403],
+    ])('reads nothing again after %s on publish', async (_reason, status) => {
+      const page = await render({ permissions: PUBLISHER })
+
+      refuse =
+        status === 422
+          ? validationReply([
+              'definition.states.0.task.assignment.roleCode',
+              '`APPROVER` is not a live role',
+            ])
+          : { status: 403, body: errorBody('FORBIDDEN', 'Missing workflow:definition:publish') }
+      await page.get('[data-testid="publish-workflow"]').trigger('click')
+      await settle()
+
+      expect(backend.requests.filter((request) => request.method === 'get')).toHaveLength(1)
+      expect(page.get('[data-testid="status"]').text()).toBe('DRAFT')
+      expect(page.find('[data-testid="publish-workflow"]').exists()).toBe(true)
+    })
   })
 
   describe('verification of #709: clearing the description', () => {
