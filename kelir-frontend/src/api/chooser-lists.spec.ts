@@ -43,6 +43,22 @@ describe('chooser list reads', () => {
     })
   })
 
+  it('sends the bound revision of a document type read, and leaves a blank one off', async () => {
+    // #713: the workflow editor's Deprecate warning lists the types bound to a
+    // revision through this filter, one call rather than one read per type.
+    await listDocumentTypes({ workflowDefinitionId: 'wf-1', pageSize: 100 })
+
+    expect(sent()).toEqual({
+      url: '/document-types',
+      params: { workflowDefinitionId: 'wf-1', pageSize: 100 },
+    })
+
+    backend.requests.length = 0
+    await listDocumentTypes({ workflowDefinitionId: '' })
+
+    expect(sent().params).toEqual({})
+  })
+
   it('sends the search and the status of a form read', async () => {
     await listForms({ search: 'po', status: 'PUBLISHED' })
 

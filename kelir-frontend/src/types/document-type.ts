@@ -1,3 +1,5 @@
+import type { SearchPageQuery } from './api'
+
 /**
  * What the document-type list returns (`domain::DocumentTypeSummary`).
  *
@@ -22,6 +24,18 @@ export interface DocumentTypeSummary {
   status: DocumentTypeStatus
   createdAt: string
   updatedAt: string
+}
+
+/**
+ * What the document-type list narrows on (`domain::DocumentTypeQuery`).
+ *
+ * `workflowDefinitionId` keeps the types with a **live** binding to that one
+ * revision: not deleted and `ACTIVE`, whatever its validity window (#713). An id
+ * that names nothing is an empty page. It is what the workflow editor's
+ * *Deprecate* warning lists.
+ */
+export interface DocumentTypeListQuery extends SearchPageQuery<DocumentTypeStatus> {
+  workflowDefinitionId?: string
 }
 
 /**

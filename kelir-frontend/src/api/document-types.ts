@@ -1,9 +1,9 @@
 import { deleteItem, getItem, getPage, postItem, putItem, withoutBlanks } from './client'
-import type { Page, SearchPageQuery } from '@/types/api'
+import type { Page } from '@/types/api'
 import type {
   CreateDocumentTypeRequest,
   DocumentType,
-  DocumentTypeStatus,
+  DocumentTypeListQuery,
   DocumentTypeSummary,
   NumberingRule,
   SetNumberingRuleRequest,
@@ -21,9 +21,10 @@ import type {
  * type over the API because there was no screen. There is one now.
  */
 export function listDocumentTypes(
-  query: SearchPageQuery<DocumentTypeStatus> = {},
+  query: DocumentTypeListQuery = {},
 ): Promise<Page<DocumentTypeSummary>> {
-  // `search` matches the type code and the name (#525).
+  // `search` matches the type code and the name (#525); `workflowDefinitionId`
+  // keeps the types with a live binding to that one revision (#713).
   return getPage<DocumentTypeSummary>('/document-types', withoutBlanks(query))
 }
 

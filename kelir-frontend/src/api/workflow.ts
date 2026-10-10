@@ -15,11 +15,11 @@ import type {
  * `/admin/workflows`; the rest is the editor's (FR-WF-018, #426), against the
  * routes the backend has had since Sprint 10 (`workflow/handlers.rs:55–64`).
  *
- * **Deprecating a revision is not here yet.** It is #573's route (**D-101** B,
- * under `workflow:definition:deprecate` by **D-108**), and plan 19 merges the
- * screen's action after that route. A client function for a route that does
- * not exist would be a 404 waiting for a caller, so `deprecateWorkflowDefinition`
- * lands here with it.
+ * **Deprecating a revision is here since 2026-10-10** (corrected in place: this
+ * said it was *not here yet*, waiting for #573's route). The route merged with
+ * #711 (**D-101** B, under `workflow:definition:deprecate` by **D-108**), and
+ * {@link deprecateWorkflowDefinition} is the editor's call to it (#713, plan 19
+ * row 6b).
  */
 export function listWorkflowDefinitions(
   query: SearchPageQuery<WorkflowDefinitionStatus> = {},
@@ -82,4 +82,20 @@ export function createWorkflowRevision(
   request: UpdateWorkflowRequest = {},
 ): Promise<WorkflowDefinition> {
   return postItem<WorkflowDefinition>(`/workflow/definitions/${id}/revisions`, request)
+}
+
+/**
+ * Deprecates an `ACTIVE` revision (`workflow:definition:deprecate`, **D-101** B,
+ * **D-108**). New documents stop routing to it; approvals already running on it
+ * carry on, since an instance pins its revision.
+ *
+ * **A document type still bound to it stays bound**, and that type's next
+ * submission is refused with `WORKFLOW_NOT_PUBLISHED` until it is rebound. The
+ * route does not warn, so the screen does before it calls this.
+ *
+ * A 409 means the revision is not `ACTIVE`: a draft, or already deprecated.
+ * Nothing writes `ACTIVE` back.
+ */
+export function deprecateWorkflowDefinition(id: string): Promise<WorkflowDefinition> {
+  return postItem<WorkflowDefinition>(`/workflow/definitions/${id}/deprecation`, {})
 }

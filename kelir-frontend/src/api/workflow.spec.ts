@@ -13,7 +13,8 @@ import type { JwssDefinition } from '@/types/workflow'
 
 /**
  * The editor's calls land on the routes the backend already has
- * (`workflow/handlers.rs:55–64`), and no other (#426 AC1: no new route).
+ * (`workflow/handlers.rs:55–64`), and no other (#426 AC1: no new route but the
+ * deprecation D-101 B adds, #711).
  */
 
 const DEFINITION = { workflowKey: 'w', name: 'W' } as JwssDefinition
@@ -50,10 +51,17 @@ describe('workflow definition client', () => {
     expect(backend.requests[4].body).toEqual({})
   })
 
-  it('has no deprecate call until #573’s route exists', () => {
-    // #426 AC5, test-engineer campaign 2026-10-10. A client function for a
-    // route that is not there is a 404 waiting for a caller. This flips when
-    // #573 merges and `deprecateWorkflowDefinition` lands with it.
-    expect(Object.keys(workflowApi).filter((name) => /deprecat|retire/i.test(name))).toEqual([])
+  it('deprecates at #711’s route, and at no other', async () => {
+    // #426 AC5, #713. Flipped 2026-10-10: this asserted that no deprecate call
+    // existed until #573’s route did. The route merged with #711, and the call
+    // lands with the editor’s action.
+    await workflowApi.deprecateWorkflowDefinition('d1')
+
+    expect(Object.keys(workflowApi).filter((name) => /deprecat|retire/i.test(name))).toEqual([
+      'deprecateWorkflowDefinition',
+    ])
+    expect(backend.requests.map((request) => `${request.method} ${request.url}`)).toEqual([
+      'post /workflow/definitions/d1/deprecation',
+    ])
   })
 })
