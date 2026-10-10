@@ -10,6 +10,9 @@
 //!   for every instance that will run it. `rad::handlers`' spelling for the same
 //!   operation on a form; two names for one thing across two modules would be a
 //!   difference with no reason behind it.
+//! * `POST /definitions/{id}/deprecation` — deprecating a published revision,
+//!   so new documents stop routing to it (**D-101** B, #573). The noun form
+//!   `/publication` uses, because it is the same kind of act on the same row.
 //! * `POST /tasks/{id}/claim`, `POST /tasks/{id}/decision` and
 //!   `POST /tasks/{id}/delegation` — taking a task, deciding it, and handing it
 //!   to somebody else. Each has its own preconditions, which is why none of them
@@ -65,6 +68,7 @@ pub fn routes() -> Router<AppState> {
                 .delete(delete_definition),
         )
         .route("/definitions/{id}/publication", post(publish_definition))
+        .route("/definitions/{id}/deprecation", post(deprecate_definition))
         .route("/definitions/{id}/revisions", post(create_revision))
         .route("/instances/{id}", get(get_instance))
         .route("/tasks/{id}/claim", post(claim_task))
@@ -175,6 +179,31 @@ async fn publish_definition(
 }
 
 #[utoipa::path(
+    post, path = "/api/v1/workflow/definitions/{id}/deprecation", tag = "workflow",
+    responses(
+        (status = 200, description = "Deprecated: new documents stop routing to this revision. \
+                                      Approvals already running on it carry on, since an instance \
+                                      pins its revision. A document type still bound to it stays \
+                                      bound, and its next submission is refused with 422 \
+                                      WORKFLOW_NOT_PUBLISHED until the type is bound to a published \
+                                      revision", body = WorkflowDefinition),
+        (status = 403, description = "Missing workflow:definition:deprecate"),
+        (status = 404, description = "No such definition in the caller's tenant"),
+        (status = 409, description = "The revision is a draft, or is already deprecated")
+    ),
+    security(("bearer" = []))
+)]
+async fn deprecate_definition(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    PathParam(id): PathParam<Uuid>,
+) -> Result<Json<ItemEnvelope<WorkflowDefinition>>, AppError> {
+    Ok(Json(ItemEnvelope::new(
+        definition_service::deprecate_definition(&state, &caller, id).await?,
+    )))
+}
+
+#[utoipa::path(
     post, path = "/api/v1/workflow/definitions/{id}/revisions", tag = "workflow",
     request_body = UpdateWorkflowRequest,
     responses(
@@ -198,9 +227,11 @@ async fn create_revision(
 #[utoipa::path(
     delete, path = "/api/v1/workflow/definitions/{id}", tag = "workflow",
     responses(
-        (status = 204, description = "Retired"),
+        (status = 204, description = "Deleted"),
         (status = 404, description = "No such definition"),
-        (status = 409, description = "Approvals are still running against this revision")
+        (status = 409, description = "Approvals are still running against this revision. The \
+                                      message names POST /api/v1/workflow/definitions/{id}/deprecation, \
+                                      which stops new documents routing to it")
     ),
     security(("bearer" = []))
 )]

@@ -34,8 +34,29 @@
 //! `ROLE_NOT_LIVE` at its path. Without it, the first submission routed to the
 //! revision was refused as `ASSIGNMENT_UNRESOLVED`, in front of the submitter.
 //!
+//! # Deprecating stops new documents and nothing else
+//!
+//! **D-101** B ([#573]). [`deprecate_definition`] moves an `ACTIVE` revision to
+//! `DEPRECATED`, and that one column is the whole of the write. What follows
+//! from it is read elsewhere, by rules that already existed:
+//!
+//! * **A running approval carries on.** An instance pins its revision, and
+//!   nothing on the decision path asks the revision's status.
+//! * **A document type bound to it stays bound**, and **its next submission is
+//!   refused** as `WORKFLOW_NOT_PUBLISHED` (422) by `engine::start`, which has
+//!   checked `ACTIVE` since #187 because a revision could be deprecated after
+//!   it was bound. The submit writes nothing. The administrator rebinds the
+//!   type; a binding that names a deprecated revision is refused as
+//!   `NOT_PUBLISHED` (`document_type::service::check_workflow_bindings`).
+//! * **A role it names stops being held by it** once its running approvals
+//!   finish (`repo::definitions_naming_role`, **D-91** (3)).
+//!
+//! It is not reversible: there is no route from `DEPRECATED` back to
+//! `ACTIVE`. A revision is revived by revising it, which publishes a new number.
+//!
 //! [#174]: https://github.com/sujanto-gaws/kelir/issues/174
 //! [#572]: https://github.com/sujanto-gaws/kelir/issues/572
+//! [#573]: https://github.com/sujanto-gaws/kelir/issues/573
 
 use std::collections::BTreeSet;
 
@@ -51,7 +72,8 @@ use super::super::domain::{
 use super::super::domain::{graph, jwss};
 use super::super::repository::{definition as repo, projection};
 use super::super::{
-    DEFINITION_CREATE, DEFINITION_DELETE, DEFINITION_PUBLISH, DEFINITION_READ, DEFINITION_UPDATE,
+    DEFINITION_CREATE, DEFINITION_DELETE, DEFINITION_DEPRECATE, DEFINITION_PUBLISH,
+    DEFINITION_READ, DEFINITION_UPDATE,
 };
 use crate::error::{AppError, ValidationDetail};
 use crate::middleware::auth::Authenticated;
@@ -392,6 +414,91 @@ pub async fn publish_definition(
     Ok(after)
 }
 
+/// Deprecates a published revision, so new documents stop routing to it
+/// (**D-101** B, [#573]). The module documentation says what follows from it.
+///
+/// **The row is held `FOR UPDATE` before it is read**, as
+/// [`publish_definition`] holds it, so the status checked is the status
+/// changed. A deprecate sent while a publish of the same draft is in flight
+/// waits for it and then deprecates the revision it published; a second
+/// deprecate waits for the first and is refused. `repo::deprecate` also carries
+/// `AND status = 'ACTIVE'`, which no longer decides between them.
+///
+/// [#573]: https://github.com/sujanto-gaws/kelir/issues/573
+pub async fn deprecate_definition(
+    state: &AppState,
+    caller: &Authenticated,
+    id: Uuid,
+) -> Result<WorkflowDefinition, AppError> {
+    caller.require(DEFINITION_DEPRECATE)?;
+
+    let tenant_id = caller.tenant_id();
+    let actor = Some(caller.user_id());
+
+    let mut transaction = state.pool.begin().await?;
+
+    if !repo::lock_for_publish(&mut transaction, tenant_id, id).await? {
+        return Err(AppError::not_found("Workflow definition"));
+    }
+
+    let before = repo::find_definition(&mut *transaction, tenant_id, id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Workflow definition"))?;
+
+    match before.status {
+        WorkflowDefinitionStatus::Active => {}
+        WorkflowDefinitionStatus::Draft => {
+            return Err(AppError::conflict(format!(
+                "revision {} of `{}` is a draft, and only a published revision can be \
+                 deprecated; nothing routes to a draft, so delete it instead",
+                before.version, before.workflow_key
+            )))
+        }
+        WorkflowDefinitionStatus::Deprecated => {
+            return Err(AppError::conflict(format!(
+                "revision {} of `{}` is already deprecated",
+                before.version, before.workflow_key
+            )))
+        }
+    }
+
+    if repo::deprecate(&mut *transaction, tenant_id, id, actor).await? == 0 {
+        // Not reached while the row is locked above and was `ACTIVE`; kept for
+        // `publish_definition`'s reason.
+        return Err(AppError::conflict(format!(
+            "revision {} of `{}` was deprecated by another request",
+            before.version, before.workflow_key
+        )));
+    }
+
+    transaction.commit().await?;
+
+    let after = load(state, tenant_id, id).await?;
+
+    audit::record_or_warn(
+        &state.pool,
+        AuditEntry {
+            tenant_id,
+            event_type: "Workflow.Deprecated",
+            action: "UPDATE",
+            object_type: ObjectType::WorkflowDefinition,
+            object_id: id,
+            actor_user_id: actor,
+            ip_address: caller.ip_address(),
+            reason: None,
+            old_value: Some(json!({ "status": before.status })),
+            new_value: Some(json!({
+                "status": after.status,
+                "workflowKey": after.workflow_key,
+                "version": after.version,
+            })),
+        },
+    )
+    .await;
+
+    Ok(after)
+}
+
 /// Creates the next revision of a workflow as a draft, from an existing one.
 ///
 /// The path an edit to a published definition takes. It reads the revision the
@@ -495,13 +602,15 @@ pub async fn delete_definition(
 
     // Refused rather than cascaded, which is `delete_type`'s decision one module
     // over and for its reason: an instance *is* its definition — the definition
-    // says which transitions exist and who may fire them — so retiring one under
+    // says which transitions exist and who may fire them — so deleting one under
     // a running approval leaves that approval unable to move. Deprecating the
-    // definition is how new documents stop routing to it, and that is an update.
+    // revision is how new documents stop routing to it, and the message names
+    // the route that does it (#573).
     if repo::has_live_instances(&state.pool, tenant_id, id).await? {
         return Err(AppError::conflict(format!(
-            "revision {} of `{}` has running approvals and cannot be retired; \
-             deprecate it instead, which stops new documents routing to it",
+            "revision {} of `{}` has running approvals and cannot be deleted; \
+             deprecate it instead (POST /api/v1/workflow/definitions/{id}/deprecation), \
+             which stops new documents routing to it and lets those approvals finish",
             before.version, before.workflow_key
         )));
     }

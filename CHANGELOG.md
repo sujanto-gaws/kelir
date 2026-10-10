@@ -100,9 +100,35 @@ While the major version is `0`, the public API may change in any release.
   convention it enforces: a feature row's pull request carries the line until
   its campaign section is written. **It binds nothing until the product owner
   makes it required on `main`.**
+- **A published workflow revision can be deprecated**
+  ([#573](https://github.com/sujanto-gaws/kelir/issues/573), decisions
+  **D-101** B and **D-108**). `POST /api/v1/workflow/definitions/{id}/deprecation`
+  moves an `ACTIVE` revision to `DEPRECATED` and changes nothing else about it.
+  It answers 409 `CONFLICT` on a draft or on a revision already deprecated, and
+  nothing moves a revision back to `ACTIVE`; revising it does. It needs the new
+  permission `workflow:definition:deprecate`, which migration `0051` seeds and
+  grants to the tenant administrator; a tenant provisioned afterwards is
+  granted it too. **Approvals already running on the revision carry on**,
+  because an instance keeps the revision it started on. **A document type
+  still bound to it stays bound, and its next submission is refused** with 422
+  `WORKFLOW_NOT_PUBLISHED` until the type is bound to a published revision.
+  Once its running approvals finish, a deprecated revision no longer keeps a
+  role it names from being deleted. Each deprecation writes a
+  `Workflow.Deprecated` audit record, and no outbox event. Publishing a new
+  revision still leaves the previous one `ACTIVE`, and the workflow editor's
+  *Deprecate* action follows.
 
 ### Changed
 
+- **The texts that told an administrator to retire a workflow revision now
+  name what does it** ([#573](https://github.com/sujanto-gaws/kelir/issues/573)).
+  Deleting a revision that approvals still run on is refused, as before, and
+  the message now names `POST /api/v1/workflow/definitions/{id}/deprecation`.
+  The `ROLE_NAMED_BY_PUBLISHED_DEFINITION` refusal on a role delete says to
+  deprecate the old revision rather than delete it. Migration `0051` rewords
+  `workflow:definition:delete`'s description from *Retire a workflow
+  definition* to *Delete a workflow revision that no running approval uses*;
+  the code is unchanged.
 - **The pull-request title check no longer writes the title into its shell step**
   ([#702](https://github.com/sujanto-gaws/kelir/issues/702)). GitHub substitutes an expression in
   `run:` before the shell parses it, so a title holding `"` and `$(…)` would have run as shell in the

@@ -321,6 +321,44 @@ pub async fn publish<'e, E: PgExecutor<'e>>(
     Ok(affected)
 }
 
+/// Deprecates a published revision, conditionally on it still being one
+/// ([#573], **D-101** B).
+///
+/// `status` alone moves. `published_at` and `published_by` keep saying who
+/// fixed the revision and when, the projections stay for the instances still
+/// running it, and no instance or binding row is touched.
+///
+/// `service::definition::deprecate_definition` holds the row
+/// ([`lock_for_publish`]) and has already read it `ACTIVE`, so `AND status =
+/// 'ACTIVE'` is the second line, [`publish`]'s compare-and-swap reasoning: a
+/// caller that reaches this without the lock changes nothing it did not read.
+///
+/// [#573]: https://github.com/sujanto-gaws/kelir/issues/573
+pub async fn deprecate<'e, E: PgExecutor<'e>>(
+    executor: E,
+    tenant_id: Uuid,
+    id: Uuid,
+    actor: Option<Uuid>,
+) -> Result<u64, sqlx::Error> {
+    let affected = sqlx::query!(
+        r#"
+        UPDATE workflow_definitions SET
+            status     = 'DEPRECATED',
+            updated_by = $3,
+            updated_at = now()
+        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL AND status = 'ACTIVE'
+        "#,
+        tenant_id,
+        id,
+        actor,
+    )
+    .execute(executor)
+    .await?
+    .rows_affected();
+
+    Ok(affected)
+}
+
 /// Holds a definition and reports whether it may be bound to a document type
 /// ([#187](https://github.com/sujanto-gaws/kelir/issues/187) AC2).
 ///

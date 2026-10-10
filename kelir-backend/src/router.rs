@@ -141,6 +141,7 @@ use crate::state::AppState;
         workflow::handlers::create_definition,
         workflow::handlers::update_definition,
         workflow::handlers::publish_definition,
+        workflow::handlers::deprecate_definition,
         workflow::handlers::create_revision,
         workflow::handlers::delete_definition,
         workflow::handlers::get_instance,
