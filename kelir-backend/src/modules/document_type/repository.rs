@@ -52,8 +52,18 @@ pub struct BindableForm {
     pub status: String,
 }
 
-/// The type list's filters: a search term already trimmed (blank is `None`) and a
-/// status already reduced to its column value (#525).
+/// The type list's filters: a search term already trimmed (blank is `None`), a
+/// status already reduced to its column value (#525), and a workflow revision
+/// the type must be bound to (#713).
+///
+/// **A binding counts when it is live**: filed under the caller's tenant, not
+/// soft-deleted and `ACTIVE` — the conditions [`workflow_binding`] puts on the
+/// row itself. Its validity window is not one of them, because the filter
+/// answers "what still names this revision", which a binding whose window has
+/// not opened yet does; `workflow_binding` answers "what routes today". The
+/// binding's `tenant_id` is matched as well as the type's, because neither of
+/// the row's foreign keys is composite and a row filed under another tenant can
+/// name this tenant's type.
 ///
 /// **The count and the page take the same one**: a `meta.total` counted over a
 /// different population than the rows is not a smaller version of the same
@@ -62,6 +72,7 @@ pub struct BindableForm {
 pub struct DocumentTypeFilter<'a> {
     pub search: Option<&'a str>,
     pub status: Option<&'a str>,
+    pub workflow_definition_id: Option<Uuid>,
 }
 
 /// How many types the list's filters match.
@@ -80,10 +91,20 @@ pub async fn count_types(
           AND deleted_at IS NULL
           AND ($2::text IS NULL OR type_code ILIKE $2 OR name ILIKE $2)
           AND ($3::text IS NULL OR status = $3)
+          AND ($4::uuid IS NULL OR EXISTS (
+                SELECT 1
+                FROM document_type_workflows w
+                WHERE w.tenant_id = $1
+                  AND w.document_type_id = document_types.id
+                  AND w.workflow_definition_id = $4
+                  AND w.deleted_at IS NULL
+                  AND w.status = 'ACTIVE'
+              ))
         "#,
         tenant_id,
         search,
         filter.status,
+        filter.workflow_definition_id,
     )
     .fetch_one(pool)
     .await
@@ -108,12 +129,22 @@ pub async fn list_types(
           AND deleted_at IS NULL
           AND ($2::text IS NULL OR type_code ILIKE $2 OR name ILIKE $2)
           AND ($3::text IS NULL OR status = $3)
+          AND ($4::uuid IS NULL OR EXISTS (
+                SELECT 1
+                FROM document_type_workflows w
+                WHERE w.tenant_id = $1
+                  AND w.document_type_id = document_types.id
+                  AND w.workflow_definition_id = $4
+                  AND w.deleted_at IS NULL
+                  AND w.status = 'ACTIVE'
+              ))
         ORDER BY type_code
-        LIMIT $4 OFFSET $5
+        LIMIT $5 OFFSET $6
         "#,
         tenant_id,
         search,
         filter.status,
+        filter.workflow_definition_id,
         limit,
         offset
     )

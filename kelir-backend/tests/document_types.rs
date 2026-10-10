@@ -1267,3 +1267,364 @@ async fn an_unpinned_document_of_another_type_does_not_block_this_rebinding() {
 
     assert_eq!(bound, next, "the rebinding landed");
 }
+
+// ---------------------------------------------------------------------------
+// The list, filtered by a bound workflow revision (#713, row 6b)
+// ---------------------------------------------------------------------------
+//
+// The workflow editor's *Deprecate* warning names the document types still
+// bound to the revision it is about to deprecate, in one call. A type is
+// listed when it has a **live** binding row naming that revision: not
+// soft-deleted, and `ACTIVE` — the two conditions `repository::workflow_binding`
+// applies to the row itself. The validity window is not one of them: a binding
+// whose window has not opened yet will still route to the revision, which is
+// exactly what the warning is for.
+//
+// # Seen to fail (coding standard §2.9)
+//
+// Every test below was first run against the unchanged list, which ignored
+// `workflowDefinitionId` as it ignores any unknown parameter: the eight
+// asserting rows and totals got every type, the OpenAPI one found no such
+// parameter, and the malformed id was a 200. The mutations were then made one
+// at a time in `document_type::repository`, the binary run, and the mutation
+// reverted. **Seen red, 2026-10-10.**
+//
+// | Mutation | Reddened |
+// |---|---|
+// | `AND w.deleted_at IS NULL` dropped from both statements | `a_retired_or_inactive_binding_does_not_count` |
+// | `AND w.status = 'ACTIVE'` dropped from both statements | `a_retired_or_inactive_binding_does_not_count` |
+// | `w.tenant_id = $1` replaced by `TRUE` in both statements | `another_tenants_binding_row_does_not_count` |
+// | the filter neutered in `count_types` alone | six, among them `the_filter_pages_and_counts_the_same_rows` and `an_unknown_revision_is_an_empty_page_not_a_404` |
+// | `AND w.workflow_definition_id = $4` dropped from both statements | `a_binding_to_another_revision_of_the_same_key_does_not_count`, `only_the_types_bound_to_the_revision_are_listed`, `an_unknown_revision_is_an_empty_page_not_a_404` |
+
+/// A type created through the API, bound to each of `workflows` in order.
+async fn type_bound_to(
+    app: &TestApp,
+    token: &str,
+    code: &str,
+    status: &str,
+    workflows: &[Uuid],
+) -> Uuid {
+    let bindings: Vec<Value> = workflows
+        .iter()
+        .enumerate()
+        .map(|(index, id)| json!({ "workflowDefinitionId": id, "priority": index + 1 }))
+        .collect();
+
+    let created = app
+        .send(
+            Method::POST,
+            "/api/v1/document-types",
+            Some(token),
+            Some(json!({
+                "typeCode": code,
+                "name": code,
+                "status": status,
+                "workflows": bindings,
+            })),
+        )
+        .await;
+
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+    id_of(&created.body["data"])
+}
+
+/// The type codes on one page of the list at `query`, and `meta.total`.
+async fn listed(app: &TestApp, token: &str, query: &str) -> (Vec<String>, u64) {
+    let response = app
+        .send(
+            Method::GET,
+            &format!("/api/v1/document-types?{query}"),
+            Some(token),
+            None,
+        )
+        .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "{query}: {}",
+        response.body
+    );
+
+    let codes = response.body["data"]
+        .as_array()
+        .expect("a page")
+        .iter()
+        .map(|row| row["typeCode"].as_str().expect("a code").to_owned())
+        .collect();
+    let total = response.body["meta"]["total"].as_u64().expect("a total");
+
+    (codes, total)
+}
+
+#[tokio::test]
+async fn only_the_types_bound_to_the_revision_are_listed() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let workflow = published_workflow(&app, &token, "wf_filter_bound").await;
+    let elsewhere = published_workflow(&app, &token, "wf_filter_elsewhere").await;
+
+    type_bound_to(&app, &token, "FLT_BOUND_A", "ACTIVE", &[workflow]).await;
+    // Bound second, behind another workflow: any live row counts, not only
+    // the one selection would pick first.
+    type_bound_to(
+        &app,
+        &token,
+        "FLT_BOUND_B",
+        "ACTIVE",
+        &[elsewhere, workflow],
+    )
+    .await;
+    type_bound_to(&app, &token, "FLT_UNBOUND", "ACTIVE", &[elsewhere]).await;
+    type_bound_to(&app, &token, "FLT_NOTHING", "ACTIVE", &[]).await;
+
+    let (codes, total) = listed(&app, &token, &format!("workflowDefinitionId={workflow}")).await;
+
+    assert_eq!(codes, ["FLT_BOUND_A", "FLT_BOUND_B"]);
+    assert_eq!(total, 2);
+}
+
+#[tokio::test]
+async fn a_binding_to_another_revision_of_the_same_key_does_not_count() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let first = published_workflow(&app, &token, "wf_filter_revised").await;
+
+    let revision = app
+        .send(
+            Method::POST,
+            &format!("/api/v1/workflow/definitions/{first}/revisions"),
+            Some(&token),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(revision.status, StatusCode::CREATED, "{}", revision.body);
+    let second = id_of(&revision.body["data"]);
+
+    let published = app
+        .send(
+            Method::POST,
+            &format!("/api/v1/workflow/definitions/{second}/publication"),
+            Some(&token),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(published.status, StatusCode::OK, "{}", published.body);
+
+    type_bound_to(&app, &token, "FLT_ON_FIRST", "ACTIVE", &[first]).await;
+    type_bound_to(&app, &token, "FLT_ON_SECOND", "ACTIVE", &[second]).await;
+
+    let (on_first, _) = listed(&app, &token, &format!("workflowDefinitionId={first}")).await;
+    let (on_second, _) = listed(&app, &token, &format!("workflowDefinitionId={second}")).await;
+
+    assert_eq!(on_first, ["FLT_ON_FIRST"], "a revision, not a workflow key");
+    assert_eq!(
+        on_second,
+        ["FLT_ON_SECOND"],
+        "a revision, not a workflow key"
+    );
+}
+
+#[tokio::test]
+async fn a_retired_or_inactive_binding_does_not_count() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let workflow = published_workflow(&app, &token, "wf_filter_dead").await;
+
+    type_bound_to(&app, &token, "FLT_LIVE", "ACTIVE", &[workflow]).await;
+    let retired = type_bound_to(&app, &token, "FLT_RETIRED", "ACTIVE", &[workflow]).await;
+    let inactive = type_bound_to(&app, &token, "FLT_INACTIVE", "ACTIVE", &[workflow]).await;
+
+    // Neither state has a route: the API replaces a type's bindings by hard
+    // delete and inserts them `ACTIVE`. Both are still states §6.4 allows and
+    // `workflow_binding` skips, so the filter must skip them too.
+    sqlx::query(
+        "UPDATE document_type_workflows SET deleted_at = now() WHERE document_type_id = $1",
+    )
+    .bind(retired)
+    .execute(&app.pool)
+    .await
+    .expect("retire the binding");
+    sqlx::query(
+        "UPDATE document_type_workflows SET status = 'INACTIVE' WHERE document_type_id = $1",
+    )
+    .bind(inactive)
+    .execute(&app.pool)
+    .await
+    .expect("deactivate the binding");
+
+    let (codes, total) = listed(&app, &token, &format!("workflowDefinitionId={workflow}")).await;
+
+    assert_eq!(codes, ["FLT_LIVE"]);
+    assert_eq!(total, 1);
+}
+
+#[tokio::test]
+async fn another_tenants_binding_row_does_not_count() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let workflow = published_workflow(&app, &token, "wf_filter_tenant").await;
+    let other = fixtures::create_tenant(&app.pool, "TNT-DT-FILTER", "Filter tenant").await;
+
+    type_bound_to(&app, &token, "FLT_MINE", "ACTIVE", &[workflow]).await;
+    let unbound_here = type_bound_to(&app, &token, "FLT_NOT_MINE", "ACTIVE", &[]).await;
+
+    // The other tenant's own type, bound to this revision...
+    let theirs = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO document_types (id, tenant_id, type_code, name)
+         VALUES ($1, $2, 'FLT_THEIRS', 'Theirs')",
+    )
+    .bind(theirs)
+    .bind(other)
+    .execute(&app.pool)
+    .await
+    .expect("insert the other tenant's type");
+
+    // ...and a stray row filed under the other tenant that names *this*
+    // tenant's type. Neither foreign key is composite, so the row is
+    // writable; only `tenant_id` on the binding keeps it out.
+    for type_id in [theirs, unbound_here] {
+        sqlx::query(
+            "INSERT INTO document_type_workflows
+                 (id, tenant_id, document_type_id, workflow_definition_id)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(other)
+        .bind(type_id)
+        .bind(workflow)
+        .execute(&app.pool)
+        .await
+        .expect("insert the other tenant's binding");
+    }
+
+    let (codes, total) = listed(&app, &token, &format!("workflowDefinitionId={workflow}")).await;
+
+    assert_eq!(codes, ["FLT_MINE"]);
+    assert_eq!(total, 1);
+}
+
+#[tokio::test]
+async fn the_filter_composes_with_status_and_search() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let workflow = published_workflow(&app, &token, "wf_filter_status").await;
+
+    type_bound_to(&app, &token, "FLT_ACTIVE_BOUND", "ACTIVE", &[workflow]).await;
+    type_bound_to(&app, &token, "FLT_DRAFT_BOUND", "DRAFT", &[workflow]).await;
+    type_bound_to(&app, &token, "FLT_DRAFT_OTHER", "DRAFT", &[workflow]).await;
+    type_bound_to(&app, &token, "FLT_DRAFT_UNBOUND", "DRAFT", &[]).await;
+
+    let (drafts, total) = listed(
+        &app,
+        &token,
+        &format!("workflowDefinitionId={workflow}&status=DRAFT"),
+    )
+    .await;
+    assert_eq!(drafts, ["FLT_DRAFT_BOUND", "FLT_DRAFT_OTHER"]);
+    assert_eq!(total, 2);
+
+    // `bound` is a substring of `FLT_DRAFT_UNBOUND` too: the search alone
+    // would list it, and the binding filter is what keeps it out.
+    let (searched, total) = listed(
+        &app,
+        &token,
+        &format!("workflowDefinitionId={workflow}&status=DRAFT&search=bound"),
+    )
+    .await;
+    assert_eq!(searched, ["FLT_DRAFT_BOUND"]);
+    assert_eq!(total, 1);
+}
+
+#[tokio::test]
+async fn the_filter_pages_and_counts_the_same_rows() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let workflow = published_workflow(&app, &token, "wf_filter_paging").await;
+
+    for code in ["FLT_PAGE_1", "FLT_PAGE_2", "FLT_PAGE_3"] {
+        type_bound_to(&app, &token, code, "ACTIVE", &[workflow]).await;
+    }
+    // Unbound rows sorting ahead of and between the bound ones, so a page
+    // taken before the filter would hold the wrong rows.
+    for code in ["FLT_PAGE_0", "FLT_PAGE_1A", "FLT_PAGE_2A"] {
+        type_bound_to(&app, &token, code, "ACTIVE", &[]).await;
+    }
+
+    let filter = format!("workflowDefinitionId={workflow}");
+    let (first, total) = listed(&app, &token, &format!("{filter}&page=1&pageSize=2")).await;
+    assert_eq!(first, ["FLT_PAGE_1", "FLT_PAGE_2"]);
+    assert_eq!(total, 3, "meta.total counts the filtered rows");
+
+    let (second, total) = listed(&app, &token, &format!("{filter}&page=2&pageSize=2")).await;
+    assert_eq!(second, ["FLT_PAGE_3"]);
+    assert_eq!(total, 3);
+}
+
+#[tokio::test]
+async fn an_unknown_revision_is_an_empty_page_not_a_404() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let workflow = published_workflow(&app, &token, "wf_filter_unknown").await;
+
+    type_bound_to(&app, &token, "FLT_SOMETHING", "ACTIVE", &[workflow]).await;
+
+    let (codes, total) = listed(
+        &app,
+        &token,
+        &format!("workflowDefinitionId={}", Uuid::now_v7()),
+    )
+    .await;
+
+    assert!(codes.is_empty(), "{codes:?}");
+    assert_eq!(total, 0);
+}
+
+#[tokio::test]
+async fn the_list_documents_its_workflow_filter() {
+    let app = TestApp::spawn().await;
+    let document = app
+        .send(Method::GET, "/api/docs/openapi.json", None, None)
+        .await;
+
+    let parameter = document.body["paths"]["/api/v1/document-types"]["get"]["parameters"]
+        .as_array()
+        .expect("the list has parameters")
+        .iter()
+        .find(|parameter| parameter["name"] == "workflowDefinitionId")
+        .cloned()
+        .unwrap_or_else(|| panic!("workflowDefinitionId is not documented: {}", document.body));
+
+    assert_eq!(parameter["in"], "query");
+    assert_eq!(parameter["schema"]["format"], "uuid", "{parameter}");
+}
+
+#[tokio::test]
+async fn a_revision_that_is_not_a_uuid_is_refused_by_name() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let response = app
+        .send(
+            Method::GET,
+            "/api/v1/document-types?workflowDefinitionId=not-a-uuid",
+            Some(&token),
+            None,
+        )
+        .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        response.body
+    );
+    assert_eq!(
+        response.body["error"]["details"][0]["path"], "workflowDefinitionId",
+        "{}",
+        response.body
+    );
+}

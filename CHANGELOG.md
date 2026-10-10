@@ -131,6 +131,17 @@ While the major version is `0`, the public API may change in any release.
   `Workflow.Deprecated` audit record, and no outbox event. Publishing a new
   revision still leaves the previous one `ACTIVE`, and the workflow editor's
   *Deprecate* action follows.
+- **The document-type list filters by a bound workflow revision**
+  ([#713](https://github.com/sujanto-gaws/kelir/issues/713), row 6b).
+  `GET /api/v1/document-types?workflowDefinitionId={id}` lists only the types
+  with a live binding to that revision: in the caller's tenant, not deleted,
+  and `ACTIVE`. Its validity window is not considered, so a binding that has not
+  opened yet is listed. It names one revision, not a workflow key, and composes
+  with `search`, `status` and paging, with `meta.total` counting the same rows.
+  An id that names nothing is an empty page, and one that is not a uuid is a 422
+  naming `workflowDefinitionId`. It is for the workflow editor's *Deprecate*
+  warning, which lists the types still bound in one call. It needs
+  `document-type:read`, as the list always did, and adds no route or permission.
 
 ### Changed
 

@@ -140,7 +140,8 @@ pub struct DocumentType {
     pub updated_at: DateTime<Utc>,
 }
 
-/// The type list's query string: paging, a search and a status.
+/// The type list's query string: paging, a search, a status and a bound
+/// workflow revision.
 ///
 /// Unknown parameters are ignored, as [`Pagination`] ignores them everywhere;
 /// a `status` outside the vocabulary is a 422 naming `status`, because it
@@ -160,6 +161,11 @@ pub struct DocumentTypeQuery {
     pub search: Option<String>,
     /// `DRAFT`, `ACTIVE` or `DEPRECATED`, matched exactly.
     pub status: Option<DocumentTypeStatus>,
+    /// Only the types with a live binding to this workflow revision: in this
+    /// tenant, not deleted and `ACTIVE`, whatever its validity window. One
+    /// revision, not a workflow key; an id that names nothing is an empty page
+    /// (#713, for the workflow editor's *Deprecate* warning).
+    pub workflow_definition_id: Option<Uuid>,
 }
 
 impl DocumentTypeQuery {
