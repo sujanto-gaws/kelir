@@ -2936,8 +2936,9 @@ describe('WorkflowEditorPage', () => {
   // Past the builder's tests: what the success path shows, the hundred-type
   // boundary, and the warning by keyboard. Seen to fail: the screen keeping
   // its own definition after a success (*shows the revision the route
-  // answers…*), and `unnamed >= 0` (*names exactly a hundred…*). Focus is not
-  // handed back when the warning closes: pinned with `it.fails` below.
+  // answers…*), and `unnamed >= 0` (*names exactly a hundred…*). Focus was not
+  // handed back when the warning closed: pinned with `it.fails` below, and
+  // fixed in `Dialog` the same day.
 
   describe('deprecating a revision, adversarially (#713)', () => {
     function hundred(): unknown[] {
@@ -3054,13 +3055,12 @@ describe('WorkflowEditorPage', () => {
       expect(page.get('[data-testid="status"]').text()).toBe('DEPRECATED')
     })
 
-    // DEFECT (test-engineer, 2026-10-10, PR #715): closing the warning leaves
+    // DEFECT (test-engineer, 2026-10-10, PR #715): closing the warning left
     // focus on `<body>`, not on the *Deprecate* button that opened it. The
-    // shared `Dialog` moves focus in on open and never hands it back (WAI-ARIA
-    // dialog pattern), so a keyboard user restarts from the top of the page.
-    // Not this row's code; it is every `ConfirmDialog`'s. Flip to `it` when
-    // `Dialog` restores focus.
-    it.fails('hands focus back to Deprecate when the warning is cancelled', async () => {
+    // shared `Dialog` moved focus in on open and never handed it back (WAI-ARIA
+    // dialog pattern). Fixed the same day in `Dialog`, for every
+    // `ConfirmDialog`; a plain `it` since.
+    it('hands focus back to Deprecate when the warning is cancelled', async () => {
       stored = record({ status: 'ACTIVE' })
 
       const page = await render({ permissions: DEPRECATOR, attach: true })

@@ -220,6 +220,14 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A dialog hands focus back to what opened it when it closes**
+  (PR [#715](https://github.com/sujanto-gaws/kelir/pull/715)'s campaign on
+  [#713](https://github.com/sujanto-gaws/kelir/issues/713)). The shared
+  dialog moved focus into its panel on open and never returned it, so after
+  a confirmation was cancelled or answered a keyboard user was left on the
+  page's body. It now restores focus to the element that held it, as the
+  WAI-ARIA dialog pattern asks, unless focus has moved elsewhere since or
+  that element is gone. Every confirmation dialog takes it.
 - **A refresh checks its tenant's status**
   ([#649](https://github.com/sujanto-gaws/kelir/issues/649)). A refresh
   read the user's status and not the tenant's, and relied on the revocation
