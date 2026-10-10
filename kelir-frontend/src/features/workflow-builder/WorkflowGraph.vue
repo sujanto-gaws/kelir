@@ -53,6 +53,11 @@ import {
  * reaches them and Enter presses them. A pointer pans and zooms as Vue Flow
  * allows.
  *
+ * **Named, and not operable, to a screen reader**: each state is named with
+ * its marks and each transition by what its edge draws, and Vue Flow's keyboard
+ * help (select, move with the arrows, delete) is off, since none of it is true
+ * here.
+ *
  * [ADR-0046]: ../../../../docs/architectures/adr/0046.%20The%20Builders%20Drag%20with%20Vue%20Draggable%20Plus%20and%20Draw%20with%20Vue%20Flow%20and%20Dagre,%20Off%20the%20First-Load%20Path.md
  */
 const props = defineProps<{ definition: JwssDefinition }>()
@@ -78,20 +83,23 @@ const nodes = computed<Node<WorkflowGraphNode>[]>(() =>
 /** An edge as drawn: the transition, and dagre's route for it. */
 type RoutedEdge = WorkflowGraphEdge & { route: EdgeRoute }
 
-const edges = computed<Edge<RoutedEdge>[]>(() =>
-  graph.value.edges.map((edge) => ({
+const edges = computed<Edge<RoutedEdge>[]>(() => {
+  const names = new Map(graph.value.nodes.map((node) => [node.id, node.name]))
+
+  return graph.value.edges.map((edge) => ({
     id: edge.id,
     type: 'transition',
     source: edge.source,
     target: edge.target,
     markerEnd: MarkerType.ArrowClosed,
     class: cn('workflow-graph-edge', edge.conditional && 'workflow-graph-edge--conditional'),
+    ariaLabel: edgeLabel(edge, names),
     data: {
       ...edge,
       route: layout.value.edges.get(edge.id) ?? { points: [], label: { x: 0, y: 0 } },
     },
-  })),
-)
+  }))
+})
 
 const summary = computed(() => {
   const states = graph.value.nodes.filter((node) => node.declared).length
@@ -115,6 +123,23 @@ function nodeLabel(node: WorkflowGraphNode): string {
   ].filter(Boolean)
 
   return [`${node.name} (${node.code})`, ...marks].join(', ')
+}
+
+/**
+ * A transition in words: what its edge draws, by the names its states show.
+ * Without it Vue Flow names an edge by the graph's internal ids, and the
+ * edge's `role="img"` hides the drawn label from assistive technology.
+ */
+function edgeLabel(edge: WorkflowGraphEdge, names: Map<string, string>): string {
+  const marker = edge.conditional
+    ? 'if a condition holds'
+    : edge.fallback
+      ? 'otherwise, when no condition holds'
+      : null
+
+  return [edge.actionLabel, `from ${names.get(edge.source)} to ${names.get(edge.target)}`, marker]
+    .filter(Boolean)
+    .join(', ')
 }
 
 function fit(): void {
@@ -147,6 +172,7 @@ watch(nodes, async () => {
         :edges-focusable="false"
         :zoom-on-double-click="false"
         :delete-key-code="null"
+        disable-keyboard-a11y
         :min-zoom="0.2"
         :max-zoom="2"
         fit-view-on-init

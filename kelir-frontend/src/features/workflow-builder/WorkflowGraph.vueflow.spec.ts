@@ -151,34 +151,32 @@ describe('WorkflowGraph, drawn by Vue Flow itself', () => {
       ])
     })
 
-    // DEFECT (#719 campaign, 2026-10-10): the component gives an edge no
-    // `ariaLabel`, so Vue Flow 1.48.2's EdgeWrapper falls back to "Edge from
-    // ${source} to ${target}" with the graph's internal ids, and gives the
+    // With no `ariaLabel`, Vue Flow 1.48.2's EdgeWrapper falls back to "Edge
+    // from ${source} to ${target}" with the graph's internal ids, and gives the
     // non-focusable edge `role="img"`, whose children are presentational: the
-    // drawn label ("Approve · if…") is hidden from assistive technology and
-    // "Edge from state-0 to state-1" is read instead.
-    it.fails(
-      'names every transition by its label and its states, not by Vue Flow’s ids',
-      async () => {
-        await render()
+    // drawn label ("Approve · if…") was hidden and "Edge from state-0 to
+    // state-1" read instead (the #719 campaign). The name says what is drawn,
+    // in words: the marker "if…" read aloud is punctuation.
+    it('names every transition by its label and its states, not by Vue Flow’s ids', async () => {
+      await render()
 
-        const names = [...figure().querySelectorAll('.vue-flow__edge')].map((edge) =>
-          edge.getAttribute('aria-label'),
-        )
+      const names = [...figure().querySelectorAll('.vue-flow__edge')].map((edge) =>
+        edge.getAttribute('aria-label'),
+      )
 
-        expect(names).toHaveLength(3)
-        names.forEach((name) => expect(name).not.toMatch(/state-\d|transition-\d/))
-        expect(names[0]).toContain('Approve · if…')
-        expect(names[0]).toContain('Manager approval')
-        expect(names[0]).toContain('Done')
-      },
-    )
+      names.forEach((name) => expect(name).not.toMatch(/state-\d|transition-\d/))
+      expect(names).toEqual([
+        'Approve, from Manager approval to Done, if a condition holds',
+        'Approve, from Manager approval to Rejected, otherwise, when no condition holds',
+        'Reject, from Manager approval to Rejected',
+      ])
+    })
 
-    // DEFECT (#719 campaign, 2026-10-10): Vue Flow describes each node, by
-    // `aria-describedby`, as something to "select", "move around" with the
-    // arrows and "remove" with Delete, because `disable-keyboard-a11y` is not
-    // set. None of it is true of a read-only graph.
-    it.fails('describes no node as something to move or delete', async () => {
+    // Vue Flow described each node, by `aria-describedby`, as something to
+    // "select", "move around" with the arrows and "remove" with Delete, until
+    // `disable-keyboard-a11y` was set (the #719 campaign). None of it is true
+    // of a read-only graph.
+    it('describes no node as something to move or delete', async () => {
       await render()
 
       const descriptions = [...figure().querySelectorAll('.vue-flow__node')].map((node) => {

@@ -52,6 +52,8 @@ export interface WorkflowGraphEdge {
   source: string
   target: string
   action: TransitionAction
+  /** The action's label alone, as the list names it. */
+  actionLabel: string
   /** What the edge says: the action's label, and the condition marker when there is one. */
   label: string
   /** Whether the transition carries a `condition` (JWSS §6). */
@@ -164,6 +166,7 @@ export function workflowGraphOf(definition: JwssDefinition): WorkflowGraph {
       source: nodeFor(transition.from),
       target: nodeFor(transition.to),
       action: transition.action,
+      actionLabel: action,
       label: marker ? `${action} · ${marker}` : action,
       conditional,
       fallback,
