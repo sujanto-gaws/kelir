@@ -225,6 +225,11 @@ export interface LogicBuilderContext {
   variables: readonly LogicVariable[]
   /** Whether a path outside `variables` may be typed. One already there is kept either way. */
   allowFreePaths: boolean
+  /**
+   * Prefixes under which every path counts as offered: an open-ended part of
+   * the context the host cannot list, such as a workflow's `formData.`.
+   */
+  freePrefixes?: readonly string[]
   disabled: boolean
 }
 
@@ -425,9 +430,20 @@ export function rebuild(node: LogicNode): unknown {
   return emit(node, false)
 }
 
-/** Whether a `var` path is one the host offers. Anything else is kept, with a warning (B4). */
-export function isOfferedPath(path: string, variables: readonly LogicVariable[]): boolean {
-  return variables.some((variable) => variable.path === path)
+/**
+ * Whether a `var` path is one the host offers: a listed variable, or a path
+ * under one of `freePrefixes` with something after the prefix. Anything else
+ * is kept, with a warning (B4).
+ */
+export function isOfferedPath(
+  path: string,
+  variables: readonly LogicVariable[],
+  freePrefixes: readonly string[] = [],
+): boolean {
+  return (
+    variables.some((variable) => variable.path === path) ||
+    freePrefixes.some((prefix) => path.length > prefix.length && path.startsWith(prefix))
+  )
 }
 
 export function literalNode(value: JsonLiteral): LiteralNode {

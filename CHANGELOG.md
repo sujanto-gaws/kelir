@@ -57,7 +57,10 @@ While the major version is `0`, the public API may change in any release.
   revision.** Publish saves unsaved changes first, and what the editor does not
   show, such as guards, actions and an escalation, is saved back unchanged. It
   uses the existing definition routes and adds none. Deprecating a revision
-  follows with #573's route.
+  follows with #573's route. `workflow:definition:publish` alone may publish
+  a saved draft as it is stored. The editor takes no edits while a save or
+  publish is in flight, a cleared description clears the stored one, and a
+  typed `formData.` path in a condition counts as offered.
 - **A shared builder edits a JSON Logic expression visually**
   ([#686](https://github.com/sujanto-gaws/kelir/issues/686), decision
   **D-110**). One component for a form's `calculate` and `conditional.logic`

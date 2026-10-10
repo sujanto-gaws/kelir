@@ -8,7 +8,7 @@ import { Select } from '@/components/ui/select'
 import type { AssigneeType, AssignmentRule } from '@/types/workflow'
 
 import { readRule, retype } from './assignmentRule'
-import { ASSIGNEE_TYPES } from './jwssRegistry'
+import { ASSIGNEE_TYPES, CONDITION_FREE_PREFIXES } from './jwssRegistry'
 
 /**
  * One JWSS assignment rule: a task's `assignment`, or a transition's
@@ -178,6 +178,7 @@ function setExpression(value: unknown): void {
         tier="conditional"
         :variables="variables"
         allow-free-paths
+        :free-prefixes="CONDITION_FREE_PREFIXES"
         :label="`${label}: expression`"
         :disabled="disabled"
         @update:model-value="setExpression"

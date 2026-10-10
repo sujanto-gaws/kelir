@@ -31,8 +31,23 @@ import type { JwssDefinition } from '@/types/workflow'
  *
  * # Seen to fail (coding standard §2.9)
  *
- * Nineteen mutations over row 6's code, run 2026-10-09, all nineteen red. Seen
- * red, 2026-10-09, in this file:
+ * **Nineteen distinct mutations** over row 6's code, run 2026-10-09, all
+ * nineteen red (restated 2026-10-10: this paragraph said *the other six* and
+ * the records below add up to more). Fourteen reddened a test in this file and
+ * are listed in the table. The other five reddened only a unit spec and are
+ * recorded there: same-path messages kept first-wins (`workflowVerdict.spec.ts`),
+ * removing a state that keeps its outgoing transitions and dropping the
+ * `isRestoring` guard (`useWorkflowDraft.spec.ts`), `retype` keeping every
+ * field (`assignmentRule.spec.ts`), and *New revision* on a draft row
+ * (`WorkflowListPage.spec.ts`). **Three of the fourteen are recorded twice**,
+ * here and in the unit spec they also reddened — the S6/S7 placement, the
+ * offered `document.amount`, and the rename — which is why the per-file
+ * records total more than nineteen.
+ *
+ * **The test-engineer campaign's forty further mutations**, run 2026-10-10,
+ * are in their own table below (*The test-engineer campaign*), M01–M40.
+ *
+ * Seen red, 2026-10-09, in this file:
  *
  * | Mutation | Reddened |
  * |---|---|
@@ -49,9 +64,6 @@ import type { JwssDefinition } from '@/types/workflow'
  * | A rename does not take its transitions | *renames a state and its transitions and the initial state follow* |
  * | A save keeps the local draft, not what was stored | *shows what the server stored after a save…* |
  * | An edit does not clear its field’s message; a row move keeps stale ones | *clears a field’s message when it is edited…* (two mutations) |
- *
- * The other six are in `useWorkflowDraft.spec.ts`, `workflowVerdict.spec.ts`,
- * `assignmentRule.spec.ts`, `jwssRegistry.spec.ts` and `WorkflowListPage.spec.ts`.
  */
 
 const ID = '0199a1a0-0000-7000-8000-00000000wf01'
@@ -373,6 +385,79 @@ describe('WorkflowEditorPage', () => {
         'actor.userId',
         'variables.threshold',
       ])
+    })
+  })
+
+  // --- Fixes after the campaign, 2026-10-10 ----------------------------------
+  //
+  // Seen red, 2026-10-10: eight mutations over the fixes, all red.
+  //
+  // | Mutation | Reddened |
+  // |---|---|
+  // | Not read-only while a save or publish is in flight | *takes no edit while a save is in flight…*, *…while a publish is in flight*, *draws a refusal on the row it named…* |
+  // | A cleared description left out of the request | *clears the stored description when the author clears it* |
+  // | The first declared code that appears wins, not the longest | *puts S6 on the state it names when that code holds a backtick* |
+  // | Publish offered only to a caller who can edit | *offers publish to a caller who may publish and not update…* |
+  // | `freePrefixes` ignored by the offered-path check | *counts a typed formData path as offered…*; `JsonLogicBuilder.spec.ts` *counts a path under a free prefix…* |
+  // | A bare prefix counted as a path under it | `JsonLogicBuilder.spec.ts` *does not count the bare prefix…* |
+  // | The task note never shown | *says beside the task checkbox…*, *says it for a due time or a priority alone too* |
+  // | No re-read after `NOT_A_DRAFT` | *reads the revision again after NOT_A_DRAFT…* |
+  describe('fixes after the campaign, 2026-10-10', () => {
+    it('counts a typed formData path as offered, with no badge', async () => {
+      const page = await render()
+
+      await byLabel(page, 'Transition 1 condition, operand 1: variable path').setValue(
+        'formData.amount',
+      )
+
+      expect(page.get('[data-testid="transition-0-detail"]').text()).not.toContain(
+        'Not in the offered',
+      )
+
+      await byLabel(page, 'Transition 1 condition, operand 1: variable path').setValue('foo.bar')
+
+      expect(page.get('[data-testid="transition-0-detail"]').text()).toContain('Not in the offered')
+
+      await save(page)
+
+      expect(lastWrite().definition.transitions[0].condition).toEqual({
+        '==': [{ var: 'foo.bar' }, 'PENDING_APPROVAL'],
+      })
+    })
+
+    it('says beside the task checkbox what unticking it removes, and undo restores it', async () => {
+      const page = await render()
+
+      expect(page.get('[data-testid="state-task-unshown-0"]').text()).toContain(
+        'Unticking this also removes the stored escalation, due hours and priority.',
+      )
+      // A task with none of them has nothing unshown to lose.
+      await page.get('[data-testid="add-state-task"]').trigger('click')
+      expect(page.find('[data-testid="state-task-unshown-3"]').exists()).toBe(false)
+
+      await page.get('[data-testid="state-has-task-0"]').setValue(false)
+      expect(page.find('[data-testid="state-task-unshown-0"]').exists()).toBe(false)
+
+      await page.get('[data-testid="undo"]').trigger('click')
+      await settle()
+      await save(page)
+
+      expect(lastWrite().definition.states[0].task?.escalation).toEqual({
+        afterHours: 72,
+        assignment: { assigneeType: 'ROLE', roleCode: 'HEAD' },
+      })
+    })
+
+    it('says it for a due time or a priority alone too', async () => {
+      const loaded = jwss()
+
+      delete loaded.states[0].task!.escalation
+      loaded.states[0].task!.priority = 'HIGH'
+      stored = record({ definition: loaded })
+
+      const page = await render()
+
+      expect(page.find('[data-testid="state-task-unshown-0"]').exists()).toBe(true)
     })
   })
 
@@ -725,8 +810,9 @@ describe('WorkflowEditorPage', () => {
   // --- The test-engineer campaign, 2026-10-10 ----------------------------------
   //
   // What the builder's suite above did not reach, traced to #426's criteria.
-  // Four defects are pinned with `it.fails` (five tests), each saying what it
-  // would take to turn it into a plain `it`.
+  // Four defects were pinned with `it.fails` (five tests), each saying what it
+  // would take to turn it into a plain `it`. All five are plain `it` since the
+  // fixes of 2026-10-10; each says what changed.
   //
   // Seen to fail (coding standard §2.9): forty mutations the builder did not
   // list, run 2026-10-10 against this suite, the list and draft specs, the
@@ -1132,31 +1218,37 @@ describe('WorkflowEditorPage', () => {
       expect(page.get('[data-testid="workflow-key-error"]').text()).toBe('workflowKey is required')
     })
 
-    it.fails(
-      'clears the stored description when the author clears it (defect: an absent field is left as stored)',
-      async () => {
-        // `PUT` treats an absent `description` as *leave it* (`UpdateWorkflowRequest`,
-        // and `COALESCE($4, description)` in `repository/definition.rs`). The editor
-        // drops a blank description from the request, so the column keeps the old
-        // text while the JWSS it was taken from has none: the "two facts" the page's
-        // own `save()` comment says it prevents. Passes once a cleared description
-        // is sent as one that clears.
-        const loaded = jwss()
+    it('clears the stored description when the author clears it', async () => {
+      // `PUT` treats an absent `description` as *leave it* (`UpdateWorkflowRequest`,
+      // and `COALESCE($4, description)` in `repository/definition.rs`), so a
+      // cleared description is sent as `''`, and the JWSS carries none.
+      // Pinned `it.fails` by the campaign until fixed 2026-10-10.
+      const loaded = jwss()
 
-        loaded.description = 'Old description'
-        stored = record({ description: 'Old description', definition: loaded })
+      loaded.description = 'Old description'
+      stored = record({ description: 'Old description', definition: loaded })
 
-        const page = await render()
+      const page = await render()
 
-        await page.get('#workflow-description').setValue('')
-        await save(page)
+      await page.get('#workflow-description').setValue('')
+      await save(page)
 
-        const body = writes()[0].body as Record<string, unknown>
+      const body = writes()[0].body as Record<string, unknown>
 
-        expect(body).toHaveProperty('description')
-        expect(body.description).toBe('')
-      },
-    )
+      expect(body).toHaveProperty('description')
+      expect(body.description).toBe('')
+      expect('description' in (body.definition as object)).toBe(false)
+      expect(jwssViolations(body.definition)).toEqual([])
+    })
+
+    it('sends no description for a workflow that never had one', async () => {
+      const page = await render()
+
+      await page.get('[data-testid="workflow-name"]').setValue('Renamed')
+      await save(page)
+
+      expect('description' in (writes()[0].body as object)).toBe(false)
+    })
   })
 
   describe('the campaign: undo and redo', () => {
@@ -1492,41 +1584,38 @@ describe('WorkflowEditorPage', () => {
       expect(page.find('[data-testid="unplaced-errors"]').exists()).toBe(false)
     })
 
-    it.fails(
-      'puts S6 on the state it names when that code holds a backtick (defect: the first backtick pair is read)',
-      async () => {
-        // `namedCode` takes the text between the message's first two backticks.
-        // A code holding one (refused by the meta-schema at its own field, while
-        // S6 still runs and names it) is cut short, and when the cut text is
-        // another state's code the verdict lands on the wrong state. Passes once
-        // the message is matched against the declared codes rather than parsed.
-        const loaded = jwss()
+    it('puts S6 on the state it names when that code holds a backtick', async () => {
+      // A code holding a backtick (refused by the meta-schema at its own
+      // field, while S6 still runs and names it) used to be cut short at the
+      // first backtick pair, onto another state's code. The message is now
+      // matched against the declared codes, the longest first. Pinned
+      // `it.fails` by the campaign until fixed 2026-10-10.
+      const loaded = jwss()
 
-        loaded.states.push(
-          { code: 'A', name: 'A', mapsToDocumentStatus: 'IN_REVIEW' },
-          { code: 'A`B', name: 'A with a backtick', mapsToDocumentStatus: 'IN_REVIEW' },
-        )
-        stored = record({ definition: loaded })
+      loaded.states.push(
+        { code: 'A', name: 'A', mapsToDocumentStatus: 'IN_REVIEW' },
+        { code: 'A`B', name: 'A with a backtick', mapsToDocumentStatus: 'IN_REVIEW' },
+      )
+      stored = record({ definition: loaded })
 
-        const page = await render()
+      const page = await render()
 
-        refuse = {
-          status: 422,
-          body: errorBody('VALIDATION_ERROR', 'Validation failed', [
-            {
-              path: 'definition.states',
-              rule: 'S6',
-              code: 'UNREACHABLE_STATE',
-              message: '`A`B` cannot be reached from the initial state',
-            },
-          ]),
-        }
-        await save(page)
+      refuse = {
+        status: 422,
+        body: errorBody('VALIDATION_ERROR', 'Validation failed', [
+          {
+            path: 'definition.states',
+            rule: 'S6',
+            code: 'UNREACHABLE_STATE',
+            message: '`A`B` cannot be reached from the initial state',
+          },
+        ]),
+      }
+      await save(page)
 
-        expect(page.find('[data-testid="state-3-messages"]').exists()).toBe(false)
-        expect(page.get('[data-testid="state-4-messages"]').text()).toContain('cannot be reached')
-      },
-    )
+      expect(page.find('[data-testid="state-3-messages"]').exists()).toBe(false)
+      expect(page.get('[data-testid="state-4-messages"]').text()).toContain('cannot be reached')
+    })
 
     it('says why when the revision was published under the author (NOT_A_DRAFT is a 422 at status)', async () => {
       const page = await render()
@@ -1552,6 +1641,46 @@ describe('WorkflowEditorPage', () => {
       expect((page.get('[data-testid="workflow-name"]').element as HTMLInputElement).value).toBe(
         'Renamed',
       )
+    })
+
+    it('reads the revision again after NOT_A_DRAFT, and offers a new revision with the edit kept', async () => {
+      const page = await render()
+
+      await page.get('[data-testid="workflow-name"]').setValue('Renamed')
+      // Somebody else published it between the load and this save.
+      stored = record({ status: 'ACTIVE' })
+      refuse = {
+        status: 422,
+        body: errorBody('VALIDATION_ERROR', 'Validation failed', [
+          {
+            path: 'status',
+            rule: 'immutable',
+            code: 'NOT_A_DRAFT',
+            message: 'revision 1 of `purchase_approval` is published and cannot be edited',
+          },
+        ]),
+      }
+      await save(page)
+
+      expect(backend.requests.filter((request) => request.method === 'get')).toHaveLength(2)
+      expect(page.get('[data-testid="status"]').text()).toBe('ACTIVE')
+      expect(page.find('[data-testid="published-notice"]').exists()).toBe(true)
+      expect(page.find('[data-testid="new-revision"]').exists()).toBe(true)
+      expect(page.find('[data-testid="save-workflow"]').exists()).toBe(false)
+      // The refusal stays said, and the refused edit stays on screen to carry over.
+      expect(page.get('[data-testid="unplaced-errors"]').text()).toContain('is published')
+      expect((page.get('[data-testid="workflow-name"]').element as HTMLInputElement).value).toBe(
+        'Renamed',
+      )
+    })
+
+    it('reads nothing again after a refusal that is not NOT_A_DRAFT', async () => {
+      const page = await render()
+
+      refuse = validationReply(['name', 'name is required'])
+      await save(page)
+
+      expect(backend.requests.filter((request) => request.method === 'get')).toHaveLength(1)
     })
 
     it('shows a 409 on publish verbatim, and leaves the draft a draft that can still be edited', async () => {
@@ -1605,51 +1734,74 @@ describe('WorkflowEditorPage', () => {
       expect(page.get('[data-testid="notice"]').text()).toContain('Saved')
     })
 
-    it.fails(
-      'keeps what is typed while a save is in flight (defect: the reply reloads the draft over it)',
-      async () => {
-        // The inputs stay enabled while a save is in flight, and `save()` answers
-        // with `draft.load(stored.definition)`, which replaces the draft and its
-        // history. Whatever was typed between the click and the reply is gone,
-        // with nothing said. "Save and publish" then publishes without it. Passes
-        // once the reply is applied only if the draft is still what was sent, or
-        // the editor is read-only while it waits.
-        const page = await render()
-        const release = holdNextRequest()
+    it('takes no edit while a save is in flight, so nothing typed is lost under its reply', async () => {
+      // The campaign pinned this `it.fails` as *keeps what is typed while a save
+      // is in flight*: the reply reloads the draft, and whatever was typed in
+      // the gap was gone with nothing said. Fixed 2026-10-10 by the second of
+      // its two candidate fixes, the one the coordinator chose: the editor is
+      // read-only while it waits, so there is nothing to lose. The assertion is
+      // that, rather than the typed text surviving.
+      const page = await render()
+      const release = holdNextRequest()
 
-        await page.get('[data-testid="save-workflow"]').trigger('click')
-        await page.get('[data-testid="state-name-0"]').setValue('Typed during the save')
-        await release()
+      await page.get('[data-testid="save-workflow"]').trigger('click')
 
-        expect((page.get('[data-testid="state-name-0"]').element as HTMLInputElement).value).toBe(
-          'Typed during the save',
-        )
-      },
-    )
+      expect(page.get('[data-testid="state-name-0"]').attributes('disabled')).toBeDefined()
+      expect(page.get('[data-testid="workflow-name"]').attributes('disabled')).toBeDefined()
+      expect(page.get('[data-testid="remove-state-0"]').attributes('disabled')).toBeDefined()
+      expect(page.get('[data-testid="requires-comment-0"]').attributes('disabled')).toBeDefined()
+      expect(
+        byLabel(page, 'Transition 1 condition, operand 2: text').attributes('disabled'),
+      ).toBeDefined()
+      expect(page.get('[data-testid="publish-workflow"]').attributes('disabled')).toBeDefined()
 
-    it.fails(
-      'draws a refusal on the row it named when a row was removed while it was in flight (defect)',
-      async () => {
-        // The same window: the verdict addresses rows by their position in what
-        // was sent, and `reset()` from the removal runs before it lands, so a
-        // detail about the sent state 1 (COMPLETED) is drawn on whatever is
-        // state 1 now (REJECTED). Passes with the fix above.
-        const page = await render()
-        const release = holdNextRequest()
+      await page.get('[data-testid="state-name-0"]').setValue('Typed during the save')
+      await release()
 
-        refuse = validationReply(['definition.states.1.name', 'about COMPLETED'])
-        await page.get('[data-testid="save-workflow"]').trigger('click')
-        await page.get('[data-testid="remove-state-0"]').trigger('click')
-        await release()
+      // The input event of a disabled field reached nothing: the draft is what
+      // was sent and stored, and the screen takes edits again.
+      expect((page.get('[data-testid="state-name-0"]').element as HTMLInputElement).value).toBe(
+        'Manager approval',
+      )
+      expect(page.get('[data-testid="state-name-0"]').attributes('disabled')).toBeUndefined()
+      expect(page.get('[data-testid="publish-workflow"]').text()).toBe('Publish')
+    })
 
-        const shownOn = page
-          .findAll('section[aria-label]')
-          .filter((card) => card.text().includes('about COMPLETED'))
-          .map((card) => card.attributes('aria-label'))
+    it('takes no edit while a publish is in flight', async () => {
+      const page = await render()
+      const release = holdNextRequest()
 
-        expect(shownOn).not.toContain('State REJECTED')
-      },
-    )
+      await page.get('[data-testid="publish-workflow"]').trigger('click')
+
+      expect(page.get('[data-testid="state-name-0"]').attributes('disabled')).toBeDefined()
+
+      await release()
+
+      expect(page.get('[data-testid="status"]').text()).toBe('ACTIVE')
+    })
+
+    it('draws a refusal on the row it named, since no row can be removed while it is in flight', async () => {
+      // The same window: the verdict addresses rows by their position in what
+      // was sent, so a removal in the gap drew a detail about the sent state 1
+      // (COMPLETED) on whatever was state 1 then (REJECTED). The editor is
+      // read-only while it waits, so the removal does not happen. Pinned
+      // `it.fails` by the campaign until fixed 2026-10-10.
+      const page = await render()
+      const release = holdNextRequest()
+
+      refuse = validationReply(['definition.states.1.name', 'about COMPLETED'])
+      await page.get('[data-testid="save-workflow"]').trigger('click')
+      await page.get('[data-testid="remove-state-0"]').trigger('click')
+      await release()
+
+      const shownOn = page
+        .findAll('section[aria-label]')
+        .filter((card) => card.text().includes('about COMPLETED'))
+        .map((card) => card.attributes('aria-label'))
+
+      expect(shownOn).not.toContain('State REJECTED')
+      expect(shownOn).toEqual(['State COMPLETED'])
+    })
   })
 
   describe('the campaign: a published revision is read-only (AC5)', () => {
@@ -1730,23 +1882,42 @@ describe('WorkflowEditorPage', () => {
       expect(enabledControls(existing)).toEqual([])
     })
 
-    it.fails(
-      'offers publish to a caller who may publish and not update (defect or decision: publish is gated behind update)',
-      async () => {
-        // `workflow:definition:publish` is its own grant on the backend, and
-        // `publish_definition` checks only it. The Publish button sits inside
-        // the `!readOnly` block, and `readOnly` is true without `update`, so a
-        // caller holding publish alone — a reviewer who signs a workflow off but
-        // does not author it — cannot publish a saved draft from the screen.
-        // Passes once Publish is offered on a clean draft to anyone who holds
-        // publish; or, if that separation is not wanted, this test is deleted
-        // and the decision recorded.
-        const page = await render({
-          permissions: ['workflow:definition:read', 'workflow:definition:publish'],
-        })
+    it('offers publish to a caller who may publish and not update, and publishes the stored draft', async () => {
+      // `workflow:definition:publish` is its own grant, and `publish_definition`
+      // checks only it. The product owner decided on 2026-10-10 that it alone
+      // may publish: a reviewer who signs a workflow off without authoring it.
+      // Pinned `it.fails` by the campaign until then.
+      const page = await render({
+        permissions: ['workflow:definition:read', 'workflow:definition:publish'],
+      })
 
-        expect(page.find('[data-testid="publish-workflow"]').exists()).toBe(true)
-      },
-    )
+      expect(page.get('[data-testid="read-only-notice"]').text()).toContain(
+        'You can publish it as it is stored.',
+      )
+      expect(page.find('[data-testid="save-workflow"]').exists()).toBe(false)
+      expect(page.get('[data-testid="state-name-0"]').attributes('disabled')).toBeDefined()
+
+      const publish = page.get('[data-testid="publish-workflow"]')
+
+      expect(publish.text()).toBe('Publish')
+
+      await publish.trigger('click')
+      await settle()
+
+      // No save first: there is nothing unsaved, and no grant to save with.
+      expect(writes().map((request) => `${request.method} ${request.url}`)).toEqual([
+        `post /workflow/definitions/${ID}/publication`,
+      ])
+      expect(page.get('[data-testid="status"]').text()).toBe('ACTIVE')
+      expect(page.find('[data-testid="publish-workflow"]').exists()).toBe(false)
+    })
+
+    it('offers no publish on a published revision, whatever the caller holds', async () => {
+      stored = record({ status: 'ACTIVE' })
+
+      const page = await render()
+
+      expect(page.find('[data-testid="publish-workflow"]').exists()).toBe(false)
+    })
   })
 })

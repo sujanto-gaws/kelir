@@ -204,8 +204,8 @@ export function starterDefinition(): JwssDefinition {
  * route would take the fallback and report nothing. Offering them would put
  * that mistake one click away. `formData` is every field of the document's
  * form, which this editor cannot enumerate — a workflow is bound to a document
- * type, not a form — so a `formData.<key>` path is typed, and the builder marks
- * it as outside this list.
+ * type, not a form — so a `formData.<key>` path is typed, and counts as
+ * offered through {@link CONDITION_FREE_PREFIXES}.
  */
 export function conditionVariables(definition: JwssDefinition): LogicVariable[] {
   return [
@@ -220,6 +220,12 @@ export function conditionVariables(definition: JwssDefinition): LogicVariable[] 
     })),
   ]
 }
+
+/**
+ * The parts of the condition context the engine builds and the editor cannot
+ * list: a typed path under one is offered, and draws no warning.
+ */
+export const CONDITION_FREE_PREFIXES: readonly string[] = ['formData.']
 
 /** `[{value, label}]` from a registry, for a `Select`. */
 export function optionsOf<Key extends string>(

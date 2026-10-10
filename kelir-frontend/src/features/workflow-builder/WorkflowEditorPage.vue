@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { Plus, Redo2, Undo2 } from 'lucide-vue-next'
 
 import { toApiError } from '@/api/client'
+import { ApiError } from '@/api/error'
 import {
   createWorkflowDefinition,
   createWorkflowRevision,
@@ -81,7 +82,25 @@ const { fieldErrors, formError, report, reset, clearField } = useFormErrors()
 const status = computed(() => record.value?.status ?? 'DRAFT')
 const isPublished = computed(() => status.value !== 'DRAFT')
 const canEdit = computed(() => (isNew.value ? canCreate.value : canUpdate.value))
-const readOnly = computed(() => isPublished.value || !canEdit.value)
+/** Whether this caller may change this revision at all: a draft, and the right grant. */
+const editable = computed(() => !isPublished.value && canEdit.value)
+/**
+ * Whether the inputs take edits now. **Not while a save or publish is in
+ * flight**: its reply replaces the draft with what the server stored, and its
+ * refusal addresses rows by their position in what was sent, so an edit made
+ * in the gap would be lost or would move the refusal onto the wrong row.
+ */
+const readOnly = computed(() => !editable.value || isSaving.value)
+/**
+ * Whether *Publish* is offered. **`workflow:definition:publish` alone may
+ * publish** (the product owner, 2026-10-10), as the backend's
+ * `publish_definition` already allows. A caller who can edit
+ * publishes what is on screen, saved first; one who cannot publishes the
+ * stored draft as it is.
+ */
+const offerPublish = computed(
+  () => canPublish.value && status.value === 'DRAFT' && (editable.value || record.value !== null),
+)
 
 /** Which logic builders hold an unfilled operand, by row key and field. */
 const validity = ref<Record<string, boolean>>({})
@@ -179,6 +198,8 @@ async function load(id: string): Promise<void> {
 }
 
 function setRootText(key: 'name' | 'description' | 'workflowKey', value: string): void {
+  // A blank description is no description in the JWSS; the request clears the
+  // stored column separately (`save`).
   draft.setRoot(key, key === 'description' && value === '' ? undefined : value)
   clearField(key)
   clearField(`definition.${key}`)
@@ -210,10 +231,18 @@ async function redo(): Promise<void> {
  * The request's `name` and `description` are the document's own: the two are
  * one fact, and a column that disagreed with the JWSS it was extracted from
  * would be two.
+ *
+ * **A cleared description is sent as `''`**, not left out. The `PUT` reads an
+ * absent field as *leave it* (`COALESCE` in `repository/definition.rs`), so
+ * leaving it out kept the old text in the column while the document had none.
+ * The JWSS itself carries no `description` then, which the meta-schema allows;
+ * `''` is sent only when there is a stored one to clear, so a workflow that
+ * never had one keeps a null column.
  */
 async function save(): Promise<boolean> {
   const sent = definition.value
-  const body = { name: sent.name, description: sent.description, definition: sent }
+  const description = sent.description ?? (record.value?.description ? '' : undefined)
+  const body = { name: sent.name, description, definition: sent }
 
   reset()
   notice.value = ''
@@ -235,6 +264,7 @@ async function save(): Promise<boolean> {
     return true
   } catch (failure) {
     report(placeVerdict(failure, sent))
+    await refreshIfPublished(failure)
 
     return false
   } finally {
@@ -243,13 +273,37 @@ async function save(): Promise<boolean> {
 }
 
 /**
+ * After a save refused as `NOT_A_DRAFT` — somebody published the revision
+ * first — reads the revision's status again, so the screen turns read-only
+ * and offers *New revision*. **The draft is kept**: the refused edits stay on
+ * screen, read-only, for the author to carry into the new revision by hand.
+ */
+async function refreshIfPublished(failure: unknown): Promise<void> {
+  const published =
+    failure instanceof ApiError && failure.details.some((detail) => detail.code === 'NOT_A_DRAFT')
+
+  if (!published || !record.value) {
+    return
+  }
+
+  try {
+    const now = await getWorkflowDefinition(record.value.id)
+
+    record.value = { ...now, definition: record.value.definition }
+  } catch {
+    // The refusal already says why; a failed re-read leaves the screen as it was.
+  }
+}
+
+/**
  * Publishes the stored revision, saving first when the screen holds more.
  *
  * **What is published is what is stored**, so publishing unsaved edits would
- * publish something other than what the author is looking at.
+ * publish something other than what the author is looking at. A caller who
+ * cannot edit has nothing unsaved, and publishes the stored draft as it is.
  */
 async function publish(): Promise<void> {
-  if ((draft.isDirty.value || !record.value) && !(await save())) {
+  if (editable.value && (draft.isDirty.value || !record.value) && !(await save())) {
     return
   }
 
@@ -338,7 +392,7 @@ onMounted(() => {
             {{ status }}
           </Badge>
 
-          <template v-if="!readOnly">
+          <template v-if="editable">
             <Button
               variant="ghost"
               size="sm"
@@ -362,16 +416,16 @@ onMounted(() => {
             <Button :disabled="isSaving" data-testid="save-workflow" @click="save">
               {{ isSaving ? 'Saving…' : 'Save' }}
             </Button>
-            <Button
-              v-if="canPublish"
-              variant="secondary"
-              :disabled="isSaving"
-              data-testid="publish-workflow"
-              @click="publish"
-            >
-              {{ draft.isDirty.value || !record ? 'Save and publish' : 'Publish' }}
-            </Button>
           </template>
+          <Button
+            v-if="offerPublish"
+            variant="secondary"
+            :disabled="isSaving"
+            data-testid="publish-workflow"
+            @click="publish"
+          >
+            {{ editable && (draft.isDirty.value || !record) ? 'Save and publish' : 'Publish' }}
+          </Button>
 
           <Button
             v-if="isPublished && canCreate"
@@ -402,7 +456,9 @@ onMounted(() => {
         type; approvals already running on it carry on. Open a new revision to build on it.
       </Alert>
       <Alert v-else-if="!canEdit" data-testid="read-only-notice">
-        You can read this workflow but not change it.
+        You can read this workflow but not change it.<template v-if="offerPublish">
+          You can publish it as it is stored.</template
+        >
       </Alert>
 
       <Alert v-if="formError" variant="destructive" data-testid="form-error">{{ formError }}</Alert>
@@ -412,7 +468,7 @@ onMounted(() => {
         data-testid="unplaced-errors"
       />
       <Alert v-if="notice" data-testid="notice">{{ notice }}</Alert>
-      <Alert v-if="unfilledExpressions > 0 && !readOnly" data-testid="unfilled-expressions">
+      <Alert v-if="unfilledExpressions > 0 && editable" data-testid="unfilled-expressions">
         {{ unfilledExpressions }}
         {{ unfilledExpressions === 1 ? 'expression has' : 'expressions have' }}
         an operand not filled in. Until it is, what is saved is the last complete version.

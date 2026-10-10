@@ -56,11 +56,23 @@ const props = withDefaults(
     variables: readonly LogicVariable[]
     /** Whether a path outside `variables` may be typed. */
     allowFreePaths?: boolean
+    /**
+     * Prefixes under which a typed path counts as offered, and draws no
+     * warning: a part of the context the host cannot list. Kept for a path
+     * either way; this decides only the badge.
+     */
+    freePrefixes?: readonly string[]
     /** The accessible name of the expression, and the prefix of every control's. */
     label?: string
     disabled?: boolean
   }>(),
-  { modelValue: undefined, allowFreePaths: false, label: 'Expression', disabled: false },
+  {
+    modelValue: undefined,
+    allowFreePaths: false,
+    freePrefixes: () => [],
+    label: 'Expression',
+    disabled: false,
+  },
 )
 
 const emit = defineEmits<{
@@ -85,6 +97,7 @@ const context = computed<LogicBuilderContext>(() => ({
   tier: props.tier,
   variables: props.variables,
   allowFreePaths: props.allowFreePaths,
+  freePrefixes: props.freePrefixes,
   disabled: props.disabled,
 }))
 
