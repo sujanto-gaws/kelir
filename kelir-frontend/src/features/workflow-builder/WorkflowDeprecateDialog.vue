@@ -9,10 +9,13 @@ import type { WorkflowDeprecation } from './useWorkflowDeprecation'
 /**
  * The warning before a revision is deprecated (#713, **D-101** B).
  *
- * **It names the document types still bound to the revision**, because each one's
- * submissions are refused from the moment it is deprecated until somebody binds
- * the type to a published revision. Where they could not be read it says so,
- * and says what deprecating does to any there may be.
+ * **It names the document types still bound to the revision**, because each
+ * one's submissions may be refused from the moment it is deprecated until
+ * somebody binds the type to a published revision. *May*, since the list holds
+ * every live binding whatever its dates: a type whose document another binding
+ * in force routes first, or whose binding has lapsed, is not blocked (corrected
+ * 2026-10-10: this said *are refused*). Where they could not be read it says so,
+ * and says what deprecating may do to any there are.
  */
 const props = defineProps<{ deprecation: WorkflowDeprecation }>()
 
@@ -70,8 +73,8 @@ const unnamed = computed(() =>
     <Alert v-else-if="bound.kind === 'listed'" variant="destructive" data-testid="bound-types">
       <p>
         {{ bound.total === 1 ? 'This document type is' : 'These document types are' }} still bound
-        to this revision. Deprecating it blocks their submissions until each is bound to a published
-        revision:
+        to this revision. Deprecating it may block their submissions until each is bound to a
+        published revision, unless another binding routes them first or theirs has lapsed:
       </p>
       <ul class="mt-2 list-disc space-y-1 pl-5">
         <li v-for="type in bound.types" :key="type.id" data-testid="bound-type">
@@ -84,7 +87,7 @@ const unnamed = computed(() =>
     </Alert>
 
     <Alert v-else variant="destructive" data-testid="bound-types-unchecked">
-      {{ bound.reason }} Deprecating blocks submissions for any document type still bound to it,
+      {{ bound.reason }} Deprecating may block submissions for any document type still bound to it,
       until that type is bound to a published revision.
     </Alert>
   </ConfirmDialog>

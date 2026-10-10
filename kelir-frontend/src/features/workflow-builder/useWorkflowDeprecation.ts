@@ -48,10 +48,14 @@ export interface WorkflowDeprecation {
  * The *Deprecate* action's warning, shared by the editor header and the list
  * rows (#713, plan 19 row 6b; **D-101** B, **D-108**).
  *
- * **Deprecating a revision a document type is still bound to blocks that
+ * **Deprecating a revision a document type is still bound to may block that
  * type's submissions until somebody rebinds it** (#187's rule, D-101's dated
- * note of 2026-10-10): the binding stays, and the next submit is refused with
- * `WORKFLOW_NOT_PUBLISHED`. The route does not warn, and the permissions are
+ * note of 2026-10-10): the binding stays, and a submit it routes is refused
+ * with `WORKFLOW_NOT_PUBLISHED`. *May* (corrected 2026-10-10: this said
+ * *blocks*): a document follows the first binding in force by priority, so a
+ * type another binding routes first, or whose binding has lapsed, is not
+ * blocked. The list names every live binding whatever its dates, erring on
+ * the side of too many. The route does not warn, and the permissions are
  * split, so a `workflow:definition:deprecate` holder can halt what only a
  * `document-type:update` holder can fix. So before it proceeds, the action
  * lists those types, read in one call through the list's

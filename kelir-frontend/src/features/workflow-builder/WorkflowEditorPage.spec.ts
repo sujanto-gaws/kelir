@@ -2663,7 +2663,7 @@ describe('WorkflowEditorPage', () => {
       expect(typeReads()).toHaveLength(1)
       expect(typeReads()[0].params).toEqual({ workflowDefinitionId: ID, pageSize: 100 })
       expect(page.get('[data-testid="bound-types"]').text()).toContain(
-        'blocks their submissions until each is bound to a published revision',
+        'may block their submissions until each is bound to a published revision, unless another binding routes them first or theirs has lapsed',
       )
       expect(page.findAll('[data-testid="bound-type"]').map((item) => item.text())).toEqual([
         'Purchase request (PURCHASE_REQUEST)',
@@ -2722,7 +2722,7 @@ describe('WorkflowEditorPage', () => {
         'You cannot read document types, so whether any is still bound to this revision could not be checked.',
       )
       expect(page.get('[data-testid="bound-types-unchecked"]').text()).toContain(
-        'Deprecating blocks submissions for any document type still bound to it',
+        'Deprecating may block submissions for any document type still bound to it',
       )
       expect(page.get('[data-testid="confirm-action"]').attributes('disabled')).toBeUndefined()
 
