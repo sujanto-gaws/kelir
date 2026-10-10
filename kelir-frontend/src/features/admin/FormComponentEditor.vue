@@ -9,6 +9,8 @@ import type { ValidationDetail } from '@/types/api'
 import type { JfssAdvancedRule, JfssComponent, JfssDataComponent } from '@/types/jfss'
 import type { LookupSource } from '@/types/rad'
 
+import { offeredEntry } from './form-builder/builderRegistry'
+
 /**
  * One component of a form definition, edited (#373 AC1); since #688, the one
  * the canvas has selected.
@@ -90,6 +92,25 @@ const LOOKUP_SOURCES: LookupSource[] = ['supplier', 'customer', 'employee', 'fac
  */
 const ENFORCEABLE_RULES = ['matchesField', 'notMatchesField', 'regex', 'oneOf', 'notOneOf'] as const
 
+/**
+ * Each enforceable rule's parameters, empty, by the names the Validation Rule
+ * Registry gives them (§3.1): what *Add rule* and a change of rule write, so
+ * the box shows the author what to fill in (schema-guardian M1). An empty one
+ * is the server's to refuse or the rule's to fail, not a value this editor
+ * guesses.
+ */
+const RULE_PARAMS: Record<string, () => Record<string, unknown>> = {
+  matchesField: () => ({ target: '' }),
+  notMatchesField: () => ({ target: '' }),
+  regex: () => ({ pattern: '' }),
+  oneOf: () => ({ values: [] }),
+  notOneOf: () => ({ values: [] }),
+}
+
+function seededParams(rule: string): Record<string, unknown> {
+  return Object.prototype.hasOwnProperty.call(RULE_PARAMS, rule) ? RULE_PARAMS[rule]() : {}
+}
+
 const isData = computed(() => props.component.role === 'data')
 const isDisplay = computed(() => props.component.role === 'display')
 const isGrid = computed(() => isData.value && props.component.type === 'datagrid')
@@ -144,6 +165,57 @@ const allMessages = computed(() => props.details.map((detail) => detail.message)
 
 function patch(changes: Record<string, unknown>): void {
   emit('update', { ...props.component, ...changes } as JfssComponent)
+}
+
+/** What a fresh node of a type carries: the builder's own defaults. */
+function defaultsOf(type: string): Record<string, unknown> {
+  return (offeredEntry(type)?.create({ id: props.component.id, key: 'k' }) ?? {}) as Record<
+    string,
+    unknown
+  >
+}
+
+/**
+ * Switches the type, and the properties that belong to it (#688, the
+ * schema-guardian's M2 and L).
+ *
+ * - A **divider** draws no text (JFSS §4.4), so its `content` goes; leaving a
+ *   divider for a type that draws text gives that type's default content.
+ * - A **select** or **radio** takes its choices from `options`, so one with
+ *   none gets the default option.
+ * - A **lookup** takes its choices from master data, and the server refuses
+ *   one that also carries `options` (`LOOKUP_HAS_STATIC_OPTIONS`), so they go.
+ *   Its source is bound in `settings.lookups`; until one is chosen the
+ *   editor says so under the chooser, since the server refuses an unbound
+ *   lookup too (`LOOKUP_SOURCE_MISSING`).
+ */
+function switchType(next: string): void {
+  const node: Record<string, unknown> = { ...record.value, type: next }
+
+  if (isDisplay.value) {
+    if (next === 'divider') {
+      delete node.content
+    } else if (typeof node.content !== 'string' || node.content === '') {
+      node.content = defaultsOf(next).content
+    }
+  }
+
+  if (isData.value) {
+    const options = node.options
+
+    if (
+      (next === 'select' || next === 'radio') &&
+      !(Array.isArray(options) && options.length > 0)
+    ) {
+      node.options = defaultsOf(next).options
+    }
+
+    if (next === 'lookup') {
+      delete node.options
+    }
+  }
+
+  emit('update', node as unknown as JfssComponent)
 }
 
 /** `select` and `radio` are the two types whose choices come from the definition. */
@@ -251,7 +323,12 @@ function setConditionalAction(action: string): void {
 function addRule(): void {
   const rules: JfssAdvancedRule[] = [
     ...(data.value.rules ?? []),
-    { rule: ENFORCEABLE_RULES[0], scope: 'both', params: {}, message: 'This value is not valid.' },
+    {
+      rule: ENFORCEABLE_RULES[0],
+      scope: 'both',
+      params: seededParams(ENFORCEABLE_RULES[0]),
+      message: 'This value is not valid.',
+    },
   ]
 
   patch({ rules })
@@ -311,7 +388,7 @@ function removeRule(at: number): void {
           :disabled="disabled"
           :options="types"
           :data-testid="`type-${component.id}`"
-          @update:model-value="patch({ type: String($event) })"
+          @update:model-value="switchType(String($event))"
         />
         <!-- A layout node, a button and a data grid keep their type: what
              they hold, or do, is not something another type has. -->
@@ -413,6 +490,13 @@ function removeRule(at: number): void {
                component's `id`, because JFSS is frozen and a `dataSource`
                property on the component would make the document
                non-conformant (D-23). -->
+          <p
+            v-if="lookupSource === ''"
+            class="text-xs text-destructive"
+            :data-testid="`lookup-unbound-${component.id}`"
+          >
+            Choose a master data source: a lookup with none is refused when the form is saved.
+          </p>
           <p class="text-xs text-muted-foreground">
             Options come from master data the person filling the form may already read.
           </p>
@@ -534,7 +618,9 @@ function removeRule(at: number): void {
             :disabled="disabled"
             :options="RULE_CHOICES"
             :data-testid="`rule-${component.id}-${at}`"
-            @update:model-value="updateRule(at, { rule: String($event) })"
+            @update:model-value="
+              updateRule(at, { rule: String($event), params: seededParams(String($event)) })
+            "
           />
 
           <Select

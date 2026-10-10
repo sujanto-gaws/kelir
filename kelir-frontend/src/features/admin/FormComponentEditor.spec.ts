@@ -284,7 +284,7 @@ describe('FormComponentEditor', () => {
     expect((latest() as { rules: unknown[] }).rules[0]).toEqual({
       rule: 'matchesField',
       scope: 'both',
-      params: {},
+      params: { target: '' },
       message: 'This value is not valid.',
     })
     expect(violations(latest())).toEqual([])
@@ -313,5 +313,110 @@ describe('FormComponentEditor', () => {
         .findAll('option')
         .map((option) => option.attributes('value')),
     ).toEqual(ENFORCEABLE)
+  })
+
+  // --- The schema-guardian's findings on #720 ------------------------------
+
+  it.each([
+    ['matchesField', { target: '' }],
+    ['notMatchesField', { target: '' }],
+    ['regex', { pattern: '' }],
+    ['oneOf', { values: [] }],
+    ['notOneOf', { values: [] }],
+  ])(
+    'seeds %s with its own empty parameters when the rule is chosen (M1)',
+    async (rule, params) => {
+      const { wrapper, latest } = harness({
+        id: 'f',
+        role: 'data',
+        type: 'textfield',
+        key: 'f',
+        label: 'F',
+        validation: { type: 'string' },
+      } as JfssComponent)
+
+      await wrapper.find('[data-testid="add-rule-f"]').trigger('click')
+      // Chosen from another rule, with parameters typed for that one: a change
+      // of rule replaces them.
+      await wrapper.find('[data-testid="rule-f-0"]').setValue(rule === 'regex' ? 'oneOf' : 'regex')
+      await wrapper.find('[data-testid="rule-params-f-0"]').setValue('{"other": "x"}')
+      await wrapper.find('[data-testid="rule-f-0"]').setValue(rule)
+
+      expect((latest() as { rules: { rule: string; params: unknown }[] }).rules[0]).toMatchObject({
+        rule,
+        params,
+      })
+      expect(violations(latest())).toEqual([])
+    },
+  )
+
+  it('drops content on a switch to divider, and gives it back on a switch away (M2)', async () => {
+    const { wrapper, latest } = harness({
+      id: 'd',
+      role: 'display',
+      type: 'heading',
+      content: 'Shipping',
+    } as JfssComponent)
+
+    await wrapper.find('[data-testid="type-d"]').setValue('divider')
+
+    expect(latest()).toEqual({ id: 'd', role: 'display', type: 'divider' })
+
+    await wrapper.find('[data-testid="type-d"]').setValue('alert')
+
+    expect(latest()).toEqual({ id: 'd', role: 'display', type: 'alert', content: 'Alert' })
+
+    // Text an author wrote is kept between types that draw text.
+    await wrapper.find('[data-testid="content-d"]').setValue('Read this')
+    await wrapper.find('[data-testid="type-d"]').setValue('paragraph')
+
+    expect(latest()).toMatchObject({ type: 'paragraph', content: 'Read this' })
+  })
+
+  it('gives a select or radio its default option, and keeps options it has (L)', async () => {
+    const { wrapper, latest } = harness({
+      id: 'f',
+      role: 'data',
+      type: 'textfield',
+      key: 'f',
+      label: 'F',
+      validation: { type: 'string' },
+    } as JfssComponent)
+
+    await wrapper.find('[data-testid="type-f"]').setValue('select')
+
+    expect((latest() as { options: unknown[] }).options).toEqual([
+      { label: 'Option 1', value: 'option_1' },
+    ])
+
+    await wrapper.find('[data-testid="options-f"]').setValue('Air=air\nSea=sea')
+    await wrapper.find('[data-testid="type-f"]').setValue('radio')
+
+    expect((latest() as { options: unknown[] }).options).toEqual([
+      { label: 'Air', value: 'air' },
+      { label: 'Sea', value: 'sea' },
+    ])
+    expect(violations(latest())).toEqual([])
+  })
+
+  it('drops static options on a switch to lookup, and says the lookup needs a source (L)', async () => {
+    const { wrapper, latest } = harness({
+      id: 'f',
+      role: 'data',
+      type: 'select',
+      key: 'f',
+      label: 'F',
+      validation: { type: 'string' },
+      options: [{ label: 'A', value: 'a' }],
+    } as JfssComponent)
+
+    await wrapper.find('[data-testid="type-f"]').setValue('lookup')
+
+    expect(latest()).not.toHaveProperty('options')
+    expect(wrapper.find('[data-testid="lookup-unbound-f"]').exists()).toBe(true)
+
+    await wrapper.find('[data-testid="lookup-f"]').setValue('supplier')
+
+    expect(wrapper.find('[data-testid="lookup-unbound-f"]').exists()).toBe(false)
   })
 })

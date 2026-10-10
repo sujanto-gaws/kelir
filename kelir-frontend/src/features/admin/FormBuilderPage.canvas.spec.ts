@@ -822,7 +822,7 @@ describe('FormBuilderPage, the nesting canvas', () => {
     const { definition: sent } = await saved(wrapper)
 
     expect((sent.components[0] as { rules: unknown[] }).rules).toEqual([
-      { rule: 'matchesField', scope: 'both', params: {}, message: 'This value is not valid.' },
+      { rule: 'matchesField', scope: 'both', params: { target: '' }, message: 'This value is not valid.' },
     ])
     expect(jfssViolations(sent)).toEqual([])
   })
