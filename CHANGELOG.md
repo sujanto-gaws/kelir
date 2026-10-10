@@ -135,7 +135,8 @@ While the major version is `0`, the public API may change in any release.
   *Deprecate* action follows~~ the workflow editor's *Deprecate* action is in
   the entry below (corrected 2026-10-10).
 - **The document-type list filters by a bound workflow revision**
-  ([#713](https://github.com/sujanto-gaws/kelir/issues/713), row 6b).
+  ([#713](https://github.com/sujanto-gaws/kelir/issues/713),
+  [#715](https://github.com/sujanto-gaws/kelir/pull/715), row 6b).
   `GET /api/v1/document-types?workflowDefinitionId={id}` lists only the types
   with a live binding to that revision: in the caller's tenant, not deleted,
   and `ACTIVE`. Its validity window is not considered, so a binding that has not
@@ -146,19 +147,21 @@ While the major version is `0`, the public API may change in any release.
   warning, which lists the types still bound in one call. It needs
   `document-type:read`, as the list always did, and adds no route or permission.
 - **A workflow revision is deprecated from the browser**
-  ([#713](https://github.com/sujanto-gaws/kelir/issues/713), #426 AC1 and AC5,
+  ([#713](https://github.com/sujanto-gaws/kelir/issues/713),
+  [#715](https://github.com/sujanto-gaws/kelir/pull/715), #426 AC1 and AC5,
   decisions **D-101** B and **D-108**). *Deprecate* sits beside *New revision*
   in the workflow editor's header and on the workflow list's rows, on an
   `ACTIVE` revision only, for a holder of `workflow:definition:deprecate`.
   **Before it does anything it warns, and lists the document types still bound
-  to the revision**, read through the filter above, because deprecating blocks
+  to the revision**, read through the filter above, because deprecating may block
   their submissions until each is rebound. It names the first hundred and says
   how many more. A caller without `document-type:read`, or a list that cannot
   be read, is told the check could not be made, and may still go on or
-  cancel. After it succeeds the editor turns read-only and says the revision
-  is deprecated, and the list reads its rows again. **A 409 from the route** (a
-  draft, or already deprecated) reads the revision again, as a publish's 409
-  does; a 403 or 404 reads nothing again. Nothing in the editor takes an edit
+  cancel. After it succeeds the editor shows the revision as deprecated and
+  offers only *New revision*, and the list reads its rows again. **A 409 from the route** (a
+  draft, or already deprecated) makes the editor read the revision again, as a
+  publish's 409 does, and the list read its page again; a 403 or 404 reads
+  nothing again. Nothing in the editor takes an edit
   while the deprecation is in flight. `api/workflow.ts` gains
   `deprecateWorkflowDefinition`, and the shared confirmation dialog takes a
   slot for what one sentence cannot say.
