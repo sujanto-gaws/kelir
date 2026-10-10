@@ -25,18 +25,26 @@ const RESTRICTED = [
   '@vueuse/core',
   'reka-ui',
   'vue-sonner',
-  '@lucide/vue',
   'json-logic-js',
   'vuedraggable',
   'elkjs',
   'dagre',
+  // Inverted by #698, in #688's change: the deprecated package is refused, and
+  // its successor `@lucide/vue` is the tree's icon package.
+  'lucide-vue-next',
 ]
 
 let eslint: ESLint
 
-beforeAll(() => {
+beforeAll(async () => {
   eslint = new ESLint({ cwd: resolve(__dirname, '../..') })
-})
+  // The first lint loads the configuration and its plugins. Warmed here, so
+  // that cost lands on the hook and not on whichever case runs first, which
+  // timed out at 5 s under the full suite on a loaded machine (2026-10-10).
+  await eslint.lintText('export {}', {
+    filePath: resolve(__dirname, '../..', 'src/features/probe/warm.ts'),
+  })
+}, 60_000)
 
 /** The two rules that refuse a restricted package: a declaration, and an `import()`. */
 const RULES = ['no-restricted-imports', 'no-restricted-syntax']
@@ -64,7 +72,7 @@ describe('no-restricted-imports, the packages Kelir code does not import', () =>
     '@vueuse/core/index.mjs',
     '@vueuse/core/',
     'reka-ui/dist/index.js',
-    '@lucide/vue/icons/plus',
+    'lucide-vue-next/dist/esm/icons/plus.mjs',
     'elkjs/lib/elk.bundled.js',
     'dagre/lib/layout',
   ])('refuses the subpath %s', async (path) => {
@@ -100,7 +108,8 @@ describe('no-restricted-imports, the packages Kelir code does not import', () =>
     '@dagrejs/graphlib',
     '@vue-flow/core',
     '@vue-flow/controls',
-    'lucide-vue-next',
+    '@lucide/vue',
+    '@lucide/vue/dist/esm/icons/circle.mjs',
     'vue-draggable-plus',
     'dagre-d3',
     'zodiac',
@@ -158,12 +167,17 @@ describe('no-restricted-imports, the packages Kelir code does not import', () =>
     expect(await refusals(component, 'src/features/probe/ProbeGraph.vue')).toHaveLength(1)
   })
 
-  it.each(['@dagrejs/dagre', '@vue-flow/core', 'dagre-d3', 'zodiac', './dagre', '@/lib/zod'])(
-    'allows a dynamic import of %s, which only looks like a restricted name',
-    async (name) => {
-      expect(await refusals(`void import('${name}')\n`)).toEqual([])
-    },
-  )
+  it.each([
+    '@dagrejs/dagre',
+    '@vue-flow/core',
+    '@lucide/vue',
+    'dagre-d3',
+    'zodiac',
+    './dagre',
+    '@/lib/zod',
+  ])('allows a dynamic import of %s, which only looks like a restricted name', async (name) => {
+    expect(await refusals(`void import('${name}')\n`)).toEqual([])
+  })
 
   it('leaves a template with an expression to review: what it names is not known', async () => {
     expect(await refusals('export const load = (name: string) => import(`zod/${name}`)\n')).toEqual(

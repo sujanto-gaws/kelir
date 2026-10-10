@@ -269,7 +269,9 @@ describe('WorkflowEditorPage, the graph view', () => {
       await openGraph(page)
 
       expect(graph.imports).toBe(1)
-    })
+      // Opening the tab imports Vue Flow for real, which took over 5 s under the
+      // full suite on a loaded machine (2026-10-10).
+    }, 30_000)
 
     it('says so, and keeps the list, when the graph cannot be loaded', async () => {
       graph.fail = true

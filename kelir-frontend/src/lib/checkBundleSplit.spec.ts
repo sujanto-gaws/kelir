@@ -35,6 +35,8 @@ type Manifest = Record<
   {
     file: string
     isEntry?: boolean
+    isDynamicEntry?: boolean
+    name?: string
     imports?: string[]
     dynamicImports?: string[]
     css?: string[]
@@ -46,6 +48,11 @@ interface Build {
   manifest: Manifest
   carried: Record<string, string[]>
   styled: Record<string, string[]> | null
+  /**
+   * `chunk-package-modules.json` (#688): how many of each package's modules a
+   * chunk carries, which the icon-set check counts.
+   */
+  modules: Record<string, Record<string, number>>
 }
 
 const ENTRY = 'assets/index-CQaDf5LZ.js'
@@ -68,7 +75,19 @@ function clean(): Build {
           'src/layouts/AppLayout.vue',
           'src/features/dashboard/DashboardPage.vue',
           '_WorkflowEditorPage-Bc_YsB1j.js',
+          'src/features/admin/FormBuilderPage.vue',
+          'src/layouts/menuIconModules.ts',
         ],
+      },
+      // #688: the form builder's page carries the drag library, and the
+      // menu-icon map reaches one chunk per icon, both off first load.
+      'src/features/admin/FormBuilderPage.vue': {
+        file: 'assets/FormBuilderPage-Cl3sNbA1.js',
+        imports: ['index.html'],
+      },
+      'src/layouts/menuIconModules.ts': {
+        file: 'assets/menuIconModules-Bjo7U9BT.js',
+        imports: ['index.html'],
       },
       'src/layouts/AppLayout.vue': { file: LAYOUT, imports: ['index.html'] },
       'src/features/dashboard/DashboardPage.vue': {
@@ -100,7 +119,9 @@ function clean(): Build {
     },
     carried: {
       [ENTRY]: ['@vue/runtime-core', 'axios', 'pinia', 'vue-router'],
-      [LAYOUT]: ['lucide-vue-next'],
+      [LAYOUT]: ['@lucide/vue'],
+      'assets/FormBuilderPage-Cl3sNbA1.js': ['vue-draggable-plus'],
+      'assets/menuIconModules-Bjo7U9BT.js': [],
       [DASHBOARD]: [],
       'assets/DocumentStatusChart-BtcyQ087.js': ['@unovis/ts', '@unovis/vue', 'd3-selection'],
       'assets/datalogic_wasm-DNVD5O3Z.js': ['@goplasmatic/datalogic-wasm'],
@@ -108,6 +129,8 @@ function clean(): Build {
       [GRAPH]: ['@dagrejs/dagre', '@vue-flow/controls', '@vue-flow/core'],
     },
     styled: { [ENTRY_CSS]: [], [GRAPH_CSS]: VUE_FLOW_CSS },
+    // The layout's own icons on first load; the set, one per chunk, off it.
+    modules: { [LAYOUT]: { '@lucide/vue': 28 }, 'assets/file-cog-Dx1.js': { '@lucide/vue': 1851 } },
   }
 }
 
@@ -136,6 +159,7 @@ describe('check-bundle-split.mjs, the workflow graph’s subject', () => {
 
     writeFileSync(join(vite, 'manifest.json'), JSON.stringify(build.manifest))
     writeFileSync(join(vite, 'chunk-packages.json'), JSON.stringify(build.carried))
+    writeFileSync(join(vite, 'chunk-package-modules.json'), JSON.stringify(build.modules))
 
     if (build.styled) {
       writeFileSync(join(vite, 'stylesheet-packages.json'), JSON.stringify(build.styled))
@@ -315,6 +339,63 @@ describe('check-bundle-split.mjs, the workflow graph’s subject', () => {
       expect(check(build).output).toContain(
         '✓ the Unovis chart library is off the first-load path — 1 split chunk(s), 0 payload asset(s), 0 stylesheet(s)',
       )
+    })
+  })
+
+  describe('the icon set (#688, after #698)', () => {
+    it('passes the layout’s own icons on first load, naming the count', () => {
+      const run = check(clean())
+
+      expect(run.output).toContain(
+        '✓ the @lucide/vue icon set is off the first-load path — 28 of its 1879 module(s) on first load (limit 100)',
+      )
+      expect(run.status).toBe(0)
+    })
+
+    it('fails a build whose layout carries the whole set, as `import * as` put it there', () => {
+      const build = clean()
+
+      build.modules = { [LAYOUT]: { '@lucide/vue': 1879 } }
+
+      const run = check(build)
+
+      expect(run.output).toContain(
+        'first load carries 1879 @lucide/vue modules, over the limit of 100',
+      )
+      expect(run.output).toContain(`    ${LAYOUT} (1879)`)
+      expect(run.status).toBe(1)
+    })
+
+    it('fails a build that carries no more of the set than the limit, rather than passing on nothing', () => {
+      const build = clean()
+
+      build.modules = { [LAYOUT]: { '@lucide/vue': 28 } }
+
+      const run = check(build)
+
+      expect(run.output).toContain('so the check below would pass by not finding')
+      expect(run.status).toBe(1)
+    })
+
+    it('finds the layout by its name when Vite keys its chunk `_AppLayout-…`', () => {
+      const build = clean()
+      const { file, imports } = build.manifest['src/layouts/AppLayout.vue']
+
+      delete build.manifest['src/layouts/AppLayout.vue']
+      build.manifest['_AppLayout-CXiqFNvo.js'] = {
+        file,
+        imports,
+        name: 'AppLayout',
+        isDynamicEntry: true,
+      }
+      build.modules = { [LAYOUT]: { '@lucide/vue': 1879 } }
+
+      // Found, so its 1,879 icons are counted as first load, and the build fails.
+      const run = check(build)
+
+      expect(run.output).not.toContain('the home route has no chunk')
+      expect(run.output).toContain('first load carries 1879 @lucide/vue modules')
+      expect(run.status).toBe(1)
     })
   })
 

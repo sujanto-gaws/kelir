@@ -11,7 +11,7 @@ import {
   type Node,
 } from '@vue-flow/core'
 import { ControlButton, Controls } from '@vue-flow/controls'
-import { Maximize, Minus, Plus } from 'lucide-vue-next'
+import { Maximize, Minus, Plus } from '@lucide/vue'
 import '@vue-flow/core/dist/style.css'
 import '@vue-flow/controls/dist/style.css'
 

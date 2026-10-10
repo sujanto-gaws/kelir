@@ -1,6 +1,6 @@
 import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 
 import AppLayout from './AppLayout.vue'
@@ -28,6 +28,13 @@ function profileBody(permissions: string[]): unknown {
 }
 
 describe('AppLayout', () => {
+  // The menu-icon map names ~1,870 modules, and its first import is transformed
+  // here rather than in whichever icon test runs first, which took over 5 s
+  // under the full suite on a loaded machine (2026-10-10).
+  beforeAll(async () => {
+    await import('./menuIconModules')
+  }, 60_000)
+
   let backend: FakeBackendHandle
   let permissions: string[]
   let menus: unknown[]
