@@ -8,7 +8,7 @@ import type { JfssComponent } from '@/types/jfss'
 
 import { offeredEntry, typeLabel } from './builderRegistry'
 import FormCanvasList from './FormCanvasList.vue'
-import { cardReason, nodeName, type ListKind } from './formTree'
+import { drawnReason, nodeName, type ListKind } from './formTree'
 import { useFormBuilder } from './useFormBuilder'
 
 /**
@@ -41,7 +41,9 @@ const props = defineProps<{
 const builder = useFormBuilder()
 
 const name = computed(() => nodeName(props.node))
-const reason = computed(() => cardReason(props.listKind, props.node))
+const reason = computed(() =>
+  drawnReason(builder.definition.value, props.listKind, props.node, props.nodePath),
+)
 const shape = computed(() =>
   reason.value ? 'none' : (offeredEntry(props.node.type)?.children ?? 'none'),
 )

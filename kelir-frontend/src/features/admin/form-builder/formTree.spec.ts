@@ -6,6 +6,7 @@ import {
   addSlot,
   canContain,
   cardReason,
+  drawnReason,
   freshIdentity,
   insertNode,
   listAt,
@@ -16,6 +17,7 @@ import {
   removeNode,
   removeSlot,
   renameSlot,
+  repeatedIdPaths,
   resolveDetail,
   unsupportedReason,
 } from './formTree'
@@ -753,5 +755,30 @@ describe('the tree at its edges', () => {
     expect(
       resolveDetail(definition, 'definition.components.0.columns.0.components.0'),
     ).toMatchObject({ nodeId: 'panel_1', rest: 'columns.0.components.0' })
+  })
+})
+
+describe('repeated ids (te defect 3)', () => {
+  it('draws every later node with a repeated id as unsupported, and offers no list inside it', () => {
+    const definition = form([panel('p', [field('x')]), panel('p', [field('y')]), field('x')])
+
+    expect(repeatedIdPaths(definition)).toEqual(new Set(['components.1', 'components.2']))
+    expect(drawnReason(definition, 'root', definition.components[0], 'components.0')).toBeNull()
+    expect(drawnReason(definition, 'root', definition.components[1], 'components.1')).toContain(
+      'repeats the id',
+    )
+    expect(listAt(definition, 'components.0.components')).not.toBeNull()
+    expect(listAt(definition, 'components.1.components')).toBeNull()
+  })
+
+  it('moves a repeat, and the first in document order is then the one drawn', () => {
+    const definition = form([field('a', { label: 'First' }), field('a', { label: 'Second' })])
+    const moved = moveBy(definition, 'components.1', -1) as JfssDefinition
+
+    expect(moved.components.map((node) => (node as { label: string }).label)).toEqual([
+      'Second',
+      'First',
+    ])
+    expect(repeatedIdPaths(moved)).toEqual(new Set(['components.1']))
   })
 })

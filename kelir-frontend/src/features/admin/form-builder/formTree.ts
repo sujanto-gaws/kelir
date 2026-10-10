@@ -158,6 +158,55 @@ export function cardReason(kind: ListKind, node: JfssComponent): string | null {
   return unsupportedReason(node) ?? placementReason(kind, node)
 }
 
+const REPEATED_ID =
+  'It repeats the id of a component above it, so the builder cannot tell the two apart to edit.'
+
+const repeats = new WeakMap<object, Set<string>>()
+
+/**
+ * The paths of nodes whose `id` a node earlier in document order already has.
+ *
+ * **A loaded definition may repeat an id** (JFSS §4.1 makes it unique, and
+ * the server refuses a repeat only where `settings.lookups` names it), and
+ * selection, focus and the editor follow ids. So the first node with an id is
+ * the one the builder edits, and every later one is drawn as an unsupported
+ * card: kept, movable and removable, never edited as though it were the
+ * first. Cached per definition, which every change replaces.
+ */
+export function repeatedIdPaths(definition: JfssDefinition): Set<string> {
+  let found = repeats.get(definition)
+
+  if (!found) {
+    const seen = new Set<string>()
+    const repeated = new Set<string>()
+
+    walk(definition, (node, path) => {
+      if (seen.has(node.id)) {
+        repeated.add(path)
+      } else {
+        seen.add(node.id)
+      }
+    })
+    found = repeated
+    repeats.set(definition, found)
+  }
+
+  return found
+}
+
+/**
+ * Why the canvas draws the node at this path as an unsupported card, or
+ * `null`: {@link cardReason}, or an `id` an earlier node already has.
+ */
+export function drawnReason(
+  definition: JfssDefinition,
+  kind: ListKind,
+  node: JfssComponent,
+  nodePath: string,
+): string | null {
+  return cardReason(kind, node) ?? (repeatedIdPaths(definition).has(nodePath) ? REPEATED_ID : null)
+}
+
 /**
  * The list a list path addresses, **only when the canvas draws it**.
  *
@@ -189,7 +238,7 @@ export function listAt(definition: JfssDefinition, listPath: string): ListInfo |
   // unsupported card is not a list the canvas offers, however well formed.
   const parent = located ? listAt(definition, located.listPath) : null
 
-  if (!located || !parent || cardReason(parent.kind, located.node)) {
+  if (!located || !parent || drawnReason(definition, parent.kind, located.node, ownerPath)) {
     return null
   }
 
@@ -656,7 +705,11 @@ export function setLookup(definition: JfssDefinition, id: string, source: string
 function slotContainer(definition: JfssDefinition, nodePath: string) {
   const at = locate(definition, nodePath)
 
-  if (!at || !listAt(definition, at.listPath) || cardReason(at.kind, at.node)) {
+  if (
+    !at ||
+    !listAt(definition, at.listPath) ||
+    drawnReason(definition, at.kind, at.node, nodePath)
+  ) {
     return null
   }
 
@@ -789,7 +842,7 @@ export function drawnLists(definition: JfssDefinition): string[] {
     items.forEach((node, index) => {
       const path = `${listPath}.${index}`
 
-      if (cardReason(kind, node)) {
+      if (drawnReason(definition, kind, node, path)) {
         return
       }
 
@@ -907,7 +960,7 @@ export interface ResolvedDetail {
 export function resolveDetail(
   definition: JfssDefinition,
   path: string,
-  stop: (node: JfssComponent, kind: ListKind) => boolean = () => false,
+  stop: (node: JfssComponent, kind: ListKind, nodePath: string) => boolean = () => false,
 ): ResolvedDetail | null {
   const prefix = 'definition.'
 
@@ -922,7 +975,7 @@ export function resolveDetail(
   let at = 0
 
   for (;;) {
-    if (node && stop(node, kind)) {
+    if (node && stop(node, kind, nodePath)) {
       break
     }
 
@@ -985,8 +1038,8 @@ export function placeDetails(
   const unplaced: ValidationDetail[] = []
 
   for (const detail of details) {
-    const placed = resolveDetail(definition, detail.path, (node, kind) =>
-      Boolean(cardReason(kind, node)),
+    const placed = resolveDetail(definition, detail.path, (node, kind, nodePath) =>
+      Boolean(drawnReason(definition, kind, node, nodePath)),
     )
 
     if (placed) {

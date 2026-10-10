@@ -822,7 +822,12 @@ describe('FormBuilderPage, the nesting canvas', () => {
     const { definition: sent } = await saved(wrapper)
 
     expect((sent.components[0] as { rules: unknown[] }).rules).toEqual([
-      { rule: 'matchesField', scope: 'both', params: { target: '' }, message: 'This value is not valid.' },
+      {
+        rule: 'matchesField',
+        scope: 'both',
+        params: { target: '' },
+        message: 'This value is not valid.',
+      },
     ])
     expect(jfssViolations(sent)).toEqual([])
   })
@@ -1144,6 +1149,112 @@ describe('FormBuilderPage, the nesting canvas', () => {
     expect(wrapper.find('[data-testid="form-errors"]').exists()).toBe(false)
   })
 
+  it('lists every message an ancestor gets, its own and the cascade’s, on its one card (E6, F-4)', async () => {
+    // Two strays in two columns, a rule refused on one of them, and a tab with
+    // a property of its own refused. `unevaluatedProperties` reports each
+    // ancestor once per failing subtree, so the columns and the tabs each
+    // collect more than one message, and none of them may be dropped or moved.
+    current = form(
+      definition([
+        {
+          id: 'tabs_1',
+          role: 'layout',
+          type: 'tabs',
+          tabs: [
+            {
+              title: 'T',
+              components: [
+                {
+                  id: 'columns_1',
+                  role: 'layout',
+                  type: 'columns',
+                  columns: [{ components: [field('left')] }, { components: [field('right')] }],
+                },
+              ],
+            },
+          ],
+        },
+      ]),
+    )
+    saveResponse = {
+      status: 422,
+      body: errorBody('VALIDATION_ERROR', 'Validation failed', [
+        {
+          code: 'INVALID_DEFINITION',
+          message: "Unevaluated properties are not allowed ('bogus' was unexpected)",
+          path: 'definition.components.0.tabs.0.components.0.columns.0.components.0',
+          rule: 'jfss',
+        },
+        {
+          code: 'INVALID_DEFINITION',
+          message: "Unevaluated properties are not allowed ('stray' was unexpected)",
+          path: 'definition.components.0.tabs.0.components.0.columns.1.components.0',
+          rule: 'jfss',
+        },
+        {
+          code: 'RULE_NOT_REGISTERED',
+          message: '`looksNice` is not a rule in the JFSS Validation Rule Registry',
+          path: 'definition.components.0.tabs.0.components.0.columns.1.components.0.rules.0',
+          rule: 'rule',
+        },
+        {
+          code: 'INVALID_DEFINITION',
+          message: "Unevaluated properties are not allowed ('columns' was unexpected)",
+          path: 'definition.components.0.tabs.0.components.0',
+          rule: 'jfss',
+        },
+        {
+          code: 'INVALID_DEFINITION',
+          message: "Additional properties are not allowed ('width' was unexpected)",
+          path: 'definition.components.0.tabs.0',
+          rule: 'jfss',
+        },
+        {
+          code: 'INVALID_DEFINITION',
+          message: "Unevaluated properties are not allowed ('tabs' was unexpected)",
+          path: 'definition.components.0',
+          rule: 'jfss',
+        },
+      ]),
+    }
+
+    const wrapper = await render()
+
+    await wrapper.find('[data-testid="save-definition"]').trigger('click')
+    await settle()
+
+    const own = (id: string) =>
+      wrapper
+        .find(`[data-testid="component-errors-${id}"]`)
+        .findAll('li')
+        .map((item) => item.text())
+
+    expect(own('left')).toEqual(["Unevaluated properties are not allowed ('bogus' was unexpected)"])
+    expect(own('right')).toEqual([
+      "Unevaluated properties are not allowed ('stray' was unexpected)",
+      '`looksNice` is not a rule in the JFSS Validation Rule Registry',
+    ])
+    expect(own('columns_1')).toEqual([
+      "Unevaluated properties are not allowed ('columns' was unexpected)",
+    ])
+    // The tab slot's own refusal lands on the tabs card, beside the cascade's.
+    expect(own('tabs_1')).toEqual([
+      "Additional properties are not allowed ('width' was unexpected)",
+      "Unevaluated properties are not allowed ('tabs' was unexpected)",
+    ])
+    expect(wrapper.find('[data-testid="form-errors"]').exists()).toBe(false)
+
+    // And the editor of a node with two lists both.
+    await wrapper.find('[data-testid="select-right"]').trigger('click')
+
+    expect(
+      wrapper
+        .find('[data-testid="editor-errors-right"]')
+        .findAll('li')
+        .map((item) => item.text()),
+    ).toHaveLength(2)
+  })
+
   it('saves what it cannot fully draw exactly as loaded, after edits around it (B5, E1)', async () => {
     // Unsupported nodes deep inside supported ones, with properties the builder
     // never writes, and settings it does not own.
@@ -1295,37 +1406,35 @@ describe('FormBuilderPage, the nesting canvas', () => {
     expect(sent.components).toHaveLength(2)
   })
 
-  // DEFECT (test-engineer, 2026-10-10): selection is by `id`, and `pathOf`
-  // returns the first node with it, so on a loaded definition that repeats an
-  // id the editor edits the first node whichever card was selected. The canvas
-  // draws both (formTree's own note), and the server stores such a definition
-  // (no duplicate-id refusal outside `settings.lookups`). Flip to `it` when fixed.
-  it.fails(
-    'edits the card that was selected when a loaded definition repeats an id (A2)',
-    async () => {
-      current = form(
-        definition([
-          field('dup', { label: 'First' }),
-          {
-            id: 'panel_1',
-            role: 'layout',
-            type: 'panel',
-            title: 'Details',
-            components: [field('dup', { key: 'dup_2', label: 'Second' })],
-          },
-        ]),
-      )
+  // Was `it.fails` (test-engineer, 2026-10-10): selection is by `id`, and
+  // `pathOf` returns the first node with it, so on a loaded definition that
+  // repeats an id, selecting the second card edited the first. Fixed by drawing
+  // every later node with a repeated id as an unsupported card: it cannot be
+  // selected, so it cannot be edited as the first, and it is saved as loaded.
+  it('never edits one card for another when a loaded definition repeats an id (A2, B5)', async () => {
+    const second = field('dup', { key: 'dup_2', label: 'Second' })
 
-      const wrapper = await render()
-      const second = wrapper.find('[data-testid="component-panel_1"] [data-testid="select-dup"]')
+    current = form(
+      definition([
+        field('dup', { label: 'First' }),
+        { id: 'panel_1', role: 'layout', type: 'panel', title: 'Details', components: [second] },
+      ]),
+    )
 
-      await second.trigger('click')
+    const wrapper = await render()
+    const panel = wrapper.find('[data-testid="component-panel_1"]')
 
-      expect(wrapper.find<HTMLInputElement>('[data-testid="label-dup"]').element.value).toBe(
-        'Second',
-      )
-    },
-  )
+    expect(panel.find('[data-testid="select-dup"]').exists()).toBe(false)
+    expect(panel.find('[data-testid="unsupported-dup"]').text()).toContain('repeats the id')
+
+    // The first is the one selected and edited.
+    await wrapper.find('[data-testid="label-dup"]').setValue('First, edited')
+
+    const { definition: sent } = await saved(wrapper)
+
+    expect(sent.components[0]).toMatchObject({ id: 'dup', label: 'First, edited' })
+    expect((sent.components[1] as unknown as { components: Node[] }).components[0]).toEqual(second)
+  })
 
   it('refuses every change on a read-only builder, by whatever path reaches it (D7)', () => {
     // The page hides the controls; the builder is what must refuse. Each call

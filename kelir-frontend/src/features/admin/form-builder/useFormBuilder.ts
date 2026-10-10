@@ -7,7 +7,7 @@ import {
   addComponent,
   addSlot as addSlotTo,
   canContain,
-  cardReason,
+  drawnReason,
   itemsAt,
   listAt,
   listName,
@@ -104,7 +104,12 @@ function selectable(definition: JfssDefinition, id: string): boolean {
   const at = path ? locate(definition, path) : null
   const list = at ? listAt(definition, at.listPath) : null
 
-  return at !== null && list !== null && cardReason(list.kind, at.node) === null
+  return (
+    at !== null &&
+    path !== null &&
+    list !== null &&
+    drawnReason(definition, list.kind, at.node, path) === null
+  )
 }
 
 /** Whether a node holds anything: removing it then asks first (C3). */
