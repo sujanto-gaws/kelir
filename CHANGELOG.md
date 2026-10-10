@@ -220,6 +220,17 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **The document type dialog's workflow chooser keeps a bound workflow's
+  name** ([#625](https://github.com/sujanto-gaws/kelir/issues/625)). Editing
+  a type bound to a revision that no search returned showed *The current
+  choice, outside these results* in place of its name: one sorting past the
+  first 100 active revisions, or one deprecated since it was bound. The form
+  and list choosers already read such a value back by its id, and the
+  workflow chooser now does too, through `GET /workflow/definitions/{id}`. A
+  deprecated revision is named as deprecated, as in *Approval (r2,
+  deprecated)*, since no search offers it again and the type cannot be saved
+  until it is rebound or cleared. The value was always kept; only its name
+  was lost.
 - **A dialog hands focus back to what opened it when it closes**
   (PR [#715](https://github.com/sujanto-gaws/kelir/pull/715)'s campaign on
   [#713](https://github.com/sujanto-gaws/kelir/issues/713)). The shared

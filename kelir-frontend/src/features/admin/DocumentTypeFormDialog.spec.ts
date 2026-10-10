@@ -68,6 +68,14 @@ function workflow(n: string, status = 'ACTIVE') {
 const wantedForm = { ...form('zz'), formKey: 'zz_requisition', title: 'Requisition' }
 const wantedList = { ...list('zz'), listKey: 'zz_requisitions', title: 'Requisitions' }
 const wantedFlow = { ...workflow('zz'), workflowKey: 'zz_approval', name: 'Approval' }
+/** A revision deprecated after a type was bound to it (#715): no search offers it. */
+const retiredFlow = {
+  ...workflow('zy'),
+  workflowKey: 'zy_retired_approval',
+  name: 'Retired approval',
+  version: 2,
+  status: 'DEPRECATED',
+}
 
 /** 105 of each ahead of the wanted row, with drafts and deprecated rows among them. */
 const forms = [
@@ -83,6 +91,7 @@ const lists = [
 const flows = [
   ...filler(105, (n) => workflow(n)),
   ...filler(10, (n) => workflow(`d${n}`, 'DRAFT')),
+  retiredFlow,
   wantedFlow,
 ]
 
@@ -109,6 +118,14 @@ function route(request: RecordedRequest): FakeReply {
     const found = [...forms, ...lists].find((row) => row.id === one[2])
 
     return found ? { status: 200, body: itemBody(found) } : { status: 404 }
+  }
+
+  const flow = request.url.match(/^\/workflow\/definitions\/(.+)$/)
+
+  if (flow) {
+    const found = flows.find((row) => row.id === flow[1])
+
+    return found ? { status: 200, body: itemBody({ ...found, definition: {} }) } : { status: 404 }
   }
 
   return { status: 404 }
@@ -196,8 +213,9 @@ describe('DocumentTypeFormDialog choosers', () => {
     })
   })
 
-  it('names a bound form and list that no search has returned', async () => {
-    const wrapper = await open({
+  /** A type bound to these, as `GET /document-types/{id}` returns it. */
+  function boundType(workflowDefinitionId: string): DocumentType {
+    return {
       id: 't-1',
       typeCode: 'REQ',
       name: 'Requisition',
@@ -209,16 +227,56 @@ describe('DocumentTypeFormDialog choosers', () => {
       retentionPolicyId: null,
       targetEntityType: null,
       status: 'ACTIVE',
-      workflows: [],
+      workflows: [{ workflowDefinitionId }],
       createdAt: '2026-09-01T00:00:00Z',
       updatedAt: '2026-09-01T00:00:00Z',
-    })
+    }
+  }
+
+  function selectedValue(wrapper: VueWrapper, testId: string): string {
+    return (wrapper.get(`[data-testid="${testId}"]`).element as HTMLSelectElement).value
+  }
+
+  it('names a bound form, list and workflow that no search has returned', async () => {
+    const wrapper = await open(boundType(wantedFlow.id))
     await flushPromises()
 
-    const formSelect = wrapper.get('[data-testid="type-form"]').element as HTMLSelectElement
-
-    expect(formSelect.value).toBe(wantedForm.id)
+    expect(selectedValue(wrapper, 'type-form')).toBe(wantedForm.id)
     expect(optionsOf(wrapper, 'type-form')[1]).toBe('Requisition (r1)')
     expect(optionsOf(wrapper, 'type-list')[1]).toBe('Requisitions (zz_requisitions)')
+
+    // 105 active flows sort ahead of it, so the first page does not hold it (#625).
+    expect(selectedValue(wrapper, 'type-workflow')).toBe(wantedFlow.id)
+    expect(optionsOf(wrapper, 'type-workflow').slice(0, 3)).toEqual([
+      'No workflow',
+      'Approval (r1)',
+      'Filler flow 001 (r1)',
+    ])
+    // Read once, by its id, rather than by paging through the list.
+    expect(
+      backend.requests.filter(
+        (request) => request.url === `/workflow/definitions/${wantedFlow.id}`,
+      ),
+    ).toHaveLength(1)
+  })
+
+  it('names a bound revision that has since been deprecated as deprecated', async () => {
+    const wrapper = await open(boundType(retiredFlow.id))
+    await flushPromises()
+
+    expect(selectedValue(wrapper, 'type-workflow')).toBe(retiredFlow.id)
+    expect(optionsOf(wrapper, 'type-workflow')[1]).toBe('Retired approval (r2, deprecated)')
+
+    // Searching for it finds nothing, because only an active revision can be
+    // bound; the stored choice stays named while the search moves on.
+    await search(wrapper, 'type-workflow', 'retired')
+
+    expect(optionsOf(wrapper, 'type-workflow')).toEqual([
+      'No workflow',
+      'Retired approval (r2, deprecated)',
+    ])
+    expect(wrapper.get('[data-testid="type-workflow-status"]').text()).toContain(
+      'Nothing matches “retired”.',
+    )
   })
 })
