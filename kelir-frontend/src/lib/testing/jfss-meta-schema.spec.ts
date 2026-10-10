@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+
 import { describe, expect, it } from 'vitest'
 
 import { jfssViolations } from './jfss-meta-schema'
@@ -142,5 +145,109 @@ describe('jfssViolations', () => {
     expect(
       jfssViolations(definition([{ ...field, rules: [{ rule: 'regex', scope: 'both' }] }])),
     ).not.toEqual([])
+  })
+
+  // --- test-engineer campaign, 2026-10-10 (#688 row 11) -------------------------------
+  //
+  // The walk's two sets are transcribed from the meta-schema; these read the
+  // file again and hold the transcription to it, in both directions, so a
+  // property added to or dropped from one role's branch cannot leave the helper
+  // passing what the server refuses, or refusing what it takes.
+
+  const meta = JSON.parse(
+    readFileSync(resolve(process.cwd(), '../docs/schema/jfss-meta-v2.0.1.json'), 'utf8'),
+  ) as {
+    $defs: {
+      component: {
+        properties: Record<string, unknown>
+        allOf: {
+          if: { properties: { role: { const: string } } }
+          then: { properties: Record<string, unknown> }
+        }[]
+      }
+    }
+  }
+  const base = Object.keys(meta.$defs.component.properties)
+  const byRole = Object.fromEntries(
+    meta.$defs.component.allOf.map((branch) => [
+      branch.if.properties.role.const,
+      Object.keys(branch.then.properties),
+    ]),
+  ) as Record<string, string[]>
+
+  /** A node of each role that conforms on its own. */
+  const minimal: Record<string, Record<string, unknown>> = {
+    data: { ...field },
+    layout: { id: 'p', role: 'layout', type: 'panel', components: [] },
+    display: { id: 'h', role: 'display', type: 'heading' },
+    action: { id: 'b', role: 'action', type: 'button', label: 'Go', action: 'submit' },
+  }
+
+  /** The closure walk's complaints about one property, whatever Ajv says about its value. */
+  function walkFlags(node: Record<string, unknown>, key: string): boolean {
+    return jfssViolations(definition([node])).some((line) =>
+      line.endsWith(`undeclared property "${key}"`),
+    )
+  }
+
+  it('reads four role branches from the meta-schema, so the checks below are not vacuous', () => {
+    expect(Object.keys(byRole).sort()).toEqual(['action', 'data', 'display', 'layout'])
+    expect(base).toEqual(expect.arrayContaining(['id', 'role', 'type']))
+  })
+
+  it.each(['data', 'layout', 'display', 'action'])(
+    'takes every property the meta-schema declares for a %s node',
+    (role) => {
+      for (const key of [...base, ...byRole[role]]) {
+        expect(walkFlags({ ...minimal[role], [key]: minimal[role][key] ?? 'x' }, key), key).toBe(
+          false,
+        )
+      }
+    },
+  )
+
+  it.each(['data', 'layout', 'display', 'action'])(
+    'refuses every property the meta-schema declares only for another role, on a %s node',
+    (role) => {
+      const own = new Set([...base, ...byRole[role]])
+      const foreign = [...new Set(Object.values(byRole).flat())].filter((key) => !own.has(key))
+
+      expect(foreign.length).toBeGreaterThan(0)
+
+      for (const key of foreign) {
+        expect(walkFlags({ ...minimal[role], [key]: 'x' }, key), key).toBe(true)
+      }
+    },
+  )
+
+  it('refuses a stray property inside a tab and inside a row template', () => {
+    const inTab = jfssViolations(
+      definition([
+        {
+          id: 't',
+          role: 'layout',
+          type: 'tabs',
+          tabs: [{ title: 'T', components: [{ ...field, bogus: true }] }],
+        },
+      ]),
+    )
+    const inRow = jfssViolations(
+      definition([
+        {
+          id: 'g',
+          role: 'data',
+          type: 'datagrid',
+          key: 'g',
+          label: 'G',
+          validation: { type: 'array' },
+          components: [{ id: 'h', role: 'display', type: 'heading', key: 'h' }],
+        },
+      ]),
+    )
+
+    expect(inTab.join(' | ')).toContain(
+      'components.0.tabs.0.components.0 has undeclared property "bogus"',
+    )
+    expect(inRow.join(' | ')).toContain('components.0.components.0 has undeclared property "key"')
   })
 })

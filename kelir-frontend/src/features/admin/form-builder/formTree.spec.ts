@@ -600,3 +600,158 @@ describe('S10.3 paths (E6)', () => {
     expect(placed.unplaced.map((detail) => detail.message)).toEqual(['three'])
   })
 })
+
+// --- test-engineer campaign, 2026-10-10 (#688 row 11) ---------------------------------
+//
+// Paths that the builder's own cases reach only on one side: a row template
+// that was never written, a path that is a prefix of another without being its
+// ancestor, a lookup that moved before it was removed, and the shapes the
+// unsupported card must catch beyond the two-shape layout.
+
+describe('the tree at its edges', () => {
+  it('moves into a data grid that never had a row template, and loses nothing (D3)', () => {
+    const bare = form([
+      field('a'),
+      {
+        id: 'g',
+        role: 'data',
+        type: 'datagrid',
+        key: 'g',
+        label: 'G',
+        validation: { type: 'array' },
+      } as JfssComponent,
+    ])
+    const moved = valid(moveNode(bare, 'components.0', 'components.1.components', 0))
+
+    expect(moved.components.map((node) => node.id)).toEqual(['g'])
+    expect((moved.components[0] as { components?: JfssComponent[] }).components?.[0]?.id).toBe('a')
+  })
+
+  it('moves the second of eleven into the panel at index ten: a prefix is not an ancestor (C1)', () => {
+    const definition = form([...Array.from({ length: 10 }, (_, at) => field(`f${at}`)), panel('p')])
+
+    expect(canContain(definition, 'components.10.components', field('f1'), 'components.1').ok).toBe(
+      true,
+    )
+    expect(
+      moveDestinations(definition, 'components.1').map((destination) => destination.listPath),
+    ).toEqual(['components.10.components'])
+
+    const moved = valid(moveNode(definition, 'components.1', 'components.10.components', 0))
+
+    expect((moved.components[9] as { components: JfssComponent[] }).components[0].id).toBe('f1')
+  })
+
+  it('moves a node out of the deepest list it can reach and back, and the tree is as it was', () => {
+    const definition = nested()
+    const deep = 'components.0.components.0.tabs.0.components.0.columns.1.components'
+    const out = valid(moveNode(definition, `${deep}.0`, 'components', 3))
+    const back = valid(moveNode(out, 'components.3', deep, 0))
+
+    expect(back).toEqual(definition)
+  })
+
+  it('drops the binding of a lookup that was moved and then removed with its new container (C4)', () => {
+    const definition = form([field('l', { type: 'lookup' }), panel('p'), field('kept')], {
+      lookups: { l: 'supplier', kept: 'customer' },
+    })
+    const moved = valid(moveNode(definition, 'components.0', 'components.1.components', 0))
+
+    expect(moved.settings?.lookups).toEqual({ l: 'supplier', kept: 'customer' })
+    expect(valid(removeNode(moved, 'components.0')).settings?.lookups).toEqual({
+      kept: 'customer',
+    })
+  })
+
+  it('avoids an id held inside an unsupported node’s slots (B4)', () => {
+    const definition = form([
+      {
+        id: 's',
+        role: 'layout',
+        type: 'steps',
+        tabs: [{ title: 'One', components: [field('field_1')] }],
+      } as JfssComponent,
+    ])
+
+    expect(freshIdentity(definition, 'textfield').id).toBe('field_2')
+  })
+
+  it.each([
+    [
+      'tabs with an untitled slot',
+      { id: 't', role: 'layout', type: 'tabs', tabs: [{ components: [] }] },
+    ],
+    [
+      'columns whose slot holds no list',
+      { id: 'c', role: 'layout', type: 'columns', columns: [{ components: [] }, {}] },
+    ],
+    [
+      'a data grid holding slots',
+      {
+        id: 'g',
+        role: 'data',
+        type: 'datagrid',
+        key: 'g',
+        label: 'G',
+        validation: { type: 'array' },
+        columns: [{ components: [] }],
+      },
+    ],
+    ['a text field holding children', field('x', { components: [field('y')] })],
+    [
+      'a heading holding children',
+      { id: 'h', role: 'display', type: 'heading', content: 'H', components: [] },
+    ],
+    ['a type named after Object’s prototype', { id: 'p', role: 'display', type: '__proto__' }],
+  ])('draws %s as unsupported, and offers no list inside it (B5)', (_case, node) => {
+    const definition = form([node as JfssComponent])
+
+    expect(unsupportedReason(node as JfssComponent)).toBeTruthy()
+    expect(listAt(definition, 'components.0.components')).toBeNull()
+    expect(listAt(definition, 'components.0.columns.0.components')).toBeNull()
+    expect(listAt(definition, 'components.0.tabs.0.components')).toBeNull()
+  })
+
+  it('places a detail inside a layout node in a row template on that node’s card (E6)', () => {
+    const definition = form([grid('g', [panel('row_panel', [field('inner')])])])
+    const placed = placeDetails(definition, [
+      {
+        path: 'definition.components.0.components.0.components.0.key',
+        rule: 'jfss',
+        code: 'INVALID_DEFINITION',
+        message: 'inside',
+      },
+    ])
+
+    // The panel is drawn as a card in the row template, and nothing inside it
+    // is drawn, so the card is where the message can be seen.
+    expect([...placed.byNode.keys()]).toEqual(['row_panel'])
+    expect(placed.unplaced).toEqual([])
+  })
+
+  it('places a slot’s own detail on the slot’s owner, and keeps the slot in the rest (E6)', () => {
+    const definition = nested()
+
+    expect(resolveDetail(definition, 'definition.components.0.components.0.tabs.0')).toMatchObject({
+      nodeId: 'tabs_1',
+      rest: 'tabs.0',
+    })
+    expect(
+      resolveDetail(
+        definition,
+        'definition.components.0.components.0.tabs.0.components.0.columns.1',
+      ),
+    ).toMatchObject({ nodeId: 'columns_1', rest: 'columns.1' })
+    // An index past the end of a slot's list stops at the slot's owner.
+    expect(
+      resolveDetail(
+        definition,
+        'definition.components.0.components.0.tabs.0.components.0.columns.1.components.5.key',
+      ),
+    ).toMatchObject({ nodeId: 'columns_1', rest: 'columns.1.components.5.key' })
+    // A slot path into a node that has no such shape stops at that node.
+    expect(
+      resolveDetail(definition, 'definition.components.0.columns.0.components.0'),
+    ).toMatchObject({ nodeId: 'panel_1', rest: 'columns.0.components.0' })
+  })
+})
