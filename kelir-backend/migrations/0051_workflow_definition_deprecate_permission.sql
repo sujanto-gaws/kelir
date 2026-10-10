@@ -40,9 +40,10 @@
 -- # N−1 compatibility
 --
 -- One catalogue row, one grant, and one description rewrite. Nothing is dropped
--- and no column, constraint or index is touched. No code reads a description,
--- and the previous image names neither the new code nor the route, so it starts
--- against this schema unchanged (release process §6).
+-- and no column, constraint or index is touched. The permission catalogue
+-- returns a description as text and nothing branches on it, and the previous
+-- image names neither the new code nor the route, so it starts against this
+-- schema unchanged (release process §6).
 
 INSERT INTO permissions (id, tenant_id, permission_code, module, description) VALUES
     ('00000000-0000-0000-0001-000000000078', '00000000-0000-0000-0000-000000000001',
