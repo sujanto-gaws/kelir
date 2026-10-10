@@ -18,11 +18,18 @@ const state = vi.hoisted(() => ({
   modules: {} as Record<string, () => Promise<unknown>>,
   /** How many times the per-icon map was read, which is once per fetch of it. */
   reads: 0,
+  /** How many more fetches of the map fail, as a dropped connection would. */
+  failures: 0,
 }))
 
 vi.mock('./menuIconModules', () => ({
   get ICON_MODULES() {
     state.reads += 1
+
+    if (state.failures > 0) {
+      state.failures -= 1
+      throw new Error('Failed to fetch dynamically imported module: menuIconModules')
+    }
 
     return state.modules
   },
@@ -92,6 +99,7 @@ describe('menuIcon', () => {
     vi.resetModules()
     state.modules = {}
     state.reads = 0
+    state.failures = 0
   })
 
   it('draws the neutral circle for no name, an empty one or a blank one, and loads nothing', async () => {
@@ -161,18 +169,50 @@ describe('menuIcon', () => {
     }
   })
 
-  // DEFECT (test-engineer, 2026-10-10): the alias map is a plain object, so a
-  // configured name of `__proto__` (or `__defineGetter__`, …) reads
-  // `Object.prototype` as an alias, `pascal()` is called on it, and the loader
-  // throws `TypeError: name.split is not a function`. The circle is still
-  // drawn — by `errorComponent` — but the error reaches the app's error
-  // handler (and `console.error` in production) for a string a tenant typed.
-  // Flip to `it` when the lookup is an own-property one.
-  it.fails('resolves a name like __proto__ to the circle without raising an error', async () => {
+  // Was `it.fails` (test-engineer, 2026-10-10): the alias map is a plain
+  // object, so `__proto__` read `Object.prototype` as an alias and the loader
+  // threw `TypeError: name.split is not a function` into the app's error
+  // handler. Fixed by reading the map by its own keys only.
+  it('resolves a name like __proto__ to the circle without raising an error', async () => {
     provide(['file-cog'])
 
     const { errors } = await draw(['__proto__', '__defineGetter__'])
 
+    expect(errors).toEqual([])
+  })
+
+  it('fetches the icon map again on the next draw after a failed fetch', async () => {
+    provide(['file-cog'])
+    state.failures = 1
+
+    // The first fetch fails: the circle, as for a failed icon chunk.
+    expect((await draw(['file-cog'])).classes[0]).toContain('lucide-circle')
+
+    // The next draw asks again, rather than reusing the failed fetch.
+    const again = await draw(['file-cog'])
+
+    expect(again.classes[0]).toContain('stub-file-cog')
+    expect(state.reads).toBe(2)
+  })
+
+  it('matches the package’s other spellings of a name by the bare name', async () => {
+    provide(['file-cog', 'file'])
+
+    const { classes, errors } = await draw([
+      'FileCogIcon',
+      'LucideFileCog',
+      'file-cog-icon',
+      'lucide-file-cog',
+      'lucide-file',
+    ])
+
+    expect(classes).toEqual([
+      expect.stringContaining('stub-file-cog'),
+      expect.stringContaining('stub-file-cog'),
+      expect.stringContaining('stub-file-cog'),
+      expect.stringContaining('stub-file-cog'),
+      expect.stringContaining('stub-file'),
+    ])
     expect(errors).toEqual([])
   })
 

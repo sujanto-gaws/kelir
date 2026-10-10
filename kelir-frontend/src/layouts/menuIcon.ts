@@ -20,14 +20,30 @@ import { Circle } from '@lucide/vue'
  * menu names are fetched. `check:bundle` holds first load to a handful of
  * Lucide modules.
  *
- * **A name resolves as it did** when it was looked up in the namespace:
- * converted to PascalCase (`file-cog` → `FileCog`; a PascalCase name passes
- * through), then matched to the icon file of that name, else to an old name
+ * **How a name resolves.** It is converted to PascalCase as the namespace
+ * lookup converted it (`file-cog` → `FileCog`; a PascalCase name passes
+ * through), then matched to the icon file of that name. The package's other
+ * spellings of a name, `FileCogIcon` and `LucideFileCog` (so `file-cog-icon`
+ * and `lucide-file-cog` too), are matched by their bare name. Then an old name
  * the package still exports (`alert-triangle` → `triangle-alert`), read from a
- * small alias map that is loaded only for such a name. A name that is neither
- * draws the neutral `circle`, rather than nothing: the icon set is the
- * client's, and a definition outlives a release of it.
+ * small alias map that is loaded only for such a name, and only by its own
+ * keys: `__proto__` is not an alias. A name that is none of these draws the
+ * neutral `circle`, rather than nothing: the icon set is the client's, and a
+ * definition outlives a release of it.
+ *
+ * **What the namespace answered and this does not**: an export of the package
+ * that is not an icon, such as `Icon` or `createLucideIcon`, which the old
+ * lookup drew or tried to draw. Each is a circle here.
+ *
+ * **A failed fetch of the map is not kept**: the next draw asks again, so a
+ * dropped connection on the first draw does not leave every menu icon a circle
+ * until the page is reloaded.
  */
+
+/** `FileCogIcon` and `LucideFileCog` → `FileCog`: the package's other spellings. */
+function bare(name: string): string {
+  return name.replace(/^Lucide(?=[A-Z0-9])/, '').replace(/(?<=.)Icon$/, '')
+}
 
 function pascal(name: string): string {
   return name
@@ -42,32 +58,51 @@ let byName: Promise<Map<string, Loader>> | null = null
 
 /** `FileCog` → `file-cog.mjs`'s loader, keyed as the namespace lookup keyed it. */
 function loaders(): Promise<Map<string, Loader>> {
-  byName ??= import('./menuIconModules').then(
-    ({ ICON_MODULES }) =>
-      new Map(
-        Object.entries(ICON_MODULES).map(([path, load]) => [
-          pascal(path.slice(path.lastIndexOf('/') + 1, -'.mjs'.length)),
-          load,
-        ]),
-      ),
-  )
+  byName ??= import('./menuIconModules')
+    .then(
+      ({ ICON_MODULES }) =>
+        new Map(
+          Object.entries(ICON_MODULES).map(([path, load]) => [
+            pascal(path.slice(path.lastIndexOf('/') + 1, -'.mjs'.length)),
+            load,
+          ]),
+        ),
+    )
+    .catch((error: unknown) => {
+      // Not cached: the next draw fetches the map again.
+      byName = null
+      throw error
+    })
 
   return byName
 }
 
 async function load(name: string): Promise<Component> {
   const byFile = await loaders()
-  const own = byFile.get(name)
+  const spellings = [...new Set([name, bare(name)])]
 
-  if (own) {
-    return own()
+  for (const spelling of spellings) {
+    const own = byFile.get(spelling)
+
+    if (own) {
+      return own()
+    }
   }
 
   const aliases = (await import('virtual:lucide-icon-aliases')).default
-  const file = aliases[name]
-  const aliased = file ? byFile.get(pascal(file)) : undefined
 
-  return aliased ? aliased() : Circle
+  for (const spelling of spellings) {
+    const file = Object.prototype.hasOwnProperty.call(aliases, spelling)
+      ? aliases[spelling]
+      : undefined
+    const aliased = file ? byFile.get(pascal(file)) : undefined
+
+    if (aliased) {
+      return aliased()
+    }
+  }
+
+  return Circle
 }
 
 const resolved = new Map<string, Component>()

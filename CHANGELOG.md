@@ -283,7 +283,9 @@ While the major version is `0`, the public API may change in any release.
 - **Icons come from `@lucide/vue`** ([#698](https://github.com/sujanto-gaws/kelir/issues/698)).
   `lucide-vue-next` is deprecated on npm, and its successor from the same
   project, `@lucide/vue`, replaces it at exactly 1.54.0 in every import. A
-  configured menu's `icon` name resolves as it did, old names included.
+  configured menu's `icon` name resolves as it did, old names and the
+  `…Icon` and `Lucide…` spellings included; only a name that is an export but
+  not an icon, such as `Icon`, now draws the neutral circle.
   **The icon set is off the first load**: the navigation looked a configured
   entry's icon up in the whole package, which put all of it on every
   sign-in, and the successor's larger set grew that from 245,578 to 280,290
