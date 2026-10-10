@@ -560,6 +560,88 @@ async fn a_tenant_that_left_stops_admitting_the_administrator_it_was_created_wit
     );
 }
 
+/// #649: a refresh that races its tenant's suspension renews nothing after it.
+///
+/// `update_tenant` changes the row and then revokes, in two statements, and a
+/// refresh reads the status and then rotates, in two more. A refresh can read
+/// `ACTIVE`, lose the revoke, and insert a token after it. That one renewal
+/// is the race's bound: whatever the interleaving, every token is refused at
+/// its next refresh, because that refresh reads the status itself. Four
+/// refreshes run at once with the suspension, on a multi-threaded runtime.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refresh_racing_its_tenants_suspension_renews_no_session_past_it() {
+    let app = multi_tenant_app().await;
+    let token = administering_token(&app).await;
+    let created = app
+        .post(TENANTS, Some(&token), create_body("ACME", "acme.admin"))
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let tenant_id = created.data()["id"].as_str().expect("created").to_owned();
+
+    let mut sessions = Vec::new();
+    for _ in 0..4 {
+        let session = app
+            .post(
+                "/api/v1/auth/login",
+                None,
+                json!({
+                    "username": "acme.admin",
+                    "password": "a-sufficiently-long-password",
+                    "tenantCode": "ACME",
+                }),
+            )
+            .await;
+        assert_eq!(session.status, StatusCode::OK, "{}", session.body);
+        sessions.push(json!({ "refreshToken": session.data()["refreshToken"] }));
+    }
+
+    let refresh = |body: &serde_json::Value| app.post("/api/v1/auth/refresh", None, body.clone());
+    let tenant = format!("{TENANTS}/{tenant_id}");
+    let (suspended, first, second, third, fourth) = tokio::join!(
+        app.put(&tenant, Some(&token), json!({ "status": "SUSPENDED" })),
+        refresh(&sessions[0]),
+        refresh(&sessions[1]),
+        refresh(&sessions[2]),
+        refresh(&sessions[3]),
+    );
+    assert_eq!(suspended.status, StatusCode::OK, "{}", suspended.body);
+
+    let raced = [first, second, third, fourth];
+    println!(
+        "raced refreshes answered {:?}",
+        raced.iter().map(|answer| answer.status).collect::<Vec<_>>()
+    );
+    for raced in raced {
+        match raced.status {
+            // Lost the race: refused, and that is the end of it.
+            StatusCode::UNAUTHORIZED => {}
+            // Won it: the token it was given is refused at its next refresh.
+            StatusCode::OK => {
+                let next = refresh(&json!({ "refreshToken": raced.data()["refreshToken"] })).await;
+                assert_eq!(
+                    next.status,
+                    StatusCode::UNAUTHORIZED,
+                    "a token issued in the race renewed the suspended tenant's session: {}",
+                    next.body
+                );
+            }
+            other => panic!("a refresh in the race answered {other}: {}", raced.body),
+        }
+    }
+
+    let live: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM refresh_tokens r JOIN users u ON u.id = r.user_id \
+         WHERE u.username = 'acme.admin' AND r.revoked_at IS NULL",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .expect("reads refresh_tokens");
+    assert_eq!(
+        live, 0,
+        "the race left a suspended tenant's refresh token live"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // D-104: what an access token already issued does after its tenant leaves.
 //
