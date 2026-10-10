@@ -4,7 +4,7 @@ import { computed, ref, watch } from 'vue'
 import { createDocumentType, updateDocumentType } from '@/api/document-types'
 import { toApiError } from '@/api/client'
 import { getForm, getList, listForms, listLists } from '@/api/rad'
-import { listWorkflowDefinitions } from '@/api/workflow'
+import { getWorkflowDefinition, listWorkflowDefinitions } from '@/api/workflow'
 import { Alert } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -131,7 +131,24 @@ const listSource: SearchSource<ListSummary> = {
 const workflowSource: SearchSource<WorkflowDefinitionSummary> = {
   fetch: (query) => listWorkflowDefinitions({ ...query, status: 'ACTIVE' }),
   value: (workflow) => workflow.id,
-  label: (workflow) => `${workflow.name} (r${workflow.version})`,
+  label: workflowLabel,
+  // The revision a type is already bound to, when no search has named it (#625):
+  // one sorting past the first page, or one deprecated since it was bound.
+  resolve: getWorkflowDefinition,
+}
+
+/**
+ * How a revision reads as a choice.
+ *
+ * **A deprecated one says so.** Only an `ACTIVE` revision is searched, so the
+ * one place a deprecated revision shows is a type still bound to it — whose
+ * submissions are refused until it is rebound (#713). Its name alone would
+ * read as a working binding, and would not say why no search finds it again.
+ */
+function workflowLabel(workflow: WorkflowDefinitionSummary): string {
+  return workflow.status === 'DEPRECATED'
+    ? `${workflow.name} (r${workflow.version}, deprecated)`
+    : `${workflow.name} (r${workflow.version})`
 }
 
 /**
