@@ -164,6 +164,42 @@ describe('useWorkflowDeprecation', () => {
     expect(deprecation.target.value?.id).toBe('second')
   })
 
+  it('stays checking when an earlier revision’s read lands before the reopened one’s', async () => {
+    // Test-engineer campaign, 2026-10-10: the warning reopened for another
+    // revision while *both* reads are out, and the stale one answering first.
+    // Without the ticket, its list would land and free confirm on the wrong
+    // revision's types.
+    const deprecation = useWorkflowDeprecation()
+    const releaseFirst = holdReadsOf('first')
+
+    deprecation.ask({ id: 'first', workflowKey: 'purchase_approval', version: 1 })
+    deprecation.cancel()
+
+    const releaseSecond = holdReadsOf('second')
+
+    deprecation.ask({ id: 'second', workflowKey: 'purchase_approval', version: 2 })
+    await flushPromises()
+
+    await releaseFirst()
+
+    expect(deprecation.bound.value.kind).toBe('checking')
+    expect(deprecation.confirm()).toBeNull()
+    expect(deprecation.isOpen.value).toBe(true)
+
+    await releaseSecond()
+
+    const bound = deprecation.bound.value
+
+    expect(bound.kind === 'listed' && bound.types.map((listed) => listed.name)).toEqual([
+      'Second’s type',
+    ])
+    expect(deprecation.confirm()).toEqual({
+      id: 'second',
+      workflowKey: 'purchase_approval',
+      version: 2,
+    })
+  })
+
   it('closes and hands back nothing when cancelled', async () => {
     const deprecation = useWorkflowDeprecation()
 

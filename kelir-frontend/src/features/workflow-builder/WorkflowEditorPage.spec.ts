@@ -16,6 +16,7 @@ import {
   type RecordedRequest,
 } from '@/lib/testing/fake-backend'
 import { jwssViolations } from '@/lib/testing/jwss-meta-schema'
+import { press, tabTo } from '@/lib/testing/keyboard'
 import { useAuthStore } from '@/stores/auth'
 import type { CurrentUser } from '@/types/auth'
 import type { JwssDefinition } from '@/types/workflow'
@@ -2927,6 +2928,155 @@ describe('WorkflowEditorPage', () => {
       await release()
 
       expect(page.get('[data-testid="status"]').text()).toBe('DEPRECATED')
+    })
+  })
+
+  // --- The test-engineer campaign on #713, 2026-10-10 --------------------------
+  //
+  // Past the builder's tests: what the success path shows, the hundred-type
+  // boundary, and the warning by keyboard. Seen to fail: the screen keeping
+  // its own definition after a success (*shows the revision the route
+  // answers…*), and `unnamed >= 0` (*names exactly a hundred…*). Focus is not
+  // handed back when the warning closes: pinned with `it.fails` below.
+
+  describe('deprecating a revision, adversarially (#713)', () => {
+    function hundred(): unknown[] {
+      return Array.from({ length: 100 }, (_, index) => ({
+        id: `dt-${index}`,
+        typeCode: `TYPE_${String(index).padStart(3, '0')}`,
+        name: `Type ${index}`,
+        category: null,
+        formId: null,
+        status: index % 2 === 0 ? 'ACTIVE' : 'DEPRECATED',
+        createdAt: '2026-10-09T00:00:00Z',
+        updatedAt: '2026-10-09T00:00:00Z',
+      }))
+    }
+
+    function opener(page: VueWrapper): HTMLButtonElement {
+      return page.get('[data-testid="deprecate-workflow"]').element as HTMLButtonElement
+    }
+
+    it('shows the revision the route answers, not the one it had on screen', async () => {
+      stored = record({ status: 'ACTIVE' })
+
+      const page = await render({ permissions: DEPRECATOR })
+
+      await page.get('[data-testid="deprecate-workflow"]').trigger('click')
+      await settle()
+
+      // The route reads the revision back after the change; here its name as
+      // stored differs from what this screen loaded, so only taking the answer
+      // shows it.
+      const answered = jwss()
+
+      answered.name = 'Purchase approval, as stored'
+      stored = record({ status: 'ACTIVE', definition: answered, updatedAt: '2026-10-10T09:00:00Z' })
+
+      await page.get('[data-testid="confirm-action"]').trigger('click')
+      await settle()
+
+      expect(page.get('[data-testid="status"]').text()).toBe('DEPRECATED')
+      expect(page.get('[data-testid="workflow-name"]').element).toHaveProperty(
+        'value',
+        'Purchase approval, as stored',
+      )
+      // Taken from the answer, not read again.
+      expect(
+        backend.requests.filter(
+          (request) => request.method === 'get' && request.url === `/workflow/definitions/${ID}`,
+        ),
+      ).toHaveLength(1)
+    })
+
+    it.each([
+      [100, null],
+      [101, 'and 1 more, 101 in all.'],
+    ])(
+      'names exactly a hundred of %i bound types, and says what is past them',
+      async (total, more) => {
+        stored = record({ status: 'ACTIVE' })
+        boundTypes = hundred()
+        boundTotal = total
+
+        const page = await render({ permissions: DEPRECATOR })
+
+        await page.get('[data-testid="deprecate-workflow"]').trigger('click')
+        await settle()
+
+        expect(page.findAll('[data-testid="bound-type"]')).toHaveLength(100)
+        expect(page.get('[data-testid="bound-types"]').text()).toContain('These document types are')
+
+        if (more === null) {
+          expect(page.find('[data-testid="bound-types-more"]').exists()).toBe(false)
+        } else {
+          expect(page.get('[data-testid="bound-types-more"]').text()).toBe(more)
+        }
+
+        // A bound type is named, not linked: deprecated or not, the warning
+        // offers nothing to open, so nothing the caller cannot open is offered.
+        expect(page.get('[data-testid="bound-types"]').findAll('a, button')).toHaveLength(0)
+      },
+    )
+
+    it('is operated by keyboard alone: Escape cancels, Enter on Deprecate confirms', async () => {
+      stored = record({ status: 'ACTIVE' })
+
+      const page = await render({ permissions: DEPRECATOR, attach: true })
+
+      opener(page).focus()
+      press('Enter')
+      await settle()
+
+      const panel = page.get('[role="dialog"]').element
+
+      expect(panel.contains(document.activeElement)).toBe(true)
+
+      document.activeElement!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      )
+      await settle()
+
+      expect(page.find('[role="dialog"]').exists()).toBe(false)
+      expect(writes()).toEqual([])
+
+      opener(page).focus()
+      press('Enter')
+      await settle()
+
+      tabTo((element) => element.getAttribute('data-testid') === 'confirm-action')
+      press('Enter')
+      await settle()
+
+      expect(writes().map((request) => `${request.method} ${request.url}`)).toEqual([
+        `post /workflow/definitions/${ID}/deprecation`,
+      ])
+      expect(page.get('[data-testid="status"]').text()).toBe('DEPRECATED')
+    })
+
+    // DEFECT (test-engineer, 2026-10-10, PR #715): closing the warning leaves
+    // focus on `<body>`, not on the *Deprecate* button that opened it. The
+    // shared `Dialog` moves focus in on open and never hands it back (WAI-ARIA
+    // dialog pattern), so a keyboard user restarts from the top of the page.
+    // Not this row's code; it is every `ConfirmDialog`'s. Flip to `it` when
+    // `Dialog` restores focus.
+    it.fails('hands focus back to Deprecate when the warning is cancelled', async () => {
+      stored = record({ status: 'ACTIVE' })
+
+      const page = await render({ permissions: DEPRECATOR, attach: true })
+
+      opener(page).focus()
+      press('Enter')
+      await settle()
+
+      await page
+        .findAll('button')
+        .find((button) => button.text() === 'Cancel')!
+        .trigger('click')
+      await settle()
+
+      expect(page.find('[role="dialog"]').exists()).toBe(false)
+      expect(document.activeElement).toBe(opener(page))
     })
   })
 })

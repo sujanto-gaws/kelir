@@ -508,4 +508,255 @@ describe('WorkflowListPage', () => {
       expect(wrapper.find('[data-testid="deprecate-purchase_approval-1"]').exists()).toBe(false)
     })
   })
+
+  // --- The test-engineer campaign on #713, 2026-10-10 --------------------------
+  //
+  // Two rows at once, a stale read, and the no-read path carried through to
+  // the request. Seen to fail: the ticket dropped from `readBound` (*shows the
+  // reopened row’s types…*), and `busy()` holding every row while any one is
+  // deprecating (*leaves another row’s actions free…*). One defect is pinned
+  // with `it.fails`.
+
+  describe('deprecating, adversarially (#713)', () => {
+    type Adapter = (config: InternalAxiosRequestConfig) => Promise<AxiosResponse>
+
+    const FIRST = summary({ status: 'ACTIVE' })
+    const SECOND = summary({ id: 'second', version: 2, status: 'ACTIVE' })
+
+    function namedType(id: string, name: string) {
+      return { ...BOUND_TYPE, id, typeCode: id.toUpperCase(), name }
+    }
+
+    /** Holds the first request `matches` accepts until the returned function is called. */
+    function hold(matches: (config: InternalAxiosRequestConfig) => boolean): () => Promise<void> {
+      const fake = apiClient.defaults.adapter as Adapter
+      let release: () => void = () => undefined
+      const gate = new Promise<void>((resolve) => {
+        release = resolve
+      })
+
+      apiClient.defaults.adapter = (async (config: InternalAxiosRequestConfig) => {
+        if (!matches(config)) {
+          return fake(config)
+        }
+
+        apiClient.defaults.adapter = fake
+        await gate
+
+        return fake(config)
+      }) as Adapter
+
+      return async () => {
+        release()
+
+        for (let round = 0; round < 4; round += 1) {
+          await flushPromises()
+        }
+      }
+    }
+
+    function deprecationOf(id: string) {
+      return (config: InternalAxiosRequestConfig) =>
+        (config.url ?? '') === `/workflow/definitions/${id}/deprecation`
+    }
+
+    function readFor(id: string) {
+      return (config: InternalAxiosRequestConfig) =>
+        (config.params as Record<string, unknown> | undefined)?.workflowDefinitionId === id
+    }
+
+    function disabled(wrapper: VueWrapper, testid: string): boolean {
+      return wrapper.get(`[data-testid="${testid}"]`).attributes('disabled') !== undefined
+    }
+
+    async function settle(): Promise<void> {
+      for (let round = 0; round < 4; round += 1) {
+        await flushPromises()
+      }
+    }
+
+    function posts(): string[] {
+      return backend.requests
+        .filter((request) => request.method === 'post')
+        .map((request) => request.url)
+    }
+
+    it('leaves another row’s actions free while one row’s deprecation is in flight', async () => {
+      rows = [FIRST, SECOND]
+
+      const wrapper = await render(DEPRECATOR)
+
+      await wrapper.get('[data-testid="deprecate-purchase_approval-1"]').trigger('click')
+      await settle()
+
+      const release = hold(deprecationOf(FIRST.id))
+
+      await wrapper.get('[data-testid="confirm-action"]').trigger('click')
+      await settle()
+
+      expect(disabled(wrapper, 'deprecate-purchase_approval-1')).toBe(true)
+      expect(disabled(wrapper, 'revise-purchase_approval-1')).toBe(true)
+      expect(disabled(wrapper, 'deprecate-purchase_approval-2')).toBe(false)
+      expect(disabled(wrapper, 'revise-purchase_approval-2')).toBe(false)
+
+      // The other row's warning opens and reads its own revision's types.
+      await wrapper.get('[data-testid="deprecate-purchase_approval-2"]').trigger('click')
+      await settle()
+
+      expect(
+        backend.requests
+          .filter((request) => request.url === '/document-types')
+          .map((r) => r.params),
+      ).toEqual([
+        { workflowDefinitionId: FIRST.id, pageSize: 100 },
+        { workflowDefinitionId: SECOND.id, pageSize: 100 },
+      ])
+
+      await wrapper
+        .findAll('button')
+        .find((button) => button.text() === 'Cancel')!
+        .trigger('click')
+      await release()
+
+      expect(posts()).toEqual([`/workflow/definitions/${FIRST.id}/deprecation`])
+      expect(wrapper.get('[data-testid="workflow-purchase_approval-1"]').text()).toContain(
+        'DEPRECATED',
+      )
+      expect(wrapper.get('[data-testid="workflow-purchase_approval-2"]').text()).toContain('ACTIVE')
+    })
+
+    // DEFECT (test-engineer, 2026-10-10, PR #715): `deprecatingId` holds one
+    // row. Deprecate row 1, then row 2 while row 1 is still out: when row 1
+    // returns, its `finally` clears the id, and row 2's actions come back
+    // while row 2's own deprecation is still in flight. A second click then
+    // posts again and is answered 409 "already deprecated" for a revision
+    // this screen just deprecated. Flip to `it` when the list tracks every
+    // in-flight row (a Set, as `busy()` implies).
+    it.fails('holds a second row’s actions until its own deprecation returns', async () => {
+      rows = [FIRST, SECOND]
+
+      const wrapper = await render(DEPRECATOR)
+
+      await wrapper.get('[data-testid="deprecate-purchase_approval-1"]').trigger('click')
+      await settle()
+
+      const releaseFirst = hold(deprecationOf(FIRST.id))
+
+      await wrapper.get('[data-testid="confirm-action"]').trigger('click')
+      await settle()
+
+      await wrapper.get('[data-testid="deprecate-purchase_approval-2"]').trigger('click')
+      await settle()
+
+      const releaseSecond = hold(deprecationOf(SECOND.id))
+
+      await wrapper.get('[data-testid="confirm-action"]').trigger('click')
+      await settle()
+
+      try {
+        expect(disabled(wrapper, 'deprecate-purchase_approval-2')).toBe(true)
+
+        await releaseFirst()
+
+        // The fake backend records a request once it is answered: row 2's is
+        // still held.
+        expect(posts()).toEqual([`/workflow/definitions/${FIRST.id}/deprecation`])
+        expect(wrapper.get('[data-testid="workflow-purchase_approval-2"]').text()).toContain(
+          'ACTIVE',
+        )
+        // Row 2 is still out; its actions must still be held.
+        expect(disabled(wrapper, 'deprecate-purchase_approval-2')).toBe(true)
+        expect(disabled(wrapper, 'revise-purchase_approval-2')).toBe(true)
+      } finally {
+        await releaseSecond()
+      }
+    })
+
+    it('shows the reopened row’s types, not a late answer for the row first asked', async () => {
+      rows = [FIRST, SECOND]
+
+      const wrapper = await render(DEPRECATOR)
+      const releaseFirst = hold(readFor(FIRST.id))
+
+      await wrapper.get('[data-testid="deprecate-purchase_approval-1"]').trigger('click')
+      await settle()
+
+      expect(wrapper.find('[data-testid="bound-types-checking"]').exists()).toBe(true)
+
+      await wrapper
+        .findAll('button')
+        .find((button) => button.text() === 'Cancel')!
+        .trigger('click')
+
+      boundTypes = [namedType('dt-second', 'Bound to the second')]
+      await wrapper.get('[data-testid="deprecate-purchase_approval-2"]').trigger('click')
+      await settle()
+
+      // The first row's read answers last, and with its own types.
+      boundTypes = [namedType('dt-first', 'Bound to the first')]
+      await releaseFirst()
+
+      expect(wrapper.get('[role="dialog"]').text()).toContain(
+        'Deprecate revision 2 of purchase_approval?',
+      )
+      expect(wrapper.findAll('[data-testid="bound-type"]').map((item) => item.text())).toEqual([
+        'Bound to the second (DT-SECOND)',
+      ])
+
+      await wrapper.get('[data-testid="confirm-action"]').trigger('click')
+      await settle()
+
+      expect(posts()).toEqual([`/workflow/definitions/${SECOND.id}/deprecation`])
+    })
+
+    it('deprecates from the warning that could not check, once confirmed', async () => {
+      rows = [FIRST]
+
+      const wrapper = await render(
+        DEPRECATOR.filter((permission) => permission !== 'document-type:read'),
+      )
+
+      await wrapper.get('[data-testid="deprecate-purchase_approval-1"]').trigger('click')
+      await settle()
+
+      expect(wrapper.find('[data-testid="bound-types-unchecked"]').exists()).toBe(true)
+
+      await wrapper.get('[data-testid="confirm-action"]').trigger('click')
+      await settle()
+
+      expect(backend.requests.some((request) => request.url === '/document-types')).toBe(false)
+      expect(posts()).toEqual([`/workflow/definitions/${FIRST.id}/deprecation`])
+      expect(wrapper.get('[data-testid="deprecation-notice"]').text()).toBe(
+        'Revision 1 of purchase_approval is deprecated.',
+      )
+    })
+
+    it('clears a refusal when the next deprecation succeeds', async () => {
+      rows = [FIRST, SECOND]
+
+      const wrapper = await render(DEPRECATOR)
+
+      await wrapper.get('[data-testid="deprecate-purchase_approval-1"]').trigger('click')
+      await settle()
+      deprecateReply = {
+        status: 409,
+        body: errorBody('CONFLICT', 'revision 1 of `purchase_approval` is already deprecated'),
+      }
+      await wrapper.get('[data-testid="confirm-action"]').trigger('click')
+      await settle()
+
+      expect(wrapper.find('[data-testid="deprecation-error"]').exists()).toBe(true)
+
+      deprecateReply = null
+      await wrapper.get('[data-testid="deprecate-purchase_approval-2"]').trigger('click')
+      await settle()
+      await wrapper.get('[data-testid="confirm-action"]').trigger('click')
+      await settle()
+
+      expect(wrapper.find('[data-testid="deprecation-error"]').exists()).toBe(false)
+      expect(wrapper.get('[data-testid="deprecation-notice"]').text()).toBe(
+        'Revision 2 of purchase_approval is deprecated.',
+      )
+    })
+  })
 })
