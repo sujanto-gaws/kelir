@@ -154,9 +154,24 @@ function chunkPackages(): Plugin {
   }
 }
 
-/** Whether a module is a stylesheet, which Vite extracts into a CSS file of its chunk's own. */
+/**
+ * Whether a module is a stylesheet, which Vite extracts into a CSS file of its
+ * chunk's own.
+ *
+ * **Not every `.css` id is.** Vite 6's `vite:css-post` extracts a stylesheet
+ * only when no query turns it into JavaScript: `?inline` makes it a string of
+ * the whole stylesheet, `?raw` the file's text, `?url` its address, and
+ * `?worker` or `?sharedworker` a worker; `?commonjs-proxy` is a CommonJS
+ * wrapper. Each of those ships in the importing chunk's JavaScript, so it is
+ * filed as JavaScript, by its `renderedLength`, and `check:bundle` sees it on
+ * the chunk (#719: an `?inline` import put Vue Flow's rules in a first-load
+ * chunk while both maps said it carried none).
+ */
 function isStylesheet(id: string): boolean {
-  return /\.css(?:$|\?)/.test(id)
+  return (
+    /\.css(?:$|\?)/.test(id) &&
+    !/[?&](?:inline|raw|url|worker|sharedworker|commonjs-proxy)\b/.test(id)
+  )
 }
 
 /** The package a module belongs to, from its last `node_modules` segment; `null` for our own source. */

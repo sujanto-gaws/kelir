@@ -122,22 +122,63 @@ describe('the kelir-chunk-packages plugin', () => {
     expect(styled).toEqual({})
   })
 
-  // DEFECT (#719 campaign, 2026-10-10): `isStylesheet` reads any id with
-  // `.css` before its query as a stylesheet, so `style.css?inline` — which
-  // Vite turns into a JavaScript string of the whole stylesheet, shipped in
-  // the importing chunk — is filed as CSS, not JavaScript, and the chunk has
-  // no CSS file to file it under. Seen on a real build: with
-  // `import css from '@vue-flow/core/dist/style.css?inline'` in AppLayout.vue,
-  // AppLayout's chunk carried Vue Flow's rules, chunk-packages.json said
-  // `['lucide-vue-next']`, and `npm run check:bundle` passed all three subjects.
-  it.fails('files a stylesheet imported `?inline` as the JavaScript it ships in', () => {
-    const { carried } = written({
+  // `isStylesheet` read any id with `.css` before its query as a stylesheet,
+  // so `style.css?inline` — which Vite turns into a JavaScript string of the
+  // whole stylesheet, shipped in the importing chunk — was filed as CSS, and
+  // the chunk had no CSS file to file it under (the #719 campaign). Seen on a
+  // real build: with `import css from '@vue-flow/core/dist/style.css?inline'`
+  // in AppLayout.vue, AppLayout's chunk carried Vue Flow's rules,
+  // chunk-packages.json said `['lucide-vue-next']`, and `npm run check:bundle`
+  // passed all three subjects.
+  it('files a stylesheet imported `?inline` as the JavaScript it ships in', () => {
+    const { carried, styled } = written({
       'assets/AppLayout.js': chunk('assets/AppLayout.js', {
         [`${NM}/@vue-flow/core/dist/style.css?inline`]: 4100,
         [`${NM}/lucide-vue-next/dist/esm/icons/plus.js`]: 300,
       }),
     })
 
-    expect(carried['assets/AppLayout.js']).toContain('@vue-flow/core')
+    expect(carried['assets/AppLayout.js']).toEqual(['@vue-flow/core', 'lucide-vue-next'])
+    expect(styled).toEqual({})
+  })
+
+  // Every query Vite 6's `vite:css-post` leaves unextracted, because it turns
+  // the stylesheet into JavaScript: a string, the file's text, its address, a
+  // worker, or a CommonJS wrapper.
+  it.each([
+    '?inline',
+    '?raw',
+    '?url',
+    '?worker',
+    '?sharedworker',
+    '?commonjs-proxy',
+    '?v=1&inline',
+  ])('files `style.css%s` as JavaScript, credited to its chunk', (query) => {
+    const { carried } = written({
+      'assets/AppLayout.js': chunk(
+        'assets/AppLayout.js',
+        { [`${NM}/@vue-flow/controls/dist/style.css${query}`]: 120 },
+        ['assets/AppLayout.css'],
+      ),
+    })
+
+    expect(carried['assets/AppLayout.js']).toEqual(['@vue-flow/controls'])
+  })
+
+  it('still files a plain or versioned `.css` import as a stylesheet, whatever it renders', () => {
+    const { carried, styled } = written({
+      'assets/AppLayout.js': chunk(
+        'assets/AppLayout.js',
+        {
+          [`${NM}/@vue-flow/core/dist/style.css`]: 0,
+          [`${NM}/@vue-flow/controls/dist/style.css?v=3`]: 0,
+          [`${NM}/@vue-flow/core/dist/theme-default.css?used`]: 0,
+        },
+        ['assets/AppLayout.css'],
+      ),
+    })
+
+    expect(carried['assets/AppLayout.js']).toEqual([])
+    expect(styled).toEqual({ 'assets/AppLayout.css': ['@vue-flow/controls', '@vue-flow/core'] })
   })
 })
