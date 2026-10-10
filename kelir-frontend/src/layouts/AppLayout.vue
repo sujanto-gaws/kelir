@@ -8,6 +8,7 @@ import {
   Circle,
   FileCog,
   FileText,
+  GitBranch,
   Inbox,
   LayoutDashboard,
   ListTree,
@@ -145,6 +146,16 @@ const navigation = [
     enabled: true,
     permission: 'rad:list:read',
     sortOrder: 96,
+  },
+  {
+    // #426. The third definition kind beside forms and lists, and the one
+    // that had an API and no screen longest.
+    name: 'admin-workflows',
+    label: 'Workflows',
+    icon: GitBranch,
+    enabled: true,
+    permission: 'workflow:definition:read',
+    sortOrder: 97,
   },
   {
     name: 'admin-menus',

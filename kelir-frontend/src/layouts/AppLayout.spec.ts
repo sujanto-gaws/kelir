@@ -75,6 +75,7 @@ describe('AppLayout', () => {
         { path: '/admin/roles', name: 'admin-roles', component: blank },
         { path: '/admin/external-systems', name: 'admin-external-systems', component: blank },
         { path: '/admin/integration-logs', name: 'admin-integration-logs', component: blank },
+        { path: '/admin/workflows', name: 'admin-workflows', component: blank },
       ],
     })
   })
@@ -143,6 +144,17 @@ describe('AppLayout', () => {
 
     expect(wrapper.find('a[href="/admin/integration-logs"]').exists()).toBe(true)
     expect(wrapper.find('a[href="/admin/external-systems"]').exists()).toBe(false)
+  })
+
+  it('links to the workflows only with their read permission', async () => {
+    // #426, test-engineer campaign 2026-10-10. Writing one is not reading the list.
+    permissions = ['workflow:definition:create', 'workflow:definition:update']
+
+    expect((await renderSignedIn()).find('a[href="/admin/workflows"]').exists()).toBe(false)
+
+    permissions = ['workflow:definition:read']
+
+    expect((await renderSignedIn()).find('a[href="/admin/workflows"]').exists()).toBe(true)
   })
 
   it('names the signed-in user', async () => {
