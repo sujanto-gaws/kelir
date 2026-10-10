@@ -11,10 +11,11 @@ import type { SeededForm } from './forms'
  * `api.ts`: one module per subject, so neither grows a dependency on the other.
  *
  * **What is seeded here is the administrator's half.** A document type with a
- * form binding and a numbering rule is configuration, and configuring it
- * through the UI is FR-DTYPE's screen — which Sprint 9 does not build. Doing it
- * over the API is what lets the browser flow be about the *document*, which is
- * what #172 AC5 asks to see driven.
+ * form binding and a numbering rule is configuration. The type screen exists
+ * and has its own flow (`configure-a-document-type.spec.ts`), so
+ * `createDocumentType` is kept for the specs that are not about the type:
+ * seeding it over the API is what lets those flows be about the *document*,
+ * which is what #172 AC5 asks to see driven.
  */
 
 export interface SeededDocumentType {
@@ -52,20 +53,35 @@ export async function createDocumentType(
 
   const id = ((await created.json()) as { data: { id: string } }).data.id
 
-  // `GLOBAL` rather than `YEAR`: the assertion downstream is that a *number
-  // appeared*, and a scope whose bucket depends on the calendar would make the
-  // expected number depend on when the suite runs.
+  await giveNumberingRule(session, id, `PR-${runSuffix()}-{sequence}`)
+
+  return { id, typeCode, name }
+}
+
+/**
+ * Gives a document type its numbering rule, which a submit needs.
+ *
+ * Exported for a type made **through a screen** (#426 AC6): that flow is about
+ * the workflow the type binds, so the rule is seeded rather than driven.
+ *
+ * `GLOBAL` rather than `YEAR`: the assertion downstream is that a *number
+ * appeared*, and a scope whose bucket depends on the calendar would make the
+ * expected number depend on when the suite runs.
+ */
+export async function giveNumberingRule(
+  session: ApiSession,
+  documentTypeId: string,
+  ruleTemplate: string,
+): Promise<void> {
   const numbering = await session.context.put(
-    `${API_PREFIX}/document-types/${id}/numbering-rule`,
-    { data: { ruleTemplate: `PR-${runSuffix()}-{sequence}`, sequenceScope: 'GLOBAL' } },
+    `${API_PREFIX}/document-types/${documentTypeId}/numbering-rule`,
+    { data: { ruleTemplate, sequenceScope: 'GLOBAL' } },
   )
 
   expect(
     numbering.ok(),
     `seeding the numbering rule failed: ${numbering.status()} ${await numbering.text()}`,
   ).toBeTruthy()
-
-  return { id, typeCode, name }
 }
 
 /**
