@@ -243,11 +243,15 @@ While the major version is `0`, the public API may change in any release.
 - **Icons come from `@lucide/vue`** ([#698](https://github.com/sujanto-gaws/kelir/issues/698)).
   `lucide-vue-next` is deprecated on npm, and its successor from the same
   project, `@lucide/vue`, replaces it at exactly 1.54.0 in every import. A
-  configured menu's `icon` name resolves the same way. The navigation's
-  name-to-icon lookup ships the whole set on first load, as before, and the
-  successor's set is larger: the first load grows from 245,578 to 280,290
-  bytes gzipped. ESLint now refuses `lucide-vue-next`, and the other packages
-  ADR-0046 names.
+  configured menu's `icon` name resolves as it did, old names included.
+  **The icon set is off the first load**: the navigation looked a configured
+  entry's icon up in the whole package, which put all of it on every
+  sign-in, and the successor's larger set grew that from 245,578 to 280,290
+  bytes gzipped. Each configured icon now loads in a chunk of its own
+  (`layouts/menuIcon.ts`), and first load is 93,623 bytes gzipped (272,688
+  raw, from 1,143,298). `check:bundle` fails if first load carries more than
+  100 of the package's modules; it carries 28. ESLint now refuses
+  `lucide-vue-next`, and the other packages ADR-0046 names.
 
 ### Fixed
 
