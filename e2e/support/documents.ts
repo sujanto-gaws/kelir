@@ -11,10 +11,11 @@ import type { SeededForm } from './forms'
  * `api.ts`: one module per subject, so neither grows a dependency on the other.
  *
  * **What is seeded here is the administrator's half.** A document type with a
- * form binding and a numbering rule is configuration, and configuring it
- * through the UI is FR-DTYPE's screen — which Sprint 9 does not build. Doing it
- * over the API is what lets the browser flow be about the *document*, which is
- * what #172 AC5 asks to see driven.
+ * form binding and a numbering rule is configuration. The type screen exists
+ * and has its own flow (`configure-a-document-type.spec.ts`), so
+ * `createDocumentType` is kept for the specs that are not about the type:
+ * seeding it over the API is what lets those flows be about the *document*,
+ * which is what #172 AC5 asks to see driven.
  */
 
 export interface SeededDocumentType {

@@ -11,7 +11,8 @@ import { createApprover, type SeededApprover } from '../support/workflow'
 /**
  * An administrator builds a workflow in the editor, publishes it and binds it
  * to a document type, and a document is then approved through it from somebody
- * else's inbox (#426 AC6; FR-RAD-009, FR-WF-004/006/013, FR-WF-018).
+ * else's inbox (#426 AC6; FR-RAD-009, FR-WF-004/006/013/015, and FR-WF-018
+ * for create, edit and publish; deprecate joins at row 6b, #713).
  *
  * **The assertion is not that the editor renders.** It is the rule
  * `build-a-form.spec.ts` follows: *a criterion that says X can is not met by
