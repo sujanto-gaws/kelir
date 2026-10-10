@@ -177,24 +177,33 @@ While the major version is `0`, the public API may change in any release.
   arrow keeps both ends. **It is laid out automatically every time it is
   opened, and no layout is stored**: nothing is written into the definition,
   and `jwss-meta-v1.0.0.json` is unchanged. It follows the draft as it changes,
-  an undo and a save's reply included, and nothing in it edits. Zoom in, zoom
-  out and fit are named buttons a keyboard reaches. The graph loads only when
+  an undo and a save's reply included, and nothing in it edits; an edit to
+  the name, key or description draws nothing, so it keeps the reader's zoom
+  and lays nothing out again. The initial state is drawn at the top wherever
+  it is declared. Zoom in, zoom out and fit are named buttons a keyboard
+  reaches. A screen reader hears each transition by its action, its two
+  states and whether a condition decides it, and no state is described as
+  something to move or delete. The graph loads only when
   its tab is first opened, and `npm run check:bundle` holds its libraries and
   their stylesheets off the first-load path. The check now also reads each
-  first-load chunk's CSS, which it could not see before.
+  first-load chunk's CSS, which it could not see before, and counts a
+  stylesheet imported `?inline` as the JavaScript it ships in.
 - **Three runtime dependencies, pinned exactly**, for the graph above:
   `@vue-flow/core` 1.48.2, `@vue-flow/controls` 1.1.3 and `@dagrejs/dagre`
   3.1.1, all MIT. They bring `@dagrejs/graphlib` 4.0.5, `@vueuse/core`,
   `@vueuse/shared` and `@vueuse/metadata` 10.11.1, `vue-demi` 0.14.10 and
   `@types/web-bluetooth` 0.0.20, all MIT. None of them is on the first-load
-  path; the graph's chunk is 218.12 kB, 72.47 kB gzipped, with a 4.11 kB
+  path; the graph's chunk is 218.87 kB, 72.75 kB gzipped, with a 4.11 kB
   stylesheet. Kelir code does not import `@vueuse/core` itself.
 - **ADR-0046 is adopted, and lint refuses the packages it turned down**
   ([#687](https://github.com/sujanto-gaws/kelir/issues/687), the first of plan
   19's rows 10 and 11 to add a dependency it names). `eslint.config.js` gains
   its first `no-restricted-imports` rule. It names zod, `@vueuse/core`,
   `reka-ui`, `vue-sonner`, `@lucide/vue`, `json-logic-js`, `vuedraggable`,
-  `elkjs` and `dagre`, each with its subpaths and a message citing the record.
+  `elkjs` and `dagre`, each with its subpaths and a message citing the record,
+  and a `no-restricted-syntax` rule from the same list refuses an `import()`
+  of any of them. Both cover `.ts`, `.mts`, `.cts`, `.tsx`, `.vue`, `.js` and
+  `.mjs`.
   `@dagrejs/dagre` is not caught by the `dagre` entry.
 
 ### Changed
