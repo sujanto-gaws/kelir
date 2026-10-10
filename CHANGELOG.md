@@ -110,7 +110,9 @@ While the major version is `0`, the public API may change in any release.
   other way round, `ACME_` beside `ACME`. The detail does not name the other
   tenant. A deleted tenant's code does not block; a code identical to any
   tenant's, live or deleted, is still 409 `CONFLICT` from the unique index, as
-  before. Until now such a tenant was created,
+  before, unless a live tenant's prefix overlaps it, which is answered 422
+  first: with `GONE` deleted and `GONE__X` live, creating `GONE` again is the
+  422. Until now such a tenant was created,
   and the names the two shared answered `SECRET_NAME_NOT_PERMITTED` for both.
 
 - **The SRS names the builder pair** ([#685](https://github.com/sujanto-gaws/kelir/issues/685)).
