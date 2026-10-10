@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Two libraries' bundle conditions, as a build assertion (issue #163 AC4; #447
- * AC4).
+ * Three libraries' bundle conditions, as a build assertion (issue #163 AC4; #447
+ * AC4; #688 G3, ADR-0046).
  *
  * **D-10 bought a 588 KB gzipped evaluator on one condition: it stays off the
  * first-load path.** `lib/jsonlogic.ts` reaches for it through a dynamic
@@ -15,6 +15,10 @@
  * the chart through `defineAsyncComponent`, and a static `import` of
  * `@unovis/vue` on the page, the layout or anything they share puts d3 in front
  * of every sign-in the same silent way.
+ *
+ * **#688 took the form builder's drag-and-drop library on the same condition**
+ * (ADR-0046 §5): `vue-draggable-plus`, with the Sortable it carries, is
+ * imported by the canvas components alone, on the builder's lazy route.
  *
  * **No unit test can see that.** A chunk graph is a property of the build, and
  * the module a test imports is reachable either way. So the condition is
@@ -88,6 +92,18 @@ const SUBJECTS = [
       '  src/features/dashboard/DocumentStatusChart.vue, which DashboardPage.vue loads with\n' +
       '  `defineAsyncComponent` — never by importing `@unovis/*` on a page or layout.',
   },
+  {
+    // #688 G3, ADR-0046 §5. vue-draggable-plus 0.6.1 inlines Sortable 1.15.2 in
+    // its own dist, so `sortablejs` is listed for a build that ever resolves it
+    // as a package of its own; today the first name is the one that matches.
+    name: "the form builder's drag-and-drop library",
+    packages: ['vue-draggable-plus', 'sortablejs'],
+    howToFix:
+      '  ADR-0046 took vue-draggable-plus on the basis that only the form builder pays for\n' +
+      '  it. Import it from src/features/admin/form-builder/FormCanvasList.vue and\n' +
+      '  FormBuilderPalette.vue alone, which only FormBuilderPage.vue reaches, on a\n' +
+      '  router-lazy route — never from a store, the layout, or anything they share.',
+  },
 ]
 
 /** The chunks `/` renders besides the entry. Router-lazy, and fetched by every sign-in. */
@@ -126,7 +142,32 @@ if (entries.length === 0) {
   die('the manifest declares no entry chunk, so nothing below was actually checked')
 }
 
-const missingRoots = HOME_ROUTE.filter((key) => !manifest[key])
+/**
+ * The manifest key of the chunk a home-route module loads as.
+ *
+ * Its own path when the chunk is that module's facade, which is the usual case.
+ * **When the chunk also exports to other chunks, Vite keys it `_<name>-<hash>.js`
+ * instead**: since #688, `AppLayout.vue`'s chunk holds the icons the layout
+ * imports by name, and the lazily loaded menu-icon map imports them from it.
+ * Such a chunk is still what the router loads, so it is found by its `name`,
+ * as the one dynamic entry of that name; two would be ambiguous, and are
+ * reported as missing rather than guessed at.
+ */
+function homeChunk(source) {
+  if (manifest[source]) {
+    return source
+  }
+
+  const name = source.slice(source.lastIndexOf('/') + 1).replace(/\.\w+$/, '')
+  const named = Object.keys(manifest).filter(
+    (key) => key.startsWith('_') && manifest[key].name === name && manifest[key].isDynamicEntry,
+  )
+
+  return named.length === 1 ? named[0] : null
+}
+
+const homeChunks = HOME_ROUTE.map(homeChunk)
+const missingRoots = HOME_ROUTE.filter((_, at) => homeChunks[at] === null)
 
 if (missingRoots.length > 0) {
   // A renamed page would otherwise shrink "first load" back to the entry, which
@@ -141,7 +182,7 @@ if (missingRoots.length > 0) {
 
 // --- First load: the entry and the home route, through static imports -------
 const reached = new Set()
-const queue = [...entries, ...HOME_ROUTE]
+const queue = [...entries, ...homeChunks]
 
 while (queue.length > 0) {
   const key = queue.shift()
@@ -228,6 +269,61 @@ for (const subject of SUBJECTS) {
       `${split.length} split chunk(s), ${payload.length} payload asset(s)`,
   )
 }
+
+// --- The icon set: a handful of its modules on first load, never the set ----
+//
+// **A different shape of condition, so a different check** (#688, after #698).
+// `@lucide/vue` belongs on first load: the layout draws its own icons, and a
+// named import tree-shakes to those. What does not belong there is the *set*:
+// `import * as` the package, which the layout did to look up a configured
+// menu's icon by name, ships all ~1,870 icons to every sign-in — 34.7 KB
+// gzipped more on the swap to `@lucide/vue`. So this counts the package's
+// modules on first-load chunks rather than asking whether it is there at all,
+// from `chunk-package-modules.json`, which `vite.config.ts` writes beside
+// `chunk-packages.json`. Menu icons are loaded one per chunk by
+// `src/layouts/menuIcon.ts`.
+const ICON_PACKAGE = '@lucide/vue'
+// 28 on 2026-10-10: the layout's and the shared components' own icons, and the
+// package's few runtime modules. The set is 1,870, so the limit leaves room for
+// many more named imports and none for the barrel.
+const ICON_MODULE_LIMIT = 100
+const moduleCounts = readBuild(
+  'chunk-package-modules.json',
+  "vite.config.ts's `kelir-chunk-packages` plugin",
+)
+const iconModulesIn = (file) => moduleCounts[file]?.[ICON_PACKAGE] ?? 0
+const iconModulesTotal = Object.keys(moduleCounts).reduce((sum, file) => sum + iconModulesIn(file), 0)
+const iconModulesFirstLoad = [...firstLoadFiles].reduce((sum, file) => sum + iconModulesIn(file), 0)
+
+if (iconModulesTotal <= ICON_MODULE_LIMIT) {
+  die(
+    `the build carries ${iconModulesTotal} ${ICON_PACKAGE} module(s) in all, no more than the\n` +
+      `  first-load limit of ${ICON_MODULE_LIMIT}, so the check below would pass by not finding\n` +
+      '  the set. Either menu icons stopped being loaded one per chunk — in which case\n' +
+      '  this check should change with that decision — or the build is stale.',
+  )
+}
+
+if (iconModulesFirstLoad > ICON_MODULE_LIMIT) {
+  const heaviest = [...firstLoadFiles]
+    .filter((file) => iconModulesIn(file) > 0)
+    .sort((left, right) => iconModulesIn(right) - iconModulesIn(left))
+    .slice(0, 3)
+
+  die(
+    `first load carries ${iconModulesFirstLoad} ${ICON_PACKAGE} modules, over the limit of ` +
+      `${ICON_MODULE_LIMIT}: the icon set is\n  on the first-load path. Heaviest:\n\n` +
+      heaviest.map((file) => `    ${file} (${iconModulesIn(file)})`).join('\n') +
+      '\n\n  Import icons by name, never `import * as` the package. A configured menu icon\n' +
+      '  is data: draw it with `menuIcon()` from src/layouts/menuIcon.ts, which loads\n' +
+      '  each icon in a chunk of its own.',
+  )
+}
+
+console.log(
+  `✓ the ${ICON_PACKAGE} icon set is off the first-load path — ` +
+    `${iconModulesFirstLoad} of its ${iconModulesTotal} module(s) on first load (limit ${ICON_MODULE_LIMIT})`,
+)
 
 console.log(
   `  ${reached.size} chunk(s) on first load: the entry and ${HOME_ROUTE.length} home-route chunk(s), ` +

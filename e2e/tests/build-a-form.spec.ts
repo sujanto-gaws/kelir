@@ -86,7 +86,9 @@ test('an administrator builds a form through a screen, and a document is raised 
   await page.getByTestId('label-field_1').fill('Reference')
   await page.getByTestId('required-field_1').check()
 
-  await page.getByTestId('add-field').click()
+  // Retargeted by #688 A1: the flat builder's *Add field* is the palette's
+  // *Text field*, which adds to the form while a field is selected.
+  await page.getByTestId('palette-textfield').click()
 
   await page.getByTestId('key-field_2').fill('amount')
   await page.getByTestId('label-field_2').fill('Amount')

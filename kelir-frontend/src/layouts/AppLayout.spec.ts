@@ -1,6 +1,6 @@
 import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 
 import AppLayout from './AppLayout.vue'
@@ -8,6 +8,7 @@ import { registerSessionBridge } from '@/api/session'
 import {
   installFakeBackend,
   itemBody,
+  pageBody,
   type FakeBackendHandle,
   type FakeReply,
 } from '@/lib/testing/fake-backend'
@@ -29,6 +30,7 @@ function profileBody(permissions: string[]): unknown {
 describe('AppLayout', () => {
   let backend: FakeBackendHandle
   let permissions: string[]
+  let menus: unknown[]
   let router: Router
 
   beforeEach(() => {
@@ -36,7 +38,12 @@ describe('AppLayout', () => {
     window.localStorage.clear()
 
     permissions = []
+    menus = []
     backend = installFakeBackend((request): FakeReply => {
+      if (request.url.startsWith('/rad/menus')) {
+        return { status: 200, body: pageBody(menus) }
+      }
+
       if (request.url === '/auth/login') {
         return {
           status: 200,
@@ -76,6 +83,11 @@ describe('AppLayout', () => {
         { path: '/admin/external-systems', name: 'admin-external-systems', component: blank },
         { path: '/admin/integration-logs', name: 'admin-integration-logs', component: blank },
         { path: '/admin/workflows', name: 'admin-workflows', component: blank },
+        { path: '/admin/menus', name: 'admin-menus', component: blank },
+        { path: '/forms', component: blank },
+        { path: '/mystery', component: blank },
+        { path: '/approvals', component: blank },
+        { path: '/reports', component: blank },
       ],
     })
   })
@@ -155,6 +167,84 @@ describe('AppLayout', () => {
     permissions = ['workflow:definition:read']
 
     expect((await renderSignedIn()).find('a[href="/admin/workflows"]').exists()).toBe(true)
+  })
+
+  function menuEntry(id: string, label: string, icon: string, sortOrder: number) {
+    return {
+      id,
+      menuKey: id,
+      label,
+      icon,
+      parentMenuId: null,
+      routePath: `/${id}`,
+      requiredPermission: null,
+      source: 'CONFIG',
+      sortOrder,
+      isEnabled: true,
+      createdAt: '2026-10-10T00:00:00Z',
+      updatedAt: '2026-10-10T00:00:00Z',
+    }
+  }
+
+  /** Lets each configured icon's own chunk load, as a browser fetches it. */
+  async function iconsLoaded(): Promise<void> {
+    for (let round = 0; round < 4; round += 1) {
+      await vi.dynamicImportSettled()
+      await flushPromises()
+    }
+  }
+
+  /**
+   * **#698: a configured entry's `icon` is looked up by name in `@lucide/vue`**,
+   * converted from kebab-case as the namespace lookup did. Since #688's fix to
+   * the swap's first-load growth, each icon is loaded on its own
+   * (`menuIcon.ts`), so a renamed export or a broken loader would turn every
+   * tenant's icon into the fallback with nothing failing but this.
+   */
+  it('draws a configured entry with the Lucide icon its name gives', async () => {
+    menus = [
+      menuEntry('forms', 'Forms', 'file-cog', 900),
+      menuEntry('mystery', 'Mystery', 'not-an-icon-anywhere', 910),
+    ]
+    permissions = ['rad:menu:read']
+
+    const wrapper = await renderSignedIn()
+
+    await iconsLoaded()
+
+    const named = wrapper.find('[data-testid="nav-config:forms"] svg')
+    const unknown = wrapper.find('[data-testid="nav-config:mystery"] svg')
+
+    expect(named.classes()).toContain('lucide-file-cog')
+    // An unknown name falls back to the neutral icon rather than to nothing.
+    expect(unknown.classes()).toContain('lucide-circle')
+  })
+
+  it('loads a menu icon on its own, after the menu renders, and resolves an old name', async () => {
+    menus = [
+      menuEntry('approvals', 'Approvals', 'alert-triangle', 900),
+      menuEntry('reports', 'Reports', 'ChartBar', 910),
+    ]
+    permissions = ['rad:menu:read']
+
+    const wrapper = await renderSignedIn()
+
+    await flushPromises()
+
+    // The entries are drawn before their icons arrive: the icon is a chunk of
+    // its own, not part of the layout.
+    expect(wrapper.find('[data-testid="nav-config:approvals"]').text()).toContain('Approvals')
+
+    await iconsLoaded()
+
+    // `alert-triangle` is the old name `@lucide/vue` still exports for
+    // `triangle-alert`; a PascalCase name passes through as it always did.
+    expect(wrapper.find('[data-testid="nav-config:approvals"] svg').classes()).toContain(
+      'lucide-triangle-alert',
+    )
+    expect(wrapper.find('[data-testid="nav-config:reports"] svg').classes()).toContain(
+      'lucide-chart-bar',
+    )
   })
 
   it('names the signed-in user', async () => {

@@ -95,6 +95,7 @@ function chunkPackages(): Plugin {
     apply: 'build',
     generateBundle(_options, bundle) {
       const packages: Record<string, string[]> = {}
+      const modules: Record<string, Record<string, number>> = {}
 
       for (const output of Object.values(bundle)) {
         if (output.type !== 'chunk') {
@@ -102,16 +103,19 @@ function chunkPackages(): Plugin {
         }
 
         const names = new Set<string>()
+        const counts: Record<string, number> = {}
 
         for (const [id, module] of Object.entries(output.modules)) {
           const name = packageOf(id)
 
           if (name !== null && module.renderedLength > 0) {
             names.add(name)
+            counts[name] = (counts[name] ?? 0) + 1
           }
         }
 
         packages[output.fileName] = [...names].sort()
+        modules[output.fileName] = counts
       }
 
       this.emitFile({
@@ -119,6 +123,72 @@ function chunkPackages(): Plugin {
         fileName: '.vite/chunk-packages.json',
         source: `${JSON.stringify(packages, null, 2)}\n`,
       })
+      // How many of each package's modules a chunk carries. A package that
+      // ships one module per item, as an icon set does, is only "on first
+      // load" in the sense that matters when it is there by the hundred (#688).
+      this.emitFile({
+        type: 'asset',
+        fileName: '.vite/chunk-package-modules.json',
+        source: `${JSON.stringify(modules, null, 2)}\n`,
+      })
+    },
+  }
+}
+
+/** The id a configured menu icon's alias map is imported by. */
+const LUCIDE_ALIASES = 'virtual:lucide-icon-aliases'
+
+/**
+ * `virtual:lucide-icon-aliases`: the Lucide export names that are not the
+ * PascalCase of their own icon file, each mapped to that file (#688).
+ *
+ * **Why it exists.** A configured menu entry names its icon as data
+ * (`layouts/menuIcon.ts`), and each icon is loaded on its own from
+ * `@lucide/vue`'s per-icon modules, keyed by file name. A renamed icon keeps
+ * its old name only as an extra export of the package's barrel —
+ * `AlertTriangle` for `triangle-alert.mjs` — and the barrel is the whole set.
+ * So the alias names are read from it here, at build time, and the map is
+ * imported lazily, only for a name no file carries.
+ *
+ * The `…Icon` and `Lucide…` spellings of every name are left out: a menu
+ * names an icon in kebab-case, and both would double the map for spellings
+ * nobody types.
+ */
+function lucideIconAliases(): Plugin {
+  const resolved = `\0${LUCIDE_ALIASES}`
+
+  return {
+    name: 'kelir-lucide-icon-aliases',
+    resolveId: (id) => (id === LUCIDE_ALIASES ? resolved : null),
+    load(id) {
+      if (id !== resolved) {
+        return null
+      }
+
+      const barrel = readFileSync(
+        fileURLToPath(
+          new URL('./node_modules/@lucide/vue/dist/esm/lucide-vue.mjs', import.meta.url),
+        ),
+        'utf8',
+      )
+      const pascal = (kebab: string) =>
+        kebab
+          .split('-')
+          .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+          .join('')
+      const aliases: Record<string, string> = {}
+
+      for (const [, names, file] of barrel.matchAll(
+        /export \{([^}]*)\} from '\.\/icons\/([^']+)\.mjs'/g,
+      )) {
+        for (const name of names.split(',').map((part) => part.replace('default as', '').trim())) {
+          if (name !== pascal(file) && !name.endsWith('Icon') && !name.startsWith('Lucide')) {
+            aliases[name] = file
+          }
+        }
+      }
+
+      return `export default ${JSON.stringify(aliases)}\n`
     },
   }
 }
@@ -135,7 +205,13 @@ const { version } = JSON.parse(
 ) as { version: string }
 
 export default defineConfig({
-  plugins: [vue(), tailwindcss(), versionAsset(version, buildSha()), chunkPackages()],
+  plugins: [
+    vue(),
+    tailwindcss(),
+    versionAsset(version, buildSha()),
+    chunkPackages(),
+    lucideIconAliases(),
+  ],
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),

@@ -166,6 +166,28 @@ While the major version is `0`, the public API may change in any release.
   `deprecateWorkflowDefinition`, and the shared confirmation dialog takes a
   slot for what one sentence cannot say.
 
+- **The form builder nests components on a canvas**
+  ([#688](https://github.com/sujanto-gaws/kelir/issues/688), part 1, decision
+  **D-86** A; FR-RAD-013). The flat list of root components becomes a palette
+  of the 18 types the renderer draws and a recursive canvas: panels,
+  fieldsets, every column and tab slot, and a data grid's row template, at any
+  depth. Every drag has a keyboard equivalent that calls the same change:
+  each list has *Add component*, and each card *Move up*, *Move down*,
+  *Move to…* (only the destinations the nesting rules allow, named by path)
+  and *Remove*, which asks first for a container that holds anything and takes
+  the lookup bindings of its subtree with it. Focus follows each change and a
+  live region announces it. The shipped editor is mounted for the selected
+  node and writes only what its role allows. A node the builder does not edit
+  (`steps`, `file`, `signature`, `repeater`, an unknown type, a role that
+  disagrees with its type) is an *unsupported* card, saved exactly as loaded.
+  A refusal's S10.3 path is resolved into the nested node it names. *Add rule*
+  now writes `params` and `message`, which the meta-schema requires; it was
+  refused at save without them. Read-only on a published revision or without
+  `rad:form:update`. `vue-draggable-plus` 0.6.1 is the one new dependency
+  ([ADR-0046](docs/architectures/adr/0046.%20The%20Builders%20Drag%20with%20Vue%20Draggable%20Plus%20and%20Draw%20with%20Vue%20Flow%20and%20Dagre,%20Off%20the%20First-Load%20Path.md)),
+  on the builder's lazy route only, held there by `check:bundle`. Expressions
+  stay raw JSON until part 2.
+
 ### Changed
 
 - **The texts that told an administrator to retire a workflow revision now
@@ -217,6 +239,19 @@ While the major version is `0`, the public API may change in any release.
   publish holds the roles it names until it commits, so a role delete
   running at the same moment cannot slip past it. Revisions already
   published are not re-checked.
+
+- **Icons come from `@lucide/vue`** ([#698](https://github.com/sujanto-gaws/kelir/issues/698)).
+  `lucide-vue-next` is deprecated on npm, and its successor from the same
+  project, `@lucide/vue`, replaces it at exactly 1.54.0 in every import. A
+  configured menu's `icon` name resolves as it did, old names included.
+  **The icon set is off the first load**: the navigation looked a configured
+  entry's icon up in the whole package, which put all of it on every
+  sign-in, and the successor's larger set grew that from 245,578 to 280,290
+  bytes gzipped. Each configured icon now loads in a chunk of its own
+  (`layouts/menuIcon.ts`), and first load is 93,623 bytes gzipped (272,688
+  raw, from 1,143,298). `check:bundle` fails if first load carries more than
+  100 of the package's modules; it carries 28. ESLint now refuses
+  `lucide-vue-next`, and the other packages ADR-0046 names.
 
 ### Fixed
 

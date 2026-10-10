@@ -1,11 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
-import * as LUCIDE from 'lucide-vue-next'
 import {
   Bell,
   Building2,
-  Circle,
   FileCog,
   FileText,
   GitBranch,
@@ -22,7 +20,7 @@ import {
   UserRoundCheck,
   UserCog,
   Users,
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 
 import { listMenus } from '@/api/rad'
 import { Button } from '@/components/ui/button'
@@ -32,6 +30,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useNotificationStore } from '@/stores/notifications'
 import type { MenuEntry } from '@/types/rad'
 
+import { menuIcon } from './menuIcon'
 import { mergeNavigation } from './navigation'
 
 const appStore = useAppStore()
@@ -212,22 +211,12 @@ const visibleNavigation = computed(() =>
   mergeNavigation(navigation, configuredMenus.value, (permission) => auth.can(permission)),
 )
 
-/** A configured entry's Lucide icon, or the fallback every entry gets. */
+/**
+ * An entry's icon: a built-in's own, or a configured entry's, loaded by name
+ * on its own (`menuIcon.ts`) so the icon set stays off the first load.
+ */
 function iconFor(item: { icon: unknown; iconName: string | null }): unknown {
-  if (item.icon) {
-    return item.icon
-  }
-
-  const icons = LUCIDE as Record<string, unknown>
-  const pascal = (item.iconName ?? '')
-    .split('-')
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join('')
-
-  // An icon name the bundle does not have renders as the neutral one rather
-  // than as nothing: the icon set is the client's and a definition outlives a
-  // release of it.
-  return icons[pascal] ?? Circle
+  return item.icon ?? menuIcon(item.iconName)
 }
 
 const currentTitle = computed(() =>

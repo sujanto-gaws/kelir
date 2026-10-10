@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { ArrowDown, ArrowUp, Plus, Trash2 } from 'lucide-vue-next'
+import { ArrowDown, ArrowUp, Plus, Trash2 } from '@lucide/vue'
 
 import { Alert } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
