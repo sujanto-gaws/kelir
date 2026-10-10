@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Two libraries' bundle conditions, as a build assertion (issue #163 AC4; #447
- * AC4).
+ * Three libraries' bundle conditions, as a build assertion (issue #163 AC4; #447
+ * AC4; #687).
  *
  * **D-10 bought a 588 KB gzipped evaluator on one condition: it stays off the
  * first-load path.** `lib/jsonlogic.ts` reaches for it through a dynamic
@@ -42,7 +42,29 @@
  * Unovis**: it is reached through a component, so its code sits in
  * `DocumentStatusChart.vue`'s chunk and no key names it. So `vite.config.ts`
  * writes `.vite/chunk-packages.json` — the packages whose code each chunk
- * renders — and every check below reads that, for both libraries alike.
+ * renders — and every check below reads that, for every library alike.
+ *
+ * # The workflow graph, and the stylesheets a chunk carries (#687)
+ *
+ * **ADR-0046 took Vue Flow and dagre for a read-only graph on the same terms.**
+ * `WorkflowEditorPage.vue` reaches `WorkflowGraph.vue` through
+ * `defineAsyncComponent`, and nothing else imports `@vue-flow/*` or
+ * `@dagrejs/*`. **`@vueuse/core` is in the subject on purpose**: it arrives as
+ * Vue Flow's own dependency, Kelir code does not import it (the lint rule
+ * says so), and a build that put it on first load for any reason is the
+ * record being reversed. Vue Flow 1.48.2's ESM build inlines the helpers it
+ * takes from `@vueuse/core` and d3, so today no chunk names either package;
+ * listing it is what catches a direct import that slipped past the lint.
+ *
+ * **Vue Flow ships two stylesheets, and the third check could not see them.**
+ * It read a first-load chunk's `assets`, and an imported stylesheet is not an
+ * asset: its rules are folded into the CSS file of the chunk that imported it,
+ * which the manifest lists under `css`. So a `import '@vue-flow/core/dist/style.css'`
+ * in `main.ts` passed. `vite.config.ts` now writes
+ * `.vite/stylesheet-packages.json`, which packages' stylesheets went into each
+ * CSS file, and the third check reads every first-load chunk's `css` against
+ * it. **A subject that ships a stylesheet must be seen in one**, so a build
+ * that stopped writing the map fails rather than checking nothing.
  *
  * # What *first load* is, and why the walk starts at three chunks
  *
@@ -88,6 +110,25 @@ const SUBJECTS = [
       '  src/features/dashboard/DocumentStatusChart.vue, which DashboardPage.vue loads with\n' +
       '  `defineAsyncComponent` — never by importing `@unovis/*` on a page or layout.',
   },
+  {
+    name: 'the workflow graph (Vue Flow and dagre)',
+    packages: [
+      '@vue-flow/core',
+      '@vue-flow/controls',
+      '@dagrejs/dagre',
+      '@dagrejs/graphlib',
+      '@vueuse/core',
+    ],
+    // Vue Flow cannot draw without its stylesheets, so a build with none
+    // carrying them is a map that stopped being written, not a clean build.
+    stylesheet: true,
+    howToFix:
+      '  ADR-0046 took Vue Flow, dagre and the @vueuse/core Vue Flow brings on the basis\n' +
+      '  that only the workflow graph pays for them. Reach them through\n' +
+      '  src/features/workflow-builder/WorkflowGraph.vue, which WorkflowEditorPage.vue loads\n' +
+      "  with `defineAsyncComponent`, and import Vue Flow's stylesheets there — never\n" +
+      '  `@vue-flow/*`, `@dagrejs/*`, `@vueuse/core` or their CSS on a page, layout or main.ts.',
+  },
 ]
 
 /** The chunks `/` renders besides the entry. Router-lazy, and fetched by every sign-in. */
@@ -117,6 +158,10 @@ function readBuild(file, whatWritesIt) {
 
 const manifest = readBuild('manifest.json', "Vite's `build.manifest`")
 const carried = readBuild('chunk-packages.json', "vite.config.ts's `kelir-chunk-packages` plugin")
+const styled = readBuild(
+  'stylesheet-packages.json',
+  "vite.config.ts's `kelir-chunk-packages` plugin",
+)
 
 const entries = Object.keys(manifest).filter((key) => manifest[key].isEntry)
 
@@ -157,6 +202,7 @@ while (queue.length > 0) {
 
 const firstLoadFiles = new Set([...reached].map((key) => manifest[key].file))
 const firstLoadAssets = new Set([...reached].flatMap((key) => manifest[key].assets ?? []))
+const firstLoadStylesheets = new Set([...reached].flatMap((key) => manifest[key].css ?? []))
 
 for (const subject of SUBJECTS) {
   const carries = (file) => (carried[file] ?? []).some((name) => subject.packages.includes(name))
@@ -164,6 +210,9 @@ for (const subject of SUBJECTS) {
   const payload = Object.keys(manifest)
     .filter((key) => !key.endsWith('.js') && subject.packages.some((name) => key.includes(name)))
     .map((key) => manifest[key].file)
+  const stylesheets = Object.keys(styled).filter((file) =>
+    styled[file].some((name) => subject.packages.includes(name)),
+  )
 
   if (carriers.length === 0) {
     die(
@@ -204,14 +253,30 @@ for (const subject of SUBJECTS) {
     )
   }
 
-  // --- 3. Nor does a first-load chunk carry its payload as an asset ---------
+  // --- 3. Nor does a first-load chunk carry its payload: an asset, or CSS ---
   //
   // The evaluator's `.wasm` binary is the 588 KB; the JavaScript wrapper beside
   // it is under four. A build that split the wrapper and attached the binary to
   // the entry would satisfy both checks above and none of the decision. Unovis
   // ships no assets today, so for it this holds over an empty set — said below
   // as a count rather than left implicit.
-  const eager = payload.filter((file) => firstLoadAssets.has(file))
+  //
+  // A stylesheet is the same payload by another route (#687): imported from a
+  // first-load module, its rules land in a first-load chunk's `css`, and no
+  // JavaScript chunk or asset shows it.
+  if (subject.stylesheet && stylesheets.length === 0) {
+    die(
+      `no stylesheet in the build carries ${subject.name}'s CSS, so the stylesheet half of\n` +
+        '  this check would pass by not finding it. Either .vite/stylesheet-packages.json\n' +
+        "  stopped recording stylesheets (vite.config.ts's `kelir-chunk-packages`), or the\n" +
+        "  library's stylesheets are no longer imported, and it cannot draw without them.",
+    )
+  }
+
+  const eager = [
+    ...payload.filter((file) => firstLoadAssets.has(file)),
+    ...stylesheets.filter((file) => firstLoadStylesheets.has(file)),
+  ]
 
   if (eager.length > 0) {
     die(
@@ -225,7 +290,8 @@ for (const subject of SUBJECTS) {
 
   console.log(
     `✓ ${subject.name} is off the first-load path — ` +
-      `${split.length} split chunk(s), ${payload.length} payload asset(s)`,
+      `${split.length} split chunk(s), ${payload.length} payload asset(s), ` +
+      `${stylesheets.length} stylesheet(s)`,
   )
 }
 

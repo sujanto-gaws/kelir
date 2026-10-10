@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, provide, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, h, onMounted, provide, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Plus, Redo2, Undo2 } from 'lucide-vue-next'
 
@@ -23,6 +23,7 @@ import { Select } from '@/components/ui/select'
 import { Table, TableBody, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Textarea } from '@/components/ui/textarea'
 import { useFormErrors } from '@/composables/useFormErrors'
+import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth'
 import type { WorkflowDefinition } from '@/types/workflow'
 
@@ -39,7 +40,8 @@ import { addressOf, placeVerdict } from './workflowVerdict'
  * The workflow editor (FR-WF-018; #426 AC1–AC5, **D-95** A).
  *
  * **A state list with a transition table under each state.** That is the
- * editor D-95 chose; a read-only graph of the same definition is #687's.
+ * editor D-95 chose. A read-only graph of the same definition is the view
+ * beside it (#687): `WorkflowGraph`, behind the *Graph* tab.
  *
  * **What this screen holds:**
  *
@@ -119,6 +121,46 @@ const offerDeprecate = computed(
 )
 
 const deprecation = useWorkflowDeprecation()
+
+/**
+ * Which view of the states and transitions is shown: the list, which edits,
+ * or the read-only graph (#687, **D-95** A).
+ *
+ * **The list stays mounted while the graph shows**, hidden: a logic builder
+ * holding an operand not yet filled in keeps it. **The graph is mounted only
+ * while it shows**, so every time it is opened it is laid out afresh.
+ */
+const view = ref<'list' | 'graph'>('list')
+
+/**
+ * The graph, **off the first-load path** ([ADR-0046]). Vue Flow and dagre are
+ * imported by `WorkflowGraph.vue` alone, and this edge is what keeps them a
+ * chunk of their own: fetched the first time somebody opens the *Graph* tab,
+ * never by a session that does not. `scripts/check-bundle-split.mjs` fails the
+ * build when they are not.
+ *
+ * [ADR-0046]: ../../../../docs/architectures/adr/0046.%20The%20Builders%20Drag%20with%20Vue%20Draggable%20Plus%20and%20Draw%20with%20Vue%20Flow%20and%20Dagre,%20Off%20the%20First-Load%20Path.md
+ */
+const WorkflowGraph = defineAsyncComponent({
+  loader: () => import('./WorkflowGraph.vue'),
+  loadingComponent: () =>
+    h(
+      'p',
+      { class: 'text-sm text-muted-foreground', 'data-testid': 'workflow-graph-loading' },
+      'Drawing the graph…',
+    ),
+  errorComponent: () =>
+    h(
+      'p',
+      { class: 'text-sm text-muted-foreground', 'data-testid': 'workflow-graph-error' },
+      'The graph could not be drawn. The list holds the same workflow.',
+    ),
+})
+
+const VIEWS = [
+  { value: 'list', label: 'List' },
+  { value: 'graph', label: 'Graph' },
+] as const
 
 /** Which logic builders hold an unfilled operand, by row key and field. */
 const validity = ref<Record<string, boolean>>({})
@@ -425,6 +467,14 @@ async function revise(): Promise<void> {
   }
 }
 
+// A refusal is drawn where it happened — on the state or transition it names,
+// which is in the list — so a refusal while the graph shows brings the list back.
+watch(fieldErrors, (errors) => {
+  if (view.value === 'graph' && Object.keys(errors).length > 0) {
+    view.value = 'list'
+  }
+})
+
 // One component serves `new` and every revision, so a move between them — the
 // create's replace, a new revision's push — is a load, unless it is the
 // revision already on screen.
@@ -638,7 +688,46 @@ onMounted(() => {
         </div>
       </div>
 
-      <div class="space-y-4">
+      <div class="flex flex-wrap gap-1 border-b border-border" role="tablist" aria-label="View">
+        <button
+          v-for="choice in VIEWS"
+          :id="`workflow-view-${choice.value}-tab`"
+          :key="choice.value"
+          type="button"
+          role="tab"
+          :aria-selected="view === choice.value"
+          :aria-controls="`workflow-view-${choice.value}`"
+          :class="
+            cn(
+              '-mb-px border-b-2 px-3 py-2 text-sm font-medium transition-colors',
+              view === choice.value
+                ? 'border-primary text-foreground'
+                : 'border-transparent text-muted-foreground hover:text-foreground',
+            )
+          "
+          :data-testid="`view-${choice.value}`"
+          @click="view = choice.value"
+        >
+          {{ choice.label }}
+        </button>
+      </div>
+
+      <div
+        id="workflow-view-graph"
+        role="tabpanel"
+        aria-labelledby="workflow-view-graph-tab"
+        :hidden="view !== 'graph'"
+      >
+        <WorkflowGraph v-if="view === 'graph'" :definition="definition" />
+      </div>
+
+      <div
+        id="workflow-view-list"
+        class="space-y-4"
+        role="tabpanel"
+        aria-labelledby="workflow-view-list-tab"
+        :hidden="view !== 'list'"
+      >
         <div class="flex flex-wrap items-center justify-between gap-2">
           <h3 class="text-base font-semibold">States</h3>
           <div class="flex flex-wrap gap-2">

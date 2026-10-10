@@ -88,6 +88,18 @@ function versionAsset(version: string, commit: string): Plugin {
  * **`renderedLength`, not `moduleIds`.** A module Rollup shook down to nothing
  * is still listed on the chunk, and counting a package for code that did not
  * ship would redden the check over a type-only import.
+ *
+ * # And `.vite/stylesheet-packages.json`, for what each stylesheet carries (#687)
+ *
+ * **A package's stylesheet is a payload no JavaScript chunk shows.** Vue Flow
+ * needs two stylesheets, and an `import` of one from `main.ts` folds its rules
+ * into the entry's CSS file while every JavaScript chunk stays clean. So this
+ * also writes, for each emitted CSS file, the packages whose stylesheets went
+ * into it: the stylesheet modules of the chunk that file was extracted from
+ * (`viteMetadata.importedCss`). `check-bundle-split.mjs` reads it against the
+ * manifest's `css` of every first-load chunk ([ADR-0046] §5).
+ *
+ * [ADR-0046]: ../docs/architectures/adr/0046.%20The%20Builders%20Drag%20with%20Vue%20Draggable%20Plus%20and%20Draw%20with%20Vue%20Flow%20and%20Dagre,%20Off%20the%20First-Load%20Path.md
  */
 function chunkPackages(): Plugin {
   return {
@@ -95,6 +107,7 @@ function chunkPackages(): Plugin {
     apply: 'build',
     generateBundle(_options, bundle) {
       const packages: Record<string, string[]> = {}
+      const stylesheets: Record<string, string[]> = {}
 
       for (const output of Object.values(bundle)) {
         if (output.type !== 'chunk') {
@@ -102,16 +115,29 @@ function chunkPackages(): Plugin {
         }
 
         const names = new Set<string>()
+        const styled = new Set<string>()
 
         for (const [id, module] of Object.entries(output.modules)) {
           const name = packageOf(id)
 
-          if (name !== null && module.renderedLength > 0) {
+          if (name === null) {
+            continue
+          }
+
+          if (isStylesheet(id)) {
+            // A stylesheet renders no JavaScript, so its `renderedLength` says
+            // nothing; its rules went to the chunk's own CSS file, below.
+            styled.add(name)
+          } else if (module.renderedLength > 0) {
             names.add(name)
           }
         }
 
         packages[output.fileName] = [...names].sort()
+
+        for (const file of output.viteMetadata?.importedCss ?? []) {
+          stylesheets[file] = [...new Set([...(stylesheets[file] ?? []), ...styled])].sort()
+        }
       }
 
       this.emitFile({
@@ -119,8 +145,18 @@ function chunkPackages(): Plugin {
         fileName: '.vite/chunk-packages.json',
         source: `${JSON.stringify(packages, null, 2)}\n`,
       })
+      this.emitFile({
+        type: 'asset',
+        fileName: '.vite/stylesheet-packages.json',
+        source: `${JSON.stringify(stylesheets, null, 2)}\n`,
+      })
     },
   }
+}
+
+/** Whether a module is a stylesheet, which Vite extracts into a CSS file of its chunk's own. */
+function isStylesheet(id: string): boolean {
+  return /\.css(?:$|\?)/.test(id)
 }
 
 /** The package a module belongs to, from its last `node_modules` segment; `null` for our own source. */
@@ -149,7 +185,7 @@ export default defineConfig({
    * unit test can observe either.** A build assertion can:
    * `scripts/check-bundle-split.mjs` walks this file through *static* imports
    * alone, reads which packages each reached chunk carries from
-   * `chunk-packages.json` above, and fails when either library is on the path.
+   * `chunk-packages.json` above, and fails when any of them is on the path.
    * That is the form the Sprint 7 retrospective judged holds, having watched the
    * actions encoded in a retrospective fail and the ones encoded in a standard
    * or a test survive.
