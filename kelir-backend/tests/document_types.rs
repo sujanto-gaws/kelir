@@ -1628,3 +1628,361 @@ async fn a_revision_that_is_not_a_uuid_is_refused_by_name() {
         response.body
     );
 }
+
+// ---------------------------------------------------------------------------
+// The workflow filter, adversarially (#713, test-engineer campaign 2026-10-10)
+// ---------------------------------------------------------------------------
+//
+// The builder's nine tests above hold the predicates the filter adds. These
+// hold the seams around them: rows the filter must not double, windows it must
+// not consult, a revision of another tenant, the page cap the warning's "and N
+// more" counts past, and the permission the warning's no-read path assumes.
+//
+// # Seen to fail (coding standard §2.9)
+//
+// Each mutation was made in `document_type::repository` (or the service), the
+// binary built online against a throwaway database migrated to head, and the
+// mutation reverted. **Seen red, 2026-10-10.** The builder's nine stayed green
+// under five of the six; the tenant one reddens one of theirs as well.
+//
+// | Mutation | Reddened |
+// |---|---|
+// | `EXISTS` rewritten as a `LEFT JOIN` in `list_types` | `a_type_bound_twice_to_the_revision_is_listed_once` |
+// | `count_types` joined to the bindings, counting rows | `a_type_bound_twice_to_the_revision_is_listed_once` |
+// | the validity window added to both statements | `a_binding_outside_its_validity_window_still_counts` |
+// | the revision's `deleted_at` added to both statements | `a_revision_soft_deleted_since_binding_still_lists_its_types` |
+// | the caller's tenant dropped, the binding matched to the type's | `another_tenants_revision_lists_nothing_of_theirs`, `another_tenants_binding_row_does_not_count` |
+// | `document-type:read` required only without the filter | `the_filter_opens_the_list_to_no_caller_without_document_type_read` |
+
+/// A published workflow revision filed under `tenant`, inserted directly: the
+/// API cannot write into a tenant the caller is not signed in to.
+async fn foreign_revision(app: &TestApp, tenant: Uuid, key: &str) -> Uuid {
+    let id = Uuid::now_v7();
+
+    sqlx::query(
+        "INSERT INTO workflow_definitions (id, tenant_id, workflow_key, name, jwss_version,
+                                           definition_json, initial_state, status,
+                                           published_at)
+         VALUES ($1, $2, $3, 'Foreign approval', '1.0.0', '{}', 'draft', 'ACTIVE', now())",
+    )
+    .bind(id)
+    .bind(tenant)
+    .bind(key)
+    .execute(&app.pool)
+    .await
+    .expect("insert the foreign revision");
+
+    id
+}
+
+/// A binding row written directly, for the states the API never writes.
+async fn insert_binding(app: &TestApp, tenant: Uuid, type_id: Uuid, workflow: Uuid, priority: i32) {
+    sqlx::query(
+        "INSERT INTO document_type_workflows
+             (id, tenant_id, document_type_id, workflow_definition_id, priority)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(tenant)
+    .bind(type_id)
+    .bind(workflow)
+    .bind(priority)
+    .execute(&app.pool)
+    .await
+    .expect("insert the binding");
+}
+
+#[tokio::test]
+async fn a_type_bound_twice_to_the_revision_is_listed_once() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let workflow = published_workflow(&app, &token, "wf_filter_twice").await;
+
+    let twice = type_bound_to(&app, &token, "FLT_TWICE", "ACTIVE", &[workflow]).await;
+    // A second live row naming the same revision, as a conditional binding
+    // ahead of a default one would: nothing in the DDL makes the pair unique.
+    insert_binding(&app, fixtures::SYSTEM_TENANT_ID, twice, workflow, 2).await;
+    type_bound_to(&app, &token, "FLT_ONCE", "ACTIVE", &[workflow]).await;
+
+    let stored: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM document_type_workflows
+         WHERE document_type_id = $1 AND workflow_definition_id = $2",
+    )
+    .bind(twice)
+    .bind(workflow)
+    .fetch_one(&app.pool)
+    .await
+    .expect("count the bindings");
+    assert_eq!(stored, 2, "the fixture holds two live rows");
+
+    let (codes, total) = listed(&app, &token, &format!("workflowDefinitionId={workflow}")).await;
+
+    assert_eq!(
+        codes,
+        ["FLT_ONCE", "FLT_TWICE"],
+        "one row per type, not per binding"
+    );
+    assert_eq!(total, 2, "meta.total counts types, not bindings");
+}
+
+#[tokio::test]
+async fn a_binding_outside_its_validity_window_still_counts() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let workflow = published_workflow(&app, &token, "wf_filter_window").await;
+
+    let closed = type_bound_to(&app, &token, "FLT_WINDOW_CLOSED", "ACTIVE", &[workflow]).await;
+    let pending = type_bound_to(&app, &token, "FLT_WINDOW_PENDING", "ACTIVE", &[workflow]).await;
+    type_bound_to(&app, &token, "FLT_WINDOW_OPEN", "ACTIVE", &[workflow]).await;
+
+    // A window that closed last year, and one that opens next year: neither
+    // routes today (`workflow_binding`), and both still name the revision.
+    sqlx::query(
+        "UPDATE document_type_workflows
+         SET valid_from = current_date - 400, valid_to = current_date - 365
+         WHERE document_type_id = $1",
+    )
+    .bind(closed)
+    .execute(&app.pool)
+    .await
+    .expect("close the window");
+    sqlx::query(
+        "UPDATE document_type_workflows
+         SET valid_from = current_date + 365, valid_to = NULL
+         WHERE document_type_id = $1",
+    )
+    .bind(pending)
+    .execute(&app.pool)
+    .await
+    .expect("defer the window");
+
+    let (codes, total) = listed(&app, &token, &format!("workflowDefinitionId={workflow}")).await;
+
+    assert_eq!(
+        codes,
+        ["FLT_WINDOW_CLOSED", "FLT_WINDOW_OPEN", "FLT_WINDOW_PENDING"]
+    );
+    assert_eq!(total, 3);
+}
+
+#[tokio::test]
+async fn a_binding_status_is_not_a_type_status_and_is_refused_by_name() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let workflow = published_workflow(&app, &token, "wf_filter_inactive").await;
+
+    type_bound_to(&app, &token, "FLT_STATUS_BOUND", "ACTIVE", &[workflow]).await;
+
+    // `INACTIVE` is the binding row's vocabulary; `status` filters the type.
+    // The filter must not make the parameter mean the other one.
+    let response = app
+        .send(
+            Method::GET,
+            &format!("/api/v1/document-types?workflowDefinitionId={workflow}&status=INACTIVE"),
+            Some(&token),
+            None,
+        )
+        .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        response.body
+    );
+    assert_eq!(
+        response.body["error"]["details"][0]["path"], "status",
+        "{}",
+        response.body
+    );
+
+    let (deprecated, total) = listed(
+        &app,
+        &token,
+        &format!("workflowDefinitionId={workflow}&status=DEPRECATED"),
+    )
+    .await;
+    assert!(deprecated.is_empty(), "{deprecated:?}");
+    assert_eq!(total, 0);
+}
+
+#[tokio::test]
+async fn the_filter_caps_a_page_at_a_hundred_and_counts_past_it() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let workflow = published_workflow(&app, &token, "wf_filter_hundred").await;
+
+    // 102 types, all but one bound: the warning names the first hundred and
+    // says how many more there are, which is only right if `meta.total`
+    // counts past the cap.
+    sqlx::query(
+        "INSERT INTO document_types (id, tenant_id, type_code, name, status)
+         SELECT gen_random_uuid(), $1, 'FLT_CAP_' || lpad(i::text, 3, '0'), 'Capped ' || i,
+                'ACTIVE'
+         FROM generate_series(1, 102) AS i",
+    )
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .execute(&app.pool)
+    .await
+    .expect("insert the types");
+    sqlx::query(
+        "INSERT INTO document_type_workflows
+             (id, tenant_id, document_type_id, workflow_definition_id)
+         SELECT gen_random_uuid(), tenant_id, id, $2
+         FROM document_types
+         WHERE tenant_id = $1 AND type_code LIKE 'FLT_CAP_%' AND type_code <> 'FLT_CAP_050'",
+    )
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .bind(workflow)
+    .execute(&app.pool)
+    .await
+    .expect("bind all but one");
+
+    let response = app
+        .send(
+            Method::GET,
+            &format!("/api/v1/document-types?workflowDefinitionId={workflow}&pageSize=500"),
+            Some(&token),
+            None,
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+
+    let rows = response.body["data"].as_array().expect("a page");
+    assert_eq!(rows.len(), 100, "a page holds at most a hundred");
+    assert_eq!(
+        response.body["meta"]["pageSize"], 100,
+        "the clamped size is echoed"
+    );
+    assert_eq!(
+        response.body["meta"]["total"], 101,
+        "the total counts past the cap"
+    );
+    assert!(
+        rows.iter().all(|row| row["typeCode"] != "FLT_CAP_050"),
+        "the unbound type is not on the page"
+    );
+
+    let (rest, total) = listed(
+        &app,
+        &token,
+        &format!("workflowDefinitionId={workflow}&page=2&pageSize=500"),
+    )
+    .await;
+    assert_eq!(rest, ["FLT_CAP_102"]);
+    assert_eq!(total, 101);
+}
+
+#[tokio::test]
+async fn another_tenants_revision_lists_nothing_of_theirs() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let other = fixtures::create_tenant(&app.pool, "TNT-DT-FOREIGN", "Foreign tenant").await;
+    let theirs = foreign_revision(&app, other, "wf_filter_foreign").await;
+    let mine = published_workflow(&app, &token, "wf_filter_home").await;
+
+    // Their type, bound to their revision, in their tenant: what the id would
+    // reveal if the filter trusted it.
+    let their_type = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO document_types (id, tenant_id, type_code, name)
+         VALUES ($1, $2, 'FLT_FOREIGN', 'Foreign')",
+    )
+    .bind(their_type)
+    .bind(other)
+    .execute(&app.pool)
+    .await
+    .expect("insert their type");
+    insert_binding(&app, other, their_type, theirs, 1).await;
+    // And one of mine, bound to my own revision, so the page is not empty for
+    // want of data.
+    type_bound_to(&app, &token, "FLT_HOME", "ACTIVE", &[mine]).await;
+
+    let response = app
+        .send(
+            Method::GET,
+            &format!("/api/v1/document-types?workflowDefinitionId={theirs}"),
+            Some(&token),
+            None,
+        )
+        .await;
+
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    assert_eq!(response.body["data"], json!([]), "{}", response.body);
+    assert_eq!(response.body["meta"]["total"], 0, "{}", response.body);
+    assert!(
+        !response.body.to_string().contains("FLT_FOREIGN"),
+        "nothing of theirs is echoed: {}",
+        response.body
+    );
+}
+
+#[tokio::test]
+async fn a_revision_soft_deleted_since_binding_still_lists_its_types() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let workflow = published_workflow(&app, &token, "wf_filter_retired_rev").await;
+
+    type_bound_to(&app, &token, "FLT_ON_RETIRED", "ACTIVE", &[workflow]).await;
+
+    // No route soft-deletes a published revision; the row can still reach the
+    // state. The binding is the type's and still names the revision, and
+    // `workflow_binding` does not consult the revision's `deleted_at` either,
+    // so the filter answers with what the binding says (characterization).
+    sqlx::query("UPDATE workflow_definitions SET deleted_at = now() WHERE id = $1")
+        .bind(workflow)
+        .execute(&app.pool)
+        .await
+        .expect("retire the revision");
+
+    let (codes, total) = listed(&app, &token, &format!("workflowDefinitionId={workflow}")).await;
+
+    assert_eq!(codes, ["FLT_ON_RETIRED"]);
+    assert_eq!(total, 1);
+}
+
+#[tokio::test]
+async fn the_filter_opens_the_list_to_no_caller_without_document_type_read() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let workflow = published_workflow(&app, &token, "wf_filter_permission").await;
+
+    type_bound_to(&app, &token, "FLT_GUARDED", "ACTIVE", &[workflow]).await;
+
+    // The warning's no-read path: a deprecator who cannot read types.
+    let role = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "ROLE-DT-DEPRECATOR",
+        &["workflow:definition:read", "workflow:definition:deprecate"],
+    )
+    .await;
+    fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "user.deprecator",
+        "deprecator@kelir.test",
+        "deprecator-only-password",
+        &[role],
+    )
+    .await;
+    let deprecator = app
+        .sign_in("user.deprecator", "deprecator-only-password")
+        .await;
+
+    let response = app
+        .send(
+            Method::GET,
+            &format!("/api/v1/document-types?workflowDefinitionId={workflow}"),
+            Some(&deprecator),
+            None,
+        )
+        .await;
+
+    assert_eq!(response.status, StatusCode::FORBIDDEN, "{}", response.body);
+    assert!(
+        !response.body.to_string().contains("FLT_GUARDED"),
+        "{}",
+        response.body
+    );
+}
