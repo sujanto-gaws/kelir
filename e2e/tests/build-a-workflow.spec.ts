@@ -36,6 +36,11 @@ import { createApprover, type SeededApprover } from '../support/workflow'
  * *Completed*. So a flow asserting only that the document was decided would
  * pass on either.
  *
+ * **A second document carries 900, and ends *Completed*.** That proves the
+ * other branch: the condition is false at or below the threshold, so the
+ * fallback decides. Without it, a condition that held for every document
+ * would pass the first leg.
+ *
  * # The logic builder is driven by keyboard alone
  *
  * Two criteria #426 inherits from #695's trace:
@@ -80,6 +85,9 @@ const TASK_NAME = 'Approve the requisition'
 const BRANCH_STATE = 'Approved above the threshold'
 const THRESHOLD = 1000
 const AMOUNT = 45_000
+/** At or below the threshold, so the condition is false and the fallback decides. */
+const SMALL_AMOUNT = 900
+const smallTitle = `Two desk lamps ${suffix}`
 
 /**
  * How long a click waits for the request it should send. Bounded below the
@@ -464,6 +472,44 @@ test('an administrator builds a workflow in the editor, and a document is approv
     await expect(history).toContainText('PENDING_APPROVAL')
     await expect(history).toContainText('APPROVE')
     await expect(history).toContainText(approver.username)
+
+    // --- **And the other branch: at or below the threshold, the fallback** ----
+    //
+    // The same type and workflow, and 900. The condition is false, so the
+    // unconditioned edge is taken and the document ends *Completed*.
+    await admin.goto('/documents/new')
+    await chooseDocumentType(admin, typeCode)
+    await admin.getByTestId('new-document-title').fill(smallTitle)
+    await admin.getByTestId('create-document').click()
+
+    await expect(admin).toHaveURL(/\/documents\/[0-9a-f-]{36}$/)
+    const smallUrl = admin.url()
+
+    await admin.locator('#jfss-amount-field').fill(String(SMALL_AMOUNT))
+    await admin.getByRole('button', { name: 'Submit request' }).click()
+
+    await expect(admin.getByTestId('document-status')).toHaveText('Pending approval')
+    await expect(admin.getByTestId('document-number')).toContainText(`WF-${suffix}-`)
+    const smallNumber = (await admin.getByTestId('document-number').textContent())?.trim() ?? ''
+
+    await decider.goto('/tasks')
+
+    const smallRow = decider.getByRole('row').filter({ hasText: smallNumber })
+    await expect(smallRow).toHaveCount(1)
+    await smallRow.getByRole('button', { name: 'Open' }).click()
+
+    await expect(decider.getByTestId('task-document')).toContainText(smallTitle)
+    await decider.getByTestId('decide-APPROVE').click()
+
+    await expect(decider.getByTestId('task-notice')).toContainText('The document is now Completed')
+
+    // Reloaded, not acted on, as above.
+    await admin.goto(smallUrl)
+
+    await expect(admin.getByTestId('document-status')).toHaveText('Completed')
+
+    await admin.getByTestId('tab-workflow').click()
+    await expect(admin.getByTestId('workflow-state')).toHaveText('Completed')
   } finally {
     await admin.close()
     await decider.close()
