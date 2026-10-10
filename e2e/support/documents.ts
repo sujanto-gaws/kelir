@@ -52,20 +52,35 @@ export async function createDocumentType(
 
   const id = ((await created.json()) as { data: { id: string } }).data.id
 
-  // `GLOBAL` rather than `YEAR`: the assertion downstream is that a *number
-  // appeared*, and a scope whose bucket depends on the calendar would make the
-  // expected number depend on when the suite runs.
+  await giveNumberingRule(session, id, `PR-${runSuffix()}-{sequence}`)
+
+  return { id, typeCode, name }
+}
+
+/**
+ * Gives a document type its numbering rule, which a submit needs.
+ *
+ * Exported for a type made **through a screen** (#426 AC6): that flow is about
+ * the workflow the type binds, so the rule is seeded rather than driven.
+ *
+ * `GLOBAL` rather than `YEAR`: the assertion downstream is that a *number
+ * appeared*, and a scope whose bucket depends on the calendar would make the
+ * expected number depend on when the suite runs.
+ */
+export async function giveNumberingRule(
+  session: ApiSession,
+  documentTypeId: string,
+  ruleTemplate: string,
+): Promise<void> {
   const numbering = await session.context.put(
-    `${API_PREFIX}/document-types/${id}/numbering-rule`,
-    { data: { ruleTemplate: `PR-${runSuffix()}-{sequence}`, sequenceScope: 'GLOBAL' } },
+    `${API_PREFIX}/document-types/${documentTypeId}/numbering-rule`,
+    { data: { ruleTemplate, sequenceScope: 'GLOBAL' } },
   )
 
   expect(
     numbering.ok(),
     `seeding the numbering rule failed: ${numbering.status()} ${await numbering.text()}`,
   ).toBeTruthy()
-
-  return { id, typeCode, name }
 }
 
 /**
