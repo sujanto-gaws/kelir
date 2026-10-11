@@ -199,12 +199,37 @@ While the major version is `0`, the public API may change in any release.
   ([#687](https://github.com/sujanto-gaws/kelir/issues/687), the first of plan
   19's rows 10 and 11 to add a dependency it names). `eslint.config.js` gains
   its first `no-restricted-imports` rule. It names zod, `@vueuse/core`,
-  `reka-ui`, `vue-sonner`, `@lucide/vue`, `json-logic-js`, `vuedraggable`,
-  `elkjs` and `dagre`, each with its subpaths and a message citing the record,
+  `reka-ui`, `vue-sonner`, ~~`@lucide/vue`~~ `lucide-vue-next` (inverted by
+  #698, under *Changed*; corrected 2026-10-10), `json-logic-js`,
+  `vuedraggable`, `elkjs` and `dagre`, each with its subpaths and a message citing the record,
   and a `no-restricted-syntax` rule from the same list refuses an `import()`
   of any of them. Both cover `.ts`, `.mts`, `.cts`, `.tsx`, `.vue`, `.js` and
   `.mjs`.
   `@dagrejs/dagre` is not caught by the `dagre` entry.
+
+- **The form builder nests components on a canvas**
+  ([#688](https://github.com/sujanto-gaws/kelir/issues/688), part 1, decision
+  **D-86** A; FR-RAD-013). The flat list of root components becomes a palette
+  of the 18 types the renderer draws and a recursive canvas: panels,
+  fieldsets, every column and tab slot, and a data grid's row template, at any
+  depth. Every drag has a keyboard equivalent that calls the same change:
+  each list has *Add component*, and each card *Move up*, *Move down*,
+  *Move to…* (only the destinations the nesting rules allow, named by path)
+  and *Remove*, which asks first for a container that holds anything and takes
+  the lookup bindings of its subtree with it. Focus follows each change and a
+  live region announces it. The shipped editor is mounted for the selected
+  node and writes only what its role allows. A node the builder does not edit
+  (`steps`, `file`, `signature`, `repeater`, `spacer`, an unknown type, a role
+  that disagrees with its type, or an `id` a node above it already has) is an
+  *unsupported* card, saved exactly as loaded. A refusal's S10.3 path is
+  resolved into the nested node it names, however deep. A type switch keeps
+  what fits: a select or radio gets an option if it has none, a lookup drops
+  its static options and asks for a master-data source, and a divider drops
+  its text. Read-only on a published revision or without
+  `rad:form:update`. `vue-draggable-plus` 0.6.1 is the one new dependency
+  ([ADR-0046](docs/architectures/adr/0046.%20The%20Builders%20Drag%20with%20Vue%20Draggable%20Plus%20and%20Draw%20with%20Vue%20Flow%20and%20Dagre,%20Off%20the%20First-Load%20Path.md)),
+  on the builder's lazy route only, held there by `check:bundle`. Expressions
+  stay raw JSON until part 2.
 
 ### Changed
 
@@ -258,8 +283,39 @@ While the major version is `0`, the public API may change in any release.
   running at the same moment cannot slip past it. Revisions already
   published are not re-checked.
 
+- **Icons come from `@lucide/vue`** ([#698](https://github.com/sujanto-gaws/kelir/issues/698)).
+  `lucide-vue-next` is deprecated on npm, and its successor from the same
+  project, `@lucide/vue`, replaces it at exactly 1.54.0 in every import. A
+  configured menu's `icon` name resolves as it did, old names and the
+  `…Icon` and `Lucide…` spellings included, and their kebab-case forms
+  (`file-cog-icon`, `lucide-file-cog`); only a name that is an export but
+  not an icon, such as `Icon`, now draws the neutral circle.
+  **The icon set is off the first load**: the navigation looked a configured
+  entry's icon up in the whole package, which put all of it on every
+  sign-in, and the successor's larger set grew that from 245,578 to 280,290
+  bytes gzipped. Each configured icon now loads in a chunk of its own
+  (`layouts/menuIcon.ts`, through a map of about 1,870 icons in
+  `menuIconModules.ts` that is itself loaded lazily), so **an entry's icon may
+  appear a moment after the menu draws**. An icon that cannot be fetched draws
+  the circle and is fetched again the next time it is drawn. First load is
+  ~~93,623 bytes gzipped (272,688 raw, from 1,143,298)~~ 93,886 bytes gzipped,
+  measured again after the rebase onto #687's graph (before it, 93,623
+  gzipped and 272,688 raw, against 1,143,298 raw with the whole set;
+  corrected 2026-10-10). `check:bundle` fails if first load carries more than
+  100 of the package's modules; it carries 28. ESLint now refuses
+  `lucide-vue-next`, and the other packages ADR-0046 names.
+
 ### Fixed
 
+- **A validation rule added in the form builder can be saved**
+  ([#688](https://github.com/sujanto-gaws/kelir/issues/688), part 1). *Add
+  rule* wrote only the rule and its scope, and the meta-schema requires
+  `params` and `message`, so a save carrying a new rule was refused with 422.
+  It now writes a default message and the parameters the rule takes, empty:
+  `{"target": ""}` for `matchesField` and `notMatchesField`,
+  `{"pattern": ""}` for `regex`, and `{"values": []}` for `oneOf` and
+  `notOneOf`. Choosing a different rule writes the new rule's. The author
+  fills them in; an empty one is not refused (see *Known limitations*).
 - **The document type dialog's workflow chooser keeps a bound workflow's
   name** ([#625](https://github.com/sujanto-gaws/kelir/issues/625)). Editing
   a type bound to a revision that no search returned showed *The current
@@ -293,6 +349,16 @@ While the major version is `0`, the public API may change in any release.
   token already issued is untouched: it still works until it expires
   (decision **D-104**), or is refused at once when the tenant is deleted
   (**D-105**).
+
+### Known limitations
+
+- **A validation rule with empty parameters is saved and published without
+  error, and misbehaves at submit**
+  ([#722](https://github.com/sujanto-gaws/kelir/issues/722)). An empty
+  `regex`, `notMatchesField` or `notOneOf` passes every value, and an empty
+  `matchesField` or `oneOf` refuses every value, so nobody can submit the
+  form. The form builder writes a new rule's parameters empty for the author
+  to fill in (*Fixed*, above), so check each before publishing.
 
 ## [0.9.0] — 2026-10-09
 

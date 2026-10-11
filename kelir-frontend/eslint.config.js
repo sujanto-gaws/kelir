@@ -52,11 +52,14 @@ export default tseslint.config(
         ],
         ['reka-ui', 'shadcn-vue’s primitives in the tree carry none'],
         ['vue-sonner', 'a refusal is shown where it happened, not in a toast'],
-        ['@lucide/vue', 'icons come from lucide-vue-next alone; two would ship one set twice'],
         ['json-logic-js', 'JSON Logic is evaluated by datalogic-wasm (D-10, ADR-0008)'],
         ['vuedraggable', 'the drag-and-drop library is vue-draggable-plus'],
         ['elkjs', 'the graph is laid out by @dagrejs/dagre; elkjs is copyleft'],
         ['dagre', 'the unmaintained package; the layout is @dagrejs/dagre'],
+        [
+          'lucide-vue-next',
+          'deprecated (#698); icons come from @lucide/vue, its successor, and two would ship one set twice',
+        ],
       ].map(([name, why]) => ({
         pattern: `^${name.replace(/[/.]/g, '\\$&')}(?:\\/.*)?$`,
         message: `Kelir code does not import ${name}: ${why} (ADR-0046 §3.4, §5).`,
