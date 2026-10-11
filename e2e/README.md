@@ -106,7 +106,7 @@ about the seam it exists for. The task has to reach somebody else's inbox, and
 the requester has to see the result without doing anything. It drives two browser
 pages in one test for that reason.
 
-Adding a flow means adding a file under `tests/`. Three rules the existing ones
+Adding a flow means adding a file under `tests/`. Four rules the existing ones
 follow:
 
 1. **Seed what you assert on.** The deployment keeps its database between runs,
@@ -134,6 +134,17 @@ follow:
    100 and offer no search. On a database holding more than 100 of those rows
    that sort ahead of the run's own, the flows that use them fail, because a
    person could not make the choice either.
+4. **Aim a drag at where the target is now, not where it was**
+   ([#720](https://github.com/sujanto-gaws/kelir/pull/720)). A drag-and-drop
+   list moves its neighbours while the pointer travels: Sortable reorders the
+   list under the card, and an empty list below it slides up by the card's
+   height. A spec that measures the drop target before pressing and releases at
+   that point passes only when the release comes mid-animation. On #720 it
+   passed on a fast local stack and failed on every CI run, because CI's runner
+   released after the layout had settled. Re-read the target's box after the
+   drag starts, move to its current centre until Sortable's placeholder
+   (`.sortable-ghost`) sits in the list you mean, and release once. Retry only
+   the aim while the button is held, never the drop.
 
 ## The one system the stack can reach
 
