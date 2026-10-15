@@ -307,6 +307,19 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **Saving the document type dialog keeps the workflow bindings it does not
+  show** ([#718](https://github.com/sujanto-gaws/kelir/issues/718)). Every
+  save sent `workflows`, built from the chooser alone, and a sent array
+  replaces the type's whole set. So a rename deleted every binding past the
+  first, and wrote the first back at priority 1 with no condition and no
+  validity window. An edit now sends `workflows` only when the chooser was
+  changed; the server already left the set alone when the field is absent.
+  Changing the chooser on a type with one binding replaces only its workflow
+  and keeps its priority, condition and window, and clearing it unbinds, as
+  before. On a type with more than one binding the chooser is disabled, and
+  a note says how many further bindings are not edited there and that
+  saving keeps every binding as it is. A type saved in the dialog before
+  this fix may already have lost bindings; they are not restored.
 - **A validation rule added in the form builder can be saved**
   ([#688](https://github.com/sujanto-gaws/kelir/issues/688), part 1). *Add
   rule* wrote only the rule and its scope, and the meta-schema requires
@@ -324,9 +337,12 @@ While the major version is `0`, the public API may change in any release.
   and list choosers already read such a value back by its id, and the
   workflow chooser now does too, through `GET /workflow/definitions/{id}`. A
   deprecated revision is named as deprecated, as in *Approval (r2,
-  deprecated)*, since no search offers it again and the type cannot be saved
-  until it is rebound or cleared. The value was always kept; only its name
-  was lost.
+  deprecated)*, since no search offers it again~~ and the type cannot be saved
+  until it is rebound or cleared~~. The value was always kept; only its name
+  was lost. (Struck 2026-10-15: since
+  [#718](https://github.com/sujanto-gaws/kelir/issues/718), a save that leaves
+  the chooser alone keeps the binding, and the type's documents are refused
+  at submit until it is bound to an active revision.)
 - **A dialog hands focus back to what opened it when it closes**
   (PR [#715](https://github.com/sujanto-gaws/kelir/pull/715)'s campaign on
   [#713](https://github.com/sujanto-gaws/kelir/issues/713)). The shared

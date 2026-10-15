@@ -231,6 +231,16 @@ pub struct UpdateDocumentTypeRequest {
     #[serde(default, deserialize_with = "present_or_absent")]
     pub target_entity_type: Option<Option<String>>,
     pub status: Option<DocumentTypeStatus>,
+    /// The workflow bindings, all or nothing.
+    ///
+    /// When the key is absent or `null`, the stored set is left untouched:
+    /// no binding is checked or rewritten, and the audit records no change to
+    /// it. When an array is sent, it
+    /// replaces the stored set wholesale, and `[]` clears it. There is no
+    /// per-binding patch. A caller that edits one binding sends every binding
+    /// it wants kept, and a caller that does not edit bindings leaves the key
+    /// out (#718). Unlike the fields above, an absent key and `null` mean the
+    /// same thing here, because "no bindings" is spelled `[]`.
     pub workflows: Option<Vec<WorkflowBinding>>,
 }
 

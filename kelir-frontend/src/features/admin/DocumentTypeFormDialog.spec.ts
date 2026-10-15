@@ -12,7 +12,7 @@ import {
   type RecordedRequest,
 } from '@/lib/testing/fake-backend'
 import { filler, searchedPage } from '@/lib/testing/searched-page'
-import type { DocumentType } from '@/types/document-type'
+import type { DocumentType, WorkflowBinding } from '@/types/document-type'
 
 /**
  * The binding choosers of the document type dialog (#525).
@@ -214,6 +214,24 @@ describe('DocumentTypeFormDialog choosers', () => {
     })
   })
 
+  /**
+   * One binding as the server returns it (`domain::WorkflowBinding`): all five
+   * wire fields, and nothing else, because the endpoint denies unknown ones.
+   */
+  function binding(
+    workflowDefinitionId: string,
+    rest: Partial<Omit<WorkflowBinding, 'workflowDefinitionId'>> = {},
+  ): WorkflowBinding {
+    return {
+      workflowDefinitionId,
+      conditionExpression: null,
+      priority: 1,
+      validFrom: null,
+      validTo: null,
+      ...rest,
+    }
+  }
+
   /** A type bound to these, as `GET /document-types/{id}` returns it. */
   function boundType(workflowDefinitionId: string): DocumentType {
     return {
@@ -228,7 +246,7 @@ describe('DocumentTypeFormDialog choosers', () => {
       retentionPolicyId: null,
       targetEntityType: null,
       status: 'ACTIVE',
-      workflows: [{ workflowDefinitionId }],
+      workflows: [binding(workflowDefinitionId)],
       createdAt: '2026-09-01T00:00:00Z',
       updatedAt: '2026-09-01T00:00:00Z',
     }
@@ -306,9 +324,26 @@ describe('DocumentTypeFormDialog choosers', () => {
     return request.method === 'put' ? { status: 200, body: itemBody({ id: 't-1' }) } : undefined
   }
 
+  /**
+   * The edit's `PUT` body as it crossed the wire: the fake records what the
+   * adapter was handed, which is the serialised JSON, parsed back. A key the
+   * dialog set to `undefined` is therefore absent here, as it is to the server.
+   */
   function putBody(): Record<string, unknown> | undefined {
     return backend.requests.find((request) => request.method === 'put')?.body as
       Record<string, unknown> | undefined
+  }
+
+  /**
+   * Whether the edit sent `workflows` at all. Absent is what leaves the stored
+   * set alone (`service::update_type`); any array, `[]` included, replaces it.
+   */
+  function sentWorkflows(): boolean {
+    const sent = putBody()
+
+    expect(sent).toBeDefined()
+
+    return 'workflows' in (sent ?? {})
   }
 
   it('reads no workflow by id when creating a type', async () => {
@@ -353,7 +388,7 @@ describe('DocumentTypeFormDialog choosers', () => {
     ['not readable by this caller (403)', { status: 403 }],
     ['unreachable', { status: 0, networkError: true }],
   ] as const)(
-    'keeps a bound revision whose read fails, %s, and saves it back unchanged',
+    'keeps a bound revision whose read fails, %s, and leaves it bound on save',
     async (_, reply) => {
       replaceBackend((request) =>
         request.url === `/workflow/definitions/${wantedFlow.id}` ? reply : acceptingPut(request),
@@ -375,8 +410,10 @@ describe('DocumentTypeFormDialog choosers', () => {
       await wrapper.get('form').trigger('submit')
       await flushPromises()
 
-      // The server, not the dialog, decides whether it still binds.
-      expect(putBody()?.workflows).toEqual([{ workflowDefinitionId: wantedFlow.id }])
+      // Left off the wire, so the stored binding stays as it is (#718): the
+      // dialog could not read the revision, and a rename is no reason to resend it.
+      expect(putBody()?.name).toBe('Requisition (renamed)')
+      expect(sentWorkflows()).toBe(false)
       expect(wrapper.emitted('saved')).toHaveLength(1)
     },
   )
@@ -435,8 +472,8 @@ describe('DocumentTypeFormDialog choosers', () => {
     const wrapper = await open({
       ...boundType(retiredFlow.id),
       workflows: [
-        { workflowDefinitionId: retiredFlow.id, priority: 10, condition: null },
-        { workflowDefinitionId: wantedFlow.id, priority: 20, condition: { '==': [1, 1] } },
+        binding(retiredFlow.id, { priority: 10 }),
+        binding(wantedFlow.id, { priority: 20, conditionExpression: '{"==":[1,1]}' }),
       ],
     })
     await flushPromises()
@@ -446,33 +483,258 @@ describe('DocumentTypeFormDialog choosers', () => {
     expect(workflowReads()).toEqual([`/workflow/definitions/${retiredFlow.id}`])
   })
 
-  // DEFECT (#625 campaign, 2026-10-10): an edit that leaves the workflow chooser
-  // alone still sends `workflows: [{ workflowDefinitionId }]`, built from the
-  // chooser alone. The array replaces the stored set (`replace_workflows`), so
-  // renaming a type with two bindings deletes the second, and drops the first
-  // one's priority and condition. Remove `.fails` when it is fixed.
-  it.fails(
-    'keeps every stored binding when an edit leaves the workflow chooser alone',
-    async () => {
-      const stored = [
-        { workflowDefinitionId: wantedFlow.id, priority: 10, condition: { '==': [1, 1] } },
-        { workflowDefinitionId: flows[0].id, priority: 20, condition: null },
-      ]
+  // Found by #625's campaign (2026-10-10) and pinned `it.fails` until #718: an
+  // edit that left the chooser alone sent `workflows: [{ workflowDefinitionId }]`,
+  // and the array replaces the stored set (`replace_workflows`), so renaming a
+  // type with two bindings deleted the second and dropped the first one's
+  // priority and condition.
+  it('keeps every stored binding when an edit leaves the workflow chooser alone', async () => {
+    const stored = [
+      binding(wantedFlow.id, { priority: 10, conditionExpression: '{"==":[1,1]}' }),
+      binding(flows[0].id, { priority: 20 }),
+    ]
+    replaceBackend(acceptingPut)
+    const wrapper = await open({ ...boundType(wantedFlow.id), workflows: stored })
+    await flushPromises()
+
+    await wrapper.get('[data-testid="type-name"]').setValue('Requisition (renamed)')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    // Left off the wire, which is what leaves the stored set alone.
+    const sent = putBody()
+
+    expect(sent).toBeDefined()
+    expect('workflows' in (sent ?? {})).toBe(false)
+  })
+
+  /*
+   * #718. An edit sends `workflows` only when the chooser changed, and then
+   * changes only what the chooser shows; a type whose bindings the chooser
+   * cannot show whole is not edited through it at all.
+   */
+
+  it.each([
+    ['the name', 'type-name', 'Requisition (renamed)', 'name'],
+    ['the description', 'type-description', 'Buying things', 'description'],
+    ['the category', 'type-category', 'PROCUREMENT', 'category'],
+    ['the status', 'type-status', 'DEPRECATED', 'status'],
+    ['the governed record', 'type-governs', 'PARTY', 'targetEntityType'],
+    ['the security level', 'type-security', 'RESTRICTED', 'defaultSecurityLevel'],
+    ['the form', 'type-form', '', 'formId'],
+    ['the list', 'type-list', '', 'listId'],
+  ] as const)(
+    'sends no workflows when an edit changes only %s',
+    async (_, testId, value, field) => {
       replaceBackend(acceptingPut)
-      const wrapper = await open({ ...boundType(wantedFlow.id), workflows: stored })
+      const wrapper = await open({
+        ...boundType(wantedFlow.id),
+        workflows: [binding(wantedFlow.id, { priority: 3, conditionExpression: 'x' })],
+      })
       await flushPromises()
 
-      await wrapper.get('[data-testid="type-name"]').setValue('Requisition (renamed)')
+      await wrapper.get(`[data-testid="${testId}"]`).setValue(value)
       await wrapper.get('form').trigger('submit')
       await flushPromises()
 
-      // Either left off the wire, which leaves the stored set alone, or sent whole.
-      const sent = putBody()
-
-      expect(sent).toBeDefined()
-      expect(sent?.workflows ?? stored).toEqual(stored)
+      expect(putBody()?.[field]).toBe(value === '' ? null : value)
+      expect(sentWorkflows()).toBe(false)
+      expect(wrapper.emitted('saved')).toHaveLength(1)
     },
   )
+
+  it('sends no workflows when the chooser is changed and changed back', async () => {
+    replaceBackend(acceptingPut)
+    // Both on the first page, so each stays a choice after the other is made.
+    const wrapper = await open(boundType(flows[0].id))
+    await flushPromises()
+
+    await wrapper.get('[data-testid="type-workflow"]').setValue(flows[1].id)
+    await wrapper.get('[data-testid="type-workflow"]').setValue(flows[0].id)
+
+    expect(selectedValue(wrapper, 'type-workflow')).toBe(flows[0].id)
+
+    await wrapper.get('[data-testid="type-name"]').setValue('Requisition (renamed)')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(sentWorkflows()).toBe(false)
+  })
+
+  it('sends no workflows when a type with none is edited and the chooser left blank', async () => {
+    replaceBackend(acceptingPut)
+    const wrapper = await open({ ...boundType(wantedFlow.id), workflows: [] })
+    await flushPromises()
+
+    await wrapper.get('[data-testid="type-name"]').setValue('Requisition (renamed)')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(sentWorkflows()).toBe(false)
+  })
+
+  it('keeps a binding’s routing when the chooser moves it to another revision', async () => {
+    const stored = binding(wantedFlow.id, {
+      priority: 7,
+      conditionExpression: '{">":[{"var":"formData.amount"},1000]}',
+      validFrom: '2026-01-01',
+      validTo: '2026-12-31',
+    })
+    replaceBackend(acceptingPut)
+    const wrapper = await open({ ...boundType(wantedFlow.id), workflows: [stored] })
+    await flushPromises()
+
+    await wrapper.get('[data-testid="type-workflow"]').setValue(flows[0].id)
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    // Only the revision moves; the four fields the dialog does not author are
+    // sent back as they were read, and nothing the server would refuse is added.
+    expect(putBody()?.workflows).toEqual([{ ...stored, workflowDefinitionId: flows[0].id }])
+    expect(wrapper.emitted('saved')).toHaveLength(1)
+  })
+
+  it('binds a type that had no binding by the revision alone', async () => {
+    replaceBackend(acceptingPut)
+    const wrapper = await open({ ...boundType(wantedFlow.id), workflows: [] })
+    await flushPromises()
+
+    await wrapper.get('[data-testid="type-workflow"]').setValue(flows[0].id)
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    // The server defaults the rest: priority 1, no condition, no window.
+    expect(putBody()?.workflows).toEqual([{ workflowDefinitionId: flows[0].id }])
+  })
+
+  it.each([
+    [2, '1 further binding is not edited here.'],
+    [3, '2 further bindings are not edited here.'],
+  ])('disables the chooser on a type with %i bindings, and says why', async (count, note) => {
+    const stored = [
+      binding(wantedFlow.id, { priority: 1, conditionExpression: '{"==":[1,1]}' }),
+      binding(flows[0].id, { priority: 2, validFrom: '2026-01-01', validTo: '2026-06-30' }),
+      binding(flows[1].id, { priority: 3 }),
+    ].slice(0, count)
+    replaceBackend(acceptingPut)
+    const wrapper = await open({ ...boundType(wantedFlow.id), workflows: stored })
+    await flushPromises()
+
+    // Still showing the first, so it can be read; neither it nor its search moves.
+    expect(selectedValue(wrapper, 'type-workflow')).toBe(wantedFlow.id)
+    expect(wrapper.get('[data-testid="type-workflow"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-testid="type-workflow-search"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-testid="type-workflow-further"]').text()).toContain(note)
+
+    await wrapper.get('[data-testid="type-name"]').setValue('Requisition (renamed)')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(sentWorkflows()).toBe(false)
+  })
+
+  it.each([
+    ['one binding', [binding(wantedFlow.id)]],
+    ['no binding', []],
+  ])('shows no note and leaves the chooser enabled on a type with %s', async (_, workflows) => {
+    const wrapper = await open({ ...boundType(wantedFlow.id), workflows })
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="type-workflow-further"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="type-workflow"]').attributes('disabled')).toBeUndefined()
+    expect(
+      wrapper.get('[data-testid="type-workflow-search"]').attributes('disabled'),
+    ).toBeUndefined()
+  })
+
+  it('shows no note and leaves the chooser enabled when creating a type', async () => {
+    const wrapper = await open()
+
+    expect(wrapper.find('[data-testid="type-workflow-further"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="type-workflow"]').attributes('disabled')).toBeUndefined()
+  })
+
+  /*
+   * #718's verification campaign. Each test below was seen red under a
+   * mutation the tests above let through.
+   */
+
+  it('names the note as what describes the chooser it disables', async () => {
+    const wrapper = await open({
+      ...boundType(wantedFlow.id),
+      workflows: [binding(wantedFlow.id), binding(flows[0].id, { priority: 2 })],
+    })
+    await flushPromises()
+
+    // A disabled control says nothing on its own; a screen reader reaches the
+    // reason only through `aria-describedby`.
+    const note = wrapper.get('[data-testid="type-workflow-further"]').attributes('id')
+    const describedBy = wrapper.get('[data-testid="type-workflow"]').attributes('aria-describedby')
+
+    expect(note).toBeDefined()
+    expect(describedBy?.split(' ')).toContain(note)
+  })
+
+  it('sends no workflows for a type with several bindings even if its chooser moves', async () => {
+    replaceBackend(acceptingPut)
+    const wrapper = await open({
+      ...boundType(wantedFlow.id),
+      workflows: [binding(wantedFlow.id), binding(flows[0].id, { priority: 2 })],
+    })
+    await flushPromises()
+
+    // The disabled chooser cannot be moved by a user, so the value is moved the
+    // way the component itself would: the save must not depend on the control
+    // staying disabled to keep the second binding.
+    const chooser = wrapper
+      .findAllComponents({ name: 'SearchSelect' })
+      .find((component) => component.props('testId') === 'type-workflow')
+
+    chooser?.vm.$emit('update:modelValue', flows[1].id)
+    await flushPromises()
+
+    expect(selectedValue(wrapper, 'type-workflow')).toBe(flows[1].id)
+
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(sentWorkflows()).toBe(false)
+  })
+
+  it('treats a type read without workflows as unbound, and sends none on a rename', async () => {
+    replaceBackend(acceptingPut)
+    // The endpoint always sends the array; a reply that does not must not throw
+    // the dialog open, nor make a rename unbind anything.
+    const withoutWorkflows: Partial<DocumentType> = boundType(wantedFlow.id)
+
+    delete withoutWorkflows.workflows
+    const wrapper = await open(withoutWorkflows as DocumentType)
+    await flushPromises()
+
+    expect(selectedValue(wrapper, 'type-workflow')).toBe('')
+    expect(wrapper.find('[data-testid="type-workflow-further"]').exists()).toBe(false)
+
+    await wrapper.get('[data-testid="type-name"]').setValue('Requisition (renamed)')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(sentWorkflows()).toBe(false)
+    expect(wrapper.emitted('saved')).toHaveLength(1)
+  })
+
+  it('still sends an empty workflows array when a type is created unbound', async () => {
+    const wrapper = await open()
+
+    await wrapper.get('[data-testid="type-code"]').setValue('REQ')
+    await wrapper.get('[data-testid="type-name"]').setValue('Requisition')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    // Only an edit leaves the key off (#718); a create states its bindings.
+    const posted = backend.requests.find((request) => request.method === 'post')
+
+    expect(posted?.body).toMatchObject({ typeCode: 'REQ', workflows: [] })
+  })
 
   /** The refusal `check_workflow_bindings` gives a binding to a deprecated revision. */
   const notPublished =
@@ -504,7 +766,9 @@ describe('DocumentTypeFormDialog choosers', () => {
     await wrapper.get('form').trigger('submit')
     await flushPromises()
 
-    expect(putBody()?.workflows).toEqual([{ workflowDefinitionId: retiredFlow.id }])
+    // A rename leaves the binding off the wire (#718); the refusal is the fake's,
+    // standing in for any 422 an edit can meet.
+    expect(sentWorkflows()).toBe(false)
     expect(wrapper.emitted('saved')).toBeUndefined()
     expect(wrapper.get('[data-testid="document-type-error"]').text()).toContain('Validation failed')
     // The choice and its name survive the refusal, so it can be changed.
