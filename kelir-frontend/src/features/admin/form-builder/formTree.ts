@@ -1,7 +1,7 @@
 import type { ValidationDetail } from '@/types/api'
 import type { JfssComponent, JfssDefinition } from '@/types/jfss'
 
-import { entryFor, offeredEntry, typeLabel, type NodeIdentity } from './builderRegistry'
+import { entryFor, lacksText, offeredEntry, typeLabel, type NodeIdentity } from './builderRegistry'
 
 /**
  * **The form builder's tree, as pure functions** (#688 C, D, E6).
@@ -429,6 +429,24 @@ function subtreeIds(node: JfssComponent): string[] {
 }
 
 // --- Identity (B4) -------------------------------------------------------------
+
+/**
+ * The text-bearing display nodes with neither `content` nor `calculate`,
+ * anywhere in the tree, by `id` (JFSS §4.4, `builderRegistry.lacksText`). The
+ * authoring tool *"MUST reject"* one, so the page refuses to save or publish
+ * while there is one; clearing a heading's content is how one is made.
+ */
+export function textlessDisplays(definition: Pick<JfssDefinition, 'components'>): string[] {
+  const found: string[] = []
+
+  walk(definition, (node) => {
+    if (lacksText(node)) {
+      found.push(node.id)
+    }
+  })
+
+  return found
+}
 
 /**
  * The data keys more than one data node uses, anywhere in the tree, in the

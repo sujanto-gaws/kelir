@@ -73,6 +73,7 @@ import FormBuilderPage from './FormBuilderPage.vue'
  * | `limitsFor('integer')` returns none | *keeps the bounds a number-to-integer switch can carry …*, *changes the purchase requisition at …maximum alone …* |
  * | `switchValueType` keeps every limit | *keeps the bounds a number-to-integer switch can carry …* |
  * | (before the fix, at `f1fdd33`) no duplicate-key check | *flags a key another component uses, and refuses the save …*, *opens a loaded definition with a repeated key flagged …* |
+ * | (before the fix, at `ab71f00`) no §4.4 check, Publish unguarded | *refuses to save a heading cleared of its text …*, *opens a loaded heading with no text flagged …*, *never publishes a draft loaded with a repeated key* |
  * | `save` without its duplicate guard, the button still disabled | *flags a key another component uses …* (the PUT count) |
  *
  * **Not a mutant:** the panel deriving `variables` as a new array on every
@@ -1035,5 +1036,86 @@ describe('FormBuilderPage, the properties panel’s expressions', () => {
     const grid = node(sent, 'lines') as { components: Node[] }
 
     expect(grid.components[0].key).toBe('qty')
+  })
+
+  // --- JFSS §4.4: a text-bearing display needs content or a calculation ----------------
+
+  function publishes(): number {
+    return backend.requests.filter(
+      (request) => request.method === 'post' && request.url.endsWith('/publish'),
+    ).length
+  }
+
+  /** Clicks a disabled button as a stale page or a shortcut might, and settles. */
+  async function forceClick(wrapper: VueWrapper, testId: string): Promise<void> {
+    const button = wrapper.find(`[data-testid="${testId}"]`)
+
+    ;(button.element as HTMLButtonElement).disabled = false
+    await button.trigger('click')
+    await settle()
+  }
+
+  it('refuses to save or publish a heading cleared of its text, until it has some (§4.4)', async () => {
+    current = form(
+      definition([
+        numberField('quantity'),
+        { id: 'title', role: 'display', type: 'heading', content: 'Order' },
+      ]),
+    )
+
+    const wrapper = await render()
+
+    await select(wrapper, 'title')
+    await wrapper.find('[data-testid="content-title"]').setValue('')
+    await settle()
+
+    expect(wrapper.find('[data-testid="content-missing-title"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="missing-content"]').text()).toContain('“title”')
+    expect(wrapper.find('[data-testid="save-definition"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('[data-testid="publish-form"]').attributes('disabled')).toBeDefined()
+
+    const puts = () => backend.requests.filter((request) => request.method === 'put').length
+
+    await forceClick(wrapper, 'save-definition')
+    await forceClick(wrapper, 'publish-form')
+    expect(puts()).toBe(0)
+    expect(publishes()).toBe(0)
+
+    await wrapper.find('[data-testid="content-title"]').setValue('Your order')
+    await settle()
+
+    expect(wrapper.find('[data-testid="missing-content"]').exists()).toBe(false)
+
+    const sent = await saved(wrapper)
+
+    expect(node(sent, 'title').content).toBe('Your order')
+  })
+
+  it('opens a loaded heading with no text flagged, with Save and Publish refused (§4.4)', async () => {
+    current = form(
+      definition([numberField('quantity'), { id: 'title', role: 'display', type: 'paragraph' }]),
+    )
+
+    const wrapper = await render()
+
+    expect(wrapper.find('[data-testid="missing-content"]').text()).toContain('“title”')
+    expect(wrapper.find('[data-testid="save-definition"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('[data-testid="publish-form"]').attributes('disabled')).toBeDefined()
+
+    await select(wrapper, 'title')
+    expect(wrapper.find('[data-testid="content-missing-title"]').exists()).toBe(true)
+  })
+
+  it('never publishes a draft loaded with a repeated key', async () => {
+    current = form(definition([numberField('quantity'), numberField('again', { key: 'quantity' })]))
+
+    const wrapper = await render()
+
+    expect(wrapper.find('[data-testid="duplicate-keys"]').text()).toContain('published')
+    expect(wrapper.find('[data-testid="publish-form"]').attributes('disabled')).toBeDefined()
+
+    await forceClick(wrapper, 'publish-form')
+
+    expect(publishes()).toBe(0)
   })
 })

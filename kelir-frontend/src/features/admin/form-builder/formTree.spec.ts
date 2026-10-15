@@ -20,6 +20,7 @@ import {
   renameSlot,
   repeatedIdPaths,
   resolveDetail,
+  textlessDisplays,
   unsupportedReason,
 } from './formTree'
 import { jfssViolations } from '@/lib/testing/jfss-meta-schema'
@@ -308,6 +309,38 @@ describe('identity (B4)', () => {
   it('names a non-data node for its type', () => {
     expect(freshIdentity(form([]), 'panel').id).toBe('panel_1')
     expect(freshIdentity(form([panel('panel_1')]), 'panel').id).toBe('panel_2')
+  })
+})
+
+describe('text-bearing displays with no text (JFSS §4.4)', () => {
+  it('finds a heading, paragraph or alert with neither content nor calculate, anywhere', () => {
+    const definition = {
+      components: [
+        { id: 'h1', role: 'display', type: 'heading', content: 'Fine' },
+        { id: 'h2', role: 'display', type: 'heading' },
+        { id: 'p1', role: 'display', type: 'paragraph', content: '' },
+        { id: 'a1', role: 'display', type: 'alert', variant: 'info' },
+        { id: 'c1', role: 'display', type: 'heading', calculate: { var: 'x' } },
+        { id: 'd1', role: 'display', type: 'divider' },
+        {
+          id: 'tabs_1',
+          role: 'layout',
+          type: 'tabs',
+          tabs: [{ title: 'T', components: [{ id: 'h3', role: 'display', type: 'paragraph' }] }],
+        },
+        {
+          id: 'g',
+          role: 'data',
+          type: 'datagrid',
+          key: 'g',
+          label: 'G',
+          validation: { type: 'array' },
+          components: [{ id: 'h4', role: 'display', type: 'heading' }],
+        },
+      ],
+    } as unknown as JfssDefinition
+
+    expect(textlessDisplays(definition)).toEqual(['h2', 'p1', 'a1', 'h3', 'h4'])
   })
 })
 

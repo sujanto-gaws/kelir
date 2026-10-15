@@ -63,7 +63,12 @@ const props = defineProps<{
 
 const emit = defineEmits<{ update: [component: JfssComponent] }>()
 
-/** Data nodes calculate; a data grid's value is its rows, so it does not (JFSS §4.3.1). */
+/**
+ * Data nodes calculate, but **the builder does not offer `calculate` on a data
+ * grid**: that is this builder's policy, not a JFSS rule. A grid's value is its
+ * rows (JFSS §4.3.1, §10.1), which the person filling the form adds and edits,
+ * so an expression there would overwrite them. One loaded is kept as loaded.
+ */
 const offersCalculate = computed(
   () => props.component.role === 'data' && props.component.type !== 'datagrid',
 )

@@ -239,6 +239,34 @@ export const BUILDER_REGISTRY: Readonly<Record<string, BuilderEntry>> = {
   ),
 } as const
 
+/**
+ * **The display types that render text**: the ones JFSS §4.4 calls
+ * text-bearing, as this registry draws them — `heading` and `paragraph`
+ * (`TextDisplay`), and `alert` (`AlertDisplay`), which shows its `content`. A
+ * `divider` draws none.
+ *
+ * §4.4 leaves the list to the registry, because the meta-schema cannot know
+ * it, and makes the authoring tool responsible: it *"MUST reject a
+ * text-bearing type that has neither `content` nor `calculate`"*
+ * (`formTree.textlessDisplays`). The server does not check it.
+ */
+export const TEXT_BEARING_TYPES: readonly string[] = ['heading', 'paragraph', 'alert']
+
+/**
+ * Whether a node is a text-bearing display with **neither text nor a
+ * calculation**: no `content`, or an empty one, and no `calculate`.
+ */
+export function lacksText(node: JfssComponent): boolean {
+  const record = node as unknown as Record<string, unknown>
+
+  return (
+    node.role === 'display' &&
+    TEXT_BEARING_TYPES.includes(node.type) &&
+    !(typeof record.content === 'string' && record.content !== '') &&
+    !('calculate' in record)
+  )
+}
+
 /** The offered entries, in palette order. */
 export function offeredEntries(): OfferedEntry[] {
   return Object.values(BUILDER_REGISTRY).filter((entry): entry is OfferedEntry => entry.offered)

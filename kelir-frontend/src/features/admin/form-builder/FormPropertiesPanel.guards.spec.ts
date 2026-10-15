@@ -26,6 +26,13 @@ import FormPropertiesPanel from './FormPropertiesPanel.vue'
  * | *does not offer a calculated row field as the row number …* (F3) | `line_total` was offered and not flagged |
  * | *removes a cleared title and content* (F5) | `title: ''` and `content: ''` were written |
  * | *offers a row field inside a layout in the row template* (F7) | `in_panel` was not offered |
+ * | *flags a heading / paragraph / alert left with neither content nor calculate …* (§4.4) | no `content-missing` note, at `ab71f00` |
+ *
+ * *Does not flag a display that calculates its text, or a divider* could not
+ * fail first: the panel at `ab71f00` drew no note at all. It is held by a
+ * mutation instead: `lacksText` ignoring `calculate` reddens it. (Adding
+ * `divider` to `TEXT_BEARING_TYPES` does not: a divider has no content box to
+ * flag. `formTree.spec.ts`'s *finds a heading, paragraph or alert …* holds that.)
  */
 
 const SCOPE: LogicVariable[] = [{ path: 'quantity', label: 'Quantity', type: 'number' }]
@@ -249,6 +256,42 @@ describe('a data grid’s row fields (F3, F7)', () => {
     expect(options(wrapper)).toEqual(['', 'line_no', 'in_panel'])
     expect(wrapper.find('[data-testid="unique-by-g-in_panel"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="unique-by-g-line_total"]').exists()).toBe(true)
+  })
+})
+
+describe('a text-bearing display with no text (JFSS §4.4)', () => {
+  it.each(['a heading', 'a paragraph', 'an alert'].map((name) => [name, name.split(' ')[1]]))(
+    'flags %s left with neither content nor calculate, at its content box',
+    async (_name, type) => {
+      const { wrapper } = harness({ id: 'd', role: 'display', type, content: 'Text' })
+
+      expect(wrapper.find('[data-testid="content-missing-d"]').exists()).toBe(false)
+
+      await wrapper.get('[data-testid="content-d"]').setValue('')
+
+      expect(wrapper.find('[data-testid="content-missing-d"]').exists()).toBe(true)
+      expect(wrapper.get('[data-testid="content-d"]').attributes('aria-invalid')).toBe('true')
+
+      await wrapper.get('[data-testid="content-d"]').setValue('Back')
+
+      expect(wrapper.find('[data-testid="content-missing-d"]').exists()).toBe(false)
+    },
+  )
+
+  it('does not flag a display that calculates its text, or a divider', () => {
+    const calculated = harness({
+      id: 'd',
+      role: 'display',
+      type: 'heading',
+      calculate: { cat: ['Order ', { var: 'quantity' }] },
+    })
+
+    expect(calculated.wrapper.find('[data-testid="content-missing-d"]').exists()).toBe(false)
+    calculated.wrapper.unmount()
+
+    const divider = harness({ id: 'v', role: 'display', type: 'divider' })
+
+    expect(divider.wrapper.find('[data-testid^="content-missing"]').exists()).toBe(false)
   })
 })
 

@@ -19,7 +19,14 @@ import { scopeVariables } from './form-builder/expressionScope'
 import FormBuilderCanvas from './form-builder/FormBuilderCanvas.vue'
 import FormBuilderPalette from './form-builder/FormBuilderPalette.vue'
 import FormPropertiesPanel from './form-builder/FormPropertiesPanel.vue'
-import { duplicateKeys, locate, pathOf, replaceNode, setLookup } from './form-builder/formTree'
+import {
+  duplicateKeys,
+  locate,
+  pathOf,
+  replaceNode,
+  setLookup,
+  textlessDisplays,
+} from './form-builder/formTree'
 import { createFormBuilder, provideFormBuilder } from './form-builder/useFormBuilder'
 
 /**
@@ -111,6 +118,19 @@ const selectedScope = computed(() =>
  */
 const repeatedKeys = computed(() => (definition.value ? duplicateKeys(definition.value) : []))
 
+/**
+ * The text-bearing display nodes with neither `content` nor `calculate`, which
+ * JFSS §4.4 has the authoring tool reject (`formTree.textlessDisplays`).
+ */
+const textless = computed(() => (definition.value ? textlessDisplays(definition.value) : []))
+
+/**
+ * **What refuses both Save and Publish** until it is fixed. Publish sends the
+ * stored draft, so a draft loaded with a repeated key could otherwise be
+ * published without ever being saved from here.
+ */
+const blocked = computed(() => repeatedKeys.value.length > 0 || textless.value.length > 0)
+
 /** The details no node claims. A message nobody claims is a message the author never sees. */
 const unclaimedDetails = computed(() => builder.unplacedDetails.value)
 
@@ -158,7 +178,7 @@ async function load(): Promise<void> {
 }
 
 async function save(): Promise<void> {
-  if (!form.value || !definition.value || repeatedKeys.value.length > 0) {
+  if (!form.value || !definition.value || blocked.value) {
     return
   }
 
@@ -192,7 +212,7 @@ async function save(): Promise<void> {
 }
 
 async function publish(): Promise<void> {
-  if (!form.value) {
+  if (!form.value || blocked.value) {
     return
   }
 
@@ -260,7 +280,7 @@ onMounted(() => {
 
           <Button
             v-if="!isPublished && canUpdate"
-            :disabled="isSaving || repeatedKeys.length > 0"
+            :disabled="isSaving || blocked"
             data-testid="save-definition"
             @click="save"
           >
@@ -270,7 +290,7 @@ onMounted(() => {
           <Button
             v-if="!isPublished && canPublish"
             variant="secondary"
-            :disabled="isSaving"
+            :disabled="isSaving || blocked"
             data-testid="publish-form"
             @click="publish"
           >
@@ -302,10 +322,20 @@ onMounted(() => {
         variant="destructive"
         data-testid="duplicate-keys"
       >
-        It cannot be saved: two or more components use the
+        It cannot be saved or published: two or more components use the
         {{ repeatedKeys.length === 1 ? 'key' : 'keys' }}
         {{ repeatedKeys.map((key) => `“${key}”`).join(', ') }}. A key is unique across the form;
         change one of each before saving.
+      </Alert>
+
+      <Alert
+        v-if="textless.length > 0 && !isReadOnly"
+        variant="destructive"
+        data-testid="missing-content"
+      >
+        It cannot be saved or published: {{ textless.map((id) => `“${id}”`).join(', ') }}
+        {{ textless.length === 1 ? 'shows' : 'show' }} no text. Give each content, or a calculation
+        (JFSS §4.4).
       </Alert>
 
       <Alert v-if="saveError" variant="destructive" data-testid="save-error">
