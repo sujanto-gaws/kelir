@@ -22,7 +22,8 @@ import { describe, expect, it } from 'vitest'
  * `ExpressionProperties.vue` reddens *evaluates nothing in the properties
  * panel …*; a `new RegExp(pattern)` in `ValidationLimitsFields.vue` reddens it
  * too; `JsonLogicBuilder` imported from `FormBuilderPage.vue` reddens *reaches
- * the logic builder from the panel's expressions …*.
+ * the logic builder from the panel's expressions …*; the panel imported into
+ * `JfssRenderer.spec.ts` reddens *keeps the renderer, its specs included, …*.
  */
 
 const sources = import.meta.glob<string>('/src/**/*.{ts,vue}', {
@@ -124,6 +125,19 @@ describe('the form builder’s boundaries', () => {
       '/src/features/workflow-builder/AssignmentRuleEditor.vue',
       '/src/features/workflow-builder/WorkflowTransitionRow.vue',
     ])
+  })
+
+  it('keeps the renderer, its specs included, from importing the form builder', () => {
+    const renderer = Object.entries(sources).filter(([path]) =>
+      path.startsWith('/src/features/rad/'),
+    )
+
+    expect(renderer.length).toBeGreaterThan(20)
+    expect(
+      renderer
+        .filter(([, text]) => /features\/admin\/form-builder|FormPropertiesPanel/.test(text))
+        .map(([path]) => path),
+    ).toEqual([])
   })
 
   it('reaches the canvas components from the form builder page alone (G2)', () => {
