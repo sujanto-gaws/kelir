@@ -1,7 +1,7 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { nextTick } from 'vue'
+import { nextTick, toRaw } from 'vue'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 
 import JsonLogicBuilder from '@/components/logic-builder/JsonLogicBuilder.vue'
@@ -42,6 +42,24 @@ import FormBuilderPage from './FormBuilderPage.vue'
  * | The page keys the panel by the node's JSON rather than its `id` (a host that replaces the panel on every write) | both I1 cases, at (a): the input is replaced after the first key |
  * | `scopeVariables` ignores row templates (the whole form is one scope) | *offers a row template's expressions that row's keys …* |
  * | `FormPropertiesPanel` passes `disabled: false` to `ExpressionProperties` | *disables both builders on a published revision* |
+ *
+ * The `test-engineer` campaign, 2026-10-15, each mutation reverted after. The
+ * first three **survived every case above them**: a host that does not copy
+ * hands the builder its own emission back, so a builder checking echoes by
+ * identity passes I1 as well. The copy is now asserted.
+ *
+ * | Mutation | Reddened |
+ * |---|---|
+ * | `replaceNode` puts the emitted node in by reference (`items[at.index] = node`) | *hands the builder an equal copy …*, both cases |
+ * | `replaceNode` writes into the definition in place, copying nothing | the same |
+ * | the first, with `JsonLogicBuilder.isOwnEcho` by identity alone | the same |
+ * | the page keys the panel by `selected.path`, not the node's `id` | *keeps the builder and an unfinished operand when the selected node is moved …* |
+ * | a 0 ms or a 30 ms trailing debounce on `replaceSelected`; either builder keyed by its value's JSON or by the node's label; `ExpressionProperties` keyed by a count of writes; a watcher resetting the builders' values from the node on every write; a label edit spread from a copy of the node taken at setup; `steady` by identity | *keeps focus, …*, both cases |
+ * | either builder keyed by its `variables`; `JsonLogicBuilder` reloading on any change of `variables`, `label` or `disabled` | *keeps focus, …*: `conditional.logic` alone, since a `calculate` is not offered its own key, so its variables do not change when its label does |
+ *
+ * **Not a mutant:** the panel deriving `variables` as a new array on every
+ * write. No case reddens, and none should: `JsonLogicBuilder` reads
+ * `variables` for its choices and badges only, and has no watcher on it.
  */
 
 const FORM_ID = '0199a1a0-0000-7000-8000-0000000000e1'
@@ -303,6 +321,81 @@ describe('FormBuilderPage, the properties panel’s expressions', () => {
       expect(jfssViolations(sent)).toEqual([])
     },
   )
+
+  // I1's premise, pinned (test-engineer campaign, 2026-10-15). The case above
+  // proves a JSON echo check only while the page hands the builder a *copy* of
+  // what it emitted: a host that put the emitted node in by reference hands back
+  // the very object, and a builder checking echoes by identity alone then passes
+  // it too. So the copy is asserted, key by key.
+  it.each([
+    {
+      expression: 'calculate',
+      id: 'total',
+      testId: 'calculate-total',
+      number: 'Calculate, operand 2: number',
+    },
+    {
+      expression: 'conditional.logic',
+      id: 'notes',
+      testId: 'conditional-notes',
+      number: 'Conditional logic, operand 1, operand 2: number',
+    },
+  ])(
+    'hands the builder an equal copy of each value it emitted, never the value itself: $expression (AC8)',
+    async ({ id, testId, number }) => {
+      const wrapper = await render()
+
+      await select(wrapper, id)
+
+      const builder = builderIn(wrapper, testId)
+      const input = control(number) as HTMLInputElement
+
+      input.focus()
+
+      for (const key of '25') {
+        type(key)
+        await settle()
+
+        const emitted = builder.emitted('update:modelValue') ?? []
+        const last = emitted[emitted.length - 1]?.[0]
+        const handed = toRaw(builderIn(wrapper, testId).props('modelValue'))
+
+        expect(last, `after "${key}"`).toBeDefined()
+        expect(handed, `after "${key}"`).toEqual(last)
+        expect(handed, `after "${key}"`).not.toBe(last)
+      }
+    },
+  )
+
+  // A move on the canvas is a write too: the node's path changes, its id does
+  // not, and the panel is the node's, so nothing in it is remounted
+  // (test-engineer campaign, 2026-10-15).
+  it('keeps the builder and an unfinished operand when the selected node is moved on the canvas (AC8)', async () => {
+    const wrapper = await render()
+
+    await select(wrapper, 'total')
+
+    const instance = builderIn(wrapper, 'calculate-total').vm.$
+
+    control('Add operand to Calculate').click()
+    await settle()
+
+    const hole = control('Calculate, operand 3: kind')
+
+    await wrapper.find('[data-testid="up-total"]').trigger('click')
+    await settle()
+
+    // It moved: `total` is now the second node.
+    const order = wrapper
+      .findAll('[data-testid^="select-"]')
+      .map((button) => button.attributes('data-testid'))
+
+    expect(order.indexOf('select-total')).toBeLessThan(order.indexOf('select-unit_price'))
+
+    expect(builderIn(wrapper, 'calculate-total').vm.$).toBe(instance)
+    expect(control('Calculate, operand 3: kind')).toBe(hole)
+    expect(wrapper.find('[data-testid="calculate-unfinished-total"]').exists()).toBe(true)
+  })
 
   // --- AC4: what the panel does not show saves unchanged -------------------------------
 
