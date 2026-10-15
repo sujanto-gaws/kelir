@@ -96,7 +96,9 @@ While the major version is `0`, the public API may change in any release.
   is its first host** (#426, above), for a transition's `condition`; it shows
   an `EXPRESSION` assignment rule's `expression` there too, but only for a
   stored rule that already uses one, because `EXPRESSION` is refused at save
-  (JWSS §5.3) and is not offered. The form builder takes it in its own row.
+  (JWSS §5.3) and is not offered. ~~The form builder takes it in its own row.~~
+  The form builder's properties panel is its second host, in the #688 part 2
+  entry below (corrected 2026-10-15).
   JWSS §6.2 now names the Calculation Rule Registry's §2.5 tier for
   conditions, which is what the save-time check already applied.
 - **A pull request marked not ready fails a check**
@@ -244,8 +246,41 @@ While the major version is `0`, the public API may change in any release.
   its text. Read-only on a published revision or without
   `rad:form:update`. `vue-draggable-plus` 0.6.1 is the one new dependency
   ([ADR-0046](docs/architectures/adr/0046.%20The%20Builders%20Drag%20with%20Vue%20Draggable%20Plus%20and%20Draw%20with%20Vue%20Flow%20and%20Dagre,%20Off%20the%20First-Load%20Path.md)),
-  on the builder's lazy route only, held there by `check:bundle`. Expressions
-  stay raw JSON until part 2.
+  on the builder's lazy route only, held there by `check:bundle`.
+  ~~Expressions stay raw JSON until part 2.~~ Part 2 replaces the shipped
+  editor with a properties panel that builds expressions visually, in the
+  entry below (corrected 2026-10-15).
+- **The form builder's properties panel edits every component it offers, and
+  builds expressions visually**
+  ([#688](https://github.com/sujanto-gaws/kelir/issues/688), part 2,
+  decisions **D-86** A, **D-110** and **D-116**; FR-RAD-013). Each of the 18
+  types has a body of its own. **A data field's `calculate` and
+  `conditional.logic` are built in the shared logic builder**, each in its
+  registry tier: arithmetic and `var` for `calculate`, and comparisons,
+  `and`, `or` and `!` as well for a condition. An expression is offered the
+  data keys of its scope, which is the form's top level or, inside a data
+  grid's row, that row's, and a `calculate` is not offered its own key. An
+  expression the builder cannot show opens as raw JSON, marked *Advanced*,
+  and is never rewritten. **An unfinished expression saves its last complete
+  value**, the field says it is unfinished, and Save stays enabled. **A data
+  grid gains `sequenceKey`, `defaultItems` and `validation.uniqueBy`**, which
+  offer only the row's direct fields and keep a loaded value that names none,
+  flagged. **The validation limits and the text properties are edited too**
+  (**D-116**), but only where they have an effect: `minLength`, `maxLength`
+  and `pattern` on a text field or text area whose value type is `string`,
+  and `minimum` and `maximum` on a number whose value type is `number` or
+  `integer`. `description` goes on every data field, and `placeholder` on
+  `textfield`, `textarea`, `number`, `select` and `lookup`, the types whose
+  field draws one. An alert's `variant` offers the default, `info` or
+  `warning`, which are the only looks the renderer draws. A limit, placeholder
+  or variant loaded where the panel does not offer it is kept as loaded. A
+  lower bound above its upper one is flagged and saved
+  as typed, and the panel does not try a `pattern`: the server's refusal is
+  shown under the box. **Clearing a field removes the property**, never
+  writing `null` or `''`, and a change of value type removes only the limits
+  the new type cannot carry. A refusal about an expression, a rule's
+  `params` or a limit is shown at that field. It adds no route and no
+  dependency, and `JsonLogicBuilder` stays off the first-load path.
 
 ### Changed
 
@@ -320,6 +355,23 @@ While the major version is `0`, the public API may change in any release.
   corrected 2026-10-10). `check:bundle` fails if first load carries more than
   100 of the package's modules; it carries 28. ESLint now refuses
   `lucide-vue-next`, and the other packages ADR-0046 names.
+
+- **The form builder's properties panel replaces its component editor**
+  ([#688](https://github.com/sujanto-gaws/kelir/issues/688), part 2).
+  `FormComponentEditor` is gone, and `FormPropertiesPanel` is mounted for
+  the selected node in its place. What the old editor did is kept: the type
+  switches, the seeded rule parameters, the note on an unbound lookup, the
+  five rules and their test ids, and the server's messages at their field.
+  **`calculate` and `conditional.logic` are no longer typed as raw JSON**;
+  they are built visually (*Added*, above). A rule's `params` stay raw JSON
+  (**D-110**). **What the panel does not show is saved as loaded**:
+  `defaultValue`, `readOnly`, `calculateMode`, `validation.format`,
+  `validation.enum` and `validation.messages`, a layout's `grid`, a button's
+  `theme`, a rule outside the five, a limit or placeholder on a type not
+  offered one, an alert's `variant` other than `info` or `warning`, and a
+  button loaded with an action other
+  than `submit`, which is shown read-only. The save body and `api/rad.ts` are
+  unchanged.
 
 ### Fixed
 
