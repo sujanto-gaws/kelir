@@ -43,6 +43,12 @@ import type { JfssDefinition } from '@/types/jfss'
  * | `focusAfterRemoval` skips the next sibling | *focuses the next sibling after a removal, else the previous, else the container* |
  * | A move strips an unsupported node to its `id`, `role` and `type` | *draws an unsupported node as a card, and saves it unchanged* |
  * | `save` sends the definition without `title` | *saves a container in a column in a tab in a panel* |
+ *
+ * Run 2026-10-15 (#722 AC15):
+ *
+ * | Mutation | Reddened |
+ * |---|---|
+ * | the page's `blocked` also true for a rule whose required parameter is empty | *writes a rule the meta-schema takes, flagged and not blocked* |
  */
 
 const FORM_ID = '0199a1a0-0000-7000-8000-0000000000f1'
@@ -814,10 +820,15 @@ describe('FormBuilderPage, the nesting canvas', () => {
     })
   })
 
-  it('writes a rule the server takes (E7)', async () => {
+  // The seeded `target: ''` is flagged, and the server refuses it at save
+  // (#722); the flag does not hold the save back (AC15).
+  it('writes a rule the meta-schema takes, flagged and not blocked (E7, #722 AC15)', async () => {
     const wrapper = await render()
 
     await wrapper.find('[data-testid="add-rule-field_1"]').trigger('click')
+
+    expect(wrapper.find('[data-testid="rule-params-flag-field_1-0"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="save-definition"]').attributes('disabled')).toBeUndefined()
 
     const { definition: sent } = await saved(wrapper)
 

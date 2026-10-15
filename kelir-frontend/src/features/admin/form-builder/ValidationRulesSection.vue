@@ -7,7 +7,7 @@ import { Select } from '@/components/ui/select'
 import type { ValidationDetail } from '@/types/api'
 import type { JfssAdvancedRule } from '@/types/jfss'
 
-import { messageAt } from './propertyEdits'
+import { messageAt, paramsFlag, seededParams } from './propertyEdits'
 import RuleParamsBox from './RuleParamsBox.vue'
 
 /**
@@ -17,8 +17,14 @@ import RuleParamsBox from './RuleParamsBox.vue'
  *
  * **A rule's `params` stay raw JSON** (**D-110**): the visual builder is for
  * expressions, and a rule's parameters are not one. `RuleParamsBox` holds the
- * text as typed and writes only a plain object. The raw box is where
- * #722's flag lands, after this row; this row adds no `params` check.
+ * text as typed and writes only a plain object.
+ *
+ * **A required parameter missing, empty or of the wrong type is flagged under
+ * the box** (#722 AC15, `rule-params-flag-{id}-{at}`), from the moment *Add
+ * rule* seeds it empty. **It does not block Save or Publish**: the server
+ * refuses the rule, and its detail lands on the same card, in place of the
+ * flag, so the card shows one message at a time. It is information, not a
+ * control, so a read-only form shows it too, as the limits' conflict notes do.
  */
 const props = defineProps<{
   componentId: string
@@ -49,23 +55,6 @@ const emit = defineEmits<{ 'update:rules': [rules: JfssAdvancedRule[]] }>()
  * itself and kept; it is not offered.
  */
 const ENFORCEABLE_RULES = ['matchesField', 'notMatchesField', 'regex', 'oneOf', 'notOneOf'] as const
-
-/**
- * Each enforceable rule's parameters, empty, by the names the Validation Rule
- * Registry gives them (§3.1): what *Add rule* and a change of rule write, so
- * the box shows the author what to fill in (schema-guardian M1).
- */
-const RULE_PARAMS: Record<string, () => Record<string, unknown>> = {
-  matchesField: () => ({ target: '' }),
-  notMatchesField: () => ({ target: '' }),
-  regex: () => ({ pattern: '' }),
-  oneOf: () => ({ values: [] }),
-  notOneOf: () => ({ values: [] }),
-}
-
-function seededParams(rule: string): Record<string, unknown> {
-  return Object.prototype.hasOwnProperty.call(RULE_PARAMS, rule) ? RULE_PARAMS[rule]() : {}
-}
 
 function choices(values: readonly string[]): { value: string; label: string }[] {
   return values.map((value) => ({ value, label: value }))
@@ -120,6 +109,9 @@ function removeRule(at: number): void {
 function paramsMessage(at: number): string | undefined {
   return messageAt(props.details, props.nodePath, `rules.${at}.params`)
 }
+
+/** Each rule's flag about its required parameter, by position. */
+const flags = computed(() => list.value.map((rule) => paramsFlag(rule.rule, rule.params)))
 </script>
 
 <template>
@@ -182,6 +174,13 @@ function paramsMessage(at: number): string | undefined {
         :data-testid="`rule-params-error-${componentId}-${at}`"
       >
         {{ paramsMessage(at) }}
+      </p>
+      <p
+        v-else-if="flags[at]"
+        class="text-xs text-destructive sm:col-span-3"
+        :data-testid="`rule-params-flag-${componentId}-${at}`"
+      >
+        <code>{{ flags[at]?.param }}</code> {{ flags[at]?.text }}
       </p>
     </div>
 
