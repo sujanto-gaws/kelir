@@ -651,6 +651,126 @@ async fn an_update_that_does_not_send_workflows_keeps_every_stored_binding() {
     }
 }
 
+/// A rename of a type whose bound revision was deprecated since succeeds, and
+/// the binding stays as it was (#718's verification campaign).
+///
+/// The server checks every binding it is sent, and only an `ACTIVE` revision
+/// may be bound. So the dialog's old body, which sent the stored binding back
+/// on every save, made a type bound to a revision deprecated after binding
+/// impossible even to rename. Leaving `workflows` out binds nothing, so nothing
+/// is checked. The last half pins why the omission is what matters: sending
+/// the same binding back is still refused, and the refusal changes nothing.
+///
+/// # Seen to fail
+///
+/// Red against an `update_type` that re-checks the stored bindings when
+/// `workflows` is absent: the rename was refused `NOT_PUBLISHED`.
+#[tokio::test]
+async fn a_rename_that_does_not_send_workflows_keeps_a_binding_deprecated_since() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let workflow = published_workflow(&app, &token, "wf_deprecated_since").await;
+
+    let created = app
+        .send(
+            Method::POST,
+            "/api/v1/document-types",
+            Some(&token),
+            Some(json!({
+                "typeCode": "DEPRECATED_SINCE",
+                "name": "Deprecated since",
+                "workflows": [{ "workflowDefinitionId": workflow, "priority": 4 }]
+            })),
+        )
+        .await;
+
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let id = id_of(&created.body["data"]);
+
+    let deprecated = app
+        .send(
+            Method::POST,
+            &format!("/api/v1/workflow/definitions/{workflow}/deprecation"),
+            Some(&token),
+            Some(json!({})),
+        )
+        .await;
+
+    assert_eq!(deprecated.status, StatusCode::OK, "{}", deprecated.body);
+
+    let expected = json!([{
+        "workflowDefinitionId": workflow,
+        "conditionExpression": null,
+        "priority": 4,
+        "validFrom": null,
+        "validTo": null
+    }]);
+    let rows_before = stored_binding_rows(&app, id).await;
+
+    let renamed = app
+        .send(
+            Method::PUT,
+            &format!("/api/v1/document-types/{id}"),
+            Some(&token),
+            Some(json!({ "name": "Renamed after deprecation" })),
+        )
+        .await;
+
+    assert_eq!(
+        renamed.status,
+        StatusCode::OK,
+        "a rename binds nothing, so a binding deprecated since must not refuse \
+         it: {}",
+        renamed.body
+    );
+    assert_eq!(renamed.body["data"]["name"], "Renamed after deprecation");
+    assert_eq!(
+        renamed.body["data"]["workflows"], expected,
+        "{}",
+        renamed.body
+    );
+    assert_eq!(stored_binding_rows(&app, id).await, rows_before);
+
+    let resent = app
+        .send(
+            Method::PUT,
+            &format!("/api/v1/document-types/{id}"),
+            Some(&token),
+            Some(json!({
+                "name": "Renamed and rebound",
+                "workflows": [{ "workflowDefinitionId": workflow, "priority": 4 }]
+            })),
+        )
+        .await;
+
+    assert_eq!(
+        resent.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        resent.body
+    );
+    assert_eq!(
+        resent.body["error"]["details"][0]["code"], "NOT_PUBLISHED",
+        "{}",
+        resent.body
+    );
+
+    let read = app
+        .send(
+            Method::GET,
+            &format!("/api/v1/document-types/{id}"),
+            Some(&token),
+            None,
+        )
+        .await;
+
+    assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+    assert_eq!(read.body["data"]["name"], "Renamed after deprecation");
+    assert_eq!(read.body["data"]["workflows"], expected);
+    assert_eq!(stored_binding_rows(&app, id).await, rows_before);
+}
+
 #[tokio::test]
 async fn an_update_may_leave_a_binding_alone_even_when_its_form_was_retired() {
     // Re-checking an unchanged binding on every edit would make a type
