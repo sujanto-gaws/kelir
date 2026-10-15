@@ -5,8 +5,11 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import type { JfssLayoutComponent } from '@/types/jfss'
 
+import { withProperty } from './propertyEdits'
+
 /**
- * A layout node's properties (JFSS §4.3): a panel's or fieldset's `title`, and
+ * A layout node's properties (JFSS §4.3): a panel's or fieldset's `title`,
+ * which is optional and goes when cleared, and
  * nothing for columns and tabs, whose slots are added, removed and titled on
  * the canvas. Kept as loaded and not offered: `grid` and `conditional`.
  */
@@ -36,7 +39,7 @@ const slotNote = computed(() =>
       :model-value="component.title ?? ''"
       :disabled="disabled"
       :data-testid="`title-${id}`"
-      @update:model-value="emit('update', { ...component, title: String($event) })"
+      @update:model-value="emit('update', withProperty(component, 'title', String($event)))"
     />
   </div>
 

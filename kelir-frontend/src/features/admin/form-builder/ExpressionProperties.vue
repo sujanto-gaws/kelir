@@ -8,7 +8,7 @@ import { Select } from '@/components/ui/select'
 import type { ValidationDetail } from '@/types/api'
 import type { JfssComponent, JfssConditional } from '@/types/jfss'
 
-import { messageAt, withProperty } from './propertyEdits'
+import { isExpression, messageAt, withProperty } from './propertyEdits'
 
 /**
  * A node's expressions, built visually (#688 AC5–AC9, **D-110**).
@@ -41,6 +41,15 @@ import { messageAt, withProperty } from './propertyEdits'
  * The builder never emits a placeholder: while an operand is unfilled, the
  * definition holds the last complete expression, and the field says so. Save
  * stays enabled (product owner, 2026-10-15).
+ *
+ * # What the raw box parses is written only when it is an expression
+ *
+ * The builder's raw-JSON box emits whatever its text parses to. A form's
+ * expression is a JSON Logic object of exactly one operator (the meta-schema's
+ * `$defs/jsonLogic`), so `null`, `5`, `[]`, `{}` or an object of two keys is
+ * **refused here, in the form's host**, not in the shared builder (a workflow
+ * condition may be a literal). The last good value stays, and the field says
+ * the text was not saved.
  */
 const props = defineProps<{
   component: JfssComponent
@@ -102,6 +111,9 @@ const conditionalVariables = steady(() => [...props.scope])
 
 const calculateUnfinished = ref(false)
 const conditionalUnfinished = ref(false)
+/** The raw box's last value was not an expression, so it was not written. */
+const calculateRefused = ref(false)
+const conditionalRefused = ref(false)
 
 const calculateMessage = computed(() => messageAt(props.details, props.nodePath, 'calculate'))
 const conditionalMessage = computed(
@@ -116,14 +128,24 @@ function emitWith(key: string, value: unknown): void {
   emit('update', withProperty(props.component, key, value))
 }
 
-/** Cleared, the property goes (AC7). */
+/** Cleared, the property goes (AC7). Anything but an expression is refused (F1). */
 function setCalculate(value: unknown): void {
-  emitWith('calculate', value)
+  calculateRefused.value = value !== undefined && !isExpression(value)
+
+  if (!calculateRefused.value) {
+    emitWith('calculate', value)
+  }
 }
 
 /** Cleared, the whole `conditional` goes: an action with no logic is not one (AC7). */
 function setLogic(value: unknown): void {
   const existing = props.component.conditional
+
+  conditionalRefused.value = value !== undefined && !isExpression(value)
+
+  if (conditionalRefused.value) {
+    return
+  }
 
   emitWith(
     'conditional',
@@ -155,6 +177,8 @@ function setAction(action: string): void {
       :variables="calculateVariables"
       label="Calculate"
       :disabled="disabled"
+      :aria-invalid="calculateRefused || undefined"
+      :aria-describedby="calculateRefused ? `calculate-refused-${component.id}` : undefined"
       @update:model-value="setCalculate"
       @validity-changed="calculateUnfinished = !$event"
     />
@@ -164,6 +188,16 @@ function setAction(action: string): void {
       :data-testid="`calculate-unfinished-${component.id}`"
     >
       Unfinished: an operand is not filled in. Saving keeps the last complete calculation.
+    </p>
+    <p
+      v-if="calculateRefused"
+      class="text-xs text-destructive"
+      :id="`calculate-refused-${component.id}`"
+      role="alert"
+      :data-testid="`calculate-refused-${component.id}`"
+    >
+      Not saved: a calculation is a JSON object with exactly one operator, such as
+      <code>{"+": [1, 2]}</code>. The last valid one is kept.
     </p>
     <p
       v-if="calculateMessage"
@@ -198,6 +232,8 @@ function setAction(action: string): void {
       :variables="conditionalVariables"
       label="Conditional logic"
       :disabled="disabled"
+      :aria-invalid="conditionalRefused || undefined"
+      :aria-describedby="conditionalRefused ? `conditional-refused-${component.id}` : undefined"
       @update:model-value="setLogic"
       @validity-changed="conditionalUnfinished = !$event"
     />
@@ -207,6 +243,16 @@ function setAction(action: string): void {
       :data-testid="`conditional-unfinished-${component.id}`"
     >
       Unfinished: an operand is not filled in. Saving keeps the last complete condition.
+    </p>
+    <p
+      v-if="conditionalRefused"
+      class="text-xs text-destructive"
+      :id="`conditional-refused-${component.id}`"
+      role="alert"
+      :data-testid="`conditional-refused-${component.id}`"
+    >
+      Not saved: a condition is a JSON object with exactly one operator, such as
+      <code>{"var": "approved"}</code>. The last valid one is kept.
     </p>
     <p
       v-if="conditionalMessage"

@@ -29,6 +29,8 @@ const props = defineProps<{
   nodePath: string
   disabled: boolean
   details: ValidationDetail[]
+  /** Another data node in the form uses this node's key (JFSS §4.2). */
+  keyTaken: boolean
   /** `settings.lookups[component.id]`, when this component is bound to a source. */
   lookupSource: string
 }>()
@@ -100,6 +102,7 @@ const optionLines = computed({
     :node-path="nodePath"
     :disabled="disabled"
     :details="details"
+    :key-taken="keyTaken"
     @update="emit('update', $event)"
   />
 

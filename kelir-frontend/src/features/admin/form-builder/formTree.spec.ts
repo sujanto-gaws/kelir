@@ -7,6 +7,7 @@ import {
   canContain,
   cardReason,
   drawnReason,
+  duplicateKeys,
   freshIdentity,
   insertNode,
   listAt,
@@ -307,6 +308,54 @@ describe('identity (B4)', () => {
   it('names a non-data node for its type', () => {
     expect(freshIdentity(form([]), 'panel').id).toBe('panel_1')
     expect(freshIdentity(form([panel('panel_1')]), 'panel').id).toBe('panel_2')
+  })
+})
+
+describe('duplicate keys (JFSS §4.2, the campaign’s defect 1)', () => {
+  const data = (id: string, key: string) => ({
+    id,
+    role: 'data',
+    type: 'textfield',
+    key,
+    label: key,
+    validation: { type: 'string' },
+  })
+
+  it('finds a key two data nodes use anywhere in the form, row templates and slots included', () => {
+    const definition = {
+      components: [
+        data('a', 'quantity'),
+        {
+          id: 'cols',
+          role: 'layout',
+          type: 'columns',
+          columns: [{ components: [data('b', 'price')] }, { components: [data('c', 'quantity')] }],
+        },
+        {
+          id: 'g',
+          role: 'data',
+          type: 'datagrid',
+          key: 'lines',
+          label: 'Lines',
+          validation: { type: 'array' },
+          components: [data('d', 'price'), data('e', 'sku')],
+        },
+        { id: 'h', role: 'display', type: 'heading', content: 'quantity' },
+      ],
+    } as unknown as JfssDefinition
+
+    expect(duplicateKeys(definition)).toEqual(['quantity', 'price'])
+  })
+
+  it('finds none in a form whose keys are unique, and ignores layout and display nodes', () => {
+    const definition = {
+      components: [
+        data('a', 'a'),
+        { id: 'p', role: 'layout', type: 'panel', components: [data('b', 'b')] },
+      ],
+    } as unknown as JfssDefinition
+
+    expect(duplicateKeys(definition)).toEqual([])
   })
 })
 

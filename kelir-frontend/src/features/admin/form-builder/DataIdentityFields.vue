@@ -13,6 +13,9 @@ import { messageAt } from './propertyEdits'
  * shows first. Both are required by the meta-schema, so an emptied box writes
  * the empty string and the server's refusal says why, at the key.
  *
+ * **A key another data node uses is flagged here**, and the page refuses to
+ * save while one is (JFSS §4.2, `formTree.duplicateKeys`).
+ *
  * **A key edit rewrites no expression** (#688 AC6): renaming is out of #688's
  * scope, so a `var` that read the old key keeps reading it and is badged in its
  * builder as not offered.
@@ -22,6 +25,8 @@ const props = defineProps<{
   nodePath: string
   disabled: boolean
   details: ValidationDetail[]
+  /** Another data node in the form uses this key (JFSS §4.2). */
+  keyTaken: boolean
 }>()
 
 const emit = defineEmits<{ update: [component: JfssDataComponent] }>()
@@ -37,10 +42,20 @@ const keyMessage = computed(() => messageAt(props.details, props.nodePath, 'key'
       :id="`key-${id}`"
       :model-value="component.key"
       :disabled="disabled"
-      :invalid="keyMessage !== undefined"
+      :invalid="keyMessage !== undefined || keyTaken"
+      :described-by="keyTaken ? `key-taken-${id}` : undefined"
       :data-testid="`key-${id}`"
       @update:model-value="emit('update', { ...component, key: String($event) })"
     />
+    <p
+      v-if="keyTaken"
+      :id="`key-taken-${id}`"
+      class="text-xs text-destructive"
+      :data-testid="`key-taken-${id}`"
+    >
+      Another component already uses this key. Keys are unique across the form, so it cannot be
+      saved until one of them changes.
+    </p>
     <p v-if="keyMessage" class="text-xs text-destructive">{{ keyMessage }}</p>
   </div>
 

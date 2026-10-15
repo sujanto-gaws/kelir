@@ -2,6 +2,7 @@ import type { ValidationDetail } from '@/types/api'
 import type { JfssComponent, JfssValidation } from '@/types/jfss'
 
 import { offeredEntry } from './builderRegistry'
+import { dataNodes } from './expressionScope'
 
 /**
  * **The properties panel's edits, as pure functions** (#688 part 2, **D-86** A,
@@ -16,9 +17,12 @@ import { offeredEntry } from './builderRegistry'
  * writes `null` or `''` for an optional property: the meta-schema refuses
  * `null` for every one of them, and an empty string is a value the author did
  * not type — an empty `pattern` matches everything, an empty `placeholder`
- * draws nothing. Required properties (`key`, `label`, `content`, `title`) are
- * the exception, and keep what was typed, because removing them is a refusal
- * the server makes rather than one the panel hides.
+ * draws nothing. **The properties JFSS requires are the exception**: a data
+ * node's `key` and `label`, and a button's `label`. Those keep what was typed,
+ * even empty, because removing them is a refusal the server makes rather than
+ * one the panel hides. Everything else the panel edits — a display node's
+ * `content`, a layout's `title`, every limit and text — is optional, and goes
+ * when cleared.
  */
 
 type Node = Record<string, unknown>
@@ -34,6 +38,33 @@ export function withProperty<T extends object>(record: T, key: string, value: un
   }
 
   return next as T
+}
+
+// --- Expressions (D-110) ----------------------------------------------------------
+
+/**
+ * Whether a value may be written as a `calculate` or a `conditional.logic`:
+ * **a plain object with exactly one property**, the meta-schema's
+ * `$defs/jsonLogic` (`type: object`, `minProperties: 1`, `maxProperties: 1`).
+ *
+ * The visual builder only ever emits one, but its raw box emits whatever the
+ * text parses to — `null`, `5`, `[]`, `{}`, an object of two keys — and the
+ * shared builder is right to: a workflow condition may be a literal. A form's
+ * expression may not, so this host refuses it rather than writing a value the
+ * server refuses at save.
+ */
+export function isExpression(value: unknown): boolean {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.keys(value).length === 1
+  )
+}
+
+/** Whether a value may be written as a rule's `params`: a plain object (`advancedRule.params`). */
+export function isParams(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 // --- Validation limits (D-116) ------------------------------------------------
@@ -200,30 +231,33 @@ export function switchType(component: JfssComponent, next: string): JfssComponen
 // --- Data grid (AC3) -------------------------------------------------------------
 
 /**
- * The row template's **direct** data keys: what `sequenceKey` and `uniqueBy`
- * may name (AC3). A row's value is an object of exactly these keys, so a key
- * nested deeper is not one a row carries.
+ * The row template's data fields: what `sequenceKey` and `uniqueBy` may name
+ * (AC3). **Through any layout container in the template**, as the server's
+ * `container_children` walks it and as the renderer fills a row: a field in a
+ * panel inside the row is still a key of the row's object. Not into a nested
+ * grid's own template, whose keys are its rows', not this row's. The same walk
+ * as an expression's variables (`expressionScope.dataNodes`).
  */
-export function rowKeys(grid: JfssComponent): string[] {
+export function rowFields(grid: JfssComponent): JfssComponent[] {
   const template = (grid as unknown as Node).components
-  const keys: string[] = []
 
-  if (!Array.isArray(template)) {
-    return keys
-  }
+  return Array.isArray(template) ? dataNodes(template as JfssComponent[]) : []
+}
 
-  for (const child of template as Node[]) {
-    if (
-      child?.role === 'data' &&
-      typeof child.key === 'string' &&
-      child.key !== '' &&
-      !keys.includes(child.key)
-    ) {
-      keys.push(child.key)
-    }
-  }
+/** The keys of {@link rowFields}, once each. */
+export function rowKeys(grid: JfssComponent): string[] {
+  return rowFields(grid).map((field) => (field as unknown as { key: string }).key)
+}
 
-  return keys
+/**
+ * The row fields `sequenceKey` may name: those with no `calculate`. JFSS S12.7
+ * — *never use `sequenceKey` in combination with a `calculate` property on the
+ * same child field* — since the two would each overwrite the other's value.
+ */
+export function sequenceKeys(grid: JfssComponent): string[] {
+  return rowFields(grid)
+    .filter((field) => !('calculate' in (field as unknown as Node)))
+    .map((field) => (field as unknown as { key: string }).key)
 }
 
 /** `uniqueBy` as a list, whichever of its two shapes it was loaded in. */

@@ -8,6 +8,7 @@ import type { ValidationDetail } from '@/types/api'
 import type { JfssAdvancedRule } from '@/types/jfss'
 
 import { messageAt } from './propertyEdits'
+import RuleParamsBox from './RuleParamsBox.vue'
 
 /**
  * A data field's advanced rules (JFSS §6.2): **a self-contained unit, its test
@@ -15,7 +16,8 @@ import { messageAt } from './propertyEdits'
  * `rule-scope-{id}-{at}`, `rule-params-{id}-{at}` and `remove-rule-{id}-{at}`.
  *
  * **A rule's `params` stay raw JSON** (**D-110**): the visual builder is for
- * expressions, and a rule's parameters are not one. The raw box is where
+ * expressions, and a rule's parameters are not one. `RuleParamsBox` holds the
+ * text as typed and writes only a plain object. The raw box is where
  * #722's flag lands, after this row; this row adds no `params` check.
  */
 const props = defineProps<{
@@ -82,29 +84,6 @@ function ruleChoices(name: string): { value: string; label: string; disabled?: b
 
 const list = computed(() => props.rules ?? [])
 
-/** `params` as text; an absent one shows empty. */
-function jsonText(value: unknown): string {
-  return value === undefined ? '' : JSON.stringify(value, null, 2)
-}
-
-/**
- * Parses a params box, keeping the rule as it is while the text is not JSON
- * yet: half-typed JSON is the normal state of a text box.
- */
-function parsed(text: string): { ok: boolean; value: unknown } {
-  const trimmed = text.trim()
-
-  if (trimmed === '') {
-    return { ok: true, value: undefined }
-  }
-
-  try {
-    return { ok: true, value: JSON.parse(trimmed) }
-  } catch {
-    return { ok: false, value: undefined }
-  }
-}
-
 /**
  * A new rule, **with the `params` and `message` the meta-schema requires**
  * (#688 E7). `{rule, scope}` alone was refused at save: measured on
@@ -128,15 +107,6 @@ function updateRule(at: number, changes: Partial<JfssAdvancedRule>): void {
     'update:rules',
     list.value.map((rule, index) => (index === at ? { ...rule, ...changes } : rule)),
   )
-}
-
-function setRuleParams(at: number, text: string): void {
-  const { ok, value } = parsed(text)
-
-  if (ok) {
-    // Emptied, the box means no parameters: `{}`, which the meta-schema requires.
-    updateRule(at, { params: (value as Record<string, unknown> | undefined) ?? {} })
-  }
 }
 
 function removeRule(at: number): void {
@@ -198,17 +168,14 @@ function paramsMessage(at: number): string | undefined {
         Remove
       </Button>
 
-      <textarea
-        rows="2"
-        class="w-full rounded-md border bg-background p-2 font-mono text-xs sm:col-span-3"
-        placeholder='{"pattern": "^[A-Z]+$"}'
-        :aria-label="`Rule ${at + 1} parameters (JSON)`"
-        :aria-invalid="paramsMessage(at) !== undefined"
-        :value="jsonText(rule.params)"
+      <RuleParamsBox
+        :model-value="rule.params"
+        :test-id="`rule-params-${componentId}-${at}`"
+        :label="`Rule ${at + 1} parameters (JSON)`"
         :disabled="disabled"
-        :data-testid="`rule-params-${componentId}-${at}`"
-        @input="setRuleParams(at, ($event.target as HTMLTextAreaElement).value)"
-      ></textarea>
+        :invalid-by-server="paramsMessage(at) !== undefined"
+        @update:model-value="updateRule(at, { params: $event })"
+      />
       <p
         v-if="paramsMessage(at)"
         class="text-xs text-destructive sm:col-span-3"

@@ -72,6 +72,8 @@ import FormBuilderPage from './FormBuilderPage.vue'
  * | `JsonLogicNode` counts every var as offered | *keeps and badges a var whose field was removed …*, *offers a row in a panel in tabs …* |
  * | `limitsFor('integer')` returns none | *keeps the bounds a number-to-integer switch can carry …*, *changes the purchase requisition at …maximum alone …* |
  * | `switchValueType` keeps every limit | *keeps the bounds a number-to-integer switch can carry …* |
+ * | (before the fix, at `f1fdd33`) no duplicate-key check | *flags a key another component uses, and refuses the save …*, *opens a loaded definition with a repeated key flagged …* |
+ * | `save` without its duplicate guard, the button still disabled | *flags a key another component uses …* (the PUT count) |
  *
  * **Not a mutant:** the panel deriving `variables` as a new array on every
  * write. No case reddens, and none should: `JsonLogicBuilder` reads
@@ -675,7 +677,9 @@ describe('FormBuilderPage, the properties panel’s expressions', () => {
     }
 
     expect(changedPaths(loaded, await saved(wrapper))).toEqual([])
-  })
+    // About twenty selections, each mounting a panel: 2.3 s alone, past the 5 s
+    // default under the whole suite's parallel load (2026-10-15).
+  }, 20_000)
 
   it.each([
     {
@@ -957,5 +961,79 @@ describe('FormBuilderPage, the properties panel’s expressions', () => {
 
     expect(node(sent, 'quantity').validation).toEqual({ type: 'number', maximum: 5 })
     expect(jfssViolations(sent)).toEqual([])
+  })
+
+  // --- The campaign's defect 1: a key is unique across the form (JFSS §4.2) ---------
+
+  it('flags a key another component uses, and refuses the save until it changes', async () => {
+    const wrapper = await render()
+
+    await select(wrapper, 'unit_price')
+    await wrapper.find('[data-testid="key-unit_price"]').setValue('quantity')
+    await settle()
+
+    expect(wrapper.find('[data-testid="key-taken-unit_price"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="duplicate-keys"]').text()).toContain('“quantity”')
+
+    const save = wrapper.find('[data-testid="save-definition"]')
+
+    expect(save.attributes('disabled')).toBeDefined()
+
+    // Pressed anyway — a stale button, a keyboard shortcut — nothing is sent.
+    const puts = () => backend.requests.filter((request) => request.method === 'put').length
+
+    ;(save.element as HTMLButtonElement).disabled = false
+    await save.trigger('click')
+    await settle()
+    expect(puts()).toBe(0)
+
+    // The other node is flagged too, when it is the one selected.
+    await select(wrapper, 'quantity')
+    expect(wrapper.find('[data-testid="key-taken-quantity"]').exists()).toBe(true)
+
+    await select(wrapper, 'unit_price')
+    await wrapper.find('[data-testid="key-unit_price"]').setValue('price')
+    await settle()
+
+    expect(wrapper.find('[data-testid="key-taken-unit_price"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="duplicate-keys"]').exists()).toBe(false)
+
+    const sent = await saved(wrapper)
+
+    expect(node(sent, 'unit_price').key).toBe('price')
+  })
+
+  it('opens a loaded definition with a repeated key flagged, and Save refused until it is fixed', async () => {
+    current = form(
+      definition([
+        numberField('quantity'),
+        {
+          id: 'lines',
+          role: 'data',
+          type: 'datagrid',
+          key: 'lines',
+          label: 'Lines',
+          validation: { type: 'array' },
+          components: [numberField('row_quantity', { key: 'quantity' })],
+        },
+      ]),
+    )
+
+    const wrapper = await render()
+
+    expect(wrapper.find('[data-testid="duplicate-keys"]').text()).toContain('“quantity”')
+    expect(wrapper.find('[data-testid="save-definition"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('[data-testid="key-taken-quantity"]').exists()).toBe(true)
+
+    await select(wrapper, 'row_quantity')
+    await wrapper.find('[data-testid="key-row_quantity"]').setValue('qty')
+    await settle()
+
+    expect(wrapper.find('[data-testid="duplicate-keys"]').exists()).toBe(false)
+
+    const sent = await saved(wrapper)
+    const grid = node(sent, 'lines') as { components: Node[] }
+
+    expect(grid.components[0].key).toBe('qty')
   })
 })

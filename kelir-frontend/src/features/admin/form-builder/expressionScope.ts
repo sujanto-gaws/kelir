@@ -77,11 +77,18 @@ export function scopeListOf(definition: JfssDefinition, nodePath: string): JfssC
 }
 
 /**
- * The data keys of one scope: through layout containers, never into a row
- * template. First declaration wins, as it does on the server.
+ * The data nodes of one scope: through layout containers (`components`,
+ * `columns[].components`, `tabs[].components`, as the server's
+ * `container_children` does), never into a row template. **First declaration
+ * wins**, as it does on the server, so a key appears once.
+ *
+ * The one walk both the expressions' variables and a data grid's row fields
+ * (`propertyEdits.rowFields`) are read from, so the two cannot disagree about
+ * what a scope holds.
  */
-export function dataVariables(list: readonly JfssComponent[]): LogicVariable[] {
-  const found: LogicVariable[] = []
+export function dataNodes(list: readonly JfssComponent[]): JfssComponent[] {
+  const found: JfssComponent[] = []
+  const keys = new Set<string>()
 
   const walk = (nodes: readonly unknown[]): void => {
     for (const value of nodes) {
@@ -94,15 +101,9 @@ export function dataVariables(list: readonly JfssComponent[]): LogicVariable[] {
       if (node.role === 'data') {
         const key = node.key
 
-        if (typeof key === 'string' && key !== '' && !found.some((v) => v.path === key)) {
-          const validation = node.validation as Node | undefined
-          const label = typeof node.label === 'string' && node.label !== '' ? node.label : key
-
-          found.push(
-            typeof validation?.type === 'string'
-              ? { path: key, label, type: validation.type }
-              : { path: key, label },
-          )
+        if (typeof key === 'string' && key !== '' && !keys.has(key)) {
+          keys.add(key)
+          found.push(node as unknown as JfssComponent)
         }
 
         // A data node's `components` is a row template: another scope.
@@ -124,6 +125,20 @@ export function dataVariables(list: readonly JfssComponent[]): LogicVariable[] {
   walk(list)
 
   return found
+}
+
+/** The data keys of one scope, as the variables an expression is offered. */
+export function dataVariables(list: readonly JfssComponent[]): LogicVariable[] {
+  return dataNodes(list).map((value) => {
+    const node = value as unknown as Node
+    const key = node.key as string
+    const validation = node.validation as Node | undefined
+    const label = typeof node.label === 'string' && node.label !== '' ? node.label : key
+
+    return typeof validation?.type === 'string'
+      ? { path: key, label, type: validation.type }
+      : { path: key, label }
+  })
 }
 
 /** The variables an expression on the node at `nodePath` is offered (AC6). */

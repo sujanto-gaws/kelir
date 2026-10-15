@@ -87,7 +87,9 @@ describe('the limits (AC3b)', () => {
 })
 
 describe('the data grid (AC3)', () => {
-  it('reads the row template’s direct data keys, once each, and nothing deeper', () => {
+  // F7: through layout containers, as the server's `container_children` reads a
+  // row. Was the direct children alone, which missed `deep`.
+  it('reads the row template’s data keys through its layout containers, once each', () => {
     const grid = {
       id: 'g',
       role: 'data',
@@ -128,10 +130,29 @@ describe('the data grid (AC3)', () => {
             },
           ],
         },
+        {
+          id: 'sub',
+          role: 'data',
+          type: 'datagrid',
+          key: 'sub',
+          label: 'Sub',
+          validation: { type: 'array' },
+          components: [
+            {
+              id: 'inner',
+              role: 'data',
+              type: 'textfield',
+              key: 'inner',
+              label: 'I',
+              validation: { type: 'string' },
+            },
+          ],
+        },
       ],
     } as unknown as JfssComponent
 
-    expect(rowKeys(grid)).toEqual(['a'])
+    // A nested grid is a field of the row; its own row's keys are not.
+    expect(rowKeys(grid)).toEqual(['a', 'deep', 'sub'])
     expect(rowKeys({ ...grid, components: undefined } as unknown as JfssComponent)).toEqual([])
   })
 

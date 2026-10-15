@@ -9,7 +9,8 @@ import type { JfssDisplayComponent } from '@/types/jfss'
 import { withProperty } from './propertyEdits'
 
 /**
- * A display node's properties (JFSS §4.4): its `content`, and an alert's
+ * A display node's properties (JFSS §4.4): its `content`, optional and gone
+ * when cleared, and an alert's
  * **`variant`** (**D-116**). A divider draws no text, so it has neither.
  *
  * Kept as loaded and not offered: a heading's or paragraph's `variant`, and a
@@ -56,7 +57,7 @@ const variantChoices = computed(() => [
       :model-value="component.content ?? ''"
       :disabled="disabled"
       :data-testid="`content-${id}`"
-      @update:model-value="emit('update', { ...component, content: String($event) })"
+      @update:model-value="emit('update', withProperty(component, 'content', String($event)))"
     />
   </div>
 

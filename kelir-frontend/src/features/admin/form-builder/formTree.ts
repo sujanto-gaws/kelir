@@ -431,6 +431,39 @@ function subtreeIds(node: JfssComponent): string[] {
 // --- Identity (B4) -------------------------------------------------------------
 
 /**
+ * The data keys more than one data node uses, anywhere in the tree, in the
+ * order they are first met.
+ *
+ * JFSS §4.2: a key *"MUST be unique across the form"*, and the meta-schema
+ * cannot say so — *"enforced by the authoring tool"*. This is that check. New
+ * nodes already get a fresh key ({@link freshIdentity}); this catches a key
+ * typed into the Key box, or a definition loaded with one repeated. **Across
+ * the form means across it**: a row template's keys are counted with the rest.
+ */
+export function duplicateKeys(definition: Pick<JfssDefinition, 'components'>): string[] {
+  const seen = new Set<string>()
+  const repeated: string[] = []
+
+  walk(definition, (node) => {
+    const key = (node as unknown as Record<string, unknown>).key
+
+    if (node.role !== 'data' || typeof key !== 'string' || key === '') {
+      return
+    }
+
+    if (seen.has(key)) {
+      if (!repeated.includes(key)) {
+        repeated.push(key)
+      }
+    } else {
+      seen.add(key)
+    }
+  })
+
+  return repeated
+}
+
+/**
  * A fresh `id` and `key`, unique across **the whole tree**: row templates,
  * slots and unsupported subtrees included.
  *

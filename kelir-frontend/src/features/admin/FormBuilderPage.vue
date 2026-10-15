@@ -19,7 +19,7 @@ import { scopeVariables } from './form-builder/expressionScope'
 import FormBuilderCanvas from './form-builder/FormBuilderCanvas.vue'
 import FormBuilderPalette from './form-builder/FormBuilderPalette.vue'
 import FormPropertiesPanel from './form-builder/FormPropertiesPanel.vue'
-import { locate, pathOf, replaceNode, setLookup } from './form-builder/formTree'
+import { duplicateKeys, locate, pathOf, replaceNode, setLookup } from './form-builder/formTree'
 import { createFormBuilder, provideFormBuilder } from './form-builder/useFormBuilder'
 
 /**
@@ -103,6 +103,14 @@ const selectedScope = computed(() =>
   definition.value && selected.value ? scopeVariables(definition.value, selected.value.path) : [],
 )
 
+/**
+ * The keys two or more data nodes use. **Save is refused while there is one**:
+ * JFSS §4.2 makes a key unique across the form and leaves enforcing it to the
+ * authoring tool, and a payload with two values under one key is a document
+ * that silently loses one of them.
+ */
+const repeatedKeys = computed(() => (definition.value ? duplicateKeys(definition.value) : []))
+
 /** The details no node claims. A message nobody claims is a message the author never sees. */
 const unclaimedDetails = computed(() => builder.unplacedDetails.value)
 
@@ -150,7 +158,7 @@ async function load(): Promise<void> {
 }
 
 async function save(): Promise<void> {
-  if (!form.value || !definition.value) {
+  if (!form.value || !definition.value || repeatedKeys.value.length > 0) {
     return
   }
 
@@ -252,7 +260,7 @@ onMounted(() => {
 
           <Button
             v-if="!isPublished && canUpdate"
-            :disabled="isSaving"
+            :disabled="isSaving || repeatedKeys.length > 0"
             data-testid="save-definition"
             @click="save"
           >
@@ -287,6 +295,17 @@ onMounted(() => {
         This revision is published and cannot be edited. Documents raised from it pinned this exact
         definition, so changing it would alter what they were filled against. Open a new revision to
         make changes.
+      </Alert>
+
+      <Alert
+        v-if="repeatedKeys.length > 0 && !isReadOnly"
+        variant="destructive"
+        data-testid="duplicate-keys"
+      >
+        It cannot be saved: two or more components use the
+        {{ repeatedKeys.length === 1 ? 'key' : 'keys' }}
+        {{ repeatedKeys.map((key) => `“${key}”`).join(', ') }}. A key is unique across the form;
+        change one of each before saving.
       </Alert>
 
       <Alert v-if="saveError" variant="destructive" data-testid="save-error">
@@ -344,6 +363,7 @@ onMounted(() => {
               :details="builder.detailsFor(selected.node.id)"
               :lookup-source="lookups[selected.node.id] ?? ''"
               :scope="selectedScope"
+              :duplicate-keys="repeatedKeys"
               @update="replaceSelected"
               @update:lookup-source="setLookupSource(selected.node.id, $event)"
             />

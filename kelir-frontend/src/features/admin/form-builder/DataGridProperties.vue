@@ -9,23 +9,31 @@ import type { JfssDataComponent } from '@/types/jfss'
 
 import DataIdentityFields from './DataIdentityFields.vue'
 import PropertyNumberInput from './PropertyNumberInput.vue'
-import { messageAt, rowKeys, toggleUniqueBy, uniqueByKeys, withProperty } from './propertyEdits'
+import {
+  messageAt,
+  rowKeys,
+  sequenceKeys,
+  toggleUniqueBy,
+  uniqueByKeys,
+  withProperty,
+} from './propertyEdits'
 
 /**
  * A data grid's properties (#688 AC3; JFSS §4.2, §4.3.1, §5).
  *
  * Its key, label, description and `required`, and the three a grid has alone:
  *
- * - **`sequenceKey`**: one of the row template's direct data keys, filled with
- *   each row's 1-based number;
+ * - **`sequenceKey`**: one of the row template's data keys, filled with each
+ *   row's 1-based number — **never one with a `calculate`** (JFSS S12.7), since
+ *   each would overwrite the other;
  * - **`defaultItems`**: the empty rows a new grid opens with, a whole number of
  *   0 or more;
- * - **`validation.uniqueBy`**: one or more of the same keys, whose combination
+ * - **`validation.uniqueBy`**: one or more of the row's keys, whose combination
  *   no two rows may repeat. **It keeps its loaded shape**: a string stays a
  *   string until a second key is added (`toggleUniqueBy`).
  *
- * **A loaded value that names no row field is kept and flagged, never
- * dropped**: the row template may be mid-edit on the canvas, and the server is
+ * **A loaded value that names no row field, or a `sequenceKey` that names a
+ * calculated one, is kept and flagged, never dropped**: the row template may be mid-edit on the canvas, and the server is
  * the verdict. `validation.type` stays `array`, the row template is edited on
  * the canvas, and a grid does not `calculate`.
  */
@@ -35,6 +43,8 @@ const props = defineProps<{
   nodePath: string
   disabled: boolean
   details: ValidationDetail[]
+  /** Another data node in the form uses this node's key (JFSS §4.2). */
+  keyTaken: boolean
 }>()
 
 const emit = defineEmits<{ update: [component: JfssDataComponent] }>()
@@ -49,18 +59,26 @@ function patch(key: string, value: unknown): void {
 // --- sequenceKey -------------------------------------------------------------
 
 const sequenceKey = computed(() => props.component.sequenceKey ?? '')
+/** The row fields a row number may fill: those that do not `calculate` (S12.7). */
+const sequenceable = computed(() => sequenceKeys(props.component))
 const sequenceUnknown = computed(
   () => sequenceKey.value !== '' && !keys.value.includes(sequenceKey.value),
+)
+const sequenceCalculated = computed(
+  () =>
+    sequenceKey.value !== '' &&
+    keys.value.includes(sequenceKey.value) &&
+    !sequenceable.value.includes(sequenceKey.value),
 )
 
 const sequenceChoices = computed(() => [
   { value: '', label: 'None' },
-  ...keys.value.map((key) => ({ value: key, label: key })),
-  ...(sequenceUnknown.value
+  ...sequenceable.value.map((key) => ({ value: key, label: key })),
+  ...(sequenceUnknown.value || sequenceCalculated.value
     ? [
         {
           value: sequenceKey.value,
-          label: `${sequenceKey.value} (not a row field)`,
+          label: `${sequenceKey.value} (${sequenceUnknown.value ? 'not a row field' : 'calculated'})`,
           disabled: true,
         },
       ]
@@ -97,6 +115,7 @@ function setUnique(key: string, on: boolean): void {
     :node-path="nodePath"
     :disabled="disabled"
     :details="details"
+    :key-taken="keyTaken"
     @update="emit('update', $event)"
   />
 
@@ -139,7 +158,7 @@ function setUnique(key: string, on: boolean): void {
       :model-value="sequenceKey"
       :disabled="disabled"
       :options="sequenceChoices"
-      :invalid="sequenceUnknown"
+      :invalid="sequenceUnknown || sequenceCalculated"
       :data-testid="`sequence-key-${id}`"
       @update:model-value="patch('sequenceKey', String($event))"
     />
@@ -151,8 +170,17 @@ function setUnique(key: string, on: boolean): void {
       “{{ sequenceKey }}” is not a field of the row, so no row is numbered. It is kept until it is
       changed.
     </p>
+    <p
+      v-else-if="sequenceCalculated"
+      class="text-xs text-destructive"
+      :data-testid="`sequence-key-calculated-${id}`"
+    >
+      “{{ sequenceKey }}” calculates its own value, and a row number would overwrite it (JFSS
+      S12.7). It is kept until it is changed.
+    </p>
     <p v-else class="text-xs text-muted-foreground">
-      A field of the row that is filled with the row’s number, from 1.
+      A field of the row that is filled with the row’s number, from 1. A field that calculates is
+      not offered.
     </p>
   </div>
 

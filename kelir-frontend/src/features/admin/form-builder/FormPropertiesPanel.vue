@@ -55,18 +55,23 @@ import ValidationRulesSection from './ValidationRulesSection.vue'
  * data types for data and display types for display, from `SUPPORTED`. A
  * layout node, a button and a data grid show their type read-only.
  */
-const props = defineProps<{
-  component: JfssComponent
-  /** Where the node sits, as S10.3 addresses it without `definition.`: `components.0`. */
-  path: string
-  disabled: boolean
-  /** The S10.3 details the page placed on this node. */
-  details: ValidationDetail[]
-  /** `settings.lookups[component.id]`, when this component is bound to a source. */
-  lookupSource: string
-  /** The data keys an expression on this node may read (`expressionScope.ts`). */
-  scope: readonly LogicVariable[]
-}>()
+const props = withDefaults(
+  defineProps<{
+    component: JfssComponent
+    /** Where the node sits, as S10.3 addresses it without `definition.`: `components.0`. */
+    path: string
+    disabled: boolean
+    /** The S10.3 details the page placed on this node. */
+    details: ValidationDetail[]
+    /** `settings.lookups[component.id]`, when this component is bound to a source. */
+    lookupSource: string
+    /** The data keys an expression on this node may read (`expressionScope.ts`). */
+    scope: readonly LogicVariable[]
+    /** The keys more than one data node in the form uses (`formTree.duplicateKeys`). */
+    duplicateKeys?: readonly string[]
+  }>(),
+  { duplicateKeys: () => [] },
+)
 
 const emit = defineEmits<{
   update: [component: JfssComponent]
@@ -91,6 +96,11 @@ const DISPLAY_TYPES = ['heading', 'paragraph', 'divider', 'alert'] as const
 const isData = computed(() => props.component.role === 'data')
 const isGrid = computed(() => isData.value && props.component.type === 'datagrid')
 const isDisplay = computed(() => props.component.role === 'display')
+
+/** Whether this node's key is one another data node also uses (JFSS §4.2). */
+const keyTaken = computed(
+  () => isData.value && props.duplicateKeys.includes((props.component as JfssDataComponent).key),
+)
 
 /** Data types switch among themselves, display among theirs; the rest are fixed. */
 const switchable = computed(() => (isData.value && !isGrid.value) || isDisplay.value)
@@ -167,6 +177,7 @@ function setRules(rules: JfssAdvancedRule[]): void {
         :node-path="path"
         :disabled="disabled"
         :details="details"
+        :key-taken="keyTaken"
         @update="update"
       />
       <DataFieldProperties
@@ -176,6 +187,7 @@ function setRules(rules: JfssAdvancedRule[]): void {
         :disabled="disabled"
         :details="details"
         :lookup-source="lookupSource"
+        :key-taken="keyTaken"
         @update="update"
         @update:lookup-source="emit('update:lookupSource', $event)"
       />
