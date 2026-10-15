@@ -60,7 +60,7 @@ video are kept for failures only.
 
 ## What it covers
 
-~~Twenty-five~~ Twenty-six flows (2026-10-10, with #688's), each the criterion that decides whether an item is Done rather
+~~Twenty-six~~ Twenty-seven flows (2026-10-15, with #688's browser flow), each the criterion that decides whether an item is Done rather
 than a broad sweep. **This table said six until 2026-09-14**, while eight more
 specs landed beside it; it is listed in the order the flows were added.
 
@@ -92,6 +92,7 @@ specs landed beside it; it is listed in the order the flows were added.
 | An administrator runs a test call the system **answers**: the dialog says *Success* and *HTTP 200* with the system's body, the log row and its detail say the same, and the log filtered by that system lists it beside a call the same system answered `404`. The system echoes the credential it was sent, so the body Kelir read holds the secret: the dialog and the stored payloads show `[REDACTED]` in each place, and **no response the browser received carries the secret**, plain or in base64. The upstream's own journal holds one call under the log row's correlation id, carrying the bearer token. **The success the two flows above could not show**, on a stack that now has one system to call (`a-test-call-is-answered-and-its-secret-is-masked.spec.ts`) | #593, FR-INT-002, FR-INT-006 |
 | An administrator builds a workflow in the editor, with a second approval edge whose condition is built **by keyboard alone** in the logic builder, then saves and publishes it and binds it to a document type on the type screen. A document of that type is approved from somebody else's inbox and ends *Approved*, which only the condition's edge leads to. A second document below the threshold takes the fallback and ends *Completed*, so both branches are proved. Typing through the editor's `v-model` keeps focus, and an unfilled operand survives a write elsewhere in the editor (`build-a-workflow.spec.ts`) | #426 AC6; FR-RAD-009, FR-WF-004/006/013/015, FR-WF-018 (deprecate built in row 6b, #715; covered by the Vue specs, not this flow); #695's two inherited criteria. Seeded over the API: the form, the approver and their role, and the numbering rule |
 | An administrator nests a form **by keyboard alone** on the form builder's canvas: a panel from the palette, a field from the panel's own *Add component*, columns with a field in a column, *Move to…* the panel, a removal, and a save; the preview nests the labels and a reload reads the tree back. A second test drags a card by its handle with the pointer (`build-a-nested-form-by-keyboard.spec.ts`) | #688 I3 and D1, part 1; #695's real-browser keyboard criterion, canvas half. The form is created through the screen; nothing is seeded |
+| An administrator builds a nested form with expressions through the screen: a panel whose `total` calculates `quantity × unit_price`, and a `notes` field shown when `total` is above 1000, both built in the logic builder **by keyboard alone**, the threshold typed one digit at a time with focus and text checked after each, and an emptied operand surviving a write elsewhere in the panel; a `maxLength`; and a data grid with a `sequenceKey` and `defaultItems: 2`. It is saved, published and read back, and a document raised against it computes the total, shows `notes` only above the threshold, refuses a long value, opens with rows numbered 1 and 2, and submits. A second test types into an expression's raw JSON box and a rule's `params` box, checking focus, text and caret after every key, which jsdom cannot (`build-a-nested-form-with-expressions.spec.ts`) | #688 AC13–AC15 (I2's second half, and I4), which close #688 and FR-RAD-013; #695's real-browser keyboard criterion, panel half. No drag. Seeded over the API: the document type and its numbering rule |
 
 **Every flow runs in Chromium except `a-pattern-the-browser-gives-up-on.spec.ts`, which runs in Firefox and only there** ([#496](https://github.com/sujanto-gaws/kelir/issues/496)). It is about a match Firefox throws on. Chromium does not throw on the same match, it keeps matching, so the spec would hold its tab until the test timed out. `playwright.config.ts` holds the split, as two projects.
 
@@ -129,11 +130,18 @@ follow:
    first page, count rows across the tenant, or take `.first()` of a list
    other runs write to.
 
-   **What the harness cannot get round:** the new-document type chooser, and
+   ~~**What the harness cannot get round:** the new-document type chooser, and
    the form and list choosers in the document type dialog, read one page of
    100 and offer no search. On a database holding more than 100 of those rows
    that sort ahead of the run's own, the flows that use them fail, because a
-   person could not make the choice either.
+   person could not make the choice either.~~ **The choosers search, so pick
+   from one by this run's key** (corrected 2026-10-15). Since
+   [#525](https://github.com/sujanto-gaws/kelir/issues/525) the new-document
+   type chooser, and the form, list and workflow choosers in the document type
+   dialog, ask the server for the first 100 rows that match what is typed.
+   `support/choosers.ts` types the run's own key first (`chooseDocumentType`
+   by the type's code, `chooseOption` by a form, list or workflow key), so the
+   row is on the page the search returns however many rows sort ahead of it.
 4. **Aim a drag at where the target is now, not where it was**
    ([#720](https://github.com/sujanto-gaws/kelir/pull/720)). A drag-and-drop
    list moves its neighbours while the pointer travels: Sortable reorders the
