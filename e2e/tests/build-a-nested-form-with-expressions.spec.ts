@@ -68,8 +68,9 @@ import { tabTo } from '../support/keyboard'
  *   empty, so a box that remounted on its own value coming back would show the
  *   pretty-printed JSON instead of the compact text typed. Then edited in the
  *   middle, through states that do and do not parse.
- * - **A rule's `params` box**, between the quotes the seeded `regex` params
- *   leave, through a state that does not parse and back.
+ * - **A rule's `params` box**, after *regex* seeds it. Emptied, which writes
+ *   `{}`, and retyped compact for the same reason. Then edited in the middle,
+ *   through a state that does not parse and back.
  *
  * Each is then shown to have reached the definition: the visual builder draws
  * the typed expression, the preview computes it and enforces the typed
@@ -80,8 +81,39 @@ import { tabTo } from '../support/keyboard'
  * Nothing here is dragged. Every node is added from the palette, which adds to
  * the selected container or the container of the selected node.
  *
- * **Seen red against a broken builder**: not yet run. The mutations and the
- * step each one fails at are recorded here once they have been.
+ * # Seen red against a broken builder
+ *
+ * 2026-10-15, on a throwaway stack. Each break was run against a frontend
+ * image built from the mutated source, then restored with `git checkout --`.
+ * Both tests were green again on the image rebuilt without it.
+ *
+ * - **Both builders keyed by their expression's JSON** (`:key` on each
+ *   `JsonLogicBuilder` in `ExpressionProperties.vue`, so every emission
+ *   remounts it). The first test fails in step 2: the calculate is complete,
+ *   but `calculate-unfinished-field_4` is still shown, because the remounted
+ *   builder never reports its validity. The second test fails at the raw box's
+ *   last key, `}`, the first key that parses: the box is gone.
+ * - **Only the conditional builder keyed by its JSON.** The first test fails
+ *   in step 3, at the threshold's first digit: after the key `1` the number
+ *   input holds `1` and **no longer has focus**.
+ * - **`calculate` mounted in the conditional tier** (`tier="conditional"`).
+ *   The first test fails in step 2, at the calculate builder's kind chooser,
+ *   which offers *Comparison*, *All of / any of* and *Not* as well.
+ * - **`calculate` never written** (`setCalculate` emits nothing). The first
+ *   test fails in step 2, where the preview's `total` stays empty for
+ *   4 × 250. The second test fails where the preview's `score` stays empty
+ *   for the typed `{"+": [1, 2]}`.
+ * - **The builder taking its own echo for a new value** (`isOwnEcho` in
+ *   `JsonLogicBuilder.vue` always false). The first test fails at the
+ *   threshold's `1`, where focus is lost. The second fails at the raw box's
+ *   `}`, where the box is gone.
+ * - **The raw box remounted on every value it parses** (`generation` bumped
+ *   in `onRawParsed`). The second test fails at `}`: the box holds the value
+ *   pretty-printed over six lines, not the text typed, and has lost focus.
+ * - **The params box rewriting its text whenever the rule's params change**
+ *   (the `watch` in `RuleParamsBox.vue` with its echo check removed). The
+ *   second test fails where the box is emptied: it holds `{}`, with the caret
+ *   at 2.
  */
 
 const suffix = runSuffix()
@@ -154,20 +186,30 @@ async function name(page: Page, id: string, key: string, label: string): Promise
   await page.getByTestId(`label-${id}`).fill(label)
 }
 
-/** What a text box holds, and where its caret is. */
+/**
+ * What a text box holds, and where its caret is. A box that has left the page
+ * reads as such at once, so the assertion after a key names the key rather
+ * than the test timing out.
+ */
 async function caretOf(
   box: Locator,
 ): Promise<{ focused: boolean; text: string; start: number | null; end: number | null }> {
-  return box.evaluate((element) => {
-    const input = element as HTMLInputElement | HTMLTextAreaElement
+  return box
+    .evaluate(
+      (element) => {
+        const input = element as HTMLInputElement | HTMLTextAreaElement
 
-    return {
-      focused: input === document.activeElement,
-      text: input.value,
-      start: input.selectionStart,
-      end: input.selectionEnd,
-    }
-  })
+        return {
+          focused: input === document.activeElement,
+          text: input.value,
+          start: input.selectionStart,
+          end: input.selectionEnd,
+        }
+      },
+      undefined,
+      { timeout: 2_000 },
+    )
+    .catch(() => ({ focused: false, text: '(the box is not on the page)', start: null, end: null }))
 }
 
 /**
@@ -264,7 +306,11 @@ test('an administrator builds a nested form with expressions, and a document obe
   await tabTo(page, calculateKind)
   // The calculate tier: a variable or arithmetic, and **no comparison**
   // (Calculation Rule Registry §2.1 and §2.3). Pins the tier.
-  await expect(calculateKind.locator('option')).toHaveText(['No expression', 'Variable', 'Arithmetic'])
+  await expect(calculateKind.locator('option')).toHaveText([
+    'No expression',
+    'Variable',
+    'Arithmetic',
+  ])
 
   // Typeahead: "a" is *Arithmetic*. The chooser is replaced by the expression it
   // started, `+` with two operands unfilled, so focus moves on.
@@ -665,23 +711,30 @@ test('the raw JSON boxes keep the caret and the text under every key', async ({ 
   await expect(params).toHaveValue(seeded)
   await tabTo(page, params)
 
-  // Between the two quotes: Ctrl+End, then three keys back.
-  await page.keyboard.press('ControlOrMeta+End')
-  for (let step = 0; step < 3; step += 1) {
-    await page.keyboard.press('ArrowLeft')
-  }
-
-  let typedParams = { text: seeded, at: seeded.length - 3 }
-
-  expect(await caretOf(params)).toEqual({
+  // **Emptied, and retyped compact.** An empty box is no parameters, `{}`,
+  // which is written; the seeded text is pretty-printed, so a box that rewrote
+  // itself from what it wrote would no longer be empty.
+  await page.keyboard.press('ControlOrMeta+a')
+  await page.keyboard.press('Backspace')
+  expect(await caretOf(params), 'after emptying the box').toEqual({
     focused: true,
-    text: seeded,
-    start: typedParams.at,
-    end: typedParams.at,
+    text: '',
+    start: 0,
+    end: 0,
   })
 
-  // Every key leaves a JSON string, so every key is written and comes back.
-  typedParams = await typeKeyByKey(page, params, '^[A-Z]+$', typedParams.text, typedParams.at)
+  // Every key but the last leaves text that does not parse, which is marked
+  // and not written; the last parses and is written.
+  let typedParams = await typeKeyByKey(page, params, '{"pattern": "^[A-Z]+"}', '', 0)
+
+  await expect(page.getByTestId('rule-params-field_1-0-refused')).toHaveCount(0)
+
+  // Then in the middle, before `"}`: the `$` keeps it parsing, so it is
+  // written and comes back while the caret is inside the text.
+  await page.keyboard.press('ArrowLeft')
+  await page.keyboard.press('ArrowLeft')
+  typedParams = { text: typedParams.text, at: typedParams.at - 2 }
+  typedParams = await typeKeyByKey(page, params, '$', typedParams.text, typedParams.at)
 
   // A quote ends the string early, so the text does not parse: it is marked
   // and not written. Backspace makes it parse again.
@@ -689,7 +742,7 @@ test('the raw JSON boxes keep the caret and the text under every key', async ({ 
   await expect(page.getByTestId('rule-params-field_1-0-refused')).toBeVisible()
   typedParams = await backspace(page, params, typedParams.text, typedParams.at)
   await expect(page.getByTestId('rule-params-field_1-0-refused')).toHaveCount(0)
-  expect(typedParams.text).toBe('{\n  "pattern": "^[A-Z]+$"\n}')
+  expect(typedParams.text).toBe('{"pattern": "^[A-Z]+$"}')
 
   // The preview enforces the pattern the box wrote, once it has been submitted.
   await preview.locator('#jfss-field_1').fill('abc')
