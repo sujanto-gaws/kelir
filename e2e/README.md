@@ -130,11 +130,18 @@ follow:
    first page, count rows across the tenant, or take `.first()` of a list
    other runs write to.
 
-   **What the harness cannot get round:** the new-document type chooser, and
+   ~~**What the harness cannot get round:** the new-document type chooser, and
    the form and list choosers in the document type dialog, read one page of
    100 and offer no search. On a database holding more than 100 of those rows
    that sort ahead of the run's own, the flows that use them fail, because a
-   person could not make the choice either.
+   person could not make the choice either.~~ **The choosers search, so pick
+   from one by this run's key** (corrected 2026-10-15). Since
+   [#525](https://github.com/sujanto-gaws/kelir/issues/525) the new-document
+   type chooser, and the form, list and workflow choosers in the document type
+   dialog, ask the server for the first 100 rows that match what is typed.
+   `support/choosers.ts` types the run's own key first (`chooseDocumentType`
+   by the type's code, `chooseOption` by a form, list or workflow key), so the
+   row is on the page the search returns however many rows sort ahead of it.
 4. **Aim a drag at where the target is now, not where it was**
    ([#720](https://github.com/sujanto-gaws/kelir/pull/720)). A drag-and-drop
    list moves its neighbours while the pointer travels: Sortable reorders the
