@@ -493,6 +493,164 @@ async fn an_update_records_what_changed_and_replaces_the_bindings_it_is_sent() {
     assert_eq!(rows, 1);
 }
 
+/// The binding rows of a type as storage holds them, in a stable order.
+async fn stored_binding_rows(app: &TestApp, type_id: Uuid) -> Vec<(Uuid, String)> {
+    sqlx::query_as(
+        "SELECT id, status FROM document_type_workflows
+         WHERE document_type_id = $1 AND deleted_at IS NULL
+         ORDER BY priority",
+    )
+    .bind(type_id)
+    .fetch_all(&app.pool)
+    .await
+    .expect("bindings are queryable")
+}
+
+/// An edit that does not send `workflows`, or sends it as `null`, leaves every
+/// stored binding exactly as it was (#718).
+///
+/// The test above pins the other half: a collection that **is** sent replaces
+/// the stored set. Nothing pinned this half, and the admin dialog depends on
+/// it. The dialog sees one binding at most and cannot send back fields it
+/// never read, so it leaves `workflows` out to keep the rest.
+///
+/// Both bindings carry the fields the dialog does not author: a condition on
+/// one and a validity window on the other. The rows are checked by id and
+/// status as well as on the wire. A server that rewrote the same set would
+/// keep the wire shape but insert new rows, with new ids and `status` back at
+/// its default. That is not leaving the bindings alone.
+#[tokio::test]
+async fn an_update_that_does_not_send_workflows_keeps_every_stored_binding() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let conditional = published_workflow(&app, &token, "wf_kept_conditional").await;
+    let windowed = published_workflow(&app, &token, "wf_kept_windowed").await;
+    let condition = r#"{"<=":[{"var":"amount"},10000000]}"#;
+
+    let created = app
+        .send(
+            Method::POST,
+            "/api/v1/document-types",
+            Some(&token),
+            Some(json!({
+                "typeCode": "KEPT_BINDINGS",
+                "name": "Kept bindings",
+                "workflows": [
+                    {
+                        "workflowDefinitionId": conditional,
+                        "conditionExpression": condition,
+                        "priority": 1
+                    },
+                    {
+                        "workflowDefinitionId": windowed,
+                        "priority": 2,
+                        "validFrom": "2026-01-01",
+                        "validTo": "2026-12-31"
+                    }
+                ]
+            })),
+        )
+        .await;
+
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let id = id_of(&created.body["data"]);
+
+    let expected = json!([
+        {
+            "workflowDefinitionId": conditional,
+            "conditionExpression": condition,
+            "priority": 1,
+            "validFrom": null,
+            "validTo": null
+        },
+        {
+            "workflowDefinitionId": windowed,
+            "conditionExpression": null,
+            "priority": 2,
+            "validFrom": "2026-01-01",
+            "validTo": "2026-12-31"
+        }
+    ]);
+    assert_eq!(
+        created.body["data"]["workflows"], expected,
+        "the bindings were not stored as sent, so the assertions below would \
+         compare against the wrong baseline"
+    );
+
+    let rows_before = stored_binding_rows(&app, id).await;
+    assert_eq!(rows_before.len(), 2, "{rows_before:?}");
+
+    let edits = [
+        (
+            "an absent key",
+            json!({ "name": "Renamed without workflows" }),
+        ),
+        (
+            "an explicit null",
+            json!({ "name": "Renamed with null workflows", "workflows": null }),
+        ),
+    ];
+
+    for (label, body) in edits {
+        let updated = app
+            .send(
+                Method::PUT,
+                &format!("/api/v1/document-types/{id}"),
+                Some(&token),
+                Some(body.clone()),
+            )
+            .await;
+
+        assert_eq!(
+            updated.status,
+            StatusCode::OK,
+            "{label}: an edit that leaves workflows alone was refused: {}",
+            updated.body
+        );
+        assert_eq!(updated.body["data"]["name"], body["name"], "{label}");
+
+        let read = app
+            .send(
+                Method::GET,
+                &format!("/api/v1/document-types/{id}"),
+                Some(&token),
+                None,
+            )
+            .await;
+
+        assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+        assert_eq!(
+            read.body["data"]["workflows"], expected,
+            "{label}: an edit that did not send workflows changed the stored \
+             bindings"
+        );
+
+        assert_eq!(
+            stored_binding_rows(&app, id).await,
+            rows_before,
+            "{label}: the binding rows were rewritten rather than left alone"
+        );
+
+        let (old_value, new_value): (Value, Value) = sqlx::query_as(
+            "SELECT old_value_json, new_value_json FROM audit_events
+             WHERE object_id = $1 AND event_type = 'DocumentType.Updated'
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(id)
+        .fetch_one(&app.pool)
+        .await
+        .expect("the update was audited");
+
+        assert_eq!(new_value["name"], body["name"], "{label}: {new_value}");
+        assert!(
+            old_value.get("workflows").is_none() && new_value.get("workflows").is_none(),
+            "{label}: the audit records a workflows change that did not happen; \
+             old {old_value}, new {new_value}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn an_update_may_leave_a_binding_alone_even_when_its_form_was_retired() {
     // Re-checking an unchanged binding on every edit would make a type

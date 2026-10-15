@@ -48,17 +48,35 @@ export interface DocumentTypeListQuery extends SearchPageQuery<DocumentTypeStatu
  */
 export type SecurityLevel = 'PUBLIC' | 'INTERNAL' | 'CONFIDENTIAL' | 'RESTRICTED'
 
-/** One workflow a type routes to, and when (`domain::WorkflowBinding`). */
+/**
+ * One workflow a type routes to, and when (`domain::WorkflowBinding`), as the
+ * server returns it.
+ *
+ * **These five fields and no others.** The endpoint denies an unknown field, so
+ * a binding sent back must carry exactly these — which is why there is no
+ * `condition` here: the wire calls it `conditionExpression`, and it is a string.
+ */
 export interface WorkflowBinding {
   workflowDefinitionId: string
+  /** Whether this binding applies; `null` makes it the default binding. */
+  conditionExpression: string | null
   /**
    * Which binding wins where two match. Lower runs first, as everywhere else in
    * this product.
    */
-  priority?: number | null
-  /** A JSON Logic expression deciding whether this binding applies. */
-  condition?: unknown
+  priority: number
+  /** The first day this binding applies (`YYYY-MM-DD`), or `null` for always. */
+  validFrom: string | null
+  /** The last day this binding applies (`YYYY-MM-DD`), or `null` for always. */
+  validTo: string | null
 }
+
+/**
+ * A binding as a write sends it. Only the revision is required: the server
+ * defaults the rest to priority 1, no condition and no window.
+ */
+export type WorkflowBindingRequest = Pick<WorkflowBinding, 'workflowDefinitionId'> &
+  Partial<Omit<WorkflowBinding, 'workflowDefinitionId'>>
 
 export interface DocumentType {
   id: string
@@ -88,7 +106,8 @@ export interface CreateDocumentTypeRequest {
   retentionPolicyId?: string | null
   targetEntityType?: GovernedEntityType | null
   status?: DocumentTypeStatus
-  workflows?: WorkflowBinding[]
+  /** Replaces the stored set whole when present, `[]` included; absent leaves it alone. */
+  workflows?: WorkflowBindingRequest[]
 }
 
 /**

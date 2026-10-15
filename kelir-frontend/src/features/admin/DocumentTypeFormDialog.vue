@@ -18,6 +18,8 @@ import type {
   DocumentTypeStatus,
   GovernedEntityType,
   SecurityLevel,
+  WorkflowBinding,
+  WorkflowBindingRequest,
 } from '@/types/document-type'
 import type { FormSummary, ListSummary } from '@/types/rad'
 import type { WorkflowDefinitionSummary } from '@/types/workflow'
@@ -63,12 +65,24 @@ const targetEntity = ref<GovernedEntityType | ''>('')
 const status = ref<DocumentTypeStatus>('DRAFT')
 const securityLevel = ref<SecurityLevel>('INTERNAL')
 const workflowId = ref('')
+/** The bindings the type had when the dialog opened, in the server's order. */
+const storedBindings = ref<WorkflowBinding[]>([])
 
 const isSaving = ref(false)
 const error = ref('')
 const details = ref<ValidationDetail[]>([])
 
 const isEditing = computed(() => props.editing !== null)
+
+/**
+ * The bindings past the first, which the chooser does not show (#718).
+ *
+ * **Above none, the chooser is disabled.** It shows one revision; with several
+ * bound, a change could mean any of them, and guessing would rewrite a routing
+ * the administrator cannot see from here. So the chooser shows the first, says
+ * how many more there are, and an edit leaves all of them as they are.
+ */
+const furtherBindings = computed(() => Math.max(storedBindings.value.length - 1, 0))
 
 const STATUSES: { value: DocumentTypeStatus; label: string }[] = [
   { value: 'DRAFT', label: 'Draft' },
@@ -185,7 +199,8 @@ watch(
     securityLevel.value = editing?.defaultSecurityLevel ?? 'INTERNAL'
     // Guarded, because a dialog that throws while opening renders nothing
     // at all — including the error that would have said why.
-    workflowId.value = editing?.workflows?.[0]?.workflowDefinitionId ?? ''
+    storedBindings.value = editing?.workflows ?? []
+    workflowId.value = storedBindings.value[0]?.workflowDefinitionId ?? ''
   },
   { immediate: true },
 )
@@ -195,6 +210,52 @@ function orNull(value: string): string | null {
   const trimmed = value.trim()
 
   return trimmed === '' ? null : trimmed
+}
+
+/**
+ * The `workflows` a save sends, or `undefined` to leave them off the wire.
+ *
+ * **Sending the array replaces the stored set** (`repository::replace_workflows`),
+ * and leaving it off leaves the set alone — so an edit sends it only when the
+ * chooser moved (#718). Until then a rename rebuilt the set from the chooser
+ * and deleted every binding past the first, along with the first one's
+ * priority, condition and window.
+ *
+ * When it does move, only the revision changes: the binding goes back with the
+ * four fields the dialog does not author as they were read. Those are a routing
+ * decision, and a workflow designer is FR-RAD-011's. Clearing the chooser sends
+ * `[]`, which unbinds.
+ */
+function workflowsToSend(): WorkflowBindingRequest[] | undefined {
+  const first = storedBindings.value[0]
+  const chosen = workflowId.value
+
+  if (
+    isEditing.value &&
+    (furtherBindings.value > 0 || chosen === (first?.workflowDefinitionId ?? ''))
+  ) {
+    return undefined
+  }
+
+  if (chosen === '') {
+    return []
+  }
+
+  if (!first) {
+    return [{ workflowDefinitionId: chosen }]
+  }
+
+  // Named rather than spread: the endpoint denies an unknown field, and these
+  // five are all a binding is on the wire.
+  return [
+    {
+      workflowDefinitionId: chosen,
+      conditionExpression: first.conditionExpression,
+      priority: first.priority,
+      validFrom: first.validFrom,
+      validTo: first.validTo,
+    },
+  ]
 }
 
 async function save(): Promise<void> {
@@ -212,11 +273,14 @@ async function save(): Promise<void> {
     targetEntityType: targetEntity.value === '' ? null : targetEntity.value,
     defaultSecurityLevel: securityLevel.value,
     status: status.value,
-    // One binding, which is what a screen can usefully author: the priority and
-    // condition that make several of them meaningful are a routing decision,
-    // and a workflow designer is FR-RAD-011's. Sending the array replaces the
-    // stored set, so clearing the chooser unbinds.
-    workflows: workflowId.value ? [{ workflowDefinitionId: workflowId.value }] : [],
+  }
+
+  const workflows = workflowsToSend()
+
+  // Absent rather than `undefined`, so what leaves the stored set alone is not
+  // left to how the client serialises.
+  if (workflows !== undefined) {
+    body.workflows = workflows
   }
 
   try {
@@ -373,9 +437,26 @@ async function save(): Promise<void> {
             placeholder="No workflow"
             search-placeholder="Search by name or key"
             :source="workflowSource"
+            :disabled="furtherBindings > 0"
+            :described-by="furtherBindings > 0 ? 'type-workflow-further' : undefined"
           />
           <p class="text-xs text-muted-foreground">
             Documents of this type route through it when submitted.
+          </p>
+          <!-- #718: the chooser shows one binding, so with several it cannot
+               say which a change would mean. Saving leaves every one alone. -->
+          <p
+            v-if="furtherBindings > 0"
+            id="type-workflow-further"
+            class="text-xs text-muted-foreground"
+            data-testid="type-workflow-further"
+          >
+            {{
+              furtherBindings === 1
+                ? '1 further binding is not edited here.'
+                : `${furtherBindings} further bindings are not edited here.`
+            }}
+            Saving keeps every binding as it is.
           </p>
         </div>
 
