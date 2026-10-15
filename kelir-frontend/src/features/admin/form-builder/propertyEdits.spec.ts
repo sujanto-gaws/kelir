@@ -240,6 +240,17 @@ describe('a rule’s required parameter (#722 AC15)', () => {
     })
   })
 
+  // The server's empty is `''` and `[]` only: a blank pattern is a pattern, and
+  // a blank target is its `RULE_TARGET_NOT_FOUND`, which the flag leaves to it.
+  // A flag saying "Saving is refused" there would be wrong about the save.
+  // Seen red 2026-10-15 (test-engineer campaign) with a trimmed text counted
+  // as empty.
+  it('does not flag a blank text, which the server does not call empty', () => {
+    expect(paramsFlag('regex', { pattern: ' ' })).toBeUndefined()
+    expect(paramsFlag('matchesField', { target: ' ' })).toBeUndefined()
+    expect(paramsFlag('oneOf', { values: [''] })).toBeUndefined()
+  })
+
   it('seeds and flags nothing for a rule outside the five', () => {
     for (const rule of ['passwordStrength', 'async', 'unique', 'exists', 'authorized', 'x']) {
       expect(seededParams(rule), rule).toEqual({})

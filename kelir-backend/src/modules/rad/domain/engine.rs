@@ -117,9 +117,9 @@ pub(crate) const PATTERN_CONSTRUCT_NOT_PORTABLE: &str = "PATTERN_CONSTRUCT_NOT_P
 ///
 /// **The defect it ends is a rule that does nothing, or refuses everything,
 /// silently** ([#722]). The meta-schema requires `params` and accepts any
-/// object in it, so `{"rule": "oneOf", "params": {"values": []}}` was stored,
-/// published and then refused every value anybody typed — with a message the
-/// author wrote for the wrong reason.
+/// object in it, so a `oneOf` rule whose `params` were `{"values": []}` was
+/// stored, published and then refused every value anybody typed — with a
+/// message the author wrote for the wrong reason.
 ///
 /// [#722]: https://github.com/sujanto-gaws/kelir/issues/722
 pub(crate) const RULE_PARAM_MISSING: &str = "RULE_PARAM_MISSING";
@@ -2169,7 +2169,7 @@ mod tests {
             }),
             json!({
                 "id": "cols", "role": "layout", "type": "columns",
-                "columns": [{"width": 6, "components": [plain("email")]}]
+                "columns": [{"components": [plain("email")]}]
             }),
         ]));
 
