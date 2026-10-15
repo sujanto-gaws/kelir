@@ -254,7 +254,8 @@ While the major version is `0`, the public API may change in any release.
   builds expressions visually**
   ([#688](https://github.com/sujanto-gaws/kelir/issues/688), part 2,
   decisions **D-86** A, **D-110** and **D-116**; FR-RAD-013). Each of the 18
-  types has a body of its own. **A data field's `calculate` and
+  types is edited as far as it has properties: `columns` and `tabs` have none,
+  their slots being managed on the canvas. **A data field's `calculate` and
   `conditional.logic` are built in the shared logic builder**, each in its
   registry tier: arithmetic and `var` for `calculate`, and comparisons,
   `and`, `or` and `!` as well for a condition. An expression is offered the
@@ -288,7 +289,8 @@ While the major version is `0`, the public API may change in any release.
   lower bound above its upper one is flagged and saved
   as typed, and the panel does not try a `pattern`: the server's refusal is
   shown under the box. **Clearing a field removes the property**, never
-  writing `null` or `''`, and a change of value type removes only the limits
+  writing `null` or `''`, except a data field's `key` and `label` and a button's
+  `label`, which stay as typed for the server to refuse when empty, and a change of value type removes only the limits
   the new type cannot carry; a display node's `content` and a layout's
   `title` go too. The panel's raw boxes write only an object: an expression
   only one with one key, refused in the panel and not in the shared builder,
@@ -382,7 +384,8 @@ While the major version is `0`, the public API may change in any release.
   they are built visually (*Added*, above). A rule's `params` stay raw JSON
   (**D-110**). **What the panel does not show is saved as loaded**:
   `defaultValue`, `readOnly`, `calculateMode`, `validation.format`,
-  `validation.enum` and `validation.messages`, a layout's `grid`, a button's
+  `validation.enum`, `validation.uniqueItems` and `validation.messages`, a
+  data grid's `calculate`, a layout's `grid`, a button's
   `theme`, a rule outside the five, a limit or placeholder on a type not
   offered one, an alert's `variant` other than `info` or `warning`, and a
   button loaded with an action other

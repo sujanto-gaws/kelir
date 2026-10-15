@@ -103,8 +103,8 @@ function numberOf(limit: Limit): number | undefined {
           {{ messageFor(limit) }}
         </p>
         <p v-else class="text-xs text-muted-foreground">
-          A regular expression the whole value must match. The server checks it when the form is
-          saved.
+          A regular expression found anywhere in the value; start it with ^ and end it with $ to
+          match the whole value. The server checks it when the form is saved.
         </p>
       </div>
 
