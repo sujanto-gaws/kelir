@@ -392,6 +392,27 @@ While the major version is `0`, the public API may change in any release.
   than `submit`, which is shown read-only. The save body and `api/rad.ts` are
   unchanged.
 
+- **A validation rule without the parameter it needs is refused at save and
+  publish** ([#722](https://github.com/sujanto-gaws/kelir/issues/722)). Such
+  a rule was saved and published without error, and then an empty `regex`,
+  `notMatchesField` or `notOneOf` accepted every value at submit, and an
+  empty `matchesField` or `oneOf` refused every value. Creating, updating and
+  publishing a form now answer 422 with an S10.3 detail at
+  `definition.components.N.rules.M.params.<param>`: `RULE_PARAM_MISSING` when
+  `target`, `pattern` or `values` is absent, `""` or `[]`;
+  `RULE_PARAM_INVALID` when it is the wrong JSON type, or when a `target`
+  names the rule's own field; and `RULE_TARGET_NOT_FOUND` when a `target`
+  names no data field in the record the rule is checked against at submit,
+  which is the form's top level or the rule's own data grid row. Publish
+  re-checks the stored draft. The other five registered rules are not
+  checked. **Revisions already published are not re-checked, and submit is
+  unchanged**: a published one is corrected by a new revision. The form
+  builder marks an empty parameter under the rule's parameters box from the
+  moment *Add rule* writes it, naming the parameter and what the rule would
+  do. It does not disable Save or Publish, and the server's message replaces
+  it. The Validation Rule Registry (1.5.8) marks each rule's required
+  parameter, and JFSS takes erratum E-4.
+
 ### Fixed
 
 - **Saving the document type dialog keeps the workflow bindings it does not
@@ -415,7 +436,9 @@ While the major version is `0`, the public API may change in any release.
   `{"target": ""}` for `matchesField` and `notMatchesField`,
   `{"pattern": ""}` for `regex`, and `{"values": []}` for `oneOf` and
   `notOneOf`. Choosing a different rule writes the new rule's. The author
-  fills them in; an empty one is not refused (see *Known limitations*).
+  fills them in; ~~an empty one is not refused (see *Known limitations*)~~ an
+  empty one is marked, and refused at save and publish (#722, under
+  *Changed*; corrected 2026-10-15).
 - **The document type dialog's workflow chooser keeps a bound workflow's
   name** ([#625](https://github.com/sujanto-gaws/kelir/issues/625)). Editing
   a type bound to a revision that no search returned showed *The current
@@ -455,13 +478,15 @@ While the major version is `0`, the public API may change in any release.
 
 ### Known limitations
 
-- **A validation rule with empty parameters is saved and published without
+- ~~**A validation rule with empty parameters is saved and published without
   error, and misbehaves at submit**
   ([#722](https://github.com/sujanto-gaws/kelir/issues/722)). An empty
   `regex`, `notMatchesField` or `notOneOf` passes every value, and an empty
   `matchesField` or `oneOf` refuses every value, so nobody can submit the
   form. The form builder writes a new rule's parameters empty for the author
-  to fill in (*Fixed*, above), so check each before publishing.
+  to fill in (*Fixed*, above), so check each before publishing.~~ (Struck
+  2026-10-15: such a rule is refused at save and publish since #722, under
+  *Changed*. A revision published before it is not re-checked.)
 
 ## [0.9.0] — 2026-10-09
 
