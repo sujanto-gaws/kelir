@@ -264,8 +264,19 @@ While the major version is `0`, the public API may change in any release.
   and is never rewritten. **An unfinished expression saves its last complete
   value**, the field says it is unfinished, and Save stays enabled. **A data
   grid gains `sequenceKey`, `defaultItems` and `validation.uniqueBy`**, which
-  offer only the row's direct fields and keep a loaded value that names none,
-  flagged. **The validation limits and the text properties are edited too**
+  offer the row's data fields as the server walks the row, a layout node's in
+  the row included and a nested grid's row not, and keep a loaded value that
+  names none, flagged. `sequenceKey` offers no field with a `calculate` (JFSS
+  S12.7), and keeps a loaded one that names such a field, flagged. **A data
+  key used twice refuses Save and Publish** (JFSS §4.2): every node sharing
+  it is flagged, row templates included, an alert names the keys and says the
+  form cannot be saved or published, and both stay refused until they
+  differ, including on a definition loaded that way. **So does a `heading`,
+  `paragraph` or `alert` with neither `content` nor `calculate`** (JFSS
+  §4.4): it is flagged at its content box and named in an alert until it has
+  text, and a loaded one opens flagged. A `divider` has no text and is not
+  flagged.
+  **The validation limits and the text properties are edited too**
   (**D-116**), but only where they have an effect: `minLength`, `maxLength`
   and `pattern` on a text field or text area whose value type is `string`,
   and `minimum` and `maximum` on a number whose value type is `number` or
@@ -278,8 +289,13 @@ While the major version is `0`, the public API may change in any release.
   as typed, and the panel does not try a `pattern`: the server's refusal is
   shown under the box. **Clearing a field removes the property**, never
   writing `null` or `''`, and a change of value type removes only the limits
-  the new type cannot carry. A refusal about an expression, a rule's
-  `params` or a limit is shown at that field. It adds no route and no
+  the new type cannot carry; a display node's `content` and a layout's
+  `title` go too. The panel's raw boxes write only an object: an expression
+  only one with one key, refused in the panel and not in the shared builder,
+  so a workflow condition is unchanged, and a rule's `params` only a plain
+  object, an empty box being `{}`. Anything else is marked *Not saved* and the
+  last good value stays. The `params` box keeps the text as typed. A refusal
+  about an expression, a rule's `params` or a limit is shown at that field. It adds no route and no
   dependency, and `JsonLogicBuilder` stays off the first-load path.
 
 ### Changed
