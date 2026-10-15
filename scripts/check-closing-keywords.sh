@@ -14,7 +14,9 @@
 # **The rule.** A closing keyword is *close*, *closes*, *closed*, *fix*,
 # *fixes*, *fixed*, *resolve*, *resolves* or *resolved*, as a whole word,
 # optionally followed by a colon. An issue reference is `#N`, `owner/repo#N`
-# or `https://github.com/owner/repo/issues/N`. A line is refused when a keyword
+# or `https://github.com/owner/repo/issues/N`, or a link whose text is `#N` or
+# `owner/repo#N` (`[#N](…)`: GitHub closed #587 from #588's `Fixes [#587](…)`).
+# A line is refused when a keyword
 # and its reference are followed directly by a list separator (a comma, *and*,
 # `&`, `/` or `+`, with or without spaces, and a comma may take an *and*) and
 # then by a reference with no keyword of its own. That reference, and each one
@@ -38,7 +40,9 @@
 #   does not hide a list (`**Closes** #1, #2`, `Closes #1, _#2_`), and an
 #   underscore inside a repository's name stays in the name;
 # - case is ignored, so *CLOSES* and *Fixes* are keywords too;
-# - spaces and tabs are matched in any number.
+# - spaces and tabs are matched in any number, and a no-break space (U+00A0,
+#   U+2007, U+202F) is a space: the runner's glibc leaves those three out of
+#   `[[:blank:]]`, so without this a list joined by one passed in CI.
 #
 # **What GitHub shows is read, and code is not.** A closing keyword inside code
 # closes nothing, and a body that explains this rule has to quote the form it
@@ -50,7 +54,9 @@
 # - A fenced code block is skipped: from a line opening with three or more
 #   backticks or tildes, indented or not, to a line holding only a run of the
 #   same character at least as long. A fence never closed hides the rest of
-#   the body, as GitHub renders it.
+#   the body, as GitHub renders it. A backtick fence's info string holds no
+#   backtick (CommonMark §4.5), so a line opening with ```x``` is a code span,
+#   read below, and opens no fence.
 # - An inline code span is removed: a run of backticks to the next run of the
 #   same length on the same line. A run with no partner is text.
 #
@@ -84,7 +90,8 @@ shopt -s nocasematch
 KEYWORD='(close[sd]?|fix(e[sd])?|resolve[sd]?)'
 NAME='[[:alnum:]._-]+'
 # One group, and none inside it: the patterns below read it by position.
-REFERENCE="(#[0-9]+|${NAME}/${NAME}#[0-9]+|https?://github\.com/${NAME}/${NAME}/issues/[0-9]+)"
+LINK='\]\([^)[:blank:]]*\)'
+REFERENCE="(#[0-9]+|${NAME}/${NAME}#[0-9]+|https?://github\.com/${NAME}/${NAME}/issues/[0-9]+|\[#[0-9]+${LINK}|\[${NAME}/${NAME}#[0-9]+${LINK})"
 SEPARATOR='([[:blank:]]*[,&/+][[:blank:]]*(and[[:blank:]]+)?|[[:blank:]]+and[[:blank:]]+)'
 
 # A keyword and its reference; the last two groups are the reference and the
@@ -149,6 +156,11 @@ refused=0
 fence=''
 while IFS= read -r line || [[ -n "${line}" ]]; do
   line="${line//$'\r'/}"
+  # U+00A0, U+2007 and U+202F, written as bytes so they mean the same in any
+  # locale; the runner's `[[:blank:]]` matches none of them.
+  line="${line//$'\xc2\xa0'/ }"
+  line="${line//$'\xe2\x80\x87'/ }"
+  line="${line//$'\xe2\x80\xaf'/ }"
 
   if [[ -n "${fence}" ]]; then
     if [[ "${line}" =~ ${FENCE_CLOSE} ]] \
@@ -158,7 +170,9 @@ while IFS= read -r line || [[ -n "${line}" ]]; do
     fi
     continue
   fi
-  if [[ "${line}" =~ ${FENCE_OPEN} ]]; then
+  # A backtick fence whose line holds another backtick is a code span instead.
+  if [[ "${line}" =~ ${FENCE_OPEN} ]] \
+    && [[ "${BASH_REMATCH[1]}" == '~'* || "${line#*"${BASH_REMATCH[1]}"}" != *'`'* ]]; then
     fence="${BASH_REMATCH[1]}"
     continue
   fi

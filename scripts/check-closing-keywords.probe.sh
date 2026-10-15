@@ -24,6 +24,10 @@ Closes #673"
 CR=$'\r'
 TAB=$'\t'
 FENCE='```'
+# Written as bytes, so the probe means the same character in any locale.
+NBSP=$'\xc2\xa0'
+NNBSP=$'\xe2\x80\xaf'
+ISSUES='https://github.com/sujanto-gaws/kelir/issues'
 
 failures=0
 
@@ -227,6 +231,76 @@ probe accepted "a list in a span holding a backtick" "The span \`\`a \` Closes #
 # The text after a span is read. Seen red with a span hiding the rest of its
 # line.
 probe refused "a list after a code span" "The form \`Closes #1\` works; Closes #2, #3 does not."
+
+# **Shapes from the test-engineer campaign on #729.** Each is a rule the header
+# states that no probe above held: seen red with the change named, made to a
+# copy of the check, and green against the check as written.
+
+# A span closes on a run of its own length, never a longer one. Seen red with
+# a span closed by a run at least as long.
+probe accepted "a list in a span holding longer runs" "\`a\`\` Closes #1, #2 \`\`b\`"
+
+# A span reads as a space, so the words either side stay apart. Seen red with
+# a span replaced by nothing, which joins 'the' to the keyword.
+probe refused "a keyword right after a code span" "the\`check\`closes #1, #2"
+
+# The report writes the keyword for each listed issue. Seen red with the
+# 'write' line given another group of the match than the keyword.
+probe_names "#707's line writes a keyword for #690" "${LINE}" "  write   Closes #690"
+
+# A fence's closing line holds only the fence. Seen red with a fence closed by
+# a line that opens with the fence and goes on.
+probe accepted "a list after a line that does not close a fence" "${FENCE}
+${FENCE} not a closing line
+${LINE}
+${FENCE}"
+
+# Each comment ends at its own '-->', so text between two comments is read.
+# Seen red with a comment ended at the last '-->' in the body.
+probe refused "a list between two comments" "<!-- a --> Closes #1, #2 <!-- b -->"
+
+# A comment never closed hides the rest of the body, as GitHub renders it.
+# Seen red with the text after an unclosed '<!--' kept.
+probe accepted "a list after a comment never closed" "<!-- a draft note
+${LINE}"
+
+# The colon after a keyword needs no space. Seen red with a space required.
+probe refused "a colon and no space" "Fix:#1, #2"
+
+# A repository's name may hold a dot. Seen red with '.' taken out of NAME.
+probe_names "a repository name with a dot" \
+  "Closes sujanto-gaws/kelir.github.io#1, sujanto-gaws/kelir.github.io#2" \
+  "  FAIL    may not close: sujanto-gaws/kelir.github.io#2"
+
+# Two backticks open no fence. Seen red with a fence opened by two.
+probe refused "a list after a line opening with two backticks" "\`\` is two backticks
+Closes #1, #2"
+
+# A backtick fence's info string holds no backtick (CommonMark §4.5), so a
+# line opening with three backticks and holding more is a code span, not a
+# fence hiding the rest of the body. Seen red against the check before the
+# fence opener read the rest of its line.
+probe refused "a list after a line opening with a triple-backtick span" "${FENCE}x${FENCE} is a span
+Closes #1, #2"
+probe accepted "a list in a triple-backtick span" "${FENCE}Closes #1, #2${FENCE} is a span"
+
+# **A no-break space is a space.** The runner's glibc leaves U+00A0, U+2007
+# and U+202F out of '[[:blank:]]', which the author's machine may not, so
+# these passed on the runner and were refused locally. Seen red on
+# ubuntu (bash 5.2.21) against the check before it read them as spaces.
+probe refused "a no-break space after the comma" "Closes #1,${NBSP}#2"
+probe refused "a no-break space after the keyword" "Closes${NBSP}#1, #2"
+probe refused "a narrow no-break space after the comma" "Closes #1,${NNBSP}#2"
+
+# **A link whose text is a reference is a reference.** GitHub closed #587 from
+# #588's 'Fixes [#587](…)'. Seen red against the check before REFERENCE held
+# the link form.
+probe_names "issue links" \
+  "Fixes [#1](${ISSUES}/1), [#2](${ISSUES}/2)" \
+  "  FAIL    may not close: [#2](${ISSUES}/2)"
+probe refused "a link listed after a reference" "Fixes #1, [#2](${ISSUES}/2)"
+probe refused "a reference listed after a link" "Fixes [#1](${ISSUES}/1) and #2"
+probe accepted "a keyword for each link" "Fixes [#1](${ISSUES}/1), fixes [#2](${ISSUES}/2)"
 
 # Nothing to read. Seen red with the check made to refuse every body.
 probe accepted "an empty body" ""
