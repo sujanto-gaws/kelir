@@ -15,11 +15,19 @@ import type { ValidationDetail } from '@/types/api'
 import type { JfssComponent, JfssDefinition } from '@/types/jfss'
 import type { Form } from '@/types/rad'
 
+import { scopeVariables } from './form-builder/expressionScope'
 import FormBuilderCanvas from './form-builder/FormBuilderCanvas.vue'
 import FormBuilderPalette from './form-builder/FormBuilderPalette.vue'
-import { locate, pathOf, replaceNode, setLookup } from './form-builder/formTree'
+import FormPropertiesPanel from './form-builder/FormPropertiesPanel.vue'
+import {
+  duplicateKeys,
+  locate,
+  pathOf,
+  replaceNode,
+  setLookup,
+  textlessDisplays,
+} from './form-builder/formTree'
 import { createFormBuilder, provideFormBuilder } from './form-builder/useFormBuilder'
-import FormComponentEditor from './FormComponentEditor.vue'
 
 /**
  * The form builder (FR-RAD-004, #373; nested since FR-RAD-013, #688).
@@ -45,8 +53,9 @@ import FormComponentEditor from './FormComponentEditor.vue'
  *
  * **The canvas is a tree** (#688, **D-86** A): a palette of what the renderer
  * draws, a recursive canvas that nests panels, fieldsets, columns, tabs and a
- * data grid's row template, by pointer and by keyboard, and the shipped
- * `FormComponentEditor` mounted for the one node selected. The drag-and-drop
+ * data grid's row template, by pointer and by keyboard, and a properties panel
+ * (`FormPropertiesPanel`) mounted for the one node selected, which builds its
+ * expressions visually with `JsonLogicBuilder` (**D-110**). The drag-and-drop
  * library is imported by the canvas components alone, which this page alone
  * imports, and the route is lazy, so a session that never opens a builder
  * never fetches it ([ADR-0046]; `check:bundle`).
@@ -96,6 +105,32 @@ const selected = computed<{ path: string; node: JfssComponent } | null>(() => {
   return path && at ? { path, node: at.node } : null
 })
 
+/** What an expression on the selected node may read: its scope's data keys (AC6). */
+const selectedScope = computed(() =>
+  definition.value && selected.value ? scopeVariables(definition.value, selected.value.path) : [],
+)
+
+/**
+ * The keys two or more data nodes use. **Save is refused while there is one**:
+ * JFSS §4.2 makes a key unique across the form and leaves enforcing it to the
+ * authoring tool, and a payload with two values under one key is a document
+ * that silently loses one of them.
+ */
+const repeatedKeys = computed(() => (definition.value ? duplicateKeys(definition.value) : []))
+
+/**
+ * The text-bearing display nodes with neither `content` nor `calculate`, which
+ * JFSS §4.4 has the authoring tool reject (`formTree.textlessDisplays`).
+ */
+const textless = computed(() => (definition.value ? textlessDisplays(definition.value) : []))
+
+/**
+ * **What refuses both Save and Publish** until it is fixed. Publish sends the
+ * stored draft, so a draft loaded with a repeated key could otherwise be
+ * published without ever being saved from here.
+ */
+const blocked = computed(() => repeatedKeys.value.length > 0 || textless.value.length > 0)
+
 /** The details no node claims. A message nobody claims is a message the author never sees. */
 const unclaimedDetails = computed(() => builder.unplacedDetails.value)
 
@@ -143,7 +178,7 @@ async function load(): Promise<void> {
 }
 
 async function save(): Promise<void> {
-  if (!form.value || !definition.value) {
+  if (!form.value || !definition.value || blocked.value) {
     return
   }
 
@@ -177,7 +212,7 @@ async function save(): Promise<void> {
 }
 
 async function publish(): Promise<void> {
-  if (!form.value) {
+  if (!form.value || blocked.value) {
     return
   }
 
@@ -245,7 +280,7 @@ onMounted(() => {
 
           <Button
             v-if="!isPublished && canUpdate"
-            :disabled="isSaving"
+            :disabled="isSaving || blocked"
             data-testid="save-definition"
             @click="save"
           >
@@ -255,7 +290,7 @@ onMounted(() => {
           <Button
             v-if="!isPublished && canPublish"
             variant="secondary"
-            :disabled="isSaving"
+            :disabled="isSaving || blocked"
             data-testid="publish-form"
             @click="publish"
           >
@@ -280,6 +315,27 @@ onMounted(() => {
         This revision is published and cannot be edited. Documents raised from it pinned this exact
         definition, so changing it would alter what they were filled against. Open a new revision to
         make changes.
+      </Alert>
+
+      <Alert
+        v-if="repeatedKeys.length > 0 && !isReadOnly"
+        variant="destructive"
+        data-testid="duplicate-keys"
+      >
+        It cannot be saved or published: two or more components use the
+        {{ repeatedKeys.length === 1 ? 'key' : 'keys' }}
+        {{ repeatedKeys.map((key) => `“${key}”`).join(', ') }}. A key is unique across the form;
+        change one of each before saving.
+      </Alert>
+
+      <Alert
+        v-if="textless.length > 0 && !isReadOnly"
+        variant="destructive"
+        data-testid="missing-content"
+      >
+        It cannot be saved or published: {{ textless.map((id) => `“${id}”`).join(', ') }}
+        {{ textless.length === 1 ? 'shows' : 'show' }} no text. Give each content, or a calculation
+        (JFSS §4.4).
       </Alert>
 
       <Alert v-if="saveError" variant="destructive" data-testid="save-error">
@@ -328,13 +384,16 @@ onMounted(() => {
         <div class="space-y-6">
           <section class="space-y-2" aria-labelledby="properties-heading" data-testid="properties">
             <h3 id="properties-heading" class="text-sm font-semibold">Properties</h3>
-            <FormComponentEditor
+            <FormPropertiesPanel
               v-if="selected"
               :key="selected.node.id"
               :component="selected.node"
+              :path="selected.path"
               :disabled="isReadOnly"
               :details="builder.detailsFor(selected.node.id)"
               :lookup-source="lookups[selected.node.id] ?? ''"
+              :scope="selectedScope"
+              :duplicate-keys="repeatedKeys"
               @update="replaceSelected"
               @update:lookup-source="setLookupSource(selected.node.id, $event)"
             />

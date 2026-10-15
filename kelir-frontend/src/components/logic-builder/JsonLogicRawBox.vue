@@ -8,8 +8,8 @@ import { Textarea } from '@/components/ui/textarea'
 /**
  * The raw-JSON box, marked advanced (#686 C11, C12).
  *
- * It is the box `FormComponentEditor.vue` has today, kept honest in the same
- * two ways. **Half-typed JSON is the normal state of a text box**, so text that
+ * It is the box the form builder's expressions were before #688 part 2, kept
+ * honest in the same two ways. **Half-typed JSON is the normal state of a text box**, so text that
  * does not parse leaves the held value alone and reports itself as unparsed.
  * **A value that parses is emitted as parsed** — never re-indented, re-sorted
  * or normalised — and the text the user typed stays exactly as they typed it.

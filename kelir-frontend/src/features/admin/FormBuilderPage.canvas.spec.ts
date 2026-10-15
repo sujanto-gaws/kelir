@@ -5,7 +5,7 @@ import { nextTick, ref } from 'vue'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 
 import FormBuilderPage from './FormBuilderPage.vue'
-import FormComponentEditor from './FormComponentEditor.vue'
+import FormPropertiesPanel from './form-builder/FormPropertiesPanel.vue'
 import { createFormBuilder } from './form-builder/useFormBuilder'
 import {
   errorBody,
@@ -241,7 +241,7 @@ describe('FormBuilderPage, the nesting canvas', () => {
   it('selects the first root component on load, and edits one node at a time (A2)', async () => {
     const wrapper = await render()
 
-    expect(wrapper.findAllComponents(FormComponentEditor)).toHaveLength(1)
+    expect(wrapper.findAllComponents(FormPropertiesPanel)).toHaveLength(1)
     expect(wrapper.find('[data-testid="editor-field_1"]').exists()).toBe(true)
 
     await wrapper.find('[data-testid="select-field_2"]').trigger('click')
