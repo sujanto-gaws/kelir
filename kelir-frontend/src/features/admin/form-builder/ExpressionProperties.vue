@@ -191,8 +191,8 @@ function setAction(action: string): void {
     </p>
     <p
       v-if="calculateRefused"
-      class="text-xs text-destructive"
       :id="`calculate-refused-${component.id}`"
+      class="text-xs text-destructive"
       role="alert"
       :data-testid="`calculate-refused-${component.id}`"
     >
@@ -246,8 +246,8 @@ function setAction(action: string): void {
     </p>
     <p
       v-if="conditionalRefused"
-      class="text-xs text-destructive"
       :id="`conditional-refused-${component.id}`"
+      class="text-xs text-destructive"
       role="alert"
       :data-testid="`conditional-refused-${component.id}`"
     >
