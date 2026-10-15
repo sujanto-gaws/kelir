@@ -1,11 +1,19 @@
 name: Pull-request ready
 
-# **A pull request whose body opens by saying it is not ready fails this
-# check** (#696, decision D-112). A feature row's pull request carries
-# `**Not ready: <gate> is still running. Do not merge yet.**` as its first line
-# until its campaign section is written (Git Workflow §4), and three Sprint 22
-# rows and #693 were merged while theirs said so. The rule itself, and why it
-# reads only the first line, are in `scripts/check-pull-request-ready.sh`.
+# **Two rules on the pull-request body, each failing this check.**
+#
+# - **A body that opens by saying it is not ready** (#696, decision D-112). A
+#   feature row's pull request carries
+#   `**Not ready: <gate> is still running. Do not merge yet.**` as its first
+#   line until its campaign section is written (Git Workflow §4), and three
+#   Sprint 22 rows and #693 were merged while theirs said so. The rule itself,
+#   and why it reads only the first line, are in
+#   `scripts/check-pull-request-ready.sh`.
+# - **A closing keyword followed by a list of issues** (#725). GitHub closes
+#   only the first issue of `Closes #1, #2`, and says nothing: #707's body
+#   listed three and linked #655 alone (Git Workflow §4). The rule, and what it
+#   ignores so a body can quote the form, are in
+#   `scripts/check-closing-keywords.sh`.
 #
 # **A workflow of its own, for the reason `pull-request-title.yml` is one**
 # (D-65): it must re-run on `edited`, which `ci.yml` does not listen for, and
@@ -17,7 +25,8 @@ name: Pull-request ready
 
 on:
   pull_request:
-    # `edited` is the one that clears it: removing the line is a body edit.
+    # `edited` is the one that clears it: removing the line, or giving each
+    # listed issue its own keyword, is a body edit.
     # The rest keep a result on every head commit, since branch protection
     # reads required checks per commit and a push would otherwise leave the new
     # head with none. `ready_for_review` re-reads the body when a draft is
@@ -36,6 +45,8 @@ jobs:
   ready:
     name: Pull-request ready
     runs-on: ubuntu-latest
+    # Seconds on any body: a pathological one fails here, not after six hours.
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
         with:
@@ -60,3 +71,18 @@ jobs:
       - name: Probe the first-line rule
         if: ${{ !cancelled() }}
         run: ./scripts/check-pull-request-ready.probe.sh
+
+      # The same body, the same way in, for the second rule. Run even when the
+      # first is red: a body still marked not ready is the one most likely to
+      # be edited again, and both results should be on it.
+      - name: Refuse a closing keyword followed by a list of issues
+        if: ${{ !cancelled() }}
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: ./scripts/check-closing-keywords.sh
+
+      # Its shapes, each a body expected to be refused or accepted. Seconds of
+      # bash, run whatever the steps above did.
+      - name: Probe the closing-keyword rule
+        if: ${{ !cancelled() }}
+        run: ./scripts/check-closing-keywords.probe.sh

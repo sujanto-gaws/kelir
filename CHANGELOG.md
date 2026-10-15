@@ -114,6 +114,22 @@ While the major version is `0`, the public API may change in any release.
   convention it enforces: a feature row's pull request carries the line until
   its campaign section is written. **It binds nothing until the product owner
   makes it required on `main`.**
+- **A pull request whose closing keyword is followed by a list fails a check**
+  ([#725](https://github.com/sujanto-gaws/kelir/issues/725)). `Pull-request
+  ready` now also fails a body in which a closing keyword is followed by a
+  list of issues, as in `Closes #1, #2`, because GitHub does not close every
+  issue in such a list and says nothing: it links the first one only. In
+  [#707](https://github.com/sujanto-gaws/kelir/pull/707) a list of three
+  linked one, and another was closed by hand afterwards. Each issue with its own keyword passes,
+  one per line or several on a line, and so does a list no keyword governs,
+  such as `See #1, #2`. HTML comments and code are ignored, so a body can
+  still quote the form it refuses. Its probes run in the same job, and the job
+  stops at five minutes, so no body can hold it longer. The
+  [git workflow](docs/standards/05.%20Git%20Workflow.md) §4 now cites it. Across
+  eleven merged pull requests with such a list, GitHub linked only the first
+  issue every time.
+  **Like the not-ready line, it binds nothing until the product owner makes
+  `Pull-request ready` required on `main`.**
 - **A published workflow revision can be deprecated**
   ([#573](https://github.com/sujanto-gaws/kelir/issues/573), decisions
   **D-101** B and **D-108**). `POST /api/v1/workflow/definitions/{id}/deprecation`
