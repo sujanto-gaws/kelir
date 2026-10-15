@@ -44,7 +44,7 @@ probe() {
 }
 
 # probe_names <name> <body> <line>: refused, and the report holds the line
-# naming the references that may not close, exactly.
+# naming the references that will not close, exactly.
 probe_names() {
   local name="$1" body="$2" expected_line="$3"
 
@@ -80,7 +80,7 @@ probe accepted "one keyword per line" "${PER_LINE}"
 
 # The report names the references after the first, and only those. Seen red
 # with every reference on the line named, the keyword's own included.
-probe_names "#707's line names #690 and #673" "${LINE}" "  FAIL    may not close: #690, #673"
+probe_names "#707's line names #690 and #673" "${LINE}" "  FAIL    will not close: #690, #673"
 
 # Each keyword GitHub honours. Seen red with each taken out of KEYWORD.
 for keyword in close closes closed fix fixes fixed resolve resolves resolved; do
@@ -94,6 +94,16 @@ probe refused "'and'" "Fixes #1 and #2"
 probe refused "'&'" "closes #1 & #2"
 probe refused "'/'" "Resolves #1 / #2"
 probe refused "'+'" "Fixes #1 + #2"
+# A semicolon, and a dash with no space either side, which writes a range.
+# Seen red against the check before either was a separator, and with each
+# taken out of SEPARATOR.
+probe refused "';'" "Closes #1; #2"
+probe refused "a range" "Closes #1-#3"
+# A spaced dash is punctuation, and a word between references is prose. Seen
+# red with spaces allowed around the dash, and with 'through' made a
+# separator.
+probe accepted "a spaced dash" "Closes #1 - #3"
+probe accepted "'through'" "Closes #1 through #3"
 # An 'and' after the comma. Seen red with the comma's optional 'and' removed.
 probe refused "a comma and 'and'" "Closes #1, and #2"
 
@@ -109,6 +119,9 @@ probe refused "a colon after the keyword" "Resolves: #1, #2, #3"
 
 # Case. Seen red with nocasematch off.
 probe refused "upper case" "FIXES #1, #2"
+# A separator in upper case. Seen red with the split into references made
+# case-sensitive, which found the list and named nothing in it.
+probe_names "an upper-case 'AND'" "Fixes #1 AND #2" "  FAIL    will not close: #2"
 
 # Emphasis. Seen red without the '*' strip, and without the '_' strip.
 probe refused "bold around the keyword" "**Closes** #1, #2"
@@ -118,7 +131,7 @@ probe refused "italic around a listed reference" "Closes #1, _#2_"
 # every '_' removed, which names the repository wrongly.
 probe_names "a repository name with an underscore" \
   "Closes sujanto-gaws/my_repo#1, sujanto-gaws/my_repo#2" \
-  "  FAIL    may not close: sujanto-gaws/my_repo#2"
+  "  FAIL    will not close: sujanto-gaws/my_repo#2"
 
 # The other two reference forms. Seen red with each taken out of REFERENCE.
 probe refused "owner/repo references" "Closes sujanto-gaws/kelir#1, sujanto-gaws/kelir#2"
@@ -130,9 +143,11 @@ probe refused "issue URLs" "Fixes https://github.com/sujanto-gaws/kelir/issues/1
 probe refused "a keyword mid-line" "This pull request closes #1, #2."
 probe refused "a bracket against the keyword" "(closes #1, #2)"
 
-# A list after a second keyword on the line. Seen red with the line given up
-# after the first keyword's list ended.
+# A list after a second keyword on the line, and two lists on one line. Seen
+# red with the line given up after the first keyword's list ended; the second
+# with only a line's first list read.
 probe refused "a list after a second keyword" "Closes #1, closes #2, #3"
+probe_names "two lists on one line" "Closes #1, #2. Fixes #3, #4." "  FAIL    will not close: #2, #4"
 
 # Every line is read. Seen red with only the first non-blank line read.
 probe refused "a list on a later line" "Closes #1
@@ -169,8 +184,8 @@ probe accepted "prose between the reference and a list" "Closes #1. It also touc
 # Whole words. Seen red without the boundary before the keyword.
 probe accepted "a word that ends with a keyword" "The parser prefixes #1, #2 with a hash."
 
-# A separator then a word, not a reference. Seen red with the reference after
-# the separator made optional.
+# A separator then a word, not a reference. Seen red with any word allowed
+# after a separator.
 probe accepted "a separator then a word" "Fixes #1, and the rest is prose."
 
 # HTML comments, which GitHub renders as nothing. Seen red without the comment
@@ -255,9 +270,12 @@ ${FENCE} not a closing line
 ${LINE}
 ${FENCE}"
 
-# Each comment ends at its own '-->', so text between two comments is read.
-# Seen red with a comment ended at the last '-->' in the body.
+# Each comment ends at its own '-->', so text between two comments is read,
+# and so is text after a stray '-->'. Seen red with a comment ended at the last
+# '-->' in the body; the second with it ended at the last '-->' before the next
+# '<!--'.
 probe refused "a list between two comments" "<!-- a --> Closes #1, #2 <!-- b -->"
+probe refused "a list before a stray '-->'" "<!-- a --> Closes #1, #2 -->"
 
 # A comment never closed hides the rest of the body, as GitHub renders it.
 # Seen red with the text after an unclosed '<!--' kept.
@@ -270,7 +288,7 @@ probe refused "a colon and no space" "Fix:#1, #2"
 # A repository's name may hold a dot. Seen red with '.' taken out of NAME.
 probe_names "a repository name with a dot" \
   "Closes sujanto-gaws/kelir.github.io#1, sujanto-gaws/kelir.github.io#2" \
-  "  FAIL    may not close: sujanto-gaws/kelir.github.io#2"
+  "  FAIL    will not close: sujanto-gaws/kelir.github.io#2"
 
 # Two backticks open no fence. Seen red with a fence opened by two.
 probe refused "a list after a line opening with two backticks" "\`\` is two backticks
@@ -297,7 +315,7 @@ probe refused "a narrow no-break space after the comma" "Closes #1,${NNBSP}#2"
 # the link form.
 probe_names "issue links" \
   "Fixes [#1](${ISSUES}/1), [#2](${ISSUES}/2)" \
-  "  FAIL    may not close: [#2](${ISSUES}/2)"
+  "  FAIL    will not close: [#2](${ISSUES}/2)"
 probe refused "a link listed after a reference" "Fixes #1, [#2](${ISSUES}/2)"
 probe refused "a reference listed after a link" "Fixes [#1](${ISSUES}/1) and #2"
 probe accepted "a keyword for each link" "Fixes [#1](${ISSUES}/1), fixes [#2](${ISSUES}/2)"

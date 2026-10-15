@@ -9,10 +9,11 @@ name: Pull-request ready
 #   Sprint 22 rows and #693 were merged while theirs said so. The rule itself,
 #   and why it reads only the first line, are in
 #   `scripts/check-pull-request-ready.sh`.
-# - **A closing keyword followed by a list of issues** (#725). GitHub does not
-#   close every issue in `Closes #1, #2`, and says nothing: #707's body listed
-#   three and #690 stayed open (Git Workflow §4). The rule, and what it ignores
-#   so a body can quote the form, are in `scripts/check-closing-keywords.sh`.
+# - **A closing keyword followed by a list of issues** (#725). GitHub closes
+#   only the first issue of `Closes #1, #2`, and says nothing: #707's body
+#   listed three and linked #655 alone (Git Workflow §4). The rule, and what it
+#   ignores so a body can quote the form, are in
+#   `scripts/check-closing-keywords.sh`.
 #
 # **A workflow of its own, for the reason `pull-request-title.yml` is one**
 # (D-65): it must re-run on `edited`, which `ci.yml` does not listen for, and
@@ -44,6 +45,8 @@ jobs:
   ready:
     name: Pull-request ready
     runs-on: ubuntu-latest
+    # Seconds on any body: a pathological one fails here, not after six hours.
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
         with:
