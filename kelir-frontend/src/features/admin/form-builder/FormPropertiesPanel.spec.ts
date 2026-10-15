@@ -45,6 +45,20 @@ import ValidationRulesSection from './ValidationRulesSection.vue'
  * | `defaultItems` accepts any number | *refuses a negative or non-integer defaultItems* (AC3) |
  * | the params message dropped from the rules section | *shows a detail at …rules.N.params …* (AC9) |
  * | `rule-scope-` renamed | *keeps the rules section's test ids …* (AC10) |
+ *
+ * The `test-engineer` campaign, 2026-10-15, ran 66 more mutations over the
+ * panel through `src/features/admin`; 58 were killed by the cases above or in
+ * the sibling specs. Of the eight that **survived them**, these six are
+ * killed by the cases they added here, each mutation reverted after:
+ *
+ * | Mutation | Reddened |
+ * |---|---|
+ * | `setLogic` starts a new `conditional` with `action: 'hide'`, while the select shows `show` | *starts a new conditional with the action its select showed …* (AC7) |
+ * | `FormPropertiesPanel` passes `disabled: false` to `LayoutProperties` | *disables every control when read-only …* (AC7), now over a fresh node of every offered type |
+ * | the same for `ButtonProperties` | the same |
+ * | the server's detail at `…key`, at `…defaultItems` or at `…validation.uniqueBy` not shown beside its field (three mutations) | *shows a detail at …key, …defaultItems or …validation.uniqueBy beside that field …* (AC9) |
+ *
+ * The other survivors are killed in `FormBuilderPage.expressions.spec.ts`.
  */
 
 const ENFORCEABLE = ['matchesField', 'notMatchesField', 'regex', 'oneOf', 'notOneOf']
@@ -1084,6 +1098,24 @@ describe('FormPropertiesPanel', () => {
       expect(latest()).toEqual(textField())
     })
 
+    // The action select shows `show` before any conditional exists, so the
+    // first one built must carry what it showed (test-engineer campaign,
+    // 2026-10-15: a default of `hide` passed every case above).
+    it('starts a new conditional with the action its select showed, show (AC7)', async () => {
+      const { wrapper, latest } = harness(textField())
+      const action = wrapper.find('[data-testid="conditional-action-f"]')
+
+      expect((action.element as HTMLSelectElement).value).toBe('show')
+      expect(action.attributes('disabled')).toBeDefined()
+
+      await byLabel(wrapper, 'Conditional logic: kind').setValue('var')
+      await byLabel(wrapper, 'Conditional logic: variable').setValue('quantity')
+
+      expect(latest()).toEqual(
+        textField({ conditional: { action: 'show', logic: { var: 'quantity' } } }),
+      )
+    })
+
     it('keeps the last complete value while an operand is unfinished, and says so (AC7)', async () => {
       const calculate = { '+': [{ var: 'quantity' }, 1] }
       const { wrapper, latest, count } = harness(textField({ calculate }))
@@ -1144,6 +1176,10 @@ describe('FormPropertiesPanel', () => {
         }),
         grid({ sequenceKey: 'line_no' }),
         { id: 'a', role: 'display', type: 'alert', content: 'A' } as JfssComponent,
+        // And a fresh node of every offered type, so each property body is
+        // held to it (test-engineer campaign, 2026-10-15: a panel's title and
+        // a button's label passed this case enabled while it held three nodes).
+        ...offeredEntries().map((entry) => fresh(entry.type)),
       ]) {
         const { wrapper } = harness(node, { disabled: true })
         const live = wrapper
@@ -1202,6 +1238,38 @@ describe('FormPropertiesPanel', () => {
 
     // Every detail is still in the panel's list, the unclaimed one included.
     const list = wrapper.find('[data-testid="editor-errors-f"]').text()
+
+    for (const detail of details) {
+      expect(list).toContain(detail.message)
+    }
+  })
+
+  // The data grid's own properties place their details too (test-engineer
+  // campaign, 2026-10-15: each of these three passed every case when it was
+  // left to the list alone).
+  it('shows a detail at …key, …defaultItems or …validation.uniqueBy beside that field, and in the list (AC9)', () => {
+    const at = (rest: string, message: string): ValidationDetail => ({
+      path: `definition.components.0.${rest}`,
+      rule: 'schema',
+      code: 'INVALID_DEFINITION',
+      message,
+    })
+    const details = [
+      at('key', 'the key is taken'),
+      at('defaultItems', 'defaultItems must be an integer'),
+      at('validation.uniqueBy', 'uniqueBy names no row field'),
+    ]
+    const { wrapper } = harness(grid(), { details })
+    const beside = (testId: string) =>
+      wrapper.find(`[data-testid="${testId}"]`).element.parentElement?.textContent
+
+    expect(beside('key-g')).toContain('the key is taken')
+    expect(beside('default-items-g')).toContain('defaultItems must be an integer')
+    expect(wrapper.find('[data-testid="unique-by-g"]').text()).toContain(
+      'uniqueBy names no row field',
+    )
+
+    const list = wrapper.find('[data-testid="editor-errors-g"]').text()
 
     for (const detail of details) {
       expect(list).toContain(detail.message)

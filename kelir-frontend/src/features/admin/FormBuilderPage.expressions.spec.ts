@@ -13,6 +13,7 @@ import {
   type RecordedRequest,
 } from '@/lib/testing/fake-backend'
 import { jfssViolations } from '@/lib/testing/jfss-meta-schema'
+import purchaseRequisition from '@/features/rad/__fixtures__/purchase-requisition.json'
 import { type } from '@/lib/testing/keyboard'
 import { useAuthStore } from '@/stores/auth'
 import type { CurrentUser } from '@/types/auth'
@@ -57,6 +58,21 @@ import FormBuilderPage from './FormBuilderPage.vue'
  * | a 0 ms or a 30 ms trailing debounce on `replaceSelected`; either builder keyed by its value's JSON or by the node's label; `ExpressionProperties` keyed by a count of writes; a watcher resetting the builders' values from the node on every write; a label edit spread from a copy of the node taken at setup; `steady` by identity | *keeps focus, …*, both cases |
  * | either builder keyed by its `variables`; `JsonLogicBuilder` reloading on any change of `variables`, `label` or `disabled` | *keeps focus, …*: `conditional.logic` alone, since a `calculate` is not offered its own key, so its variables do not change when its label does |
  *
+ * The campaign's cases on the purchase requisition and on the canvas, each
+ * seen red against the mutation beside it, reverted after:
+ *
+ * | Mutation | Reddened |
+ * |---|---|
+ * | `DisplayProperties` gives a paragraph with no `content` one when it is selected | *saves the purchase requisition unchanged after every node in it is selected* |
+ * | clearing a limit also deletes its `validation.messages` entry | *changes the purchase requisition at …validation.maxLength alone …* |
+ * | `dataVariables` skips `columns` and `tabs` slots | *offers the purchase requisition's expressions their scope …*, *offers a row in a panel in tabs …* |
+ * | `scopeListOf` does not walk into a `columns` or `tabs` slot (it **survived every other case**) | the same two |
+ * | `removeNode` drops a grid's `sequenceKey` that names the removed row field | *keeps and flags sequenceKey and uniqueBy when the row fields they name are removed …* |
+ * | `DataGridProperties` drops a `sequenceKey` naming no row field on any other edit (it **survived every other case**) | the same |
+ * | `JsonLogicNode` counts every var as offered | *keeps and badges a var whose field was removed …*, *offers a row in a panel in tabs …* |
+ * | `limitsFor('integer')` returns none | *keeps the bounds a number-to-integer switch can carry …*, *changes the purchase requisition at …maximum alone …* |
+ * | `switchValueType` keeps every limit | *keeps the bounds a number-to-integer switch can carry …* |
+ *
  * **Not a mutant:** the panel deriving `variables` as a new array on every
  * write. No case reddens, and none should: `JsonLogicBuilder` reads
  * `variables` for its choices and badges only, and has no watcher on it.
@@ -66,6 +82,43 @@ const FORM_ID = '0199a1a0-0000-7000-8000-0000000000e1'
 const blank = { template: '<div />' }
 
 type Node = Record<string, unknown>
+
+/** The dot paths at which `after` differs from `before`: added, removed or changed. */
+function changedPaths(before: unknown, after: unknown, path = ''): string[] {
+  if (JSON.stringify(before) === JSON.stringify(after)) {
+    return []
+  }
+
+  const isRecord = (value: unknown): value is Record<string, unknown> =>
+    typeof value === 'object' && value !== null
+
+  if (isRecord(before) && isRecord(after) && Array.isArray(before) === Array.isArray(after)) {
+    const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])]
+
+    return keys.flatMap((key) =>
+      changedPaths(before[key], after[key], path === '' ? key : `${path}.${key}`),
+    )
+  }
+
+  return [path]
+}
+
+/** Every component id in a definition, through slots and row templates. */
+function idsOf(nodes: unknown): string[] {
+  if (!Array.isArray(nodes)) {
+    return []
+  }
+
+  return (nodes as Node[]).flatMap((node) => [
+    String(node.id),
+    ...idsOf(node.components),
+    ...(['columns', 'tabs'] as const).flatMap((slots) =>
+      Array.isArray(node[slots])
+        ? (node[slots] as Node[]).flatMap((slot) => idsOf(slot.components))
+        : [],
+    ),
+  ])
+}
 
 function numberField(key: string, extra: Node = {}): Node {
   return {
@@ -574,5 +627,335 @@ describe('FormBuilderPage, the properties panel’s expressions', () => {
 
     await select(wrapper, 'notes')
     expect(wrapper.find('[data-testid="conditional-error-notes"]').text()).toContain('`map`')
+  })
+
+  // --- The purchase requisition, through the page (test-engineer campaign, 2026-10-15) ---
+  //
+  // The repository's real form (`features/rad/__fixtures__`, which the backend
+  // asserts it would store): tabs, columns, a fieldset, a grid in a tab with a
+  // numbered row, a lookup bound in `settings`, a `calculate` the builder can
+  // draw, one it cannot (`sum` over `map`), a `conditional`, an alert and a
+  // button. The cases above use small definitions; this is the shape an author
+  // actually opens.
+
+  function purchaseRequisitionDefinition(): Node {
+    return JSON.parse(JSON.stringify(purchaseRequisition)) as Node
+  }
+
+  /** The top level's data keys, in declaration order: every key outside the grid's row. */
+  const TOP_LEVEL = [
+    'title',
+    'supplier_id',
+    'cost_centre',
+    'needed_by',
+    'budget',
+    'baseline_budget',
+    'priority',
+    'line_items',
+    'grand_total',
+    'justification',
+    'notes',
+    'category',
+    'urgent',
+  ]
+
+  it('saves the purchase requisition unchanged after every node in it is selected (AC4)', async () => {
+    const loaded = purchaseRequisitionDefinition()
+
+    current = form(loaded, { title: loaded.title })
+
+    const wrapper = await render()
+    const ids = idsOf(loaded.components)
+
+    expect(ids.length).toBe(26)
+
+    for (const id of ids) {
+      await select(wrapper, id)
+      expect(wrapper.find(`[data-testid="editor-${id}"]`).exists(), id).toBe(true)
+    }
+
+    expect(changedPaths(loaded, await saved(wrapper))).toEqual([])
+  })
+
+  it.each([
+    {
+      id: 'title-field',
+      testId: 'label-title-field',
+      value: 'Subject',
+      path: 'components.0.components.0.label',
+    },
+    // Cleared, the limit goes; its loaded `messages.maxLength` is not the panel's to touch.
+    {
+      id: 'title-field',
+      testId: 'max-length-title-field',
+      value: '',
+      path: 'components.0.components.0.validation.maxLength',
+    },
+    {
+      id: 'supplier-field',
+      testId: 'description-supplier-field',
+      value: 'From the register',
+      path: 'components.0.components.1.description',
+    },
+    {
+      id: 'baseline-field',
+      testId: 'label-baseline-field',
+      value: 'Opening budget',
+      path: 'components.1.columns.0.components.1.label',
+    },
+    {
+      id: 'line-quantity',
+      testId: 'maximum-line-quantity',
+      value: '99',
+      path: 'components.2.tabs.0.components.0.components.2.validation.maximum',
+    },
+    {
+      id: 'line-items',
+      testId: 'default-items-line-items',
+      value: '2',
+      path: 'components.2.tabs.0.components.0.defaultItems',
+    },
+    {
+      id: 'line-items',
+      testId: 'unique-by-line-items-description',
+      value: true,
+      path: 'components.2.tabs.0.components.0.validation.uniqueBy',
+    },
+    {
+      id: 'grand-total-field',
+      testId: 'label-grand-total-field',
+      value: 'Total',
+      path: 'components.2.tabs.0.components.1.label',
+    },
+    {
+      id: 'justification-field',
+      testId: 'conditional-action-justification-field',
+      value: 'hide',
+      path: 'components.2.tabs.1.components.0.components.0.conditional.action',
+    },
+    {
+      id: 'category-field',
+      testId: 'label-category-field',
+      value: 'Kind',
+      path: 'components.2.tabs.1.components.0.components.2.label',
+    },
+    {
+      id: 'notes-fieldset',
+      testId: 'title-notes-fieldset',
+      value: 'More',
+      path: 'components.2.tabs.1.components.0.title',
+    },
+    {
+      id: 'approval-note',
+      testId: 'variant-approval-note',
+      value: 'warning',
+      path: 'components.4.variant',
+    },
+    {
+      id: 'submit-button',
+      testId: 'button-label-submit-button',
+      value: 'Send',
+      path: 'components.5.label',
+    },
+  ])(
+    'changes the purchase requisition at $path alone when $testId is set (AC4)',
+    async ({ id, testId, value, path }) => {
+      const loaded = purchaseRequisitionDefinition()
+
+      current = form(loaded, { title: loaded.title })
+
+      const wrapper = await render()
+
+      await select(wrapper, id)
+
+      const control = wrapper.find(`[data-testid="${testId}"]`)
+
+      expect(control.exists(), testId).toBe(true)
+      await control.setValue(value)
+      await settle()
+
+      const sent = await saved(wrapper)
+
+      expect(changedPaths(loaded, sent)).toEqual([path])
+      expect(jfssViolations(sent)).toEqual([])
+    },
+  )
+
+  it('offers the purchase requisition’s expressions their scope, in a tab’s grid row and at the top level (AC6)', async () => {
+    current = form(purchaseRequisitionDefinition())
+
+    const wrapper = await render()
+    const paths = (testId: string) =>
+      (builderIn(wrapper, testId).props('variables') as LogicVariable[]).map((v) => v.path)
+    const row = ['line_no', 'description', 'quantity', 'unit_price']
+
+    await select(wrapper, 'line-total')
+    expect(paths('calculate-line-total')).toEqual(row)
+    expect(paths('conditional-line-total')).toEqual([...row, 'line_total'])
+
+    // `sum` over `map` is not in the `calculate` tier's set: it opens raw.
+    await select(wrapper, 'grand-total-field')
+    expect(paths('calculate-grand-total-field')).toEqual(
+      TOP_LEVEL.filter((key) => key !== 'grand_total'),
+    )
+    expect(wrapper.find('[data-testid="calculate-grand-total-field"] textarea').exists()).toBe(true)
+
+    await select(wrapper, 'justification-field')
+    expect(paths('conditional-justification-field')).toEqual(TOP_LEVEL)
+
+    // A display node is offered a `conditional` and no `calculate`.
+    await select(wrapper, 'total-echo')
+    expect(wrapper.find('[data-testid="calculate-total-echo"]').exists()).toBe(false)
+    expect(paths('conditional-total-echo')).toEqual(TOP_LEVEL)
+  })
+
+  it('offers a row in a panel in tabs its own keys, and keeps and badges a top-level key it reads (AC6)', async () => {
+    // The engine and the renderer evaluate a row against the row
+    // (`engine.rs`'s scopes, `DataGridRow.vue`), so `threshold` reads null
+    // there: offering it would be offering a value that is never set.
+    const loaded = definition([
+      numberField('threshold'),
+      {
+        id: 'tabs_1',
+        role: 'layout',
+        type: 'tabs',
+        tabs: [
+          {
+            title: 'Lines',
+            components: [
+              {
+                id: 'panel_1',
+                role: 'layout',
+                type: 'panel',
+                title: 'Lines',
+                components: [
+                  {
+                    id: 'lines',
+                    role: 'data',
+                    type: 'datagrid',
+                    key: 'lines',
+                    label: 'Lines',
+                    validation: { type: 'array' },
+                    components: [
+                      numberField('qty'),
+                      numberField('price'),
+                      numberField('line_total', {
+                        calculate: { '*': [{ var: 'qty' }, { var: 'price' }] },
+                        conditional: { action: 'show', logic: { '>': [{ var: 'threshold' }, 1] } },
+                      }),
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ])
+
+    current = form(loaded)
+
+    const wrapper = await render()
+    const paths = (testId: string) =>
+      (builderIn(wrapper, testId).props('variables') as LogicVariable[]).map((v) => v.path)
+
+    await select(wrapper, 'line_total')
+    expect(paths('calculate-line_total')).toEqual(['qty', 'price'])
+    expect(paths('conditional-line_total')).toEqual(['qty', 'price', 'line_total'])
+    expect(wrapper.find('[data-testid="conditional-line_total"]').text()).toContain(
+      'Not in the offered variables',
+    )
+
+    await select(wrapper, 'lines')
+    expect(paths('conditional-lines')).toEqual(['threshold', 'lines'])
+
+    expect(changedPaths(loaded, await saved(wrapper))).toEqual([])
+  })
+
+  it('keeps and flags sequenceKey and uniqueBy when the row fields they name are removed on the canvas (AC3)', async () => {
+    current = form(
+      definition([
+        {
+          id: 'lines',
+          role: 'data',
+          type: 'datagrid',
+          key: 'lines',
+          label: 'Lines',
+          sequenceKey: 'line_no',
+          validation: { type: 'array', uniqueBy: 'sku' },
+          components: [
+            numberField('line_no'),
+            { ...numberField('sku'), type: 'textfield', validation: { type: 'string' } },
+          ],
+        },
+      ]),
+    )
+
+    const wrapper = await render()
+
+    await select(wrapper, 'lines')
+    await wrapper.find('[data-testid="remove-line_no"]').trigger('click')
+    await settle()
+    await wrapper.find('[data-testid="remove-sku"]').trigger('click')
+    await settle()
+    await select(wrapper, 'lines')
+
+    expect(wrapper.find('[data-testid="sequence-key-unknown-lines"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="unique-by-unknown-lines-sku"]').exists()).toBe(true)
+
+    // Kept through the grid's other edits, not only through a save.
+    await wrapper.find('[data-testid="label-lines"]').setValue('Line items')
+    await wrapper.find('[data-testid="default-items-lines"]').setValue('2')
+    await settle()
+
+    const grid = (await saved(wrapper)).components[0] as unknown as Node
+
+    expect(grid.label).toBe('Line items')
+    expect(grid.defaultItems).toBe(2)
+    expect(grid.components).toEqual([])
+    expect(grid.sequenceKey).toBe('line_no')
+    expect(grid.validation).toEqual({ type: 'array', uniqueBy: 'sku' })
+  })
+
+  it('keeps and badges a var whose field was removed on the canvas (AC6)', async () => {
+    const wrapper = await render()
+
+    await select(wrapper, 'quantity')
+    await wrapper.find('[data-testid="remove-quantity"]').trigger('click')
+    await settle()
+    await select(wrapper, 'total')
+
+    expect(wrapper.find('[data-testid="calculate-total"]').text()).toContain(
+      'Not in the offered variables',
+    )
+    expect(node(await saved(wrapper), 'total').calculate).toEqual(TOTAL)
+  })
+
+  it('keeps the bounds a number-to-integer switch can carry, and revives none after a switch away (AC3b)', async () => {
+    const wrapper = await render()
+    const minimum = () => wrapper.find('[data-testid="minimum-quantity"]')
+
+    await select(wrapper, 'quantity')
+    await minimum().setValue('1')
+    await wrapper.find('[data-testid="maximum-quantity"]').setValue('9')
+    await settle()
+
+    const shown: Record<string, string | null> = {}
+
+    for (const valueType of ['integer', 'string', 'boolean', 'number']) {
+      await wrapper.find('[data-testid="vtype-quantity"]').setValue(valueType)
+      await settle()
+      shown[valueType] = minimum().exists() ? (minimum().element as HTMLInputElement).value : null
+    }
+
+    expect(shown).toEqual({ integer: '1', string: null, boolean: null, number: '' })
+
+    await wrapper.find('[data-testid="maximum-quantity"]').setValue('5')
+    await settle()
+
+    const sent = await saved(wrapper)
+
+    expect(node(sent, 'quantity').validation).toEqual({ type: 'number', maximum: 5 })
+    expect(jfssViolations(sent)).toEqual([])
   })
 })
