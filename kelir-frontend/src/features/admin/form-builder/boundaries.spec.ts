@@ -17,6 +17,12 @@ import { describe, expect, it } from 'vitest'
  * Run 2026-10-10: `vue-draggable-plus` imported from `FormBuilderPage.vue`
  * reddens *imports the drag library from the two canvas components only*;
  * `"^0.6.1"` in `package.json` reddens *pins vue-draggable-plus exactly*.
+ *
+ * Run 2026-10-15 (#688 part 2, AC11): `loadEvaluator` imported into
+ * `ExpressionProperties.vue` reddens *evaluates nothing in the properties
+ * panel …*; a `new RegExp(pattern)` in `ValidationLimitsFields.vue` reddens it
+ * too; `JsonLogicBuilder` imported from `FormBuilderPage.vue` reddens *reaches
+ * the logic builder from the panel's expressions …*.
  */
 
 const sources = import.meta.glob<string>('/src/**/*.{ts,vue}', {
@@ -59,6 +65,7 @@ describe('the form builder’s boundaries', () => {
     ['customEndpoint', /customEndpoint/],
     ['maxFileSize', /maxFileSize/],
     ['matchesField.targetField', /targetField/],
+    ['a `unique` rule name', /['"]unique['"]/],
     ['a re-registered map', /add_operation|addOperation/],
   ])('has no %s in application source (F1, D-86)', (_name, pattern) => {
     expect(importers(pattern)).toEqual([])
@@ -91,6 +98,31 @@ describe('the form builder’s boundaries', () => {
     expect(importers(/from ['"]vue-draggable-plus['"]/)).toEqual([
       '/src/features/admin/form-builder/FormBuilderPalette.vue',
       '/src/features/admin/form-builder/FormCanvasList.vue',
+    ])
+  })
+
+  it('evaluates nothing in the properties panel or the logic builder: no engine, no pattern compiled (D-10, AC11)', () => {
+    const panel = application.filter(
+      ([path]) =>
+        path.startsWith('/src/features/admin/form-builder/') ||
+        path.startsWith('/src/components/logic-builder/') ||
+        path === '/src/features/admin/FormBuilderPage.vue',
+    )
+
+    expect(panel.length).toBeGreaterThan(15)
+
+    for (const [path, text] of panel) {
+      expect(text, path).not.toMatch(/from ['"]@\/lib\/jsonlogic['"]|import\(['"]@\/lib\/jsonlogic/)
+      expect(text, path).not.toMatch(/datalogic|json-logic-js/)
+      expect(text, path).not.toMatch(/new RegExp\(|RegExp\(\s*(props\.|validation)/)
+    }
+  })
+
+  it('reaches the logic builder from the panel’s expressions and the workflow editor alone (AC12)', () => {
+    expect(importers(/JsonLogicBuilder\.vue['"]/)).toEqual([
+      '/src/features/admin/form-builder/ExpressionProperties.vue',
+      '/src/features/workflow-builder/AssignmentRuleEditor.vue',
+      '/src/features/workflow-builder/WorkflowTransitionRow.vue',
     ])
   })
 
