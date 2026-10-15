@@ -654,17 +654,22 @@ async fn an_update_that_does_not_send_workflows_keeps_every_stored_binding() {
 /// A rename of a type whose bound revision was deprecated since succeeds, and
 /// the binding stays as it was (#718's verification campaign).
 ///
-/// The server checks every binding it is sent, and only an `ACTIVE` revision
-/// may be bound. So the dialog's old body, which sent the stored binding back
-/// on every save, made a type bound to a revision deprecated after binding
+/// Only an `ACTIVE` revision may be bound. Until #716 the server checked every
+/// binding it was sent, so the dialog's old body, which sent the stored binding
+/// back on every save, made a type bound to a revision deprecated after binding
 /// impossible even to rename. Leaving `workflows` out binds nothing, so nothing
-/// is checked. The last half pins why the omission is what matters: sending
-/// the same binding back is still refused, and the refusal changes nothing.
+/// is checked.
+///
+/// **The last half asserted the opposite until #716**, and inverts in place: a
+/// binding sent back exactly as stored is not re-checked either, so the rename
+/// saves and the binding is still the deprecated revision. Changing it in one
+/// field (here its priority) is binding something, and is still refused.
 ///
 /// # Seen to fail
 ///
 /// Red against an `update_type` that re-checks the stored bindings when
-/// `workflows` is absent: the rename was refused `NOT_PUBLISHED`.
+/// `workflows` is absent: the rename was refused `NOT_PUBLISHED`. The re-sent
+/// half was red against #716's parent (5781320): `NOT_PUBLISHED`.
 #[tokio::test]
 async fn a_rename_that_does_not_send_workflows_keeps_a_binding_deprecated_since() {
     let app = TestApp::spawn().await;
@@ -738,7 +743,7 @@ async fn a_rename_that_does_not_send_workflows_keeps_a_binding_deprecated_since(
             &format!("/api/v1/document-types/{id}"),
             Some(&token),
             Some(json!({
-                "name": "Renamed and rebound",
+                "name": "Renamed and re-sent",
                 "workflows": [{ "workflowDefinitionId": workflow, "priority": 4 }]
             })),
         )
@@ -746,14 +751,40 @@ async fn a_rename_that_does_not_send_workflows_keeps_a_binding_deprecated_since(
 
     assert_eq!(
         resent.status,
-        StatusCode::UNPROCESSABLE_ENTITY,
+        StatusCode::OK,
+        "a binding sent back unchanged binds nothing new, so it must not be \
+         re-checked (#716): {}",
+        resent.body
+    );
+    assert_eq!(resent.body["data"]["name"], "Renamed and re-sent");
+    assert_eq!(
+        resent.body["data"]["workflows"], expected,
         "{}",
         resent.body
     );
+
+    let edited = app
+        .send(
+            Method::PUT,
+            &format!("/api/v1/document-types/{id}"),
+            Some(&token),
+            Some(json!({
+                "name": "Renamed and rebound",
+                "workflows": [{ "workflowDefinitionId": workflow, "priority": 5 }]
+            })),
+        )
+        .await;
+
     assert_eq!(
-        resent.body["error"]["details"][0]["code"], "NOT_PUBLISHED",
+        edited.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
         "{}",
-        resent.body
+        edited.body
+    );
+    assert_eq!(
+        edited.body["error"]["details"][0]["code"], "NOT_PUBLISHED",
+        "{}",
+        edited.body
     );
 
     let read = app
@@ -766,9 +797,477 @@ async fn a_rename_that_does_not_send_workflows_keeps_a_binding_deprecated_since(
         .await;
 
     assert_eq!(read.status, StatusCode::OK, "{}", read.body);
-    assert_eq!(read.body["data"]["name"], "Renamed after deprecation");
+    assert_eq!(read.body["data"]["name"], "Renamed and re-sent");
     assert_eq!(read.body["data"]["workflows"], expected);
-    assert_eq!(stored_binding_rows(&app, id).await, rows_before);
+}
+
+// ---------------------------------------------------------------------------
+// A binding sent back unchanged is not re-checked (#716)
+// ---------------------------------------------------------------------------
+//
+// Option (a) of the criteria on #716: `update_type` checks only the workflow
+// bindings that differ from a stored row in one of their five fields. (The
+// form and list bindings are skipped only when their key is left out; one sent
+// at its stored value is still checked, #739.) So an API
+// client that PUTs the whole type back can rename a type whose revision was
+// deprecated since, and nothing becomes routable that was not: a submission
+// still refuses the deprecated binding (#187, #713; `workflow_deprecation.rs`).
+
+/// Publishes a workflow and deprecates it, which is how a binding to a revision
+/// that is no longer `ACTIVE` comes to exist: storage refuses binding one.
+async fn deprecate(app: &TestApp, token: &str, workflow: Uuid) {
+    let deprecated = app
+        .send(
+            Method::POST,
+            &format!("/api/v1/workflow/definitions/{workflow}/deprecation"),
+            Some(token),
+            Some(json!({})),
+        )
+        .await;
+
+    assert_eq!(deprecated.status, StatusCode::OK, "{}", deprecated.body);
+}
+
+async fn deprecated_workflow(app: &TestApp, token: &str, key: &str) -> Uuid {
+    let workflow = published_workflow(app, token, key).await;
+    deprecate(app, token, workflow).await;
+    workflow
+}
+
+async fn read_type(app: &TestApp, token: &str, id: Uuid) -> Value {
+    let read = app
+        .send(
+            Method::GET,
+            &format!("/api/v1/document-types/{id}"),
+            Some(token),
+            None,
+        )
+        .await;
+
+    assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+    read.body["data"].clone()
+}
+
+async fn put_type(app: &TestApp, token: &str, id: Uuid, body: Value) -> common::TestResponse {
+    app.send(
+        Method::PUT,
+        &format!("/api/v1/document-types/{id}"),
+        Some(token),
+        Some(body),
+    )
+    .await
+}
+
+fn assert_refused_at(response: &common::TestResponse, path: &str, code: &str, label: &str) {
+    assert_eq!(
+        response.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{label}: {}",
+        response.body
+    );
+    assert_eq!(
+        response.body["error"]["details"][0]["path"], path,
+        "{label}: {}",
+        response.body
+    );
+    assert_eq!(
+        response.body["error"]["details"][0]["code"], code,
+        "{label}: {}",
+        response.body
+    );
+}
+
+/// **Unchanged means all five fields** (#716 AC1, AC6). A type is bound to a
+/// deprecated revision through a binding that sets every field: a condition, a
+/// priority and a window. Sent back exactly, the binding saves with a rename.
+/// Each field edited alone is a binding the caller is setting, so it is checked
+/// and refused at `workflows.0.workflowDefinitionId` — `NOT_FOUND` for an id
+/// that names nothing, `NOT_PUBLISHED` for everything else — and every refusal
+/// leaves the type as it was.
+///
+/// # Seen to fail
+///
+/// Red against #716's parent (5781320): the unchanged re-send was refused
+/// `NOT_PUBLISHED`. The edit arms are the two mutations AC6 names: skipping the
+/// check for every sent binding accepts all seven edits, and matching on
+/// `workflowDefinitionId` alone accepts the four that keep the revision.
+#[tokio::test]
+async fn a_deprecated_binding_sent_back_unchanged_saves_and_any_edit_to_it_is_checked() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let bound = published_workflow(&app, &token, "wf_unchanged_bound").await;
+    let other_deprecated = deprecated_workflow(&app, &token, "wf_unchanged_other").await;
+    let condition = r#"{"<=":[{"var":"amount"},10000000]}"#;
+
+    let stored = json!({
+        "workflowDefinitionId": bound,
+        "conditionExpression": condition,
+        "priority": 3,
+        "validFrom": "2026-01-01",
+        "validTo": "2026-12-31"
+    });
+
+    let created = app
+        .send(
+            Method::POST,
+            "/api/v1/document-types",
+            Some(&token),
+            Some(json!({
+                "typeCode": "UNCHANGED_FIVE",
+                "name": "Unchanged five",
+                "workflows": [stored.clone()]
+            })),
+        )
+        .await;
+
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    assert_eq!(created.body["data"]["workflows"], json!([stored.clone()]));
+    let id = id_of(&created.body["data"]);
+
+    deprecate(&app, &token, bound).await;
+
+    let renamed = put_type(
+        &app,
+        &token,
+        id,
+        json!({ "name": "Renamed, binding re-sent", "workflows": [stored.clone()] }),
+    )
+    .await;
+
+    assert_eq!(
+        renamed.status,
+        StatusCode::OK,
+        "the stored binding was sent back unchanged in all five fields: {}",
+        renamed.body
+    );
+    assert_eq!(renamed.body["data"]["name"], "Renamed, binding re-sent");
+    assert_eq!(renamed.body["data"]["workflows"], json!([stored.clone()]));
+
+    let edit = |field: &str, value: Value| {
+        let mut binding = stored.clone();
+        binding[field] = value;
+        binding
+    };
+
+    let edits = [
+        (
+            "another deprecated revision",
+            edit("workflowDefinitionId", json!(other_deprecated)),
+            "NOT_PUBLISHED",
+        ),
+        (
+            "a revision that names nothing",
+            edit("workflowDefinitionId", json!(Uuid::now_v7())),
+            "NOT_FOUND",
+        ),
+        (
+            "another condition",
+            edit(
+                "conditionExpression",
+                json!(r#"{"<=":[{"var":"amount"},5]}"#),
+            ),
+            "NOT_PUBLISHED",
+        ),
+        (
+            "the condition cleared",
+            edit("conditionExpression", Value::Null),
+            "NOT_PUBLISHED",
+        ),
+        (
+            "another priority",
+            edit("priority", json!(4)),
+            "NOT_PUBLISHED",
+        ),
+        (
+            "another start",
+            edit("validFrom", json!("2026-02-01")),
+            "NOT_PUBLISHED",
+        ),
+        ("an open end", edit("validTo", Value::Null), "NOT_PUBLISHED"),
+    ];
+
+    for (label, binding, code) in edits {
+        let refused = put_type(
+            &app,
+            &token,
+            id,
+            json!({ "name": format!("Edited: {label}"), "workflows": [binding] }),
+        )
+        .await;
+
+        assert_refused_at(&refused, "workflows.0.workflowDefinitionId", code, label);
+
+        let read = read_type(&app, &token, id).await;
+        assert_eq!(read["name"], "Renamed, binding re-sent", "{label}");
+        assert_eq!(read["workflows"], json!([stored.clone()]), "{label}");
+    }
+}
+
+/// **Two stored bindings, one on a deprecated revision** (#716 AC2). Both sent
+/// back unchanged save, in either order. An `ACTIVE` binding edited beside the
+/// unchanged deprecated one saves too, because only the edit is checked. And a
+/// deprecated revision put in place of the deprecated binding is refused at
+/// the index it was sent at — `0` or `1` — with the stored set left alone.
+///
+/// # Seen to fail
+///
+/// Red against #716's parent (5781320): the unchanged pair was refused
+/// `NOT_PUBLISHED` at `workflows.0`. The index arms are what a check that
+/// reported the position of the matching *stored* row, or of the first
+/// binding, would get wrong.
+#[tokio::test]
+async fn of_two_bindings_only_the_one_that_changed_is_checked_at_its_index() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let stale = published_workflow(&app, &token, "wf_pair_stale").await;
+    let live = published_workflow(&app, &token, "wf_pair_live").await;
+    let replacement = deprecated_workflow(&app, &token, "wf_pair_replacement").await;
+
+    let stale_binding = json!({
+        "workflowDefinitionId": stale,
+        "conditionExpression": r#"{">":[{"var":"amount"},1000]}"#,
+        "priority": 1,
+        "validFrom": null,
+        "validTo": null
+    });
+    let live_binding = json!({
+        "workflowDefinitionId": live,
+        "conditionExpression": null,
+        "priority": 2,
+        "validFrom": null,
+        "validTo": null
+    });
+
+    let created = app
+        .send(
+            Method::POST,
+            "/api/v1/document-types",
+            Some(&token),
+            Some(json!({
+                "typeCode": "PAIR_ONE_STALE",
+                "name": "Pair, one stale",
+                "workflows": [stale_binding.clone(), live_binding.clone()]
+            })),
+        )
+        .await;
+
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let id = id_of(&created.body["data"]);
+
+    deprecate(&app, &token, stale).await;
+
+    let stored = json!([stale_binding.clone(), live_binding.clone()]);
+
+    for (label, workflows) in [
+        (
+            "as read",
+            json!([stale_binding.clone(), live_binding.clone()]),
+        ),
+        (
+            "reversed",
+            json!([live_binding.clone(), stale_binding.clone()]),
+        ),
+    ] {
+        let saved = put_type(
+            &app,
+            &token,
+            id,
+            json!({ "name": format!("Both re-sent, {label}"), "workflows": workflows }),
+        )
+        .await;
+
+        assert_eq!(saved.status, StatusCode::OK, "{label}: {}", saved.body);
+        assert_eq!(saved.body["data"]["workflows"], stored, "{label}");
+    }
+
+    // The ACTIVE binding is edited beside the unchanged deprecated one.
+    let mut widened = live_binding.clone();
+    widened["validFrom"] = json!("2026-01-01");
+
+    let saved = put_type(
+        &app,
+        &token,
+        id,
+        json!({
+            "name": "Live binding edited",
+            "workflows": [stale_binding.clone(), widened.clone()]
+        }),
+    )
+    .await;
+
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
+    let stored = json!([stale_binding.clone(), widened.clone()]);
+    assert_eq!(saved.body["data"]["workflows"], stored);
+
+    // The deprecated binding replaced by another deprecated revision, at
+    // either index.
+    let mut replaced = stale_binding.clone();
+    replaced["workflowDefinitionId"] = json!(replacement);
+
+    for (path, workflows) in [
+        (
+            "workflows.0.workflowDefinitionId",
+            json!([replaced.clone(), widened.clone()]),
+        ),
+        (
+            "workflows.1.workflowDefinitionId",
+            json!([widened.clone(), replaced.clone()]),
+        ),
+    ] {
+        let refused = put_type(
+            &app,
+            &token,
+            id,
+            json!({ "name": "Replaced", "workflows": workflows }),
+        )
+        .await;
+
+        assert_refused_at(&refused, path, "NOT_PUBLISHED", path);
+
+        let read = read_type(&app, &token, id).await;
+        assert_eq!(read["name"], "Live binding edited", "{path}");
+        assert_eq!(read["workflows"], stored, "{path}");
+    }
+}
+
+/// **A type bound to a deprecated revision is renamed in both request shapes**
+/// (#716 AC5). The admin dialog's: every field it authors and no `workflows`,
+/// which it leaves out while the chooser has not moved (#718,
+/// `DocumentTypeFormDialog.vue`'s `save()`). And an API client's: the same
+/// body with the stored bindings sent back as it read them. Both save, and the
+/// binding is still the deprecated revision.
+///
+/// # Seen to fail
+///
+/// The client's half was red against #716's parent (5781320): `NOT_PUBLISHED`
+/// at `workflows.0.workflowDefinitionId`. The dialog's half was green there,
+/// since #718 already made an absent `workflows` bind nothing.
+#[tokio::test]
+async fn a_type_bound_to_a_deprecated_revision_is_renamed_by_the_dialog_and_by_a_client() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let form = published_form(&app, &token, "pr-renamed-deprecated").await;
+    let workflow = published_workflow(&app, &token, "wf_renamed_deprecated").await;
+
+    let created = app
+        .send(
+            Method::POST,
+            "/api/v1/document-types",
+            Some(&token),
+            Some(json!({
+                "typeCode": "RENAMED_DEPRECATED",
+                "name": "Before the rename",
+                "category": "PROCUREMENT",
+                "formId": form,
+                "workflows": [{ "workflowDefinitionId": workflow, "priority": 1 }]
+            })),
+        )
+        .await;
+
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let id = id_of(&created.body["data"]);
+
+    deprecate(&app, &token, workflow).await;
+
+    let before = read_type(&app, &token, id).await;
+    let stored = before["workflows"].clone();
+    assert_eq!(stored.as_array().map(Vec::len), Some(1), "{before}");
+
+    // The dialog's body, field for field: `typeCode` dropped on an edit, the
+    // blank optionals as `null`, and no `workflows` key.
+    let dialog = json!({
+        "name": "Renamed by the dialog",
+        "description": null,
+        "category": before["category"],
+        "formId": before["formId"],
+        "listId": before["listId"],
+        "targetEntityType": before["targetEntityType"],
+        "defaultSecurityLevel": before["defaultSecurityLevel"],
+        "status": before["status"],
+    });
+
+    let renamed = put_type(&app, &token, id, dialog.clone()).await;
+    assert_eq!(renamed.status, StatusCode::OK, "{}", renamed.body);
+    assert_eq!(renamed.body["data"]["name"], "Renamed by the dialog");
+    assert_eq!(renamed.body["data"]["workflows"], stored);
+
+    let mut client = dialog;
+    client["name"] = json!("Renamed by a client");
+    client["workflows"] = stored.clone();
+
+    let renamed = put_type(&app, &token, id, client).await;
+    assert_eq!(
+        renamed.status,
+        StatusCode::OK,
+        "a full-body PUT that sends the stored binding back must be idempotent \
+         for it: {}",
+        renamed.body
+    );
+    assert_eq!(renamed.body["data"]["name"], "Renamed by a client");
+    assert_eq!(renamed.body["data"]["workflows"], stored);
+
+    let read = read_type(&app, &token, id).await;
+    assert_eq!(read["name"], "Renamed by a client");
+    assert_eq!(read["workflows"], stored);
+    assert_eq!(read["formId"], form.to_string());
+}
+
+/// **One unchanged binding sent twice is refused as a duplicate priority**
+/// (#716's verification campaign). `changed_bindings` skips every sent binding
+/// equal to a stored one, so both copies of a deprecated binding are skipped
+/// and nothing below the request's validation would stop the replace storing
+/// the binding twice. What does stop it is `validate_update`'s duplicate
+/// priority check, which no update-path test pinned: the unit test reaches it
+/// through `validate_create` only.
+///
+/// # Seen to fail
+///
+/// Red against `validate_update` without its `check_workflows` call: the save
+/// was accepted and the type read back with the deprecated binding twice.
+#[tokio::test]
+async fn a_deprecated_binding_sent_back_twice_is_refused_as_a_duplicate_priority() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let workflow = published_workflow(&app, &token, "wf_twice_deprecated").await;
+
+    let created = app
+        .send(
+            Method::POST,
+            "/api/v1/document-types",
+            Some(&token),
+            Some(json!({
+                "typeCode": "TWICE_DEPRECATED",
+                "name": "Sent twice",
+                "workflows": [{ "workflowDefinitionId": workflow, "priority": 3 }]
+            })),
+        )
+        .await;
+
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let id = id_of(&created.body["data"]);
+
+    deprecate(&app, &token, workflow).await;
+
+    let stored = read_type(&app, &token, id).await["workflows"].clone();
+    assert_eq!(stored.as_array().map(Vec::len), Some(1), "{stored}");
+
+    let twice = put_type(
+        &app,
+        &token,
+        id,
+        json!({ "name": "Twice", "workflows": [stored[0].clone(), stored[0].clone()] }),
+    )
+    .await;
+
+    assert_refused_at(&twice, "workflows.1.priority", "DUPLICATE", "sent twice");
+
+    let read = read_type(&app, &token, id).await;
+    assert_eq!(read["name"], "Sent twice");
+    assert_eq!(read["workflows"], stored);
 }
 
 #[tokio::test]

@@ -702,7 +702,9 @@ async fn running_approvals_carry_on_after_their_revision_is_deprecated() {
 ///   `documentTypeId`, by `engine::start`'s `ACTIVE` check, and writes
 ///   nothing: the document stays a draft with no instance.
 /// * A binding naming the deprecated revision is refused as `NOT_PUBLISHED`,
-///   on a new type or on this one.
+///   on a new type or on this one. On this one it is sent at another priority:
+///   since #716 the stored binding sent back unchanged is not re-checked
+///   (`a_rename_that_sends_the_deprecated_binding_back_unchanged_still_cannot_submit`).
 /// * Rebound to the next revision, published, the same draft submits and runs
 ///   on that revision.
 ///
@@ -753,12 +755,14 @@ async fn a_type_bound_to_a_deprecated_revision_stays_bound_and_refuses_submissio
     assert_eq!(document_status(&app, document).await, "DRAFT");
     assert!(instance_of(&app, document).await.is_none());
 
-    // A binding naming it is refused, here and on a new type.
+    // A binding naming it is refused, here and on a new type. Here it is an
+    // edit of the stored binding, which is priority 1: sent back unchanged it
+    // binds nothing new and is not re-checked (#716).
     let rebinding_to_it = app
         .put(
             &format!("/api/v1/document-types/{type_id}"),
             Some(&token),
-            json!({ "workflows": [{ "workflowDefinitionId": first }] }),
+            json!({ "workflows": [{ "workflowDefinitionId": first, "priority": 2 }] }),
         )
         .await;
     assert_eq!(
@@ -823,6 +827,136 @@ async fn a_type_bound_to_a_deprecated_revision_stays_bound_and_refuses_submissio
         instance_of(&app, document).await.expect("an instance").0,
         second
     );
+}
+
+/// **A type renamed with its deprecated binding sent back unchanged saves, and
+/// still cannot submit** (#716 AC1).
+///
+/// The rename is a full-body PUT, as an API client sends one: the stored
+/// binding read back and returned in all five fields. It is not re-checked, so
+/// it saves and the type is still bound to the deprecated revision. What the
+/// caller *sets* is still checked at `workflows.0.workflowDefinitionId`:
+/// another deprecated revision (`NOT_PUBLISHED`), one that names nothing
+/// (`NOT_FOUND`), and the same revision edited (`NOT_PUBLISHED`). And nothing
+/// became routable: the renamed type's next submission is refused as
+/// `WORKFLOW_NOT_PUBLISHED` at `documentTypeId`, writes no instance, and leaves
+/// the draft a draft.
+///
+/// **Seen red** against #716's parent (5781320): the rename was refused
+/// `NOT_PUBLISHED` at `workflows.0.workflowDefinitionId`.
+#[tokio::test]
+async fn a_rename_that_sends_the_deprecated_binding_back_unchanged_still_cannot_submit() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let first = published(&app, &token, "dep_unchanged").await;
+    let other = published(&app, &token, "dep_unchanged_other").await;
+    let type_id = document_type_bound(
+        &app,
+        &token,
+        "PR_DEP_UNCHANGED",
+        json!([{ "workflowDefinitionId": first, "priority": 3 }]),
+    )
+    .await;
+
+    assert_eq!(deprecate(&app, &token, first).await.status, StatusCode::OK);
+    assert_eq!(deprecate(&app, &token, other).await.status, StatusCode::OK);
+
+    let read = app
+        .get(&format!("/api/v1/document-types/{type_id}"), Some(&token))
+        .await;
+    assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+    let stored = read.body["data"]["workflows"].clone();
+    assert_eq!(stored[0]["workflowDefinitionId"], first.to_string());
+
+    let renamed = app
+        .put(
+            &format!("/api/v1/document-types/{type_id}"),
+            Some(&token),
+            json!({ "name": "Renamed, still deprecated", "workflows": stored }),
+        )
+        .await;
+    assert_eq!(
+        renamed.status,
+        StatusCode::OK,
+        "the stored binding was sent back unchanged: {}",
+        renamed.body
+    );
+    assert_eq!(renamed.body["data"]["name"], "Renamed, still deprecated");
+    assert_eq!(
+        renamed.body["data"]["workflows"], stored,
+        "{}",
+        renamed.body
+    );
+
+    let mut edited = stored[0].clone();
+    edited["priority"] = json!(4);
+
+    for (label, binding, code) in [
+        (
+            "another deprecated revision",
+            json!({ "workflowDefinitionId": other, "priority": 3 }),
+            "NOT_PUBLISHED",
+        ),
+        (
+            "a revision that names nothing",
+            json!({ "workflowDefinitionId": Uuid::now_v7(), "priority": 3 }),
+            "NOT_FOUND",
+        ),
+        ("the binding edited", edited, "NOT_PUBLISHED"),
+    ] {
+        let refused = app
+            .put(
+                &format!("/api/v1/document-types/{type_id}"),
+                Some(&token),
+                json!({ "name": "Refused", "workflows": [binding] }),
+            )
+            .await;
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{label}: {}",
+            refused.body
+        );
+        assert_eq!(
+            refused.body["error"]["details"][0]["path"], "workflows.0.workflowDefinitionId",
+            "{label}: {}",
+            refused.body
+        );
+        assert_eq!(
+            refused.body["error"]["details"][0]["code"], code,
+            "{label}: {}",
+            refused.body
+        );
+    }
+
+    let read = app
+        .get(&format!("/api/v1/document-types/{type_id}"), Some(&token))
+        .await;
+    assert_eq!(read.body["data"]["name"], "Renamed, still deprecated");
+    assert_eq!(read.body["data"]["workflows"], stored);
+
+    // Nothing became routable: the renamed type still refuses a submission.
+    let document = draft(&app, &token, type_id).await;
+    let refused = submit(&app, &token, document).await;
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a submission started an approval on a deprecated revision: {}",
+        refused.body
+    );
+    assert_eq!(
+        refused.body["error"]["details"][0]["code"], "WORKFLOW_NOT_PUBLISHED",
+        "{}",
+        refused.body
+    );
+    assert_eq!(
+        refused.body["error"]["details"][0]["path"], "documentTypeId",
+        "{}",
+        refused.body
+    );
+    assert_eq!(document_status(&app, document).await, "DRAFT");
+    assert!(instance_of(&app, document).await.is_none());
 }
 
 /// **A role named only by a deprecated revision can be deleted** once no
