@@ -395,11 +395,12 @@ While the major version is `0`, the public API may change in any release.
 - **A validation rule without the parameter it needs is refused at save and
   publish** ([#722](https://github.com/sujanto-gaws/kelir/issues/722)). Such
   a rule was saved and published without error, and then an empty `regex`,
-  `notMatchesField` or `notOneOf` accepted every value at submit, and an
-  empty `matchesField` or `oneOf` refused every value. Creating, updating and
-  publishing a form now answer 422 with an S10.3 detail at
+  `notMatchesField` or `notOneOf` accepted every filled-in value at submit,
+  and an empty `matchesField` or `oneOf` refused every one. Creating,
+  updating and publishing a form now answer 422 with an S10.3 detail at
   `definition.components.N.rules.M.params.<param>`: `RULE_PARAM_MISSING` when
-  `target`, `pattern` or `values` is absent, `""` or `[]`;
+  `target`, `pattern` or `values` is absent, or empty (`""` for `target` and
+  `pattern`, `[]` for `values`);
   `RULE_PARAM_INVALID` when it is the wrong JSON type, or when a `target`
   names the rule's own field; and `RULE_TARGET_NOT_FOUND` when a `target`
   names no data field in the record the rule is checked against at submit,
@@ -410,7 +411,7 @@ While the major version is `0`, the public API may change in any release.
   builder marks an empty parameter under the rule's parameters box from the
   moment *Add rule* writes it, naming the parameter and what the rule would
   do. It does not disable Save or Publish, and the server's message replaces
-  it. The Validation Rule Registry (1.5.8) marks each rule's required
+  it. The Validation Rule Registry (1.6.0) marks each rule's required
   parameter, and JFSS takes erratum E-4.
 
 ### Fixed
