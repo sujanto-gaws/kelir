@@ -63,6 +63,35 @@ export function limitsFor(type: string): readonly Limit[] {
 }
 
 /**
+ * The limits each component type is offered, before its `validation.type` is
+ * consulted: **a string's limits on a text box alone, bounds on a number
+ * alone**. A date, a select, a radio group and a lookup also carry
+ * `validation.type: "string"`, but their value is a date or a chosen option,
+ * not text an author's length or pattern is about, so offering them one would
+ * be offering a setting that does nothing useful. A limit loaded on any other
+ * type is kept as loaded (AC4), not offered.
+ */
+const LIMITS_BY_COMPONENT: Readonly<Record<string, readonly Limit[]>> = {
+  textfield: ['minLength', 'maxLength', 'pattern'],
+  textarea: ['minLength', 'maxLength', 'pattern'],
+  number: ['minimum', 'maximum'],
+}
+
+/**
+ * The limits the panel offers a node (AC3b, D-116): those its component type
+ * is offered **and** its `validation.type` can carry. A text field whose value
+ * type was switched to `number` is offered none, and so is a number field
+ * switched to `string`.
+ */
+export function offeredLimits(componentType: string, valueType: string): readonly Limit[] {
+  const byComponent = Object.prototype.hasOwnProperty.call(LIMITS_BY_COMPONENT, componentType)
+    ? LIMITS_BY_COMPONENT[componentType]
+    : []
+
+  return limitsFor(valueType).filter((limit) => byComponent.includes(limit))
+}
+
+/**
  * Switches `validation.type`, **removing only the limits the new type cannot
  * carry** (AC3b). `number` to `integer` keeps both bounds; `string` to
  * `number` drops the lengths and the pattern. Everything else — `required`,

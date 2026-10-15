@@ -36,6 +36,9 @@ import ValidationRulesSection from './ValidationRulesSection.vue'
  * | `disabled` not passed to the conditional builder | *disables every control …* (AC7) |
  * | `PLACEHOLDER_TYPES` gains `date` | *has a body for all 18 …*, *offers description on data nodes, placeholder where …* (AC1, AC3b) |
  * | `limitsFor('boolean')` offers `minimum` | *offers the limits that fit validation.type* (AC3b) |
+ * | `LIMITS_BY_COMPONENT` offers `minLength` on `date` | *has a body for all 18 …*, *offers string limits on a text box alone …* (AC1, AC3b) |
+ * | the length note shown on `conflicts.range` | *flags a lower limit above its upper one …* (AC3b) |
+ * | `success` offered as an alert variant | *offers an alert info and warning alone …* (AC3b) |
  * | `withProperty` writes `''` for a cleared value | *clears a limit, a placeholder and a description …* (AC3b) |
  * | `switchValueType` keeps every limit | *removes only the limits the new value type cannot carry* (AC3b) |
  * | `toggleUniqueBy` always writes a list | *keeps uniqueBy in its loaded shape …* (AC3) |
@@ -354,10 +357,11 @@ describe('FormPropertiesPanel', () => {
   const BODIES: Record<string, string[]> = {
     textfield: [...DATA, ...STRING_LIMITS],
     textarea: [...DATA, ...STRING_LIMITS],
-    date: [...DATA_NO_PLACEHOLDER, ...STRING_LIMITS],
-    select: [...DATA, ...STRING_LIMITS, 'options'],
-    radio: [...DATA_NO_PLACEHOLDER, ...STRING_LIMITS, 'options'],
-    lookup: [...DATA, ...STRING_LIMITS, 'lookup'],
+    // A string's limits on a text box alone, though these carry `string` too.
+    date: DATA_NO_PLACEHOLDER,
+    select: [...DATA, 'options'],
+    radio: [...DATA_NO_PLACEHOLDER, 'options'],
+    lookup: [...DATA, 'lookup'],
     number: [...DATA, 'minimum', 'maximum'],
     checkbox: DATA_NO_PLACEHOLDER,
     datagrid: [
@@ -771,13 +775,39 @@ describe('FormPropertiesPanel', () => {
       ['array', []],
       ['object', []],
     ])('offers the limits that fit validation.type %s', (type, expected) => {
-      const { wrapper } = harness(textField({ validation: { type } }))
       const limits = ['min-length-f', 'max-length-f', 'pattern-f', 'minimum-f', 'maximum-f']
+      const offered = (node: JfssComponent) => {
+        const { wrapper } = harness(node)
+        const found = limits.filter((id) => wrapper.find(`[data-testid="${id}"]`).exists())
 
-      expect(limits.filter((id) => wrapper.find(`[data-testid="${id}"]`).exists())).toEqual(
-        expected,
-      )
+        wrapper.unmount()
+
+        return found
+      }
+
+      // Each limit where its component type uses it: lengths and a pattern on a
+      // text box, bounds on a number.
+      const onText = offered(textField({ validation: { type } }))
+      const onNumber = offered(textField({ type: 'number', validation: { type } }))
+
+      expect([...onText, ...onNumber]).toEqual(expected)
     })
+
+    it.each(['date', 'select', 'radio', 'lookup', 'checkbox'])(
+      'offers string limits on a text box alone: none on a %s, and keeps one it was loaded with',
+      async (type) => {
+        const validation = { type: 'string', minLength: 2, maxLength: 9, pattern: '^[A-Z]' }
+        const extra =
+          type === 'select' || type === 'radio' ? { options: [{ label: 'A', value: 'A' }] } : {}
+        const { wrapper, latest } = harness(textField({ type, validation, ...extra }))
+
+        expect(wrapper.find('[data-testid="limits-f"]').exists()).toBe(false)
+
+        await wrapper.find('[data-testid="label-f"]').setValue('Edited')
+
+        expect(latest()).toMatchObject({ validation })
+      },
+    )
 
     it('offers description on data nodes, placeholder where the renderer draws one, and variant on an alert alone', () => {
       for (const entry of offeredEntries()) {
@@ -826,19 +856,21 @@ describe('FormPropertiesPanel', () => {
       await text.wrapper.find('[data-testid="min-length-f"]').setValue('5')
 
       expect(text.latest()).toMatchObject({ validation: { minLength: 5, maxLength: 2 } })
-      expect(text.wrapper.find('[data-testid="limits-conflict-f"]').exists()).toBe(true)
+      expect(text.wrapper.find('[data-testid="limits-conflict-length-f"]').exists()).toBe(true)
+      expect(text.wrapper.find('[data-testid="limits-conflict-range-f"]').exists()).toBe(false)
       text.wrapper.unmount()
 
       const number = harness(
         textField({ type: 'number', validation: { type: 'number', minimum: 10 } }),
       )
 
-      expect(number.wrapper.find('[data-testid="limits-conflict-f"]').exists()).toBe(false)
+      expect(number.wrapper.find('[data-testid="limits-conflict-range-f"]').exists()).toBe(false)
 
       await number.wrapper.find('[data-testid="maximum-f"]').setValue('1')
 
       expect(number.latest()).toMatchObject({ validation: { minimum: 10, maximum: 1 } })
-      expect(number.wrapper.find('[data-testid="limits-conflict-f"]').exists()).toBe(true)
+      expect(number.wrapper.find('[data-testid="limits-conflict-range-f"]').exists()).toBe(true)
+      expect(number.wrapper.find('[data-testid="limits-conflict-length-f"]').exists()).toBe(false)
     })
 
     it('does not evaluate a pattern: one no engine compiles is saved as typed', async () => {
@@ -883,17 +915,61 @@ describe('FormPropertiesPanel', () => {
       await wrapper.find('[data-testid="vtype-f"]').setValue('number')
 
       expect((latest() as { validation: unknown }).validation).toEqual({ type: 'number', ...kept })
+      wrapper.unmount()
 
-      await wrapper.find('[data-testid="minimum-f"]').setValue('1')
-      await wrapper.find('[data-testid="maximum-f"]').setValue('5')
-      await wrapper.find('[data-testid="vtype-f"]').setValue('integer')
+      const number = harness(textField({ type: 'number', validation: { type: 'number', ...kept } }))
 
-      expect(latest()).toMatchObject({ validation: { type: 'integer', minimum: 1, maximum: 5 } })
+      await number.wrapper.find('[data-testid="minimum-f"]').setValue('1')
+      await number.wrapper.find('[data-testid="maximum-f"]').setValue('5')
+      await number.wrapper.find('[data-testid="vtype-f"]').setValue('integer')
 
-      await wrapper.find('[data-testid="vtype-f"]').setValue('boolean')
+      expect(number.latest()).toMatchObject({
+        validation: { type: 'integer', minimum: 1, maximum: 5 },
+      })
 
-      expect((latest() as { validation: unknown }).validation).toEqual({ type: 'boolean', ...kept })
+      await number.wrapper.find('[data-testid="vtype-f"]').setValue('boolean')
+
+      expect((number.latest() as { validation: unknown }).validation).toEqual({
+        type: 'boolean',
+        ...kept,
+      })
     })
+
+    it('offers an alert info and warning alone, the two looks the renderer draws', () => {
+      const { wrapper } = harness({
+        id: 'a',
+        role: 'display',
+        type: 'alert',
+        content: 'A',
+      } as JfssComponent)
+
+      expect(
+        wrapper
+          .find('[data-testid="variant-a"]')
+          .findAll('option')
+          .map((option) => option.attributes('value')),
+      ).toEqual(['', 'info', 'warning'])
+    })
+
+    it.each(['success', 'error'])(
+      'keeps a loaded %s variant, shown and not choosable',
+      async (variant) => {
+        const { wrapper, latest } = harness({
+          id: 'a',
+          role: 'display',
+          type: 'alert',
+          content: 'A',
+          variant,
+        } as JfssComponent)
+        const select = wrapper.find('[data-testid="variant-a"]')
+
+        expect((select.element as HTMLSelectElement).value).toBe(variant)
+        expect(select.find(`option[value="${variant}"]`).attributes('disabled')).toBeDefined()
+
+        await wrapper.find('[data-testid="content-a"]').setValue('B')
+        expect(latest()).toMatchObject({ variant })
+      },
+    )
 
     it('offers an alert its variant, keeps one it does not offer, and clears it', async () => {
       const { wrapper, latest } = harness({

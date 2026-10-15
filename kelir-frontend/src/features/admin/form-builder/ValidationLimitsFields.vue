@@ -7,7 +7,7 @@ import type { ValidationDetail } from '@/types/api'
 import type { JfssValidation } from '@/types/jfss'
 
 import PropertyNumberInput from './PropertyNumberInput.vue'
-import { limitConflicts, limitsFor, messageAt, withProperty, type Limit } from './propertyEdits'
+import { limitConflicts, messageAt, offeredLimits, withProperty, type Limit } from './propertyEdits'
 
 /**
  * A data field's validation limits (#688 AC3b, **D-116**).
@@ -25,6 +25,8 @@ import { limitConflicts, limitsFor, messageAt, withProperty, type Limit } from '
  */
 const props = defineProps<{
   componentId: string
+  /** The node's component type: only a text box and a number are offered limits. */
+  componentType: string
   /** The node's path, for the server's details (S10.3). */
   nodePath: string
   validation: JfssValidation
@@ -34,8 +36,11 @@ const props = defineProps<{
 
 const emit = defineEmits<{ 'update:validation': [validation: JfssValidation] }>()
 
-const offered = computed(() => limitsFor(props.validation.type))
+const offered = computed(() => offeredLimits(props.componentType, props.validation.type))
 const conflicts = computed(() => limitConflicts(props.validation))
+/** A lower bound above its upper one, each flagged only where its two fields are offered. */
+const lengthConflict = computed(() => conflicts.value.length && offered.value.includes('minLength'))
+const rangeConflict = computed(() => conflicts.value.range && offered.value.includes('minimum'))
 
 const LABELS: Record<Limit, string> = {
   minLength: 'Minimum length',
@@ -116,17 +121,17 @@ function numberOf(limit: Limit): number | undefined {
     </template>
 
     <p
-      v-if="conflicts.length"
+      v-if="lengthConflict"
       class="text-xs text-destructive sm:col-span-2"
-      :data-testid="`limits-conflict-${componentId}`"
+      :data-testid="`limits-conflict-length-${componentId}`"
     >
       The minimum length is greater than the maximum length, so no value can pass. It is saved as
       typed.
     </p>
     <p
-      v-if="conflicts.range"
+      v-if="rangeConflict"
       class="text-xs text-destructive sm:col-span-2"
-      :data-testid="`limits-conflict-${componentId}`"
+      :data-testid="`limits-conflict-range-${componentId}`"
     >
       The minimum is greater than the maximum, so no value can pass. It is saved as typed.
     </p>

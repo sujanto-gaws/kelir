@@ -28,12 +28,14 @@ const id = computed(() => props.component.id)
 const hasContent = computed(() => props.component.type !== 'divider')
 
 /**
- * An alert's variants: JFSS §4.4's `info` and `warning`, and the two more a
- * callout commonly takes. The renderer draws `warning` and `error` as
- * destructive and every other as the default (`AlertDisplay.vue`). A loaded
- * variant outside these is shown as itself and kept.
+ * An alert's variants: **the two looks the renderer draws**, by JFSS §4.4's
+ * own examples. `AlertDisplay.vue` draws `warning` and `error` as destructive
+ * and every other value as the default, so `info` and `warning` are the whole
+ * of what a choice here changes; offering `success` or `error` as well would
+ * be offering a setting that does nothing new. A loaded variant outside these
+ * two is kept as loaded, and shown as itself, not choosable.
  */
-const VARIANTS = ['info', 'success', 'warning', 'error']
+const VARIANTS = ['info', 'warning']
 
 const variant = computed(() => props.component.variant ?? '')
 

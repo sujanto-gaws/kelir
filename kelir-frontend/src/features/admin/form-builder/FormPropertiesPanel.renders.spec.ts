@@ -34,6 +34,7 @@ import { PLACEHOLDER_TYPES } from './propertyEdits'
  * | the limits section drops a `minLength` it was given | *applies the minLength …* |
  * | `PLACEHOLDER_TYPES` gains `date` | *offers a placeholder on exactly the types the renderer draws one on* |
  * | `PLACEHOLDER_TYPES` loses `textarea` | the same |
+ * | `LIMITS_BY_COMPONENT` offers `minLength` on `date` | *offers a string's limits on exactly the text boxes …* |
  */
 
 // The lookup field asks the server for its options on mount; what matters here
@@ -194,6 +195,57 @@ describe('a definition the properties panel wrote, rendered (#688)', () => {
       panel.unmount()
       wrapper.unmount()
     }
+  })
+
+  it('offers a string’s limits on exactly the text boxes, and bounds on the number, the renderer applies them to', async () => {
+    const dataTypes = offeredEntries().filter(
+      (entry) => entry.role === 'data' && entry.type !== 'datagrid',
+    )
+
+    for (const entry of dataTypes) {
+      const node = entry.create({ id: 'field', key: 'field' })
+      const panel = mount(FormPropertiesPanel, {
+        props: {
+          component: node,
+          path: 'components.0',
+          disabled: false,
+          details: [],
+          lookupSource: '',
+          scope: [],
+        },
+      })
+      const offered = ['min-length', 'max-length', 'pattern', 'minimum', 'maximum'].filter((id) =>
+        panel.find(`[data-testid="${id}-field"]`).exists(),
+      )
+
+      panel.unmount()
+
+      const expected =
+        entry.type === 'textfield' || entry.type === 'textarea'
+          ? ['min-length', 'max-length', 'pattern']
+          : entry.type === 'number'
+            ? ['minimum', 'maximum']
+            : []
+
+      expect(offered, entry.type).toEqual(expected)
+    }
+
+    // And the renderer applies the length a text area was given.
+    const area = await authored(
+      {
+        id: 'notes-field',
+        role: 'data',
+        type: 'textarea',
+        key: 'notes',
+        label: 'Notes',
+        validation: { type: 'string' },
+      },
+      [['max-length-notes-field', '3']],
+    )
+
+    expect(await refusal(formOf(area), '#jfss-notes-field', 'Four')).toBe(
+      'Use at most 3 characters.',
+    )
   })
 
   it('draws the description the panel wrote, and points the control at it', async () => {

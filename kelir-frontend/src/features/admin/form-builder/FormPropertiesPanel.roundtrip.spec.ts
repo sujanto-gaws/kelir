@@ -90,7 +90,10 @@ const FIELD = {
   conditional: { action: 'hide', logic: { if: [{ var: 'qty' }, true, false] } },
 }
 
-/** A placeholder on a type whose renderer draws none: kept as loaded, not offered (D-116). */
+/**
+ * A placeholder on a type whose renderer draws none, and string limits on a
+ * type that is not a text box: each kept as loaded, not offered (D-116).
+ */
 const DATE = {
   id: 'd',
   role: 'data',
@@ -98,7 +101,17 @@ const DATE = {
   key: 'due',
   label: 'Due',
   placeholder: 'dd/mm/yyyy',
-  validation: { type: 'string', format: 'date' },
+  validation: { type: 'string', format: 'date', minLength: 10, maxLength: 10, pattern: '^\\d' },
+}
+
+/** Bounds on a text box, whose value type was switched to `number`: kept, not offered. */
+const TEXT_AS_NUMBER = {
+  id: 't',
+  role: 'data',
+  type: 'textfield',
+  key: 'qty_text',
+  label: 'Quantity',
+  validation: { type: 'number', minimum: 1, maximum: 9 },
 }
 
 const GRID = {
@@ -254,6 +267,14 @@ const CASES: [name: string, fixture: Record<string, unknown>, edits: Edit[]][] =
     ],
   ],
   [
+    'textfield as number',
+    TEXT_AS_NUMBER,
+    [
+      ['label-t', 'Count', ['label']],
+      ['required-t', true, ['validation.required']],
+    ],
+  ],
+  [
     'datagrid',
     GRID,
     [
@@ -314,10 +335,11 @@ describe('the properties panel’s round trip (AC4)', () => {
     },
   )
 
-  it('does not offer a placeholder on a date, and keeps the one it was loaded with', () => {
+  it('does not offer a date a placeholder or a limit, though it was loaded with them', () => {
     const { wrapper } = harness(DATE)
 
     expect(wrapper.find('[data-testid="placeholder-d"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="limits-d"]').exists()).toBe(false)
   })
 
   it('changes nothing it does not show when an expression it can show is edited', async () => {

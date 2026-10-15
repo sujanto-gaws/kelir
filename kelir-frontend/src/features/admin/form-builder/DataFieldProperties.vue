@@ -18,7 +18,7 @@ import ValidationLimitsFields from './ValidationLimitsFields.vue'
  *
  * Its key, label, **description** and, where the renderer draws one, a
  * **placeholder** (**D-116**, `PLACEHOLDER_TYPES`), value type, `required`,
- * **the limits that fit the value type** (D-116), and, by type, a select's or
+ * **the limits a text box or a number can use** (D-116, `offeredLimits`), and, by type, a select's or
  * radio's options and a lookup's master-data source. Kept as loaded and not
  * offered: `defaultValue`, `readOnly`, `calculateMode`, `format`, `enum`,
  * `messages`, and a placeholder on a type that draws none.
@@ -157,6 +157,7 @@ const optionLines = computed({
 
   <ValidationLimitsFields
     :component-id="id"
+    :component-type="component.type"
     :node-path="nodePath"
     :validation="component.validation"
     :disabled="disabled"
