@@ -1,0 +1,72 @@
+<script setup lang="ts">
+import { computed } from 'vue'
+
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Select } from '@/components/ui/select'
+import type { JfssDisplayComponent } from '@/types/jfss'
+
+import { withProperty } from './propertyEdits'
+
+/**
+ * A display node's properties (JFSS §4.4): its `content`, and an alert's
+ * **`variant`** (**D-116**). A divider draws no text, so it has neither.
+ *
+ * Kept as loaded and not offered: a heading's or paragraph's `variant`, and a
+ * display node's `calculate`.
+ */
+const props = defineProps<{
+  component: JfssDisplayComponent
+  disabled: boolean
+}>()
+
+const emit = defineEmits<{ update: [component: JfssDisplayComponent] }>()
+
+const id = computed(() => props.component.id)
+
+/** Display types that render text; a divider has none (JFSS §4.4). */
+const hasContent = computed(() => props.component.type !== 'divider')
+
+/**
+ * An alert's variants: JFSS §4.4's `info` and `warning`, and the two more a
+ * callout commonly takes. The renderer draws `warning` and `error` as
+ * destructive and every other as the default (`AlertDisplay.vue`). A loaded
+ * variant outside these is shown as itself and kept.
+ */
+const VARIANTS = ['info', 'success', 'warning', 'error']
+
+const variant = computed(() => props.component.variant ?? '')
+
+const variantChoices = computed(() => [
+  { value: '', label: 'Default' },
+  ...VARIANTS.map((value) => ({ value, label: value })),
+  ...(variant.value !== '' && !VARIANTS.includes(variant.value)
+    ? [{ value: variant.value, label: `${variant.value} (not offered)`, disabled: true }]
+    : []),
+])
+</script>
+
+<template>
+  <div v-if="hasContent" class="space-y-2 sm:col-span-2">
+    <Label :for="`content-${id}`">Content</Label>
+    <Input
+      :id="`content-${id}`"
+      :model-value="component.content ?? ''"
+      :disabled="disabled"
+      :data-testid="`content-${id}`"
+      @update:model-value="emit('update', { ...component, content: String($event) })"
+    />
+  </div>
+
+  <div v-if="component.type === 'alert'" class="space-y-2">
+    <Label :for="`variant-${id}`">Variant</Label>
+    <Select
+      :id="`variant-${id}`"
+      :model-value="variant"
+      :disabled="disabled"
+      :options="variantChoices"
+      :data-testid="`variant-${id}`"
+      @update:model-value="emit('update', withProperty(component, 'variant', String($event)))"
+    />
+  </div>
+</template>

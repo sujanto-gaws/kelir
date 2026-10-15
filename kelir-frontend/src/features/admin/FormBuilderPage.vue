@@ -15,11 +15,12 @@ import type { ValidationDetail } from '@/types/api'
 import type { JfssComponent, JfssDefinition } from '@/types/jfss'
 import type { Form } from '@/types/rad'
 
+import { scopeVariables } from './form-builder/expressionScope'
 import FormBuilderCanvas from './form-builder/FormBuilderCanvas.vue'
 import FormBuilderPalette from './form-builder/FormBuilderPalette.vue'
+import FormPropertiesPanel from './form-builder/FormPropertiesPanel.vue'
 import { locate, pathOf, replaceNode, setLookup } from './form-builder/formTree'
 import { createFormBuilder, provideFormBuilder } from './form-builder/useFormBuilder'
-import FormComponentEditor from './FormComponentEditor.vue'
 
 /**
  * The form builder (FR-RAD-004, #373; nested since FR-RAD-013, #688).
@@ -45,8 +46,9 @@ import FormComponentEditor from './FormComponentEditor.vue'
  *
  * **The canvas is a tree** (#688, **D-86** A): a palette of what the renderer
  * draws, a recursive canvas that nests panels, fieldsets, columns, tabs and a
- * data grid's row template, by pointer and by keyboard, and the shipped
- * `FormComponentEditor` mounted for the one node selected. The drag-and-drop
+ * data grid's row template, by pointer and by keyboard, and a properties panel
+ * (`FormPropertiesPanel`) mounted for the one node selected, which builds its
+ * expressions visually with `JsonLogicBuilder` (**D-110**). The drag-and-drop
  * library is imported by the canvas components alone, which this page alone
  * imports, and the route is lazy, so a session that never opens a builder
  * never fetches it ([ADR-0046]; `check:bundle`).
@@ -95,6 +97,11 @@ const selected = computed<{ path: string; node: JfssComponent } | null>(() => {
 
   return path && at ? { path, node: at.node } : null
 })
+
+/** What an expression on the selected node may read: its scope's data keys (AC6). */
+const selectedScope = computed(() =>
+  definition.value && selected.value ? scopeVariables(definition.value, selected.value.path) : [],
+)
 
 /** The details no node claims. A message nobody claims is a message the author never sees. */
 const unclaimedDetails = computed(() => builder.unplacedDetails.value)
@@ -328,13 +335,15 @@ onMounted(() => {
         <div class="space-y-6">
           <section class="space-y-2" aria-labelledby="properties-heading" data-testid="properties">
             <h3 id="properties-heading" class="text-sm font-semibold">Properties</h3>
-            <FormComponentEditor
+            <FormPropertiesPanel
               v-if="selected"
               :key="selected.node.id"
               :component="selected.node"
+              :path="selected.path"
               :disabled="isReadOnly"
               :details="builder.detailsFor(selected.node.id)"
               :lookup-source="lookups[selected.node.id] ?? ''"
+              :scope="selectedScope"
               @update="replaceSelected"
               @update:lookup-source="setLookupSource(selected.node.id, $event)"
             />

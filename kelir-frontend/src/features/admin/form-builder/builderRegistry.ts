@@ -167,8 +167,9 @@ export const BUILDER_REGISTRY: Readonly<Record<string, BuilderEntry>> = {
     label: 'Lookup',
     validation: { type: 'string' },
   })),
-  // JFSS §4.3.1: a row template, repeated per row. `sequenceKey`,
-  // `defaultItems` and `uniqueBy` are part 2's (#688 §0).
+  // JFSS §4.3.1: a row template, repeated per row. A new grid carries none of
+  // `sequenceKey`, `defaultItems` or `validation.uniqueBy`; the properties
+  // panel sets them (`DataGridProperties`, #688 part 2).
   datagrid: data(
     'datagrid',
     'Data grid',
@@ -193,7 +194,8 @@ export const BUILDER_REGISTRY: Readonly<Record<string, BuilderEntry>> = {
   divider: display('divider', 'Divider'),
   alert: display('alert', 'Alert', 'Alert'),
 
-  // role: action. `submit` is the only action part 1 offers (#688 §0).
+  // role: action. `submit` is the only action the builder offers (#688 §0); a
+  // loaded other action is kept and shown read-only (`ButtonProperties`).
   button: {
     type: 'button',
     offered: true,
