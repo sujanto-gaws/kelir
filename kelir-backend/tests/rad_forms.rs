@@ -1297,3 +1297,438 @@ async fn a_deleted_revision_number_is_not_reused() {
         "revision 2 was retired, not freed"
     );
 }
+
+// -- A rule with nothing to compare against (#722) -------------------------
+
+/// The five rules whose one parameter decides the verdict, each with the
+/// parameter the builder seeds empty when *Add rule* is pressed.
+const EMPTY_RULES: [(&str, &str); 5] = [
+    ("matchesField", "target"),
+    ("notMatchesField", "target"),
+    ("regex", "pattern"),
+    ("oneOf", "values"),
+    ("notOneOf", "values"),
+];
+
+/// `definition(form_id)` with one rule on `quantity`, its parameter empty.
+fn definition_with_empty_rule(form_id: &str, rule: &str, param: &str) -> Value {
+    let empty = if param == "values" {
+        json!([])
+    } else {
+        json!("")
+    };
+    let mut document = definition(form_id);
+
+    document["components"][0]["rules"] = json!([{
+        "rule": rule, "scope": "both", "params": { param: empty }, "message": "No.",
+    }]);
+    document
+}
+
+/// The one detail a refusal carries at `path`, which must be `code` for `rule`.
+fn refusal_at<'a>(body: &'a Value, path: &str, code: &str, rule: &str) -> &'a Value {
+    let at_path: Vec<&Value> = body["error"]["details"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no details: {body}"))
+        .iter()
+        .filter(|detail| detail["path"] == path)
+        .collect();
+
+    assert_eq!(at_path.len(), 1, "one detail at {path}; body {body}");
+    assert_eq!(at_path[0]["code"], code, "body {body}");
+    assert_eq!(at_path[0]["rule"], rule, "body {body}");
+    at_path[0]
+}
+
+/// Writes `definition` into a draft without the checks the API runs — the
+/// state a draft stored before #722 is in.
+async fn store_behind_the_api(app: &TestApp, id: Uuid, definition: &Value) {
+    let affected = sqlx::query("UPDATE rad_forms SET definition_json = $1 WHERE id = $2")
+        .bind(definition)
+        .bind(id)
+        .execute(&app.pool)
+        .await
+        .expect("the draft is rewritten behind the API")
+        .rows_affected();
+
+    assert_eq!(affected, 1);
+}
+
+/// **[#722] AC1–AC3 and AC9, at create.** Each rule the builder seeds empty is
+/// refused at its parameter's path, which is where the builder lands it.
+///
+/// **Seen red, 2026-10-15**: with `check_rule_params` removed from
+/// `check_scope`, every rule here stores with a `201`, and the five refusal
+/// tests below redden with this one — six of the seven; the filled-in second
+/// subject stays green. Making the `RULE_TARGET_NOT_FOUND` guard `false`
+/// reddens the scope test alone.
+///
+/// [#722]: https://github.com/sujanto-gaws/kelir/issues/722
+#[tokio::test]
+async fn an_empty_rule_parameter_is_refused_at_create() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for (rule, param) in EMPTY_RULES {
+        let key = format!("empty-create-{}", rule.to_lowercase());
+        let response = app
+            .send(
+                Method::POST,
+                "/api/v1/rad/forms",
+                Some(&token),
+                Some(json!({
+                    "formKey": key,
+                    "title": "Empty rule",
+                    "definition": definition_with_empty_rule(&key, rule, param),
+                })),
+            )
+            .await;
+
+        assert_eq!(
+            response.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{rule} with an empty `{param}` must not be stored; body {}",
+            response.body
+        );
+
+        let detail = refusal_at(
+            &response.body,
+            &format!("definition.components.0.rules.0.params.{param}"),
+            "RULE_PARAM_MISSING",
+            rule,
+        );
+        let message = detail["message"].as_str().unwrap_or_default();
+        assert!(message.contains("`quantity`"), "{message}");
+        assert!(message.contains(&format!("`{param}`")), "{message}");
+    }
+}
+
+/// **AC4 and AC5 at the endpoint**: a row's rule naming a top-level field, and
+/// a rule naming its own key, in one answer (AC8).
+#[tokio::test]
+async fn a_target_outside_the_rules_scope_or_its_own_key_is_refused_at_create() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let mut document = definition("misdirected-target");
+    document["components"][0]["rules"] = json!([{
+        "rule": "notMatchesField", "scope": "server",
+        "params": {"target": "quantity"}, "message": "No.",
+    }]);
+    document["components"]
+        .as_array_mut()
+        .expect("components")
+        .push(json!({
+            "id": "lines", "role": "data", "type": "datagrid", "key": "lines",
+            "label": "Lines", "validation": {"type": "array"},
+            "components": [{
+                "id": "line_qty", "role": "data", "type": "number", "key": "line_qty",
+                "label": "Line quantity", "validation": {"type": "number"},
+                "rules": [{
+                    "rule": "matchesField", "scope": "both",
+                    "params": {"target": "quantity"}, "message": "No.",
+                }]
+            }]
+        }));
+
+    let response = app
+        .send(
+            Method::POST,
+            "/api/v1/rad/forms",
+            Some(&token),
+            Some(json!({
+                "formKey": "misdirected-target",
+                "title": "Misdirected target",
+                "definition": document,
+            })),
+        )
+        .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "body {}",
+        response.body
+    );
+    refusal_at(
+        &response.body,
+        "definition.components.0.rules.0.params.target",
+        "RULE_PARAM_INVALID",
+        "notMatchesField",
+    );
+    refusal_at(
+        &response.body,
+        "definition.components.1.components.0.rules.0.params.target",
+        "RULE_TARGET_NOT_FOUND",
+        "matchesField",
+    );
+}
+
+/// **AC9, at update.** The draft is fine; the edit that empties a rule is not.
+#[tokio::test]
+async fn an_empty_rule_parameter_is_refused_at_update() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for (rule, param) in EMPTY_RULES {
+        let key = format!("empty-update-{}", rule.to_lowercase());
+        let id = id_of(&create_form(&app, &token, &key, definition(&key)).await);
+
+        let response = app
+            .send(
+                Method::PUT,
+                &format!("/api/v1/rad/forms/{id}"),
+                Some(&token),
+                Some(json!({ "definition": definition_with_empty_rule(&key, rule, param) })),
+            )
+            .await;
+
+        assert_eq!(
+            response.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{rule}: body {}",
+            response.body
+        );
+        refusal_at(
+            &response.body,
+            &format!("definition.components.0.rules.0.params.{param}"),
+            "RULE_PARAM_MISSING",
+            rule,
+        );
+    }
+}
+
+/// **AC9 and AC11, at publish (D-67).** A draft stored before this check keeps
+/// what it was stored with, and publishing is the one-way door, so the stored
+/// definition is checked there and the revision stays a draft.
+#[tokio::test]
+async fn a_stored_empty_rule_parameter_is_refused_at_publish() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for (rule, param) in EMPTY_RULES {
+        let key = format!("empty-publish-{}", rule.to_lowercase());
+        let id = id_of(&create_form(&app, &token, &key, definition(&key)).await);
+        store_behind_the_api(&app, id, &definition_with_empty_rule(&key, rule, param)).await;
+
+        let response = app
+            .send(
+                Method::POST,
+                &format!("/api/v1/rad/forms/{id}/publish"),
+                Some(&token),
+                None,
+            )
+            .await;
+
+        assert_eq!(
+            response.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{rule}: body {}",
+            response.body
+        );
+        refusal_at(
+            &response.body,
+            &format!("definition.components.0.rules.0.params.{param}"),
+            "RULE_PARAM_MISSING",
+            rule,
+        );
+
+        let status: String = sqlx::query_scalar("SELECT status FROM rad_forms WHERE id = $1")
+            .bind(id)
+            .fetch_one(&app.pool)
+            .await
+            .expect("the form is queryable");
+        assert_eq!(status, "DRAFT", "{rule}: a refused publish leaves a draft");
+    }
+}
+
+/// **AC9: a revision copies its source unchecked**, because a request with no
+/// definition in it has nothing new to validate — so the copy is caught where
+/// it would go live.
+#[tokio::test]
+async fn a_revision_copying_an_empty_rule_is_refused_at_publish() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let source =
+        id_of(&create_form(&app, &token, "empty-copied", definition("empty-copied")).await);
+    store_behind_the_api(
+        &app,
+        source,
+        &definition_with_empty_rule("empty-copied", "oneOf", "values"),
+    )
+    .await;
+
+    let next = app
+        .send(
+            Method::POST,
+            &format!("/api/v1/rad/forms/{source}/revisions"),
+            Some(&token),
+            Some(json!({ "title": "Copied" })),
+        )
+        .await;
+    assert_eq!(next.status, StatusCode::CREATED, "body {}", next.body);
+    let copy = id_of(&next.body["data"]);
+
+    let response = app
+        .send(
+            Method::POST,
+            &format!("/api/v1/rad/forms/{copy}/publish"),
+            Some(&token),
+            None,
+        )
+        .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "body {}",
+        response.body
+    );
+    refusal_at(
+        &response.body,
+        "definition.components.0.rules.0.params.values",
+        "RULE_PARAM_MISSING",
+        "oneOf",
+    );
+}
+
+/// **AC9 and AC11: a title is not a definition.** A title-only update of a
+/// stored draft in this state still saves; the draft is refused at publish
+/// until its definition is corrected, and publishes after.
+#[tokio::test]
+async fn a_stored_empty_rule_keeps_its_title_edits_and_publishes_once_corrected() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let id =
+        id_of(&create_form(&app, &token, "empty-retitled", definition("empty-retitled")).await);
+    store_behind_the_api(
+        &app,
+        id,
+        &definition_with_empty_rule("empty-retitled", "regex", "pattern"),
+    )
+    .await;
+
+    let retitled = app
+        .send(
+            Method::PUT,
+            &format!("/api/v1/rad/forms/{id}"),
+            Some(&token),
+            Some(json!({ "title": "Retitled" })),
+        )
+        .await;
+    assert_eq!(retitled.status, StatusCode::OK, "body {}", retitled.body);
+    assert_eq!(retitled.body["data"]["title"], "Retitled");
+
+    // Retitled, and still not publishable.
+    let refused = app
+        .send(
+            Method::POST,
+            &format!("/api/v1/rad/forms/{id}/publish"),
+            Some(&token),
+            None,
+        )
+        .await;
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "body {}",
+        refused.body
+    );
+    refusal_at(
+        &refused.body,
+        "definition.components.0.rules.0.params.pattern",
+        "RULE_PARAM_MISSING",
+        "regex",
+    );
+
+    let mut corrected = definition_with_empty_rule("empty-retitled", "regex", "pattern");
+    corrected["components"][0]["rules"][0]["params"]["pattern"] = json!("^[0-9]+$");
+
+    let saved = app
+        .send(
+            Method::PUT,
+            &format!("/api/v1/rad/forms/{id}"),
+            Some(&token),
+            Some(json!({ "definition": corrected })),
+        )
+        .await;
+    assert_eq!(saved.status, StatusCode::OK, "body {}", saved.body);
+
+    let published = app
+        .send(
+            Method::POST,
+            &format!("/api/v1/rad/forms/{id}/publish"),
+            Some(&token),
+            None,
+        )
+        .await;
+    assert_eq!(published.status, StatusCode::OK, "body {}", published.body);
+}
+
+/// **The second subject** ([coding standard] §2.9): all five rules filled in,
+/// a row's rule naming its sibling among them, still create, update and
+/// publish.
+///
+/// [coding standard]: ../../docs/standards/01.%20Coding%20Standard.md
+#[tokio::test]
+async fn all_five_rules_filled_in_create_update_and_publish() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let rule = |rule: &str, params: Value| json!({"rule": rule, "scope": "both", "params": params, "message": "No."});
+    let mut document = definition("all-five");
+    document["components"][0]["rules"] = json!([
+        rule("oneOf", json!({"values": [1, 2, 3]})),
+        rule("notOneOf", json!({"values": [0]})),
+    ]);
+    document["components"]
+        .as_array_mut()
+        .expect("components")
+        .extend([
+            json!({
+                "id": "reference", "role": "data", "type": "textfield", "key": "reference",
+                "label": "Reference", "validation": {"type": "string"},
+                "rules": [rule("regex", json!({"pattern": "^[A-Z]{2}-[0-9]{4}$"}))]
+            }),
+            json!({
+                "id": "confirm", "role": "data", "type": "textfield", "key": "confirm",
+                "label": "Confirm", "validation": {"type": "string"},
+                "rules": [rule("matchesField", json!({"target": "reference"}))]
+            }),
+            json!({
+                "id": "lines", "role": "data", "type": "datagrid", "key": "lines",
+                "label": "Lines", "validation": {"type": "array"},
+                "components": [
+                    {"id": "from", "role": "data", "type": "textfield", "key": "from",
+                     "label": "From", "validation": {"type": "string"}},
+                    {"id": "to", "role": "data", "type": "textfield", "key": "to",
+                     "label": "To", "validation": {"type": "string"},
+                     "rules": [rule("notMatchesField", json!({"target": "from"}))]}
+                ]
+            }),
+        ]);
+
+    let id = id_of(&create_form(&app, &token, "all-five", document.clone()).await);
+
+    let updated = app
+        .send(
+            Method::PUT,
+            &format!("/api/v1/rad/forms/{id}"),
+            Some(&token),
+            Some(json!({ "definition": document })),
+        )
+        .await;
+    assert_eq!(updated.status, StatusCode::OK, "body {}", updated.body);
+
+    let published = app
+        .send(
+            Method::POST,
+            &format!("/api/v1/rad/forms/{id}/publish"),
+            Some(&token),
+            None,
+        )
+        .await;
+    assert_eq!(published.status, StatusCode::OK, "body {}", published.body);
+}

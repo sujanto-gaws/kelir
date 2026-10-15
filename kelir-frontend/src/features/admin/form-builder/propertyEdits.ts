@@ -67,6 +67,89 @@ export function isParams(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+// --- A rule's required parameter (#722) ------------------------------------------
+
+interface RequiredParam {
+  param: string
+  kind: 'text' | 'list'
+  /** What the rule does at submit with the parameter empty. */
+  withoutIt: 'refuses' | 'accepts'
+}
+
+/**
+ * Each enforceable rule's required parameter, by the name the Validation Rule
+ * Registry gives it (§3.1). **The one table** (AC15): *Add rule* and a change of
+ * rule seed its empty shape, so the box shows the author what to fill in
+ * (schema-guardian M1), and the flag reads the same entry.
+ *
+ * **The verdict is the server's** (`kelir-backend/src/modules/rad/domain/engine.rs`),
+ * which refuses such a rule at save and at publish (`RULE_PARAM_MISSING`,
+ * `RULE_PARAM_INVALID`); the flag only says so before the Save. Whether a
+ * `target` names a field in the rule's scope is not checked here: that is the
+ * server's `RULE_TARGET_NOT_FOUND`.
+ */
+const REQUIRED_PARAMS: Readonly<Record<string, RequiredParam>> = {
+  matchesField: { param: 'target', kind: 'text', withoutIt: 'refuses' },
+  notMatchesField: { param: 'target', kind: 'text', withoutIt: 'accepts' },
+  regex: { param: 'pattern', kind: 'text', withoutIt: 'accepts' },
+  oneOf: { param: 'values', kind: 'list', withoutIt: 'refuses' },
+  notOneOf: { param: 'values', kind: 'list', withoutIt: 'accepts' },
+}
+
+function requiredParam(rule: string): RequiredParam | undefined {
+  return Object.prototype.hasOwnProperty.call(REQUIRED_PARAMS, rule)
+    ? REQUIRED_PARAMS[rule]
+    : undefined
+}
+
+/** A rule's parameters, empty: `{target: ''}`, `{values: []}`, or `{}` for a rule outside the table. */
+export function seededParams(rule: string): Record<string, unknown> {
+  const required = requiredParam(rule)
+
+  return required ? { [required.param]: required.kind === 'text' ? '' : [] } : {}
+}
+
+/** What the flag under a rule's parameters says: the parameter, and the rest of the sentence. */
+export interface ParamsFlag {
+  param: string
+  text: string
+}
+
+/**
+ * The flag for a rule whose required parameter is missing, empty (`''`, `[]`)
+ * or of the wrong JSON type, or `undefined` when there is nothing to say.
+ * **Flagged, not refused**, as `limitConflicts` is: what was typed is saved, and
+ * the server refuses it.
+ */
+export function paramsFlag(rule: string, params: unknown): ParamsFlag | undefined {
+  const required = requiredParam(rule)
+
+  if (!required) {
+    return undefined
+  }
+
+  const { param, kind, withoutIt } = required
+  const value = isParams(params) ? params[param] : undefined
+  const consequence = `a ${rule} rule with no ${param} ${withoutIt} every value. Saving is refused until it is filled in.`
+
+  if (value === undefined) {
+    return { param, text: `is missing: ${consequence}` }
+  }
+
+  const fits = kind === 'text' ? typeof value === 'string' : Array.isArray(value)
+
+  if (!fits) {
+    return {
+      param,
+      text: `must be ${kind === 'text' ? 'a text' : 'a list'}. Saving is refused until it is one.`,
+    }
+  }
+
+  return (value as string | unknown[]).length === 0
+    ? { param, text: `is empty: ${consequence}` }
+    : undefined
+}
+
 // --- Validation limits (D-116) ------------------------------------------------
 
 /** Every limit the panel edits, in the order it draws them. */

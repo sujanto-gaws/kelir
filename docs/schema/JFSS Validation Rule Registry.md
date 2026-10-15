@@ -1,7 +1,7 @@
 # JFSS Validation Rule Registry
-**Version:** 1.5.7  
+**Version:** 1.6.0  
 **Status:** Active Standard  
-**Last updated:** 2026-10-01  
+**Last updated:** 2026-10-15  
 **Pairs with:** JFSS v2.0.1  
 **Maintainers:** Full-Stack Engineering Team
 
@@ -37,6 +37,31 @@ Every rule in the schema must conform to this structure:
 ### 3.1 Scope: `both` (Shared Data Integrity)
 *These rules enforce fundamental data relationships. They are evaluated in real-time by the frontend for immediate UX feedback, and strictly re-evaluated by the backend upon submission to prevent tampering.*
 
+**Each rule below has one required parameter, and Kelir refuses a definition without it when the definition is written** (1.6.0, [#722](https://github.com/sujanto-gaws/kelir/issues/722)). A rule whose parameter is absent or empty raises nothing at submit: it accepts every filled-in value, or refuses every one with a message the author wrote for another reason, and nothing says why. So the check runs at create, at update and at publish, which re-checks the stored definition (**D-67**), through the S10.3 envelope, at the seam that already refuses an unregistered rule name:
+
+| Rule | Required parameter | It must be | Empty, the rule |
+|---|---|---|---|
+| `matchesField` | `target` | A non-empty string naming a data `key` in the rule's scope, other than the rule's own | Refuses every value |
+| `notMatchesField` | `target` | The same | Accepts every value |
+| `regex` | `pattern` | A non-empty string, which the pattern checks under the warning below then judge | Accepts every value |
+| `oneOf` | `values` | A non-empty array. Its elements are not checked | Refuses every value |
+| `notOneOf` | `values` | The same | Accepts every value |
+
+*Every value* means every filled-in value: a rule decides only a value that is not empty, and an empty one is `required`'s to decide ([JFSS](JSON%20Form%20Schema.md) §5). **The last column is the server's verdict.** The browser agrees for an empty `""`, but a `regex` with no `pattern` at all reads there as the text `undefined`, so the renderer refuses most values the server accepts ([#737](https://github.com/sujanto-gaws/kelir/issues/737)).
+
+| Refused | Code | Why |
+|---|---|---|
+| The parameter is absent, or empty: `""` for `target` and `pattern`, `[]` for `values` | `RULE_PARAM_MISSING` | The server decides every filled-in value the same way, as the last column above says |
+| The parameter is the wrong JSON type: a `target` or `pattern` that is not a string, `[]` included, or `values` that is not an array, `""` included | `RULE_PARAM_INVALID` | The rule cannot read it. The type is checked before emptiness |
+| A `target` that is the rule's own `key` | `RULE_PARAM_INVALID` | The rule compares a value with itself, so it does the reverse of an empty one: `matchesField` accepts every value and `notMatchesField` refuses every value |
+| A `target` that names no data `key` in the rule's scope | `RULE_TARGET_NOT_FOUND` | At submit the rule looks in its record, finds nothing, and decides as an empty one does |
+
+**The scope is the record the rule is read against at submit.** A rule on a top-level field reads the form's top-level data keys, through any layout, a data grid's own `key` included. A rule on a field in a data grid's row reads that row's keys. So a row's rule naming a top-level field is refused, and so is the reverse, whatever the rule's `scope` (`client`, `server` or `both`). A field hidden by its `conditional` is still a target. While it is hidden, the server reads it as absent (JFSS §9.2) and the browser reads its live value.
+
+**The path is `definition.components.N.rules.M.params.<param>`**, given even when the key is absent, and the detail's `rule` is the rule's name. Every problem in a definition is reported in one response. **What is not checked here:** a rule with no `params`, or `params` that is not an object, is the meta-schema's `INVALID_DEFINITION`; a name outside this registry is `RULE_NOT_REGISTERED`, and its parameters are not read; `regex`'s `flags` is optional; and the rules of §3.2 and §3.3 are not checked. **A revision already published is not re-checked, and submit is unchanged**: a published revision cannot change, so the remedy is a new revision, corrected and published.
+
+**Not the meta-schema's.** `advancedRule.params` is any object, JFSS 2.0.1 freezes the meta-schema, and no `if`/`then` per rule name could say that a `target` names a key in the rule's own record. [JFSS](JSON%20Form%20Schema.md) §6.2 points here (erratum E-4).
+
 #### `matchesField`
 Ensures the current field's value exactly matches the value of another data component.
 * **Use Case:** Password confirmation, email confirmation.
@@ -44,6 +69,7 @@ Ensures the current field's value exactly matches the value of another data comp
   ```json
   { "target": "string (The `key` of the target data component)" }
   ```
+* **Required:** `target`, a non-empty string naming a data `key` in the rule's scope other than its own (1.6.0; the table above).
 * **Example:**
   ```json
   { "rule": "matchesField", "scope": "both", "params": { "target": "password" }, "message": "Passwords do not match." }
@@ -56,6 +82,7 @@ Ensures the current field's value exactly matches the value of another data comp
 Ensures the current field's value does *not* match another field.
 * **Use Case:** Ensuring a new password is different from the old password.
 * **Params Schema:** `{ "target": "string" }`
+* **Required:** `target`, as for `matchesField` (1.6.0).
 * **Example:**
   ```json
   { "rule": "notMatchesField", "scope": "both", "params": { "target": "old_password" }, "message": "New password must be different from the old password." }
@@ -68,6 +95,7 @@ Applies a custom regular expression. (Use this when the base `validation.pattern
   ```json
   { "pattern": "string (ECMA 262 regex)", "flags": "string (ECMA 262 flags; for a `both` rule, read the warning below before setting any)" }
   ```
+* **Required:** `pattern`, a non-empty string (1.6.0; the table above). `flags` is optional.
 * **Implementation Notes:**
   * **Vue:** `new RegExp(params.pattern, params.flags).test(value)`
   * **Rust:** `regex::Regex::new(&params.pattern)?.is_match(value)` — **but see the warning below. The Rust `regex` crate cannot honour the full ECMA-262 params schema, and the divergences are not all loud.**
@@ -153,6 +181,8 @@ Applies a custom regular expression. (Use this when the base `validation.pattern
 >
 > Both apply to `validation.pattern` as well as to this rule, because one evaluator decides both.
 >
+> **A `regex` rule with no `pattern`, or an empty one, is refused before this table is read**, as `RULE_PARAM_MISSING` (§3.1's table, 1.6.0), so it is never reported twice. An empty pattern compiles, so none of these codes would catch it. **An empty `validation.pattern` is not refused**: the keyword is not a rule, and its empty pattern is the same silent no-op ([#736](https://github.com/sujanto-gaws/kelir/issues/736)).
+>
 > **What the check covers, and what it does not** — the edge an absence of findings needs to mean anything ([coding standard](../standards/01.%20Coding%20Standard.md) §2.9):
 >
 > - **Covered:** `\d \D \w \W \s \S` anywhere in the pattern; `\p{…}` and `\P{…}` anywhere; POSIX bracket expressions inside a bracket expression; `\b` and `\B` **outside** one.
@@ -165,6 +195,7 @@ Applies a custom regular expression. (Use this when the base `validation.pattern
 Ensures the value is strictly within a provided array.
 * **Use Case:** Restricting input to a dynamic list of allowed codes.
 * **Params Schema:** `{ "values": ["array", "of", "allowed", "values"] }`
+* **Required:** `values`, a non-empty array (1.6.0; the table above).
 * **Example:**
   ```json
   { "rule": "oneOf", "scope": "both", "params": { "values": ["standard", "express", "overnight"] }, "message": "Please select a valid shipping method." }
@@ -174,6 +205,7 @@ Ensures the value is strictly within a provided array.
 Ensures the value is strictly excluded from a provided array.
 * **Use Case:** Blocking reserved or disallowed values (e.g., reserved usernames).
 * **Params Schema:** `{ "values": ["array", "of", "disallowed", "values"] }`
+* **Required:** `values`, as for `oneOf` (1.6.0).
 * **Example:**
   ```json
   { "rule": "notOneOf", "scope": "both", "params": { "values": ["admin", "root", "system"] }, "message": "This username is reserved." }
@@ -267,11 +299,11 @@ Verifies that the currently authenticated user session has the required permissi
 
 If a developer needs to introduce a new validation rule (e.g., `validateCryptoAddress`), they must follow this workflow:
 
-1. **Draft the Rule:** Define the `rule` name, `scope`, and `params` schema.
+1. **Draft the Rule:** Define the `rule` name, `scope`, and `params` schema, **and which of its parameters are required**: those without which it accepts every value or refuses every value (1.6.0).
 2. **Update this Registry:** Add the rule to the appropriate scope section in this document.
 3. **Implement in Vue:** Add the logic to ~~the `zodBuilder.ts` (or equivalent) switch statement~~ the renderer's rule catalogue, `kelir-frontend/src/features/rad/renderer/validation.ts` (1.5.7).
 4. **Implement in Rust:** Add the logic to the backend's server-rule evaluator (`evaluate_server_rules` or equivalent) as a new `match` arm. An unrecognised rule name MUST be an error, not a skipped arm — a rule the backend silently ignores is a `server`-scoped check that does not run.
-5. **Update Meta-Schema (Optional):** If the rule requires strict parameter validation, update the `advancedRule` definition in `jfss-meta-v2.0.1.json` to include an `if/then` block for the new `rule` string.
+5. ~~**Update Meta-Schema (Optional):** If the rule requires strict parameter validation, update the `advancedRule` definition in `jfss-meta-v2.0.1.json` to include an `if/then` block for the new `rule` string.~~ **Declare its required parameters in the write-time check** (1.6.0, [#722](https://github.com/sujanto-gaws/kelir/issues/722)): an entry in `REQUIRED_PARAMS` in `kelir-backend/src/modules/rad/domain/engine.rs`, which refuses a definition without them at create, update and publish (§3.1), and the same entry in the form builder's `REQUIRED_PARAMS` in `kelir-frontend/src/features/admin/form-builder/propertyEdits.ts`, which seeds the empty shape and flags it. **Not the meta-schema**: JFSS 2.0.1 is a Final Standard, so `jfss-meta-v2.0.1.json` changes only with a new major version, and an `if/then` per rule name could still not say that a `target` names a key in the rule's scope.
 6. **Code Review:** The PR must be reviewed by at least one frontend and one backend engineer to ensure parity.
 
 ---
@@ -311,6 +343,7 @@ The Vue submission handler must catch the `400` response, iterate through the `d
 
 ## 6. Changelog
 
+- **1.6.0 (2026-10-15):** **Each §3.1 rule's required parameter is marked, and a definition without it is refused when it is written** ([#722](https://github.com/sujanto-gaws/kelir/issues/722), Sprint 24 row 4). The meta-schema requires `params` and accepts any object in it, so `{"rule": "oneOf", "scope": "both", "params": {"values": []}, "message": "Pick one."}` was stored, published, and then refused every value anybody typed, with a message the author wrote for another reason. An empty `regex`, `notMatchesField` or `notOneOf` accepted every value. **A minor version**, as 1.4.0 and 1.5.0 were, because it adds refusals and codes. **§3.1 now marks the parameter each rule cannot work without**: `target` for `matchesField` and `notMatchesField`, a non-empty string naming a data key in the rule's scope other than its own; `pattern` for `regex`, a non-empty string; `values` for `oneOf` and `notOneOf`, a non-empty array. It tabulates three new S10.3 codes, `RULE_PARAM_MISSING`, `RULE_PARAM_INVALID` and `RULE_TARGET_NOT_FOUND`, refused at create, update and publish. The scope is the record the rule is read against at submit, so a row's rule naming a top-level field is refused. A note under the table says the verdicts are the server's, on filled-in values, and that the browser reads a `regex` with no `pattern` differently ([#737](https://github.com/sujanto-gaws/kelir/issues/737)). **§4's step 5 is struck**: a rule's parameters are no longer sent to the meta-schema, which JFSS 2.0.1 freezes, and a new rule declares its required parameters in the write-time check. The `regex` warning says an empty `pattern` is refused before its table is read. JFSS §6.2 points here, as erratum E-4. **Revisions already published are not re-checked, and submit is unchanged.** No rule is added, removed, or re-scoped.
 - **1.5.7 (2026-10-01):** **The Vue notes stop prescribing Zod and Yup** ([#626](https://github.com/sujanto-gaws/kelir/issues/626), record 20 finding 9). Kelir's renderer uses neither: it decides the rules in its own catalogue, `kelir-frontend/src/features/rad/renderer/validation.ts`, and the server validates every submission. [#577](https://github.com/sujanto-gaws/kelir/pull/577) removed them from the architecture documents, the SDD and the coding standard, and missed this registry. §1.1's frontend-parity condition, the `matchesField` and `async` implementation notes, and §4's step 3 are struck in place beside what the renderer does. The `async` note now says the renderer does not decide the rule yet. No rule, scope, code or refusal changed.
 - **1.4.1 (2026-09-11):** **1.4.0 called the `regex` question resolved, and it is not wholly.** The save-time refusal closes lookahead, backreferences and a bare `\d`, `\w` or `\s`; `\b`, POSIX bracket expressions and `\p{…}` still compile on the server and diverge silently in the browser ([#413](https://github.com/sujanto-gaws/kelir/issues/413), the [Sprint 16 independent pass](../../projects/verifications/15.%20Sprint%2016%20Independent%20Pass.md) finding 1). The warning under `regex` now says which. Found again by the `v0.7.0` pre-flight schema check; 1.4.0's entry below is left as written. No rule is added, removed, or re-scoped.
 - **1.5.6 (2026-09-26):** **A match the browser throws on is left to the server, not refused** ([#496](https://github.com/sujanto-gaws/kelir/issues/496), the product owner's 2026-09-25 decision, options 2A and 1A). The warning under `regex` said the renderer counts an exception as a violation, and it now leaves the rule, or `validation.pattern`, undecided, and the server decides on submit. **A pattern the browser cannot compile still fails**: the renderer compiles first, and treats only a throw from the match as undecided. **Once a keyword has failed on the field, the renderer also runs none of the rules it decides itself** (`matchesField`, `notMatchesField`, `oneOf`, `notOneOf` and `regex`), which changes no verdict. The measured table is left as measured, with a note that its *refused* is the renderer before this version. **This fixes only the engine that throws.** It says nothing about which patterns the two sides decide alike (**D-88**), and changes nothing for an engine that keeps matching or answers *no match*. No rule, code or refusal changed.

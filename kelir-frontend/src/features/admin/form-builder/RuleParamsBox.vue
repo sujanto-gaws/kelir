@@ -21,7 +21,9 @@ import { isParams } from './propertyEdits'
  * On blur, text that was not written gives way to the parameters the rule
  * holds, so what the box shows is what is saved.
  *
- * This is the box #722's check will sit beside, after this row.
+ * **It checks the shape alone.** A required parameter that is missing, empty
+ * or of the wrong type is valid JSON here; the section flags it under this box
+ * (#722).
  */
 const props = defineProps<{
   modelValue: Record<string, unknown> | undefined

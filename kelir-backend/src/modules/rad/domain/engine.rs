@@ -112,6 +112,34 @@ pub(crate) const PATTERN_CLASS_NOT_PINNED: &str = "PATTERN_CLASS_NOT_PINNED";
 /// it ([#413](https://github.com/sujanto-gaws/kelir/issues/413)).
 pub(crate) const PATTERN_CONSTRUCT_NOT_PORTABLE: &str = "PATTERN_CONSTRUCT_NOT_PORTABLE";
 
+/// The S10.3 `code` a rule carries when the parameter it cannot work without is
+/// absent, `""` or `[]`.
+///
+/// **The defect it ends is a rule that does nothing, or refuses everything,
+/// silently** ([#722]). The meta-schema requires `params` and accepts any
+/// object in it, so a `oneOf` rule whose `params` were `{"values": []}` was
+/// stored, published and then refused every value anybody typed — with a
+/// message the author wrote for the wrong reason.
+///
+/// [#722]: https://github.com/sujanto-gaws/kelir/issues/722
+pub(crate) const RULE_PARAM_MISSING: &str = "RULE_PARAM_MISSING";
+
+/// The S10.3 `code` a required parameter of the wrong JSON type carries, and a
+/// `target` that names the rule's own key.
+///
+/// The second is the same defect in another spelling: a rule comparing a value
+/// with itself always holds or never does, whatever was typed.
+pub(crate) const RULE_PARAM_INVALID: &str = "RULE_PARAM_INVALID";
+
+/// The S10.3 `code` a `target` naming no data field in the rule's scope
+/// carries.
+///
+/// **The scope is the record the rule is read against at submit**, which is
+/// [`super::validation`]'s `scope_target`: the top-level payload, or one row
+/// inside a data grid. So a row's rule naming a top-level field is refused here
+/// for the reason it would fail there — it looks in the row and finds nothing.
+pub(crate) const RULE_TARGET_NOT_FOUND: &str = "RULE_TARGET_NOT_FOUND";
+
 /// A dependency cycle, as the keys that make it up.
 ///
 /// The keys are in *reading* order — `keys[0]`'s expression reads `keys[1]`,
@@ -559,9 +587,11 @@ pub(crate) fn definition_errors(definition: &Value) -> Vec<ValidationDetail> {
 /// One scope: its catalogue, its rule names, its order — then its rows.
 fn check_scope(components: &[&Value], path: &str, details: &mut Vec<ValidationDetail>) {
     let catalogue = ScopeCatalogue::of(components, path);
+    let scope_keys: BTreeSet<&str> = catalogue.entries.iter().map(|entry| entry.key).collect();
 
     for entry in &catalogue.entries {
         check_rule_names(entry, details);
+        check_rule_params(entry, &scope_keys, details);
         check_operator_sets(entry, details);
         check_patterns(entry, details);
     }
@@ -636,6 +666,226 @@ fn check_rule_names(entry: &Entry<'_>, details: &mut Vec<ValidationDetail>) {
     }
 }
 
+/// What a required parameter has to hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParamKind {
+    /// A non-empty string naming a data key in the rule's scope, not its own.
+    FieldKey,
+    /// A non-empty string.
+    Text,
+    /// A non-empty array. Its elements are not read: a list of anything is a
+    /// list the rule can compare against.
+    List,
+}
+
+impl ParamKind {
+    /// Whether `value` is the JSON type this kind is spelled in.
+    fn holds(self, value: &Value) -> bool {
+        match self {
+            Self::FieldKey | Self::Text => value.is_string(),
+            Self::List => value.is_array(),
+        }
+    }
+
+    fn wanted(self) -> &'static str {
+        match self {
+            Self::FieldKey => "a string naming a field",
+            Self::Text => "a string",
+            Self::List => "a list",
+        }
+    }
+}
+
+/// What a rule does at submit when its required parameter says nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmptyVerdict {
+    AcceptsEvery,
+    RefusesEvery,
+}
+
+impl EmptyVerdict {
+    fn says(self) -> &'static str {
+        match self {
+            Self::AcceptsEvery => "accepts every value",
+            Self::RefusesEvery => "refuses every value",
+        }
+    }
+
+    /// A `target` that is the rule's own key does the reverse of an empty one:
+    /// `matchesField` compares a value with itself and always holds, where an
+    /// empty target compares it with an absent field and never does.
+    fn reversed(self) -> Self {
+        match self {
+            Self::AcceptsEvery => Self::RefusesEvery,
+            Self::RefusesEvery => Self::AcceptsEvery,
+        }
+    }
+}
+
+/// One rule's required parameter.
+struct RequiredParam {
+    rule: &'static str,
+    param: &'static str,
+    kind: ParamKind,
+    empty: EmptyVerdict,
+}
+
+/// The parameter each rule cannot work without — the [Validation Rule
+/// Registry](../../../../../docs/schema/JFSS%20Validation%20Rule%20Registry.md)
+/// §3.1, as one table.
+///
+/// **Only the five rules whose parameter decides the verdict.** `regex`'s
+/// `flags` is optional, and the §3.2 and §3.3 rules take nothing this backend
+/// reads. **The builder carries a mirror**: `REQUIRED_PARAMS` in
+/// `kelir-frontend/src/features/admin/form-builder/propertyEdits.ts` seeds
+/// these shapes empty and flags them until they are filled, so a rule added
+/// here is a rule added there.
+const REQUIRED_PARAMS: &[RequiredParam] = &[
+    RequiredParam {
+        rule: "matchesField",
+        param: "target",
+        kind: ParamKind::FieldKey,
+        empty: EmptyVerdict::RefusesEvery,
+    },
+    RequiredParam {
+        rule: "notMatchesField",
+        param: "target",
+        kind: ParamKind::FieldKey,
+        empty: EmptyVerdict::AcceptsEvery,
+    },
+    RequiredParam {
+        rule: "regex",
+        param: "pattern",
+        kind: ParamKind::Text,
+        empty: EmptyVerdict::AcceptsEvery,
+    },
+    RequiredParam {
+        rule: "oneOf",
+        param: "values",
+        kind: ParamKind::List,
+        empty: EmptyVerdict::RefusesEvery,
+    },
+    RequiredParam {
+        rule: "notOneOf",
+        param: "values",
+        kind: ParamKind::List,
+        empty: EmptyVerdict::AcceptsEvery,
+    },
+];
+
+/// The required parameter of every rule one component declares, against the
+/// scope the rule is read in.
+///
+/// **Not a shape question, so not the meta-schema's.** `advancedRule.params` is
+/// any object, and could not be anything narrower without one `if` per rule
+/// name; nor could it say that a `target` is a key *in this record*. So the
+/// meta-schema answers for `params` being there and being an object, and this
+/// answers for what is in it — a rule with no `params`, or with an unregistered
+/// name, is left to the check that already reports it rather than told twice.
+///
+/// `scope_keys` is the catalogue's keys, which are the keys
+/// [`super::validation`]'s `scope_target` looks a target up in at submit.
+fn check_rule_params(
+    entry: &Entry<'_>,
+    scope_keys: &BTreeSet<&str>,
+    details: &mut Vec<ValidationDetail>,
+) {
+    let rules = entry
+        .component
+        .get("rules")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+
+    for (index, rule) in rules.iter().enumerate() {
+        let name = rule.get("rule").and_then(Value::as_str).unwrap_or_default();
+        let (Some(required), Some(params)) = (
+            REQUIRED_PARAMS
+                .iter()
+                .find(|required| required.rule == name),
+            rule.get("params").and_then(Value::as_object),
+        ) else {
+            continue;
+        };
+
+        let param = required.param;
+        let key = entry.key;
+        let empty = required.empty.says();
+        let path = format!("{}.rules.{index}.params.{param}", entry.path);
+        let mut report = |code: &str, message: String| {
+            details.push(ValidationDetail::new(path.clone(), name, code, message));
+        };
+
+        match params.get(param) {
+            None => report(
+                RULE_PARAM_MISSING,
+                format!(
+                    "`{key}`'s `{name}` rule has no `{param}`, so at submit it {empty}; \
+                     `{param}` must be {} and not empty",
+                    required.kind.wanted()
+                ),
+            ),
+            Some(value) if !required.kind.holds(value) => report(
+                RULE_PARAM_INVALID,
+                format!(
+                    "`{key}`'s `{name}` rule has a `{param}` that is {} rather than {}",
+                    json_kind(value),
+                    required.kind.wanted()
+                ),
+            ),
+            Some(value)
+                if value.as_str() == Some("") || value.as_array().is_some_and(Vec::is_empty) =>
+            {
+                report(
+                    RULE_PARAM_MISSING,
+                    format!(
+                        "`{key}`'s `{name}` rule has an empty `{param}`, so at submit it {empty}"
+                    ),
+                );
+            }
+            Some(Value::String(target))
+                if required.kind == ParamKind::FieldKey && target == key =>
+            {
+                report(
+                    RULE_PARAM_INVALID,
+                    format!(
+                        "`{key}`'s `{name}` rule names `{key}` itself as its `target`, so at \
+                         submit it compares the value with itself and {}",
+                        required.empty.reversed().says()
+                    ),
+                );
+            }
+            Some(Value::String(target))
+                if required.kind == ParamKind::FieldKey
+                    && !scope_keys.contains(target.as_str()) =>
+            {
+                report(
+                    RULE_TARGET_NOT_FOUND,
+                    format!(
+                        "`{key}`'s `{name}` rule names `{target}` as its `target`, and no field \
+                         in the record it is checked against has that key, so at submit it \
+                         {empty}. A rule inside a data grid's row reads that row's fields; any \
+                         other rule reads the form's top-level fields"
+                    ),
+                );
+            }
+            Some(_) => {}
+        }
+    }
+}
+
+/// A JSON value's type, as a message names it.
+fn json_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "a list",
+        Value::Object(_) => "an object",
+    }
+}
+
 /// Every pattern one component carries, against what this backend can honour.
 ///
 /// **Two places declare one, and both are checked here.** §5's `validation.pattern`
@@ -679,9 +929,12 @@ fn check_patterns(entry: &Entry<'_>, details: &mut Vec<ValidationDetail>) {
         let Some(pattern) = params
             .and_then(|params| params.get("pattern"))
             .and_then(Value::as_str)
+            .filter(|pattern| !pattern.is_empty())
         else {
-            // A `regex` rule with no pattern is a shape problem, and the
-            // meta-schema is what answers for shape.
+            // A missing, empty or non-string pattern is [`check_rule_params`]'s
+            // to report. The meta-schema does not: `advancedRule.params` is any
+            // object. And an empty pattern compiles, so judging it here too
+            // would either say nothing or say the same defect twice.
             continue;
         };
 
@@ -1730,5 +1983,295 @@ mod tests {
     #[test]
     fn a_definition_that_is_not_a_document_is_left_to_the_meta_schema() {
         assert!(definition_errors(&json!({"nope": true})).is_empty());
+    }
+
+    // -- The required parameters ([#722]) ----------------------------------
+    //
+    // [#722]: https://github.com/sujanto-gaws/kelir/issues/722
+
+    /// `component` carrying one rule, with `params` as given.
+    fn with_rule(mut component: Value, rule: &str, params: Value) -> Value {
+        component["rules"] = json!([{
+            "rule": rule, "scope": "both", "params": params, "message": "m",
+        }]);
+        component
+    }
+
+    /// The five, each with its parameter and the verdict an empty one reaches.
+    const FIVE: [(&str, &str, &str); 5] = [
+        ("matchesField", "target", "refuses every value"),
+        ("notMatchesField", "target", "accepts every value"),
+        ("regex", "pattern", "accepts every value"),
+        ("oneOf", "values", "refuses every value"),
+        ("notOneOf", "values", "accepts every value"),
+    ];
+
+    /// One detail for `params` on each of the five rules, checked for code,
+    /// path and rule name. `sibling` is beside the rule's component, so a
+    /// filled `target` would have something to name.
+    fn refused_once(params_for: impl Fn(&str) -> Value, code: &str, says_verdict: bool) {
+        for (rule, param, verdict) in FIVE {
+            let component = with_rule(plain("amount"), rule, params_for(param));
+            let details = definition_errors(&definition(vec![component, plain("sibling")]));
+
+            assert_eq!(codes(&details), [code], "{rule}: {details:?}");
+            assert_eq!(
+                details[0].path,
+                format!("definition.components.0.rules.0.params.{param}"),
+                "{rule}"
+            );
+            assert_eq!(details[0].rule, rule);
+
+            let message = &details[0].message;
+            assert!(message.contains("`amount`"), "{rule}: {message}");
+            assert!(message.contains(&format!("`{param}`")), "{rule}: {message}");
+
+            if says_verdict {
+                assert!(message.contains(verdict), "{rule}: {message}");
+            }
+        }
+    }
+
+    /// **AC1–AC3: an absent parameter.** `params` is there and an object, so
+    /// the meta-schema is satisfied and nothing else would say a word.
+    ///
+    /// **Seen red, 2026-10-15**, with two mutations. Removing the
+    /// `check_rule_params` call from `check_scope` reddens this and the seven
+    /// tests below that expect a refusal — eight of the thirteen #722 tests;
+    /// the five that expect silence stay green, as they should. Making the
+    /// `RULE_TARGET_NOT_FOUND` guard `false` reddens only the three that
+    /// expect that code — the sharper of the two, because it lands on the
+    /// branch those tests name.
+    #[test]
+    fn a_missing_required_parameter_is_refused_once_on_each_rule() {
+        refused_once(|_| json!({}), RULE_PARAM_MISSING, true);
+    }
+
+    /// **AC1–AC3: `""` and `[]`** — the shapes the builder seeds.
+    #[test]
+    fn an_empty_required_parameter_is_refused_once_on_each_rule() {
+        refused_once(
+            |param| match param {
+                "values" => json!({ param: [] }),
+                _ => json!({ param: "" }),
+            },
+            RULE_PARAM_MISSING,
+            true,
+        );
+    }
+
+    /// **AC1–AC3: the wrong JSON type.** A number where a string belongs, and
+    /// a string where a list does — which submit would read as `"5"` and as no
+    /// list at all.
+    #[test]
+    fn a_mistyped_required_parameter_is_refused_once_on_each_rule() {
+        refused_once(
+            |param| match param {
+                "values" => json!({ param: "a,b" }),
+                _ => json!({ param: 5 }),
+            },
+            RULE_PARAM_INVALID,
+            false,
+        );
+    }
+
+    /// **The second subject** ([coding standard] §2.9): every rule filled in
+    /// stores, and a list's elements are not read (AC3).
+    ///
+    /// [coding standard]: ../../../../../docs/standards/01.%20Coding%20Standard.md
+    #[test]
+    fn a_filled_required_parameter_on_each_rule_stores() {
+        let components = vec![
+            with_rule(plain("a"), "matchesField", json!({"target": "b"})),
+            with_rule(plain("b"), "notMatchesField", json!({"target": "a"})),
+            with_rule(plain("c"), "regex", json!({"pattern": "^[0-9]+$"})),
+            with_rule(plain("d"), "oneOf", json!({"values": [1, "two", null]})),
+            with_rule(plain("e"), "notOneOf", json!({"values": [{}]})),
+        ];
+
+        let details = definition_errors(&definition(components));
+
+        assert!(details.is_empty(), "{details:?}");
+    }
+
+    /// **AC2: an empty pattern is one defect, reported once.** It compiles, so
+    /// the pattern checks have nothing of their own to say about it.
+    #[test]
+    fn an_empty_pattern_is_reported_once_and_not_as_a_pattern_too() {
+        let component = with_rule(plain("code"), "regex", json!({"pattern": "", "flags": "u"}));
+
+        let details = definition_errors(&definition(vec![component]));
+
+        assert_eq!(codes(&details), [RULE_PARAM_MISSING]);
+    }
+
+    fn datagrid(key: &str, rows: Vec<Value>) -> Value {
+        json!({
+            "id": key, "role": "data", "type": "datagrid", "key": key, "label": key,
+            "validation": {"type": "array"}, "components": rows,
+        })
+    }
+
+    /// **AC4, the row half.** At submit a row's rule reads the row, so a
+    /// sibling column is found and a top-level field of any name is not — in
+    /// every `scope` the rule can declare.
+    #[test]
+    fn a_row_rule_reads_its_row_and_not_the_top_level() {
+        for scope in ["client", "server", "both"] {
+            let mut sibling = with_rule(plain("confirm"), "matchesField", json!({"target": "qty"}));
+            sibling["rules"][0]["scope"] = json!(scope);
+            let mut outside =
+                with_rule(plain("other"), "notMatchesField", json!({"target": "top"}));
+            outside["rules"][0]["scope"] = json!(scope);
+
+            let details = definition_errors(&definition(vec![
+                plain("top"),
+                datagrid("lines", vec![plain("qty"), sibling, outside]),
+            ]));
+
+            assert_eq!(codes(&details), [RULE_TARGET_NOT_FOUND], "{scope}");
+            assert_eq!(
+                details[0].path,
+                "definition.components.1.components.2.rules.0.params.target"
+            );
+            assert!(
+                details[0].message.contains("`top`"),
+                "{}",
+                details[0].message
+            );
+        }
+    }
+
+    /// **AC4, the reverse.** A top-level rule cannot see into a row: at submit
+    /// the payload's `qty` is not there, only `lines`.
+    #[test]
+    fn a_top_level_rule_naming_a_row_field_is_refused() {
+        let details = definition_errors(&definition(vec![
+            with_rule(plain("total"), "matchesField", json!({"target": "qty"})),
+            datagrid("lines", vec![plain("qty")]),
+        ]));
+
+        assert_eq!(codes(&details), [RULE_TARGET_NOT_FOUND]);
+        assert_eq!(
+            details[0].path,
+            "definition.components.0.rules.0.params.target"
+        );
+    }
+
+    /// **AC4: layouts are transparent**, on both ends — a rule inside a
+    /// fieldset names a field inside a column, and both are top-level keys.
+    #[test]
+    fn a_target_inside_a_layout_is_in_the_same_scope() {
+        let details = definition_errors(&definition(vec![
+            json!({
+                "id": "panel", "role": "layout", "type": "fieldset",
+                "components": [with_rule(plain("confirm"), "matchesField", json!({"target": "email"}))]
+            }),
+            json!({
+                "id": "cols", "role": "layout", "type": "columns",
+                "columns": [{"components": [plain("email")]}]
+            }),
+        ]));
+
+        assert!(details.is_empty(), "{details:?}");
+    }
+
+    /// **AC4: a data grid's own key is a top-level field**, whose value at
+    /// submit is the array of rows.
+    #[test]
+    fn a_data_grids_own_key_is_a_target_at_the_top_level() {
+        let details = definition_errors(&definition(vec![
+            with_rule(plain("copy"), "notMatchesField", json!({"target": "lines"})),
+            datagrid("lines", vec![plain("qty")]),
+        ]));
+
+        assert!(details.is_empty(), "{details:?}");
+    }
+
+    /// **AC5.** A rule comparing a value with itself — and the verdict is the
+    /// reverse of an empty target's, which the message says.
+    #[test]
+    fn a_target_that_is_the_rules_own_key_is_refused() {
+        for (rule, verdict) in [
+            ("matchesField", "accepts every value"),
+            ("notMatchesField", "refuses every value"),
+        ] {
+            let details = definition_errors(&definition(vec![with_rule(
+                plain("email"),
+                rule,
+                json!({"target": "email"}),
+            )]));
+
+            assert_eq!(codes(&details), [RULE_PARAM_INVALID], "{rule}");
+            assert_eq!(
+                details[0].path,
+                "definition.components.0.rules.0.params.target"
+            );
+            assert!(
+                details[0].message.contains(verdict),
+                "{}",
+                details[0].message
+            );
+        }
+    }
+
+    /// **AC6 and AC7: nothing is said twice, and nothing outside the five.**
+    #[test]
+    fn what_another_check_owns_is_left_to_it() {
+        let no_params = {
+            let mut component = plain("a");
+            component["rules"] = json!([{"rule": "oneOf", "scope": "both", "message": "m"}]);
+            component
+        };
+        let components = vec![
+            // The meta-schema's: `params` absent, and `params` not an object.
+            no_params,
+            with_rule(plain("b"), "matchesField", json!("target")),
+            // The §3.2 and §3.3 rules take nothing this backend reads.
+            with_rule(plain("c"), "passwordStrength", json!({})),
+            with_rule(plain("d"), "unique", json!({})),
+        ];
+
+        assert!(definition_errors(&definition(components)).is_empty());
+
+        // An unregistered name is `RULE_NOT_REGISTERED` and nothing more.
+        let details = definition_errors(&definition(vec![with_rule(
+            plain("e"),
+            "matchesFeild",
+            json!({}),
+        )]));
+
+        assert_eq!(codes(&details), [RULE_NOT_REGISTERED]);
+    }
+
+    /// **AC8: every problem at once**, beside a detail from another check.
+    #[test]
+    fn every_empty_rule_is_reported_in_one_answer() {
+        let details = definition_errors(&definition(vec![
+            with_rule(plain("a"), "oneOf", json!({"values": []})),
+            with_rule(plain("b"), "matchesField", json!({"target": "nowhere"})),
+            field("c", json!({"+": [{"var": "c"}, 1]})),
+        ]));
+
+        assert_eq!(
+            codes(&details),
+            [RULE_PARAM_MISSING, RULE_TARGET_NOT_FOUND, CALCULATION_CYCLE]
+        );
+    }
+
+    /// The table names registry rules only. A misspelt entry would check
+    /// nothing, silently, because no definition could carry the name.
+    #[test]
+    fn every_required_parameter_belongs_to_a_registered_rule() {
+        for required in REQUIRED_PARAMS {
+            assert!(is_registered(required.rule), "{}", required.rule);
+        }
+
+        let names: Vec<&str> = REQUIRED_PARAMS
+            .iter()
+            .map(|required| required.rule)
+            .collect();
+        let five: Vec<&str> = FIVE.iter().map(|(rule, _, _)| *rule).collect();
+        assert_eq!(names, five);
     }
 }

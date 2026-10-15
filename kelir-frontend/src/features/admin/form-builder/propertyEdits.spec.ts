@@ -7,15 +7,19 @@ import {
   limitConflicts,
   limitsFor,
   messageAt,
+  paramsFlag,
   rowKeys,
+  seededParams,
   switchValueType,
   toggleUniqueBy,
   withProperty,
 } from './propertyEdits'
 
 /**
- * The panel's edits as pure functions (#688 AC3, AC3b, AC9). The panel's own
- * spec drives them through the screen; these pin the edge cases.
+ * The panel's edits as pure functions (#688 AC3, AC3b, AC9; #722 AC15). The
+ * panel's own spec drives them through the screen; these pin the edge cases.
+ * The mutations seen to redden the #722 cases are listed in
+ * `ValidationRulesSection.spec.ts`.
  */
 
 describe('withProperty', () => {
@@ -180,6 +184,7 @@ describe('messageAt (AC9)', () => {
   const details = [
     detail('definition.components.1.calculate', 'about calculate'),
     detail('definition.components.1.rules.2.params.pattern', 'about params'),
+    detail('definition.components.1.rules.3.params.target', 'about a target'),
     detail('definition.components.1.components.0.calculate', 'about a row field'),
     detail('definition.components.10.validation.pattern', 'about another node'),
   ]
@@ -187,11 +192,73 @@ describe('messageAt (AC9)', () => {
   it('finds a message at a property of this node, or below it', () => {
     expect(messageAt(details, 'components.1', 'calculate')).toBe('about calculate')
     expect(messageAt(details, 'components.1', 'rules.2.params')).toBe('about params')
+    // #722's RULE_PARAM_* and RULE_TARGET_NOT_FOUND land on the parameters box too.
+    expect(messageAt(details, 'components.1', 'rules.3.params')).toBe('about a target')
   })
 
   it('does not take a message about another node, or a property that only shares a prefix', () => {
     expect(messageAt(details, 'components.1', 'validation.pattern')).toBeUndefined()
     expect(messageAt(details, 'components.1', 'rules.2.param')).toBeUndefined()
     expect(messageAt(details, 'components.1', 'components')).toBe('about a row field')
+  })
+})
+
+describe('a rule’s required parameter (#722 AC15)', () => {
+  const ENFORCEABLE = ['matchesField', 'notMatchesField', 'regex', 'oneOf', 'notOneOf']
+
+  it('flags every seeded shape: the seeds and the flag read one table', () => {
+    for (const rule of ENFORCEABLE) {
+      expect(Object.keys(seededParams(rule)), rule).toHaveLength(1)
+      expect(paramsFlag(rule, seededParams(rule))?.text, rule).toMatch(/^is empty: /)
+    }
+  })
+
+  it.each([
+    ['matchesField', { target: 'other' }],
+    ['notMatchesField', { target: 'other' }],
+    ['regex', { pattern: '^A' }],
+    ['oneOf', { values: ['a'] }],
+    ['notOneOf', { values: [''] }],
+  ])('does not flag %s filled in as %j', (rule, params) => {
+    expect(paramsFlag(rule, params)).toBeUndefined()
+  })
+
+  it('flags a missing parameter, and parameters that are not an object', () => {
+    for (const params of [undefined, {}, null, [], 'x']) {
+      expect(paramsFlag('regex', params)?.text, JSON.stringify(params)).toMatch(/^is missing: /)
+    }
+  })
+
+  it('flags the wrong JSON type, null included', () => {
+    expect(paramsFlag('matchesField', { target: null })).toEqual({
+      param: 'target',
+      text: 'must be a text. Saving is refused until it is one.',
+    })
+    expect(paramsFlag('oneOf', { values: '' })).toEqual({
+      param: 'values',
+      text: 'must be a list. Saving is refused until it is one.',
+    })
+  })
+
+  // The server's empty is `''` and `[]` only: a blank pattern is a pattern, and
+  // a blank target is its `RULE_TARGET_NOT_FOUND`, which the flag leaves to it.
+  // A flag saying "Saving is refused" there would be wrong about the save.
+  // Seen red 2026-10-15 (test-engineer campaign) with a trimmed text counted
+  // as empty.
+  it('does not flag a blank text, which the server does not call empty', () => {
+    expect(paramsFlag('regex', { pattern: ' ' })).toBeUndefined()
+    expect(paramsFlag('matchesField', { target: ' ' })).toBeUndefined()
+    expect(paramsFlag('oneOf', { values: [''] })).toBeUndefined()
+  })
+
+  it('seeds and flags nothing for a rule outside the five', () => {
+    for (const rule of ['passwordStrength', 'async', 'unique', 'exists', 'authorized', 'x']) {
+      expect(seededParams(rule), rule).toEqual({})
+      expect(paramsFlag(rule, {}), rule).toBeUndefined()
+    }
+
+    // Not an inherited property either.
+    expect(seededParams('toString')).toEqual({})
+    expect(paramsFlag('toString', {})).toBeUndefined()
   })
 })
