@@ -654,6 +654,88 @@ describe('DocumentTypeFormDialog choosers', () => {
     expect(wrapper.get('[data-testid="type-workflow"]').attributes('disabled')).toBeUndefined()
   })
 
+  /*
+   * #718's verification campaign. Each test below was seen red under a
+   * mutation the tests above let through.
+   */
+
+  it('names the note as what describes the chooser it disables', async () => {
+    const wrapper = await open({
+      ...boundType(wantedFlow.id),
+      workflows: [binding(wantedFlow.id), binding(flows[0].id, { priority: 2 })],
+    })
+    await flushPromises()
+
+    // A disabled control says nothing on its own; a screen reader reaches the
+    // reason only through `aria-describedby`.
+    const note = wrapper.get('[data-testid="type-workflow-further"]').attributes('id')
+    const describedBy = wrapper.get('[data-testid="type-workflow"]').attributes('aria-describedby')
+
+    expect(note).toBeDefined()
+    expect(describedBy?.split(' ')).toContain(note)
+  })
+
+  it('sends no workflows for a type with several bindings even if its chooser moves', async () => {
+    replaceBackend(acceptingPut)
+    const wrapper = await open({
+      ...boundType(wantedFlow.id),
+      workflows: [binding(wantedFlow.id), binding(flows[0].id, { priority: 2 })],
+    })
+    await flushPromises()
+
+    // The disabled chooser cannot be moved by a user, so the value is moved the
+    // way the component itself would: the save must not depend on the control
+    // staying disabled to keep the second binding.
+    const chooser = wrapper
+      .findAllComponents({ name: 'SearchSelect' })
+      .find((component) => component.props('testId') === 'type-workflow')
+
+    chooser?.vm.$emit('update:modelValue', flows[1].id)
+    await flushPromises()
+
+    expect(selectedValue(wrapper, 'type-workflow')).toBe(flows[1].id)
+
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(sentWorkflows()).toBe(false)
+  })
+
+  it('treats a type read without workflows as unbound, and sends none on a rename', async () => {
+    replaceBackend(acceptingPut)
+    // The endpoint always sends the array; a reply that does not must not throw
+    // the dialog open, nor make a rename unbind anything.
+    const withoutWorkflows: Partial<DocumentType> = boundType(wantedFlow.id)
+
+    delete withoutWorkflows.workflows
+    const wrapper = await open(withoutWorkflows as DocumentType)
+    await flushPromises()
+
+    expect(selectedValue(wrapper, 'type-workflow')).toBe('')
+    expect(wrapper.find('[data-testid="type-workflow-further"]').exists()).toBe(false)
+
+    await wrapper.get('[data-testid="type-name"]').setValue('Requisition (renamed)')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(sentWorkflows()).toBe(false)
+    expect(wrapper.emitted('saved')).toHaveLength(1)
+  })
+
+  it('still sends an empty workflows array when a type is created unbound', async () => {
+    const wrapper = await open()
+
+    await wrapper.get('[data-testid="type-code"]').setValue('REQ')
+    await wrapper.get('[data-testid="type-name"]').setValue('Requisition')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    // Only an edit leaves the key off (#718); a create states its bindings.
+    const posted = backend.requests.find((request) => request.method === 'post')
+
+    expect(posted?.body).toMatchObject({ typeCode: 'REQ', workflows: [] })
+  })
+
   /** The refusal `check_workflow_bindings` gives a binding to a deprecated revision. */
   const notPublished =
     `workflow definition ${retiredFlow.id} is DEPRECATED and only a published revision may ` +
