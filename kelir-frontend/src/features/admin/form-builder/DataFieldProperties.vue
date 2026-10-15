@@ -9,18 +9,19 @@ import type { JfssDataComponent, JfssValidation } from '@/types/jfss'
 import type { LookupSource } from '@/types/rad'
 
 import DataIdentityFields from './DataIdentityFields.vue'
-import { switchValueType, withProperty } from './propertyEdits'
+import { PLACEHOLDER_TYPES, switchValueType, withProperty } from './propertyEdits'
 import ValidationLimitsFields from './ValidationLimitsFields.vue'
 
 /**
  * A data field's own properties (#688 part 2): every data type but the data
  * grid, which has `DataGridProperties`.
  *
- * Its key, label, **placeholder and description** (**D-116**), value type,
- * `required`, **the limits that fit the value type** (D-116), and, by type,
- * a select's or radio's options and a lookup's master-data source. Kept as
- * loaded and not offered: `defaultValue`, `readOnly`, `calculateMode`,
- * `format`, `enum` and `messages`.
+ * Its key, label, **description** and, where the renderer draws one, a
+ * **placeholder** (**D-116**, `PLACEHOLDER_TYPES`), value type, `required`,
+ * **the limits that fit the value type** (D-116), and, by type, a select's or
+ * radio's options and a lookup's master-data source. Kept as loaded and not
+ * offered: `defaultValue`, `readOnly`, `calculateMode`, `format`, `enum`,
+ * `messages`, and a placeholder on a type that draws none.
  */
 const props = defineProps<{
   component: JfssDataComponent
@@ -56,6 +57,8 @@ function patch(key: string, value: unknown): void {
 function setValidation(validation: JfssValidation): void {
   emit('update', { ...props.component, validation })
 }
+
+const offersPlaceholder = computed(() => PLACEHOLDER_TYPES.includes(props.component.type))
 
 /** `select` and `radio` are the two types whose choices come from the definition. */
 const hasOptions = computed(
@@ -100,7 +103,7 @@ const optionLines = computed({
     @update="emit('update', $event)"
   />
 
-  <div class="space-y-2">
+  <div v-if="offersPlaceholder" class="space-y-2">
     <Label :for="`placeholder-${id}`">Placeholder</Label>
     <Input
       :id="`placeholder-${id}`"

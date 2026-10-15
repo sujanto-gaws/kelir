@@ -14,7 +14,7 @@ import FormPropertiesPanel from './FormPropertiesPanel.vue'
  * Each fixture carries every property the per-type table keeps as loaded and
  * does not offer — `defaultValue`, `readOnly`, `calculateMode`, `format`,
  * `enum`, `messages`, `uniqueItems`, `grid`, `theme`, a heading's `variant`, a
- * display node's `calculate` — plus a rule name outside the five, and a
+ * display node's `calculate`, a placeholder on a type that draws none — plus a rule name outside the five, and a
  * `calculate` and a `conditional.logic` the builder cannot show (`min`, `if`).
  * Then **one offered property is edited, and the node's JSON is diffed**: it
  * must change at that path and nowhere else.
@@ -88,6 +88,17 @@ const FIELD = {
   ],
   calculate: { min: [{ var: 'qty' }, 10] },
   conditional: { action: 'hide', logic: { if: [{ var: 'qty' }, true, false] } },
+}
+
+/** A placeholder on a type whose renderer draws none: kept as loaded, not offered (D-116). */
+const DATE = {
+  id: 'd',
+  role: 'data',
+  type: 'date',
+  key: 'due',
+  label: 'Due',
+  placeholder: 'dd/mm/yyyy',
+  validation: { type: 'string', format: 'date' },
 }
 
 const GRID = {
@@ -235,6 +246,14 @@ const CASES: [name: string, fixture: Record<string, unknown>, edits: Edit[]][] =
     ],
   ],
   [
+    'date',
+    DATE,
+    [
+      ['label-d', 'Due by', ['label']],
+      ['type-d', 'textfield', ['type']],
+    ],
+  ],
+  [
     'datagrid',
     GRID,
     [
@@ -294,6 +313,12 @@ describe('the properties panel’s round trip (AC4)', () => {
       expect(changedPaths(fixture, history[history.length - 1])).toEqual(changed)
     },
   )
+
+  it('does not offer a placeholder on a date, and keeps the one it was loaded with', () => {
+    const { wrapper } = harness(DATE)
+
+    expect(wrapper.find('[data-testid="placeholder-d"]').exists()).toBe(false)
+  })
 
   it('changes nothing it does not show when an expression it can show is edited', async () => {
     const fixture = {

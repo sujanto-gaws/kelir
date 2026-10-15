@@ -99,6 +99,27 @@ export function limitConflicts(validation: JfssValidation): { length: boolean; r
   }
 }
 
+// --- Placeholder (D-116) ---------------------------------------------------------
+
+/**
+ * The data types whose renderer field draws a `placeholder`: `TextField`,
+ * `TextareaField` and `NumberField` on the input, `SelectField` as its empty
+ * choice, and `LookupField` on its search box (`features/rad/fields/`).
+ *
+ * **Only these are offered one.** A date, a radio group and a checkbox draw
+ * none, so a placeholder offered there would be saved and never seen. One
+ * loaded on them is kept as loaded (AC4), not offered.
+ * `FormPropertiesPanel.renders.spec.ts` renders every data type with one and
+ * fails if this list and the renderer disagree.
+ */
+export const PLACEHOLDER_TYPES: readonly string[] = [
+  'textfield',
+  'textarea',
+  'number',
+  'select',
+  'lookup',
+]
+
 // --- Type switches (part 1's rules, moved here unchanged) ------------------------
 
 /** What a fresh node of a type carries: the builder's own defaults. */

@@ -34,6 +34,7 @@ import ValidationRulesSection from './ValidationRulesSection.vue'
  * | a cleared expression writes `null` | *removes calculate when it is cleared …*, *every edit of a …* (AC2, AC7) |
  * | a cleared `conditional.logic` leaves `{action}` | *removes the whole conditional …* (AC7) |
  * | `disabled` not passed to the conditional builder | *disables every control …* (AC7) |
+ * | `PLACEHOLDER_TYPES` gains `date` | *has a body for all 18 …*, *offers description on data nodes, placeholder where …* (AC1, AC3b) |
  * | `limitsFor('boolean')` offers `minimum` | *offers the limits that fit validation.type* (AC3b) |
  * | `withProperty` writes `''` for a cleared value | *clears a limit, a placeholder and a description …* (AC3b) |
  * | `switchValueType` keeps every limit | *removes only the limits the new value type cannot carry* (AC3b) |
@@ -344,19 +345,21 @@ describe('FormPropertiesPanel', () => {
     },
   )
 
+  /** A data body; `placeholder` only where the renderer draws one (D-116). */
   const DATA = ['type', 'key', 'label', 'placeholder', 'description', 'vtype', 'required']
+  const DATA_NO_PLACEHOLDER = DATA.filter((id) => id !== 'placeholder')
   const STRING_LIMITS = ['min-length', 'max-length', 'pattern']
 
   /** What each type's body offers, by test id prefix, in the table's order (AC1). */
   const BODIES: Record<string, string[]> = {
     textfield: [...DATA, ...STRING_LIMITS],
     textarea: [...DATA, ...STRING_LIMITS],
-    date: [...DATA, ...STRING_LIMITS],
+    date: [...DATA_NO_PLACEHOLDER, ...STRING_LIMITS],
     select: [...DATA, ...STRING_LIMITS, 'options'],
-    radio: [...DATA, ...STRING_LIMITS, 'options'],
+    radio: [...DATA_NO_PLACEHOLDER, ...STRING_LIMITS, 'options'],
     lookup: [...DATA, ...STRING_LIMITS, 'lookup'],
     number: [...DATA, 'minimum', 'maximum'],
-    checkbox: DATA,
+    checkbox: DATA_NO_PLACEHOLDER,
     datagrid: [
       'key',
       'label',
@@ -776,13 +779,15 @@ describe('FormPropertiesPanel', () => {
       )
     })
 
-    it('offers placeholder and description on data nodes, and variant on an alert alone', () => {
+    it('offers description on data nodes, placeholder where the renderer draws one, and variant on an alert alone', () => {
       for (const entry of offeredEntries()) {
         const { wrapper } = harness(fresh(entry.type))
         const has = (prefix: string) => wrapper.find(`[data-testid="${prefix}-node_1"]`).exists()
 
+        // Where the renderer draws one: `FormPropertiesPanel.renders.spec.ts`
+        // holds this list against the renderer's fields.
         expect(has('placeholder'), entry.type).toBe(
-          entry.role === 'data' && entry.type !== 'datagrid',
+          ['textfield', 'textarea', 'number', 'select', 'lookup'].includes(entry.type),
         )
         expect(has('description'), entry.type).toBe(entry.role === 'data')
         expect(has('variant'), entry.type).toBe(entry.type === 'alert')
