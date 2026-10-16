@@ -257,6 +257,79 @@ pub struct UpdateDocumentTypeRequest {
     /// are checked; one sent back exactly as stored binds nothing new (#716,
     /// [`changed_bindings`]).
     pub workflows: Option<Vec<WorkflowBinding>>,
+    /// The workflow bindings the caller read, sent with `workflows` so that a
+    /// replacement built from a stale read is refused rather than applied
+    /// (#728, **D-117**).
+    ///
+    /// `workflows` replaces the stored set wholesale, so a caller that read
+    /// the type, waited, and sent its edit would delete every binding another
+    /// administrator added in between. Sending the set it read lets the server
+    /// see that: under the type-row lock and before anything is written, the
+    /// stored set is compared with this one, and one that differs is a **409**
+    /// with `error.code` `DOCUMENT_TYPE_WORKFLOWS_CHANGED` and nothing written,
+    /// not the name or status either. The caller reloads the type and makes its
+    /// change again.
+    ///
+    /// The comparison is a set comparison on all five fields of each binding,
+    /// ignoring order and counting duplicates ([`same_bindings`]); `[]`
+    /// matches a type with no bindings. A condition is compared as the text
+    /// stored, so a caller sends back exactly what it read: the same expression
+    /// re-serialised does not match.
+    ///
+    /// **Optional, for compatibility.** A caller that leaves it out, or sends
+    /// `null`, is served exactly as before #728: its `workflows` replaces the
+    /// stored set whatever that set has become, so it is unprotected against
+    /// this race. Sent without `workflows`, it is a 422 at `expectedWorkflows`,
+    /// code `REQUIRES_WORKFLOWS`, since there is no replacement for it to guard.
+    pub expected_workflows: Option<Vec<WorkflowBinding>>,
+}
+
+/// The code a workflow replacement is refused with when the stored bindings
+/// are no longer the ones the caller read (#728, **D-117**). A client
+/// branches on it, not on the message, and offers to reload the type.
+pub const DOCUMENT_TYPE_WORKFLOWS_CHANGED: &str = "DOCUMENT_TYPE_WORKFLOWS_CHANGED";
+
+/// The refusal [`DOCUMENT_TYPE_WORKFLOWS_CHANGED`] names.
+pub fn workflows_changed() -> AppError {
+    AppError::conflict_with_code(
+        DOCUMENT_TYPE_WORKFLOWS_CHANGED,
+        "The workflow bindings of this document type changed since they were read, \
+         so nothing was saved. Reload the document type and make the change again.",
+    )
+}
+
+/// Whether the bindings a caller read are the bindings stored (#728).
+///
+/// A set comparison on all five fields: order does not matter, and one field
+/// that differs on one binding is a mismatch. **Duplicates count**, so this
+/// compares multisets: `[a, a]` is not `[a]`, and `[a, a, b]` is not
+/// `[a, b, b]`. Collapsing them would let a read that saw one binding vouch
+/// for a stored set holding two copies of it, which is not the set it read.
+/// Two empty sets are the same set.
+pub fn same_bindings(expected: &[WorkflowBinding], stored: &[WorkflowBinding]) -> bool {
+    if expected.len() != stored.len() {
+        return false;
+    }
+
+    // Each expected binding claims one stored binding equal to it, and a
+    // claimed one cannot be claimed twice. The sets are a handful of rows, so
+    // the quadratic walk is simpler than sorting a type with no `Ord`.
+    let mut claimed = vec![false; stored.len()];
+
+    expected.iter().all(|binding| {
+        let unclaimed = stored
+            .iter()
+            .zip(claimed.iter())
+            .position(|(candidate, taken)| !taken && candidate == binding);
+
+        match unclaimed {
+            Some(index) => {
+                claimed[index] = true;
+                true
+            }
+            None => false,
+        }
+    })
 }
 
 /// The sent bindings a write has to check, each with the index it was sent at:
@@ -436,6 +509,18 @@ pub fn validate_update(request: &UpdateDocumentTypeRequest) -> Result<(), AppErr
         check_workflows(workflows, &mut details);
     }
 
+    // The precondition guards a replacement, so without one it guards nothing,
+    // and a caller sending it has misread the contract (#728 AC6).
+    if request.expected_workflows.is_some() && request.workflows.is_none() {
+        details.push(ValidationDetail::new(
+            "expectedWorkflows",
+            "consistency",
+            "REQUIRES_WORKFLOWS",
+            "expectedWorkflows is the set a replacement was read against, so it is \
+             sent only with workflows",
+        ));
+    }
+
     finish(details)
 }
 
@@ -547,9 +632,164 @@ mod tests {
             target_entity_type: None,
             status: None,
             workflows: None,
+            expected_workflows: None,
         };
 
         assert!(validate_update(&request).is_ok());
+    }
+
+    fn update(
+        workflows: Option<Vec<WorkflowBinding>>,
+        expected_workflows: Option<Vec<WorkflowBinding>>,
+    ) -> UpdateDocumentTypeRequest {
+        UpdateDocumentTypeRequest {
+            name: None,
+            description: None,
+            category: None,
+            form_id: None,
+            list_id: None,
+            default_security_level: None,
+            retention_policy_id: None,
+            target_entity_type: None,
+            status: None,
+            workflows,
+            expected_workflows,
+        }
+    }
+
+    #[test]
+    fn expected_workflows_without_workflows_is_refused_at_its_path() {
+        let refused =
+            details(validate_update(&update(None, Some(vec![binding(1)]))).expect_err("refused"));
+
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert_eq!(refused[0].path, "expectedWorkflows");
+        assert_eq!(refused[0].code, "REQUIRES_WORKFLOWS");
+
+        // `[]` is a precondition too, "I read none", and is refused the same.
+        assert!(validate_update(&update(None, Some(Vec::new()))).is_err());
+    }
+
+    #[test]
+    fn expected_workflows_with_workflows_or_absent_is_valid() {
+        assert!(validate_update(&update(Some(vec![binding(1)]), Some(vec![binding(2)]))).is_ok());
+        assert!(validate_update(&update(Some(Vec::new()), Some(Vec::new()))).is_ok());
+        assert!(validate_update(&update(Some(vec![binding(1)]), None)).is_ok());
+    }
+
+    #[test]
+    fn expected_workflows_is_not_checked_like_a_replacement() {
+        // It is a read, not a write: two read bindings at one priority are a
+        // stored state to compare with, not a routing decision to refuse.
+        let duplicate = vec![binding(1), binding(1)];
+
+        assert!(validate_update(&update(Some(Vec::new()), Some(duplicate))).is_ok());
+    }
+
+    #[test]
+    fn null_expected_workflows_reads_as_absent_and_is_camel_case() {
+        let null: UpdateDocumentTypeRequest =
+            serde_json::from_value(serde_json::json!({ "expectedWorkflows": null }))
+                .expect("null deserializes");
+        assert!(null.expected_workflows.is_none());
+
+        let sent: UpdateDocumentTypeRequest = serde_json::from_value(serde_json::json!({
+            "workflows": [],
+            "expectedWorkflows": [{ "workflowDefinitionId": Uuid::now_v7(), "priority": 3 }]
+        }))
+        .expect("the camelCase key deserializes");
+        assert_eq!(sent.expected_workflows.expect("sent")[0].priority, 3);
+
+        assert!(serde_json::from_value::<UpdateDocumentTypeRequest>(
+            serde_json::json!({ "expected_workflows": [] })
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn the_same_bindings_in_any_order_are_the_same_set() {
+        let stored = vec![full_binding(1), full_binding(2), full_binding(3)];
+        let shuffled = vec![stored[2].clone(), stored[0].clone(), stored[1].clone()];
+
+        assert!(same_bindings(&stored, &stored));
+        assert!(same_bindings(&shuffled, &stored));
+    }
+
+    #[test]
+    fn two_empty_sets_are_the_same_and_empty_is_not_one() {
+        assert!(same_bindings(&[], &[]));
+        assert!(!same_bindings(&[], &[full_binding(1)]));
+        assert!(!same_bindings(&[full_binding(1)], &[]));
+    }
+
+    #[test]
+    fn a_set_that_lost_or_gained_a_binding_is_not_the_same() {
+        let stored = vec![full_binding(1), full_binding(2)];
+
+        // The race #728 is about: read one, another administrator added one.
+        assert!(!same_bindings(&stored[..1], &stored));
+        assert!(!same_bindings(&stored, &stored[..1]));
+    }
+
+    #[test]
+    fn one_field_that_differs_on_one_binding_is_a_mismatch() {
+        type Edit = (&'static str, fn(&mut WorkflowBinding));
+        let stored = vec![full_binding(1), full_binding(2)];
+        let edits: [Edit; 8] = [
+            ("revision", |b| b.workflow_definition_id = Uuid::now_v7()),
+            ("condition", |b| {
+                b.condition_expression = Some("{}".to_owned())
+            }),
+            ("condition cleared", |b| b.condition_expression = None),
+            ("priority", |b| b.priority = 7),
+            ("start", |b| b.valid_from = Some(date(2))),
+            ("start cleared", |b| b.valid_from = None),
+            ("end", |b| b.valid_to = Some(date(11))),
+            ("end cleared", |b| b.valid_to = None),
+        ];
+
+        for (label, edit) in edits {
+            for index in 0..stored.len() {
+                let mut expected = stored.clone();
+                edit(&mut expected[index]);
+
+                assert!(
+                    !same_bindings(&expected, &stored),
+                    "{label} on binding {index}"
+                );
+                assert!(
+                    !same_bindings(&stored, &expected),
+                    "{label} on binding {index}, the other way"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn duplicates_count() {
+        let a = full_binding(1);
+        let b = full_binding(2);
+
+        assert!(same_bindings(
+            &[a.clone(), a.clone(), b.clone()],
+            &[b.clone(), a.clone(), a.clone()]
+        ));
+        // Same length, same distinct members, different counts.
+        assert!(!same_bindings(
+            &[a.clone(), a.clone(), b.clone()],
+            &[a.clone(), b.clone(), b.clone()]
+        ));
+        // One copy read is not two stored, nor the other way.
+        assert!(!same_bindings(
+            std::slice::from_ref(&a),
+            &[a.clone(), a.clone()]
+        ));
+        assert!(!same_bindings(
+            &[a.clone(), a.clone()],
+            std::slice::from_ref(&a)
+        ));
+        // Two copies of one stored binding cannot both claim it.
+        assert!(!same_bindings(&[a.clone(), a.clone()], &[a, b]));
     }
 
     fn date(month: u32) -> chrono::NaiveDate {

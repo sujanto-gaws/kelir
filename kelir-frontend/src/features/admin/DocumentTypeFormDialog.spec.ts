@@ -1,8 +1,10 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import type { AxiosResponse, InternalAxiosRequestConfig } from 'axios'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import DocumentTypeFormDialog from './DocumentTypeFormDialog.vue'
+import { apiClient } from '@/api/client'
 import {
   errorBody,
   installFakeBackend,
@@ -1073,5 +1075,503 @@ describe('DocumentTypeFormDialog choosers', () => {
     expect(wrapper.emitted('saved')).toHaveLength(1)
     expect(wrapper.find('[data-testid="document-type-error"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="document-type-unplaced-errors"]').exists()).toBe(false)
+  })
+
+  /*
+   * #728 (D-117). An edit that replaces the bindings also sends the ones it
+   * read, and the server refuses a stored set that changed since: the dialog
+   * says so, and Reload brings in the current set.
+   */
+
+  /** Every edit's `PUT` body, in the order they were sent. */
+  function putBodies(): Record<string, unknown>[] {
+    return backend.requests
+      .filter((request) => request.method === 'put')
+      .map((request) => request.body as Record<string, unknown>)
+  }
+
+  /** One binding with every field set, so a field lost on the way back shows. */
+  const routed = binding(wantedFlow.id, {
+    priority: 7,
+    conditionExpression: '{">":[{"var":"formData.amount"},1000]}',
+    validFrom: '2026-01-01',
+    validTo: '2026-12-31',
+  })
+
+  const workflowsChangedMessage =
+    'the workflow bindings of this document type changed since they were read; reload and try again'
+
+  /** The server's refusal of a stale `expectedWorkflows`. */
+  const workflowsChanged: FakeReply = {
+    status: 409,
+    body: errorBody('DOCUMENT_TYPE_WORKFLOWS_CHANGED', workflowsChangedMessage),
+  }
+
+  const STALE_ALERT =
+    'Another administrator changed the workflow bindings of this document type since this ' +
+    'dialog opened. Nothing was saved. Reload brings in the current bindings and discards ' +
+    'your unsaved edits.'
+
+  function staleAlert(wrapper: VueWrapper) {
+    return wrapper.find('[data-testid="document-type-workflows-changed"]')
+  }
+
+  /** Submits the form and lets the save settle. */
+  async function submit(wrapper: VueWrapper): Promise<void> {
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+  }
+
+  it.each([
+    [
+      'moves it to another revision',
+      flows[0].id,
+      [{ ...routed, workflowDefinitionId: flows[0].id }],
+    ],
+    ['clears it', '', []],
+  ] as const)(
+    'sends the bindings it read beside workflows when the chooser %s',
+    async (_, chosen, workflows) => {
+      replaceBackend(acceptingPut)
+      const wrapper = await open({ ...boundType(wantedFlow.id), workflows: [routed] })
+
+      await wrapper.get('[data-testid="type-workflow"]').setValue(chosen)
+      await submit(wrapper)
+
+      // All five fields as read, not only the one the chooser shows.
+      expect(putBody()?.workflows).toEqual(workflows)
+      expect(putBody()?.expectedWorkflows).toEqual([routed])
+      expect(wrapper.emitted('saved')).toHaveLength(1)
+    },
+  )
+
+  it.each([
+    ['one binding', [routed]],
+    ['several bindings', [routed, binding(flows[0].id, { priority: 2 })]],
+    ['no binding', []],
+  ] as const)(
+    'sends neither workflows nor expectedWorkflows when the chooser is left alone on a type with %s',
+    async (_, workflows) => {
+      replaceBackend(acceptingPut)
+      const wrapper = await open({ ...boundType(wantedFlow.id), workflows: [...workflows] })
+
+      await wrapper.get('[data-testid="type-name"]').setValue('Requisition (renamed)')
+      await submit(wrapper)
+
+      expect(putBody()?.name).toBe('Requisition (renamed)')
+      expect(putBody()).not.toHaveProperty('workflows')
+      expect(putBody()).not.toHaveProperty('expectedWorkflows')
+    },
+  )
+
+  it('sends an empty expectedWorkflows when the type it read had no binding', async () => {
+    replaceBackend(acceptingPut)
+    const wrapper = await open({ ...boundType(wantedFlow.id), workflows: [] })
+
+    await wrapper.get('[data-testid="type-workflow"]').setValue(flows[0].id)
+    await submit(wrapper)
+
+    // `[]` and not absent: an empty read is a claim the server can check.
+    expect(putBody()?.workflows).toEqual([{ workflowDefinitionId: flows[0].id }])
+    expect(putBody()).toHaveProperty('expectedWorkflows')
+    expect(putBody()?.expectedWorkflows).toEqual([])
+  })
+
+  it('sends no expectedWorkflows when creating a type', async () => {
+    const wrapper = await open()
+
+    await wrapper.get('[data-testid="type-code"]').setValue('REQ')
+    await wrapper.get('[data-testid="type-name"]').setValue('Requisition')
+    await wrapper.get('[data-testid="type-workflow"]').setValue(flows[0].id)
+    await submit(wrapper)
+
+    const posted = backend.requests.find((request) => request.method === 'post')?.body
+
+    expect(posted).toHaveProperty('workflows')
+    expect(posted).not.toHaveProperty('expectedWorkflows')
+  })
+
+  it('says the bindings changed since it opened, above the form, and that nothing was saved', async () => {
+    refusingPut(workflowsChanged)
+    const wrapper = await open({ ...boundType(wantedFlow.id), workflows: [routed] })
+
+    await wrapper.get('[data-testid="type-workflow"]').setValue(flows[0].id)
+    await submit(wrapper)
+
+    const alert = staleAlert(wrapper)
+
+    expect(alert.exists()).toBe(true)
+    expect(alert.attributes('role')).toBe('alert')
+    expect(wrapper.get('[data-testid="document-type-workflows-changed-message"]').text()).toBe(
+      STALE_ALERT,
+    )
+    expect(wrapper.get('[data-testid="reload-document-type"]').text()).toBe('Reload')
+    // Above the form, as the dialog's other refusals are.
+    expect(
+      alert.element.compareDocumentPosition(wrapper.get('form').element) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+    // Said once, in the dialog's words: not repeated as the plain form error.
+    expect(wrapper.find('[data-testid="document-type-error"]').exists()).toBe(false)
+    expect(wrapper.emitted('saved')).toBeUndefined()
+    expect(wrapper.emitted('close')).toBeUndefined()
+    // The edit survives the refusal until Reload is asked for.
+    expect(selectedValue(wrapper, 'type-workflow')).toBe(flows[0].id)
+  })
+
+  it('branches on the code, not the words, of a refusal', async () => {
+    refusingPut({
+      status: 409,
+      body: errorBody('DOCUMENT_TYPE_WORKFLOWS_CHANGED', 'Worded some other way'),
+    })
+    const wrapper = await open({ ...boundType(wantedFlow.id), workflows: [routed] })
+
+    await wrapper.get('[data-testid="type-workflow"]').setValue(flows[0].id)
+    await submit(wrapper)
+
+    expect(staleAlert(wrapper).exists()).toBe(true)
+  })
+
+  it.each([
+    ['the same words under another code', 'CONFLICT', workflowsChangedMessage],
+    ['another conflict', 'CONFLICT', 'A document type with that code already exists'],
+  ])('shows %s as it did before', async (_, code, message) => {
+    refusingPut({ status: 409, body: errorBody(code, message) })
+    const wrapper = await open({ ...boundType(wantedFlow.id), workflows: [routed] })
+
+    await wrapper.get('[data-testid="type-workflow"]').setValue(flows[0].id)
+    await submit(wrapper)
+
+    expect(wrapper.get('[data-testid="document-type-error"]').text()).toBe(message)
+    expect(staleAlert(wrapper).exists()).toBe(false)
+    expect(wrapper.find('[data-testid="reload-document-type"]').exists()).toBe(false)
+  })
+
+  /** One binding as the server's set comparison sees it: all five fields. */
+  function bindingKey(sent: Partial<WorkflowBinding>): string {
+    return JSON.stringify([
+      sent.workflowDefinitionId,
+      sent.conditionExpression ?? null,
+      sent.priority ?? 1,
+      sent.validFrom ?? null,
+      sent.validTo ?? null,
+    ])
+  }
+
+  function sameSet(left: Partial<WorkflowBinding>[], right: Partial<WorkflowBinding>[]): boolean {
+    const keys = (set: Partial<WorkflowBinding>[]) => set.map(bindingKey).sort().join('\n')
+
+    return left.length === right.length && keys(left) === keys(right)
+  }
+
+  /**
+   * A server holding one type, which another administrator edits through
+   * `theirEdit` while the dialog is open. Its `PUT` refuses a stale
+   * `expectedWorkflows` as `update_type` does, and stores what it accepts.
+   */
+  function serveOneType(reloadFails = false): { theirEdit(): void } {
+    let stored: DocumentType = { ...boundType(wantedFlow.id), workflows: [routed] }
+
+    replaceBackend((request) => {
+      if (request.url !== '/document-types/t-1') {
+        return undefined
+      }
+
+      if (request.method === 'get') {
+        return reloadFails
+          ? { status: 0, networkError: true }
+          : { status: 200, body: itemBody(stored) }
+      }
+
+      const sent = request.body as {
+        name: string
+        workflows?: WorkflowBinding[]
+        expectedWorkflows?: WorkflowBinding[]
+      }
+
+      if (sent.expectedWorkflows && !sameSet(sent.expectedWorkflows, stored.workflows)) {
+        return workflowsChanged
+      }
+
+      stored = { ...stored, name: sent.name, workflows: sent.workflows ?? stored.workflows }
+
+      return { status: 200, body: itemBody(stored) }
+    })
+
+    return {
+      theirEdit() {
+        stored = {
+          ...stored,
+          name: 'Requisition (theirs)',
+          workflows: [binding(flows[1].id, { priority: 4, validFrom: '2026-03-01' })],
+        }
+      },
+    }
+  }
+
+  it('reloads after a refusal, and then saves against the bindings it reloaded', async () => {
+    const server = serveOneType()
+    const wrapper = await open({ ...boundType(wantedFlow.id), workflows: [routed] })
+
+    server.theirEdit()
+    await wrapper.get('[data-testid="type-name"]').setValue('Requisition (mine)')
+    await wrapper.get('[data-testid="type-workflow"]').setValue(flows[0].id)
+    await submit(wrapper)
+
+    expect(staleAlert(wrapper).exists()).toBe(true)
+    expect(putBodies()[0]?.expectedWorkflows).toEqual([routed])
+
+    await wrapper.get('[data-testid="reload-document-type"]').trigger('click')
+    await flushPromises()
+
+    // Re-read, and every field, the stored set and the chooser are the server's now.
+    expect(
+      backend.requests.filter(
+        (request) => request.method === 'get' && request.url === '/document-types/t-1',
+      ),
+    ).toHaveLength(1)
+    expect((wrapper.get('[data-testid="type-name"]').element as HTMLInputElement).value).toBe(
+      'Requisition (theirs)',
+    )
+    expect(selectedValue(wrapper, 'type-workflow')).toBe(flows[1].id)
+    expect(staleAlert(wrapper).exists()).toBe(false)
+    expect(wrapper.find('[data-testid="document-type-dialog"]').exists()).toBe(true)
+    expect(wrapper.emitted('close')).toBeUndefined()
+    expect(wrapper.emitted('saved')).toBeUndefined()
+
+    await wrapper.get('[data-testid="type-workflow"]').setValue(flows[0].id)
+    await submit(wrapper)
+
+    const theirs = binding(flows[1].id, { priority: 4, validFrom: '2026-03-01' })
+
+    expect(putBodies()).toHaveLength(2)
+    expect(putBodies()[1]?.expectedWorkflows).toEqual([theirs])
+    expect(putBodies()[1]?.workflows).toEqual([{ ...theirs, workflowDefinitionId: flows[0].id }])
+    expect(wrapper.emitted('saved')).toHaveLength(1)
+    expect(staleAlert(wrapper).exists()).toBe(false)
+  })
+
+  it('says a reload failed and leaves the dialog as it was, still known to be stale', async () => {
+    const server = serveOneType(true)
+    const wrapper = await open({ ...boundType(wantedFlow.id), workflows: [routed] })
+
+    server.theirEdit()
+    await wrapper.get('[data-testid="type-name"]').setValue('Requisition (mine)')
+    await wrapper.get('[data-testid="type-workflow"]').setValue(flows[0].id)
+    await submit(wrapper)
+    await wrapper.get('[data-testid="reload-document-type"]').trigger('click')
+    await flushPromises()
+
+    const failed = wrapper.get('[data-testid="document-type-reload-error"]')
+
+    expect(failed.attributes('role')).toBe('alert')
+    expect(failed.text()).toContain('The document type could not be reloaded')
+    // Nothing half-applied: the edit is still the user's, and the alert still says it is stale.
+    expect(staleAlert(wrapper).exists()).toBe(true)
+    expect((wrapper.get('[data-testid="type-name"]').element as HTMLInputElement).value).toBe(
+      'Requisition (mine)',
+    )
+    expect(selectedValue(wrapper, 'type-workflow')).toBe(flows[0].id)
+
+    // A later save still sends the read it holds, which the server refuses again.
+    await submit(wrapper)
+
+    expect(putBodies()).toHaveLength(2)
+    expect(putBodies()[1]?.expectedWorkflows).toEqual([routed])
+    expect(staleAlert(wrapper).exists()).toBe(true)
+    expect(wrapper.emitted('saved')).toBeUndefined()
+  })
+
+  it('opens again without the last opening’s stale alert', async () => {
+    refusingPut(workflowsChanged)
+    const wrapper = await open({ ...boundType(wantedFlow.id), workflows: [routed] })
+
+    await wrapper.get('[data-testid="type-workflow"]').setValue(flows[0].id)
+    await submit(wrapper)
+
+    expect(staleAlert(wrapper).exists()).toBe(true)
+
+    await wrapper.setProps({ open: false })
+    await wrapper.setProps({ editing: boundType(wantedFlow.id) })
+    await wrapper.setProps({ open: true })
+    await flushPromises()
+
+    expect(staleAlert(wrapper).exists()).toBe(false)
+  })
+
+  /*
+   * #728's verification campaign (test-engineer, 2026-10-16): a reload whose
+   * read returns after the dialog has moved on, and a failed reload's alert
+   * on the next opening.
+   */
+
+  /** Holds every `GET /document-types/{id}` until the returned function is called. */
+  function holdTypeReads(): () => void {
+    const fake = apiClient.defaults.adapter as (
+      config: InternalAxiosRequestConfig,
+    ) => Promise<AxiosResponse>
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+
+    apiClient.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      if (config.method === 'get' && config.url?.startsWith('/document-types/')) {
+        await gate
+      }
+
+      return fake(config)
+    }
+
+    return release
+  }
+
+  /** Another type, as `GET /document-types/{id}` returns it. */
+  function otherType(): DocumentType {
+    return {
+      ...boundType(flows[2].id),
+      id: 't-2',
+      typeCode: 'PO',
+      name: 'Purchase order',
+      workflows: [binding(flows[2].id, { priority: 3, validTo: '2026-06-30' })],
+    }
+  }
+
+  it('drops a reload that returns after the dialog moved to another type', async () => {
+    const server = serveOneType()
+    const wrapper = await open({ ...boundType(wantedFlow.id), workflows: [routed] })
+
+    server.theirEdit()
+    await wrapper.get('[data-testid="type-workflow"]').setValue(flows[0].id)
+    await submit(wrapper)
+    expect(staleAlert(wrapper).exists()).toBe(true)
+
+    const release = holdTypeReads()
+
+    await wrapper.get('[data-testid="reload-document-type"]').trigger('click')
+    await flushPromises()
+
+    // While t-1's read is out, the dialog is closed and opened on t-2.
+    await wrapper.setProps({ open: false })
+    await wrapper.setProps({ editing: otherType() })
+    await wrapper.setProps({ open: true })
+    await flushPromises()
+
+    release()
+    await flushPromises()
+
+    // t-1's read arrived, and t-2's dialog is not filled with it.
+    expect(
+      backend.requests.filter(
+        (request) => request.method === 'get' && request.url === '/document-types/t-1',
+      ),
+    ).toHaveLength(1)
+    expect((wrapper.get('[data-testid="type-name"]').element as HTMLInputElement).value).toBe(
+      'Purchase order',
+    )
+    expect(selectedValue(wrapper, 'type-workflow')).toBe(flows[2].id)
+
+    // And a save from t-2 vouches for t-2's bindings, not t-1's.
+    await wrapper.get('[data-testid="type-workflow"]').setValue(flows[0].id)
+    await submit(wrapper)
+
+    const sent = backend.requests.filter(
+      (request) => request.method === 'put' && request.url === '/document-types/t-2',
+    )
+
+    expect(sent).toHaveLength(1)
+    expect((sent[0].body as Record<string, unknown>).expectedWorkflows).toEqual(
+      otherType().workflows,
+    )
+  })
+
+  it('opens again without the last opening’s reload failure', async () => {
+    const server = serveOneType(true)
+    const wrapper = await open({ ...boundType(wantedFlow.id), workflows: [routed] })
+
+    server.theirEdit()
+    await wrapper.get('[data-testid="type-workflow"]').setValue(flows[0].id)
+    await submit(wrapper)
+    await wrapper.get('[data-testid="reload-document-type"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="document-type-reload-error"]').exists()).toBe(true)
+
+    await wrapper.setProps({ open: false })
+    await wrapper.setProps({ editing: boundType(wantedFlow.id) })
+    await wrapper.setProps({ open: true })
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="document-type-reload-error"]').exists()).toBe(false)
+    expect(staleAlert(wrapper).exists()).toBe(false)
+  })
+
+  /** Holds every `PUT /document-types/{id}` until the returned function is called. */
+  function holdTypeWrites(): () => void {
+    const fake = apiClient.defaults.adapter as (
+      config: InternalAxiosRequestConfig,
+    ) => Promise<AxiosResponse>
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+
+    apiClient.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      if (config.method === 'put' && config.url?.startsWith('/document-types/')) {
+        await gate
+      }
+
+      return fake(config)
+    }
+
+    return release
+  }
+
+  // Seen to fail, 2026-10-16: the first with Save's `isReloading` dropped, the
+  // second with Reload's `isSaving` dropped. Neither was held before.
+  it('holds Save while a reload is out', async () => {
+    const server = serveOneType()
+    const wrapper = await open({ ...boundType(wantedFlow.id), workflows: [routed] })
+
+    server.theirEdit()
+    await wrapper.get('[data-testid="type-workflow"]').setValue(flows[0].id)
+    await submit(wrapper)
+
+    const release = holdTypeReads()
+
+    await wrapper.get('[data-testid="reload-document-type"]').trigger('click')
+    await flushPromises()
+
+    // A save now would vouch for the bindings the reload is replacing.
+    expect(wrapper.get('[data-testid="save-document-type"]').attributes('disabled')).toBeDefined()
+
+    release()
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="save-document-type"]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('holds Reload while a save is out', async () => {
+    const server = serveOneType()
+    const wrapper = await open({ ...boundType(wantedFlow.id), workflows: [routed] })
+
+    server.theirEdit()
+    await wrapper.get('[data-testid="type-workflow"]').setValue(flows[0].id)
+    await submit(wrapper)
+
+    const release = holdTypeWrites()
+
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    // A reload now would fill the form under the save that is still out.
+    expect(wrapper.get('[data-testid="reload-document-type"]').attributes('disabled')).toBeDefined()
+
+    release()
+    await flushPromises()
+
+    expect(
+      wrapper.get('[data-testid="reload-document-type"]').attributes('disabled'),
+    ).toBeUndefined()
   })
 })
