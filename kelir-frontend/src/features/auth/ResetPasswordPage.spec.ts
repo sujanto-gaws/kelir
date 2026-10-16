@@ -85,6 +85,14 @@ describe('ResetPasswordPage', () => {
 
     expect(router.currentRoute.value.query.token).toBeUndefined()
     expect(wrapper.text()).toContain('Your password is changed')
+    // #697, D-107 A: a reset revokes refresh tokens only; an access token
+    // already issued keeps working until it expires. The page must not
+    // promise an instant sign-out it cannot deliver.
+    expect(wrapper.text()).toContain(
+      'Your other sessions can no longer be renewed, and any still open ends within 15 minutes. Sign in again with the new password.',
+    )
+    expect(wrapper.text()).not.toContain('Everywhere you were signed in')
+    expect(wrapper.text()).not.toContain('signed out')
   })
 
   it('offers no form when the link carried no token', async () => {
