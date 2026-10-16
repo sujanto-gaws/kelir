@@ -2763,3 +2763,748 @@ async fn the_filter_opens_the_list_to_no_caller_without_document_type_read() {
         response.body
     );
 }
+
+// ---------------------------------------------------------------------------
+// A replacement built from a stale read (#728, D-117)
+// ---------------------------------------------------------------------------
+//
+// `workflows` replaces the stored set wholesale, and the type-row lock only
+// serialises writers: it cannot see that a writer's input was read before
+// another writer's commit. So a client that read one binding and saved a
+// one-element set deleted every binding added in between. `expectedWorkflows`
+// is the set the client read; a stored set that differs is refused with a 409
+// `DOCUMENT_TYPE_WORKFLOWS_CHANGED`, under the lock and before any write.
+
+const WORKFLOWS_CHANGED: &str = "DOCUMENT_TYPE_WORKFLOWS_CHANGED";
+
+/// The `UPDATE` audit rows written for a type.
+async fn audited_updates(app: &TestApp, type_id: Uuid) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM audit_events WHERE object_id = $1 AND action = 'UPDATE'",
+    )
+    .bind(type_id)
+    .fetch_one(&app.pool)
+    .await
+    .expect("audit rows are countable")
+}
+
+/// The revisions a wire `workflows` array binds, in its order.
+fn revisions(workflows: &Value) -> Vec<String> {
+    workflows
+        .as_array()
+        .expect("workflows is an array")
+        .iter()
+        .map(|binding| {
+            binding["workflowDefinitionId"]
+                .as_str()
+                .expect("a revision")
+                .to_owned()
+        })
+        .collect()
+}
+
+fn assert_workflows_changed(response: &common::TestResponse, label: &str) {
+    assert_eq!(
+        response.status,
+        StatusCode::CONFLICT,
+        "{label}: {}",
+        response.body
+    );
+    assert_eq!(
+        response.body["error"]["code"], WORKFLOWS_CHANGED,
+        "{label}: {}",
+        response.body
+    );
+}
+
+/// **AC7, sequential.** A and B both read a type bound to one workflow. B saves
+/// two bindings. A then saves the one-element set its dialog built, with its
+/// read as `expectedWorkflows`, and is refused: B's two bindings are intact.
+///
+/// # Seen to fail
+///
+/// 2026-10-16, against `update_type` with the comparison mutated out (its
+/// condition `!same_bindings(expected, stored)` made `... && false`, so the
+/// refusal is never taken): A's stale save was accepted, 200 where 409 was
+/// asserted. A 200 here is the replace having run over B's two bindings, which
+/// is #728 itself. Restored, green.
+#[tokio::test]
+async fn a_stale_replacement_is_refused_and_the_newer_set_survives() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let first = published_workflow(&app, &token, "wf_stale_first").await;
+    let second = published_workflow(&app, &token, "wf_stale_second").await;
+    let id = type_bound_to(&app, &token, "STALE_SEQUENTIAL", "ACTIVE", &[first]).await;
+
+    let read_by_a = read_type(&app, &token, id).await["workflows"].clone();
+    let read_by_b = read_type(&app, &token, id).await["workflows"].clone();
+
+    let by_b = put_type(
+        &app,
+        &token,
+        id,
+        json!({
+            "workflows": [
+                { "workflowDefinitionId": first, "priority": 1 },
+                { "workflowDefinitionId": second, "priority": 2 }
+            ],
+            "expectedWorkflows": read_by_b,
+        }),
+    )
+    .await;
+    assert_eq!(by_b.status, StatusCode::OK, "{}", by_b.body);
+    let saved_by_b = by_b.body["data"]["workflows"].clone();
+    assert_eq!(
+        saved_by_b.as_array().map(Vec::len),
+        Some(2),
+        "{}",
+        by_b.body
+    );
+
+    // A's dialog moved the chooser to `second` and built one element from its
+    // read, which saw only `first`.
+    let by_a = put_type(
+        &app,
+        &token,
+        id,
+        json!({
+            "workflows": [{ "workflowDefinitionId": second, "priority": 1 }],
+            "expectedWorkflows": read_by_a,
+        }),
+    )
+    .await;
+
+    assert_workflows_changed(&by_a, "a save built from a read B has moved past");
+    let message = by_a.body["error"]["message"].as_str().expect("a message");
+    assert!(
+        message.contains("changed since they were read") && message.contains("Reload"),
+        "the message says what happened and what to do: {message}"
+    );
+
+    let read = read_type(&app, &token, id).await;
+    assert_eq!(read["workflows"], saved_by_b, "B's set is intact: {read}");
+}
+
+/// **AC7, concurrent.** Two saves from one read, under `tokio::join!`. The type
+/// row's lock serialises them, and the second to take it reads the first's set,
+/// which is not the one it read: exactly one is accepted, and the stored set is
+/// the winner's. The order the lock grants is not asserted, only that one wins.
+///
+/// # Seen to fail
+///
+/// 2026-10-16, against the same mutation as the sequential test: both saves
+/// were accepted, so the one taken as the loser answered 200 where 409 was
+/// asserted, and the second to commit had replaced the first's set unseen.
+/// Restored, green.
+#[tokio::test]
+async fn two_saves_from_one_read_race_and_exactly_one_wins() {
+    use std::time::Duration;
+
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let shared = published_workflow(&app, &token, "wf_race_shared").await;
+    let for_a = published_workflow(&app, &token, "wf_race_for_a").await;
+    let for_b = published_workflow(&app, &token, "wf_race_for_b").await;
+    let id = type_bound_to(&app, &token, "STALE_CONCURRENT", "ACTIVE", &[shared]).await;
+
+    let read = read_type(&app, &token, id).await["workflows"].clone();
+
+    // Bound to a `let` so the borrow outlives the futures, which `app.send`
+    // holds until they are awaited.
+    let route = format!("/api/v1/document-types/{id}");
+    let body = |added: Uuid| {
+        json!({
+            "workflows": [
+                { "workflowDefinitionId": shared, "priority": 1 },
+                { "workflowDefinitionId": added, "priority": 2 }
+            ],
+            "expectedWorkflows": read.clone(),
+        })
+    };
+
+    let by_a = app.send(Method::PUT, &route, Some(&token), Some(body(for_a)));
+    let by_b = app.send(Method::PUT, &route, Some(&token), Some(body(for_b)));
+
+    let (by_a, by_b) = tokio::time::timeout(Duration::from_secs(20), futures_lite_join(by_a, by_b))
+        .await
+        .expect("neither save may block forever");
+
+    let (winner, loser, added) = match (by_a.status, by_b.status) {
+        (StatusCode::OK, _) => (by_a, by_b, for_a),
+        (_, StatusCode::OK) => (by_b, by_a, for_b),
+        _ => panic!(
+            "one of two saves from one read must win: A {} {}, B {} {}",
+            by_a.status, by_a.body, by_b.status, by_b.body
+        ),
+    };
+
+    assert_workflows_changed(&loser, "the second save to take the lock");
+
+    let stored = read_type(&app, &token, id).await["workflows"].clone();
+    assert_eq!(stored, winner.body["data"]["workflows"], "{stored}");
+    assert_eq!(
+        revisions(&stored),
+        [shared.to_string(), added.to_string()],
+        "the stored set is the winner's"
+    );
+}
+
+/// **AC2: a refused save writes nothing.** The `PUT` also renames the type and
+/// deprecates it. The comparison runs before the scalar `UPDATE`, so a GET
+/// after it shows the name, status, `updatedAt` and bindings as they were, and
+/// no audit entry was written.
+///
+/// # Seen to fail
+///
+/// 2026-10-16, against the comparison mutated out: the stale rename was
+/// accepted, 200 where 409 was asserted. A 409 rolls the transaction
+/// back, so this test cannot tell a check placed before the scalar `UPDATE`
+/// from one placed after it in the same transaction; that placement is held by
+/// `update_type`'s structure and its comment, and what this test holds is that
+/// a refusal leaves no trace.
+#[tokio::test]
+async fn a_refused_save_writes_nothing_not_even_the_name() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let first = published_workflow(&app, &token, "wf_refused_first").await;
+    let second = published_workflow(&app, &token, "wf_refused_second").await;
+    let id = type_bound_to(&app, &token, "STALE_REFUSED", "ACTIVE", &[first, second]).await;
+
+    let before = read_type(&app, &token, id).await;
+    let audited = audited_updates(&app, id).await;
+
+    // A read that saw only the first binding.
+    let stale = json!([before["workflows"][0].clone()]);
+
+    let refused = put_type(
+        &app,
+        &token,
+        id,
+        json!({
+            "name": "Renamed while stale",
+            "status": "DEPRECATED",
+            "workflows": [{ "workflowDefinitionId": second, "priority": 1 }],
+            "expectedWorkflows": stale,
+        }),
+    )
+    .await;
+
+    assert_workflows_changed(&refused, "a stale save that also renames");
+
+    let after = read_type(&app, &token, id).await;
+    assert_eq!(after["name"], before["name"], "{after}");
+    assert_eq!(after["status"], before["status"], "{after}");
+    assert_eq!(after["updatedAt"], before["updatedAt"], "{after}");
+    assert_eq!(after["workflows"], before["workflows"], "{after}");
+    assert_eq!(after, before, "every field is as it was");
+    assert_eq!(
+        audited_updates(&app, id).await,
+        audited,
+        "a refused save is not audited"
+    );
+}
+
+/// **AC4: a current save works as today.** With `expectedWorkflows` equal to
+/// the stored set, the `PUT` replaces the set, answers 200 with the new one,
+/// and is audited.
+#[tokio::test]
+async fn a_current_save_replaces_the_set_and_is_audited() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let first = published_workflow(&app, &token, "wf_current_first").await;
+    let second = published_workflow(&app, &token, "wf_current_second").await;
+    let id = type_bound_to(&app, &token, "STALE_CURRENT", "ACTIVE", &[first]).await;
+
+    let read = read_type(&app, &token, id).await;
+    let audited = audited_updates(&app, id).await;
+
+    let saved = put_type(
+        &app,
+        &token,
+        id,
+        json!({
+            "name": "Saved while current",
+            "workflows": [{ "workflowDefinitionId": second, "priority": 1 }],
+            "expectedWorkflows": read["workflows"],
+        }),
+    )
+    .await;
+
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
+    assert_eq!(
+        revisions(&saved.body["data"]["workflows"]),
+        [second.to_string()]
+    );
+    assert_eq!(saved.body["data"]["name"], "Saved while current");
+    assert_eq!(
+        read_type(&app, &token, id).await["workflows"],
+        saved.body["data"]["workflows"]
+    );
+    assert_eq!(audited_updates(&app, id).await, audited + 1);
+}
+
+/// **AC3 on the wire.** Order does not matter, one field on one binding does,
+/// and `[]` matches a type with no bindings.
+///
+/// The first binding carries a condition and a window, so the read sent back
+/// has every field set; the mismatch edits only its condition.
+///
+/// # Seen to fail
+///
+/// 2026-10-16, red against both mutations. With the comparison mutated out,
+/// the one-condition mismatch was accepted, 200 where 409 was asserted. With
+/// it made positional (`expected == stored` in place of `same_bindings`), the
+/// read sent back in reverse order was refused, 409 where 200 was asserted.
+/// Restored, green.
+#[tokio::test]
+async fn the_comparison_ignores_order_and_sees_one_field() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let first = published_workflow(&app, &token, "wf_compare_first").await;
+    let second = published_workflow(&app, &token, "wf_compare_second").await;
+    let condition = r#"{"<=":[{"var":"amount"},10000000]}"#;
+    let bindings = json!([
+        {
+            "workflowDefinitionId": first,
+            "conditionExpression": condition,
+            "priority": 1,
+            "validFrom": "2026-01-01",
+            "validTo": "2026-12-31"
+        },
+        { "workflowDefinitionId": second, "priority": 2 }
+    ]);
+
+    let created = app
+        .send(
+            Method::POST,
+            "/api/v1/document-types",
+            Some(&token),
+            Some(json!({
+                "typeCode": "STALE_COMPARED",
+                "name": "Compared",
+                "workflows": bindings,
+            })),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let id = id_of(&created.body["data"]);
+
+    let read = read_type(&app, &token, id).await["workflows"].clone();
+    let reversed = json!([read[1].clone(), read[0].clone()]);
+
+    // One field on one binding: the condition of the first.
+    let mut edited = read.clone();
+    edited[0]["conditionExpression"] = json!(r#"{"<=":[{"var":"amount"},5000000]}"#);
+
+    let refused = put_type(
+        &app,
+        &token,
+        id,
+        json!({ "workflows": read.clone(), "expectedWorkflows": edited }),
+    )
+    .await;
+    assert_workflows_changed(&refused, "one condition differs");
+
+    // The same set read in another order is the set stored. Clearing it
+    // leaves a type with none.
+    let cleared = put_type(
+        &app,
+        &token,
+        id,
+        json!({ "workflows": [], "expectedWorkflows": reversed }),
+    )
+    .await;
+    assert_eq!(cleared.status, StatusCode::OK, "{}", cleared.body);
+    assert_eq!(cleared.body["data"]["workflows"], json!([]));
+
+    // `[]` read is the empty set stored.
+    let rebound = put_type(
+        &app,
+        &token,
+        id,
+        json!({
+            "workflows": [{ "workflowDefinitionId": second, "priority": 1 }],
+            "expectedWorkflows": [],
+        }),
+    )
+    .await;
+    assert_eq!(rebound.status, StatusCode::OK, "{}", rebound.body);
+
+    // And `[]` is not a set that has a binding.
+    let refused = put_type(
+        &app,
+        &token,
+        id,
+        json!({ "workflows": [], "expectedWorkflows": [] }),
+    )
+    .await;
+    assert_workflows_changed(&refused, "an empty read against one binding");
+}
+
+/// **AC5: compatibility.** A `PUT` with `workflows` and no `expectedWorkflows`,
+/// or with it `null`, replaces whatever is stored, as before #728: such a
+/// client is not compared, and so is not protected.
+#[tokio::test]
+async fn a_save_without_expected_workflows_replaces_whatever_is_stored() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let first = published_workflow(&app, &token, "wf_compat_first").await;
+    let second = published_workflow(&app, &token, "wf_compat_second").await;
+    let id = type_bound_to(&app, &token, "STALE_COMPATIBLE", "ACTIVE", &[first, second]).await;
+
+    let absent = put_type(
+        &app,
+        &token,
+        id,
+        json!({ "workflows": [{ "workflowDefinitionId": second, "priority": 1 }] }),
+    )
+    .await;
+    assert_eq!(absent.status, StatusCode::OK, "{}", absent.body);
+    assert_eq!(
+        revisions(&absent.body["data"]["workflows"]),
+        [second.to_string()]
+    );
+
+    let null = put_type(
+        &app,
+        &token,
+        id,
+        json!({
+            "workflows": [{ "workflowDefinitionId": first, "priority": 1 }],
+            "expectedWorkflows": null,
+        }),
+    )
+    .await;
+    assert_eq!(null.status, StatusCode::OK, "{}", null.body);
+    assert_eq!(
+        revisions(&null.body["data"]["workflows"]),
+        [first.to_string()]
+    );
+}
+
+/// **AC6: misuse.** `expectedWorkflows` without `workflows` guards nothing, so
+/// it is a 422 at its own path, and the rename sent with it is not written.
+#[tokio::test]
+async fn expected_workflows_without_workflows_is_refused_and_writes_nothing() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let workflow = published_workflow(&app, &token, "wf_misused").await;
+    let id = type_bound_to(&app, &token, "STALE_MISUSED", "ACTIVE", &[workflow]).await;
+
+    let before = read_type(&app, &token, id).await;
+    let audited = audited_updates(&app, id).await;
+
+    let refused = put_type(
+        &app,
+        &token,
+        id,
+        json!({
+            "name": "Renamed with a precondition and nothing to guard",
+            "expectedWorkflows": before["workflows"],
+        }),
+    )
+    .await;
+
+    assert_refused_at(
+        &refused,
+        "expectedWorkflows",
+        "REQUIRES_WORKFLOWS",
+        "expectedWorkflows without workflows",
+    );
+    assert_eq!(read_type(&app, &token, id).await, before);
+    assert_eq!(audited_updates(&app, id).await, audited);
+}
+
+/// **AC13: the 409 is documented** on the update, with its code.
+#[tokio::test]
+async fn the_update_documents_its_stale_workflows_refusal() {
+    let app = TestApp::spawn().await;
+    let document = app
+        .send(Method::GET, "/api/docs/openapi.json", None, None)
+        .await;
+
+    let update = &document.body["paths"]["/api/v1/document-types/{id}"]["put"];
+    let conflict = update["responses"]["409"]["description"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the update documents no 409: {update}"));
+    assert!(conflict.contains(WORKFLOWS_CHANGED), "{conflict}");
+
+    let schema = &document.body["components"]["schemas"]["UpdateDocumentTypeRequest"];
+    let field = &schema["properties"]["expectedWorkflows"];
+    assert!(
+        field["description"]
+            .as_str()
+            .is_some_and(|text| text.contains(WORKFLOWS_CHANGED)),
+        "expectedWorkflows is described: {schema}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #728's verification campaign (test-engineer, 2026-10-16): the round trip a
+// client makes, and the lock under an arranged race rather than a hoped one.
+//
+// Seen to fail (coding standard 2.9), 2026-10-16: fifteen mutants, switched
+// in one build by an environment variable and run against the `document_type`
+// unit tests and this file. A clean run was 37 and 54 green.
+//
+// - Killed by this file and the unit tests: the comparison skipped; made
+//   positional; made a set, not a multiset (unit tests only); each of the
+//   five fields ignored (`workflowDefinitionId`, `priority`, `validFrom` and
+//   `validTo` by the unit tests only; `conditionExpression` by both); the
+//   length check dropped; the 422 for `expectedWorkflows` alone dropped; the
+//   check skipped for an empty `workflows`; the 409 given a generic code.
+// - **Killed only by the arranged race below**: the stored set read before
+//   `lock_type_binding`, and `lock_type_binding` without `FOR UPDATE`.
+//   `two_saves_from_one_read_race_and_exactly_one_wins` stayed green under
+//   both, so that test is not what holds the lock.
+// - Survived, and equivalent: the comparison moved after the scalar `UPDATE`.
+//   A 409 rolls the whole transaction back, so no request can tell the two
+//   places apart.
+// ---------------------------------------------------------------------------
+
+/// **The riskiest property of #728: a client echoing exactly what it read is
+/// never refused.** The comparison holds the stored set as `update_type`
+/// deserialises it; a client holds what the GET serialised from the same rows.
+/// If the two ever differed, in a condition's text, a date's form, a default
+/// priority or a null against an absent key, every honest save would be a
+/// false 409.
+///
+/// So every field is set to something a normalisation would change: a
+/// condition with spacing and key order no serializer would produce, both date
+/// bounds, and priorities that are not the default. The read goes back as
+/// `expectedWorkflows` in four forms: as read, reversed, with its nulls and
+/// default priority left out, and as the previous `PUT` answered it.
+///
+/// It also pins that the condition is compared as the stored text, which is
+/// what a GET returns: the same JSON re-serialised is a different condition,
+/// as it would be if it were sent as `workflows` and stored.
+#[tokio::test]
+async fn a_read_sent_back_unchanged_is_the_stored_set() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let first = published_workflow(&app, &token, "wf_echo_first").await;
+    let second = published_workflow(&app, &token, "wf_echo_second").await;
+    let third = published_workflow(&app, &token, "wf_echo_third").await;
+    let condition =
+        "{ \"<=\" :  [ { \"var\" : \"formData.amount\" } , 10000000.50 ] ,\n \"_\": \"é\" }";
+
+    let created = app
+        .send(
+            Method::POST,
+            "/api/v1/document-types",
+            Some(&token),
+            Some(json!({
+                "typeCode": "ECHOED",
+                "name": "Echoed",
+                "workflows": [
+                    {
+                        "workflowDefinitionId": first,
+                        "conditionExpression": condition,
+                        "priority": 7,
+                        "validFrom": "2026-02-28",
+                        "validTo": "2026-12-31"
+                    },
+                    { "workflowDefinitionId": second, "priority": 30, "validTo": "2027-01-01" },
+                    { "workflowDefinitionId": third }
+                ],
+            })),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let id = id_of(&created.body["data"]);
+
+    let read = read_type(&app, &token, id).await["workflows"].clone();
+    let stored_condition = read
+        .as_array()
+        .expect("an array")
+        .iter()
+        .find(|binding| binding["priority"] == 7)
+        .map(|binding| binding["conditionExpression"].clone());
+    assert_eq!(
+        stored_condition,
+        Some(json!(condition)),
+        "the condition is stored and read back as sent: {read}"
+    );
+
+    // As read, with an unrelated edit beside it.
+    let echoed = put_type(
+        &app,
+        &token,
+        id,
+        json!({ "name": "Echoed once", "workflows": read.clone(), "expectedWorkflows": read.clone() }),
+    )
+    .await;
+    assert_eq!(echoed.status, StatusCode::OK, "as read: {}", echoed.body);
+
+    // As the `PUT` answered it, in reverse.
+    let answered = echoed.body["data"]["workflows"].clone();
+    let mut reversed = answered.as_array().expect("an array").clone();
+    reversed.reverse();
+    let echoed = put_type(
+        &app,
+        &token,
+        id,
+        json!({ "workflows": read.clone(), "expectedWorkflows": reversed }),
+    )
+    .await;
+    assert_eq!(
+        echoed.status,
+        StatusCode::OK,
+        "as answered, reversed: {}",
+        echoed.body
+    );
+
+    // With every null and the default priority left off the wire.
+    let sparse: Vec<Value> = read
+        .as_array()
+        .expect("an array")
+        .iter()
+        .map(|binding| {
+            let mut sparse = binding.as_object().expect("an object").clone();
+            sparse.retain(|key, value| !(value.is_null() || (key == "priority" && *value == 1)));
+            Value::Object(sparse)
+        })
+        .collect();
+    assert!(
+        sparse
+            .iter()
+            .any(|binding| binding.get("priority").is_none()),
+        "one binding goes without its default priority: {sparse:?}"
+    );
+    let echoed = put_type(
+        &app,
+        &token,
+        id,
+        json!({ "workflows": read.clone(), "expectedWorkflows": sparse }),
+    )
+    .await;
+    assert_eq!(
+        echoed.status,
+        StatusCode::OK,
+        "nulls and the default left out: {}",
+        echoed.body
+    );
+
+    // The same condition re-serialised compactly is not the stored text.
+    let mut reserialised = read.clone();
+    for binding in reserialised.as_array_mut().expect("an array") {
+        if binding["priority"] == 7 {
+            let parsed: Value = serde_json::from_str(condition).expect("the condition is JSON");
+            binding["conditionExpression"] = json!(parsed.to_string());
+        }
+    }
+    let refused = put_type(
+        &app,
+        &token,
+        id,
+        json!({ "workflows": read.clone(), "expectedWorkflows": reserialised }),
+    )
+    .await;
+    assert_workflows_changed(&refused, "the condition re-serialised");
+
+    assert_eq!(read_type(&app, &token, id).await["workflows"], read);
+}
+
+/// **AC2 and AC7: the comparison reads the set under the lock**, held by an
+/// arranged race rather than a hoped one.
+///
+/// `two_saves_from_one_read_race_and_exactly_one_wins` fires two requests and
+/// asserts on whatever interleaving the scheduler gives. A comparison made
+/// outside the lock is red there only when both requests read before either
+/// commits, which the scheduler does not promise. Here a transaction holds the
+/// type row and adds a binding, uncommitted, and the save is let go once it is
+/// seen queued in `pg_locks`. A save that read the set before taking the lock
+/// read the set without that binding, and is accepted, deleting it; one that
+/// reads after the lock sees it and is refused.
+///
+/// # Seen to fail (coding standard 2.9)
+///
+/// 2026-10-16: red against the stored set read before `lock_type_binding`,
+/// and against `lock_type_binding` without `FOR UPDATE`; the only test in this
+/// file that failed under either. Restored, green.
+#[tokio::test]
+async fn a_save_queued_on_the_lock_compares_against_the_set_committed_ahead_of_it() {
+    use std::time::Duration;
+
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let first = published_workflow(&app, &token, "wf_queued_first").await;
+    let added = published_workflow(&app, &token, "wf_queued_added").await;
+    let id = type_bound_to(&app, &token, "STALE_QUEUED", "ACTIVE", &[first]).await;
+
+    let read = read_type(&app, &token, id).await["workflows"].clone();
+
+    // Another writer, mid-transaction: it holds the type row as `update_type`
+    // does, and has added a binding it has not committed.
+    let mut holder = app.pool.begin().await.expect("a transaction opens");
+    sqlx::query("SELECT id FROM document_types WHERE id = $1 FOR UPDATE")
+        .bind(id)
+        .execute(&mut *holder)
+        .await
+        .expect("holds the type row");
+    sqlx::query(
+        "INSERT INTO document_type_workflows
+            (id, tenant_id, document_type_id, workflow_definition_id, priority)
+         VALUES ($1, $2, $3, $4, 2)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .bind(id)
+    .bind(added)
+    .execute(&mut *holder)
+    .await
+    .expect("adds a binding, uncommitted");
+
+    let route = format!("/api/v1/document-types/{id}");
+    let save = app.send(
+        Method::PUT,
+        &route,
+        Some(&token),
+        Some(json!({
+            "workflows": [{ "workflowDefinitionId": first, "priority": 3 }],
+            "expectedWorkflows": read,
+        })),
+    );
+
+    let release = async {
+        // Commit once the save is queued on a lock. If it never queues, commit
+        // after ten seconds anyway, and the assertions say what it did.
+        for _ in 0..200 {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_locks WHERE NOT granted \
+                 AND pid IN (SELECT pid FROM pg_stat_activity WHERE datname = current_database())",
+            )
+            .fetch_one(&app.pool)
+            .await
+            .expect("reads pg_locks");
+            if waiting > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        holder.commit().await.expect("the other writer commits");
+    };
+
+    let (saved, ()) =
+        tokio::time::timeout(Duration::from_secs(20), futures_lite_join(save, release))
+            .await
+            .expect("the save must not block forever");
+
+    assert_workflows_changed(&saved, "a save queued behind a writer that added a binding");
+
+    let stored = read_type(&app, &token, id).await["workflows"].clone();
+    assert_eq!(
+        revisions(&stored),
+        [first.to_string(), added.to_string()],
+        "the binding committed ahead of the save survives: {stored}"
+    );
+}

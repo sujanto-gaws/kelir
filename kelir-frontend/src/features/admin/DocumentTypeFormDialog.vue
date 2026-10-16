@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 
-import { createDocumentType, updateDocumentType } from '@/api/document-types'
+import { toApiError } from '@/api/client'
+import { createDocumentType, getDocumentType, updateDocumentType } from '@/api/document-types'
+import { ApiError } from '@/api/error'
 import { getForm, getList, listForms, listLists } from '@/api/rad'
 import { getWorkflowDefinition, listWorkflowDefinitions } from '@/api/workflow'
 import FormUnplacedErrors from '@/components/FormUnplacedErrors.vue'
@@ -12,14 +14,16 @@ import { Label } from '@/components/ui/label'
 import { SearchSelect, type SearchSource } from '@/components/ui/search-select'
 import { Select } from '@/components/ui/select'
 import { useFormErrors } from '@/composables/useFormErrors'
-import type {
-  CreateDocumentTypeRequest,
-  DocumentType,
-  DocumentTypeStatus,
-  GovernedEntityType,
-  SecurityLevel,
-  WorkflowBinding,
-  WorkflowBindingRequest,
+import {
+  DOCUMENT_TYPE_WORKFLOWS_CHANGED,
+  type CreateDocumentTypeRequest,
+  type DocumentType,
+  type DocumentTypeStatus,
+  type GovernedEntityType,
+  type SecurityLevel,
+  type UpdateDocumentTypeRequest,
+  type WorkflowBinding,
+  type WorkflowBindingRequest,
 } from '@/types/document-type'
 import type { FormSummary, ListSummary } from '@/types/rad'
 import type { WorkflowDefinitionSummary } from '@/types/workflow'
@@ -70,6 +74,16 @@ const storedBindings = ref<WorkflowBinding[]>([])
 
 const isSaving = ref(false)
 const { fieldErrors, formError, report, reset } = useFormErrors()
+
+/**
+ * Whether the server refused a save because the bindings changed since they
+ * were read (#728). It stays up until a reload succeeds or the dialog opens
+ * again: until then `storedBindings` is known to be stale.
+ */
+const workflowsChanged = ref(false)
+const isReloading = ref(false)
+/** Why the last reload failed, empty when it did not. */
+const reloadError = ref('')
 
 const isEditing = computed(() => props.editing !== null)
 
@@ -199,30 +213,39 @@ function governedEntityOf(value: string | null | undefined): GovernedEntityType 
   return value === 'PARTY' || value === 'FACILITY' ? value : ''
 }
 
+/**
+ * Puts a read of the type, or nothing for a new one, into every field.
+ *
+ * **All at once, after the read arrived.** It is the one place the fields,
+ * `storedBindings` and the chooser are set, so a reload whose read fails
+ * leaves them as they were rather than half the server's (#728).
+ */
+function fill(editing: DocumentType | null): void {
+  reset()
+  workflowsChanged.value = false
+  reloadError.value = ''
+
+  typeCode.value = editing?.typeCode ?? ''
+  name.value = editing?.name ?? ''
+  description.value = editing?.description ?? ''
+  category.value = editing?.category ?? ''
+  formId.value = editing?.formId ?? ''
+  listId.value = editing?.listId ?? ''
+  targetEntity.value = governedEntityOf(editing?.targetEntityType)
+  status.value = editing?.status ?? 'DRAFT'
+  securityLevel.value = editing?.defaultSecurityLevel ?? 'INTERNAL'
+  // Guarded, because a dialog that throws while opening renders nothing
+  // at all — including the error that would have said why.
+  storedBindings.value = editing?.workflows ?? []
+  workflowId.value = storedBindings.value[0]?.workflowDefinitionId ?? ''
+}
+
 watch(
   () => props.open,
   (open) => {
-    if (!open) {
-      return
+    if (open) {
+      fill(props.editing)
     }
-
-    reset()
-
-    const editing = props.editing
-
-    typeCode.value = editing?.typeCode ?? ''
-    name.value = editing?.name ?? ''
-    description.value = editing?.description ?? ''
-    category.value = editing?.category ?? ''
-    formId.value = editing?.formId ?? ''
-    listId.value = editing?.listId ?? ''
-    targetEntity.value = governedEntityOf(editing?.targetEntityType)
-    status.value = editing?.status ?? 'DRAFT'
-    securityLevel.value = editing?.defaultSecurityLevel ?? 'INTERNAL'
-    // Guarded, because a dialog that throws while opening renders nothing
-    // at all — including the error that would have said why.
-    storedBindings.value = editing?.workflows ?? []
-    workflowId.value = storedBindings.value[0]?.workflowDefinitionId ?? ''
   },
   { immediate: true },
 )
@@ -235,9 +258,24 @@ function orNull(value: string): string | null {
 }
 
 /**
+ * A binding as the wire carries it. Named rather than spread: the endpoint
+ * denies an unknown field, and these five are all a binding is on the wire.
+ */
+function onTheWire(binding: WorkflowBinding): WorkflowBindingRequest {
+  return {
+    workflowDefinitionId: binding.workflowDefinitionId,
+    conditionExpression: binding.conditionExpression,
+    priority: binding.priority,
+    validFrom: binding.validFrom,
+    validTo: binding.validTo,
+  }
+}
+
+/**
  * The `workflows` a save sends, or `undefined` to leave them off the wire.
  *
  * **Sending the array replaces the stored set** (`repository::replace_workflows`),
+ * unless the set it read, sent beside it as `expectedWorkflows`, is stale (#728);
  * and leaving it off leaves the set alone — so an edit sends it only when the
  * chooser moved (#718). Until then a rename rebuilt the set from the chooser
  * and deleted every binding past the first, along with the first one's
@@ -267,17 +305,7 @@ function workflowsToSend(): WorkflowBindingRequest[] | undefined {
     return [{ workflowDefinitionId: chosen }]
   }
 
-  // Named rather than spread: the endpoint denies an unknown field, and these
-  // five are all a binding is on the wire.
-  return [
-    {
-      workflowDefinitionId: chosen,
-      conditionExpression: first.conditionExpression,
-      priority: first.priority,
-      validFrom: first.validFrom,
-      validTo: first.validTo,
-    },
-  ]
+  return [{ ...onTheWire(first), workflowDefinitionId: chosen }]
 }
 
 async function save(): Promise<void> {
@@ -311,16 +339,64 @@ async function save(): Promise<void> {
       const editable = { ...body, typeCode: undefined }
 
       delete editable.typeCode
-      await updateDocumentType(props.editing.id, editable)
+
+      // #728 (D-117): a replacement names the set it replaces, so a binding
+      // another administrator saved since this dialog read the type is
+      // refused rather than deleted. Every binding read, all five fields as
+      // read, `[]` included; never without `workflows`, which is a 422.
+      const request: UpdateDocumentTypeRequest =
+        workflows === undefined
+          ? editable
+          : { ...editable, expectedWorkflows: storedBindings.value.map(onTheWire) }
+
+      await updateDocumentType(props.editing.id, request)
     } else {
       await createDocumentType(body)
     }
 
     emit('saved')
   } catch (failure) {
-    report(failure)
+    // Told apart by the code (coding standard §2.3): this route answers other
+    // 409s, and only this one is mended by a reload.
+    if (failure instanceof ApiError && failure.code === DOCUMENT_TYPE_WORKFLOWS_CHANGED) {
+      workflowsChanged.value = true
+    } else {
+      report(failure)
+    }
   } finally {
     isSaving.value = false
+  }
+}
+
+/**
+ * Re-reads the type after that refusal, and starts the edit over from it.
+ *
+ * **Unsaved edits are discarded**, which the alert says before Reload is
+ * pressed: they were made against bindings that are no longer there. A read
+ * that fails changes nothing, so the alert stays up and a later save still
+ * sends the read the dialog holds, which the server refuses again.
+ */
+async function reload(): Promise<void> {
+  const editing = props.editing
+
+  if (!editing) {
+    return
+  }
+
+  isReloading.value = true
+  reloadError.value = ''
+
+  try {
+    const current = await getDocumentType(editing.id)
+
+    // Not if it closed, or opened on another type, while the read was out.
+    if (props.open && props.editing?.id === editing.id) {
+      fill(current)
+    }
+  } catch (failure) {
+    reloadError.value = `The document type could not be reloaded: ${toApiError(failure).message}`
+  } finally {
+    isReloading.value = false
   }
 }
 </script>
@@ -338,6 +414,40 @@ async function save(): Promise<void> {
       <h3 class="text-lg font-semibold">
         {{ isEditing ? 'Edit document type' : 'New document type' }}
       </h3>
+
+      <!-- #728: the bindings changed since this dialog read them. Its own
+           alert, because unlike the others it offers the way out. -->
+      <Alert
+        v-if="workflowsChanged"
+        variant="destructive"
+        class="mt-4"
+        data-testid="document-type-workflows-changed"
+      >
+        <p data-testid="document-type-workflows-changed-message">
+          Another administrator changed the workflow bindings of this document type since this
+          dialog opened. Nothing was saved. Reload brings in the current bindings and discards your
+          unsaved edits.
+        </p>
+        <Button
+          type="button"
+          variant="secondary"
+          class="mt-3"
+          :disabled="isReloading || isSaving"
+          data-testid="reload-document-type"
+          @click="reload"
+        >
+          {{ isReloading ? 'Reloading…' : 'Reload' }}
+        </Button>
+      </Alert>
+
+      <Alert
+        v-if="reloadError"
+        variant="destructive"
+        class="mt-4"
+        data-testid="document-type-reload-error"
+      >
+        {{ reloadError }}
+      </Alert>
 
       <Alert v-if="formError" variant="destructive" class="mt-4" data-testid="document-type-error">
         {{ formError }}
@@ -553,7 +663,11 @@ async function save(): Promise<void> {
 
         <div class="flex justify-end gap-2 sm:col-span-2">
           <Button type="button" variant="secondary" @click="emit('close')">Cancel</Button>
-          <Button type="submit" :disabled="isSaving" data-testid="save-document-type">
+          <Button
+            type="submit"
+            :disabled="isSaving || isReloading"
+            data-testid="save-document-type"
+          >
             {{ isSaving ? 'Saving…' : 'Save' }}
           </Button>
         </div>

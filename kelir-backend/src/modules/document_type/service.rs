@@ -21,9 +21,9 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::domain::{
-    changed_bindings, validate_create, validate_update, CreateDocumentTypeRequest, DocumentType,
-    DocumentTypeQuery, DocumentTypeStatus, DocumentTypeSummary, SecurityLevel,
-    UpdateDocumentTypeRequest, WorkflowBinding,
+    changed_bindings, same_bindings, validate_create, validate_update, workflows_changed,
+    CreateDocumentTypeRequest, DocumentType, DocumentTypeQuery, DocumentTypeStatus,
+    DocumentTypeSummary, SecurityLevel, UpdateDocumentTypeRequest, WorkflowBinding,
 };
 use super::repository::{self as repo, DocumentTypeFields, NewDocumentType};
 use super::{TYPE_CREATE, TYPE_DELETE, TYPE_READ, TYPE_UPDATE};
@@ -186,6 +186,25 @@ pub async fn update_type(
         .await?
         .ok_or_else(|| AppError::not_found("Document type"))?;
 
+    // The stored workflow set, read under the type row held above, which every
+    // writer of these rows takes first, so it cannot move before the replace
+    // below. Read only when a replacement is sent; otherwise nothing uses it.
+    let stored_workflows = match &request.workflows {
+        Some(_) => Some(repo::bound_workflows(&mut transaction, tenant_id, id).await?),
+        None => None,
+    };
+
+    // A replacement built from a stale read is refused before anything is
+    // written: not the scalar fields below, and so no audit entry either
+    // (#728, D-117). The lock is what makes the comparison mean something, and
+    // a caller that sends no `expectedWorkflows` is not compared at all, which
+    // is the behaviour before #728 (AC5).
+    if let (Some(expected), Some(stored)) = (&request.expected_workflows, &stored_workflows) {
+        if !same_bindings(expected, stored) {
+            return Err(workflows_changed());
+        }
+    }
+
     // A binding is checked only when it is sent, and only when it names
     // something. Re-checking an unchanged binding would refuse an unrelated
     // edit because a form was retired weeks ago — which is a real state, and
@@ -247,11 +266,8 @@ pub async fn update_type(
         return Err(AppError::not_found("Document type"));
     }
 
-    if let Some(workflows) = &request.workflows {
-        // Read under the type row held above, which every writer of these rows
-        // takes first, so the stored set cannot move before the replace.
-        let stored = repo::bound_workflows(&mut transaction, tenant_id, id).await?;
-        check_workflow_bindings(&mut transaction, tenant_id, workflows, &stored).await?;
+    if let (Some(workflows), Some(stored)) = (&request.workflows, &stored_workflows) {
+        check_workflow_bindings(&mut transaction, tenant_id, workflows, stored).await?;
         repo::replace_workflows(&mut transaction, tenant_id, id, workflows, actor).await?;
     }
 

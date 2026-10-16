@@ -106,7 +106,11 @@ export interface CreateDocumentTypeRequest {
   retentionPolicyId?: string | null
   targetEntityType?: GovernedEntityType | null
   status?: DocumentTypeStatus
-  /** Replaces the stored set whole when present, `[]` included; absent leaves it alone. */
+  /**
+   * Replaces the stored set whole when present, `[]` included; absent leaves it alone.
+   * With `expectedWorkflows`, the replacement is refused (409) if the stored set has
+   * changed since it was read (#728).
+   */
   workflows?: WorkflowBindingRequest[]
 }
 
@@ -129,7 +133,27 @@ export type GovernedEntityType = 'PARTY' | 'FACILITY'
  * `typeCode` is absent because it may not change: a delegation scopes itself to
  * it and an integration names a type by it.
  */
-export type UpdateDocumentTypeRequest = Partial<Omit<CreateDocumentTypeRequest, 'typeCode'>>
+export interface UpdateDocumentTypeRequest extends Partial<
+  Omit<CreateDocumentTypeRequest, 'typeCode'>
+> {
+  /**
+   * The bindings the caller read, sent beside `workflows` (#728, D-117). The
+   * server compares them with the stored set, as a set on all five fields,
+   * before it writes: a difference is a 409
+   * {@link DOCUMENT_TYPE_WORKFLOWS_CHANGED} and nothing is written. Sent
+   * without `workflows` it is a 422. Absent, a `workflows` replaces whatever
+   * is stored, as before.
+   */
+  expectedWorkflows?: WorkflowBindingRequest[]
+}
+
+/**
+ * The code an edit is refused with when the type's stored bindings are not
+ * the `expectedWorkflows` it sent (#728, D-117): another administrator changed
+ * them since they were read. This code, not the 409, is what says a reload
+ * will help.
+ */
+export const DOCUMENT_TYPE_WORKFLOWS_CHANGED = 'DOCUMENT_TYPE_WORKFLOWS_CHANGED'
 
 /** Where a numbering sequence restarts (`numbering::SequenceScope`). */
 export type SequenceScope = 'GLOBAL' | 'YEAR' | 'MONTH' | 'DEPARTMENT_YEAR'

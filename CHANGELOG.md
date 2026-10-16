@@ -299,6 +299,18 @@ While the major version is `0`, the public API may change in any release.
   last good value stays. The `params` box keeps the text as typed. A refusal
   about an expression, a rule's `params` or a limit is shown at that field. It adds no route and no
   dependency, and `JsonLogicBuilder` stays off the first-load path.
+- **`PUT /document-types/{id}` takes an optional `expectedWorkflows`**
+  ([#728](https://github.com/sujanto-gaws/kelir/issues/728), decision
+  **D-117** A): the workflow bindings the client read, each in the shape of a
+  `workflows` element. Sent with `workflows`, it makes the replacement
+  conditional: a stored set that differs from it in any of
+  `workflowDefinitionId`, `conditionExpression`, `priority`, `validFrom` or
+  `validTo`, order ignored, is answered 409 `DOCUMENT_TYPE_WORKFLOWS_CHANGED`,
+  and nothing is written. A condition is compared as the text stored, so a
+  client sends back exactly what it read. Sent without `workflows`, it is a 422
+  at `expectedWorkflows`, code `REQUIRES_WORKFLOWS`. A client that leaves it out
+  behaves exactly as before and is not protected, so integrations should send it
+  (*Fixed*, below).
 
 ### Changed
 
@@ -416,6 +428,23 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A stale document type save no longer deletes a workflow binding added
+  since it was read** ([#728](https://github.com/sujanto-gaws/kelir/issues/728),
+  decision **D-117** A). A sent `workflows` array replaces the type's whole
+  set, so a save built from bindings read before another administrator added
+  one deleted it: from the dialog when its chooser was changed, and from any
+  API client. `PUT /document-types/{id}` now takes an optional
+  `expectedWorkflows` (*Added*, above), and when the stored set no longer
+  matches it, refuses with 409 `DOCUMENT_TYPE_WORKFLOWS_CHANGED` and writes
+  nothing. The document type dialog sends the bindings it read whenever it
+  sends its own. On that refusal it says another administrator changed the
+  bindings since it opened and nothing was saved, and its **Reload** button
+  brings in the current values, discarding the dialog's unsaved edits. **A
+  client that omits `expectedWorkflows` is not protected**, and behaves
+  exactly as before. Only the bindings are checked: the type's other fields
+  are still last writer wins, and a stale save can still undo a status change
+  ([#742](https://github.com/sujanto-gaws/kelir/issues/742)). No migration,
+  and no schema change.
 - **The password-reset texts say what a reset does**
   ([#697](https://github.com/sujanto-gaws/kelir/issues/697), decision
   **D-107** A). The reset page, the reset email, and the OpenAPI texts for

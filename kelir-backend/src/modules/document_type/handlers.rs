@@ -164,7 +164,14 @@ async fn create_type(
     responses(
         (status = 200, description = "Updated; a collection that is sent replaces the stored set", body = DocumentType),
         (status = 404, description = "No such document type"),
-        (status = 422, description = "Validation failed, or a binding names something that does not exist")
+        (status = 409, description = "`DOCUMENT_TYPE_WORKFLOWS_CHANGED`: `expectedWorkflows` was sent \
+            and the stored workflow bindings are no longer that set, compared on all five fields in \
+            any order. Another writer changed them since the caller read them (#728, D-117). Nothing \
+            was saved, not the other fields either; reload the type and make the change again. A \
+            request without `expectedWorkflows` is never refused this way"),
+        (status = 422, description = "Validation failed, or a binding names something that does not \
+            exist, or `expectedWorkflows` was sent without `workflows` (at `expectedWorkflows`, \
+            code `REQUIRES_WORKFLOWS`)")
     ),
     security(("bearer" = []))
 )]
