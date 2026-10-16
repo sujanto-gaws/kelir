@@ -736,53 +736,331 @@ describe('DocumentTypeFormDialog choosers', () => {
     expect(posted?.body).toMatchObject({ typeCode: 'REQ', workflows: [] })
   })
 
-  /** The refusal `check_workflow_bindings` gives a binding to a deprecated revision. */
-  const notPublished =
-    `workflow definition ${retiredFlow.id} is DEPRECATED and only a published revision may ` +
-    'be bound — a running approval executes the revision it started against'
+  /*
+   * #716. A refused save says why, under the chooser the server named.
+   *
+   * After #718 a save that leaves the workflow chooser alone sends no
+   * `workflows`, so keeping a deprecated binding is no longer refused (the
+   * rename test below). What the dialog can still meet is a refusal of a
+   * binding it *changed*: a revision, form or list retired between the chooser
+   * listing it and the save — `check_workflow_bindings` and `check_bindings`
+   * name it at `workflows.{index}.workflowDefinitionId`, `formId` and `listId`.
+   */
 
-  function refusingDeprecated(request: RecordedRequest): FakeReply | undefined {
-    return request.method === 'put'
-      ? {
-          status: 422,
-          body: errorBody('VALIDATION_ERROR', 'Validation failed', [
-            {
-              path: 'workflows.0.workflowDefinitionId',
-              rule: 'reference',
-              code: 'NOT_PUBLISHED',
-              message: notPublished,
-            },
-          ]),
-        }
-      : undefined
+  /** A 422 `VALIDATION_ERROR` as `binding_error` gives it: rule `reference`. */
+  function refusal(...details: [path: string, code: string, message: string][]): FakeReply {
+    return {
+      status: 422,
+      body: errorBody(
+        'VALIDATION_ERROR',
+        'Validation failed',
+        details.map(([path, code, message]) => ({ path, rule: 'reference', code, message })),
+      ),
+    }
   }
 
-  it('stays open when a save keeping a deprecated binding is refused', async () => {
-    replaceBackend(refusingDeprecated)
-    const wrapper = await open(boundType(retiredFlow.id))
+  /** Every `PUT` refused with `reply`. */
+  function refusingPut(reply: FakeReply): void {
+    replaceBackend((request) => (request.method === 'put' ? reply : undefined))
+  }
+
+  /** `check_workflow_bindings`' refusal of a revision deprecated since it was listed. */
+  const workflowNotPublished =
+    `workflow definition ${flows[0].id} is DEPRECATED and only a published revision may ` +
+    'be bound — a running approval executes the revision it started against'
+  /** `check_bindings`' refusal of a form retired since it was listed. */
+  const formNotPublished =
+    `form definition ${forms[0].id} is DEPRECATED and only a published revision may be ` +
+    'bound — a document pins the revision it was created against'
+  /** `check_bindings`' refusal of a list deleted since it was listed. */
+  const listNotFound = `no list definition ${lists[0].id} in this tenant`
+
+  const CHOOSERS = ['type-form', 'type-list', 'type-workflow'] as const
+
+  /**
+   * The message a chooser shows for the server, found the way assistive
+   * technology finds it: through the chooser's own `aria-describedby`. Empty
+   * when the chooser names no message, or the one it names is not drawn.
+   */
+  function messageUnder(wrapper: VueWrapper, testId: string): string {
+    const chooser = wrapper.get(`[data-testid="${testId}"]`)
+    const ids = chooser.attributes('aria-describedby')?.split(' ') ?? []
+    const message = wrapper.find(`[data-testid="${testId}-message"]`)
+
+    if (!message.exists()) {
+      return ''
+    }
+
+    // Named by the chooser it sits under, and drawn beside it rather than
+    // beside another: a message described by one chooser and drawn under the
+    // next would read right to a screen reader and wrong on the screen.
+    expect(ids).toContain(message.attributes('id'))
+    expect(message.element.parentElement?.contains(chooser.element)).toBe(true)
+
+    return message.text()
+  }
+
+  it.each([
+    ['form', 'type-form', forms[0].id, 'formId', 'NOT_PUBLISHED', formNotPublished],
+    ['list', 'type-list', lists[0].id, 'listId', 'NOT_FOUND', listNotFound],
+    [
+      'workflow',
+      'type-workflow',
+      flows[0].id,
+      'workflows.0.workflowDefinitionId',
+      'NOT_PUBLISHED',
+      workflowNotPublished,
+    ],
+  ] as const)(
+    'says why a changed %s was refused, under that chooser and no other',
+    async (_, testId, chosen, path, code, message) => {
+      refusingPut(refusal([path, code, message]))
+      const wrapper = await open(boundType(wantedFlow.id))
+      await flushPromises()
+
+      await wrapper.get(`[data-testid="${testId}"]`).setValue(chosen)
+      await wrapper.get('form').trigger('submit')
+      await flushPromises()
+
+      // The change reached the wire, so the refusal is one this dialog can meet.
+      expect(JSON.stringify(putBody())).toContain(chosen)
+      expect(wrapper.emitted('saved')).toBeUndefined()
+
+      expect(messageUnder(wrapper, testId)).toBe(message)
+      expect(wrapper.get(`[data-testid="${testId}"]`).attributes('aria-invalid')).toBe('true')
+
+      for (const other of CHOOSERS.filter((candidate) => candidate !== testId)) {
+        expect(messageUnder(wrapper, other)).toBe('')
+        expect(wrapper.get(`[data-testid="${other}"]`).attributes('aria-invalid')).toBe('false')
+      }
+
+      // Placed, so not listed again above the form.
+      expect(wrapper.find('[data-testid="document-type-unplaced-errors"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="document-type-error"]').exists()).toBe(false)
+    },
+  )
+
+  it('places each of several refusals under its own chooser', async () => {
+    refusingPut(
+      refusal(
+        ['formId', 'NOT_PUBLISHED', formNotPublished],
+        ['listId', 'NOT_FOUND', listNotFound],
+        ['workflows.0.workflowDefinitionId', 'NOT_PUBLISHED', workflowNotPublished],
+      ),
+    )
+    const wrapper = await open(boundType(wantedFlow.id))
     await flushPromises()
 
-    await wrapper.get('[data-testid="type-name"]').setValue('Requisition (renamed)')
+    await wrapper.get('[data-testid="type-form"]').setValue(forms[0].id)
+    await wrapper.get('[data-testid="type-list"]').setValue(lists[0].id)
+    await wrapper.get('[data-testid="type-workflow"]').setValue(flows[0].id)
     await wrapper.get('form').trigger('submit')
     await flushPromises()
 
-    // A rename leaves the binding off the wire (#718); the refusal is the fake's,
-    // standing in for any 422 an edit can meet.
-    expect(sentWorkflows()).toBe(false)
-    expect(wrapper.emitted('saved')).toBeUndefined()
-    expect(wrapper.get('[data-testid="document-type-error"]').text()).toContain('Validation failed')
-    // The choice and its name survive the refusal, so it can be changed.
-    expect(selectedValue(wrapper, 'type-workflow')).toBe(retiredFlow.id)
-    expect(optionsOf(wrapper, 'type-workflow')[1]).toBe('Retired approval (r2, deprecated)')
+    expect(messageUnder(wrapper, 'type-form')).toBe(formNotPublished)
+    expect(messageUnder(wrapper, 'type-list')).toBe(listNotFound)
+    expect(messageUnder(wrapper, 'type-workflow')).toBe(workflowNotPublished)
   })
 
-  // DEFECT (#625 campaign, 2026-10-10): the dialog shows a field's message only
-  // for `typeCode`, `name` and `targetEntityType`. The refusal of a deprecated
-  // binding names `workflows.0.workflowDefinitionId`, so the screen says only
-  // "Validation failed" and drops the reason the server gave. Remove `.fails`
-  // when it is fixed.
-  it.fails('says why a save keeping a deprecated binding was refused', async () => {
-    replaceBackend(refusingDeprecated)
+  it('lists a refusal at a path it shows no message for, so none is dropped', async () => {
+    refusingPut(
+      refusal(
+        ['workflows.0.priority', 'OUT_OF_RANGE', 'priority must be at least 1'],
+        ['description', 'TOO_LONG', 'description is longer than 2000 characters'],
+        ['formId', 'NOT_PUBLISHED', formNotPublished],
+      ),
+    )
+    const wrapper = await open(boundType(wantedFlow.id))
+    await flushPromises()
+
+    await wrapper.get('[data-testid="type-form"]').setValue(forms[0].id)
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    const unplaced = wrapper.get('[data-testid="document-type-unplaced-errors"]')
+
+    expect(unplaced.attributes('role')).toBe('alert')
+    expect(unplaced.findAll('li').map((item) => item.text())).toEqual([
+      'workflows.0.priority: priority must be at least 1',
+      'description: description is longer than 2000 characters',
+    ])
+    // The one with a place is under its chooser, and only there.
+    expect(messageUnder(wrapper, 'type-form')).toBe(formNotPublished)
+    expect(unplaced.text()).not.toContain(formNotPublished)
+  })
+
+  it('places a refusal of the name under the name, as before', async () => {
+    refusingPut(refusal(['name', 'REQUIRED', 'name is required']))
+    const wrapper = await open(boundType(wantedFlow.id))
+    await flushPromises()
+
+    await wrapper.get('[data-testid="type-name"]').setValue('')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    const input = wrapper.get('[data-testid="type-name"]')
+    const message = wrapper.get('[data-testid="type-name-message"]')
+
+    expect(message.text()).toBe('name is required')
+    expect(input.attributes('aria-invalid')).toBe('true')
+    expect(input.attributes('aria-describedby')).toBe(message.attributes('id'))
+    expect(wrapper.find('[data-testid="document-type-unplaced-errors"]').exists()).toBe(false)
+  })
+
+  // #716's verification campaign: the other two paths the dialog places, each
+  // on the write that can be refused at it. Survived before these: dropping
+  // either path from the placed list, its `invalid`, or its `described-by`.
+  it.each([
+    [
+      'type code',
+      'post',
+      'type-code',
+      'typeCode',
+      'TOO_LONG',
+      'typeCode must be at most 64 characters',
+    ],
+    [
+      'governed record',
+      'put',
+      'type-governs',
+      'targetEntityType',
+      'ENTITY_NOT_GOVERNABLE',
+      '`PARTY` is not a record type changes can be routed through approval for',
+    ],
+  ] as const)(
+    'places a refusal of the %s under it, and not above the form',
+    async (_, method, testId, path, code, message) => {
+      replaceBackend((request) =>
+        request.method === method ? refusal([path, code, message]) : undefined,
+      )
+      const wrapper = await open(method === 'post' ? null : boundType(wantedFlow.id))
+      await flushPromises()
+
+      if (method === 'post') {
+        await wrapper.get('[data-testid="type-code"]').setValue('REQ')
+        await wrapper.get('[data-testid="type-name"]').setValue('Requisition')
+      } else {
+        await wrapper.get('[data-testid="type-governs"]').setValue('PARTY')
+      }
+      await wrapper.get('form').trigger('submit')
+      await flushPromises()
+
+      const control = wrapper.get(`[data-testid="${testId}"]`)
+      const shown = wrapper.get(`[data-testid="${testId}-message"]`)
+
+      expect(wrapper.emitted('saved')).toBeUndefined()
+      expect(shown.text()).toBe(message)
+      expect(control.attributes('aria-invalid')).toBe('true')
+      expect(control.attributes('aria-describedby')).toBe(shown.attributes('id'))
+      expect(shown.element.parentElement?.contains(control.element)).toBe(true)
+      expect(wrapper.find('[data-testid="document-type-unplaced-errors"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="document-type-error"]').exists()).toBe(false)
+    },
+  )
+
+  // #716's verification campaign: survived before this, dropping the `reset()`
+  // the opening watch makes — a refusal of one type was still shown under the
+  // chooser, and listed above the form, when the dialog was opened on another.
+  it('opens on another type without the last one’s refusals', async () => {
+    refusingPut(
+      refusal(
+        ['workflows.0.workflowDefinitionId', 'NOT_PUBLISHED', workflowNotPublished],
+        ['description', 'TOO_LONG', 'description is longer than 2000 characters'],
+      ),
+    )
+    const wrapper = await open(boundType(retiredFlow.id))
+    await flushPromises()
+
+    await wrapper.get('[data-testid="type-workflow"]').setValue(flows[0].id)
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(messageUnder(wrapper, 'type-workflow')).toBe(workflowNotPublished)
+    expect(wrapper.find('[data-testid="document-type-unplaced-errors"]').exists()).toBe(true)
+
+    // As the list page does it: close, then open with what is to be edited.
+    await wrapper.setProps({ open: false })
+    await wrapper.setProps({ editing: boundType(wantedFlow.id) })
+    await wrapper.setProps({ open: true })
+    await flushPromises()
+
+    expect(messageUnder(wrapper, 'type-workflow')).toBe('')
+    expect(wrapper.get('[data-testid="type-workflow"]').attributes('aria-invalid')).toBe('false')
+    expect(wrapper.find('[data-testid="document-type-unplaced-errors"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="document-type-error"]').exists()).toBe(false)
+  })
+
+  it('still says why a refusal that names no field failed', async () => {
+    refusingPut({
+      status: 403,
+      body: errorBody('FORBIDDEN', 'You may not configure document types'),
+    })
+    const wrapper = await open(boundType(wantedFlow.id))
+    await flushPromises()
+
+    await wrapper.get('[data-testid="type-name"]').setValue('Requisition (renamed)')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="document-type-error"]').text()).toBe(
+      'You may not configure document types',
+    )
+    expect(wrapper.emitted('saved')).toBeUndefined()
+  })
+
+  it('stays open when a save rebinding to a revision deprecated since it was listed is refused', async () => {
+    refusingPut(
+      refusal(['workflows.0.workflowDefinitionId', 'NOT_PUBLISHED', workflowNotPublished]),
+    )
+    const wrapper = await open(boundType(retiredFlow.id))
+    await flushPromises()
+
+    await wrapper.get('[data-testid="type-workflow"]').setValue(flows[0].id)
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(putBody()?.workflows).toEqual([binding(flows[0].id)])
+    expect(wrapper.emitted('saved')).toBeUndefined()
+    expect(wrapper.find('[data-testid="document-type-dialog"]').exists()).toBe(true)
+    // The choice and its name survive the refusal, so it can be changed again.
+    expect(selectedValue(wrapper, 'type-workflow')).toBe(flows[0].id)
+    expect(optionsOf(wrapper, 'type-workflow')).toContain('Filler flow 001 (r1)')
+  })
+
+  // Pinned `it.fails` by #625's campaign (2026-10-10) as "says why a save keeping
+  // a deprecated binding was refused": the dialog showed a field's message only
+  // for `typeCode`, `name` and `targetEntityType`, so this refusal read as
+  // "Validation failed". Re-based by #716 onto a refusal #718 leaves reachable.
+  it('says why a save rebinding to a revision deprecated since it was listed was refused', async () => {
+    refusingPut(
+      refusal(['workflows.0.workflowDefinitionId', 'NOT_PUBLISHED', workflowNotPublished]),
+    )
+    const wrapper = await open(boundType(retiredFlow.id))
+    await flushPromises()
+
+    await wrapper.get('[data-testid="type-workflow"]').setValue(flows[0].id)
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(messageUnder(wrapper, 'type-workflow')).toBe(workflowNotPublished)
+    expect(wrapper.get('[data-testid="document-type-dialog"]').text()).not.toContain(
+      'Validation failed',
+    )
+  })
+
+  // #716's *Done when*: the rename that could not be made.
+  it('renames a type bound to a deprecated revision, sending no workflows', async () => {
+    // As the server answers without #716's option (a): a write naming the
+    // deprecated revision is refused, and any other is accepted.
+    replaceBackend((request) => {
+      if (request.method !== 'put') {
+        return undefined
+      }
+
+      return JSON.stringify(request.body).includes(retiredFlow.id)
+        ? refusal(['workflows.0.workflowDefinitionId', 'NOT_PUBLISHED', 'is DEPRECATED'])
+        : { status: 200, body: itemBody({ id: 't-1' }) }
+    })
     const wrapper = await open(boundType(retiredFlow.id))
     await flushPromises()
 
@@ -790,6 +1068,10 @@ describe('DocumentTypeFormDialog choosers', () => {
     await wrapper.get('form').trigger('submit')
     await flushPromises()
 
-    expect(wrapper.get('[data-testid="document-type-dialog"]').text()).toContain(notPublished)
+    expect(putBody()?.name).toBe('Requisition (renamed)')
+    expect(sentWorkflows()).toBe(false)
+    expect(wrapper.emitted('saved')).toHaveLength(1)
+    expect(wrapper.find('[data-testid="document-type-error"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="document-type-unplaced-errors"]').exists()).toBe(false)
   })
 })

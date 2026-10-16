@@ -2,16 +2,16 @@
 import { computed, ref, watch } from 'vue'
 
 import { createDocumentType, updateDocumentType } from '@/api/document-types'
-import { toApiError } from '@/api/client'
 import { getForm, getList, listForms, listLists } from '@/api/rad'
 import { getWorkflowDefinition, listWorkflowDefinitions } from '@/api/workflow'
+import FormUnplacedErrors from '@/components/FormUnplacedErrors.vue'
 import { Alert } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { SearchSelect, type SearchSource } from '@/components/ui/search-select'
 import { Select } from '@/components/ui/select'
-import type { ValidationDetail } from '@/types/api'
+import { useFormErrors } from '@/composables/useFormErrors'
 import type {
   CreateDocumentTypeRequest,
   DocumentType,
@@ -69,8 +69,7 @@ const workflowId = ref('')
 const storedBindings = ref<WorkflowBinding[]>([])
 
 const isSaving = ref(false)
-const error = ref('')
-const details = ref<ValidationDetail[]>([])
+const { fieldErrors, formError, report, reset } = useFormErrors()
 
 const isEditing = computed(() => props.editing !== null)
 
@@ -111,10 +110,34 @@ const SECURITY_LEVELS: { value: SecurityLevel; label: string }[] = [
   { value: 'RESTRICTED', label: 'Restricted' },
 ]
 
+/**
+ * Where `check_workflow_bindings` names the chooser's revision. The dialog sends
+ * at most one binding, so a refusal of what it sent is always the first.
+ */
+const WORKFLOW_PATH = 'workflows.0.workflowDefinitionId'
+
+/**
+ * The paths a message is shown under (#716); a detail at any other path is
+ * listed above the form by `FormUnplacedErrors`, so a refused save always says
+ * why. Each chooser is drawn in every mode, so the list does not change with it.
+ */
+const PLACED = ['typeCode', 'name', 'targetEntityType', 'formId', 'listId', WORKFLOW_PATH]
+
 /** The field-level message for one path, if the server named it. */
 function messageFor(path: string): string {
-  return details.value.find((detail) => detail.path === path)?.message ?? ''
+  return fieldErrors.value[path] ?? ''
 }
+
+/** What describes the workflow chooser: why it is disabled, and why it was refused. */
+const workflowDescribedBy = computed(
+  () =>
+    [
+      furtherBindings.value > 0 ? 'type-workflow-further' : '',
+      messageFor(WORKFLOW_PATH) ? 'type-workflow-message' : '',
+    ]
+      .filter((id) => id)
+      .join(' ') || undefined,
+)
 
 /**
  * What may be bound, each searched on the server.
@@ -183,8 +206,7 @@ watch(
       return
     }
 
-    error.value = ''
-    details.value = []
+    reset()
 
     const editing = props.editing
 
@@ -260,8 +282,7 @@ function workflowsToSend(): WorkflowBindingRequest[] | undefined {
 
 async function save(): Promise<void> {
   isSaving.value = true
-  error.value = ''
-  details.value = []
+  reset()
 
   const body: CreateDocumentTypeRequest = {
     typeCode: typeCode.value.trim(),
@@ -297,10 +318,7 @@ async function save(): Promise<void> {
 
     emit('saved')
   } catch (failure) {
-    const failed = toApiError(failure)
-
-    error.value = failed.message
-    details.value = failed.details
+    report(failure)
   } finally {
     isSaving.value = false
   }
@@ -321,9 +339,16 @@ async function save(): Promise<void> {
         {{ isEditing ? 'Edit document type' : 'New document type' }}
       </h3>
 
-      <Alert v-if="error" variant="destructive" class="mt-4" data-testid="document-type-error">
-        {{ error }}
+      <Alert v-if="formError" variant="destructive" class="mt-4" data-testid="document-type-error">
+        {{ formError }}
       </Alert>
+
+      <FormUnplacedErrors
+        :field-errors="fieldErrors"
+        :placed="PLACED"
+        class="mt-4"
+        data-testid="document-type-unplaced-errors"
+      />
 
       <form class="mt-4 grid gap-4 sm:grid-cols-2" @submit.prevent="save">
         <div class="space-y-2">
@@ -334,6 +359,8 @@ async function save(): Promise<void> {
             data-testid="type-code"
             :disabled="isEditing"
             placeholder="PURCHASE_REQUISITION"
+            :invalid="Boolean(messageFor('typeCode'))"
+            :described-by="messageFor('typeCode') ? 'type-code-message' : undefined"
           />
           <!-- Immutable once created: a delegation scopes itself to it and an
                integration names a type by it. Disabled rather than hidden, so an
@@ -341,15 +368,31 @@ async function save(): Promise<void> {
           <p v-if="isEditing" class="text-xs text-muted-foreground">
             A type code cannot change once documents and delegations refer to it.
           </p>
-          <p v-if="messageFor('typeCode')" class="text-xs text-destructive">
+          <p
+            v-if="messageFor('typeCode')"
+            id="type-code-message"
+            class="text-xs text-destructive"
+            data-testid="type-code-message"
+          >
             {{ messageFor('typeCode') }}
           </p>
         </div>
 
         <div class="space-y-2">
           <Label for="type-name">Name</Label>
-          <Input id="type-name" v-model="name" data-testid="type-name" />
-          <p v-if="messageFor('name')" class="text-xs text-destructive">
+          <Input
+            id="type-name"
+            v-model="name"
+            data-testid="type-name"
+            :invalid="Boolean(messageFor('name'))"
+            :described-by="messageFor('name') ? 'type-name-message' : undefined"
+          />
+          <p
+            v-if="messageFor('name')"
+            id="type-name-message"
+            class="text-xs text-destructive"
+            data-testid="type-name-message"
+          >
             {{ messageFor('name') }}
           </p>
         </div>
@@ -383,7 +426,17 @@ async function save(): Promise<void> {
             placeholder="No form"
             search-placeholder="Search by title or key"
             :source="formSource"
+            :invalid="Boolean(messageFor('formId'))"
+            :described-by="messageFor('formId') ? 'type-form-message' : undefined"
           />
+          <p
+            v-if="messageFor('formId')"
+            id="type-form-message"
+            class="text-xs text-destructive"
+            data-testid="type-form-message"
+          >
+            {{ messageFor('formId') }}
+          </p>
           <!-- Only published revisions: a draft is rewritten in place, so a
                document pinning one would render against a definition that no
                longer means what it meant. -->
@@ -399,7 +452,17 @@ async function save(): Promise<void> {
             placeholder="No list"
             search-placeholder="Search by title or key"
             :source="listSource"
+            :invalid="Boolean(messageFor('listId'))"
+            :described-by="messageFor('listId') ? 'type-list-message' : undefined"
           />
+          <p
+            v-if="messageFor('listId')"
+            id="type-list-message"
+            class="text-xs text-destructive"
+            data-testid="type-list-message"
+          >
+            {{ messageFor('listId') }}
+          </p>
           <!-- The list a document of this type appears on — the renderer #340
                built. A type with none is not on a configured list; it is still
                on `/documents`. -->
@@ -415,6 +478,8 @@ async function save(): Promise<void> {
             v-model="targetEntity"
             data-testid="type-governs"
             :options="GOVERNED_ENTITIES"
+            :invalid="Boolean(messageFor('targetEntityType'))"
+            :described-by="messageFor('targetEntityType') ? 'type-governs-message' : undefined"
           />
           <!-- Stated because it changes what submitting a document *does*: a
                governing type parks its record at pending-approval rather than
@@ -423,7 +488,12 @@ async function save(): Promise<void> {
             A document of a governing type carries a proposed change, and the record it names waits
             for the approval rather than changing when the document is submitted.
           </p>
-          <p v-if="messageFor('targetEntityType')" class="text-xs text-destructive">
+          <p
+            v-if="messageFor('targetEntityType')"
+            id="type-governs-message"
+            class="text-xs text-destructive"
+            data-testid="type-governs-message"
+          >
             {{ messageFor('targetEntityType') }}
           </p>
         </div>
@@ -438,8 +508,19 @@ async function save(): Promise<void> {
             search-placeholder="Search by name or key"
             :source="workflowSource"
             :disabled="furtherBindings > 0"
-            :described-by="furtherBindings > 0 ? 'type-workflow-further' : undefined"
+            :invalid="Boolean(messageFor(WORKFLOW_PATH))"
+            :described-by="workflowDescribedBy"
           />
+          <!-- #716: a revision retired between this chooser listing it and the
+               save is refused here, and the server's reason belongs under it. -->
+          <p
+            v-if="messageFor(WORKFLOW_PATH)"
+            id="type-workflow-message"
+            class="text-xs text-destructive"
+            data-testid="type-workflow-message"
+          >
+            {{ messageFor(WORKFLOW_PATH) }}
+          </p>
           <p class="text-xs text-muted-foreground">
             Documents of this type route through it when submitted.
           </p>

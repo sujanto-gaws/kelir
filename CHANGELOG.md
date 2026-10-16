@@ -416,6 +416,28 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A document type bound to a deprecated workflow revision can be renamed**
+  ([#716](https://github.com/sujanto-gaws/kelir/issues/716)). `PUT
+  /document-types/{id}` checked every binding in a sent `workflows` array, so
+  once a bound revision was deprecated, a rename that re-sent the type's
+  stored bindings was refused with 422 `NOT_PUBLISHED`: from the dialog
+  until #718 stopped it sending an unchanged chooser, and from an API client
+  until this fix. A sent binding whose five fields (`workflowDefinitionId`,
+  `conditionExpression`, `priority`, `validFrom`, `validTo`) all equal one of
+  the type's stored rows is now kept without the check. A changed binding is
+  still checked, and refused with 422 `NOT_PUBLISHED` or `NOT_FOUND` at
+  `workflows.{i}.workflowDefinitionId`. Submission is unchanged: the type's
+  documents are refused at submit until it is bound to an active revision.
+  A form or list binding is still checked whenever it is sent, so a type
+  whose bound form or list was retired cannot yet be renamed from the dialog
+  ([#739](https://github.com/sujanto-gaws/kelir/issues/739)).
+- **The document type dialog shows a refusal under the chooser it concerns**
+  ([#716](https://github.com/sujanto-gaws/kelir/issues/716)). A refused save
+  said only *Validation failed*. A detail at
+  `workflows.0.workflowDefinitionId` is now shown under the workflow chooser,
+  one at `formId` under the form chooser, and one at `listId` under the list
+  chooser. A detail at any other path is listed with the message at the top
+  of the dialog, so none is dropped.
 - **Saving the document type dialog keeps the workflow bindings it does not
   show** ([#718](https://github.com/sujanto-gaws/kelir/issues/718)). Every
   save sent `workflows`, built from the chooser alone, and a sent array

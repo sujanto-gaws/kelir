@@ -93,19 +93,30 @@ impl DocumentTypeStatus {
 /// engine evaluates them in `priority` order and the first match wins. Which is
 /// why this is a collection rather than a column, and why `priority` is on the
 /// wire — an ordering the caller cannot see is an ordering they cannot fix.
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+///
+/// `PartialEq` is what "unchanged" means on an update (#716): a sent binding
+/// equal to a stored one in all five fields is not re-checked
+/// ([`changed_bindings`]).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkflowBinding {
     /// The workflow definition this type routes to.
     ///
     /// **Checked since [#187](https://github.com/sujanto-gaws/kelir/issues/187).**
-    /// It must name a definition that exists in this tenant and is `ACTIVE`,
-    /// verified in the write's transaction under a share lock on the row the
-    /// check read (`service::check_workflow_bindings`), and `0025_workflow.sql`
-    /// added the foreign key `0015_document.sql` deferred. Before Sprint 10 this
-    /// comment said the id was unverifiable, which stopped being true the moment
-    /// the workflow table existed — a comment describing a state that has ended
-    /// is worse than no comment (**D-34**, one document over).
+    /// A binding a write sets must name a definition that exists in this tenant
+    /// and is `ACTIVE`, verified in the write's transaction under a share lock
+    /// on the row the check read (`service::check_workflow_bindings`), and
+    /// `0025_workflow.sql` added the foreign key `0015_document.sql` deferred.
+    /// Before Sprint 10 this comment said the id was unverifiable, which stopped
+    /// being true the moment the workflow table existed — a comment describing a
+    /// state that has ended is worse than no comment (**D-34**, one document
+    /// over).
+    ///
+    /// **A binding an update sends back unchanged is not re-checked**
+    /// ([#716](https://github.com/sujanto-gaws/kelir/issues/716)), so a type
+    /// whose revision was deprecated since can still be renamed by a caller
+    /// that PUTs the whole type. It stays bound to that revision, and a
+    /// submission still refuses it (#187, #713).
     pub workflow_definition_id: Uuid,
     /// `null` means this is the default binding.
     pub condition_expression: Option<String>,
@@ -241,7 +252,36 @@ pub struct UpdateDocumentTypeRequest {
     /// it wants kept, and a caller that does not edit bindings leaves the key
     /// out (#718). Unlike the fields above, an absent key and `null` mean the
     /// same thing here, because "no bindings" is spelled `[]`.
+    ///
+    /// Of a sent array, only the bindings that differ from every stored one
+    /// are checked; one sent back exactly as stored binds nothing new (#716,
+    /// [`changed_bindings`]).
     pub workflows: Option<Vec<WorkflowBinding>>,
+}
+
+/// The sent bindings a write has to check, each with the index it was sent at:
+/// those equal to **no** stored binding in all five fields (#716).
+///
+/// A binding sent back exactly as stored binds nothing the type was not
+/// already bound to, so re-checking it could only refuse an unrelated edit —
+/// a rename, say — because its revision was deprecated since. That is a real
+/// state, and the fix for it is to change the binding, not to be unable to
+/// rename the type. A binding that differs in any one field, the revision or
+/// its condition, priority or window, is a binding the caller is setting, and
+/// is checked like a new one.
+///
+/// Matched as a set rather than by position, so a caller that sends the stored
+/// bindings in another order changes nothing. The index is the sent one, which
+/// is the position a refusal names. Two sent bindings cannot both match one
+/// stored row: they would share a priority, which `check_workflows` refuses
+/// before this runs. On create, `stored` is empty and every binding is checked.
+pub fn changed_bindings<'a>(
+    sent: &'a [WorkflowBinding],
+    stored: &'a [WorkflowBinding],
+) -> impl Iterator<Item = (usize, &'a WorkflowBinding)> + 'a {
+    sent.iter()
+        .enumerate()
+        .filter(move |(_, binding)| !stored.contains(binding))
 }
 
 fn bounded(
@@ -510,6 +550,85 @@ mod tests {
         };
 
         assert!(validate_update(&request).is_ok());
+    }
+
+    fn date(month: u32) -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(2026, month, 1).expect("a date")
+    }
+
+    /// A binding with all five fields set, so each can be edited alone.
+    fn full_binding(priority: i32) -> WorkflowBinding {
+        WorkflowBinding {
+            workflow_definition_id: Uuid::now_v7(),
+            condition_expression: Some(r#"{">":[{"var":"amount"},1000]}"#.to_owned()),
+            priority,
+            valid_from: Some(date(1)),
+            valid_to: Some(date(12)),
+        }
+    }
+
+    fn changed_indexes(sent: &[WorkflowBinding], stored: &[WorkflowBinding]) -> Vec<usize> {
+        changed_bindings(sent, stored)
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    #[test]
+    fn a_binding_sent_back_unchanged_is_not_changed_in_any_order() {
+        let stored = vec![full_binding(1), full_binding(2)];
+        let reversed = vec![stored[1].clone(), stored[0].clone()];
+
+        assert!(changed_indexes(&stored, &stored).is_empty());
+        assert!(changed_indexes(&reversed, &stored).is_empty());
+    }
+
+    #[test]
+    fn a_binding_that_differs_in_any_one_field_is_changed() {
+        // All five fields, one at a time: matching on the revision alone would
+        // let the last four through unchecked (#716 AC6).
+        type Edit = (&'static str, fn(&mut WorkflowBinding));
+        let stored = vec![full_binding(1)];
+        let edits: [Edit; 7] = [
+            ("revision", |b| b.workflow_definition_id = Uuid::now_v7()),
+            ("condition", |b| {
+                b.condition_expression = Some("{}".to_owned())
+            }),
+            ("condition cleared", |b| b.condition_expression = None),
+            ("priority", |b| b.priority = 2),
+            ("start", |b| b.valid_from = Some(date(2))),
+            ("start cleared", |b| b.valid_from = None),
+            ("end cleared", |b| b.valid_to = None),
+        ];
+
+        for (label, edit) in edits {
+            let mut sent = stored.clone();
+            edit(&mut sent[0]);
+
+            assert_eq!(changed_indexes(&sent, &stored), vec![0], "{label}");
+        }
+    }
+
+    #[test]
+    fn a_changed_binding_is_reported_at_the_index_it_was_sent_at() {
+        let stored = vec![full_binding(1), full_binding(2)];
+        let mut replaced = stored[0].clone();
+        replaced.workflow_definition_id = Uuid::now_v7();
+
+        assert_eq!(
+            changed_indexes(&[replaced.clone(), stored[1].clone()], &stored),
+            vec![0]
+        );
+        assert_eq!(
+            changed_indexes(&[stored[1].clone(), replaced], &stored),
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn with_nothing_stored_every_binding_is_changed() {
+        let sent = vec![full_binding(1), full_binding(2)];
+
+        assert_eq!(changed_indexes(&sent, &[]), vec![0, 1]);
     }
 
     #[test]

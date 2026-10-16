@@ -236,6 +236,21 @@ async fn workflows_of<'e, E: PgExecutor<'e>>(
         .collect())
 }
 
+/// A type's stored workflow bindings, read in the write's transaction (#716).
+///
+/// Called by `update_type` after [`lock_type_binding`], and that order is what
+/// makes the read safe to decide on without a lock of its own: the only writer
+/// of these rows is [`replace_workflows`], and an update reaches it only through
+/// the same `FOR UPDATE` on the type row. The same statement as the read that
+/// returns a type's bindings, so it shares that query's offline entry.
+pub async fn bound_workflows(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    document_type_id: Uuid,
+) -> Result<Vec<WorkflowBinding>, sqlx::Error> {
+    workflows_of(&mut **transaction, tenant_id, document_type_id).await
+}
+
 /// Reads a type's current form binding **and holds the type row** for the rest
 /// of the transaction.
 ///
