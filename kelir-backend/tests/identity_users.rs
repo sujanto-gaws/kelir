@@ -205,15 +205,35 @@ async fn an_administrator_can_deactivate_another_account() {
     assert_eq!(response.status, StatusCode::NO_CONTENT);
 }
 
+/// What an administrative reset is *for*: the previous holder of the password
+/// stops being able to extend their session.
+///
+/// It ends the refresh tokens, not the access token already issued, which
+/// works until it expires, at most `ACCESS_TOKEN_TTL_MINUTES` (15) after issue
+/// with no leeway (#650). That is the documented cost of carrying permissions
+/// in the token (architecture 01 §18.1), and the check `middleware::auth`
+/// makes on every request reads deletion, not a password. A change and a
+/// self-service reset leave the same window, each pinned by its own test, and
+/// since #697 (decision D-107 A) every OpenAPI 204 text of the three says so.
+///
+/// **The `200` on `/auth/me` pins a gap, not a guarantee.** If it ever fails,
+/// the window has been closed and the set-password text can widen. Read the
+/// failure as news, not as a regression.
+///
+/// # Seen to fail (coding standard 2.9)
+///
+/// 2026-10-16: a stand-in put in `Authenticated::from_request_parts`, after
+/// the deletion check, refusing with `AppError::Unauthorized` a caller with no
+/// unrevoked row in `refresh_tokens`. This test reddened on the target's
+/// `200`. The stand-in was reverted, and it was green.
+///
+/// A second stand-in, refusing a token whose `iat` is before
+/// `users.updated_at` (one-second grained), reddened this test in only some
+/// runs: a login and a reset in the same second let the token through. The
+/// sleep below closes that, and with it the stand-in reddened this test in
+/// three runs of three (`test-engineer`, 2026-10-16).
 #[tokio::test]
-async fn setting_a_password_ends_every_refresh_token_for_that_user() {
-    // What an administrative reset is *for*: the previous holder of the
-    // password stops being able to extend their session.
-    //
-    // It ends the refresh tokens, not the access token already issued — that
-    // one works until it expires, at most fifteen minutes from
-    // issue, which is the documented cost of carrying permissions in the token. #16 and #60 carry the same gap on the
-    // self-service path, where the contract claims otherwise.
+async fn setting_a_password_ends_every_refresh_token_but_not_an_issued_access_token() {
     let app = TestApp::spawn().await;
     let admin = app.administrator_token().await;
 
@@ -239,6 +259,15 @@ async fn setting_a_password_ends_every_refresh_token_for_that_user() {
         .as_str()
         .expect("refreshToken is a string")
         .to_owned();
+    let access = signed_in.data()["accessToken"]
+        .as_str()
+        .expect("accessToken is a string")
+        .to_owned();
+
+    // The reset lands in a later second than the token's `iat`, so a check
+    // with one-second granularity (`iat` before `users.updated_at`) would
+    // refuse the token, and the `200` below would fail as news.
+    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
 
     let reset = app
         .post(
@@ -249,6 +278,24 @@ async fn setting_a_password_ends_every_refresh_token_for_that_user() {
         .await;
 
     assert_eq!(reset.status, StatusCode::NO_CONTENT, "{}", reset.body);
+
+    // The target's access token, issued before the reset, still reads the
+    // account.
+    let me = app.get("/api/v1/auth/me", Some(&access)).await;
+
+    assert_eq!(
+        me.status,
+        StatusCode::OK,
+        "the target's pre-reset access token was refused — the window is closed, \
+         so widen the set-password text in identity/handlers.rs and rewrite this \
+         test; body {}",
+        me.body
+    );
+    assert_eq!(
+        me.body["data"]["id"],
+        json!(id),
+        "the pre-reset access token read somebody else's account"
+    );
 
     let refreshed = app
         .post(

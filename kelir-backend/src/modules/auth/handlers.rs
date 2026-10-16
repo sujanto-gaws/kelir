@@ -246,7 +246,7 @@ async fn me(
     tag = "auth",
     request_body = ChangePasswordRequest,
     responses(
-        (status = 204, description = "Changed; every refresh token for the account is revoked. An access token already issued remains valid until it expires."),
+        (status = 204, description = "Changed; every refresh token for the account is revoked. An access token already issued remains valid until it expires, at most 15 minutes after issue."),
         (status = 422, description = "The current password is wrong, or the new one is too short"),
         (status = 429, description = "Too many failed attempts from this address; see Retry-After")
     ),
@@ -304,7 +304,7 @@ async fn forgot_password(
     post, path = "/api/v1/auth/reset-password", tag = "auth",
     request_body = ResetPasswordRequest,
     responses(
-        (status = 204, description = "The password is changed and every other session for that account is signed out"),
+        (status = 204, description = "The password is changed; every refresh token for the account is revoked. An access token already issued remains valid until it expires, at most 15 minutes after issue."),
         (status = 422, description = "The token is not valid, is used or expired, or the new password fails the policy"),
         (status = 429, description = "Too many attempts from this address; see Retry-After")
     )

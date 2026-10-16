@@ -129,6 +129,66 @@ async fn a_person_resets_their_password_and_signs_in_with_the_new_one() {
     assert_eq!(refused.status, StatusCode::UNAUTHORIZED);
 }
 
+/// The email says what redeeming the link does, read off the delivered body
+/// rather than the `format!` string (#697, AC8).
+///
+/// Redeeming revokes refresh tokens and nothing else, so a session already
+/// open keeps its access token until it expires, at most
+/// `ACCESS_TOKEN_TTL_MINUTES` (15) after issue. The body said *using it signs
+/// you out everywhere else* until #697;
+/// `a_reset_revokes_every_refresh_token_and_an_issued_access_token_still_works`
+/// is what this sentence is held to. The link's lifetime and the *if this was
+/// not you* sentence are kept.
+///
+/// # Seen to fail (coding standard 2.9)
+///
+/// 2026-10-16: `reset.rs`'s old sentence, `It stops working in
+/// {TOKEN_TTL_MINUTES} minutes, and using it signs you out everywhere else.`,
+/// put back in place of the new one. This test reddened, naming the two
+/// sentences missing (the link's lifetime, which the old body ran on with a
+/// comma, and the session sentence) and the two overclaims, `signs you out`
+/// and `everywhere`. Restored, green.
+#[tokio::test]
+async fn the_reset_email_says_what_a_reset_does_to_a_session() {
+    let app = TestApp::spawn().await;
+    let (username, _) = user(&app, "mailbody").await;
+
+    assert_eq!(ask_for_a_link(&app, &username).await, StatusCode::ACCEPTED);
+
+    let sent = app.mail_delivered(1).await;
+    let body = sent[0]
+        .body
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let mut wrong = Vec::new();
+
+    for sentence in [
+        "It stops working in 30 minutes.",
+        "Using it stops your other sessions from being renewed, and any still \
+         open ends within 15 minutes.",
+        "If this was not you, nothing has changed and you can ignore this message.",
+    ] {
+        if !body.contains(sentence) {
+            wrong.push(format!("no longer says `{sentence}`"));
+        }
+    }
+
+    let lower = body.to_lowercase();
+    for overclaim in ["signs you out", "everywhere", "signed out", "immediately"] {
+        if lower.contains(overclaim) {
+            wrong.push(format!("claims more than a reset does: `{overclaim}`"));
+        }
+    }
+
+    assert!(
+        wrong.is_empty(),
+        "the reset email:\n{}\nbody: {body}",
+        wrong.join("\n")
+    );
+}
+
 /// An email address may also be used to ask, because sign-in takes either.
 #[tokio::test]
 async fn the_identifier_may_be_an_email_address() {
@@ -331,9 +391,38 @@ async fn an_expired_token_is_refused() {
 }
 
 /// Redeeming a link revokes every refresh token for that account, so no other
-/// session can be renewed.
+/// session can be renewed, **and an access token already issued keeps working
+/// until it expires** (#697, decision D-107 A).
+///
+/// **The second half pins a gap, not a guarantee**, as
+/// `auth_change_password.rs`'s `an_access_token_issued_before_a_password_change_still_works`
+/// does for a change. Access tokens are stateless JWTs checked against no
+/// revocation list (architecture 01 §18.1), and the check `middleware::auth`
+/// makes on every request reads whether the tenant and the user are deleted,
+/// not a password. So a token issued before the reset is accepted until its
+/// `exp`, at most `ACCESS_TOKEN_TTL_MINUTES` (15) after issue, with no leeway
+/// (#650). This test was named `a_reset_signs_the_account_out_everywhere`
+/// until #697, and the reset page, the OpenAPI 204 text, the email and the
+/// `CHANGELOG` said the same. They now say what this measures.
+///
+/// If the `200` below ever fails, the window has been closed and the texts can
+/// widen. Read the failure as news, not as a regression.
+///
+/// # Seen to fail (coding standard 2.9)
+///
+/// 2026-10-16: a stand-in put in `Authenticated::from_request_parts`, after
+/// the deletion check, refusing with `AppError::Unauthorized` a caller with no
+/// unrevoked row in `refresh_tokens`. This test reddened on the `200`, and so
+/// did `identity_users.rs`'s set-password test and the change-password test.
+/// The stand-in was reverted, and all three were green.
+///
+/// A second stand-in, refusing a token whose `iat` is before
+/// `users.updated_at` (one-second grained), reddened all three in only some
+/// runs: a login and a reset in the same second let the token through. The
+/// sleep below closes that, and with it the stand-in reddened all three in
+/// three runs of three (`test-engineer`, 2026-10-16).
 #[tokio::test]
-async fn a_reset_signs_the_account_out_everywhere() {
+async fn a_reset_revokes_every_refresh_token_and_an_issued_access_token_still_works() {
     let app = TestApp::spawn().await;
     let (username, _) = user(&app, "sessions").await;
 
@@ -348,14 +437,44 @@ async fn a_reset_signs_the_account_out_everywhere() {
         .await;
 
     assert_eq!(signed_in.status, StatusCode::OK);
+    let access_token = signed_in.body["data"]["accessToken"]
+        .as_str()
+        .expect("an access token")
+        .to_owned();
     let refresh_token = signed_in.body["data"]["refreshToken"]
         .as_str()
         .expect("a refresh token")
         .to_owned();
 
+    let me = app.get("/api/v1/auth/me", Some(&access_token)).await;
+    assert_eq!(me.status, StatusCode::OK, "{}", me.body);
+    let user_id = me.body["data"]["id"].clone();
+
+    // The reset lands in a later second than the token's `iat`, so a check
+    // with one-second granularity (`iat` before `users.updated_at`) would
+    // refuse the token, and the `200` below would fail as news.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+
     ask_for_a_link(&app, &username).await;
     let token = token_from_last_mail(&app, 1).await;
-    redeem(&app, &token, NEW_PASSWORD).await;
+    let redeemed = redeem(&app, &token, NEW_PASSWORD).await;
+    assert_eq!(redeemed.status, StatusCode::NO_CONTENT, "{}", redeemed.body);
+
+    // The access token issued before the reset still reads the account.
+    let after = app.get("/api/v1/auth/me", Some(&access_token)).await;
+
+    assert_eq!(
+        after.status,
+        StatusCode::OK,
+        "the pre-reset access token was refused — the window is closed, so widen \
+         the reset texts (the page, both OpenAPI 204s, the email, the CHANGELOG) \
+         and rewrite this test; body {}",
+        after.body
+    );
+    assert_eq!(
+        after.body["data"]["id"], user_id,
+        "the pre-reset access token read somebody else's account"
+    );
 
     let refreshed = app
         .send(

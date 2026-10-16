@@ -60,7 +60,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::password::hash_password;
-use super::token::hash_refresh_token;
+use super::token::{hash_refresh_token, ACCESS_TOKEN_TTL_MINUTES};
 use crate::error::{AppError, ValidationDetail};
 use crate::mail::Mail;
 use crate::modules::audit::{self, domain::ObjectType, AuditEntry};
@@ -213,8 +213,9 @@ pub async fn request_reset(
         body: format!(
             "Somebody asked to reset the password for your {} account.\n\n\
              Open this link to choose a new one:\n\n  {link}\n\n\
-             It stops working in {TOKEN_TTL_MINUTES} minutes, and using it \
-             signs you out everywhere else.\n\n\
+             It stops working in {TOKEN_TTL_MINUTES} minutes. Using it stops \
+             your other sessions from being renewed, and any still open ends \
+             within {ACCESS_TOKEN_TTL_MINUTES} minutes.\n\n\
              If this was not you, nothing has changed and you can ignore \
              this message.\n",
             state.config.app_name

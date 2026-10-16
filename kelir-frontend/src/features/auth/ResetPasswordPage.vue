@@ -162,7 +162,8 @@ async function submit(): Promise<void> {
       <div v-if="isDone" class="rounded-md border border-border bg-card p-4">
         <p class="text-sm font-medium">Your password is changed</p>
         <p class="mt-1 text-sm text-muted-foreground">
-          Everywhere you were signed in has been signed out. Sign in again with the new password.
+          Your other sessions can no longer be renewed, and any still open ends within 15 minutes.
+          Sign in again with the new password.
         </p>
         <RouterLink
           :to="{ name: 'login' }"

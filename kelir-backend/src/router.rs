@@ -1035,6 +1035,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_two_reset_contracts_do_not_promise_more_than_they_deliver() {
+        // #697, decision D-107 A: the change-password test above, extended to
+        // the two other ways a password is replaced. The administrator's 204
+        // read "every session for that user ends", and the self-service one
+        // "every other session for that account is signed out", while each
+        // path revokes refresh tokens only. `identity_users.rs` and
+        // `auth_password_reset.rs` each pin that an access token issued before
+        // the reset still works; these descriptions now say so.
+        //
+        // Seen to fail (coding standard 2.9), 2026-10-16: each old description
+        // put back in its handler, one at a time. This test reddened, naming
+        // the route and the missing sentence. Restored, green.
+        //
+        // The "15 minutes" below is a literal in an attribute, which cannot
+        // interpolate the constant, so the constant is checked here, naming
+        // every text that repeats it. Seen to fail, 2026-10-16, with the
+        // constant at 20.
+        assert_eq!(
+            crate::modules::auth::token::ACCESS_TOKEN_TTL_MINUTES,
+            15,
+            "the access-token lifetime changed: the three password 204 texts \
+             (`auth/handlers.rs`, `identity/handlers.rs`), `ResetPasswordPage.vue`, \
+             SDD §11.1 and User Manual §2 say 15 minutes, and change with it"
+        );
+        let (_, body) = get("/api/docs/openapi.json").await;
+
+        for (path, revoked) in [
+            (
+                "/api/v1/identity/users/{id}/password",
+                "every refresh token for that user is revoked",
+            ),
+            (
+                "/api/v1/auth/reset-password",
+                "every refresh token for the account is revoked",
+            ),
+        ] {
+            let description = body["paths"][path]["post"]["responses"]["204"]["description"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{path}'s 204 carries a description"));
+
+            for sentence in [
+                revoked,
+                "An access token already issued remains valid until it expires, at most 15 \
+                 minutes after issue.",
+            ] {
+                assert!(
+                    description.contains(sentence),
+                    "{path}'s 204 no longer says `{sentence}`: {description}"
+                );
+            }
+
+            let lower = description.to_lowercase();
+            for overclaim in ["every session", "every other session", "signed out"] {
+                assert!(
+                    !lower.contains(overclaim),
+                    "{path}'s 204 claims more than a reset does (`{overclaim}`): {description}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn the_tenant_code_is_visible_in_the_published_contract() {
         // The reason tenancy travels in the request body rather than a header
         // (FR-IDM-009): a header carries the same trust as a body field while

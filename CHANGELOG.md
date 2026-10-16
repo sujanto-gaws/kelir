@@ -416,6 +416,16 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **The password-reset texts say what a reset does**
+  ([#697](https://github.com/sujanto-gaws/kelir/issues/697), decision
+  **D-107** A). The reset page, the reset email, and the OpenAPI texts for
+  `POST /auth/reset-password` and an administrator's
+  `POST /identity/users/{id}/password` said a reset ends every session for the
+  account. It revokes every refresh token for the account, and nothing else,
+  so an access token already issued works until it expires, at most 15
+  minutes. They now say so, and `v0.4.0`'s entry for the reset is corrected in
+  place. Tests now pin this for both kinds of reset. No behaviour changes: a
+  token issued before a reset is not refused early.
 - **A document type bound to a deprecated workflow revision can be renamed**
   ([#716](https://github.com/sujanto-gaws/kelir/issues/716)). `PUT
   /document-types/{id}` checked every binding in a sent `workflows` array, so
@@ -3449,8 +3459,12 @@ changed.
   `POST /api/v1/auth/forgot-password` emails a single-use link and
   `POST /api/v1/auth/reset-password` redeems it, with pages behind both and a
   "Forgot your password?" link on sign-in. The link is good for 30 minutes,
-  redeeming it signs the account out everywhere and voids every other
-  outstanding link for it, and a resend is throttled per account. **The request
+  ~~redeeming it signs the account out everywhere~~ redeeming it revokes every
+  refresh token for the account, so an access token already issued works until
+  it expires, at most 15 minutes (corrected 2026-10-16,
+  [#697](https://github.com/sujanto-gaws/kelir/issues/697)); redeeming it also
+  voids every other outstanding link for it, and a resend is throttled per
+  account. **The request
   endpoint answers the same way whatever it is given** — unknown identifier,
   suspended account, throttled resend, mail server down — because any difference
   would tell an unauthenticated caller whether an account exists. Mail goes to

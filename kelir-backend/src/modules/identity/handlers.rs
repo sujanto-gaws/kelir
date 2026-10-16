@@ -144,7 +144,7 @@ async fn deactivate_user(
 #[utoipa::path(
     post, path = "/api/v1/identity/users/{id}/password", tag = "identity",
     request_body = SetPasswordRequest,
-    responses((status = 204, description = "Password set; every session for that user ends")),
+    responses((status = 204, description = "Password set; every refresh token for that user is revoked. An access token already issued remains valid until it expires, at most 15 minutes after issue.")),
     security(("bearer" = []))
 )]
 async fn set_password(
