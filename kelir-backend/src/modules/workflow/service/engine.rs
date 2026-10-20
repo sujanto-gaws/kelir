@@ -30,6 +30,13 @@
 //! [#663](https://github.com/sujanto-gaws/kelir/issues/663) and deadlocked with
 //! a task path.
 //!
+//! **A resubmit takes the instance's open task after the document and its
+//! type** ([#667](https://github.com/sujanto-gaws/kelir/issues/667)).
+//! [`close_open_task_for_resubmit`] locks the owner's correction task
+//! `FOR UPDATE`, closes it and writes its history row, before [`fire`] enters
+//! the next state. Every other path that locks a task takes the instance
+//! first, and the resubmit already holds it, so it never waits for the task.
+//!
 //! **[`start`] holds the revision `FOR SHARE` before it inserts the instance**
 //! ([#712](https://github.com/sujanto-gaws/kelir/issues/712)), after the caller
 //! has locked the document and its type. A publish, a deprecate and a delete
@@ -400,7 +407,8 @@ pub async fn start(
 /// particular.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DecisionProvenance<'a> {
-    /// The task the decision was recorded against.
+    /// The task the decision was recorded against, or the correction task a
+    /// resubmit closed ([`close_open_task_for_resubmit`]).
     pub task_id: Option<Uuid>,
     /// Whose authority the actor was exercising, from that task's
     /// `delegated_from_user_id` ([#184] AC4, AC5).
@@ -424,6 +432,69 @@ pub struct DecisionProvenance<'a> {
     /// a caller who sent a box full of spaces has given no reason, and an edge
     /// that asks for one must not be satisfied by the space bar.
     pub comment: Option<&'a str>,
+}
+
+/// Closes the instance's open task before a resubmit fires, and answers its id
+/// ([#667], **D-113** A).
+///
+/// A `RETURNED` state may declare a task for the owner's correction. Nothing
+/// decides it: `RESUBMIT` is taken on the document, so the task stayed open
+/// beside the next state's, and that state's `insert_task` answered 409, or,
+/// into a state with no task, the instance kept an open task from a state it
+/// had left. So the resubmit closes it here, `COMPLETED` with no action, and
+/// writes one `workflow_task_history` row with `RESUBMIT` as its verb and the
+/// status read under the lock as its old status. **No `approval_decisions`
+/// row**: nothing was decided.
+///
+/// **Before [`fire`], in its transaction.** The next state's task is then the
+/// instance's only open one, and a resubmit that `fire` refuses rolls the
+/// closure back with it.
+///
+/// **What it locks.** The caller holds the instance, then the document and its
+/// type. This takes the open task `FOR UPDATE`, after all three, as every task
+/// path takes a task after its instance. A claim, a hand-off, a reassign or a
+/// decision that arrives meanwhile waits for the instance, and then finds the
+/// task closed.
+///
+/// `None` when the instance has no open task, which is JWSS §10's own
+/// `RETURNED`: the document is with its author and nobody's queue holds it.
+///
+/// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
+pub async fn close_open_task_for_resubmit(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    instance_id: Uuid,
+    actor: Option<Uuid>,
+) -> Result<Option<Uuid>, AppError> {
+    let Some(open) = task::lock_open_task_of_instance(transaction, tenant_id, instance_id).await?
+    else {
+        return Ok(None);
+    };
+
+    if task::close_for_resubmit(transaction, tenant_id, open.id, actor).await? == 0 {
+        return Err(AppError::conflict(
+            "this document's correction task changed while it was being resubmitted; \
+             reload it and submit again",
+        ));
+    }
+
+    task::record_task_history(
+        transaction,
+        tenant_id,
+        &task::TaskHistoryEntry {
+            task_id: open.id,
+            instance_id,
+            document_id: open.document_id,
+            from: Some(open.status),
+            to: TaskStatus::Completed,
+            action: Some(TransitionAction::Resubmit.into()),
+            comment: None,
+            actor,
+        },
+    )
+    .await?;
+
+    Ok(Some(open.id))
 }
 
 /// What a decision produced.

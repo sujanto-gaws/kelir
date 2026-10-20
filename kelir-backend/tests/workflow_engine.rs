@@ -3109,6 +3109,26 @@ async fn a_returned_document_is_corrected_resubmitted_and_keeps_its_number() {
     assert_eq!(came_back["fromState"], "RETURNED");
     assert_eq!(came_back["toState"], "MANAGER_APPROVAL");
 
+    // **Nothing to close** (#667 AC4): this `RETURNED` declares no task, so
+    // the resubmit closed none, its move names none, and the decided task
+    // keeps its decision.
+    let (closures, named, kept): (i64, Option<Uuid>, Option<String>) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM workflow_task_history
+                 WHERE document_id = $1 AND action = 'RESUBMIT'),
+                (SELECT task_id FROM workflow_history
+                 WHERE document_id = $1 AND action = 'RESUBMIT'),
+                (SELECT action FROM workflow_tasks WHERE id = $2)",
+    )
+    .bind(id)
+    .bind(task)
+    .fetch_one(&app.pool)
+    .await
+    .expect("read what the resubmit wrote");
+    assert_eq!(
+        (closures, named, kept.as_deref()),
+        (0, None, Some("RETURN"))
+    );
+
     // --- And the loop closes: the new task approves ------------------------
     let next_task = open_task_of(&app, id).await;
     assert_ne!(next_task, task, "the resubmission reused the decided task");

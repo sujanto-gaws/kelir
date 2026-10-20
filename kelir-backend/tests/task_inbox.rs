@@ -6638,20 +6638,39 @@ async fn returned_document(
     queue: &str,
     rechecked: bool,
 ) -> (Uuid, Uuid) {
+    let definition = returned_for_correction(&code.to_lowercase(), queue, rechecked);
+
+    returned_under(app, token, code, queue, definition).await
+}
+
+/// [`returned_document`], under `definition`, whose key is `code` in lower
+/// case and whose `MANAGER_APPROVAL` is offered to `queue`.
+async fn returned_under(
+    app: &TestApp,
+    token: &str,
+    code: &str,
+    queue: &str,
+    definition: Value,
+) -> (Uuid, Uuid) {
     let role = worker_role(app, queue).await;
     let (_, approver) = worker(app, &format!("{}.approver", code.to_lowercase()), &[role]).await;
 
-    let key = code.to_lowercase();
-    let definition = returned_for_correction(&key, queue, rechecked);
-    let workflow = publish_workflow_definition(app, token, &key, definition).await;
+    let workflow = publish_workflow_definition(app, token, &code.to_lowercase(), definition).await;
     let type_id = document_type(app, token, code, workflow).await;
     let document = submitted_document(app, token, type_id, "Returned for correction").await;
+
+    (document, returned_by(app, &approver, document).await)
+}
+
+/// `approver` returns `document` from `MANAGER_APPROVAL`. Answers the owner's
+/// correction task.
+async fn returned_by(app: &TestApp, approver: &str, document: Uuid) -> Uuid {
     let manager = open_task_of(app, document).await;
 
     let returned = app
         .post(
             &format!("/api/v1/workflow/tasks/{manager}/decision"),
-            Some(&approver),
+            Some(approver),
             json!({ "action": "RETURN", "comment": "Fix the amount" }),
         )
         .await;
@@ -6660,7 +6679,7 @@ async fn returned_document(
     let correction = open_task_of(app, document).await;
     assert_ne!(correction, manager);
 
-    (document, correction)
+    correction
 }
 
 /// **Record 21's P1, staged with real routes on both sides.**
@@ -6771,10 +6790,12 @@ async fn document_and_instance(app: &TestApp, document: Uuid) -> (String, String
 ///
 /// Staged by [`resubmit_during_a_reassign`]. The resubmit is seen blocked in
 /// `lock_instance`'s `FOR UPDATE` on `workflow_instances`. Released, the
-/// reassign commits and answers 200. The resubmit then fires `RESUBMIT` into
-/// `MANAGER_APPROVAL`, whose task would sit beside the correction task that
-/// is still open, so it answers **409**, the refusal [#667] is about. What
-/// this test holds is that it is that 409 and not a 500.
+/// reassign commits and answers 200. The resubmit then closes the correction
+/// task as the reassign left it, offered to the role and `CREATED`, and fires
+/// `RESUBMIT` into `MANAGER_APPROVAL`, whose task is then the only open one:
+/// **200** ([#667]). It answered 409 until #667, because the correction task
+/// stayed open beside the new one; what this test held then was that it was
+/// that 409 and not a 500.
 ///
 /// [#663]: https://github.com/sujanto-gaws/kelir/issues/663
 /// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
@@ -6794,15 +6815,8 @@ async fn a_resubmit_arriving_during_a_reassign_of_the_correction_waits_for_it() 
     assert_eq!(reassigned.status, StatusCode::OK, "{}", reassigned.body);
     assert_eq!(
         resubmitted.status,
-        StatusCode::CONFLICT,
-        "the resubmit was not judged after the reassign: {}",
-        resubmitted.body
-    );
-    assert!(
-        resubmitted.body["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("already has an open task")),
-        "the resubmit was refused for another reason: {}",
+        StatusCode::OK,
+        "the resubmit did not go through after the reassign: {}",
         resubmitted.body
     );
     assert!(
@@ -6812,14 +6826,15 @@ async fn a_resubmit_arriving_during_a_reassign_of_the_correction_waits_for_it() 
 
     assert_eq!(
         task_holder(&app, correction).await,
-        (None, Some(target), "CREATED".to_owned()),
-        "the reassign did not hold"
+        (None, Some(target), "COMPLETED".to_owned()),
+        "the resubmit did not close the task as the reassign left it"
     );
+    assert_eq!(closures_of(&app, correction).await, ["CREATED"]);
     assert_eq!(
         document_and_instance(&app, document).await,
-        ("RETURNED".to_owned(), "RETURNED".to_owned()),
-        "a refused resubmit moved something"
+        ("PENDING_APPROVAL".to_owned(), "MANAGER_APPROVAL".to_owned())
     );
+    assert_ne!(open_task_of(&app, document).await, correction);
 
     assert_eq!(
         deadlocks_once_settled(&app).await,
@@ -6831,11 +6846,13 @@ async fn a_resubmit_arriving_during_a_reassign_of_the_correction_waits_for_it() 
 /// **A resubmit to a state with no task, arriving during a reassign, waits
 /// for it and then moves the process** ([#663]).
 ///
-/// The shape [#667] does not refuse: `RESUBMIT` goes to `RECHECK`, which
-/// raises no task. Staged by [`resubmit_during_a_reassign`]. The resubmit is
-/// seen blocked in `lock_instance`. Released, the reassign answers 200, and
-/// the resubmit answers 200 with the document `PENDING_APPROVAL` and the
-/// instance at `RECHECK`.
+/// `RESUBMIT` goes to `RECHECK`, which raises no task, so the resubmit went
+/// through before [#667] too, and left the correction task open in a state
+/// the process had left. Staged by [`resubmit_during_a_reassign`]. The
+/// resubmit is seen blocked in `lock_instance`. Released, the reassign answers
+/// 200, and the resubmit answers 200 with the document `PENDING_APPROVAL`, the
+/// instance at `RECHECK`, and the correction task closed as the reassign left
+/// it.
 ///
 /// [#663]: https://github.com/sujanto-gaws/kelir/issues/663
 /// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
@@ -6867,13 +6884,15 @@ async fn a_resubmit_to_a_state_with_no_task_during_a_reassign_waits_and_moves() 
 
     assert_eq!(
         task_holder(&app, correction).await,
-        (None, Some(target), "CREATED".to_owned()),
-        "the reassign did not hold"
+        (None, Some(target), "COMPLETED".to_owned()),
+        "the resubmit did not close the task as the reassign left it"
     );
+    assert_eq!(closures_of(&app, correction).await, ["CREATED"]);
     assert_eq!(
         document_and_instance(&app, document).await,
         ("PENDING_APPROVAL".to_owned(), "RECHECK".to_owned())
     );
+    assert_eq!(open_tasks_of(&app, document).await, Vec::<Uuid>::new());
 
     assert_eq!(
         deadlocks_once_settled(&app).await,
@@ -6923,8 +6942,8 @@ async fn a_resubmit_to_a_state_with_no_task_during_a_reassign_waits_and_moves() 
 /// A workflow whose `RETURN` sends the document to `RETURNED`, where a
 /// correction task is offered to `corrector`. A holder of `corrector` may claim
 /// it, hand it on, or `REJECT` the document from there. `RESUBMIT` goes to
-/// `RECHECK`, which raises no task, so [#667]'s refusal never decides the
-/// outcome.
+/// `RECHECK`, which raises no task, so the 409 the correction task raised
+/// beside a next state's task before [#667] never decided the outcome here.
 ///
 /// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
 fn corrected_by_a_role(key: &str, queue: &str, corrector: &str) -> Value {
@@ -7034,6 +7053,35 @@ async fn resubmit_during_a_held_task_path(
     document: Uuid,
     first: impl FnOnce() -> tokio::task::JoinHandle<common::TestResponse>,
 ) -> (common::TestResponse, common::TestResponse, String) {
+    second_during_a_held_first(
+        app,
+        Gate {
+            table: "workflow_task_history",
+            event: "INSERT",
+        },
+        first,
+        submission(app, token, document),
+    )
+    .await
+}
+
+/// Sends `first`, stops it at `gate` inside its transaction, sends `second`,
+/// and opens the gate once `second` is seen blocked by `first` in
+/// `pg_stat_activity`, whatever it waits on. Answers both responses and the
+/// statement `second` waited in.
+///
+/// [`resubmit_during_a_held_task_path`] races a resubmit behind a task path
+/// with it ([#663]), and [#667]'s tests race a task path, a second resubmit
+/// or an edit the other way round.
+///
+/// [#663]: https://github.com/sujanto-gaws/kelir/issues/663
+/// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
+async fn second_during_a_held_first(
+    app: &Arc<TestApp>,
+    gate: Gate,
+    first: impl FnOnce() -> tokio::task::JoinHandle<common::TestResponse>,
+    second: impl FnOnce() -> tokio::task::JoinHandle<common::TestResponse>,
+) -> (common::TestResponse, common::TestResponse, String) {
     use sqlx::{Connection, PgConnection};
     use std::time::Duration;
     use tokio::time::Instant;
@@ -7053,20 +7101,21 @@ async fn resubmit_during_a_held_task_path(
     .execute(&app.pool)
     .await
     .expect("the gate's function");
-    sqlx::query(
-        "CREATE TRIGGER test_history_gate BEFORE INSERT ON workflow_task_history
+    sqlx::query(&format!(
+        "CREATE TRIGGER test_history_gate BEFORE {} ON {}
          FOR EACH ROW EXECUTE FUNCTION test_history_gate()",
-    )
+        gate.event, gate.table
+    ))
     .execute(&app.pool)
     .await
     .expect("the gate's trigger");
 
-    let mut gate = PgConnection::connect_with(&app.pool.connect_options())
+    let mut gate_connection = PgConnection::connect_with(&app.pool.connect_options())
         .await
         .expect("the gate's connection");
     sqlx::query("SELECT pg_advisory_lock($1)")
         .bind(GATE)
-        .execute(&mut gate)
+        .execute(&mut gate_connection)
         .await
         .expect("close the gate");
 
@@ -7088,57 +7137,62 @@ async fn resubmit_during_a_held_task_path(
             break pid;
         }
         if first.is_finished() {
-            let answered = first.await.expect("the task path did not panic");
+            let answered = first.await.expect("the first request did not panic");
             panic!(
-                "the task path finished without reaching its history row: {} {}",
-                answered.status, answered.body
+                "the first request finished without reaching the gate on {} {}: {} {}",
+                gate.event, gate.table, answered.status, answered.body
             );
         }
         assert!(
             Instant::now() < deadline,
-            "the task path never reached its history row"
+            "the first request never reached the gate on {} {}",
+            gate.event,
+            gate.table
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     };
 
-    let resubmitted = submission(app, token, document)();
+    let second = second();
 
     let deadline = Instant::now() + PATIENCE;
     let waited_in = loop {
         if let Some(statement) = statement_blocked_by(app, held).await {
             break statement;
         }
-        if resubmitted.is_finished() {
-            let answered = resubmitted.await.expect("the resubmit did not panic");
+        if second.is_finished() {
+            let answered = second.await.expect("the second request did not panic");
             panic!(
-                "the resubmit did not wait for the task path: {} {}",
+                "the second request did not wait for the first: {} {}",
                 answered.status, answered.body
             );
         }
         assert!(
             Instant::now() < deadline,
-            "the resubmit was never seen waiting on the task path"
+            "the second request was never seen waiting on the first"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     };
 
     sqlx::query("SELECT pg_advisory_unlock($1)")
         .bind(GATE)
-        .execute(&mut gate)
+        .execute(&mut gate_connection)
         .await
         .expect("open the gate");
-    gate.close().await.expect("close the gate's connection");
+    gate_connection
+        .close()
+        .await
+        .expect("close the gate's connection");
 
     let first = tokio::time::timeout(PATIENCE, first)
         .await
-        .expect("the task path did not finish once the gate opened")
-        .expect("the task path did not panic");
-    let resubmitted = tokio::time::timeout(PATIENCE, resubmitted)
+        .expect("the first request did not finish once the gate opened")
+        .expect("the first request did not panic");
+    let second = tokio::time::timeout(PATIENCE, second)
         .await
-        .expect("the resubmit did not finish once the task path committed")
-        .expect("the resubmit did not panic");
+        .expect("the second request did not finish once the first committed")
+        .expect("the second request did not panic");
 
-    (first, resubmitted, waited_in)
+    (first, second, waited_in)
 }
 
 /// **A resubmit arriving during a claim of the correction task waits for it,
@@ -7146,10 +7200,12 @@ async fn resubmit_during_a_held_task_path(
 ///
 /// The claim is stopped at its history row by
 /// [`resubmit_during_a_held_task_path`], and the resubmit is seen blocked in
-/// `lock_instance`. Released, both answer 200: the corrector holds the task,
-/// and the process is at `RECHECK`.
+/// `lock_instance`. Released, both answer 200: the process is at `RECHECK`,
+/// and the task is closed as the claim left it, the corrector's and
+/// `ASSIGNED` when the resubmit took it ([#667]).
 ///
 /// [#663]: https://github.com/sujanto-gaws/kelir/issues/663
+/// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
 #[tokio::test]
 async fn a_resubmit_arriving_during_a_claim_of_the_correction_waits_for_it() {
     let app = Arc::new(TestApp::spawn().await);
@@ -7191,13 +7247,18 @@ async fn a_resubmit_arriving_during_a_claim_of_the_correction_waits_for_it() {
         (
             Some(correction.corrector_id),
             Some(correction.role),
-            "ASSIGNED".to_owned()
+            "COMPLETED".to_owned()
         ),
-        "the claim did not hold"
+        "the resubmit did not close the task as the claim left it"
     );
+    assert_eq!(closures_of(&app, task).await, ["ASSIGNED"]);
     assert_eq!(
         document_and_instance(&app, correction.document).await,
         ("PENDING_APPROVAL".to_owned(), "RECHECK".to_owned())
+    );
+    assert_eq!(
+        open_tasks_of(&app, correction.document).await,
+        Vec::<Uuid>::new()
     );
 
     assert_eq!(
@@ -7213,9 +7274,11 @@ async fn a_resubmit_arriving_during_a_claim_of_the_correction_waits_for_it() {
 /// The corrector claims the task, then hands it to a colleague. The hand-off
 /// is stopped at its history row by [`resubmit_during_a_held_task_path`], and
 /// the resubmit is seen blocked in `lock_instance`. Released, both answer 200:
-/// the colleague holds the task, and the process is at `RECHECK`.
+/// the process is at `RECHECK`, and the task is closed as the hand-off left
+/// it, the colleague's ([#667]).
 ///
 /// [#663]: https://github.com/sujanto-gaws/kelir/issues/663
+/// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
 #[tokio::test]
 async fn a_resubmit_arriving_during_a_hand_off_of_the_correction_waits_for_it() {
     let app = Arc::new(TestApp::spawn().await);
@@ -7259,13 +7322,18 @@ async fn a_resubmit_arriving_during_a_hand_off_of_the_correction_waits_for_it() 
         (
             Some(correction.colleague_id),
             Some(correction.role),
-            "ASSIGNED".to_owned()
+            "COMPLETED".to_owned()
         ),
-        "the hand-off did not hold"
+        "the resubmit did not close the task as the hand-off left it"
     );
+    assert_eq!(closures_of(&app, task).await, ["ASSIGNED"]);
     assert_eq!(
         document_and_instance(&app, correction.document).await,
         ("PENDING_APPROVAL".to_owned(), "RECHECK".to_owned())
+    );
+    assert_eq!(
+        open_tasks_of(&app, correction.document).await,
+        Vec::<Uuid>::new()
     );
 
     assert_eq!(
@@ -7283,9 +7351,11 @@ async fn a_resubmit_arriving_during_a_hand_off_of_the_correction_waits_for_it() 
 /// it updates the document, and the resubmit is seen blocked in
 /// `lock_instance`. Released, the decision answers 200 and the document is
 /// `REJECTED`. The resubmit then reads a document that is not editable, so it
-/// answers 409 and moves nothing.
+/// answers 409, moves nothing, and closes nothing: the task keeps the
+/// decision's action and has no `RESUBMIT` row ([#667]).
 ///
 /// [#663]: https://github.com/sujanto-gaws/kelir/issues/663
+/// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
 #[tokio::test]
 async fn a_resubmit_arriving_during_a_decision_on_the_correction_waits_for_it() {
     let app = Arc::new(TestApp::spawn().await);
@@ -7339,6 +7409,8 @@ async fn a_resubmit_arriving_during_a_decision_on_the_correction_waits_for_it() 
         ),
         "the decision did not hold"
     );
+    assert_eq!(closures_of(&app, task).await, Vec::<String>::new());
+    assert_eq!(task_action(&app, task).await.as_deref(), Some("REJECT"));
     assert_eq!(
         document_and_instance(&app, correction.document).await,
         ("REJECTED".to_owned(), "REJECTED".to_owned()),
@@ -7555,6 +7627,811 @@ async fn a_first_submit_overtaken_by_a_submit_and_a_return_is_refused_with_a_409
         before,
         "PostgreSQL counted a deadlock"
     );
+}
+
+// ---------------------------------------------------------------------------
+// #667 — a resubmit closes the owner's correction task (D-113 A)
+// ---------------------------------------------------------------------------
+//
+// A `RETURNED` state may declare a task for the owner's correction, and
+// nothing decided it: `RESUBMIT` is taken on the document. So a resubmit into
+// a state with a task answered 409 beside it, and one into a state with no
+// task left it open in a state the process had left. The resubmit now locks
+// the instance's open task, after the instance, the document and its type,
+// closes it `COMPLETED` with no action, writes one `workflow_task_history` row
+// with `RESUBMIT` as its verb, and only then fires.
+//
+// # Seen red at `7c17070`, the code without the closure, 2026-10-20
+//
+// | Test | How it went red |
+// |---|---|
+// | *a resubmit closes the correction task…* (AC1), *a closed correction task has one history row…* (AC2), *a resubmit closes only its own instance's task* (AC6) | The resubmit answered 409, *this process already has an open task* |
+// | #663's *…during a reassign of the correction…*, flipped (AC7) | The same 409 |
+// | #663's *…to a state with no task during a reassign…*, *…during a claim…* and *…during a hand-off…* (AC3) | 200, and the task stayed `CREATED`, `ASSIGNED` and `ASSIGNED`: open in a state the process had left |
+// | The four *…arriving during a resubmit…* (AC8) | The resubmit never reached the gate: with no closure it writes no task history into `RECHECK`, so it answered 200 and left the task open, and the task path was never sent |
+// | *two resubmits at once…*, *…during the owner's edit…*, *a role delete arriving during a resubmit…* (AC9) | The first resubmit answered 409 beside the open task |
+//
+// Green there, as predicted: *a refused resubmit leaves the correction task
+// open* (AC5), *a resubmit arriving during a delete of the next state's
+// role…*, which refuses either way, and #663's decision test.
+//
+// # Mutations of the closure, each applied alone and reverted, 2026-10-20
+//
+// | Mutation | Result |
+// |---|---|
+// | The closure removed | Red: the 14 tests above, AC1, AC2, AC3, AC6, AC7, AC8 and AC9 |
+// | The closure moved after `fire` | Red: AC1, AC2, AC6, the flipped reassign, the edit, two resubmits and the delete (`insert_task`'s 409), and `workflow_engine`'s *a returned document is corrected…* (the closure took the next state's task) |
+// | The closure only when the next state has a task | Red: AC3's three pins and the four AC8 races |
+// | The old status read on the pool rather than under the lock | Not run in this commit: its first build failed (a guard held across an `.await`); run in the next |
+// | The instance predicate dropped from `lock_open_task_of_instance` | Red: *a resubmit closes only its own instance's task*. Dropping the tenant predicate alone cannot be seen: the instance id is unique across tenants |
+// | The history row omitted | Red: 13 tests, every one that counts closures (AC2 and the rest) |
+// | #677's order reversed, the document before the instance | Red: #663's five races (AC7) answer 500, *deadlock detected*, and *two resubmits at once* waits on the document. The four AC8 races stay green: the resubmit holds everything first, so no cycle forms |
+// | The closure committed in a transaction of its own, before the submit's | Red: *a refused resubmit leaves the correction task open* (AC5), the raced delete, the edit, and AC2 |
+// | The closure refusing an instance with no open task | Red: `workflow_engine`'s *a returned document is corrected…* (AC4) only |
+
+/// The old status of each of the task's `RESUBMIT` history rows, oldest first.
+async fn closures_of(app: &TestApp, task: Uuid) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT old_status FROM workflow_task_history
+         WHERE task_id = $1 AND action = 'RESUBMIT' ORDER BY id",
+    )
+    .bind(task)
+    .fetch_all(&app.pool)
+    .await
+    .expect("read the task's closures")
+}
+
+/// The document's open tasks.
+async fn open_tasks_of(app: &TestApp, document: Uuid) -> Vec<Uuid> {
+    sqlx::query_scalar(
+        "SELECT id FROM workflow_tasks
+         WHERE document_id = $1 AND status IN ('CREATED','ASSIGNED','IN_PROGRESS')",
+    )
+    .bind(document)
+    .fetch_all(&app.pool)
+    .await
+    .expect("read the open tasks")
+}
+
+/// The task's `action` column.
+async fn task_action(app: &TestApp, task: Uuid) -> Option<String> {
+    sqlx::query_scalar("SELECT action FROM workflow_tasks WHERE id = $1")
+        .bind(task)
+        .fetch_one(&app.pool)
+        .await
+        .expect("read the task's action")
+}
+
+/// How many rows the task's history and its decisions hold.
+async fn history_and_decisions(app: &TestApp, task: Uuid) -> (i64, i64) {
+    sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM workflow_task_history WHERE task_id = $1),
+                (SELECT COUNT(*) FROM approval_decisions WHERE task_id = $1)",
+    )
+    .bind(task)
+    .fetch_one(&app.pool)
+    .await
+    .expect("count the task's history and decisions")
+}
+
+/// The document's task history, in the order it was written: task, old
+/// status, new status, action, comment and actor.
+#[allow(
+    clippy::type_complexity,
+    reason = "one row of the table, read as it is"
+)]
+async fn task_history_of_document(
+    app: &TestApp,
+    document: Uuid,
+) -> Vec<(
+    Uuid,
+    Option<String>,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<Uuid>,
+)> {
+    sqlx::query_as(
+        "SELECT task_id, old_status, new_status, action, comment, actor_user_id
+         FROM workflow_task_history WHERE document_id = $1 ORDER BY id",
+    )
+    .bind(document)
+    .fetch_all(&app.pool)
+    .await
+    .expect("read the document's task history")
+}
+
+async fn resubmit(app: &TestApp, token: &str, document: Uuid) -> common::TestResponse {
+    app.send(
+        Method::POST,
+        &format!("/api/v1/documents/{document}/submission"),
+        Some(token),
+        None,
+    )
+    .await
+}
+
+/// **A resubmit closes the owner's correction task, and the next state's
+/// task is then the only open one** ([#667] AC1).
+///
+/// The correction task is `OWNER`'s, so the administrator holds it,
+/// `ASSIGNED`. The resubmit answers 200. The task is `COMPLETED`, by the
+/// resubmitter, with no action and its holder columns as they were. The
+/// owner's open inbox no longer lists it, and the finished list does.
+///
+/// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
+#[tokio::test]
+async fn a_resubmit_closes_the_correction_task_and_enters_the_next_states_task() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let owner = administrator_id(&app).await;
+
+    let (document, correction) =
+        returned_document(&app, &token, "TI_RC_AC1", "TI-RC-AC1-Q", false).await;
+    assert_eq!(
+        task_holder(&app, correction).await,
+        (Some(owner), None, "ASSIGNED".to_owned())
+    );
+
+    let resubmitted = resubmit(&app, &token, document).await;
+    assert_eq!(resubmitted.status, StatusCode::OK, "{}", resubmitted.body);
+
+    let closed: (String, Option<String>, Option<Uuid>, bool) = sqlx::query_as(
+        "SELECT status, action, completed_by, completed_at IS NOT NULL
+         FROM workflow_tasks WHERE id = $1",
+    )
+    .bind(correction)
+    .fetch_one(&app.pool)
+    .await
+    .expect("read the correction task");
+    assert_eq!(closed, ("COMPLETED".to_owned(), None, Some(owner), true));
+    assert_eq!(
+        task_holder(&app, correction).await,
+        (Some(owner), None, "COMPLETED".to_owned()),
+        "the closure moved the holder"
+    );
+
+    let open = open_tasks_of(&app, document).await;
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_ne!(open[0], correction);
+    assert_eq!(
+        document_and_instance(&app, document).await,
+        ("PENDING_APPROVAL".to_owned(), "MANAGER_APPROVAL".to_owned())
+    );
+
+    let waiting = app.get(TASKS, Some(&token)).await;
+    assert!(!inbox_holds(&waiting, correction), "{}", waiting.body);
+    let finished = inbox_of(&app, &token, "scope=completed").await;
+    assert!(inbox_holds(&finished, correction), "{}", finished.body);
+}
+
+/// **The closure is one history row and no decision** ([#667] AC2).
+///
+/// The resubmit appends two `workflow_task_history` rows, in this order: the
+/// correction task's, `ASSIGNED` to `COMPLETED` with `RESUBMIT`, no comment
+/// and the resubmitter as the actor; then the next task's creation. Nothing
+/// is written to `approval_decisions`, and the instance's single `RESUBMIT`
+/// row in `workflow_history` names the closed task.
+///
+/// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
+#[tokio::test]
+async fn a_closed_correction_task_has_one_history_row_and_no_decision() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let owner = administrator_id(&app).await;
+
+    let (document, correction) =
+        returned_document(&app, &token, "TI_RC_AC2", "TI-RC-AC2-Q", false).await;
+    let before = task_history_of_document(&app, document).await.len();
+
+    let resubmitted = resubmit(&app, &token, document).await;
+    assert_eq!(resubmitted.status, StatusCode::OK, "{}", resubmitted.body);
+
+    let next = open_task_of(&app, document).await;
+    let rows = task_history_of_document(&app, document).await;
+    assert_eq!(
+        rows[before..],
+        [
+            (
+                correction,
+                Some("ASSIGNED".to_owned()),
+                "COMPLETED".to_owned(),
+                Some("RESUBMIT".to_owned()),
+                None,
+                Some(owner)
+            ),
+            (next, None, "CREATED".to_owned(), None, None, Some(owner)),
+        ]
+    );
+
+    assert_eq!(history_and_decisions(&app, correction).await.1, 0);
+
+    let moves: Vec<Option<Uuid>> = sqlx::query_scalar(
+        "SELECT task_id FROM workflow_history WHERE document_id = $1 AND action = 'RESUBMIT'",
+    )
+    .bind(document)
+    .fetch_all(&app.pool)
+    .await
+    .expect("read the workflow history");
+    assert_eq!(moves, [Some(correction)]);
+}
+
+/// **A refused resubmit closes nothing** ([#667] AC5).
+///
+/// Three refusals, each after the closure would have run, each in the
+/// resubmit's own transaction: a holder of `document:submit` who is not the
+/// owner (403, the edge is `allowedBy: OWNER`); the next state's role deleted
+/// (422 `ASSIGNMENT_UNRESOLVED`); and a `RETURNED` with no `RESUBMIT` edge
+/// (422 `NO_SUCH_TRANSITION`). Each correction task stays `ASSIGNED` to the
+/// owner, with no `RESUBMIT` row, and each document stays `RETURNED`.
+///
+/// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
+#[tokio::test]
+async fn a_refused_resubmit_leaves_the_correction_task_open() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let owner = administrator_id(&app).await;
+    let (_, stranger) = worker(&app, "ti.rc.stranger", &[fixtures::ADMIN_ROLE_ID]).await;
+
+    let (not_theirs, first) =
+        returned_document(&app, &token, "TI_RC_OWN", "TI-RC-OWN-Q", false).await;
+    let (unresolved, second) =
+        returned_document(&app, &token, "TI_RC_DEL", "TI-RC-DEL-Q", false).await;
+    sqlx::query("UPDATE roles SET deleted_at = now() WHERE role_code = 'TI-RC-DEL-Q'")
+        .execute(&app.pool)
+        .await
+        .expect("delete the next state's role");
+    let mut no_edge = returned_for_correction("ti_rc_edge", "TI-RC-EDGE-Q", false);
+    no_edge["transitions"][2]["action"] = json!("APPROVE");
+    let (edgeless, third) =
+        returned_under(&app, &token, "TI_RC_EDGE", "TI-RC-EDGE-Q", no_edge).await;
+
+    for (document, task, caller, status, code) in [
+        (not_theirs, first, &stranger, StatusCode::FORBIDDEN, None),
+        (
+            unresolved,
+            second,
+            &token,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Some("ASSIGNMENT_UNRESOLVED"),
+        ),
+        (
+            edgeless,
+            third,
+            &token,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Some("NO_SUCH_TRANSITION"),
+        ),
+    ] {
+        let refused = resubmit(&app, caller, document).await;
+        assert_eq!(refused.status, status, "{}", refused.body);
+        if let Some(code) = code {
+            assert_eq!(
+                refused.body["error"]["details"][0]["code"], code,
+                "{}",
+                refused.body
+            );
+        }
+
+        assert_eq!(
+            task_holder(&app, task).await,
+            (Some(owner), None, "ASSIGNED".to_owned()),
+            "a refused resubmit closed the task: {}",
+            refused.body
+        );
+        assert_eq!(closures_of(&app, task).await, Vec::<String>::new());
+        assert_eq!(
+            document_and_instance(&app, document).await,
+            ("RETURNED".to_owned(), "RETURNED".to_owned())
+        );
+    }
+}
+
+/// **A resubmit closes its own instance's task and no other** ([#667] AC6).
+///
+/// Two documents of one type are returned, so two correction tasks are open
+/// under one definition. The second is resubmitted: its task closes, and the
+/// first's stays `ASSIGNED`, with no `RESUBMIT` row. The first was returned
+/// first, so a lock that lost its instance predicate reaches its task first.
+///
+/// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
+#[tokio::test]
+async fn a_resubmit_closes_only_its_own_instances_task() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let owner = administrator_id(&app).await;
+
+    let role = worker_role(&app, "TI-RC-TWO-Q").await;
+    let (_, approver) = worker(&app, "ti.rc.two.approver", &[role]).await;
+    let definition = returned_for_correction("ti_rc_two", "TI-RC-TWO-Q", false);
+    let workflow = publish_workflow_definition(&app, &token, "ti_rc_two", definition).await;
+    let type_id = document_type(&app, &token, "TI_RC_TWO", workflow).await;
+
+    let bystander = submitted_document(&app, &token, type_id, "Left with its author").await;
+    let left_open = returned_by(&app, &approver, bystander).await;
+    let document = submitted_document(&app, &token, type_id, "Sent back up").await;
+    let correction = returned_by(&app, &approver, document).await;
+
+    let resubmitted = resubmit(&app, &token, document).await;
+    assert_eq!(resubmitted.status, StatusCode::OK, "{}", resubmitted.body);
+
+    assert_eq!(closures_of(&app, correction).await, ["ASSIGNED"]);
+    assert_eq!(
+        task_holder(&app, left_open).await,
+        (Some(owner), None, "ASSIGNED".to_owned()),
+        "the resubmit closed another document's correction task"
+    );
+    assert_eq!(closures_of(&app, left_open).await, Vec::<String>::new());
+    assert_eq!(open_tasks_of(&app, bystander).await, [left_open]);
+}
+
+// The four races below take the other order from #663's: **the resubmit holds
+// its locks first.** It is stopped at its closure's `workflow_task_history`
+// `INSERT`, holding the instance, the document, its type and the correction
+// task, and a task path is sent on the correction task. Each is seen waiting
+// in `lock_instance`, not on the task, and finds the task closed once the
+// resubmit commits.
+
+/// Sends the owner's resubmit of `document`, stops it at its closure's
+/// history row, then sends `path` as `caller`, and opens the gate once the
+/// task path is seen blocked behind the resubmit. Answers the resubmit's
+/// response, the task path's, and the statement the task path waited in.
+async fn task_path_during_a_held_resubmit(
+    app: &Arc<TestApp>,
+    token: &str,
+    document: Uuid,
+    (path, caller, body): (String, String, Value),
+) -> (common::TestResponse, common::TestResponse, String) {
+    let sender = Arc::clone(app);
+
+    second_during_a_held_first(
+        app,
+        Gate {
+            table: "workflow_task_history",
+            event: "INSERT",
+        },
+        submission(app, token, document),
+        move || tokio::spawn(async move { sender.post(&path, Some(&caller), body).await }),
+    )
+    .await
+}
+
+/// What a task path turned away by a resubmit's closure leaves: the resubmit's
+/// 200, the task path's closed-task 409 after waiting in `lock_instance`, the
+/// task closed from `status` with `holder` untouched, one history row more
+/// than `history` and no decision, the process at `RECHECK`, and no deadlock
+/// since `deadlocks`.
+async fn assert_turned_away(
+    app: &TestApp,
+    correction: &Correction,
+    (resubmitted, answered, waited_in): (common::TestResponse, common::TestResponse, String),
+    (holder, status, history, deadlocks): ((Option<Uuid>, Option<Uuid>), &str, i64, i64),
+) {
+    assert_eq!(resubmitted.status, StatusCode::OK, "{}", resubmitted.body);
+    assert_eq!(
+        answered.status,
+        StatusCode::CONFLICT,
+        "the task path acted on a task the resubmit closed: {}",
+        answered.body
+    );
+    assert!(
+        answered.body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("this task is COMPLETED")),
+        "the task path was refused for another reason: {}",
+        answered.body
+    );
+    assert!(
+        locks_the_instance(&waited_in),
+        "the task path waited somewhere other than the instance lock: {waited_in}"
+    );
+
+    assert_eq!(
+        task_holder(app, correction.task).await,
+        (holder.0, holder.1, "COMPLETED".to_owned()),
+        "the task path wrote the task's holder"
+    );
+    assert_eq!(closures_of(app, correction.task).await, [status]);
+    assert_eq!(
+        history_and_decisions(app, correction.task).await,
+        (history + 1, 0),
+        "the task path wrote history or a decision"
+    );
+    assert_eq!(
+        document_and_instance(app, correction.document).await,
+        ("PENDING_APPROVAL".to_owned(), "RECHECK".to_owned())
+    );
+    assert_eq!(
+        deadlocks_once_settled(app).await,
+        deadlocks,
+        "PostgreSQL counted a deadlock"
+    );
+}
+
+/// **A claim arriving during a resubmit waits, then finds the task closed**
+/// ([#667] AC8).
+///
+/// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
+#[tokio::test]
+async fn a_claim_arriving_during_a_resubmit_waits_and_finds_the_task_closed() {
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let before = deadlocks_so_far(&app).await;
+
+    let correction = returned_to_a_role(&app, &token, "TI_RC_CL").await;
+    let task = correction.task;
+    let (history, _) = history_and_decisions(&app, task).await;
+
+    let raced = task_path_during_a_held_resubmit(
+        &app,
+        &token,
+        correction.document,
+        (
+            format!("/api/v1/workflow/tasks/{task}/claim"),
+            correction.corrector.clone(),
+            json!({}),
+        ),
+    )
+    .await;
+
+    assert_turned_away(
+        &app,
+        &correction,
+        raced,
+        ((None, Some(correction.role)), "CREATED", history, before),
+    )
+    .await;
+}
+
+/// **A hand-off arriving during a resubmit waits, then finds the task
+/// closed** ([#667] AC8).
+///
+/// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
+#[tokio::test]
+async fn a_hand_off_arriving_during_a_resubmit_waits_and_finds_the_task_closed() {
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let before = deadlocks_so_far(&app).await;
+
+    let correction = returned_to_a_role(&app, &token, "TI_RC_HO").await;
+    let task = correction.task;
+    claim(&app, &correction.corrector, task).await;
+    let (history, _) = history_and_decisions(&app, task).await;
+
+    let raced = task_path_during_a_held_resubmit(
+        &app,
+        &token,
+        correction.document,
+        (
+            format!("/api/v1/workflow/tasks/{task}/delegation"),
+            correction.corrector.clone(),
+            json!({ "delegateUserId": correction.colleague_id }),
+        ),
+    )
+    .await;
+
+    assert_turned_away(
+        &app,
+        &correction,
+        raced,
+        (
+            (Some(correction.corrector_id), Some(correction.role)),
+            "ASSIGNED",
+            history,
+            before,
+        ),
+    )
+    .await;
+}
+
+/// **A reassign arriving during a resubmit waits, then finds the task
+/// closed** ([#667] AC8).
+///
+/// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
+#[tokio::test]
+async fn a_reassign_arriving_during_a_resubmit_waits_and_finds_the_task_closed() {
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let before = deadlocks_so_far(&app).await;
+
+    let correction = returned_to_a_role(&app, &token, "TI_RC_RA").await;
+    let task = correction.task;
+    claim(&app, &correction.corrector, task).await;
+    let (history, _) = history_and_decisions(&app, task).await;
+
+    let raced = task_path_during_a_held_resubmit(
+        &app,
+        &token,
+        correction.document,
+        (
+            format!("/api/v1/workflow/tasks/{task}/reassign"),
+            token.clone(),
+            json!({ "userId": correction.colleague_id }),
+        ),
+    )
+    .await;
+
+    assert_turned_away(
+        &app,
+        &correction,
+        raced,
+        (
+            (Some(correction.corrector_id), Some(correction.role)),
+            "ASSIGNED",
+            history,
+            before,
+        ),
+    )
+    .await;
+}
+
+/// **A decision arriving during a resubmit waits, then finds the task closed,
+/// and decides nothing** ([#667] AC8).
+///
+/// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
+#[tokio::test]
+async fn a_decision_arriving_during_a_resubmit_waits_and_finds_the_task_closed() {
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let before = deadlocks_so_far(&app).await;
+
+    let correction = returned_to_a_role(&app, &token, "TI_RC_DE").await;
+    let task = correction.task;
+    claim(&app, &correction.corrector, task).await;
+    let (history, _) = history_and_decisions(&app, task).await;
+
+    let raced = task_path_during_a_held_resubmit(
+        &app,
+        &token,
+        correction.document,
+        (
+            format!("/api/v1/workflow/tasks/{task}/decision"),
+            correction.corrector.clone(),
+            json!({ "action": "REJECT", "comment": "Not worth correcting" }),
+        ),
+    )
+    .await;
+
+    // Before the guard below, which closes the pool.
+    assert_eq!(task_action(&app, task).await, None);
+    assert_turned_away(
+        &app,
+        &correction,
+        raced,
+        (
+            (Some(correction.corrector_id), Some(correction.role)),
+            "ASSIGNED",
+            history,
+            before,
+        ),
+    )
+    .await;
+}
+
+/// **Two resubmits at once close the correction task once** ([#667] AC9).
+///
+/// The first is stopped at its closure's history row. The second is seen
+/// waiting in `lock_instance`; released, it finds the document no longer
+/// returned and answers 409. One closure, one next task.
+///
+/// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
+#[tokio::test]
+async fn two_resubmits_at_once_close_the_correction_task_once() {
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let before = deadlocks_so_far(&app).await;
+
+    let (document, correction) =
+        returned_document(&app, &token, "TI_RC_TW", "TI-RC-TW-Q", false).await;
+
+    let (first, second, waited_in) = second_during_a_held_first(
+        &app,
+        Gate {
+            table: "workflow_task_history",
+            event: "INSERT",
+        },
+        submission(&app, &token, document),
+        submission(&app, &token, document),
+    )
+    .await;
+
+    assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+    assert_eq!(second.status, StatusCode::CONFLICT, "{}", second.body);
+    assert!(
+        second.body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("only a draft or a returned document")),
+        "the second resubmit was refused for another reason: {}",
+        second.body
+    );
+    assert!(locks_the_instance(&waited_in), "{waited_in}");
+
+    assert_eq!(closures_of(&app, correction).await, ["ASSIGNED"]);
+    assert_eq!(open_tasks_of(&app, document).await.len(), 1);
+    assert_eq!(
+        deadlocks_once_settled(&app).await,
+        before,
+        "PostgreSQL counted a deadlock"
+    );
+}
+
+/// **A resubmit arriving during the owner's edit waits for it, and closes the
+/// task once** ([#667] AC9, record 22's P3 shape).
+///
+/// The edit is stopped at its `UPDATE documents`, holding the document and its
+/// type. The resubmit takes the instance, and is seen waiting for the
+/// document. Released, both answer 200, with one closure and no deadlock.
+///
+/// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
+#[tokio::test]
+async fn a_resubmit_arriving_during_the_owners_edit_waits_and_closes_once() {
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let before = deadlocks_so_far(&app).await;
+
+    let (document, correction) =
+        returned_document(&app, &token, "TI_RC_ED", "TI-RC-ED-Q", false).await;
+
+    let editor = Arc::clone(&app);
+    let editor_token = token.clone();
+    let (edited, resubmitted, waited_in) = second_during_a_held_first(
+        &app,
+        Gate {
+            table: "documents",
+            event: "UPDATE",
+        },
+        move || {
+            tokio::spawn(async move {
+                editor
+                    .put(
+                        &format!("/api/v1/documents/{document}"),
+                        Some(&editor_token),
+                        json!({ "formData": { "amount": 1_200 } }),
+                    )
+                    .await
+            })
+        },
+        submission(&app, &token, document),
+    )
+    .await;
+
+    assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
+    assert_eq!(resubmitted.status, StatusCode::OK, "{}", resubmitted.body);
+    assert!(
+        waited_in.contains("FROM documents") && waited_in.contains("FOR UPDATE"),
+        "the resubmit waited somewhere other than the document lock: {waited_in}"
+    );
+
+    assert_eq!(closures_of(&app, correction).await, ["ASSIGNED"]);
+    assert_eq!(open_tasks_of(&app, document).await.len(), 1);
+    assert_eq!(
+        deadlocks_once_settled(&app).await,
+        before,
+        "PostgreSQL counted a deadlock"
+    );
+}
+
+/// **A resubmit arriving during a delete of the next state's role waits, and
+/// is refused with the correction task still open** ([#667] AC9, and AC5
+/// raced).
+///
+/// The test holds the role `FOR UPDATE` and deletes it itself, as
+/// `workflow_engine.rs`'s *a submission racing the delete of its edge's role*
+/// does: the route refuses a role a running definition names (**D-91** (3)).
+/// The resubmit closes the task, fires, and is seen waiting on the role in
+/// `direct`'s `FOR KEY SHARE`. The delete commits, and the resubmit answers
+/// 422 `ASSIGNMENT_UNRESOLVED`, which rolls the closure back.
+///
+/// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
+#[tokio::test]
+async fn a_resubmit_arriving_during_a_delete_of_the_next_states_role_is_refused() {
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let owner = administrator_id(&app).await;
+    let before = deadlocks_so_far(&app).await;
+
+    let (document, correction) =
+        returned_document(&app, &token, "TI_RC_RD", "TI-RC-RD-Q", false).await;
+    let role: Uuid = sqlx::query_scalar("SELECT id FROM roles WHERE role_code = 'TI-RC-RD-Q'")
+        .fetch_one(&app.pool)
+        .await
+        .expect("read the next state's role");
+
+    let mut delete = app.pool.begin().await.expect("a transaction");
+    let deleting: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *delete)
+        .await
+        .expect("the delete's backend");
+    sqlx::query("SELECT id FROM roles WHERE id = $1 FOR UPDATE")
+        .bind(role)
+        .execute(&mut *delete)
+        .await
+        .expect("the delete's lock");
+
+    let resubmitted = submission(&app, &token, document)();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while blocked_by(&app, deleting, "FROM roles", "FOR KEY SHARE")
+        .await
+        .is_none()
+    {
+        assert!(
+            !resubmitted.is_finished(),
+            "the resubmit did not wait on the role"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "the resubmit was never seen waiting on the role"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    sqlx::query("UPDATE roles SET deleted_at = now() WHERE id = $1")
+        .bind(role)
+        .execute(&mut *delete)
+        .await
+        .expect("the delete");
+    delete.commit().await.expect("the delete commits");
+
+    let refused = resubmitted.await.expect("the resubmit did not panic");
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+    assert!(
+        refused.body.to_string().contains("ASSIGNMENT_UNRESOLVED"),
+        "{}",
+        refused.body
+    );
+
+    assert_eq!(
+        task_holder(&app, correction).await,
+        (Some(owner), None, "ASSIGNED".to_owned()),
+        "the refused resubmit closed the task"
+    );
+    assert_eq!(closures_of(&app, correction).await, Vec::<String>::new());
+    assert_eq!(
+        document_and_instance(&app, document).await,
+        ("RETURNED".to_owned(), "RETURNED".to_owned())
+    );
+    assert_eq!(
+        deadlocks_once_settled(&app).await,
+        before,
+        "PostgreSQL counted a deadlock"
+    );
+}
+
+/// **A role delete arriving during a resubmit waits for it, and is refused**
+/// ([#667] AC9, the other order).
+///
+/// The resubmit is stopped at the next task's `INSERT`, after it has closed
+/// the correction task and holds the next state's role `FOR KEY SHARE`, and
+/// `DELETE /api/v1/identity/roles/{id}` is seen waiting in its `FOR UPDATE`
+/// ([`delete_during_a_held_submission`]). Released, the resubmit answers 200,
+/// and the delete counts the next task and answers 409.
+///
+/// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
+#[tokio::test]
+async fn a_role_delete_arriving_during_a_resubmit_waits_and_refuses() {
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+
+    let (document, correction) =
+        returned_document(&app, &token, "TI_RC_DR", "TI-RC-DR-Q", false).await;
+    let role: Uuid = sqlx::query_scalar("SELECT id FROM roles WHERE role_code = 'TI-RC-DR-Q'")
+        .fetch_one(&app.pool)
+        .await
+        .expect("read the next state's role");
+
+    let refused = delete_during_a_held_submission(&app, &token, document, role).await;
+
+    assert_refused_for_one_open_task(&app, &refused, role, document).await;
+    assert_eq!(closures_of(&app, correction).await, ["ASSIGNED"]);
 }
 
 /// **A reassign writes every holder column, clearing what it does not name**

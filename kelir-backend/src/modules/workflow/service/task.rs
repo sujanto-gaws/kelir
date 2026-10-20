@@ -639,8 +639,9 @@ pub async fn reassign(
 /// # A state with no decision edges is not judged
 ///
 /// A `RETURNED` state whose task is the owner's correction leaves only by
-/// `RESUBMIT`, which is taken on the document, not decided on the task. There
-/// is no decision to strand, so the reassign is allowed.
+/// `RESUBMIT`, which is taken on the document, not decided on the task, and
+/// closes the task as it fires ([#667]). There is no decision to strand, so
+/// the reassign is allowed.
 ///
 /// # Locking
 ///
@@ -654,6 +655,7 @@ pub async fn reassign(
 /// [#512]: https://github.com/sujanto-gaws/kelir/issues/512
 /// [#619]: https://github.com/sujanto-gaws/kelir/issues/619
 /// [#663]: https://github.com/sujanto-gaws/kelir/issues/663
+/// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
 async fn refuse_unless_target_can_decide(
     transaction: &mut sqlx::PgTransaction<'_>,
     tenant_id: Uuid,
