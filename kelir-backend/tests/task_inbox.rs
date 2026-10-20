@@ -8434,6 +8434,502 @@ async fn a_role_delete_arriving_during_a_resubmit_waits_and_refuses() {
     assert_eq!(closures_of(&app, correction).await, ["ASSIGNED"]);
 }
 
+// ---------------------------------------------------------------------------
+// #667 — the closing campaign (test-engineer, 2026-10-20)
+// ---------------------------------------------------------------------------
+//
+// The paths the builder named as untested, what the API says about a closed
+// correction task, and #712's revision lock beside the closure. Run on the
+// tree rebased onto #712.
+
+/// **A closed correction task reads as completed and decided by nobody**
+/// ([#667] AC1, AC2, through the API).
+///
+/// After the resubmit, `GET /api/v1/tasks/{id}` and the owner's finished list
+/// both answer the task `COMPLETED` with no `action` and no reason, and the
+/// document's workflow history has one `RESUBMIT` entry naming the task, by
+/// the owner, with no comment and nobody stood in for.
+///
+/// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
+#[tokio::test]
+async fn a_closed_correction_task_reads_as_completed_with_no_decision() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let owner = administrator_id(&app).await;
+
+    let (document, correction) =
+        returned_document(&app, &token, "TI_RC_API", "TI-RC-API-Q", false).await;
+
+    let resubmitted = resubmit(&app, &token, document).await;
+    assert_eq!(resubmitted.status, StatusCode::OK, "{}", resubmitted.body);
+
+    let detail = app
+        .get(&format!("{TASKS}/{correction}"), Some(&token))
+        .await;
+    assert_eq!(detail.status, StatusCode::OK, "{}", detail.body);
+    let finished = inbox_of(&app, &token, "scope=completed").await;
+    let row = finished.body["data"]
+        .as_array()
+        .expect("a page")
+        .iter()
+        .find(|row| row["id"] == json!(correction))
+        .cloned()
+        .unwrap_or_else(|| panic!("not in the finished list: {}", finished.body));
+
+    for (seen, read) in [("the detail", &detail.body["data"]), ("the list", &row)] {
+        assert_eq!(read["status"], "COMPLETED", "{seen}: {read}");
+        assert_eq!(read["action"], Value::Null, "{seen}: {read}");
+        assert_eq!(read["decisionComment"], Value::Null, "{seen}: {read}");
+        assert!(read["completedAt"].is_string(), "{seen}: {read}");
+    }
+
+    let history = app
+        .get(
+            &format!("/api/v1/documents/{document}/workflow/history"),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(history.status, StatusCode::OK, "{}", history.body);
+    let resubmits: Vec<&Value> = history.body["data"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .filter(|entry| entry["action"] == "RESUBMIT")
+        .collect();
+    assert_eq!(resubmits.len(), 1, "{}", history.body);
+    assert_eq!(resubmits[0]["taskId"], json!(correction));
+    assert_eq!(resubmits[0]["actorUserId"], json!(owner));
+    assert_eq!(resubmits[0]["comment"], Value::Null);
+    assert_eq!(resubmits[0]["onBehalfOfUserId"], Value::Null);
+}
+
+/// **A resubmit closing a correction the corrector handed off keeps the
+/// hand-off, and stands in for nobody** ([#667], the builder's risky path 2).
+///
+/// The corrector claims the role's correction task and hands it to a
+/// colleague, so the colleague holds it on the corrector's behalf. The owner
+/// resubmits. The task is `COMPLETED` by the owner with the colleague and the
+/// corrector still in its holder columns, and the colleague still sees it.
+/// The closure's history row and the instance's `RESUBMIT` row are the
+/// owner's, and the latter names nobody on whose behalf: the owner acted on
+/// the edge's own `allowedBy`, not on the task's delegated authority.
+///
+/// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
+#[tokio::test]
+async fn a_resubmit_closing_a_handed_off_correction_keeps_the_hand_off_and_stands_in_for_nobody() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let owner = administrator_id(&app).await;
+
+    let correction = returned_to_a_role(&app, &token, "TI_RC_HD").await;
+    let task = correction.task;
+    claim(&app, &correction.corrector, task).await;
+    let handed = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/delegation"),
+            Some(&correction.corrector),
+            json!({ "delegateUserId": correction.colleague_id }),
+        )
+        .await;
+    assert_eq!(handed.status, StatusCode::OK, "{}", handed.body);
+
+    let resubmitted = resubmit(&app, &token, correction.document).await;
+    assert_eq!(resubmitted.status, StatusCode::OK, "{}", resubmitted.body);
+
+    let closed: (String, Option<Uuid>, Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+        "SELECT status, assignee_user_id, delegated_from_user_id, completed_by
+         FROM workflow_tasks WHERE id = $1",
+    )
+    .bind(task)
+    .fetch_one(&app.pool)
+    .await
+    .expect("read the correction task");
+    assert_eq!(
+        closed,
+        (
+            "COMPLETED".to_owned(),
+            Some(correction.colleague_id),
+            Some(correction.corrector_id),
+            Some(owner)
+        )
+    );
+    assert!(is_visible_to(&app, correction.colleague_id, task).await);
+
+    let closure: Option<Uuid> = sqlx::query_scalar(
+        "SELECT actor_user_id FROM workflow_task_history
+         WHERE task_id = $1 AND action = 'RESUBMIT'",
+    )
+    .bind(task)
+    .fetch_one(&app.pool)
+    .await
+    .expect("read the closure");
+    assert_eq!(closure, Some(owner));
+
+    let moved: (Option<Uuid>, Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+        "SELECT task_id, actor_user_id, on_behalf_of_user_id FROM workflow_history
+         WHERE document_id = $1 AND action = 'RESUBMIT'",
+    )
+    .bind(correction.document)
+    .fetch_one(&app.pool)
+    .await
+    .expect("read the workflow history");
+    assert_eq!(moved, (Some(task), Some(owner), None));
+}
+
+/// **A resubmit closes an `IN_PROGRESS` correction task** ([#667], the
+/// builder's risky path 3).
+///
+/// Nothing writes `IN_PROGRESS` today, so the test does, by SQL. It is an
+/// open status, and both the closure's lock and its `UPDATE` must read it as
+/// one: the task closes from `IN_PROGRESS`, and the next state's task is the
+/// only open one.
+///
+/// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
+#[tokio::test]
+async fn a_resubmit_closes_an_in_progress_correction_task() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let owner = administrator_id(&app).await;
+
+    let (document, correction) =
+        returned_document(&app, &token, "TI_RC_IP", "TI-RC-IP-Q", false).await;
+    sqlx::query("UPDATE workflow_tasks SET status = 'IN_PROGRESS' WHERE id = $1")
+        .bind(correction)
+        .execute(&app.pool)
+        .await
+        .expect("put the task in progress");
+
+    let resubmitted = resubmit(&app, &token, document).await;
+    assert_eq!(resubmitted.status, StatusCode::OK, "{}", resubmitted.body);
+
+    assert_eq!(
+        task_holder(&app, correction).await,
+        (Some(owner), None, "COMPLETED".to_owned())
+    );
+    assert_eq!(closures_of(&app, correction).await, ["IN_PROGRESS"]);
+    let open = open_tasks_of(&app, document).await;
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_ne!(open[0], correction);
+}
+
+/// The revision `document`'s instance runs.
+async fn revision_of(app: &TestApp, document: Uuid) -> Uuid {
+    sqlx::query_scalar(
+        "SELECT workflow_definition_id FROM workflow_instances WHERE document_id = $1",
+    )
+    .bind(document)
+    .fetch_one(&app.pool)
+    .await
+    .expect("read the instance's revision")
+}
+
+/// **A resubmit closing a correction carries on while a delete or a
+/// deprecate holds its revision** ([#667] beside [#712]).
+///
+/// The test holds the revision `FOR UPDATE`, as `lock_for_publish` does for a
+/// publish, a deprecate and a delete. The resubmit takes no lock on the
+/// revision, since it fires the instance it has rather than starting one, so
+/// it closes the task and enters the next state while the hold is open.
+///
+/// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
+/// [#712]: https://github.com/sujanto-gaws/kelir/issues/712
+#[tokio::test]
+async fn a_resubmit_closing_a_correction_carries_on_while_its_revision_is_held() {
+    use std::time::Duration;
+
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let before = deadlocks_so_far(&app).await;
+
+    let (document, correction) =
+        returned_document(&app, &token, "TI_RC_RV", "TI-RC-RV-Q", false).await;
+    let revision = revision_of(&app, document).await;
+
+    let mut holding = app.pool.begin().await.expect("a transaction");
+    sqlx::query("SELECT id FROM workflow_definitions WHERE id = $1 FOR UPDATE")
+        .bind(revision)
+        .execute(&mut *holding)
+        .await
+        .expect("hold the revision");
+
+    let resubmitted =
+        tokio::time::timeout(Duration::from_secs(10), resubmit(&app, &token, document)).await;
+    holding.rollback().await.expect("release the revision");
+    let resubmitted = resubmitted.expect("the resubmit waited on the held revision");
+    assert_eq!(resubmitted.status, StatusCode::OK, "{}", resubmitted.body);
+
+    assert_eq!(closures_of(&app, correction).await, ["ASSIGNED"]);
+    assert_eq!(
+        document_and_instance(&app, document).await,
+        ("PENDING_APPROVAL".to_owned(), "MANAGER_APPROVAL".to_owned())
+    );
+    assert_eq!(
+        deadlocks_once_settled(&app).await,
+        before,
+        "PostgreSQL counted a deadlock"
+    );
+}
+
+/// **A deprecate arriving while a resubmit is held at its closure goes
+/// through, and the resubmit then fires on the deprecated revision** ([#667]
+/// beside [#712]).
+///
+/// The resubmit is stopped at its closure's `workflow_task_history` `INSERT`,
+/// holding the instance, the document, its type and the correction task. The
+/// deprecate takes the revision `FOR UPDATE` and nothing the resubmit holds,
+/// so it answers 200 while the resubmit is stopped. Released, the resubmit
+/// closes the task and enters `MANAGER_APPROVAL` on the revision its instance
+/// is pinned to, now `DEPRECATED`.
+///
+/// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
+/// [#712]: https://github.com/sujanto-gaws/kelir/issues/712
+#[tokio::test]
+async fn a_deprecate_during_a_resubmit_held_at_its_closure_goes_through() {
+    use sqlx::{Connection, PgConnection};
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    const GATE: i64 = 667;
+    const PATIENCE: Duration = Duration::from_secs(30);
+
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let before = deadlocks_so_far(&app).await;
+
+    let (document, correction) =
+        returned_document(&app, &token, "TI_RC_DP", "TI-RC-DP-Q", false).await;
+    let revision = revision_of(&app, document).await;
+
+    sqlx::query(&format!(
+        "CREATE FUNCTION test_closure_gate() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             PERFORM pg_advisory_xact_lock_shared({GATE});
+             RETURN NEW;
+         END
+         $$"
+    ))
+    .execute(&app.pool)
+    .await
+    .expect("the gate's function");
+    sqlx::query(
+        "CREATE TRIGGER test_closure_gate BEFORE INSERT ON workflow_task_history
+         FOR EACH ROW EXECUTE FUNCTION test_closure_gate()",
+    )
+    .execute(&app.pool)
+    .await
+    .expect("the gate's trigger");
+    let mut gate = PgConnection::connect_with(&app.pool.connect_options())
+        .await
+        .expect("the gate's connection");
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(GATE)
+        .execute(&mut gate)
+        .await
+        .expect("close the gate");
+
+    let resubmitted = submission(&app, &token, document)();
+
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let parked: Option<i32> = sqlx::query_scalar(
+            "SELECT pid FROM pg_locks
+             WHERE locktype = 'advisory' AND objid::text::bigint = $1 AND objsubid = 1
+               AND NOT granted
+               AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
+        )
+        .bind(GATE)
+        .fetch_optional(&app.pool)
+        .await
+        .expect("read pg_locks");
+        if parked.is_some() {
+            break;
+        }
+        assert!(
+            !resubmitted.is_finished(),
+            "the resubmit finished without reaching its closure"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "the resubmit never reached its closure"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let deprecated = tokio::time::timeout(
+        Duration::from_secs(10),
+        app.post(
+            &format!("/api/v1/workflow/definitions/{revision}/deprecation"),
+            Some(&token),
+            json!({}),
+        ),
+    )
+    .await;
+
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(GATE)
+        .execute(&mut gate)
+        .await
+        .expect("open the gate");
+    gate.close().await.expect("close the gate's connection");
+
+    let deprecated = deprecated.expect("the deprecate waited on the held resubmit");
+    assert_eq!(deprecated.status, StatusCode::OK, "{}", deprecated.body);
+    let resubmitted = tokio::time::timeout(PATIENCE, resubmitted)
+        .await
+        .expect("the resubmit did not finish once the gate opened")
+        .expect("the resubmit did not panic");
+    assert_eq!(resubmitted.status, StatusCode::OK, "{}", resubmitted.body);
+
+    assert_eq!(closures_of(&app, correction).await, ["ASSIGNED"]);
+    assert_eq!(
+        document_and_instance(&app, document).await,
+        ("PENDING_APPROVAL".to_owned(), "MANAGER_APPROVAL".to_owned())
+    );
+    assert_eq!(revision_of(&app, document).await, revision);
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM workflow_definitions WHERE id = $1")
+            .bind(revision)
+            .fetch_one(&app.pool)
+            .await
+            .expect("read the revision");
+    assert_eq!(status, "DEPRECATED");
+    assert_eq!(
+        deadlocks_once_settled(&app).await,
+        before,
+        "PostgreSQL counted a deadlock"
+    );
+}
+
+/// **Three at once: a resubmit behind a reassign, which waits on a role
+/// delete** ([#667], the builder's risky path 1, record 22 §6's three-way
+/// race).
+///
+/// The correction task is reassigned to the next state's own role while the
+/// test holds that role `FOR UPDATE` for a delete, as *a resubmit arriving
+/// during a delete of the next state's role* does. The reassign holds the
+/// instance and the task and waits on the role. The resubmit is sent, and
+/// waits on the instance behind the reassign. The delete commits. The
+/// reassign is refused, the role being gone; the resubmit then closes the
+/// task, fails to enter `MANAGER_APPROVAL` for the same reason, and rolls the
+/// closure back. Neither answers 500, the task is as it was, and no deadlock
+/// is counted.
+///
+/// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
+#[tokio::test]
+async fn a_resubmit_behind_a_reassign_held_by_a_role_delete_closes_nothing() {
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let owner = administrator_id(&app).await;
+    let before = deadlocks_so_far(&app).await;
+
+    let (document, correction) =
+        returned_document(&app, &token, "TI_RC_3W", "TI-RC-3W-Q", false).await;
+    let role: Uuid = sqlx::query_scalar("SELECT id FROM roles WHERE role_code = 'TI-RC-3W-Q'")
+        .fetch_one(&app.pool)
+        .await
+        .expect("read the next state's role");
+
+    let mut delete = app.pool.begin().await.expect("a transaction");
+    let deleting: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *delete)
+        .await
+        .expect("the delete's backend");
+    sqlx::query("SELECT id FROM roles WHERE id = $1 FOR UPDATE")
+        .bind(role)
+        .execute(&mut *delete)
+        .await
+        .expect("the delete's lock");
+
+    let reassigned = reassignment(
+        &app,
+        &token,
+        correction,
+        json!({ "roleCode": "TI-RC-3W-Q" }),
+    )();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let reassigning = loop {
+        if let Some(pid) = blocked_by(&app, deleting, "FROM roles", "FOR KEY SHARE").await {
+            break pid;
+        }
+        assert!(
+            !reassigned.is_finished(),
+            "the reassign did not wait on the role"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "the reassign was never seen waiting on the role"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let resubmitted = submission(&app, &token, document)();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let waited_in = loop {
+        if let Some(statement) = statement_blocked_by(&app, reassigning).await {
+            break statement;
+        }
+        assert!(
+            !resubmitted.is_finished(),
+            "the resubmit did not wait on the reassign"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "the resubmit was never seen waiting on the reassign"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert!(locks_the_instance(&waited_in), "{waited_in}");
+
+    sqlx::query("UPDATE roles SET deleted_at = now() WHERE id = $1")
+        .bind(role)
+        .execute(&mut *delete)
+        .await
+        .expect("the delete");
+    delete.commit().await.expect("the delete commits");
+
+    let reassigned = reassigned.await.expect("the reassign did not panic");
+    let resubmitted = resubmitted.await.expect("the resubmit did not panic");
+    assert_eq!(
+        reassigned.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        reassigned.body
+    );
+    assert_eq!(
+        resubmitted.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        resubmitted.body
+    );
+    assert!(
+        resubmitted
+            .body
+            .to_string()
+            .contains("ASSIGNMENT_UNRESOLVED"),
+        "{}",
+        resubmitted.body
+    );
+
+    assert_eq!(
+        task_holder(&app, correction).await,
+        (Some(owner), None, "ASSIGNED".to_owned()),
+        "the refused reassign or resubmit wrote the task"
+    );
+    assert_eq!(closures_of(&app, correction).await, Vec::<String>::new());
+    assert_eq!(
+        document_and_instance(&app, document).await,
+        ("RETURNED".to_owned(), "RETURNED".to_owned())
+    );
+    assert_eq!(
+        deadlocks_once_settled(&app).await,
+        before,
+        "PostgreSQL counted a deadlock"
+    );
+}
+
 /// **A reassign writes every holder column, clearing what it does not name**
 /// ([#512], ADR-0042 §2).
 ///
