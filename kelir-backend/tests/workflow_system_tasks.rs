@@ -773,6 +773,188 @@ async fn an_automatic_edge_is_chosen_by_its_condition() {
 }
 
 // ---------------------------------------------------------------------------
+// A guard's `targetStatus` is a status, not a state code (#679)
+// ---------------------------------------------------------------------------
+//
+// LHCS §4 makes `targetStatus` a platform document status, and the after-chain
+// gives it as the reached state's `mapsToDocumentStatus`. The guard path gave
+// the edge's target *state code* instead, so a guard comparing it to a status
+// matched only where the two happened to be spelled alike. `STAMPING` ->
+// `COMPLETED` above is such an edge, which is why nothing here saw it. Every
+// target below has a code that is not its status.
+//
+// Each test also reads the hook log, so a guard that did not run at all is not
+// mistaken for a guard that passed.
+
+/// A guard that refuses with `code` when `condition` holds against the LHCS §4
+/// payload.
+fn guard_refusing_when(condition: Value, code: &str) -> Value {
+    json!([{
+        "handler": "core:reject_when",
+        "config": { "condition": condition, "code": code, "message": code }
+    }])
+}
+
+/// [`workflow_with_a_service_state`], whose final state is `DONE`: a code that
+/// is not its status, `COMPLETED`.
+fn workflow_ending_in_done(key: &str, guards: Value) -> Value {
+    let mut definition = workflow_with_a_service_state(key, guards, None);
+
+    definition["states"][2]["code"] = json!("DONE");
+    definition["states"][2]["name"] = json!("Done");
+    definition["transitions"][1]["to"] = json!("DONE");
+
+    definition
+}
+
+/// [`workflow_with_a_service_state`], whose automatic edge reaches
+/// `MANAGER_APPROVAL`: a state a person acts in, whose status is
+/// `PENDING_APPROVAL`. Its approval leads on to `COMPLETED`.
+///
+/// **The first state is `IN_REVIEW` here, not `PENDING_APPROVAL`.** The guard
+/// runs inside the decision that left `SUBMITTED`, so the payload's
+/// `currentStatus` is the status that decision started from. Were that also
+/// `PENDING_APPROVAL`, a guard given `currentStatus` in place of `targetStatus`
+/// would pass, and this test could not tell the two apart.
+fn workflow_reaching_a_manager(key: &str, guards: Value) -> Value {
+    let mut definition = workflow_with_a_service_state(key, guards, None);
+
+    definition["states"][0]["mapsToDocumentStatus"] = json!("IN_REVIEW");
+    definition["states"].as_array_mut().expect("states").insert(
+        2,
+        json!({
+            "code": "MANAGER_APPROVAL", "name": "Manager approval",
+            "mapsToDocumentStatus": "PENDING_APPROVAL",
+            "task": { "taskDefinitionKey": "manager_approve",
+                      "taskName": "Approve as the manager",
+                      "assignment": { "assigneeType": "ROLE", "roleCode": APPROVER_ROLE } }
+        }),
+    );
+    definition["transitions"][1]["to"] = json!("MANAGER_APPROVAL");
+    definition["transitions"]
+        .as_array_mut()
+        .expect("transitions")
+        .push(json!({
+            "from": "MANAGER_APPROVAL", "to": "COMPLETED", "action": "APPROVE",
+            "allowedBy": format!("ROLE:{APPROVER_ROLE}")
+        }));
+
+    definition
+}
+
+/// **#679 AC1: a guard on an edge to a final state is given that state's
+/// status, not its code.** The guard refuses unless `targetStatus` is
+/// `COMPLETED`, and the edge's target is `DONE`.
+#[tokio::test]
+async fn a_guards_target_status_is_the_target_states_status_not_its_code() {
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+    let token = approver(&app, "systask.target.one").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &admin,
+        workflow_ending_in_done(
+            "stamped_target_one",
+            guard_refusing_when(
+                json!({ "!=": [{ "var": "targetStatus" }, "COMPLETED"] }),
+                "TARGET_STATUS_WRONG",
+            ),
+        ),
+    )
+    .await;
+    let type_id = document_type(&app, &admin, "STAMPED_TARGET_ONE", workflow).await;
+    let document = draft(&app, &token, type_id, 100).await;
+
+    submit(&app, &token, document).await;
+
+    let decided = approve(&app, &token, document).await;
+
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+    assert_eq!(state_of(&app, document).await, "DONE");
+    assert_eq!(status_of(&app, &token, document).await, "COMPLETED");
+    assert_eq!(
+        hook_runs(&app, document).await,
+        vec![("core:reject_when".to_owned(), "CONTINUE".to_owned())],
+        "the guard ran, and passed"
+    );
+}
+
+/// **#679 AC2: the same for a target a person acts in.** `MANAGER_APPROVAL` is
+/// not final, so a fix that mapped only a final state's status is red here.
+#[tokio::test]
+async fn a_guards_target_status_is_the_target_states_status_for_a_state_a_person_acts_in() {
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+    let token = approver(&app, "systask.target.two").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &admin,
+        workflow_reaching_a_manager(
+            "stamped_target_two",
+            guard_refusing_when(
+                json!({ "!=": [{ "var": "targetStatus" }, "PENDING_APPROVAL"] }),
+                "TARGET_STATUS_WRONG",
+            ),
+        ),
+    )
+    .await;
+    let type_id = document_type(&app, &admin, "STAMPED_TARGET_TWO", workflow).await;
+    let document = draft(&app, &token, type_id, 100).await;
+
+    submit(&app, &token, document).await;
+
+    let decided = approve(&app, &token, document).await;
+
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+    assert_eq!(state_of(&app, document).await, "MANAGER_APPROVAL");
+    assert_eq!(status_of(&app, &token, document).await, "PENDING_APPROVAL");
+    assert_eq!(tasks_for(&app, document, "manager_approve").await, 1);
+    assert_eq!(
+        hook_runs(&app, document).await,
+        vec![("core:reject_when".to_owned(), "CONTINUE".to_owned())],
+        "the guard ran, and passed"
+    );
+}
+
+/// **#679 AC3: a state code does not reach the guard.** AC1's edge, with a
+/// guard that refuses if `targetStatus` is the code `DONE`.
+#[tokio::test]
+async fn a_guard_cannot_match_the_target_state_code_through_target_status() {
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+    let token = approver(&app, "systask.target.three").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &admin,
+        workflow_ending_in_done(
+            "stamped_target_three",
+            guard_refusing_when(
+                json!({ "==": [{ "var": "targetStatus" }, "DONE"] }),
+                "SAW_THE_CODE",
+            ),
+        ),
+    )
+    .await;
+    let type_id = document_type(&app, &admin, "STAMPED_TARGET_THREE", workflow).await;
+    let document = draft(&app, &token, type_id, 100).await;
+
+    submit(&app, &token, document).await;
+
+    let decided = approve(&app, &token, document).await;
+
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+    assert_eq!(state_of(&app, document).await, "DONE");
+    assert_eq!(
+        hook_runs(&app, document).await,
+        vec![("core:reject_when".to_owned(), "CONTINUE".to_owned())],
+        "the guard ran, and passed"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // AC4, AC5 — the vocabulary is enforced at publish
 // ---------------------------------------------------------------------------
 
