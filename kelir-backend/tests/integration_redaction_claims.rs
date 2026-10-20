@@ -29,6 +29,7 @@
 //!   twice needs somebody in both departments, where a grant with no department
 //!   satisfies every scope (ADR-0021). Two comments said the creator and the
 //!   submitter coincide on a first submit.
+//! - **#700.** ADR-0023 said it too.
 //!
 //! This file reads every one of those texts with each struck span removed and
 //! whitespace run together, since the screens wrap at 100 columns. It refuses
@@ -87,7 +88,7 @@ const JWSS: &str = "docs/schema/JSON Workflow Schema.md";
 /// The files read, relative to the repository root, each with the sentences it
 /// must carry. A file with none to carry must be over 10,000 bytes, so a
 /// moved file is not read as an empty one.
-const FILES: [(&str, &[&str]); 13] = [
+const FILES: [(&str, &[&str]); 14] = [
     (
         USER_MANUAL,
         &[
@@ -126,6 +127,10 @@ const FILES: [(&str, &[&str]); 13] = [
         &["masked only in the spellings Kelir lists"],
     ),
     ("kelir-backend/src/modules/document/service/submit.rs", &[]),
+    (
+        "docs/architectures/adr/0023. Resubmission Enters Through the Document Submit.md",
+        &["The creator and the submitter can differ on a first submit too"],
+    ),
     (
         "kelir-backend/src/modules/document/repository/document.rs",
         &[],

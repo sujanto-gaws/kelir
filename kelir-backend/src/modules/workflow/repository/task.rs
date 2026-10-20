@@ -140,7 +140,9 @@ pub async fn insert_task(
 ///
 /// **Taken after the instance, never before it** — see
 /// [`super::instance::lock_instance`], which says what the task paths lock and
-/// in what order.
+/// in what order. Its caller is a resubmit, which holds the instance, the
+/// document and its type when it takes this
+/// ([#667](https://github.com/sujanto-gaws/kelir/issues/667)).
 pub async fn lock_open_task_of_instance(
     transaction: &mut sqlx::PgTransaction<'_>,
     tenant_id: Uuid,
@@ -292,6 +294,54 @@ pub async fn complete(
         id,
         action.as_db(),
         comment,
+        actor,
+    )
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+
+    Ok(affected)
+}
+
+/// Closes a task with no decision, because a resubmit moved its instance out
+/// of the task's state ([#667], **D-113** A).
+///
+/// **`COMPLETED`, and `action` stays `NULL`.** Nothing was decided, so there
+/// is no verb to record here and no `approval_decisions` row beside it, and
+/// §7.6's `CHECK` on `action` has no `RESUBMIT` to give it. The verb is on
+/// the task's history row and on the instance's `workflow_history` row, which
+/// is where a transition's verb is kept.
+///
+/// **Only the status and the completion columns.** The holder columns still
+/// say who held the correction, which need not be who resubmitted it: the
+/// `RESUBMIT` edge's `allowedBy` decides who may send it, and the task's
+/// holder is whoever its rule, a claim, a hand-off or a reassign left.
+/// [`complete`] writes the decider into an empty assignee, because the
+/// decider took the task; a resubmit took no task.
+///
+/// The predicate is the backstop: the caller holds the task from
+/// [`lock_open_task_of_instance`], so zero rows is unreachable through it.
+///
+/// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
+pub async fn close_for_resubmit(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    id: Uuid,
+    actor: Option<Uuid>,
+) -> Result<u64, sqlx::Error> {
+    let affected = sqlx::query!(
+        r#"
+        UPDATE workflow_tasks SET
+            status       = 'COMPLETED',
+            completed_by = $3,
+            completed_at = now(),
+            updated_by   = $3,
+            updated_at   = now()
+        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+          AND status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')
+        "#,
+        tenant_id,
+        id,
         actor,
     )
     .execute(&mut **transaction)

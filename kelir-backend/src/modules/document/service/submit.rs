@@ -555,14 +555,21 @@ fn refuse_unless_submittable(status: DocumentStatus) -> Result<(), AppError> {
 /// passed is the obvious case. Firing `SUBMIT` from `RETURNED` would ask for an
 /// edge the specification does not put there.
 ///
-/// # There is no task, and that is the shape rather than an omission
+/// # No task decides it, and a correction task it closes
 ///
-/// A `RETURNED` state declares none in JWSS's example: the document is with its
-/// author, not in anybody's queue. So this cannot go through
+/// A `RETURNED` state declares no task in JWSS's example: the document is with
+/// its author, not in anybody's queue. So this cannot go through
 /// `workflow::service::task::decide`, which is addressed by a task id — and the
 /// authorization falls to the edge's own `allowedBy`, which is exactly what
 /// [#226](https://github.com/sujanto-gaws/kelir/issues/226) built `permits` for
 /// and the first caller to need it.
+///
+/// **A definition may still declare a task there, for the owner's
+/// correction** (**D-113** A). Nothing decides that task either, so this
+/// closes it, `COMPLETED` with no action and one history row, before it fires
+/// ([`engine::close_open_task_for_resubmit`], [#667]). Left open, it sat
+/// beside the next state's task, which `uq_workflow_tasks_open_per_instance`
+/// refused with a 409, or in a process that had left its state.
 ///
 /// **`owner_user_id` is the document's `created_by`, not the caller.** They
 /// differ whenever somebody submits another user's document, here as on a
@@ -577,6 +584,7 @@ fn refuse_unless_submittable(status: DocumentStatus) -> Result<(), AppError> {
 ///
 /// [#183]: https://github.com/sujanto-gaws/kelir/issues/183
 /// [#663]: https://github.com/sujanto-gaws/kelir/issues/663
+/// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
 async fn resubmit_workflow(
     transaction: &mut sqlx::PgTransaction<'_>,
     tenant_id: Uuid,
@@ -625,6 +633,12 @@ async fn resubmit_workflow(
     )
     .await?;
 
+    // **The owner's correction task closes first** ([#667], **D-113** A), so
+    // the next state's task is the instance's only open one. `None` when the
+    // state declares no task.
+    let closed =
+        engine::close_open_task_for_resubmit(transaction, tenant_id, instance.id, actor).await?;
+
     engine::fire(
         transaction,
         tenant_id,
@@ -636,10 +650,13 @@ async fn resubmit_workflow(
         actor,
         context,
         evaluation,
-        // No task drove this and no comment came with it. The correction is the
-        // document's own new payload, which the history's `to_state` and this
-        // row's timestamp already place.
-        engine::DecisionProvenance::default(),
+        // The correction task this closed, if there was one, and no comment:
+        // the correction is the document's own new payload, which the
+        // history's `to_state` and this row's timestamp already place.
+        engine::DecisionProvenance {
+            task_id: closed,
+            ..engine::DecisionProvenance::default()
+        },
     )
     .await?;
 
