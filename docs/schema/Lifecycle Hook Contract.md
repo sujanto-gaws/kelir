@@ -2,7 +2,7 @@
 **Version:** 1.0.0
 **Status:** Draft Standard
 **Target Stack:** Rust (Hook Resolver / Engine), Plugin Runtimes
-**Last updated:** 2026-10-08
+**Last updated:** 2026-10-21
 
 ---
 
@@ -212,6 +212,7 @@ This specification is a **`Draft Standard`** ([naming convention](../standards/0
 | :--- | :--- | :--- |
 | **R-1** | 2026-09-24 | **§5.2 says how an after-hook's success and failure are logged, §5.3 gives a handler a kind, and §7 says the log feeds the circuit breaker** — [#519](https://github.com/sujanto-gaws/kelir/issues/519), [ADR-0041](../architectures/adr/0041.%20Every%20Workflow%20Transition%20Writes%20an%20Outbox%20Event,%20and%20After-Hooks%20Are%20Its%20First%20Consumer.md). **No change to the shape**: no property is added, removed or re-typed, and the meta-schema is untouched. §5.2 settles a mapping `document_hook_executions.result` could not express before (success is `CONTINUE`, failure `ERROR`). §5.3 is a **narrowing at registration**: `actions` naming a before-only handler was accepted and is now refused, and one stored before the rule logs `ERROR` rather than doing nothing silently. |
 | **R-2** | 2026-10-08 | **§5.2 says an after-hook's payload is read at delivery**: `currentStatus`, `formData`, `metadata`, `workflowContext` and `workflowContext.state` as they stand when the event is delivered, `workflowContext.transition` and `targetStatus` as the delivered transition's. It states what [ADR-0041](../architectures/adr/0041.%20Every%20Workflow%20Transition%20Writes%20an%20Outbox%20Event,%20and%20After-Hooks%20Are%20Its%20First%20Consumer.md) built and SDD §8.5.4 already said; found by the `v0.9.0` schema gate. **No change to the shape**: no property is added, removed or re-typed, and the meta-schema is untouched. §4's *`null` … after it completes* does not reach an after-hook delivered once its instance has completed: it is given the instance's context. |
+| **R-3** | 2026-10-21 | **A guard's `targetStatus` is the target state's `mapsToDocumentStatus`, as §4 says** — [#679](https://github.com/sujanto-gaws/kelir/issues/679). A code-conformance note: the engine gave a `before_workflow_transition` guard the edge's target state code, so a guard comparing `targetStatus` to a platform status matched only where a state was named after its status. It now gives the status, as the after-chain already did (§5.2), so a guard and an after-hook on one transition read the same value. Found by the `v0.9.0` schema gate. **No change to the shape**: no property is added, removed or re-typed, and the meta-schema is untouched. No shipped handler reads the field. |
 
 ---
 

@@ -785,6 +785,27 @@ async fn an_automatic_edge_is_chosen_by_its_condition() {
 //
 // Each test also reads the hook log, so a guard that did not run at all is not
 // mistaken for a guard that passed.
+//
+// # Seen red on the unfixed code (`e9a1c29`), 2026-10-21
+//
+// 22 passed and these three failed, each with the 422 the criteria predicted:
+// AC1 and AC2 refused with `TARGET_STATUS_WRONG`, AC3 with `SAW_THE_CODE`.
+//
+// # Seen to fail after the fix, 2026-10-21
+//
+// Each mutation applied alone to `run_transition_guards`, this file run, and
+// the mutation reverted. AC1 is *…not_its_code*, AC2 *…a_person_acts_in*, AC3
+// *a_guard_cannot_match…*.
+//
+// | Mutation | Red |
+// |---|---|
+// | `target_status` back to `Some(&chosen.to)` | AC1, AC2, AC3: 422 |
+// | `target_status` is the source state's status | AC1, AC2: 422 |
+// | `target_status: None` | AC1, AC2: 422. AC3 stays green: `null` is not `DONE` |
+// | `current_status` and `target_status` swapped | AC1, AC2: 422 |
+// | the target's status only when it `is_final`, its code otherwise | AC2: 422 |
+// | the call to `run_transition_guards` removed | ten: AC1, AC2 and AC3 on the hook log, and `a_guard_runs_and_the_execution_is_logged` with six more that read a guard's run or refusal |
+// | the swap above, with AC2's first state at `PENDING_APPROVAL` (a test mutation) | AC1 only. **AC2 stays green**: a guard's `currentStatus` is the status the decision started from, so that fixture cannot tell the two fields apart, and AC2's first state is `IN_REVIEW` for it |
 
 /// A guard that refuses with `code` when `condition` holds against the LHCS §4
 /// payload.
