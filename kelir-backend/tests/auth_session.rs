@@ -8,10 +8,11 @@
 
 mod common;
 
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::http::StatusCode;
+use axum::http::{Method, StatusCode};
 use common::{fixtures, TestApp, ADMIN_PASSWORD, ADMIN_USERNAME};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use kelir_backend::modules::auth::token::hash_refresh_token;
@@ -1981,6 +1982,356 @@ async fn a_refresh_whose_new_token_cannot_be_stored_keeps_the_old_one() {
 }
 
 // ---------------------------------------------------------------------------
+// #710 and #751: what the row 10 gate's campaign found unpinned.
+//
+// The tests above were written against the criteria. These were written
+// against mutations of `refresh` that the criteria did not name, each of which
+// left every test above green: the sweep's scope, the audit row's tenant and
+// address, the expiry check and its place, the reason a revoke keeps, the
+// insert's executor, and a token that is gone by the time its rotation runs.
+// ---------------------------------------------------------------------------
+
+/// A caller other than `TEST_PEER`, so an address in a row is shown to be the
+/// presenting caller's and not a default. TEST-NET-1, as `TEST_PEER` is.
+const REPLAYING_PEER: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 77)), 41234);
+
+/// A refresh of `token` sent from `peer`.
+async fn refreshed_from(app: &TestApp, peer: SocketAddr, token: &str) -> common::TestResponse {
+    app.send_from(
+        peer,
+        Method::POST,
+        "/api/v1/auth/refresh",
+        None,
+        Some(json!({ "refreshToken": token })),
+    )
+    .await
+}
+
+/// The tenant and address of each `TOKEN_REUSE` row naming `user_id`.
+async fn reuse_origins(app: &TestApp, user_id: Uuid) -> Vec<(Uuid, Option<String>)> {
+    sqlx::query_as(
+        "SELECT tenant_id, ip_address FROM audit_events \
+         WHERE event_type = 'Security.RefreshTokenReused' AND object_id = $1 \
+         ORDER BY created_at, id",
+    )
+    .bind(user_id)
+    .fetch_all(&app.pool)
+    .await
+    .expect("reads the reuse rows")
+}
+
+/// How many refresh tokens the user has, revoked or not.
+async fn refresh_token_rows(app: &TestApp, user_id: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM refresh_tokens WHERE user_id = $1")
+        .bind(user_id)
+        .fetch_one(&app.pool)
+        .await
+        .expect("counts refresh_tokens")
+}
+
+/// The sweep ends the replayed token's user's family, and nobody else's: not
+/// a neighbour's in the same tenant, and not a user's in another. A sweep by
+/// tenant left every test above green.
+#[tokio::test]
+async fn a_replay_ends_only_its_own_users_sessions() {
+    let app = TestApp::spawn_with(|config| config.multi_tenant = true).await;
+    let (acme, replayer, username) = tenant_user(&app, "ACME").await;
+    let neighbour = fixtures::create_user(
+        &app.pool,
+        acme,
+        "acme.neighbour",
+        "acme.neighbour@kelir.test",
+        PASSWORD,
+        &[],
+    )
+    .await;
+    let (_, outsider, outsider_name) = tenant_user(&app, "BETA").await;
+
+    let replayed = refresh_token_in(&app, "ACME", &username).await;
+    let neighbours = refresh_token_in(&app, "ACME", "acme.neighbour").await;
+    let outsiders = refresh_token_in(&app, "BETA", &outsider_name).await;
+
+    replay_refusal(&app, &replayed).await;
+    assert_eq!(reuse_rows(&app, replayer).await, 1);
+
+    assert_eq!(live_refresh_tokens(&app, replayer).await, 0);
+    assert_eq!(
+        live_refresh_tokens(&app, neighbour).await,
+        1,
+        "the sweep ended a session of another user in the tenant"
+    );
+    assert_eq!(
+        live_refresh_tokens(&app, outsider).await,
+        1,
+        "the sweep ended a session in another tenant"
+    );
+    for (who, token) in [("neighbour", &neighbours), ("outsider", &outsiders)] {
+        let renewed = refreshed(&app, token).await;
+        assert_eq!(renewed.status, StatusCode::OK, "{who}: {}", renewed.body);
+    }
+}
+
+/// The `TOKEN_REUSE` row is the token's tenant's, not the deployment's
+/// default, and carries the address that presented the token: on the first
+/// read's path and on a race's loser's, which reaches the same refusal by
+/// another call.
+#[tokio::test]
+async fn a_replay_is_recorded_in_the_tokens_tenant_with_the_presenting_callers_address() {
+    let app = Arc::new(TestApp::spawn_with(|config| config.multi_tenant = true).await);
+    let replaying_address = Some(REPLAYING_PEER.ip().to_string());
+
+    let (acme, replayer, username) = tenant_user(&app, "ACME").await;
+    let token = refresh_token_in(&app, "ACME", &username).await;
+    let rotated = refreshed(&app, &token).await;
+    assert_eq!(rotated.status, StatusCode::OK, "{}", rotated.body);
+    let replayed = refreshed_from(&app, REPLAYING_PEER, &token).await;
+    assert_eq!(
+        replayed.status,
+        StatusCode::UNAUTHORIZED,
+        "{}",
+        replayed.body
+    );
+    assert_eq!(
+        reuse_origins(&app, replayer).await,
+        [(acme, replaying_address.clone())],
+        "the first read's refusal"
+    );
+
+    let racer = fixtures::create_user(
+        &app.pool,
+        acme,
+        "acme.racer",
+        "acme.racer@kelir.test",
+        PASSWORD,
+        &[],
+    )
+    .await;
+    let token = refresh_token_in(&app, "ACME", "acme.racer").await;
+    let held = HeldRow::take(&app, &token).await;
+    let raced = |app: &Arc<TestApp>| {
+        let app = Arc::clone(app);
+        let token = token.clone();
+        tokio::spawn(async move { refreshed_from(&app, REPLAYING_PEER, &token).await })
+    };
+    let first = raced(&app);
+    let second = raced(&app);
+    rotations_waiting(&app, 2, &[&first, &second]).await;
+    held.release("ROLLBACK").await;
+    let statuses = [answer(first).await.status, answer(second).await.status];
+    assert!(
+        statuses.contains(&StatusCode::OK) && statuses.contains(&StatusCode::UNAUTHORIZED),
+        "{statuses:?}"
+    );
+
+    assert_eq!(
+        reuse_origins(&app, racer).await,
+        [(acme, replaying_address)],
+        "the race loser's refusal"
+    );
+}
+
+/// An expired token is refused and renews nothing, and it is not a replay:
+/// no row and no sweep. A token both revoked and expired is still classified
+/// by its revoke, because the revoke is read first: a rotated token presented
+/// after its expiry is replay evidence. Neither the expiry check nor its
+/// place had a test.
+#[tokio::test]
+async fn an_expired_refresh_token_is_refused_and_a_replayed_one_is_still_token_reuse() {
+    let app = TestApp::spawn().await;
+    let expire = |token: &str| {
+        sqlx::query(
+            "UPDATE refresh_tokens SET expires_at = now() - interval '1 minute' \
+             WHERE token_hash = $1",
+        )
+        .bind(hash_refresh_token(token))
+    };
+
+    let user_id = user(&app, "expired.user").await;
+    let (_, expired) = session_for(&app, "expired.user").await;
+    let (_, sibling) = session_for(&app, "expired.user").await;
+    expire(&expired)
+        .execute(&app.pool)
+        .await
+        .expect("expires the token");
+
+    let refused = refreshed(&app, &expired).await;
+    assert_eq!(refused.status, StatusCode::UNAUTHORIZED, "{}", refused.body);
+    assert_eq!(refused.error_code(), Some("UNAUTHORIZED"));
+    assert!(refused.data()["accessToken"].is_null(), "{}", refused.body);
+    assert_eq!(
+        refresh_token_rows(&app, user_id).await,
+        2,
+        "a token was issued"
+    );
+    assert_eq!(reuse_rows(&app, user_id).await, 0);
+    let renewed = refreshed(&app, &sibling).await;
+    assert_eq!(renewed.status, StatusCode::OK, "{}", renewed.body);
+
+    let user_id = user(&app, "expired.replay").await;
+    let (_, spent) = session_for(&app, "expired.replay").await;
+    let rotated = refreshed(&app, &spent).await;
+    assert_eq!(rotated.status, StatusCode::OK, "{}", rotated.body);
+    expire(&spent)
+        .execute(&app.pool)
+        .await
+        .expect("expires the spent token");
+
+    let replayed = refreshed(&app, &spent).await;
+    assert_eq!(
+        replayed.status,
+        StatusCode::UNAUTHORIZED,
+        "{}",
+        replayed.body
+    );
+    assert_eq!(reuse_records(&app, user_id).await, [replay_record(user_id)]);
+    assert_eq!(live_refresh_tokens(&app, user_id).await, 0);
+}
+
+/// Each revoke keeps the reason it was first revoked for: the `UPDATE`s
+/// revoke only a live row. So a sign-out and the sweep each store their own
+/// spelling, the sweep does not respell what it skips, and a rotated token
+/// presented after a password change is still replay evidence, because the
+/// change's revoke found it already revoked. Within a class, a respelling left
+/// every test above green.
+#[tokio::test]
+async fn a_revoked_token_keeps_the_reason_it_was_first_revoked_for() {
+    let app = TestApp::spawn().await;
+    let user_id = user(&app, "first.reason").await;
+    let (signed_out_access, signed_out) = session_for(&app, "first.reason").await;
+    let (_, spent) = session_for(&app, "first.reason").await;
+    let (access, _) = session_for(&app, "first.reason").await;
+
+    let logout = app
+        .post(
+            "/api/v1/auth/logout",
+            Some(&signed_out_access),
+            json!({ "refreshToken": signed_out }),
+        )
+        .await;
+    assert_eq!(logout.status, StatusCode::NO_CONTENT, "{}", logout.body);
+    replay_refusal(&app, &spent).await;
+
+    // Oldest first: the signed-out token, the spent one, the third session,
+    // and the spent one's successor, which the sweep ended with the third.
+    let expected = [
+        Some("signed out".to_owned()),
+        Some("rotated".to_owned()),
+        Some("refresh token reuse".to_owned()),
+        Some("refresh token reuse".to_owned()),
+    ];
+    assert_eq!(revoked_reasons(&app, user_id).await, expected);
+
+    let changed = change_own_password(&app, &access).await;
+    assert_eq!(changed.status, StatusCode::NO_CONTENT, "{}", changed.body);
+    assert_eq!(
+        revoked_reasons(&app, user_id).await,
+        expected,
+        "the password change respelled a revoked token"
+    );
+
+    let replayed = refreshed(&app, &spent).await;
+    assert_eq!(
+        replayed.status,
+        StatusCode::UNAUTHORIZED,
+        "{}",
+        replayed.body
+    );
+    assert_eq!(
+        reuse_records(&app, user_id).await,
+        [replay_record(user_id), replay_record(user_id)],
+        "a rotated token presented after a password change is a replay"
+    );
+}
+
+/// The rotation and the insert are one transaction in both directions: a
+/// rotation whose commit fails stores no new token either. The failure is a
+/// deferred trigger, so the `UPDATE` and the insert both succeed and only the
+/// `COMMIT` raises. An insert sent on the pool, outside the transaction, left
+/// #751's AC5 test green, since a failed insert rolls back the rotation either
+/// way; here it leaves two live tokens.
+#[tokio::test]
+async fn a_refresh_whose_rotation_cannot_commit_stores_no_new_token() {
+    let app = TestApp::spawn().await;
+    let user_id = user(&app, "commit.fails").await;
+    let (_, token) = session_for(&app, "commit.fails").await;
+
+    execute(
+        &app,
+        "CREATE FUNCTION test_refuse_rotation_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             RAISE EXCEPTION 'injected rotation commit failure';
+         END
+         $$",
+    )
+    .await;
+    execute(
+        &app,
+        "CREATE CONSTRAINT TRIGGER test_refuse_rotation_commit AFTER UPDATE ON refresh_tokens
+         DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+         WHEN (NEW.revoked_reason = 'rotated')
+         EXECUTE FUNCTION test_refuse_rotation_commit()",
+    )
+    .await;
+
+    let failed = refreshed(&app, &token).await;
+    assert_eq!(
+        failed.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        failed.body
+    );
+    assert_eq!(
+        refresh_token_rows(&app, user_id).await,
+        1,
+        "a refresh whose rotation rolled back stored a new token"
+    );
+    assert_eq!(live_refresh_tokens(&app, user_id).await, 1);
+
+    execute(
+        &app,
+        "DROP TRIGGER test_refuse_rotation_commit ON refresh_tokens",
+    )
+    .await;
+    execute(&app, "DROP FUNCTION test_refuse_rotation_commit()").await;
+
+    let renewed = refreshed(&app, &token).await;
+    assert_eq!(renewed.status, StatusCode::OK, "{}", renewed.body);
+    assert_eq!(reuse_rows(&app, user_id).await, 0);
+}
+
+/// A token whose row is gone by the time its rotation runs is refused, and is
+/// not a replay: the re-read finds no reason to classify, so nothing is
+/// recorded and nothing swept. No path deletes a token today; a retention
+/// purge would be the first. Until this test, that arm of the re-read ran in
+/// no test.
+#[tokio::test]
+async fn a_refresh_whose_token_is_deleted_while_it_waits_is_refused_and_not_token_reuse() {
+    let app = Arc::new(TestApp::spawn().await);
+    let user_id = user(&app, "deleted.token").await;
+    let (_, token) = session_for(&app, "deleted.token").await;
+    let (_, sibling) = session_for(&app, "deleted.token").await;
+
+    let mut held = HeldRow::take(&app, &token).await;
+    let running = refresh_in_background(&app, &token);
+    rotations_waiting(&app, 1, &[&running]).await;
+    sqlx::query("DELETE FROM refresh_tokens WHERE token_hash = $1")
+        .bind(&held.token_hash)
+        .execute(&mut held.connection)
+        .await
+        .expect("deletes the held row");
+    held.release("COMMIT").await;
+
+    let refused = answer(running).await;
+    assert_eq!(refused.status, StatusCode::UNAUTHORIZED, "{}", refused.body);
+    assert_eq!(refused.error_code(), Some("UNAUTHORIZED"));
+    assert!(refused.data()["accessToken"].is_null(), "{}", refused.body);
+    assert_eq!(reuse_rows(&app, user_id).await, 0);
+    assert_eq!(refresh_token_rows(&app, user_id).await, 1);
+    let renewed = refreshed(&app, &sibling).await;
+    assert_eq!(renewed.status, StatusCode::OK, "{}", renewed.body);
+}
+
+// ---------------------------------------------------------------------------
 // #710 and #751: what the tests above were seen to do.
 //
 // # Seen red on the unfixed code (`e9a1c29`), 2026-10-20
@@ -2014,3 +2365,36 @@ async fn a_refresh_whose_new_token_cannot_be_stored_keeps_the_old_one() {
 // | Zero rows refused with a plain 401 | *two refreshes of one token at once…* |
 // | No transaction: rotation and insert on the pool | *a refresh whose new token cannot be stored…*, 3 of 3. *Two refreshes…* stayed green 3 of 3: its `live == 0` depends on the transaction, but the loser's sweep did not land between the winner's rotation and its insert in these runs |
 // | The administrative refusal answers 403 | *a refresh after an administrative revoke…* and 11 more, the #649 and D-104 tests among them |
+//
+// # The row 10 gate's campaign (test-engineer), 2026-10-21
+//
+// Mutations the builder did not list, each applied alone to `1cd443f`, this
+// file run, and the mutation reverted. One run each. "Campaign test" marks a
+// test added by the campaign. Two of the builder's rows, the count discarded
+// and the loser classified from the first read, were re-run and went red as
+// recorded above.
+//
+// | Mutation | Red |
+// |---|---|
+// | `rotated` alone classified administrative | 8 tests, *a replayed rotated token…* and *two refreshes…* among them |
+// | `signed out` alone classified administrative | *a signed-out token presented again…* |
+// | `refresh token reuse` alone classified administrative | *a sibling the reuse sweep ended…* |
+// | Every administrative reason replay evidence | *a refresh after an administrative revoke…* names all 9 cases, so each reason alone is pinned by its own case, not only by the unit test |
+// | `from_db` does not know `account deleted` | *a refresh after an administrative revoke…*, that case alone |
+// | `account not active` or `tenant not active` written as `refresh token reuse` | *a refresh after an administrative revoke…*; *…reads as one refused for its user* |
+// | The sweep revokes by tenant, not by user | Campaign test *a replay ends only its own user's sessions*. Survived the tests above |
+// | The reuse row in the `SYSTEM` tenant | Campaign test *a replay is recorded in the token's tenant…*. Survived |
+// | The reuse row without the address | The same. Survived |
+// | The race loser refused with no address | The same, its race half. Survived |
+// | The expiry check removed | Campaign test *an expired refresh token is refused…*. Survived: no test presented an expired refresh token |
+// | Expiry checked before the revoke | The same: a rotated token past its expiry went quiet. Survived |
+// | Sign-out writes `rotated` | Campaign test *a revoked token keeps the reason…*. Survived: same class |
+// | The sweep writes `rotated` | The same. Survived |
+// | `revoke_all_for_user` without `AND revoked_at IS NULL` (built online) | The same: a password change respelled a rotated token, and its replay went quiet. Survived |
+// | The new token stored on the pool, the rotation in the transaction | Campaign test *a refresh whose rotation cannot commit…*: 2 live after a failed commit. Survived: a failed insert rolls the rotation back either way |
+// | The re-read after a lost race panics on no row | Campaign test *a refresh whose token is deleted while it waits…*. Survived: that arm ran in no test |
+// | The re-read's no-row arm classified from the first read | The same: a `TOKEN_REUSE` row and a sweep. Survived |
+// | The race wait returns at once, with the count discarded | The three race tests still red: the refreshes reached the `UPDATE` before the release. The wait is asserted, so it cannot pass unseen |
+// | The loser's `rollback` removed | Survived, equivalent: the 0-row `UPDATE` holds no lock, and the drop rolls back |
+// | `mint_session` inside the transaction | Survived, equivalent: its reads go to the pool. It costs a second connection, which no test can see |
+// | `rotated == 0` read as `!= 1` | Not run, equivalent: `id` is the key |
