@@ -1979,17 +1979,17 @@ async fn a_retired_form_sent_back_is_kept_and_clearing_it_is_still_guarded() {
 //
 // # Seen to fail (coding standard §2.9)
 //
-// The mutations of #739's criteria (AC7), and three more, were made one at a
+// The mutations of #739's criteria (AC7), and five more, were made one at a
 // time in `document_type::{service, domain, repository}`, this binary run
 // whole, and the mutation reverted. Every one reddened a test. **Seen red,
 // 2026-10-20.** Against 64920ce itself ten were red: AC1, AC2 and AC3's four
-// tests, the guarded rename, and the five below.
+// tests, the guarded rename, and the first five below.
 //
 // | Mutation | Reddened |
 // |---|---|
 // | the skip applied to the form only | `a_type_whose_list_was_retired_is_renamed_by_the_dialog`, and six more |
 // | the skip applied to the list only | `a_type_whose_form_was_retired_is_renamed_by_the_dialog`, `a_retired_form_sent_back_is_kept_and_clearing_it_is_still_guarded`, and seven more |
-// | no skip: both sent values checked, as at 64920ce | AC1, AC2 and AC3's four tests, the guarded rename, and the five below |
+// | no skip: both sent values checked, as at 64920ce | AC1, AC2 and AC3's four tests, the guarded rename, and the first five below |
 // | the skip removed inside `changed_reference` | the same ten |
 // | compared with `before`, read ahead of the lock | `a_form_sent_back_after_another_rebinding_is_checked_against_the_row_at_the_lock`, its list twin, and nothing else |
 // | the sent value compared with itself | the two AC5 tests, AC4's five update tests, #165's two refusals, `each_binding_is_compared_on_its_own`, `another_tenants_form_or_list_is_never_kept_as_unchanged` |
@@ -1997,6 +1997,8 @@ async fn a_retired_form_sent_back_is_kept_and_clearing_it_is_still_guarded() {
 // | the form compared with the stored list, and the list with the stored form | AC1, AC2 and AC3's four tests, and six more |
 // | `guard_rebinding` keyed on the skip | `a_retired_form_sent_back_is_kept_and_clearing_it_is_still_guarded`, `the_binding_cannot_be_cleared_out_from_under_an_unpinned_document` |
 // | `FOR UPDATE` dropped from `lock_type_binding` | the two AC5 tests, `a_document_created_during_the_rebinding_is_not_missed`, `a_save_queued_on_the_lock_compares_against_the_set_committed_ahead_of_it` |
+// | `FOR SHARE` dropped from `lock_bindable_form` and `lock_bindable_list` | `a_form_retired_during_the_write_is_refused`, `a_form_or_list_chosen_while_it_is_retired_is_refused_on_an_update` |
+// | `FOR SHARE` dropped from `lock_bindable_list` alone | `a_form_or_list_chosen_while_it_is_retired_is_refused_on_an_update`, and nothing else; before it, nothing |
 //
 // AC4 (c), `a_type_cannot_be_created_with_a_retired_form_or_list`, is on the
 // create path, which none of these touch.
@@ -2007,6 +2009,14 @@ async fn a_retired_form_sent_back_is_kept_and_clearing_it_is_still_guarded() {
 /// so it does not wait for them: it saves while the retirement is still open,
 /// and the retirement then commits. A rename that checked them would take
 /// `FOR SHARE` on both and queue behind the delete.
+///
+/// **The race leaves nothing the sequential order does not.** The type ends
+/// bound to a retired form and list, which is where a delete landing after the
+/// rename leaves it too: nothing refuses retiring a bound form or list (#739's
+/// criteria keep that out of scope), so the lock the rename no longer takes
+/// protected no state. A *changed* binding is still share-locked, so a type is
+/// never newly bound to a row being retired:
+/// `a_form_or_list_chosen_while_it_is_retired_is_refused_on_an_update`.
 #[tokio::test]
 async fn a_rename_that_sends_its_form_and_list_back_does_not_wait_on_their_retirement() {
     use std::time::Duration;
@@ -2056,6 +2066,87 @@ async fn a_rename_that_sends_its_form_and_list_back_does_not_wait_on_their_retir
 
     retiring.commit().await.expect("the retirement commits");
     assert_renamed_as_read(&app, &token, id, &saved, &before, name).await;
+
+    // Both committed: the type is bound to a retired form and list, as after
+    // a rename followed by a delete.
+    for (table, row) in [("rad_forms", form), ("rad_lists", list)] {
+        let retired: bool = sqlx::query_scalar(&format!(
+            "SELECT deleted_at IS NOT NULL FROM {table} WHERE id = $1"
+        ))
+        .bind(row)
+        .fetch_one(&app.pool)
+        .await
+        .expect("the row is readable");
+        assert!(retired, "{table} {row} is retired");
+    }
+}
+
+/// **A changed form or list is still share-locked on an update.** The type
+/// binds neither; a form, then a list, is chosen while another administrator
+/// is retiring it, uncommitted. The save queues on the row rather than reading
+/// it as live, and once the retirement commits it is refused `NOT_FOUND` and
+/// writes nothing. `a_form_retired_during_the_write_is_refused` is the create
+/// path's twin; this is the update path, where #739's skip sits in front of
+/// the check.
+#[tokio::test]
+async fn a_form_or_list_chosen_while_it_is_retired_is_refused_on_an_update() {
+    use std::time::Duration;
+
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for (path, table, code) in [
+        ("formId", "rad_forms", "RACED_FORM"),
+        ("listId", "rad_lists", "RACED_LIST"),
+    ] {
+        let id = type_bound_to_form_and_list(&app, &token, code, None, None).await;
+        let key = code.to_lowercase();
+        let chosen = if path == "formId" {
+            published_form(&app, &token, &format!("pr-{key}")).await
+        } else {
+            created_list(&app, &token, &format!("ls_{key}")).await
+        };
+
+        let before = read_type(&app, &token, id).await;
+        let audited = audited_updates(&app, id).await;
+
+        let mut retiring = app.pool.begin().await.expect("a transaction opens");
+        sqlx::query(&format!(
+            "UPDATE {table} SET deleted_at = now() WHERE id = $1"
+        ))
+        .bind(chosen)
+        .execute(&mut *retiring)
+        .await
+        .expect("retires, uncommitted");
+
+        let save = put_type(&app, &token, id, json!({ path: chosen }));
+        let release = async {
+            // Commit once the save is queued on a lock, or after ten seconds
+            // anyway, and the assertions say what it did.
+            for _ in 0..200 {
+                let waiting: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM pg_locks WHERE NOT granted \
+                     AND pid IN (SELECT pid FROM pg_stat_activity WHERE datname = current_database())",
+                )
+                .fetch_one(&app.pool)
+                .await
+                .expect("reads pg_locks");
+                if waiting > 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            retiring.commit().await.expect("the retirement commits");
+        };
+
+        let (saved, ()) =
+            tokio::time::timeout(Duration::from_secs(20), futures_lite_join(save, release))
+                .await
+                .expect("the save must not block forever");
+
+        assert_refused_at(&saved, path, "NOT_FOUND", code);
+        assert_nothing_written(&app, &token, id, &before, audited, code).await;
+    }
 }
 
 /// **The rename's audit entry names the name alone.** A form and list sent back
