@@ -428,6 +428,18 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A document type whose form or list was retired can be renamed**
+  ([#739](https://github.com/sujanto-gaws/kelir/issues/739)). `PUT
+  /document-types/{id}` checked a sent `formId` or `listId` even at its
+  stored value, so once the bound form or list was deleted, every save from
+  the document type dialog, which sends both, was refused with 422
+  `NOT_FOUND` at `formId` or `listId`, and so was an API client that sent the
+  type back whole. A `formId` or `listId` equal to the value stored on the
+  type row, read under that row's lock, is now kept without the check. A
+  changed one is still checked: a retired form or list is refused with 422
+  `NOT_FOUND`, and a draft form with `NOT_PUBLISHED`. `null` still clears
+  either. The dialog is unchanged, and a test now pins that it sends both
+  back as read. No migration, and no schema change.
 - **A stale document type save no longer deletes a workflow binding added
   since it was read** ([#728](https://github.com/sujanto-gaws/kelir/issues/728),
   decision **D-117** A). A sent `workflows` array replaces the type's whole
@@ -467,9 +479,8 @@ While the major version is `0`, the public API may change in any release.
   still checked, and refused with 422 `NOT_PUBLISHED` or `NOT_FOUND` at
   `workflows.{i}.workflowDefinitionId`. Submission is unchanged: the type's
   documents are refused at submit until it is bound to an active revision.
-  A form or list binding is still checked whenever it is sent, so a type
-  whose bound form or list was retired cannot yet be renamed from the dialog
-  ([#739](https://github.com/sujanto-gaws/kelir/issues/739)).
+  A form or list sent at its stored value is kept the same way since
+  [#739](https://github.com/sujanto-gaws/kelir/issues/739) (above).
 - **The document type dialog shows a refusal under the chooser it concerns**
   ([#716](https://github.com/sujanto-gaws/kelir/issues/716)). A refused save
   said only *Validation failed*. A detail at
