@@ -47,8 +47,9 @@
 //!   checked `ACTIVE` since #187 because a revision could be deprecated after
 //!   it was bound. Since #712 it reads the status under a share lock, so a
 //!   submit that waited on the deprecate is refused too. The submit writes
-//!   nothing. The administrator rebinds the type; a binding that names a deprecated revision is refused as
-//!   `NOT_PUBLISHED` (`document_type::service::check_workflow_bindings`).
+//!   nothing. The administrator rebinds the type; a binding that names a
+//!   deprecated revision is refused as `NOT_PUBLISHED`
+//!   (`document_type::service::check_workflow_bindings`).
 //! * **A role it names stops being held by it** once its running approvals
 //!   finish (`repo::definitions_naming_role`, **D-91** (3)).
 //!
@@ -59,8 +60,9 @@
 //!
 //! **A publish, a deprecate and a delete take the revision `FOR UPDATE`
 //! first, holding nothing before it** (`repo::lock_for_publish`; [#572],
-//! [#573], [#712]). After it they take only the roles a publish checks,
-//! `FOR KEY SHARE`, and the revision's own row and projections. Nothing else is
+//! [#573], [#712]). After it, a publish also takes the roles it checks
+//! `FOR KEY SHARE`; a deprecate and a delete take no role. Each then writes
+//! only the revision's own row and projections. Nothing else is
 //! locked: `repo::has_live_instances` is a plain read, and no instance,
 //! document or document type is touched.
 //!
