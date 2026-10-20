@@ -3335,7 +3335,13 @@ async fn a_resubmit_under_a_held_delete_or_on_a_deleted_revision_carries_on() {
     assert_eq!(submit(&app, &token, document).await.status, StatusCode::OK);
 
     // A resubmit while a delete holds the revision.
-    send_back(&app, &approver, document, "The quotation is for 12 desks, not 2.").await;
+    send_back(
+        &app,
+        &approver,
+        document,
+        "The quotation is for 12 desks, not 2.",
+    )
+    .await;
     let mut deleting = app.pool.begin().await.expect("a transaction");
     assert!(
         definition_repo::lock_for_publish(&mut deleting, tenant, workflow)
@@ -3474,7 +3480,12 @@ async fn a_type_bound_across_tenants_fails_its_submit_and_starts_nothing() {
         "a submit bound across tenants answered other than before #712: {}",
         failed.body
     );
-    assert_eq!(failed.error_code(), Some("INTERNAL_ERROR"), "{}", failed.body);
+    assert_eq!(
+        failed.error_code(),
+        Some("INTERNAL_ERROR"),
+        "{}",
+        failed.body
+    );
 
     assert_eq!(document_status(&app, document).await, "DRAFT");
     assert!(instance_of(&app, document).await.is_none());
