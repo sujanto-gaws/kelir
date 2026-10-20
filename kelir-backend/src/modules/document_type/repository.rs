@@ -52,6 +52,13 @@ pub struct BindableForm {
     pub status: String,
 }
 
+/// A type's form and list bindings as its row stores them, read by
+/// [`lock_type_binding`] under the row's `FOR UPDATE` (#739).
+pub struct HeldBindings {
+    pub form_id: Option<Uuid>,
+    pub list_id: Option<Uuid>,
+}
+
 /// The type list's filters: a search term already trimmed (blank is `None`), a
 /// status already reduced to its column value (#525), and a workflow revision
 /// the type must be bound to (#713).
@@ -251,8 +258,8 @@ pub async fn bound_workflows(
     workflows_of(&mut **transaction, tenant_id, document_type_id).await
 }
 
-/// Reads a type's current form binding **and holds the type row** for the rest
-/// of the transaction.
+/// Reads a type's current form and list bindings **and holds the type row** for
+/// the rest of the transaction.
 ///
 /// `FOR UPDATE` rather than `FOR SHARE`, and the strength is load-bearing.
 /// [`count_documents_without_a_pinned_form`] counts rows a concurrent document
@@ -268,18 +275,21 @@ pub async fn bound_workflows(
 /// somebody to remember. `a_document_created_during_the_rebinding_is_not_missed`
 /// holds it, and goes green the moment the lock is weakened by one step.
 ///
-/// The outer `Option` is "no such type"; the inner one is "the type is bound to
-/// no form", which is a real state — §6.2 makes `form_id` nullable.
+/// The bindings it returns are what a sent `formId` or `listId` is compared
+/// with (#739): read here, under the lock, rather than before it, so a
+/// rebinding committed ahead of this write is what "unchanged" means. `None` is
+/// "no such type"; a binding of `None` is "bound to no form" or "to no list",
+/// which is a real state — §6.2 makes both columns nullable.
 ///
 /// [#167]: https://github.com/sujanto-gaws/kelir/issues/167
 pub async fn lock_type_binding(
     transaction: &mut sqlx::PgTransaction<'_>,
     tenant_id: Uuid,
     id: Uuid,
-) -> Result<Option<Option<Uuid>>, sqlx::Error> {
-    let row = sqlx::query_scalar!(
+) -> Result<Option<HeldBindings>, sqlx::Error> {
+    let row = sqlx::query!(
         r#"
-        SELECT form_id FROM document_types
+        SELECT form_id, list_id FROM document_types
         WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
         FOR UPDATE
         "#,
@@ -289,7 +299,10 @@ pub async fn lock_type_binding(
     .fetch_optional(&mut **transaction)
     .await?;
 
-    Ok(row)
+    Ok(row.map(|row| HeldBindings {
+        form_id: row.form_id,
+        list_id: row.list_id,
+    }))
 }
 
 /// How many live documents of this type pinned **no** form revision.

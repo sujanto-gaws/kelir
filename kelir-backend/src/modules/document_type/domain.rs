@@ -232,8 +232,15 @@ pub struct UpdateDocumentTypeRequest {
     pub description: Option<Option<String>>,
     #[serde(default, deserialize_with = "present_or_absent")]
     pub category: Option<Option<String>>,
+    /// The form this type renders; `null` clears it. A value equal to the one
+    /// stored is kept without being checked again, so a form retired since it
+    /// was bound does not refuse an unrelated edit; any other value must name a
+    /// live, published form (#739, [`changed_reference`]).
     #[serde(default, deserialize_with = "present_or_absent")]
     pub form_id: Option<Option<Uuid>>,
+    /// The list this type's documents appear on; `null` clears it. Like
+    /// `formId`, a value equal to the one stored is not checked again, and any
+    /// other must name a live list (#739).
     #[serde(default, deserialize_with = "present_or_absent")]
     pub list_id: Option<Option<Uuid>>,
     pub default_security_level: Option<SecurityLevel>,
@@ -355,6 +362,20 @@ pub fn changed_bindings<'a>(
     sent.iter()
         .enumerate()
         .filter(move |(_, binding)| !stored.contains(binding))
+}
+
+/// The form or list id an update has to check: the one sent, unless it is the
+/// one stored (#739).
+///
+/// `sent` is the request's field, `None` for a key left out and `Some(None)`
+/// for `null`, which clears the binding and names nothing to check. `stored` is
+/// the column as the type row holds it, read under that row's lock. An id sent
+/// back as stored binds nothing the type was not already bound to, so
+/// re-checking it could only refuse an unrelated edit because the form or list
+/// was retired since: [`changed_bindings`]' reasoning, applied to the two
+/// columns. A changed id is checked like a new one.
+pub fn changed_reference(sent: Option<Option<Uuid>>, stored: Option<Uuid>) -> Option<Uuid> {
+    sent.flatten().filter(|id| Some(*id) != stored)
 }
 
 fn bounded(
@@ -869,6 +890,38 @@ mod tests {
         let sent = vec![full_binding(1), full_binding(2)];
 
         assert_eq!(changed_indexes(&sent, &[]), vec![0, 1]);
+    }
+
+    #[test]
+    fn a_reference_left_out_or_cleared_names_nothing_to_check() {
+        let stored = Some(Uuid::now_v7());
+
+        assert_eq!(changed_reference(None, stored), None);
+        assert_eq!(changed_reference(Some(None), stored), None);
+        assert_eq!(changed_reference(Some(None), None), None);
+    }
+
+    #[test]
+    fn a_reference_sent_at_its_stored_value_is_not_checked() {
+        let stored = Uuid::now_v7();
+
+        assert_eq!(changed_reference(Some(Some(stored)), Some(stored)), None);
+    }
+
+    #[test]
+    fn a_changed_reference_is_checked() {
+        let sent = Uuid::now_v7();
+
+        assert_eq!(
+            changed_reference(Some(Some(sent)), Some(Uuid::now_v7())),
+            Some(sent),
+            "another id stored"
+        );
+        assert_eq!(
+            changed_reference(Some(Some(sent)), None),
+            Some(sent),
+            "nothing stored"
+        );
     }
 
     #[test]
