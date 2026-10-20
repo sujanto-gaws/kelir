@@ -1077,6 +1077,48 @@ describe('DocumentTypeFormDialog choosers', () => {
     expect(wrapper.find('[data-testid="document-type-unplaced-errors"]').exists()).toBe(false)
   })
 
+  // #739 AC8: the request the server's fix is written for. A form or list
+  // retired since the type was bound reads as a 404, so its chooser cannot name
+  // it, and the dialog still sends it back as read: the server keeps a binding
+  // sent at its stored value without checking it again.
+  it('renames a type whose form and list were retired, sending both back as read', async () => {
+    const retiredForm = 'f-retired'
+    const retiredList = 'l-retired'
+    replaceBackend(acceptingPut)
+    const wrapper = await open({
+      ...boundType(wantedFlow.id),
+      formId: retiredForm,
+      listId: retiredList,
+    })
+    await flushPromises()
+
+    for (const [testId, url, retired] of [
+      ['type-form', `/rad/forms/${retiredForm}`, retiredForm],
+      ['type-list', `/rad/lists/${retiredList}`, retiredList],
+    ]) {
+      // Asked for by id, refused, and still chosen under the fallback label.
+      expect(backend.requests.some((request) => request.url === url)).toBe(true)
+      expect(selectedValue(wrapper, testId)).toBe(retired)
+      expect(optionsOf(wrapper, testId)[1]).toBe('The current choice, outside these results')
+    }
+
+    await wrapper.get('[data-testid="type-name"]').setValue('Requisition (renamed)')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(putBody()).toMatchObject({
+      name: 'Requisition (renamed)',
+      formId: retiredForm,
+      listId: retiredList,
+    })
+    expect(sentWorkflows()).toBe(false)
+    expect(wrapper.emitted('saved')).toHaveLength(1)
+    expect(messageUnder(wrapper, 'type-form')).toBe('')
+    expect(messageUnder(wrapper, 'type-list')).toBe('')
+    expect(wrapper.find('[data-testid="document-type-error"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="document-type-unplaced-errors"]').exists()).toBe(false)
+  })
+
   /*
    * #728 (D-117). An edit that replaces the bindings also sends the ones it
    * read, and the server refuses a stored set that changed since: the dialog

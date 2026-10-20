@@ -21,9 +21,10 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::domain::{
-    changed_bindings, same_bindings, validate_create, validate_update, workflows_changed,
-    CreateDocumentTypeRequest, DocumentType, DocumentTypeQuery, DocumentTypeStatus,
-    DocumentTypeSummary, SecurityLevel, UpdateDocumentTypeRequest, WorkflowBinding,
+    changed_bindings, changed_reference, same_bindings, validate_create, validate_update,
+    workflows_changed, CreateDocumentTypeRequest, DocumentType, DocumentTypeQuery,
+    DocumentTypeStatus, DocumentTypeSummary, SecurityLevel, UpdateDocumentTypeRequest,
+    WorkflowBinding,
 };
 use super::repository::{self as repo, DocumentTypeFields, NewDocumentType};
 use super::{TYPE_CREATE, TYPE_DELETE, TYPE_READ, TYPE_UPDATE};
@@ -182,7 +183,7 @@ pub async fn update_type(
     // The type row is read and held before anything below decides on it. Both
     // guards that follow answer questions about state a concurrent writer could
     // move, and coding standard §2.5 puts the lock on what the *check* read.
-    let bound_form = repo::lock_type_binding(&mut transaction, tenant_id, id)
+    let held = repo::lock_type_binding(&mut transaction, tenant_id, id)
         .await?
         .ok_or_else(|| AppError::not_found("Document type"))?;
 
@@ -205,29 +206,32 @@ pub async fn update_type(
         }
     }
 
-    // A binding is checked only when it is sent, and only when it names
-    // something. Re-checking an unchanged binding would refuse an unrelated
-    // edit because a form was retired weeks ago — which is a real state, and
-    // the fix for it is to change the binding, not to be unable to rename the
-    // type.
+    // A binding is checked only when it is sent, only when it names something,
+    // and only when it differs from the one stored. Re-checking an unchanged
+    // binding would refuse an unrelated edit because a form was retired weeks
+    // ago — which is a real state, and the fix for it is to change the binding,
+    // not to be unable to rename the type.
     //
-    // For the form and the list, that holds only for a key left out: one that
-    // is sent is checked, even at its stored value, and the dialog sends both
-    // (#739). The workflow bindings below are matched against the stored set
-    // instead (#716), because they arrive as a whole array that a full-body
-    // PUT sends back: a binding equal to a stored one in all five fields is
-    // not re-checked, so a type bound to a revision deprecated since can still
-    // be renamed, and a submission still refuses that binding (#187, #713).
+    // The form and the list are compared with the row held above (#739), so a
+    // dialog or a full-body PUT that sends them back as read saves, and a value
+    // another administrator moved since is a change and is checked. The
+    // workflow bindings below are matched against the stored set (#716),
+    // because they arrive as a whole array: a binding equal to a stored one in
+    // all five fields is not re-checked, so a type bound to a revision
+    // deprecated since can still be renamed, and a submission still refuses
+    // that binding (#187, #713).
     check_bindings(
         &mut transaction,
         tenant_id,
-        request.form_id.flatten(),
-        request.list_id.flatten(),
+        changed_reference(request.form_id, held.form_id),
+        changed_reference(request.list_id, held.list_id),
     )
     .await?;
 
+    // Keyed on the value moving, not on what was checked: clearing the form
+    // checks nothing and is still a rebinding.
     if let Some(next_form) = request.form_id {
-        if next_form != bound_form {
+        if next_form != held.form_id {
             guard_rebinding(&mut transaction, tenant_id, id, &before.type_code).await?;
         }
     }
@@ -448,11 +452,11 @@ async fn guard_rebinding(
 /// checked nor locked ([`changed_bindings`]). It binds nothing the type was not
 /// already bound to, so re-checking it could only refuse an unrelated edit
 /// because its revision was deprecated since, which is the reasoning
-/// `update_type` states. The form and list bindings do not have this exemption
-/// yet (#739). Nothing becomes routable by it: a submission still refuses a
-/// binding whose revision is not `ACTIVE` (#187, #713). Its revision is not
-/// share-locked, because nothing here decides on it. A refusal names the index
-/// the binding was **sent** at.
+/// `update_type` states, and the form and list bindings have the same
+/// exemption ([`changed_reference`], #739). Nothing becomes routable by it: a
+/// submission still refuses a binding whose revision is not `ACTIVE` (#187,
+/// #713). Its revision is not share-locked, because nothing here decides on
+/// it. A refusal names the index the binding was **sent** at.
 ///
 /// **A draft is refused, and that is the same argument publishing settles for a
 /// form.** A running approval executes the revision it started against, so
@@ -521,6 +525,10 @@ async fn check_workflow_bindings(
 /// binding a draft means pinning a definition that can still change under every
 /// document already created from it — which is exactly the thing publication
 /// exists to prevent (#156).
+///
+/// On an update it is handed only a form or list that differs from the one the
+/// type row stores ([`changed_reference`], #739). One sent back as stored is
+/// neither checked nor share-locked: nothing here decides on it.
 async fn check_bindings(
     transaction: &mut sqlx::PgTransaction<'_>,
     tenant_id: Uuid,
