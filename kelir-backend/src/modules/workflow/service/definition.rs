@@ -46,8 +46,8 @@
 //!   refused** as `WORKFLOW_NOT_PUBLISHED` (422) by `engine::start`, which has
 //!   checked `ACTIVE` since #187 because a revision could be deprecated after
 //!   it was bound. Since #712 it reads the status under a share lock, so a
-//!   submit in flight when the deprecate commits is refused too. The submit writes nothing. The administrator rebinds the
-//!   type; a binding that names a deprecated revision is refused as
+//!   submit that waited on the deprecate is refused too. The submit writes
+//!   nothing. The administrator rebinds the type; a binding that names a deprecated revision is refused as
 //!   `NOT_PUBLISHED` (`document_type::service::check_workflow_bindings`).
 //! * **A role it names stops being held by it** once its running approvals
 //!   finish (`repo::definitions_naming_role`, **D-91** (3)).
