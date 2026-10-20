@@ -45,18 +45,42 @@
 //! * **A document type bound to it stays bound**, and **its next submission is
 //!   refused** as `WORKFLOW_NOT_PUBLISHED` (422) by `engine::start`, which has
 //!   checked `ACTIVE` since #187 because a revision could be deprecated after
-//!   it was bound. The submit writes nothing. The administrator rebinds the
-//!   type; a binding that names a deprecated revision is refused as
-//!   `NOT_PUBLISHED` (`document_type::service::check_workflow_bindings`).
+//!   it was bound. Since #712 it reads the status under a share lock, so a
+//!   submit that waited on the deprecate is refused too. The submit writes
+//!   nothing. The administrator rebinds the type; a binding that names a
+//!   deprecated revision is refused as `NOT_PUBLISHED`
+//!   (`document_type::service::check_workflow_bindings`).
 //! * **A role it names stops being held by it** once its running approvals
 //!   finish (`repo::definitions_naming_role`, **D-91** (3)).
 //!
 //! It is not reversible: there is no route from `DEPRECATED` back to
 //! `ACTIVE`. A revision is revived by revising it, which publishes a new number.
 //!
+//! # The locks these paths take
+//!
+//! **A publish, a deprecate and a delete take the revision `FOR UPDATE`
+//! first, holding nothing before it** (`repo::lock_for_publish`; [#572],
+//! [#573], [#712]). After it, a publish also takes the roles it checks
+//! `FOR KEY SHARE`; a deprecate and a delete take no role. Each then writes
+//! only the revision's own row and projections. Nothing else is
+//! locked: `repo::has_live_instances` is a plain read, and no instance,
+//! document or document type is touched.
+//!
+//! That is what keeps them out of a cycle with the paths that take a revision
+//! later. A submit holds its document and the document's type when
+//! `engine::start` takes the revision `FOR SHARE`, and a binding holds the type
+//! when `repo::lock_bindable_definition` does. A path that held any of those,
+//! or took one after the revision, would deadlock with them. A draft's edit is
+//! one `UPDATE` of the row on the pool, and a decision reads the revision
+//! without a lock.
+//!
+//! **This says what the paths lock. It is not a complete lock order**
+//! (ADR-0042 §2).
+//!
 //! [#174]: https://github.com/sujanto-gaws/kelir/issues/174
 //! [#572]: https://github.com/sujanto-gaws/kelir/issues/572
 //! [#573]: https://github.com/sujanto-gaws/kelir/issues/573
+//! [#712]: https://github.com/sujanto-gaws/kelir/issues/712
 
 use std::collections::BTreeSet;
 
@@ -586,6 +610,20 @@ pub async fn create_revision(
     Ok(created)
 }
 
+/// Soft-deletes a revision no approval runs on ([#712]).
+///
+/// **The row is held `FOR UPDATE` before it is read**, as
+/// [`publish_definition`] and [`deprecate_definition`] hold it, and the read,
+/// the check for running approvals and the soft-delete all run in that
+/// transaction. So the status the audit row records is the status the row had
+/// when it was deleted, and a submit cannot start an approval on the revision
+/// in between: `engine::start` holds it `FOR SHARE` before its instance
+/// `INSERT`, so a delete sent while a submit is in flight waits and then
+/// finds the approval, and a submit sent while a delete is in flight waits and
+/// then finds the row gone. The module documentation says why nothing is
+/// held before the lock.
+///
+/// [#712]: https://github.com/sujanto-gaws/kelir/issues/712
 pub async fn delete_definition(
     state: &AppState,
     caller: &Authenticated,
@@ -596,7 +634,13 @@ pub async fn delete_definition(
     let tenant_id = caller.tenant_id();
     let actor = Some(caller.user_id());
 
-    let before = repo::find_definition(&state.pool, tenant_id, id)
+    let mut transaction = state.pool.begin().await?;
+
+    if !repo::lock_for_publish(&mut transaction, tenant_id, id).await? {
+        return Err(AppError::not_found("Workflow definition"));
+    }
+
+    let before = repo::find_definition(&mut *transaction, tenant_id, id)
         .await?
         .ok_or_else(|| AppError::not_found("Workflow definition"))?;
 
@@ -606,7 +650,7 @@ pub async fn delete_definition(
     // a running approval leaves that approval unable to move. Deprecating the
     // revision is how new documents stop routing to it, and the message names
     // the route that does it (#573).
-    if repo::has_live_instances(&state.pool, tenant_id, id).await? {
+    if repo::has_live_instances(&mut *transaction, tenant_id, id).await? {
         return Err(AppError::conflict(format!(
             "revision {} of `{}` has running approvals and cannot be deleted; \
              deprecate it instead (POST /api/v1/workflow/definitions/{id}/deprecation), \
@@ -615,9 +659,13 @@ pub async fn delete_definition(
         )));
     }
 
-    if repo::soft_delete(&state.pool, tenant_id, id, actor).await? == 0 {
+    if repo::soft_delete(&mut *transaction, tenant_id, id, actor).await? == 0 {
+        // Not reached while the row is locked above and was live; kept for
+        // `publish_definition`'s reason.
         return Err(AppError::not_found("Workflow definition"));
     }
+
+    transaction.commit().await?;
 
     audit::record_or_warn(
         &state.pool,

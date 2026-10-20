@@ -266,7 +266,13 @@ pub async fn update_draft<'e, E: PgExecutor<'e>>(
 /// before the roles the definition names ([`lock_live_roles`]), which
 /// `service::definition::publish_definition` says is the order.
 ///
+/// **A deprecate and a delete take it too** ([#573], [#712]), first in their
+/// transaction like the publish, and then take nothing but the row's own
+/// write. A submit's [`lock_for_start`] waits for it, and it waits for one.
+///
 /// [#572]: https://github.com/sujanto-gaws/kelir/issues/572
+/// [#573]: https://github.com/sujanto-gaws/kelir/issues/573
+/// [#712]: https://github.com/sujanto-gaws/kelir/issues/712
 pub async fn lock_for_publish(
     transaction: &mut sqlx::PgTransaction<'_>,
     tenant_id: Uuid,
@@ -372,6 +378,39 @@ pub async fn deprecate<'e, E: PgExecutor<'e>>(
 /// "that definition is a draft" are different refusals and the caller says so
 /// differently.
 pub async fn lock_bindable_definition(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar!(
+        r#"
+        SELECT status FROM workflow_definitions
+        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+        FOR SHARE
+        "#,
+        tenant_id,
+        id
+    )
+    .fetch_optional(&mut **transaction)
+    .await
+}
+
+/// Holds a live definition `FOR SHARE` for an instance about to start on it,
+/// and reports its status; `None` when it is gone ([#712]).
+///
+/// `service::engine::start` takes it before the instance `INSERT`. A publish,
+/// a deprecate and a delete hold the row `FOR UPDATE` ([`lock_for_publish`]),
+/// which this waits for; once that commits, the row is read again, so a
+/// revision deleted in the meantime no longer matches `deleted_at IS NULL`.
+/// While a start holds it, their `FOR UPDATE` waits for the start to commit,
+/// so the delete then sees the instance it started. Shares do not conflict
+/// with one another, so concurrent submits of one revision do not wait on each
+/// other. The status it reports is the one `engine::start` checks, so a
+/// deprecate committed while the start waited is seen. The statement is
+/// [`lock_bindable_definition`]'s.
+///
+/// [#712]: https://github.com/sujanto-gaws/kelir/issues/712
+pub async fn lock_for_start(
     transaction: &mut sqlx::PgTransaction<'_>,
     tenant_id: Uuid,
     id: Uuid,
