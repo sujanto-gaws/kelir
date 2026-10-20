@@ -362,7 +362,9 @@ pub struct WorkflowHistoryEntry {
     pub to_state: String,
     /// `None` when nothing named an action — the start.
     pub action: Option<String>,
-    /// The task the decision came from, when a decision moved it.
+    /// The task the decision came from, when a decision moved it, or the
+    /// correction task a resubmit closed
+    /// ([#667](https://github.com/sujanto-gaws/kelir/issues/667)).
     pub task_id: Option<Uuid>,
     /// The reason given with the decision (FR-TASK-006,
     /// [#182](https://github.com/sujanto-gaws/kelir/issues/182)).

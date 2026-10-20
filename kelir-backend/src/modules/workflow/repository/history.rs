@@ -47,7 +47,9 @@ pub struct NewHistoryEntry<'a> {
     pub to_state: &'a str,
     /// `None` when nothing named an action — the start.
     pub action: Option<TransitionAction>,
-    /// The task the decision came from, when a decision is what moved it.
+    /// The task the decision came from, when a decision is what moved it, or
+    /// the correction task a resubmit closed
+    /// ([#667](https://github.com/sujanto-gaws/kelir/issues/667)).
     pub task_id: Option<Uuid>,
     /// The reason given with the decision (FR-TASK-006,
     /// [#182](https://github.com/sujanto-gaws/kelir/issues/182)), trimmed and
