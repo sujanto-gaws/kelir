@@ -1973,6 +1973,324 @@ async fn a_retired_form_sent_back_is_kept_and_clearing_it_is_still_guarded() {
     assert_nothing_written(&app, &token, id, &after, audited, "a retired form cleared").await;
 }
 
+// The seams around the skip, added by the closing campaign on #739: the lock
+// an unchanged binding no longer takes, the audit entry of a rename, #728's
+// `expectedWorkflows`, a key left out beside one sent back, and other tenants.
+//
+// # Seen to fail (coding standard §2.9)
+//
+// The mutations of #739's criteria (AC7), and three more, were made one at a
+// time in `document_type::{service, domain, repository}`, this binary run
+// whole, and the mutation reverted. Every one reddened a test. **Seen red,
+// 2026-10-20.** Against 64920ce itself ten were red: AC1, AC2 and AC3's four
+// tests, the guarded rename, and the five below.
+//
+// | Mutation | Reddened |
+// |---|---|
+// | the skip applied to the form only | `a_type_whose_list_was_retired_is_renamed_by_the_dialog`, and six more |
+// | the skip applied to the list only | `a_type_whose_form_was_retired_is_renamed_by_the_dialog`, `a_retired_form_sent_back_is_kept_and_clearing_it_is_still_guarded`, and seven more |
+// | no skip: both sent values checked, as at 64920ce | AC1, AC2 and AC3's four tests, the guarded rename, and the five below |
+// | the skip removed inside `changed_reference` | the same ten |
+// | compared with `before`, read ahead of the lock | `a_form_sent_back_after_another_rebinding_is_checked_against_the_row_at_the_lock`, its list twin, and nothing else |
+// | the sent value compared with itself | the two AC5 tests, AC4's five update tests, #165's two refusals, `each_binding_is_compared_on_its_own`, `another_tenants_form_or_list_is_never_kept_as_unchanged` |
+// | nothing checked on an update | the same eleven |
+// | the form compared with the stored list, and the list with the stored form | AC1, AC2 and AC3's four tests, and six more |
+// | `guard_rebinding` keyed on the skip | `a_retired_form_sent_back_is_kept_and_clearing_it_is_still_guarded`, `the_binding_cannot_be_cleared_out_from_under_an_unpinned_document` |
+// | `FOR UPDATE` dropped from `lock_type_binding` | the two AC5 tests, `a_document_created_during_the_rebinding_is_not_missed`, `a_save_queued_on_the_lock_compares_against_the_set_committed_ahead_of_it` |
+//
+// AC4 (c), `a_type_cannot_be_created_with_a_retired_form_or_list`, is on the
+// create path, which none of these touch.
+
+/// **An unchanged form or list is not share-locked.** Another administrator is
+/// retiring the type's form and list, uncommitted, when the dialog's rename
+/// arrives sending both back as read. The rename decides nothing about either,
+/// so it does not wait for them: it saves while the retirement is still open,
+/// and the retirement then commits. A rename that checked them would take
+/// `FOR SHARE` on both and queue behind the delete.
+#[tokio::test]
+async fn a_rename_that_sends_its_form_and_list_back_does_not_wait_on_their_retirement() {
+    use std::time::Duration;
+
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let form = published_form(&app, &token, "pr-retiring-unlocked").await;
+    let list = created_list(&app, &token, "ls_retiring_unlocked").await;
+    let id = type_bound_to_form_and_list(&app, &token, "RETIRING_UNLOCKED", Some(form), Some(list))
+        .await;
+    let before = read_type(&app, &token, id).await;
+
+    // The retirement, mid-flight: both rows soft-deleted, not yet committed.
+    let mut retiring = app.pool.begin().await.expect("a transaction opens");
+    for (statement, row) in [
+        (
+            "UPDATE rad_forms SET deleted_at = now() WHERE id = $1",
+            form,
+        ),
+        (
+            "UPDATE rad_lists SET deleted_at = now() WHERE id = $1",
+            list,
+        ),
+    ] {
+        sqlx::query(statement)
+            .bind(row)
+            .execute(&mut *retiring)
+            .await
+            .expect("retires, uncommitted");
+    }
+
+    let name = "Renamed while its form and list are retired";
+    let saved = tokio::time::timeout(
+        Duration::from_secs(5),
+        put_type(&app, &token, id, dialog_edit(&before, name)),
+    )
+    .await;
+
+    let Ok(saved) = saved else {
+        retiring
+            .rollback()
+            .await
+            .expect("the retirement rolls back");
+        panic!("the rename waited on a form and list it sends back unchanged");
+    };
+
+    retiring.commit().await.expect("the retirement commits");
+    assert_renamed_as_read(&app, &token, id, &saved, &before, name).await;
+}
+
+/// **The rename's audit entry names the name alone.** A form and list sent back
+/// as stored did not move, so the `UPDATE` entry records neither, nor the
+/// workflows a whole-type client sends back with them: what changed, not what
+/// was requested (#135).
+#[tokio::test]
+async fn a_rename_with_its_form_and_list_retired_audits_only_the_name() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let form = published_form(&app, &token, "pr-retired-audited").await;
+    let list = created_list(&app, &token, "ls_retired_audited").await;
+    let id =
+        type_bound_to_form_and_list(&app, &token, "RETIRED_AUDITED", Some(form), Some(list)).await;
+    retire_form(&app, &token, form).await;
+    retire_list(&app, &token, list).await;
+
+    let before = read_type(&app, &token, id).await;
+    let audited = audited_updates(&app, id).await;
+
+    let name = "Renamed and audited";
+    let mut whole = dialog_edit(&before, name);
+    whole["workflows"] = before["workflows"].clone();
+
+    let renamed = put_type(&app, &token, id, whole).await;
+    assert_renamed_as_read(&app, &token, id, &renamed, &before, name).await;
+    assert_eq!(audited_updates(&app, id).await, audited + 1);
+
+    let (old_value, new_value): (Value, Value) = sqlx::query_as(
+        "SELECT old_value_json, new_value_json FROM audit_events
+         WHERE object_id = $1 AND action = 'UPDATE'
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(id)
+    .fetch_one(&app.pool)
+    .await
+    .expect("the rename was audited");
+
+    assert_eq!(old_value, json!({ "name": before["name"] }));
+    assert_eq!(new_value, json!({ "name": name }));
+}
+
+/// **#728's comparison and #739's skip are independent.** A dialog that moves
+/// its workflow chooser on a type whose form and list were retired sends both
+/// back as read, the moved binding, and the set it read as `expectedWorkflows`
+/// (D-117). From a stale read it is refused 409 and writes nothing: sending
+/// the retired form and list back does not get it past the comparison. From a
+/// current read it saves, the workflow moves, and the form and list are kept.
+#[tokio::test]
+async fn a_dialog_that_moves_its_workflow_keeps_a_retired_form_and_list_unless_its_read_is_stale() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let form = published_form(&app, &token, "pr-retired-moved").await;
+    let list = created_list(&app, &token, "ls_retired_moved").await;
+    let id =
+        type_bound_to_form_and_list(&app, &token, "RETIRED_MOVED", Some(form), Some(list)).await;
+    retire_form(&app, &token, form).await;
+    retire_list(&app, &token, list).await;
+    let next = published_workflow(&app, &token, "wf_moved_past_retired").await;
+
+    let before = read_type(&app, &token, id).await;
+    let audited = audited_updates(&app, id).await;
+
+    let mut binding = before["workflows"][0].clone();
+    binding["workflowDefinitionId"] = json!(next);
+
+    // A read that saw no binding at all.
+    let mut stale = dialog_edit(&before, "Moved from a stale read");
+    stale["workflows"] = json!([binding.clone()]);
+    stale["expectedWorkflows"] = json!([]);
+
+    let refused = put_type(&app, &token, id, stale).await;
+    assert_workflows_changed(
+        &refused,
+        "a stale save sending a retired form and list back",
+    );
+    assert_nothing_written(&app, &token, id, &before, audited, "a stale save").await;
+
+    let mut moved = dialog_edit(&before, "Moved past a retired form and list");
+    moved["workflows"] = json!([binding]);
+    moved["expectedWorkflows"] = before["workflows"].clone();
+
+    let saved = put_type(&app, &token, id, moved).await;
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
+
+    let read = read_type(&app, &token, id).await;
+    assert_eq!(read["name"], "Moved past a retired form and list", "{read}");
+    assert_eq!(read["formId"], before["formId"], "{read}");
+    assert_eq!(read["listId"], before["listId"], "{read}");
+    assert_eq!(revisions(&read["workflows"]), vec![next.to_string()]);
+}
+
+/// **A key left out is left alone, and each binding is compared on its own.**
+/// Both stored bindings are retired. A body leaving out both keys, one sending
+/// the form back and leaving out the list, and the reverse each save and keep
+/// both. Sending one back unchanged exempts only that one: changing the other
+/// to a retired row is refused at its own path.
+#[tokio::test]
+async fn each_binding_is_compared_on_its_own() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let form = published_form(&app, &token, "pr-retired-alone").await;
+    let list = created_list(&app, &token, "ls_retired_alone").await;
+    let other_form = published_form(&app, &token, "pr-retired-beside").await;
+    let other_list = created_list(&app, &token, "ls_retired_beside").await;
+    let id =
+        type_bound_to_form_and_list(&app, &token, "RETIRED_ALONE", Some(form), Some(list)).await;
+    for retired in [form, other_form] {
+        retire_form(&app, &token, retired).await;
+    }
+    for retired in [list, other_list] {
+        retire_list(&app, &token, retired).await;
+    }
+
+    for (label, body) in [
+        ("both left out", json!({ "name": "both left out" })),
+        (
+            "the list left out",
+            json!({ "name": "the list left out", "formId": form }),
+        ),
+        (
+            "the form left out",
+            json!({ "name": "the form left out", "listId": list }),
+        ),
+    ] {
+        let saved = put_type(&app, &token, id, body).await;
+        assert_eq!(saved.status, StatusCode::OK, "{label}: {}", saved.body);
+
+        let read = read_type(&app, &token, id).await;
+        assert_eq!(read["name"], label, "{read}");
+        assert_eq!(read["formId"], form.to_string(), "{label}: {read}");
+        assert_eq!(read["listId"], list.to_string(), "{label}: {read}");
+    }
+
+    let before = read_type(&app, &token, id).await;
+    let audited = audited_updates(&app, id).await;
+
+    // The dialog's body sends both back as read; one of them then changes.
+    for (path, changed) in [("listId", other_list), ("formId", other_form)] {
+        let mut edit = dialog_edit(&before, "One kept, one changed");
+        edit[path] = json!(changed);
+
+        let refused = put_type(&app, &token, id, edit).await;
+        assert_refused_at(&refused, path, "NOT_FOUND", path);
+        assert_nothing_written(&app, &token, id, &before, audited, path).await;
+    }
+}
+
+/// **Another tenant's form or list is a change, and reads as absent.** This
+/// tenant's type stores a retired form and list, so the skip is in play; a form
+/// or list of another tenant sent in their place is checked and refused
+/// `NOT_FOUND`, never kept as unchanged. And another tenant's type, sent its
+/// own stored form and list back, is not found and not written: the row the
+/// skip compares with is read in the caller's tenant.
+#[tokio::test]
+async fn another_tenants_form_or_list_is_never_kept_as_unchanged() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let other = fixtures::create_tenant(&app.pool, "TNT-DT-RETIRED", "Retired tenant").await;
+
+    let their_form = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO rad_forms (id, tenant_id, form_key, title, jfss_version,
+                                definition_json, status, published_at)
+         VALUES ($1, $2, 'theirs', 'Theirs', '2.0.1', $3, 'PUBLISHED', now())",
+    )
+    .bind(their_form)
+    .bind(other)
+    .bind(definition("theirs"))
+    .execute(&app.pool)
+    .await
+    .expect("insert the other tenant's form");
+
+    let their_list = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO rad_lists (id, tenant_id, list_key, title) VALUES ($1, $2, 'theirs', 'Theirs')",
+    )
+    .bind(their_list)
+    .bind(other)
+    .execute(&app.pool)
+    .await
+    .expect("insert the other tenant's list");
+
+    let their_type = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO document_types (id, tenant_id, type_code, name, form_id, list_id)
+         VALUES ($1, $2, 'THEIRS', 'Theirs', $3, $4)",
+    )
+    .bind(their_type)
+    .bind(other)
+    .bind(their_form)
+    .bind(their_list)
+    .execute(&app.pool)
+    .await
+    .expect("insert the other tenant's type");
+
+    let form = published_form(&app, &token, "pr-retired-ours").await;
+    let list = created_list(&app, &token, "ls_retired_ours").await;
+    let id =
+        type_bound_to_form_and_list(&app, &token, "RETIRED_OURS", Some(form), Some(list)).await;
+    retire_form(&app, &token, form).await;
+    retire_list(&app, &token, list).await;
+
+    let before = read_type(&app, &token, id).await;
+    let audited = audited_updates(&app, id).await;
+
+    for (path, theirs) in [("formId", their_form), ("listId", their_list)] {
+        let mut edit = dialog_edit(&before, "Rebound across tenants");
+        edit[path] = json!(theirs);
+
+        let refused = put_type(&app, &token, id, edit).await;
+        assert_refused_at(&refused, path, "NOT_FOUND", path);
+        assert_nothing_written(&app, &token, id, &before, audited, path).await;
+    }
+
+    let crossed = put_type(
+        &app,
+        &token,
+        their_type,
+        json!({ "name": "Renamed across tenants", "formId": their_form, "listId": their_list }),
+    )
+    .await;
+    assert_eq!(crossed.status, StatusCode::NOT_FOUND, "{}", crossed.body);
+
+    let name: String = sqlx::query_scalar("SELECT name FROM document_types WHERE id = $1")
+        .bind(their_type)
+        .fetch_one(&app.pool)
+        .await
+        .expect("their type is readable");
+    assert_eq!(name, "Theirs");
+}
+
 /// A type with documents cannot be retired.
 #[tokio::test]
 async fn a_type_with_documents_is_refused_rather_than_retired() {
