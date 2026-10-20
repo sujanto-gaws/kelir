@@ -53,7 +53,7 @@
 //! | `is_live` ignores the user | the walk, 143 of 429 cells (every deleted-user cell); `a_user_deleted_through_the_route_has_their_token_refused_and_nobody_elses`, `a_user_whose_deleted_at_is_set_by_sql_has_their_token_refused_and_nobody_elses`, `the_current_user_route_refuses_a_deleted_tenants_token_and_a_deleted_users`, `a_token_naming_a_user_of_one_tenant_and_another_tenant_is_refused`, `a_token_naming_a_user_or_a_tenant_that_has_no_row_is_refused`; `session::a_deleted_users_access_token_and_refresh_token_are_both_refused_at_once` |
 //! | The tenant read as `t.status <> 'ACTIVE'`, not `t.deleted_at IS NOT NULL` | **The walk stays green, and so does every test that deletes a tenant through the route**: the soft delete also writes `INACTIVE`. Red: `a_tenant_whose_deleted_at_is_set_by_sql_has_its_token_refused_and_no_other_tenants`, and D-104's three: `tenants::by_decision_d_104_an_access_token_outlives_its_tenants_suspension_until_it_expires`, `tenants::by_decision_d_104_an_access_token_outlives_its_tenants_deactivation_until_it_expires`, `tenants::a_tenant_that_left_has_its_expired_access_token_refused_and_nothing_renews_it` (at its control) |
 //! | The user read as `u.status <> 'ACTIVE'` | **The walk stays green, and so does every test that deletes a user through the route.** Red: `a_user_whose_deleted_at_is_set_by_sql_has_their_token_refused_and_nobody_elses`, `session::by_decision_d_104_a_deactivated_users_access_token_works_until_it_expires`, `session::by_decision_d_104_a_locked_users_access_token_works_until_it_expires` |
-//! | `u.tenant_id = $1` dropped: the pairing of `sub` with `tenant_id` | `a_token_naming_a_user_of_one_tenant_and_another_tenant_is_refused` only. The walk is green: its tokens are the application's own |
+//! | `u.tenant_id = $1` dropped: the pairing of `sub` with `tenant_id` | `a_token_naming_a_user_of_one_tenant_and_another_tenant_is_refused`, of the files run here. Two tests in all: verification record 21's probe M1 made it again with `deleted_caller_campaign.rs` run, and its `a_refusal_tells_the_operator_which_of_the_two_it_was_and_the_caller_nothing` went red too, at its log line (#669). The walk is green: its tokens are the application's own |
 //! | A row that is not there read as live (`RowState::from_deleted(None)`) | `a_token_naming_a_user_or_a_tenant_that_has_no_row_is_refused`, `a_token_naming_a_user_of_one_tenant_and_another_tenant_is_refused`. The walk is green |
 //! | A failed lookup is a pass | `a_lookup_that_fails_is_a_500_and_neither_a_pass_nor_a_401` only (403) |
 //! | A failed lookup is a 401 | the same test only (401) |
@@ -76,6 +76,8 @@
 //! operations, 144 arguments), at `session::a_refresh_token_rotates_and_the_old_one_is_refused_on_replay`
 //! (a refresh sends no access token) and at two tests of
 //! `deleted_caller_campaign.rs`, whose header says what else it made.
+//! **The sign-in one is recorded nowhere**, here or in the campaign's file,
+//! so it is not known to have been made (#669).
 
 mod common;
 
