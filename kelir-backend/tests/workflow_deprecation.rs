@@ -2186,6 +2186,31 @@ async fn migration_0051_grants_the_system_administrator_and_not_an_older_tenants
 // The races are staged with `task_inbox.rs`'s gate (#663): a trigger that
 // stops the first request at a chosen statement, holding every lock it took
 // before it, while the second is seen waiting on it in `pg_stat_activity`.
+//
+// # Seen red on the unfixed code (`64920ce`), 2026-10-20
+//
+// | Test | How it went red |
+// |---|---|
+// | *a delete that waited on a deprecate…* | Recorded `ACTIVE` |
+// | *a delete that waited on a publish…* | Recorded `DRAFT` |
+// | *a submit waiting on a delete…* | The submit did not wait: 200. The delete's `UPDATE` takes `FOR NO KEY UPDATE`, which the instance key's `FOR KEY SHARE` does not conflict with |
+// | *a delete waiting on a submit…* | The delete did not wait: 204, under the approval just started |
+// | *a deprecate waiting on a submit…* | The deprecate did not wait: 200 |
+// | *a submit of a type bound to a deleted revision…* | 200, an approval started on the deleted revision |
+// | *twenty submits racing deletes…* | Round 0: 200 and 204 |
+//
+// # Seen to fail after the fix, 2026-10-20
+//
+// Each mutation applied alone, these tests run, and the mutation reverted.
+//
+// | Mutation | Red |
+// |---|---|
+// | `lock_for_publish` dropped from `delete_definition` | *…waited on a deprecate…* (`ACTIVE`); *…waited on a publish…* (`DRAFT`); *a delete waiting on a submit…* (waited in the `UPDATE`); *twenty…* (round 4, 200 and 204). *A submit waiting on a delete…* stays green: the start's share lock alone waits on the soft-delete's row lock |
+// | `find_definition` moved before the lock, on the pool | *…waited on a deprecate…*; *…waited on a publish…* |
+// | `has_live_instances` moved before the lock, on the pool | *a delete waiting on a submit…* (204); *twenty…* |
+// | `soft_delete` on the pool | *…waited on a deprecate…* and *…on a publish…* never answered; *a submit waiting on a delete…* never reached the gate; *eight deletes…* answered 500 |
+// | `lock_for_start` dropped from `engine::start` | *a submit waiting on a delete…* (waited in the instance `INSERT`); *a delete waiting on a submit…*; *a deprecate waiting on a submit…*; *…bound to a deleted revision…*; *twenty…* |
+// | `definition_of_instance` reads `FOR SHARE` | *running approvals carry on…*: the decision waited on the held deprecate |
 
 /// The `old_value` of every `Workflow.Deleted` row written about `id`.
 async fn deletion_records(app: &TestApp, id: Uuid) -> Vec<Value> {

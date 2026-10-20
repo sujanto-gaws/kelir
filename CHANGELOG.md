@@ -428,6 +428,22 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A workflow revision being deleted no longer has an approval started on
+  it** ([#712](https://github.com/sujanto-gaws/kelir/issues/712)).
+  `DELETE /workflow/definitions/{id}` read the revision, checked for running
+  approvals and deleted it with no lock, so a submit of a document bound to
+  it could start an approval on the revision the delete then removed, and
+  that approval could not move. The delete now holds the revision `FOR
+  UPDATE` before it reads it, as a publish and a deprecate do, and the submit
+  holds it `FOR SHARE` before it starts the approval. Whichever is first, the
+  other is refused: the delete with 409 because an approval runs on the
+  revision, or the submit with 422 `WORKFLOW_NOT_PUBLISHED`. A document type
+  bound to a revision that was deleted earlier now has its submissions
+  refused the same way; until now they started approvals on it. The
+  `Workflow.Deleted` audit row records the status the revision had when it
+  was deleted, where a delete that waited on a publish or a deprecate
+  recorded the status before it. Decisions on running approvals take no lock
+  on the revision and are unchanged. No migration, and no schema change.
 - **A document type whose form or list was retired can be renamed**
   ([#739](https://github.com/sujanto-gaws/kelir/issues/739)). `PUT
   /document-types/{id}` checked a sent `formId` or `listId` even at its
