@@ -7659,7 +7659,7 @@ async fn a_first_submit_overtaken_by_a_submit_and_a_return_is_refused_with_a_409
 //
 // | Mutation | Result |
 // |---|---|
-// | The closure removed | Red: the 14 tests above, AC1, AC2, AC3, AC6, AC7, AC8 and AC9 |
+// | The closure removed | Red: the 14 tests listed above, AC1, AC2, AC3, AC6, AC7, AC8 and AC9 |
 // | The closure moved after `fire` | Red: AC1, AC2, AC6, the flipped reassign, the edit, two resubmits and the delete (`insert_task`'s 409), and `workflow_engine`'s *a returned document is corrected…* (the closure took the next state's task) |
 // | The closure only when the next state has a task | Red: AC3's three pins and the four AC8 races |
 // | The old status read on the pool rather than under the lock | Red: the claim and both reassign races (AC7), where the task path changed the status after the resubmit's pool read. The hand-off leaves `ASSIGNED` as it found it, and in the AC8 races the resubmit reads first and holds the task, so neither can see it |

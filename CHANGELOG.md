@@ -455,10 +455,12 @@ While the major version is `0`, the public API may change in any release.
   process kept an open task in a state it had left. The resubmit now closes
   the task before it moves the process, `COMPLETED` with no action, by the
   resubmitter, and records it in the task's history as `RESUBMIT`. The
-  holder is kept, and no approval decision is recorded. A claim, a hand-off,
-  a reassign or a decision sent on the task while it is being closed waits,
-  then answers 409. A refused resubmit closes nothing. A `RETURNED` state
-  with no task is unchanged. No migration, and no schema change.
+  holder is kept, and no approval decision is recorded. The document's
+  workflow history entry for the resubmit now names the closed task
+  (`taskId`). A claim, a hand-off, a reassign or a decision sent on the task
+  while it is being closed waits, then answers 409. A refused resubmit
+  closes nothing. A `RETURNED` state with no task is unchanged. No
+  migration, and no schema change.
 - **A document type whose form or list was retired can be renamed**
   ([#739](https://github.com/sujanto-gaws/kelir/issues/739)). `PUT
   /document-types/{id}` checked a sent `formId` or `listId` even at its

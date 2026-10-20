@@ -640,7 +640,7 @@ pub async fn reassign(
 ///
 /// A `RETURNED` state whose task is the owner's correction leaves only by
 /// `RESUBMIT`, which is taken on the document, not decided on the task, and
-/// closes the task as it fires ([#667]). There is no decision to strand, so
+/// closes the task before it fires ([#667]). There is no decision to strand, so
 /// the reassign is allowed.
 ///
 /// # Locking

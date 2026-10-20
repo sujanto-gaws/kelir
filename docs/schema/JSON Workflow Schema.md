@@ -2,7 +2,7 @@
 **Version:** 1.0.0
 **Status:** Draft Standard
 **Target Stack:** Rust (Workflow Engine), Vue.js (Workflow Designer)
-**Last updated:** 2026-10-10
+**Last updated:** 2026-10-20
 
 ---
 
@@ -191,7 +191,7 @@ They were accepted rather than refused while unexecuted so that definitions auth
 
 **It authorizes; it does not select.** Where a state offers two transitions for one action, `condition` chooses between them (S7, fallback last) and `allowedBy` is then applied to the one chosen. A caller who may not take that edge is refused rather than routed down the next — an approver silently taking a branch the definition did not point them at is a worse outcome than the refusal, because a rejection routed as a return reads as their own decision.
 
-**A task's `assignment` and a transition's `allowedBy` are two controls and both apply.** They coincide in the common shape and §10's example has them differ: a `RESUBMIT` out of `RETURNED`, a state that declares no task at all.
+**A task's `assignment` and a transition's `allowedBy` are two controls and both apply.** They coincide in the common shape and ~~§8's example~~ §10's example (R-15) has them differ: a `RESUBMIT` out of `RETURNED`, a state that declares no task at all.
 
 **A task is not raised when a role one of its edges names is not live.** Entering a state that declares a task resolves the task's `assignment`, and also checks that every `ROLE` or `DEPARTMENT_ROLE` named by the `allowedBy` of a transition out of that state is a live role in the tenant. If one is not, the transition is refused as `ASSIGNMENT_UNRESOLVED` at `transitions.<from>.<action>.allowedBy.roleCode`, as an unresolvable `assignment` is. A task whose decision is already certain to be refused is an approval that has silently stopped ([#509](https://github.com/sujanto-gaws/kelir/issues/509)). **One edge is enough**: a live `APPROVE` does not excuse a dead `REJECT`.
 
@@ -406,6 +406,7 @@ This specification is a **`Draft Standard`** ([naming convention](../standards/0
 | **R-12** | 2026-10-09 | **§6.1 gains an informative implementation note: Kelir's engine builds part of the condition context** — found by [#426](https://github.com/sujanto-gaws/kelir/issues/426)'s gate, building the rest is [#706](https://github.com/sujanto-gaws/kelir/issues/706). **Informative, and no change to the shape**: no property is added, removed or re-typed, the meta-schema is untouched, and §6.1's context is unchanged. What changes is that the specification says which paths Kelir fills in (`document.status`, `document.documentTypeId`, `document.documentNumber`, `actor.userId`, `formData`, `variables`) and which it does not (`document.amount`, `document.documentTypeKey`, `actor.roles`, `actor.departmentId`), and that a condition on one of the latter reads `null` and takes the fallback without a warning. §5.3's `EXPRESSION` row points at the note. |
 | **R-13** | 2026-10-10 | **§9 says what deprecating a revision does** — [#573](https://github.com/sujanto-gaws/kelir/issues/573), **D-101** B. **No change to the shape**: no property is added, removed or re-typed, and the meta-schema is untouched. §9 said how a revision becomes `ACTIVE` and not how it stops being one, so a reader could not tell that publishing the next revision leaves the previous one `ACTIVE`, or what an engine does with a `DEPRECATED` one. It now says both. An engine starts no instance against a deprecated revision and lets running ones finish, which Kelir's engine has done since [#187](https://github.com/sujanto-gaws/kelir/issues/187); what is new in Kelir is the route that deprecates one. |
 | **R-14** | 2026-10-10 | **§4's sentence on sibling transitions names S7's exception** — found by the schema gate on [#719](https://github.com/sujanto-gaws/kelir/pull/719), [#687](https://github.com/sujanto-gaws/kelir/issues/687)'s read-only graph, which marks the fallback *otherwise*. **A clarification, and no change to the shape**: no property is added, removed or re-typed, the meta-schema is untouched, and S7 is unchanged. The sentence said an engine evaluates siblings in document order and fires the first eligible one, which read alone contradicts S7's fallback evaluated last regardless of document order; it now says the fallback is the exception. Kelir's engine already does this: `Graph::candidates` in `workflow/domain/graph.rs` puts the fallback last with a stable sort, and `fire` takes the first condition that holds. |
+| **R-15** | 2026-10-20 | **§5.3's pointer to the example corrected from §8 to §10** — [#667](https://github.com/sujanto-gaws/kelir/issues/667). **No change to the shape**: no property is added, removed or re-typed, and the meta-schema is untouched. The sentence on a task's `assignment` and a transition's `allowedBy` sent the reader to §8, the structural validation rules, for an example that is in §10. |
 
 ---
 

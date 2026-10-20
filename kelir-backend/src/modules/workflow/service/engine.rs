@@ -34,8 +34,9 @@
 //! type** ([#667](https://github.com/sujanto-gaws/kelir/issues/667)).
 //! [`close_open_task_for_resubmit`] locks the owner's correction task
 //! `FOR UPDATE`, closes it and writes its history row, before [`fire`] enters
-//! the next state. Every other path that locks a task takes the instance
-//! first, and the resubmit already holds it, so it never waits for the task.
+//! the next state. The resubmit already holds the instance, so it should not
+//! wait for the task, because every other path that locks a task holds the
+//! instance first.
 //!
 //! **[`start`] holds the revision `FOR SHARE` before it inserts the instance**
 //! ([#712](https://github.com/sujanto-gaws/kelir/issues/712)), after the caller

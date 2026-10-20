@@ -70,7 +70,9 @@ pub async fn insert_instance(
 /// `workflow_task_history` insert takes `FOR KEY SHARE` on it through the
 /// foreign key, so a task path that locked only the task took the instance
 /// second and deadlocked with a decision ([#619]). Every task path in
-/// `service::task` calls this before `task::lock_task`.
+/// `service::task` calls this before `task::lock_task`. A resubmit also takes
+/// the open task after the instance, from `document::service::submit`, through
+/// `engine::close_open_task_for_resubmit` ([#667]).
 ///
 /// **The submit calls this before it locks the document** ([#663]). The same
 /// history row takes the document through its other foreign key, so a submit
@@ -78,6 +80,7 @@ pub async fn insert_instance(
 ///
 /// [#619]: https://github.com/sujanto-gaws/kelir/issues/619
 /// [#663]: https://github.com/sujanto-gaws/kelir/issues/663
+/// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
 pub async fn lock_instance(
     transaction: &mut sqlx::PgTransaction<'_>,
     tenant_id: Uuid,
