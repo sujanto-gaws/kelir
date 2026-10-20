@@ -34,7 +34,8 @@
 //! ([#712](https://github.com/sujanto-gaws/kelir/issues/712)), after the caller
 //! has locked the document and its type. A publish, a deprecate and a delete
 //! take the revision `FOR UPDATE` with nothing held before it, so a submit and
-//! a delete of one revision do not both succeed. [`fire`] and the paths that
+//! a delete of one revision do not both succeed, and no approval starts on a
+//! revision once its deprecate has committed. [`fire`] and the paths that
 //! call it read the revision without a lock, so a running approval never waits
 //! on any of them.
 //!
@@ -231,17 +232,33 @@ pub struct Started {
 /// gives an administrator a message they can act on, and this is what stops a
 /// document routing to a revision nobody stands behind.
 ///
-/// **Holds the revision `FOR SHARE` before the instance `INSERT`, and refuses
-/// one that is deleted** ([#712](https://github.com/sujanto-gaws/kelir/issues/712)),
-/// with the same 422. A delete holds the revision `FOR UPDATE` before it reads
-/// it, so a submit and a delete of one revision do not both succeed, whichever
-/// is first. The caller already holds the document and its type, so the
-/// revision is taken after them, as a type's binding takes the type and then
-/// the revision.
+/// **Holds the revision `FOR SHARE` before it reads it, and decides under that
+/// hold** ([#712](https://github.com/sujanto-gaws/kelir/issues/712)): a
+/// revision that is deleted, or not `ACTIVE`, is refused with the same 422. A
+/// deprecate and a delete hold the revision `FOR UPDATE` before they read it,
+/// so a submit waiting on either reads what it committed, and one sent while a
+/// submit is in flight waits for it: no approval starts on a revision once its
+/// deprecate or its delete has committed. The caller already holds the document
+/// and its type, so the revision is taken after them, as a type's binding
+/// takes the type and then the revision.
 pub async fn start(
     transaction: &mut sqlx::PgTransaction<'_>,
     request: &StartRequest<'_>,
 ) -> Result<Started, AppError> {
+    // **The revision is held until this commits, and its status is read under
+    // that hold** (#712). A publish, a deprecate and a delete hold it
+    // `FOR UPDATE` before they read it, so this waits for one in flight and
+    // reads what it committed: a deleted revision is no row, and a deprecated
+    // one is `DEPRECATED`. One sent now waits for this, and a delete then finds
+    // the instance below and is refused. Taken after the document and its
+    // type, the order a binding takes the type and then this row in.
+    let held = definition_repo::lock_for_start(
+        transaction,
+        request.tenant_id,
+        request.workflow_definition_id,
+    )
+    .await?;
+
     let loaded = definition_repo::definition_of_instance(
         &mut **transaction,
         request.tenant_id,
@@ -271,26 +288,19 @@ pub async fn start(
     // A 422 rather than an internal error: nothing the caller sent is wrong, and
     // what has to change is the type's binding. The message names the workflow
     // so an administrator has somewhere to go.
-    if loaded.status != "ACTIVE" {
-        return Err(not_published(&workflow_key, &loaded.status));
-    }
+    //
+    // The status is the one read under the hold, not `loaded.status`. Read
+    // before a deprecate committed, that said `ACTIVE`, and the submit started
+    // on a revision deprecated a moment later. `definition_of_instance` has no
+    // `deleted_at` filter, so a deleted revision is told by the hold finding
+    // no row; without it, a type bound to a deleted revision started on it.
+    let status = match held {
+        Some(status) => status,
+        None => return Err(not_published(&workflow_key, "deleted")),
+    };
 
-    // **The revision is held until this commits, and refused if it is gone**
-    // (#712). The delete holds it `FOR UPDATE` before it reads it, so this
-    // waits for a delete in flight and then finds no row; and a delete sent
-    // now waits for this, then finds the instance below and is refused. The
-    // read above has no `deleted_at` filter, so without this a type bound to a
-    // deleted revision started on it. Taken after the document and its type,
-    // the order a binding takes the type and then this row in.
-    if definition_repo::lock_for_start(
-        transaction,
-        request.tenant_id,
-        request.workflow_definition_id,
-    )
-    .await?
-    .is_none()
-    {
-        return Err(not_published(&workflow_key, "deleted"));
+    if status != "ACTIVE" {
+        return Err(not_published(&workflow_key, &status));
     }
 
     let graph = Graph::parse(&definition_json, loaded.version);

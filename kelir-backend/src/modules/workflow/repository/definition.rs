@@ -405,7 +405,9 @@ pub async fn lock_bindable_definition(
 /// While a start holds it, their `FOR UPDATE` waits for the start to commit,
 /// so the delete then sees the instance it started. Shares do not conflict
 /// with one another, so concurrent submits of one revision do not wait on each
-/// other. The statement is [`lock_bindable_definition`]'s.
+/// other. The status it reports is the one `engine::start` checks, so a
+/// deprecate committed while the start waited is seen. The statement is
+/// [`lock_bindable_definition`]'s.
 ///
 /// [#712]: https://github.com/sujanto-gaws/kelir/issues/712
 pub async fn lock_for_start(

@@ -442,7 +442,9 @@ While the major version is `0`, the public API may change in any release.
   refused the same way; until now they started approvals on it. The
   `Workflow.Deleted` audit row records the status the revision had when it
   was deleted, where a delete that waited on a publish or a deprecate
-  recorded the status before it. Decisions on running approvals take no lock
+  recorded the status before it. A submit that was waiting on a deprecate
+  of the revision is now refused with 422 `WORKFLOW_NOT_PUBLISHED` too; until
+  now it started an approval on the revision just deprecated. Decisions on running approvals take no lock
   on the revision and are unchanged. No migration, and no schema change.
 - **A document type whose form or list was retired can be renamed**
   ([#739](https://github.com/sujanto-gaws/kelir/issues/739)). `PUT

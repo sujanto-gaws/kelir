@@ -1681,29 +1681,40 @@ async fn a_delete_sent_while_a_deprecate_is_in_flight_waits_then_deletes() {
     assert_eq!(deleted_records, 1);
 }
 
-/// **A submit that read the revision `ACTIVE` before a deprecate committed
-/// starts on it, and that approval is an ordinary running approval**: it is
-/// decided to the end. The next submit of the type is refused.
+/// **A submit that waits on a deprecate is refused, and starts nothing**
+/// ([#712] AC7). The deprecate's statements are held uncommitted; the submit
+/// is seen waiting on them in `engine::start`'s `FOR SHARE` on the revision;
+/// the deprecate commits, and the submit, reading the revision's status under
+/// that lock, finds it `DEPRECATED` and answers 422 `WORKFLOW_NOT_PUBLISHED` at
+/// `documentTypeId`. The document stays a draft with no instance and no
+/// number. The other order is
+/// `a_deprecate_waiting_on_a_submit_still_deprecates_and_its_approval_runs_to_the_end`.
 ///
-/// The builder said a submit racing a deprecate may start an instance on the
-/// revision. It does: `engine::start` reads the revision's status without a
-/// lock, and the instance's foreign key to the revision then waits on the
-/// deprecate's `FOR UPDATE` and is satisfied once it commits. The result is
-/// the state `running_approvals_carry_on_after_their_revision_is_deprecated`
-/// reaches in order, an instance pinned to a deprecated revision, so it is
-/// harmless: this holds that it runs.
+/// **This test held the opposite until #712.** It was
+/// `a_submit_racing_a_deprecate_starts_an_approval_that_runs_to_the_end`: the
+/// start read the status with no lock, so a submit that read `ACTIVE` started
+/// on a revision whose deprecate committed a moment later, and the campaign on
+/// #711 pinned that as harmless. Record 22 §5.2 left it to row 5's criteria.
+/// #712 decides it: no approval starts on a revision once its deprecate has
+/// committed.
+///
+/// [#712]: https://github.com/sujanto-gaws/kelir/issues/712
 #[tokio::test]
-async fn a_submit_racing_a_deprecate_starts_an_approval_that_runs_to_the_end() {
+async fn a_submit_waiting_on_a_deprecate_is_refused_and_starts_nothing() {
     let app = Arc::new(TestApp::spawn().await);
     let token = app.administrator_token().await;
     let tenant = fixtures::SYSTEM_TENANT_ID;
-    let approver = approver(&app, "dep.race.approver").await;
+    let deadlocks = deadlocks_so_far(&app).await;
 
     let workflow = published(&app, &token, "dep_submit_race").await;
     let type_id = document_type(&app, &token, "PR_DEP_RACE", workflow).await;
     let document = draft(&app, &token, type_id).await;
 
     let mut deprecating = app.pool.begin().await.expect("a transaction");
+    let deprecator: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *deprecating)
+        .await
+        .expect("the deprecate's backend");
     assert!(
         definition_repo::lock_for_publish(&mut deprecating, tenant, workflow)
             .await
@@ -1716,38 +1727,44 @@ async fn a_submit_racing_a_deprecate_starts_an_approval_that_runs_to_the_end() {
         1
     );
 
-    let submitting = {
-        let app = Arc::clone(&app);
+    let submitting = sent(&app, {
         let token = token.clone();
-        tokio::spawn(async move { submit(&app, &token, document).await })
-    };
-
-    let waited = waited_on_a_lock(&app, &submitting).await;
+        move |app| async move { submit(&app, &token, document).await }
+    });
+    let (waited_in, submitting) = waits_on(&app, deprecator, submitting, "the submit").await;
 
     deprecating.commit().await.expect("the deprecate commits");
-    let submitted = submitting.await.expect("the submit finished");
+    let submitted = answer(submitting, "the submit").await;
 
-    assert!(waited, "the submit did not wait on the deprecate in flight");
-    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
-    assert_eq!(status_of(&app, workflow).await, "DEPRECATED");
-
-    let (pinned, state, status) = instance_of(&app, document).await.expect("an instance");
-    assert_eq!(pinned, workflow);
-    assert_eq!(state, "MANAGER_APPROVAL");
-    assert_eq!(status, "RUNNING");
-
-    let task = open_task_of(&app, document).await;
-    let decided = decide(&app, &approver, task, json!({ "action": "APPROVE" })).await;
-    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
-    assert_eq!(document_status(&app, document).await, "COMPLETED");
-
-    let next = draft(&app, &token, type_id).await;
-    let refused = submit(&app, &token, next).await;
+    assert!(
+        locks_the_revision(&waited_in, &["FOR", "SHARE"]),
+        "the submit waited somewhere other than the start's lock: {waited_in}"
+    );
     assert_eq!(
-        refused.status,
+        submitted.status,
         StatusCode::UNPROCESSABLE_ENTITY,
+        "a submit started an approval on a revision whose deprecate committed first: {}",
+        submitted.body
+    );
+    assert_eq!(
+        submitted.body["error"]["details"][0]["code"], "WORKFLOW_NOT_PUBLISHED",
         "{}",
-        refused.body
+        submitted.body
+    );
+    assert_eq!(
+        submitted.body["error"]["details"][0]["path"], "documentTypeId",
+        "{}",
+        submitted.body
+    );
+    assert_eq!(status_of(&app, workflow).await, "DEPRECATED");
+    assert_eq!(document_status(&app, document).await, "DRAFT");
+    assert!(instance_of(&app, document).await.is_none());
+    assert_eq!(document_number(&app, document).await, None);
+
+    assert_eq!(
+        deadlocks_once_settled(&app).await,
+        deadlocks,
+        "PostgreSQL counted a deadlock"
     );
 }
 
@@ -2198,6 +2215,7 @@ async fn migration_0051_grants_the_system_administrator_and_not_an_older_tenants
 // | *a deprecate waiting on a submit…* | The deprecate did not wait: 200 |
 // | *a submit of a type bound to a deleted revision…* | 200, an approval started on the deleted revision |
 // | *twenty submits racing deletes…* | Round 0: 200 and 204 |
+// | *a submit waiting on a deprecate…* | The submit waited in the instance `INSERT`, not the start's lock. Until #712 this test pinned the opposite outcome |
 //
 // # Seen to fail after the fix, 2026-10-20
 //
@@ -2211,6 +2229,7 @@ async fn migration_0051_grants_the_system_administrator_and_not_an_older_tenants
 // | `soft_delete` on the pool | *…waited on a deprecate…* and *…on a publish…* never answered; *a submit waiting on a delete…* never reached the gate; *eight deletes…* answered 500 |
 // | `lock_for_start` dropped from `engine::start` | *a submit waiting on a delete…* (waited in the instance `INSERT`); *a delete waiting on a submit…*; *a deprecate waiting on a submit…*; *…bound to a deleted revision…*; *twenty…* |
 // | `definition_of_instance` reads `FOR SHARE` | *running approvals carry on…*: the decision waited on the held deprecate |
+// | `engine::start` checks the status read before its lock (`loaded.status`) | *a submit waiting on a deprecate…*: 200, an approval started on the revision just deprecated |
 
 /// The `old_value` of every `Workflow.Deleted` row written about `id`.
 async fn deletion_records(app: &TestApp, id: Uuid) -> Vec<Value> {
@@ -2733,7 +2752,7 @@ async fn a_delete_waiting_on_a_submit_is_refused_for_its_approval() {
 
 /// **A deprecate that waits on a submit still deprecates, and that approval
 /// runs to the end** ([#712] AC7). The other order is
-/// `a_submit_racing_a_deprecate_starts_an_approval_that_runs_to_the_end`.
+/// `a_submit_waiting_on_a_deprecate_is_refused_and_starts_nothing`.
 ///
 /// The submit is stopped at its instance `INSERT`, holding the revision
 /// `FOR SHARE`. The deprecate is seen waiting in its `FOR UPDATE`. When the
