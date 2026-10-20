@@ -3,6 +3,7 @@ use sqlx::PgExecutor;
 use uuid::Uuid;
 
 use super::domain::{Tenant, TenantStatus};
+use crate::modules::identity::domain::RevokeReason;
 
 /// A tenant row as the administration surface reads it.
 ///
@@ -305,7 +306,7 @@ pub async fn soft_delete(
 pub async fn revoke_sessions(
     executor: impl PgExecutor<'_>,
     tenant_id: Uuid,
-    reason: &str,
+    reason: RevokeReason,
 ) -> Result<u64, sqlx::Error> {
     sqlx::query!(
         r#"
@@ -314,7 +315,7 @@ pub async fn revoke_sessions(
         WHERE tenant_id = $1 AND revoked_at IS NULL
         "#,
         tenant_id,
-        reason
+        reason.as_str()
     )
     .execute(executor)
     .await

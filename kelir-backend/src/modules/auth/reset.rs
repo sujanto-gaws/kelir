@@ -64,7 +64,7 @@ use super::token::{hash_refresh_token, ACCESS_TOKEN_TTL_MINUTES};
 use crate::error::{AppError, ValidationDetail};
 use crate::mail::Mail;
 use crate::modules::audit::{self, domain::ObjectType, AuditEntry};
-use crate::modules::identity::domain::{validate_password_value, UserStatus};
+use crate::modules::identity::domain::{validate_password_value, RevokeReason, UserStatus};
 use crate::modules::identity::repository as identity_repo;
 use crate::state::AppState;
 
@@ -305,8 +305,12 @@ pub async fn reset_password(
     // Refresh tokens are revoked after the commit, not inside it: a revoke that
     // rolled back with a failed password change would cut sessions short for
     // nothing.
-    let revoked =
-        identity_repo::revoke_all_for_user(&state.pool, stored.user_id, "password reset").await?;
+    let revoked = identity_repo::revoke_all_for_user(
+        &state.pool,
+        stored.user_id,
+        RevokeReason::PasswordReset,
+    )
+    .await?;
 
     tracing::info!(user_id = %stored.user_id, revoked, "password reset");
 

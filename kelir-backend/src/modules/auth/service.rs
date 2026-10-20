@@ -1,14 +1,16 @@
 use chrono::{DateTime, Utc};
+use sqlx::PgExecutor;
 use uuid::Uuid;
 
 use super::password::verify_password;
 use super::token::{
-    generate_refresh_token, hash_refresh_token, issue_access_token, ACCESS_TOKEN_TTL_MINUTES,
+    generate_refresh_token, hash_refresh_token, issue_access_token, RefreshToken,
+    ACCESS_TOKEN_TTL_MINUTES,
 };
 use crate::error::AppError;
 use crate::modules::audit::{self, domain::ObjectType, AuditEntry};
-use crate::modules::identity::domain::UserStatus;
-use crate::modules::identity::repository as identity_repo;
+use crate::modules::identity::domain::{is_replay_evidence, RevokeReason, UserStatus};
+use crate::modules::identity::repository::{self as identity_repo, StoredRefreshToken};
 use crate::modules::organization::service::{self as organization, TenantResolutionError};
 use crate::state::AppState;
 
@@ -210,14 +212,7 @@ pub async fn sign_in(
         return Err(AppError::Unauthorized);
     }
 
-    let issued = issue_session(
-        state,
-        credentials.id,
-        tenant_id,
-        &credentials.username,
-        None,
-    )
-    .await?;
+    let issued = issue_session(state, credentials.id, tenant_id, &credentials.username).await?;
 
     identity_repo::record_successful_login(&state.pool, tenant_id, credentials.id).await?;
 
@@ -248,6 +243,21 @@ pub async fn sign_in(
 /// ever presented again, either the client or an attacker is replaying it. The
 /// safe response to that ambiguity is to revoke the user's whole session family
 /// and make everyone sign in again.
+///
+/// **Only replay evidence does that** (#710). A token is also revoked by an
+/// administrative act (a password change, a suspension, a deactivation), and
+/// presenting one of those is a client that has not caught up, not a copy.
+/// The stored reason decides which ([`is_replay_evidence`]). Both answer the
+/// same 401; only replay evidence is audited and ends the family (SDD §11.1).
+///
+/// **The rotation's `UPDATE` is the decision** (#751). The first read takes no
+/// lock, so two refreshes can both find the token live. The rotation changes
+/// the row only while it is live, and a refresh whose rotation changed nothing
+/// lost the token since its read, to another rotation or to a revoke: it reads
+/// the reason again and is refused as that reason says. The rotation and the
+/// new token's insert are one transaction, so a failed insert leaves the old
+/// token live, and a loser waiting on the row sweeps after the winner's new
+/// token is stored.
 pub async fn refresh(
     state: &AppState,
     presented_token: &str,
@@ -260,36 +270,7 @@ pub async fn refresh(
     };
 
     if stored.revoked_at.is_some() {
-        // A revoked token being presented means it was captured, or the client
-        // retried after rotation. Either way the family is no longer trustworthy.
-        let revoked =
-            identity_repo::revoke_all_for_user(&state.pool, stored.user_id, "refresh token reuse")
-                .await?;
-
-        tracing::warn!(
-            user_id = %stored.user_id,
-            revoked,
-            "revoked refresh token presented; ended every session for the user"
-        );
-
-        audit::record_or_warn(
-            &state.pool,
-            AuditEntry {
-                tenant_id: stored.tenant_id,
-                event_type: "Security.RefreshTokenReused",
-                action: "TOKEN_REUSE",
-                object_type: ObjectType::User,
-                object_id: stored.user_id,
-                actor_user_id: Some(stored.user_id),
-                ip_address,
-                reason: Some("revoked refresh token presented"),
-                old_value: None,
-                new_value: None,
-            },
-        )
-        .await;
-
-        return Err(AppError::Unauthorized);
+        return refuse_revoked(state, &stored, ip_address).await;
     }
 
     if stored.expires_at <= Utc::now() {
@@ -305,8 +286,12 @@ pub async fn refresh(
     if !user.status.can_sign_in() {
         // Deactivating an account must stop its sessions being renewed, not
         // merely stop new sign-ins.
-        identity_repo::revoke_all_for_user(&state.pool, stored.user_id, "account not active")
-            .await?;
+        identity_repo::revoke_all_for_user(
+            &state.pool,
+            stored.user_id,
+            RevokeReason::AccountNotActive,
+        )
+        .await?;
         return Err(AppError::Unauthorized);
     }
 
@@ -317,9 +302,12 @@ pub async fn refresh(
     // whenever it did not run. A tenant that refuses sign-in ends the user's
     // sessions here, as an inactive account does.
     if !organization::admits_session(&state.pool, stored.tenant_id).await? {
-        let revoked =
-            identity_repo::revoke_all_for_user(&state.pool, stored.user_id, "tenant not active")
-                .await?;
+        let revoked = identity_repo::revoke_all_for_user(
+            &state.pool,
+            stored.user_id,
+            RevokeReason::TenantNotActive,
+        )
+        .await?;
 
         tracing::warn!(
             tenant_id = %stored.tenant_id,
@@ -331,16 +319,100 @@ pub async fn refresh(
         return Err(AppError::Unauthorized);
     }
 
-    identity_repo::revoke_refresh_token(&state.pool, stored.id, "rotated").await?;
+    // The access token's reads run before the transaction, so it holds one
+    // connection for two statements (coding standard §2.5).
+    let minted = mint_session(state, stored.user_id, stored.tenant_id, &user.username).await?;
 
-    issue_session(
-        state,
+    let mut transaction = state.pool.begin().await?;
+
+    let rotated =
+        identity_repo::revoke_refresh_token(&mut *transaction, stored.id, RevokeReason::Rotated)
+            .await?;
+
+    if rotated == 0 {
+        // Revoked since the read above: another refresh rotated it, or an
+        // administrator's revoke landed. This read runs after the winner
+        // committed, so it finds the reason the winner wrote, where the first
+        // read found the token live and no reason at all.
+        transaction.rollback().await?;
+
+        let Some(revoked) = identity_repo::find_refresh_token(&state.pool, &token_hash).await?
+        else {
+            return Err(AppError::Unauthorized);
+        };
+
+        return refuse_revoked(state, &revoked, ip_address).await;
+    }
+
+    let issued = store_session(&mut *transaction, minted, Some(stored.id)).await?;
+
+    transaction.commit().await?;
+
+    Ok(issued)
+}
+
+/// Refuses a refresh whose token is revoked, by what revoked it (#710).
+///
+/// Always `Err`: `Unauthorized`, or the database error a sweep met.
+async fn refuse_revoked(
+    state: &AppState,
+    stored: &StoredRefreshToken,
+    ip_address: Option<&str>,
+) -> Result<SignedIn, AppError> {
+    let reason = stored.revoked_reason.as_deref();
+
+    if !is_replay_evidence(reason) {
+        // An administrative revoke, presented by a client that has not caught
+        // up. No sweep: the revoke ended the sessions that existed then, and
+        // one signed in since is legitimate. No audit row: the act is audited
+        // where it happened (`Tenant.Updated`, `User.Updated`, ...), and a row
+        // per refresh would let a stale client write to the trail without
+        // bound. The answer is the replay's own 401, so a caller cannot tell
+        // the two apart.
+        tracing::info!(
+            tenant_id = %stored.tenant_id,
+            user_id = %stored.user_id,
+            reason = reason.unwrap_or_default(),
+            "refresh refused: the token was revoked administratively"
+        );
+
+        return Err(AppError::Unauthorized);
+    }
+
+    // A revoked token being presented means it was captured, the client
+    // retried after rotation, or it lost a race to another refresh of it.
+    // Either way the family is no longer trustworthy.
+    let revoked = identity_repo::revoke_all_for_user(
+        &state.pool,
         stored.user_id,
-        stored.tenant_id,
-        &user.username,
-        Some(stored.id),
+        RevokeReason::RefreshTokenReuse,
     )
-    .await
+    .await?;
+
+    tracing::warn!(
+        user_id = %stored.user_id,
+        revoked,
+        "revoked refresh token presented; ended every session for the user"
+    );
+
+    audit::record_or_warn(
+        &state.pool,
+        AuditEntry {
+            tenant_id: stored.tenant_id,
+            event_type: "Security.RefreshTokenReused",
+            action: "TOKEN_REUSE",
+            object_type: ObjectType::User,
+            object_id: stored.user_id,
+            actor_user_id: Some(stored.user_id),
+            ip_address,
+            reason: Some("revoked refresh token presented"),
+            old_value: None,
+            new_value: None,
+        },
+    )
+    .await;
+
+    Err(AppError::Unauthorized)
 }
 
 /// Ends the session behind a refresh token (FR-AUTH-004).
@@ -361,7 +433,8 @@ pub async fn sign_out(
         let hash = hash_refresh_token(token);
 
         if let Some(stored) = identity_repo::find_refresh_token(&state.pool, &hash).await? {
-            identity_repo::revoke_refresh_token(&state.pool, stored.id, "signed out").await?;
+            identity_repo::revoke_refresh_token(&state.pool, stored.id, RevokeReason::SignedOut)
+                .await?;
             actor = Some((stored.tenant_id, stored.user_id));
         }
     }
@@ -394,8 +467,27 @@ async fn issue_session(
     user_id: Uuid,
     tenant_id: Uuid,
     username: &str,
-    rotated_from_id: Option<Uuid>,
 ) -> Result<SignedIn, AppError> {
+    let minted = mint_session(state, user_id, tenant_id, username).await?;
+
+    store_session(&state.pool, minted, None).await
+}
+
+/// A session signed but not yet stored: [`store_session`] makes it one.
+struct MintedSession {
+    signed_in: SignedIn,
+    tenant_id: Uuid,
+    refresh: RefreshToken,
+}
+
+/// Reads what the access token carries, signs it, and generates the refresh
+/// token. Writes nothing, so a refresh does it before its transaction opens.
+async fn mint_session(
+    state: &AppState,
+    user_id: Uuid,
+    tenant_id: Uuid,
+    username: &str,
+) -> Result<MintedSession, AppError> {
     let roles = identity_repo::role_codes_for_user(&state.pool, tenant_id, user_id).await?;
     let permissions = identity_repo::permissions_for_user(&state.pool, tenant_id, user_id).await?;
 
@@ -410,23 +502,37 @@ async fn issue_session(
 
     let refresh = generate_refresh_token();
 
-    identity_repo::insert_refresh_token(
-        &state.pool,
-        Uuid::now_v7(),
+    Ok(MintedSession {
+        signed_in: SignedIn {
+            access_token,
+            refresh_token: refresh.token.clone(),
+            user_id,
+            username: username.to_owned(),
+        },
         tenant_id,
-        user_id,
-        &refresh.hash,
-        refresh.expires_at,
+        refresh,
+    })
+}
+
+/// Stores a minted session's refresh digest on `executor`: the pool for a
+/// sign-in, the rotation's transaction for a refresh (#751).
+async fn store_session(
+    executor: impl PgExecutor<'_>,
+    minted: MintedSession,
+    rotated_from_id: Option<Uuid>,
+) -> Result<SignedIn, AppError> {
+    identity_repo::insert_refresh_token(
+        executor,
+        Uuid::now_v7(),
+        minted.tenant_id,
+        minted.signed_in.user_id,
+        &minted.refresh.hash,
+        minted.refresh.expires_at,
         rotated_from_id,
     )
     .await?;
 
-    Ok(SignedIn {
-        access_token,
-        refresh_token: refresh.token,
-        user_id,
-        username: username.to_owned(),
-    })
+    Ok(minted.signed_in)
 }
 
 /// Changes the signed-in user's own password (FR-AUTH-005).
@@ -527,7 +633,8 @@ pub async fn change_own_password(
     // deleted, and a password is neither. Closing this window needs a
     // per-request revocation check, which nothing has decided.
     let revoked =
-        identity_repo::revoke_all_for_user(&state.pool, user_id, "password changed").await?;
+        identity_repo::revoke_all_for_user(&state.pool, user_id, RevokeReason::PasswordChanged)
+            .await?;
     tracing::info!(user_id = %user_id, revoked, "password changed; sessions revoked");
 
     audit::record_or_warn(

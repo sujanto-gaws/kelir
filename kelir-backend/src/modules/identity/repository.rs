@@ -13,7 +13,9 @@ use uuid::Uuid;
 
 use crate::utils::search::like_contains;
 
-use super::domain::{Permission, Role, RoleSummary, RowState, TokenSubject, User, UserStatus};
+use super::domain::{
+    Permission, RevokeReason, Role, RoleSummary, RowState, TokenSubject, User, UserStatus,
+};
 
 /// A user row including the password hash — repository-internal, so the hash
 /// cannot escape into a response by accident.
@@ -263,6 +265,10 @@ pub struct StoredRefreshToken {
     pub tenant_id: Uuid,
     pub expires_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
+    /// A [`RevokeReason`]'s spelling, read back raw: a row may carry one this
+    /// code does not know, and `domain::is_replay_evidence` decides what that
+    /// means (#710).
+    pub revoked_reason: Option<String>,
 }
 
 pub async fn insert_refresh_token(
@@ -298,7 +304,7 @@ pub async fn find_refresh_token(
     sqlx::query_as!(
         StoredRefreshToken,
         r#"
-        SELECT id, user_id, tenant_id, expires_at, revoked_at
+        SELECT id, user_id, tenant_id, expires_at, revoked_at, revoked_reason
         FROM refresh_tokens
         WHERE token_hash = $1
         "#,
@@ -308,32 +314,38 @@ pub async fn find_refresh_token(
     .await
 }
 
+/// Revokes one token if it is still live, and says whether it was.
+///
+/// **The count is the decision** for a rotation (#751): of two refreshes that
+/// both read the token live, the `UPDATE` that changes the row is the one that
+/// spent it, and the other sees 0 once the first commits. A caller that does
+/// not care, as sign-out does not, ignores it.
 pub async fn revoke_refresh_token(
     executor: impl PgExecutor<'_>,
     id: Uuid,
-    reason: &str,
-) -> Result<(), sqlx::Error> {
+    reason: RevokeReason,
+) -> Result<u64, sqlx::Error> {
     sqlx::query!(
         "UPDATE refresh_tokens SET revoked_at = now(), revoked_reason = $2 WHERE id = $1 AND revoked_at IS NULL",
         id,
-        reason
+        reason.as_str()
     )
     .execute(executor)
     .await
-    .map(|_| ())
+    .map(|result| result.rows_affected())
 }
 
-/// Revokes every live token for a user — used on logout-everywhere and when a
-/// rotated token is replayed.
+/// Revokes every live token for a user: on a password change or reset, an
+/// account taken out of use, and when a refresh meets replay evidence.
 pub async fn revoke_all_for_user(
     executor: impl PgExecutor<'_>,
     user_id: Uuid,
-    reason: &str,
+    reason: RevokeReason,
 ) -> Result<u64, sqlx::Error> {
     sqlx::query!(
         "UPDATE refresh_tokens SET revoked_at = now(), revoked_reason = $2 WHERE user_id = $1 AND revoked_at IS NULL",
         user_id,
-        reason
+        reason.as_str()
     )
     .execute(executor)
     .await
