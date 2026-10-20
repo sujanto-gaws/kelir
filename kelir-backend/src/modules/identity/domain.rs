@@ -868,6 +868,48 @@ mod tests {
         assert_eq!(placed, vec![0, 1, 2, 3]);
     }
 
+    /// The strings are what stored rows carry, so renaming one strands every
+    /// token revoked under the old spelling in the fail-safe arm (#710). The
+    /// classification is the table in SDD §11.1. A twelfth reason fails to
+    /// compile in the `match` until it is placed, and the count of
+    /// administrative reasons then fails until it is classified on purpose.
+    #[test]
+    fn revoke_reason_classification_and_strings() {
+        let expected = |reason: RevokeReason| match reason {
+            RevokeReason::Rotated => ("rotated", true),
+            RevokeReason::SignedOut => ("signed out", true),
+            RevokeReason::RefreshTokenReuse => ("refresh token reuse", true),
+            RevokeReason::PasswordChanged => ("password changed", false),
+            RevokeReason::PasswordReset => ("password reset", false),
+            RevokeReason::TenantSuspended => ("tenant suspended", false),
+            RevokeReason::TenantDeleted => ("tenant deleted", false),
+            RevokeReason::AccountDeactivated => ("account deactivated", false),
+            RevokeReason::AccountDeleted => ("account deleted", false),
+            RevokeReason::AccountNotActive => ("account not active", false),
+            RevokeReason::TenantNotActive => ("tenant not active", false),
+        };
+
+        let mut spellings = std::collections::HashSet::new();
+        let mut administrative = 0;
+        for reason in RevokeReason::ALL {
+            let (text, replay) = expected(reason);
+            assert_eq!(reason.as_str(), text, "{reason:?}");
+            assert_eq!(RevokeReason::from_db(text), Some(reason), "{text}");
+            assert_eq!(is_replay_evidence(Some(text)), replay, "{text}");
+            assert!(spellings.insert(text), "{text} is spelled twice");
+            if !replay {
+                administrative += 1;
+            }
+        }
+        assert_eq!(spellings.len(), 11);
+        assert_eq!(administrative, 8);
+
+        // Fails safe: no reason, or one this code does not know, is evidence.
+        assert!(is_replay_evidence(None));
+        assert!(is_replay_evidence(Some("anything else")));
+        assert_eq!(RevokeReason::from_db("anything else"), None);
+    }
+
     /// The live-holder count reads exactly the statuses that sign in (#508):
     /// `ACTIVE`, and none of the three a deactivation leaves.
     #[test]
