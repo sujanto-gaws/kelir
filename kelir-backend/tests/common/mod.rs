@@ -1132,3 +1132,116 @@ pub fn ees_validator() -> jsonschema::Validator {
         .build(&schema)
         .expect("the EES meta-schema compiles")
 }
+
+// ---------------------------------------------------------------------------
+// Deadlocks, counted by PostgreSQL (task_inbox.rs's guard, shared for #712)
+// ---------------------------------------------------------------------------
+
+/// The deadlocks PostgreSQL has counted in this test's database so far.
+pub async fn deadlocks_so_far(app: &TestApp) -> i64 {
+    sqlx::query_scalar("SELECT deadlocks FROM pg_stat_database WHERE datname = current_database()")
+        .fetch_one(&app.pool)
+        .await
+        .expect("read pg_stat_database")
+}
+
+/// The deadlocks PostgreSQL has counted in `app`'s database, **read once every
+/// client backend on it has exited**. Closes the application's pool.
+///
+/// A backend counts a deadlock in its own pending statistics and flushes them
+/// when it has been idle long enough, which can be ten seconds after the
+/// abort. A backend that exits flushes them before it leaves
+/// `pg_stat_activity`, so waiting for the database's backends to be gone makes
+/// the read final rather than early.
+///
+/// **An idle backend the closed pool left behind is ended here** ([#637]). In
+/// CI one connection in four runs outlived `close()`: opened up to six seconds
+/// before it, idle in `ClientRead`, having run no statement, with the pool
+/// reporting itself closed and still counting one connection. Nothing was
+/// going to hang it up, so waiting for it timed out. It holds no lock and no
+/// transaction, and ending it flushes its statistics as any exit does.
+///
+/// **A backend that is not idle is never ended**: one that is running a
+/// statement, is inside a transaction or waits on a lock is work the closed
+/// pool should not have, and a lock wait there is #619's own shape. The guard
+/// waits for it and, at the deadline, fails naming it.
+///
+/// [#637]: https://github.com/sujanto-gaws/kelir/issues/637
+pub async fn deadlocks_once_settled(app: &TestApp) -> i64 {
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    app.pool.close().await;
+
+    let server = std::env::var("DATABASE_URL")
+        .or_else(|_| std::env::var("KELIR_DATABASE_URL"))
+        .expect("the server's URL");
+    let mut connection = sqlx::PgConnection::connect(&server)
+        .await
+        .expect("reach the server");
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        // Each backend that is left: whether it is idle, and one line that
+        // says what it is doing, so a timeout names what it waited for.
+        let left: Vec<(i32, bool, String)> = sqlx::query_as(
+            "SELECT pid,
+                    COALESCE(state = 'idle', false),
+                    format(
+                        'pid %s, %s, %s, waiting on %s/%s, started %s ago, in this state for %s: %s',
+                        pid,
+                        COALESCE(NULLIF(application_name, ''), 'no application name'),
+                        COALESCE(state, 'no state'),
+                        COALESCE(wait_event_type, '-'),
+                        COALESCE(wait_event, '-'),
+                        now() - backend_start,
+                        now() - state_change,
+                        left(query, 300))
+             FROM pg_stat_activity
+             WHERE datname = $1 AND backend_type = 'client backend'
+             ORDER BY backend_start",
+        )
+        .bind(&app.database_name)
+        .fetch_all(&mut connection)
+        .await
+        .expect("read pg_stat_activity");
+        if left.is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the test database's backends never exited; the pool is closed: {},              and it counts {} connections, {} of them idle:
+{}",
+            app.pool.is_closed(),
+            app.pool.size(),
+            app.pool.num_idle(),
+            left.iter()
+                .map(|(_, _, line)| line.as_str())
+                .collect::<Vec<_>>()
+                .join("
+")
+        );
+        for (pid, _, _) in left.iter().filter(|(_, idle, _)| *idle) {
+            // Guarded by the state again, so a backend that took up work
+            // between the read and here is left to finish it.
+            sqlx::query(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+                 WHERE pid = $1 AND datname = $2 AND state = 'idle'",
+            )
+            .bind(pid)
+            .bind(&app.database_name)
+            .execute(&mut connection)
+            .await
+            .expect("end an idle backend the closed pool left");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let deadlocks = sqlx::query_scalar("SELECT deadlocks FROM pg_stat_database WHERE datname = $1")
+        .bind(&app.database_name)
+        .fetch_one(&mut connection)
+        .await
+        .expect("read pg_stat_database");
+    connection.close().await.expect("close the connection");
+    deadlocks
+}

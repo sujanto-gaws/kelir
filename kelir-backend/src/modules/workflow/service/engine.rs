@@ -30,6 +30,14 @@
 //! [#663](https://github.com/sujanto-gaws/kelir/issues/663) and deadlocked with
 //! a task path.
 //!
+//! **[`start`] holds the revision `FOR SHARE` before it inserts the instance**
+//! ([#712](https://github.com/sujanto-gaws/kelir/issues/712)), after the caller
+//! has locked the document and its type. A publish, a deprecate and a delete
+//! take the revision `FOR UPDATE` with nothing held before it, so a submit and
+//! a delete of one revision do not both succeed. [`fire`] and the paths that
+//! call it read the revision without a lock, so a running approval never waits
+//! on any of them.
+//!
 //! **This says what the paths lock. It is not a complete lock order.** Rows
 //! written here take further rows through their foreign keys, and a list of
 //! explicit locks has twice missed one ([#619](https://github.com/sujanto-gaws/kelir/issues/619),
@@ -222,6 +230,14 @@ pub struct Started {
 /// binding and the submit. Belt and braces on purpose: the binding check is what
 /// gives an administrator a message they can act on, and this is what stops a
 /// document routing to a revision nobody stands behind.
+///
+/// **Holds the revision `FOR SHARE` before the instance `INSERT`, and refuses
+/// one that is deleted** ([#712](https://github.com/sujanto-gaws/kelir/issues/712)),
+/// with the same 422. A delete holds the revision `FOR UPDATE` before it reads
+/// it, so a submit and a delete of one revision do not both succeed, whichever
+/// is first. The caller already holds the document and its type, so the
+/// revision is taken after them, as a type's binding takes the type and then
+/// the revision.
 pub async fn start(
     transaction: &mut sqlx::PgTransaction<'_>,
     request: &StartRequest<'_>,
@@ -256,17 +272,25 @@ pub async fn start(
     // what has to change is the type's binding. The message names the workflow
     // so an administrator has somewhere to go.
     if loaded.status != "ACTIVE" {
-        return Err(AppError::validation(vec![ValidationDetail::new(
-            "documentTypeId",
-            "reference",
-            "WORKFLOW_NOT_PUBLISHED",
-            format!(
-                "this document type routes to workflow `{workflow_key}`, which is {} \
-                 rather than published; no approval can be started against it. Bind the \
-                 type to a published revision",
-                loaded.status
-            ),
-        )]));
+        return Err(not_published(&workflow_key, &loaded.status));
+    }
+
+    // **The revision is held until this commits, and refused if it is gone**
+    // (#712). The delete holds it `FOR UPDATE` before it reads it, so this
+    // waits for a delete in flight and then finds no row; and a delete sent
+    // now waits for this, then finds the instance below and is refused. The
+    // read above has no `deleted_at` filter, so without this a type bound to a
+    // deleted revision started on it. Taken after the document and its type,
+    // the order a binding takes the type and then this row in.
+    if definition_repo::lock_for_start(
+        transaction,
+        request.tenant_id,
+        request.workflow_definition_id,
+    )
+    .await?
+    .is_none()
+    {
+        return Err(not_published(&workflow_key, "deleted"));
     }
 
     let graph = Graph::parse(&definition_json, loaded.version);
@@ -1635,6 +1659,23 @@ fn no_transition(
         "transition",
         "NO_SUCH_TRANSITION",
         message,
+    )])
+}
+
+/// [`start`]'s refusal of a revision it cannot start on: `status` is the
+/// revision's status, or `deleted`. One 422 for both, at `documentTypeId`,
+/// because what the administrator does about either is the same: bind the
+/// type to a published revision.
+fn not_published(workflow_key: &str, status: &str) -> AppError {
+    AppError::validation(vec![ValidationDetail::new(
+        "documentTypeId",
+        "reference",
+        "WORKFLOW_NOT_PUBLISHED",
+        format!(
+            "this document type routes to workflow `{workflow_key}`, which is {status} \
+             rather than published; no approval can be started against it. Bind the \
+             type to a published revision"
+        ),
     )])
 }
 
