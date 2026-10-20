@@ -3040,3 +3040,515 @@ async fn eight_deletes_of_one_revision_produce_one_deleter() {
         "PostgreSQL counted a deadlock"
     );
 }
+
+// ===========================================================================
+// #712's closing campaign: the paths the races above do not stage
+// ===========================================================================
+//
+// Added by the independent campaign on #712. Each test holds with and without
+// the AC7 commit (`engine::start` deciding the status under its lock), so that
+// commit stays droppable.
+//
+// # Seen to fail, 2026-10-20
+//
+// Each mutation applied alone, the whole file run, and the mutation reverted.
+// Only this section's tests are named.
+//
+// | Mutation | Red |
+// |---|---|
+// | `delete_definition` without `lock_for_publish` | *a delete waiting on a deprecate…*: the delete waited in its `UPDATE`, and the deprecate answered 500. *A deprecate waiting on a delete…* stays green: the gate's `BEFORE UPDATE` trigger fires once the soft-delete has locked the row, so the deprecate waits on that lock instead |
+// | `delete_definition` reads the row before its lock | *a delete waiting on a deprecate…*: recorded `ACTIVE` |
+// | `soft_delete` on the pool | *a deprecate waiting on a delete…* and *a delete waiting on a deprecate…* |
+// | `lock_for_start` dropped from `engine::start` | *a resubmit under a held delete…*: the type's first submit on the deleted revision answered 200 |
+// | `lock_for_start` holds every revision of the key | *a submit and a publish of the next revision…*: the publish of revision 2 waited |
+// | `resubmit_workflow` takes `lock_for_start` before it fires | *a resubmit under a held delete…*: the resubmit waited on the delete |
+// | `definition_of_instance` reads `FOR SHARE` | *a resubmit under a held delete…*: the resubmit waited on the delete |
+// | `definition_of_instance` filters `deleted_at IS NULL` | *a resubmit under a held delete…*: the resubmit on the revision deleted under it answered 500 |
+// | `definition_of_instance` drops its tenant check | *a type bound across tenants…*: 422, a start read another tenant's revision |
+//
+// **One survivor.** *The deadlock guard…* stays green with `deadlocks_so_far`
+// in place of the settled read: here the aborted transaction's statistics are
+// flushed before the read. The settled read is for the slower flush #637 saw.
+
+/// **A delete parked at its write makes a deprecate wait, and the deprecate
+/// then finds nothing** ([#712] AC2, AC9). Both are the real routes:
+/// `a_deprecate_waiting_on_a_delete_in_flight_finds_nothing` holds the
+/// delete's `UPDATE` alone, which is not the delete the route now runs.
+///
+/// The delete is stopped at its soft-delete `UPDATE` by a gate, holding the
+/// revision `FOR UPDATE`. The deprecate is seen waiting in its own
+/// `FOR UPDATE`. When the gate opens, the delete answers 204 and records the
+/// revision as `ACTIVE`, and the deprecate answers 404 and records nothing.
+///
+/// [#712]: https://github.com/sujanto-gaws/kelir/issues/712
+#[tokio::test]
+async fn a_deprecate_waiting_on_a_delete_finds_nothing_and_audits_nothing() {
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let deadlocks = deadlocks_so_far(&app).await;
+
+    let id = published(&app, &token, "del_then_dep").await;
+
+    let gate = Gate::close(&app, "UPDATE", "workflow_definitions").await;
+
+    let deleting = sent(&app, {
+        let token = token.clone();
+        move |app| async move { delete_revision(&app, &token, id).await }
+    });
+    let deleter = gate.parked(&app, &deleting, "the delete").await;
+
+    let deprecating = sent(&app, {
+        let token = token.clone();
+        move |app| async move { deprecate(&app, &token, id).await }
+    });
+    let (waited_in, deprecating) = waits_on(&app, deleter, deprecating, "the deprecate").await;
+
+    gate.open().await;
+    let deleted = answer(deleting, "the delete").await;
+    let deprecated = answer(deprecating, "the deprecate").await;
+
+    assert!(
+        locks_the_revision(&waited_in, &["FOR", "UPDATE"]),
+        "the deprecate waited somewhere other than its lock: {waited_in}"
+    );
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
+    assert_eq!(
+        deprecated.status,
+        StatusCode::NOT_FOUND,
+        "a deprecate deprecated, or misreported, a revision deleted first: {}",
+        deprecated.body
+    );
+
+    let after = stamps(&app, id).await;
+    assert_eq!(after.status, "ACTIVE");
+    assert!(after.deleted_at.is_some());
+
+    let deletions = deletion_records(&app, id).await;
+    assert_eq!(deletions.len(), 1, "{deletions:?}");
+    assert_eq!(deletions[0]["status"], "ACTIVE", "{}", deletions[0]);
+    assert!(deprecation_records(&app, id).await.is_empty());
+
+    assert_eq!(
+        deadlocks_once_settled(&app).await,
+        deadlocks,
+        "PostgreSQL counted a deadlock"
+    );
+}
+
+/// **A deprecate parked at its write makes a delete wait, and each then
+/// writes its one audit row** ([#712] AC2). Both are the real routes:
+/// `a_delete_that_waited_on_a_deprecate_audits_it_as_deprecated` holds the
+/// deprecate's statements, so it never sees the deprecate's own audit row.
+///
+/// The deprecate is stopped at its `UPDATE` by a gate, holding the revision
+/// `FOR UPDATE`. The delete is seen waiting in its own `FOR UPDATE`. When the
+/// gate opens, the deprecate answers 200 and records `ACTIVE` to
+/// `DEPRECATED`, and the delete answers 204 and records `DEPRECATED`.
+///
+/// [#712]: https://github.com/sujanto-gaws/kelir/issues/712
+#[tokio::test]
+async fn a_delete_waiting_on_a_deprecate_deletes_it_and_each_audits_once() {
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let deadlocks = deadlocks_so_far(&app).await;
+
+    let id = published(&app, &token, "dep_then_del").await;
+
+    let gate = Gate::close(&app, "UPDATE", "workflow_definitions").await;
+
+    let deprecating = sent(&app, {
+        let token = token.clone();
+        move |app| async move { deprecate(&app, &token, id).await }
+    });
+    let deprecator = gate.parked(&app, &deprecating, "the deprecate").await;
+
+    let deleting = sent(&app, {
+        let token = token.clone();
+        move |app| async move { delete_revision(&app, &token, id).await }
+    });
+    let (waited_in, deleting) = waits_on(&app, deprecator, deleting, "the delete").await;
+
+    gate.open().await;
+    let deprecated = answer(deprecating, "the deprecate").await;
+    let deleted = answer(deleting, "the delete").await;
+
+    assert!(
+        locks_the_revision(&waited_in, &["FOR", "UPDATE"]),
+        "the delete waited somewhere other than its lock: {waited_in}"
+    );
+    assert_eq!(deprecated.status, StatusCode::OK, "{}", deprecated.body);
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
+
+    let after = stamps(&app, id).await;
+    assert_eq!(after.status, "DEPRECATED");
+    assert!(after.deleted_at.is_some());
+
+    let deprecations = deprecation_records(&app, id).await;
+    assert_eq!(deprecations.len(), 1, "{deprecations:?}");
+    assert_eq!(deprecations[0].3["status"], "ACTIVE");
+    assert_eq!(deprecations[0].4["status"], "DEPRECATED");
+
+    let deletions = deletion_records(&app, id).await;
+    assert_eq!(deletions.len(), 1, "{deletions:?}");
+    assert_eq!(
+        deletions[0]["status"], "DEPRECATED",
+        "the delete recorded a status the revision no longer had: {}",
+        deletions[0]
+    );
+
+    assert_eq!(
+        deadlocks_once_settled(&app).await,
+        deadlocks,
+        "PostgreSQL counted a deadlock"
+    );
+}
+
+/// **A submit on one revision and a publish of the next do not wait on each
+/// other** ([#712] AC8, record 22 §5.2 rule 3). The start's share lock is on
+/// the revision the type is bound to, by id, and the publish locks its own
+/// revision and then the roles it names `FOR KEY SHARE`, which no submit
+/// takes in a mode that conflicts.
+///
+/// First, a submit is stopped at its instance `INSERT`, holding revision 1
+/// `FOR SHARE`, and revision 2 is published through the route. Then the
+/// publish of revision 3 is held uncommitted, its revision `FOR UPDATE` and its
+/// roles `FOR KEY SHARE`, and a second submit is sent. Each answers 200 within
+/// ten seconds, and both approvals start on revision 1.
+///
+/// [#712]: https://github.com/sujanto-gaws/kelir/issues/712
+#[tokio::test]
+async fn a_submit_and_a_publish_of_the_next_revision_do_not_wait_on_each_other() {
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let tenant = fixtures::SYSTEM_TENANT_ID;
+    let deadlocks = deadlocks_so_far(&app).await;
+
+    let first = published(&app, &token, "pub_beside_submit").await;
+    let type_id = document_type(&app, &token, "PR_PUB_BESIDE", first).await;
+    let early = draft(&app, &token, type_id).await;
+    let late = draft(&app, &token, type_id).await;
+    let second = revision_of(&app, &token, first).await;
+
+    // A submit holding revision 1, and revision 2 published.
+    let gate = Gate::close(&app, "INSERT", "workflow_instances").await;
+    let submitting = sent(&app, {
+        let token = token.clone();
+        move |app| async move { submit(&app, &token, early).await }
+    });
+    gate.parked(&app, &submitting, "the submit").await;
+
+    let publication = tokio::time::timeout(Duration::from_secs(10), publish(&app, &token, second))
+        .await
+        .expect("a publish of revision 2 waited on a submit holding revision 1");
+    assert_eq!(publication.status, StatusCode::OK, "{}", publication.body);
+
+    gate.open().await;
+    let submitted = answer(submitting, "the submit").await;
+    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+
+    // Revision 3's publish held, and a submit sent.
+    let third = revision_of(&app, &token, first).await;
+    let mut publishing = app.pool.begin().await.expect("a transaction");
+    assert!(
+        definition_repo::lock_for_publish(&mut publishing, tenant, third)
+            .await
+            .expect("the publish's lock")
+    );
+    assert_eq!(
+        definition_repo::lock_live_roles(&mut publishing, tenant, &[APPROVER_ROLE.to_owned()])
+            .await
+            .expect("the publish's roles"),
+        vec![APPROVER_ROLE.to_owned()]
+    );
+    assert_eq!(
+        definition_repo::publish(&mut *publishing, tenant, third, None)
+            .await
+            .expect("the publish runs"),
+        1
+    );
+    let under_publish =
+        tokio::time::timeout(Duration::from_secs(10), submit(&app, &token, late)).await;
+    publishing.commit().await.expect("the publish commits");
+    let under_publish =
+        under_publish.expect("a submit on revision 1 waited on a publish of revision 3");
+    assert_eq!(
+        under_publish.status,
+        StatusCode::OK,
+        "{}",
+        under_publish.body
+    );
+
+    for document in [early, late] {
+        let (pinned, _, status) = instance_of(&app, document).await.expect("an instance");
+        assert_eq!(pinned, first, "an approval started on another revision");
+        assert_eq!(status, "RUNNING");
+    }
+    for revision in [first, second, third] {
+        assert_eq!(status_of(&app, revision).await, "ACTIVE");
+    }
+
+    assert_eq!(
+        deadlocks_once_settled(&app).await,
+        deadlocks,
+        "PostgreSQL counted a deadlock"
+    );
+}
+
+/// **A resubmit carries on while a delete holds its revision, and on a
+/// revision deleted under its running approval** ([#712] AC8). A resubmit
+/// fires the instance it has; it does not start one, so it takes no lock on
+/// the revision and does not ask whether the revision is live.
+///
+/// The second half is the shape the unfixed delete could leave behind: an
+/// approval running on a revision whose `deleted_at` is set, written here by
+/// SQL because the route now refuses it. That approval still moves to the
+/// end, and only a first submit of the type is refused.
+///
+/// [#712]: https://github.com/sujanto-gaws/kelir/issues/712
+#[tokio::test]
+async fn a_resubmit_under_a_held_delete_or_on_a_deleted_revision_carries_on() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let tenant = fixtures::SYSTEM_TENANT_ID;
+    let approver = approver(&app, "del.resubmit.approver").await;
+    let deadlocks = deadlocks_so_far(&app).await;
+
+    let saved_return = app
+        .post(
+            DEFINITIONS,
+            Some(&token),
+            json!({ "workflowKey": "del_return", "name": "Approval that can send back",
+                    "definition": returnable_workflow("del_return") }),
+        )
+        .await;
+    assert_eq!(
+        saved_return.status,
+        StatusCode::CREATED,
+        "{}",
+        saved_return.body
+    );
+    let workflow = id_of(&saved_return.body["data"]);
+    assert_eq!(publish(&app, &token, workflow).await.status, StatusCode::OK);
+
+    let type_id = document_type(&app, &token, "PR_DEL_RETURN", workflow).await;
+    let document = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, document).await.status, StatusCode::OK);
+
+    // A resubmit while a delete holds the revision.
+    send_back(&app, &approver, document, "The quotation is for 12 desks, not 2.").await;
+    let mut deleting = app.pool.begin().await.expect("a transaction");
+    assert!(
+        definition_repo::lock_for_publish(&mut deleting, tenant, workflow)
+            .await
+            .expect("the delete's lock")
+    );
+    let under_delete =
+        tokio::time::timeout(Duration::from_secs(10), submit(&app, &token, document)).await;
+    deleting.rollback().await.expect("the delete rolls back");
+    let under_delete = under_delete.expect("a resubmit waited on a delete held uncommitted");
+    assert_eq!(under_delete.status, StatusCode::OK, "{}", under_delete.body);
+
+    let refused = delete_revision(&app, &token, workflow).await;
+    assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.body);
+
+    // A resubmit on a revision deleted under its approval.
+    send_back(&app, &approver, document, "Attach the second quotation.").await;
+    sqlx::query("UPDATE workflow_definitions SET deleted_at = now() WHERE id = $1")
+        .bind(workflow)
+        .execute(&app.pool)
+        .await
+        .expect("delete the revision under its approval");
+
+    let resubmitted = submit(&app, &token, document).await;
+    assert_eq!(
+        resubmitted.status,
+        StatusCode::OK,
+        "a running approval stopped because its revision was deleted: {}",
+        resubmitted.body
+    );
+    let (pinned, state, status) = instance_of(&app, document).await.expect("the instance");
+    assert_eq!(pinned, workflow);
+    assert_eq!(state, "MANAGER_APPROVAL");
+    assert_eq!(status, "RUNNING");
+
+    let task = open_task_of(&app, document).await;
+    let approved = decide(&app, &approver, task, json!({ "action": "APPROVE" })).await;
+    assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
+    assert_eq!(document_status(&app, document).await, "COMPLETED");
+
+    // The type's next document is a first submit, and is refused.
+    let next = draft(&app, &token, type_id).await;
+    let first_submit = submit(&app, &token, next).await;
+    assert_eq!(
+        first_submit.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        first_submit.body
+    );
+    assert_eq!(
+        first_submit.body["error"]["details"][0]["code"], "WORKFLOW_NOT_PUBLISHED",
+        "{}",
+        first_submit.body
+    );
+    assert!(instance_of(&app, next).await.is_none());
+
+    assert_eq!(
+        deadlocks_once_settled(&app).await,
+        deadlocks,
+        "PostgreSQL counted a deadlock"
+    );
+}
+
+/// The approver returns `document` with `reason`, and it is `RETURNED`.
+async fn send_back(app: &TestApp, approver: &str, document: Uuid, reason: &str) {
+    let task = open_task_of(app, document).await;
+    let returned = decide(
+        app,
+        approver,
+        task,
+        json!({ "action": "RETURN", "comment": reason }),
+    )
+    .await;
+    assert_eq!(returned.status, StatusCode::OK, "{}", returned.body);
+    assert_eq!(document_status(app, document).await, "RETURNED");
+}
+
+/// **A type bound to another tenant's revision fails its submit with 500 and
+/// starts nothing** ([#712], the builder's first untested path). Pinned, not
+/// endorsed.
+///
+/// No route writes such a binding: the binding is checked in the caller's
+/// tenant, and its foreign key names the revision by id alone, so only SQL
+/// can. `engine::start`'s lock is scoped to the caller's tenant, so it finds
+/// no row and holds nothing in the other tenant, whether it runs before
+/// `repo::definition_of_instance` or after it. That read then logs both ends
+/// of the broken link and answers `INTERNAL_ERROR`, as it did before #712: the
+/// submit is rolled back whole, the document stays a draft with no number, and
+/// the other tenant's revision is untouched. Whether the answer should be a
+/// 422 is not #712's to decide.
+///
+/// [#712]: https://github.com/sujanto-gaws/kelir/issues/712
+#[tokio::test]
+async fn a_type_bound_across_tenants_fails_its_submit_and_starts_nothing() {
+    let app = TestApp::spawn_with(|config| config.multi_tenant = true).await;
+    let token = app
+        .sign_in_to("SYSTEM", common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await;
+
+    let mine = published(&app, &token, "del_mine").await;
+    let type_id = document_type(&app, &token, "PR_DEL_ACROSS", mine).await;
+    let document = draft(&app, &token, type_id).await;
+
+    let other = fixtures::create_tenant(&app.pool, "OTHER-START", "Other tenant").await;
+    let outsider = caller_holding(
+        &app,
+        other,
+        Some("OTHER-START"),
+        "other.publisher",
+        &[
+            "workflow:definition:read",
+            "workflow:definition:create",
+            "workflow:definition:publish",
+        ],
+    )
+    .await;
+    approver_role(&app, other).await;
+    let theirs = saved(&app, &outsider, "del_theirs").await;
+    let published = publish(&app, &outsider, theirs).await;
+    assert_eq!(published.status, StatusCode::OK, "{}", published.body);
+
+    sqlx::query(
+        "UPDATE document_type_workflows SET workflow_definition_id = $1 \
+         WHERE document_type_id = $2",
+    )
+    .bind(theirs)
+    .bind(type_id)
+    .execute(&app.pool)
+    .await
+    .expect("bind the type across tenants");
+
+    let failed = submit(&app, &token, document).await;
+    assert_eq!(
+        failed.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a submit bound across tenants answered other than before #712: {}",
+        failed.body
+    );
+    assert_eq!(failed.error_code(), Some("INTERNAL_ERROR"), "{}", failed.body);
+
+    assert_eq!(document_status(&app, document).await, "DRAFT");
+    assert!(instance_of(&app, document).await.is_none());
+    assert_eq!(document_number(&app, document).await, None);
+
+    let theirs_after = stamps(&app, theirs).await;
+    assert_eq!(theirs_after.status, "ACTIVE");
+    assert!(theirs_after.deleted_at.is_none());
+    let started_on_theirs: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM workflow_instances WHERE workflow_definition_id = $1",
+    )
+    .bind(theirs)
+    .fetch_one(&app.pool)
+    .await
+    .expect("count the instances on their revision");
+    assert_eq!(started_on_theirs, 0);
+}
+
+/// **The deadlock guard counts a deadlock it is shown** ([#712] AC10). Every
+/// race above asserts that `deadlocks_once_settled` equals `deadlocks_so_far`
+/// read at the start, which would pass as well if nothing were ever counted.
+/// Here two transactions take two revisions `FOR UPDATE` in opposite orders,
+/// PostgreSQL aborts one with `40P01`, and the settled read is one more than
+/// the read before it.
+///
+/// [#712]: https://github.com/sujanto-gaws/kelir/issues/712
+#[tokio::test]
+async fn the_deadlock_guard_counts_a_deadlock_it_is_shown() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let tenant = fixtures::SYSTEM_TENANT_ID;
+    let deadlocks = deadlocks_so_far(&app).await;
+
+    let first = published(&app, &token, "guard_first").await;
+    let second = published(&app, &token, "guard_second").await;
+
+    let mut one = app.pool.begin().await.expect("a transaction");
+    let mut two = app.pool.begin().await.expect("a transaction");
+    assert!(definition_repo::lock_for_publish(&mut one, tenant, first)
+        .await
+        .expect("one's first lock"));
+    assert!(definition_repo::lock_for_publish(&mut two, tenant, second)
+        .await
+        .expect("two's first lock"));
+
+    let (crossed_one, crossed_two) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(
+            definition_repo::lock_for_publish(&mut one, tenant, second),
+            definition_repo::lock_for_publish(&mut two, tenant, first),
+        )
+    })
+    .await
+    .expect("PostgreSQL never broke the cycle");
+
+    let aborted = [&crossed_one, &crossed_two]
+        .into_iter()
+        .filter(|crossed| {
+            crossed
+                .as_ref()
+                .err()
+                .and_then(|error| error.as_database_error())
+                .and_then(|error| error.code())
+                .as_deref()
+                == Some("40P01")
+        })
+        .count();
+    assert_eq!(aborted, 1, "{crossed_one:?} {crossed_two:?}");
+
+    one.rollback().await.expect("one rolls back");
+    two.rollback().await.expect("two rolls back");
+
+    assert_eq!(
+        deadlocks_once_settled(&app).await,
+        deadlocks + 1,
+        "the guard did not count the deadlock PostgreSQL detected"
+    );
+}
