@@ -8441,6 +8441,31 @@ async fn a_role_delete_arriving_during_a_resubmit_waits_and_refuses() {
 // The paths the builder named as untested, what the API says about a closed
 // correction task, and #712's revision lock beside the closure. Run on the
 // tree rebased onto #712.
+//
+// # The builder's mutation table, re-run, and five more, 2026-10-20
+//
+// Each applied alone and reverted; the whole of this file and
+// `workflow_engine`'s *returned* tests run under each. "+ the campaign's"
+// counts the tests below that also went red.
+//
+// | Mutation | Result |
+// |---|---|
+// | The closure removed | Red: the builder's 14, + the campaign's 5 (the three-way race refuses either way) |
+// | The closure moved after `fire` | Red: the builder's 7, + the campaign's 5, and `workflow_engine`'s *a returned document is corrected…* |
+// | The closure only when the next state has a task | Red: AC3's three pins and the four AC8 races, + *…a handed-off correction…* (a `RECHECK` shape) |
+// | The old status read on the pool, before `lock_instance` | Red: the claim race and both reassign races, each with the status before the task path |
+// | The instance predicate dropped from `lock_open_task_of_instance` | Red: *a resubmit closes only its own instance's task* |
+// | The tenant predicate dropped from `lock_open_task_of_instance` | **Survives, equivalent**: the instance id is unique across tenants |
+// | The history row omitted | Red: the builder's 13, + the campaign's 4 |
+// | #677's order reversed, the document before the instance | Red: #663's five races answer 500, and *two resubmits at once* waits on the document. The AC8 races and the three-way race stay green: the reassign there writes no history row before it is refused, so it never wants the document |
+// | The closure committed in its own transaction, before `lock_instance` | Red: 17, AC5, the role-delete race, the edit and AC2 among them |
+// | The closure refusing an instance with no open task | Red: `workflow_engine`'s *a returned document is corrected…* only |
+// | `close_for_resubmit`'s zero-rows 409 never raised | **Survives, out of reach**: the caller holds the task from the lock, so the `UPDATE` always finds it |
+// | `IN_PROGRESS` dropped from `lock_open_task_of_instance` | Red: *a resubmit closes an in-progress correction task* |
+// | `IN_PROGRESS` dropped from `close_for_resubmit` | Red: *a resubmit closes an in-progress correction task* |
+// | `lock_for_start` taken on the instance's revision before the closure | Red: *…carries on while its revision is held* (waited), *a deprecate during a resubmit held…* (the deprecate waited), and `workflow_deprecation`'s *a resubmit under a held delete…* |
+// | The `RESUBMIT` row's `on_behalf_of` taken from the closed task's `delegated_from_user_id` | Red: *…a handed-off correction…*, the history named the corrector |
+// | `assignee_user_id = COALESCE(assignee_user_id, $3)` in `close_for_resubmit` | Red: the claim race (AC8) and both reassign races (AC7), the resubmitter written into an empty assignee |
 
 /// **A closed correction task reads as completed and decided by nobody**
 /// ([#667] AC1, AC2, through the API).
