@@ -1979,3 +1979,38 @@ async fn a_refresh_whose_new_token_cannot_be_stored_keeps_the_old_one() {
     assert_eq!(renewed.status, StatusCode::OK, "{}", renewed.body);
     assert_eq!(reuse_rows(&app, user_id).await, 0);
 }
+
+// ---------------------------------------------------------------------------
+// #710 and #751: what the tests above were seen to do.
+//
+// # Seen red on the unfixed code (`e9a1c29`), 2026-10-20
+//
+// 25 passed, 6 failed. The rest are pins, green before and after.
+//
+// | Test | How it went red |
+// |---|---|
+// | *a refresh after an administrative revoke…* | All 9 cases: a `TOKEN_REUSE` row and an audit row about the user |
+// | *a stale token revoked for a password change…* | 0 live, the later session swept |
+// | *a stale token revoked for a suspension…* | 0 live, the later session swept |
+// | *two refreshes of one token at once…* | `[200, 200]`, no reuse row, 2 live |
+// | *a refresh that loses to an administrative revoke…* | 200, a new pair for a revoked session |
+// | *a refresh whose new token cannot be stored…* | The old token revoked by the failed refresh |
+// | `revoke_reason_classification_and_strings` | Did not compile: no `RevokeReason`, no `is_replay_evidence` |
+//
+// # Seen to fail after the fix, 2026-10-20
+//
+// Each mutation applied alone, the lib's and this file's matching tests run,
+// and the mutation reverted. The transaction's was run three times.
+//
+// | Mutation | Red |
+// |---|---|
+// | Only `rotated` is replay evidence | `revoke_reason_classification_and_strings`; *…unknown or missing is token reuse*; *a signed-out token…*; *a sibling the reuse sweep ended…* |
+// | Every reason is replay evidence | The unit test; *a refresh after an administrative revoke…*; both *stale token…* tests; *…loses to an administrative revoke…* |
+// | The administrative path sweeps the user's tokens | Both *stale token…* tests |
+// | The administrative path writes an audit row | *a refresh after an administrative revoke…* (AC6) |
+// | `password changed` respelled | The unit test; *a refresh after an administrative revoke…* (the respelled stored value is unknown, so replay evidence) |
+// | The rotation's count discarded | *two refreshes of one token at once…*; *…loses to an administrative revoke…* |
+// | The loser classified from the first read | *…loses to an administrative revoke…* |
+// | Zero rows refused with a plain 401 | *two refreshes of one token at once…* |
+// | No transaction: rotation and insert on the pool | *a refresh whose new token cannot be stored…*, 3 of 3. *Two refreshes…* stayed green 3 of 3: its `live == 0` depends on the transaction, but the loser's sweep did not land between the winner's rotation and its insert in these runs |
+// | The administrative refusal answers 403 | *a refresh after an administrative revoke…* and 11 more, the #649 and D-104 tests among them |
