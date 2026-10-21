@@ -9150,9 +9150,36 @@ async fn the_decidability_check_reads_return_and_not_cancel() {
 
 // # Seen to fail (coding standard §2.9)
 //
-// Red before the fix, at `a5ed7f3`, and each mutation of the clause applied
-// alone, its tests run, and the mutation reverted. The table is in the PR
-// description and the commit that fixes #635.
+// At `a5ed7f3`, before the fix, AC1-AC4, AC5 (d), AC7, AC8, AC9 and AC11
+// were red, and AC6, AC10, AC14, AC15 and `workflow_engine.rs`'s AC12 green.
+//
+// Then each mutation of `with_claimed_clause!` was applied alone, the 26 #530
+// and #635 tests here run (with AC13, the lib's source scan, for M11, and
+// `workflow_engine.rs`'s owner-department tests for M12), and the mutation
+// reverted, on 2026-10-21. Every one reddened something:
+//
+// | Mutation | Reddened |
+// |---|---|
+// | M1 the department test removed | AC1, AC2, AC3, AC4, AC5, AC7, AC8, AC9, AC11 |
+// | M2 the `OWNER_DEPARTMENT` branch made `true` | AC1, AC2, AC5, AC7, AC8, AC9, AC11 |
+// | M3 the `REQUESTED_DEPARTMENT` branch made `true` | AC3, AC7, AC9, AC11 |
+// | M4 the code branch made `true` | AC4, AC5, AC11 |
+// | M4 the code branch's `deleted_at` dropped | AC4, AC11 |
+// | M5 the owner branch's `deleted_at` dropped | AC2, AC7, AC11 |
+// | M6 the owner branch's `dep.tenant_id` dropped | AC8, AC11 |
+// | M6 the code branch's `dep.tenant_id` dropped | AC4, AC11 |
+// | M7 the `ROLE` carve-out dropped | AC6, through its stray projection scope |
+// | M8 `REQUESTED_DEPARTMENT` given a liveness join | AC10, AC11 |
+// | M9 hidden when **any** edge is unresolved, not **all** | AC5, and four of #530's tests |
+// | M10 the `IS NULL` branch dropped | AC5, AC11, and two of #530's tests |
+// | M11 the clause dropped from `list_for_caller` | AC13, and 13 of the 26 |
+// | M11 the clause dropped from `count_for_caller` | AC13, and 13 of the 26 |
+// | M11 the clause dropped from `is_visible_to` | AC13, and 12 of the 26 |
+// | M12 `hold_deciding_roles` refuses, at the raise, a scope `normalize` refuses | AC12, `an_owner_department_edge_with_no_live_department_refuses_the_decision`, and the nine tests here that raise such a task |
+// | M13 the clause applied to the unclaimed arm | AC14, and #530's unclaimed-arm test |
+// | M14 the department read from the task's snapshot | AC1, AC2, AC3, AC6, AC7, AC8, AC10, AC11 |
+// | M15 the reserved words tested after the code lookup | AC9 |
+// | M16 the live-role `AND` made `OR` | AC1-AC5, AC7-AC9, AC11, and four of #530's tests |
 
 /// The role every #635 edge names and every #635 task is offered to.
 ///
@@ -9810,8 +9837,9 @@ async fn a_claimed_task_stays_while_one_decision_edge_resolves_through_its_depar
 /// department, a live code, and the code of an `INACTIVE` department, which
 /// `direct` does not refuse. A fifth task is the `ROLE` carve-out's control: a
 /// plain `ROLE` edge whose **projection** row carries a stray
-/// `departmentScope` naming nothing, set by SQL, since a publish refuses a
-/// scope on a `ROLE` edge and `normalize` ignores one. Each stays, and each is
+/// `departmentScope` naming nothing. It is set by SQL on the projection, which
+/// is what the clause reads; the engine reads `definition_json`, and
+/// `normalize` ignores a scope on `ROLE` in any case. Each stays, and each is
 /// approved.
 ///
 /// [#635]: https://github.com/sujanto-gaws/kelir/issues/635
@@ -10187,8 +10215,10 @@ async fn the_inbox_and_the_engine_agree_on_which_department_edges_resolve() {
     let (abroad_owner_id, abroad_owner) = placed_owner(&app, "ti.635.or.abroad", None).await;
     place_user_in(&app, abroad_owner_id, Some(abroad)).await;
 
-    // (case, owner's token, scope, requested department, resolves)
-    let cases: Vec<(&str, &str, Option<&str>, Option<Uuid>, bool)> = vec![
+    /// The case, the owner's token, the scope, the requested department, and
+    /// whether the edge resolves.
+    type Case<'a> = (&'a str, &'a str, Option<&'a str>, Option<Uuid>, bool);
+    let cases: Vec<Case> = vec![
         ("no scope", token.as_str(), None, None, true),
         (
             "requested set",
