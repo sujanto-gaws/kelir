@@ -5150,3 +5150,180 @@ async fn an_owner_department_task_reaches_an_unscoped_holder_on_every_surface() 
         "the unscoped holder is offered the task and must be told"
     );
 }
+
+// ---------------------------------------------------------------------------
+// D-114 (#613) — a revision published with a scoped `ROLE` rule keeps running
+// ---------------------------------------------------------------------------
+
+/// Writes `value` at `pointer` (a `{a,b,c}` text path) of a published
+/// definition, behind the API's back, and reads it back so the fixture is known
+/// to hold. The engine reads `definition_json`, and nothing re-checks a
+/// published revision, so this is the shape a revision published before D-114
+/// has.
+async fn published_with(app: &TestApp, id: Uuid, pointer: &str, value: Value) {
+    let updated = sqlx::query(
+        "UPDATE workflow_definitions SET definition_json = jsonb_set(definition_json, $2::text[], $3) \
+         WHERE id = $1 AND status = 'ACTIVE'",
+    )
+    .bind(id)
+    .bind(pointer)
+    .bind(&value)
+    .execute(&app.pool)
+    .await
+    .expect("write the definition behind the API's back");
+    assert_eq!(updated.rows_affected(), 1, "the revision is not ACTIVE");
+
+    let stored: Value = sqlx::query_scalar(
+        "SELECT definition_json #> $2::text[] FROM workflow_definitions WHERE id = $1",
+    )
+    .bind(id)
+    .bind(pointer)
+    .fetch_one(&app.pool)
+    .await
+    .expect("read the definition back");
+    assert_eq!(stored, value, "the fixture did not store the scope");
+}
+
+/// **A revision published with a scoped `ROLE` rule keeps assigning
+/// tenant-wide** (**D-114** A, #613; JWSS §5.3). The publish refuses the scope
+/// from now on, and nothing re-checks a revision already `ACTIVE`, so the
+/// engine must go on doing what it did: offer the task to the role in the
+/// whole tenant, and let any holder decide it, rather than start reading a
+/// scope nobody's revision was published with.
+///
+/// Three placements: a department code on the task's assignment, where an
+/// approver of another department sees and decides the task; a code naming no
+/// department, which a `DEPARTMENT_ROLE` would refuse as `ASSIGNMENT_UNRESOLVED`
+/// and this submits; and a scope on the edge's `allowedBy`.
+#[tokio::test]
+async fn a_published_role_rule_with_a_scope_keeps_assigning_tenant_wide() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    department(&app, "DEPT-FIN", "Finance").await;
+    let procurement = department(&app, "DEPT-PROC", "Procurement").await;
+
+    let outsider = approver(&app, "wf.proc.rolescope").await;
+    scope_grant_to(&app, "wf.proc.rolescope", procurement).await;
+
+    let candidate_department = |task: Uuid| {
+        let pool = app.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<Uuid>>(
+                "SELECT candidate_department_id FROM workflow_tasks WHERE id = $1",
+            )
+            .bind(task)
+            .fetch_one(&pool)
+            .await
+            .expect("read the task's department")
+        }
+    };
+
+    // The task's assignment, scoped to Finance after the publish.
+    let workflow = publish_workflow(&app, &token, role_workflow("wf_kept_scope")).await;
+    published_with(
+        &app,
+        workflow,
+        "{states,0,task,assignment,departmentScope}",
+        json!("DEPT-FIN"),
+    )
+    .await;
+    let type_id = document_type(&app, &token, "PR_KEPT_SCOPE", Some(workflow)).await;
+
+    let id = draft(&app, &token, type_id).await;
+    let submitted = submit(&app, &token, id).await;
+    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+    let task = open_task_of(&app, id).await;
+
+    assert_eq!(
+        candidate_department(task).await,
+        None,
+        "a ROLE rule's scope was read: the task is offered to one department"
+    );
+
+    let inbox = app.get("/api/v1/tasks", Some(&outsider)).await;
+    assert_eq!(inbox.status, StatusCode::OK, "{}", inbox.body);
+    assert!(
+        inbox.body["data"]
+            .as_array()
+            .expect("the inbox is a list")
+            .iter()
+            .any(|row| row["id"] == json!(task.to_string())),
+        "Procurement's approver was not offered a tenant-wide task: {}",
+        inbox.body
+    );
+
+    let decided = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&outsider),
+            json!({ "action": "APPROVE" }),
+        )
+        .await;
+    assert_eq!(
+        decided.status,
+        StatusCode::OK,
+        "a tenant-wide task was refused to an approver of another department: {}",
+        decided.body
+    );
+    assert_eq!(stored_status(&app, id).await, "COMPLETED");
+
+    // A code naming no department: a scope that is read would refuse the submit.
+    let workflow = publish_workflow(&app, &token, role_workflow("wf_kept_nowhere")).await;
+    published_with(
+        &app,
+        workflow,
+        "{states,0,task,assignment,departmentScope}",
+        json!("DEPT-NOWHERE"),
+    )
+    .await;
+    let type_id = document_type(&app, &token, "PR_KEPT_NOWHERE", Some(workflow)).await;
+
+    let id = draft(&app, &token, type_id).await;
+    let submitted = submit(&app, &token, id).await;
+    assert_eq!(
+        submitted.status,
+        StatusCode::OK,
+        "a ROLE rule's scope was read and refused the submit: {}",
+        submitted.body
+    );
+    assert!(
+        !submitted.body.to_string().contains("ASSIGNMENT_UNRESOLVED"),
+        "{}",
+        submitted.body
+    );
+    assert_eq!(
+        candidate_department(open_task_of(&app, id).await).await,
+        None
+    );
+
+    // The edge's `allowedBy`, scoped to Finance after the publish.
+    let workflow = publish_workflow(&app, &token, role_workflow("wf_kept_edge")).await;
+    published_with(
+        &app,
+        workflow,
+        "{transitions,0,allowedBy}",
+        json!({ "assigneeType": "ROLE", "roleCode": APPROVER_ROLE, "departmentScope": "DEPT-FIN" }),
+    )
+    .await;
+    let type_id = document_type(&app, &token, "PR_KEPT_EDGE", Some(workflow)).await;
+
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+    let task = open_task_of(&app, id).await;
+
+    let decided = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&outsider),
+            json!({ "action": "APPROVE" }),
+        )
+        .await;
+    assert_eq!(
+        decided.status,
+        StatusCode::OK,
+        "a ROLE edge's scope was read and refused another department's approver: {}",
+        decided.body
+    );
+    assert_eq!(stored_status(&app, id).await, "COMPLETED");
+}

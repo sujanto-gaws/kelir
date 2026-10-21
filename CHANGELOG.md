@@ -426,6 +426,22 @@ While the major version is `0`, the public API may change in any release.
   it. The Validation Rule Registry (1.6.0) marks each rule's required
   parameter, and JFSS takes erratum E-4.
 
+- **Publishing a workflow definition refuses a `departmentScope` on a `ROLE`
+  rule** ([#613](https://github.com/sujanto-gaws/kelir/issues/613),
+  **D-114**). A `ROLE` rule in a task's `assignment` or a transition's
+  `allowedBy` (an object; the shorthand `"ROLE:X"` cannot carry a scope)
+  could carry a `departmentScope`, and the definition published cleanly and
+  offered the task to every holder of the role in the tenant: the scope was
+  ignored, and the author saw nothing wrong. The publish now answers 422
+  with a `ROLE_TAKES_NO_SCOPE` detail at each `…departmentScope` that
+  carries one, `""` included, ahead of any `ROLE_NOT_LIVE` detail, and the
+  definition stays a draft. A role within a department is
+  `DEPARTMENT_ROLE`, which is unchanged. Saving a draft does not check it,
+  and a task's `escalation.assignment` is not checked. **Revisions already
+  published are not re-checked, and keep assigning tenant-wide.** No
+  migration and no schema change: JWSS takes revision R-16, and its
+  meta-schema is untouched.
+
 ### Fixed
 
 - **A refresh after an administrator revoked the token is no longer recorded

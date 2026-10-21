@@ -34,6 +34,12 @@
 //! `ROLE_NOT_LIVE` at its path. Without it, the first submission routed to the
 //! revision was refused as `ASSIGNMENT_UNRESOLVED`, in front of the submitter.
 //!
+//! **D-114** A ([#613]) narrows the publish once more, and asks no table: a
+//! `departmentScope` on a `ROLE` rule is refused as `ROLE_TAKES_NO_SCOPE`
+//! (`jwss::role_scope_errors`), ahead of the `ROLE_NOT_LIVE` details in the
+//! same 422. A revision already published with one is not re-checked, and
+//! keeps assigning tenant-wide.
+//!
 //! # Deprecating stops new documents and nothing else
 //!
 //! **D-101** B ([#573]). [`deprecate_definition`] moves an `ACTIVE` revision to
@@ -80,6 +86,7 @@
 //! [#174]: https://github.com/sujanto-gaws/kelir/issues/174
 //! [#572]: https://github.com/sujanto-gaws/kelir/issues/572
 //! [#573]: https://github.com/sujanto-gaws/kelir/issues/573
+//! [#613]: https://github.com/sujanto-gaws/kelir/issues/613
 //! [#712]: https://github.com/sujanto-gaws/kelir/issues/712
 
 use std::collections::BTreeSet;
@@ -365,6 +372,15 @@ pub async fn publish_definition(
 
     let graph = Graph::parse(&before.definition, before.version);
 
+    // **A `ROLE` rule takes no `departmentScope`** (**D-114** A, #613; JWSS
+    // §5.3). The engine resolves a `ROLE` rule tenant-wide and never reads the
+    // scope, so a definition saying one department would offer its tasks to the
+    // whole tenant. At publish and not at save, as D-111's check is: a draft
+    // stays open, and a revision cloned with the scope is told when it matters.
+    // Pure, read from the locked copy, and run before the roles are taken; its
+    // details lead the same 422 as D-111's, so an author learns both at once.
+    let mut refused = jwss::role_scope_errors(&before.definition);
+
     // **Every role it names is live, and stays live until this commits**
     // (**D-111**, #572; JWSS §5.3). At publish and not at save: liveness is a
     // fact about the tenant, not the document (ADR-0019), and a check at save
@@ -385,11 +401,11 @@ pub async fn publish_definition(
             .into_iter()
             .collect();
 
-        let dead = jwss::dead_role_errors(&references, &live);
+        refused.extend(jwss::dead_role_errors(&references, &live));
+    }
 
-        if !dead.is_empty() {
-            return Err(AppError::validation(dead));
-        }
+    if !refused.is_empty() {
+        return Err(AppError::validation(refused));
     }
 
     if repo::publish(&mut *transaction, tenant_id, id, actor).await? == 0 {
