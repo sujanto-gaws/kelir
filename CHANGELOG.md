@@ -633,6 +633,21 @@ While the major version is `0`, the public API may change in any release.
   token already issued is untouched: it still works until it expires
   (decision **D-104**), or is refused at once when the tenant is deleted
   (**D-105**).
+- **A claimed task whose department never resolves is no longer *waiting for
+  you*** ([#635](https://github.com/sujanto-gaws/kelir/issues/635),
+  [#689](https://github.com/sujanto-gaws/kelir/issues/689)). #530 hid a
+  claimed task when every decision edge named a deleted role, and read
+  nothing of an edge's department scope. A task whose decision edges are
+  `allowedBy` `OWNER_DEPARTMENT` while the owner has no live department,
+  `REQUESTED_DEPARTMENT` while the document names none, or a department code
+  naming no live department is raised, and every decision on it is refused
+  as `ASSIGNMENT_UNRESOLVED`. Once claimed, it stayed on its holder's inbox,
+  its count, both dashboard cards and its page. It is now left off them as
+  #530's tasks are, and its page answers 404; an unclaimed one is unchanged.
+  The edge reads its department live, so the task returns when the
+  department resolves. A reassign is refused for every target, so the remedy
+  is the data (Installation and Deployment §9). No migration, and no schema
+  change.
 
 ### Known limitations
 
