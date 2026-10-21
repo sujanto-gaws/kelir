@@ -773,6 +773,473 @@ async fn an_automatic_edge_is_chosen_by_its_condition() {
 }
 
 // ---------------------------------------------------------------------------
+// A guard's `targetStatus` is a status, not a state code (#679)
+// ---------------------------------------------------------------------------
+//
+// LHCS §4 makes `targetStatus` a platform document status, and the after-chain
+// gives it as the reached state's `mapsToDocumentStatus`. The guard path gave
+// the edge's target *state code* instead, so a guard comparing it to a status
+// matched only where the two happened to be spelled alike. `STAMPING` ->
+// `COMPLETED` above is such an edge, which is why nothing here saw it. Every
+// target below has a code that is not its status.
+//
+// Each test also reads the hook log, so a guard that did not run at all is not
+// mistaken for a guard that passed.
+//
+// # Seen red on the unfixed code (`e9a1c29`), 2026-10-21
+//
+// 22 passed and these three failed, each with the 422 the criteria predicted:
+// AC1 and AC2 refused with `TARGET_STATUS_WRONG`, AC3 with `SAW_THE_CODE`.
+//
+// # Seen to fail after the fix, 2026-10-21
+//
+// Each mutation applied alone to `run_transition_guards`, this file run, and
+// the mutation reverted. AC1 is *…not_its_code*, AC2 *…a_person_acts_in*, AC3
+// *a_guard_cannot_match…*.
+//
+// | Mutation | Red |
+// |---|---|
+// | `target_status` back to `Some(&chosen.to)` | AC1, AC2, AC3: 422 |
+// | `target_status` is the source state's status | AC1, AC2: 422 |
+// | `target_status: None` | AC1, AC2: 422. AC3 stays green: `null` is not `DONE` |
+// | `current_status` and `target_status` swapped | AC1, AC2: 422 |
+// | the target's status only when it `is_final`, its code otherwise | AC2: 422 |
+// | the call to `run_transition_guards` removed | ten: AC1, AC2 and AC3 on the hook log, and `a_guard_runs_and_the_execution_is_logged` with six more that read a guard's run or refusal |
+// | the swap above, with AC2's first state at `PENDING_APPROVAL` (a test mutation) | AC1 only. **AC2 stays green**: a guard's `currentStatus` is the status the decision started from, so that fixture cannot tell the two fields apart, and AC2's first state is `IN_REVIEW` for it |
+//
+// # The independent campaign, 2026-10-21
+//
+// The same method, by `test-engineer`, with the three tests after AC3 added.
+// *Several* is `of_several_automatic_edges…`, *chain* is `in_a_chain…` and
+// *unchanged* is `…when_the_status_does_not_change`. Re-run first: the
+// builder's `Some(&chosen.to)` reddens AC1, AC2, AC3, *several*, *chain* and
+// *unchanged*; `None` reddens AC1, AC2, *several*, *chain* and *unchanged*,
+// with AC3 green as the table says.
+//
+// | Mutation | Red |
+// |---|---|
+// | the call passes `state` (the source) as `target` | AC1, AC2, *several*, *chain*. *Unchanged* stays green: its source and target are both `IN_REVIEW` |
+// | the status of the first `AUTO` candidate's target, not `chosen`'s | *several* only, on the fallback (`DONE_STATUS_WRONG`). **AC1 to AC3 stay green**: each has one `AUTO` edge |
+// | the status of the last `AUTO` candidate's target | *several* only, on the conditioned edge (`ESCALATED_STATUS_WRONG`) |
+// | the status the advance settles in, read ahead through every service state | *chain* only (`FIRST_STEP_STATUS_WRONG`). **AC1 to AC3 stay green**: each advance is one step |
+// | `null` when the target's status is the source state's | *unchanged* only |
+// | `null` when the target's status is `currentStatus` | *unchanged*, and *several* on the conditioned edge. **AC2 stays green**: its `currentStatus` is `IN_REVIEW` |
+// | the status of the graph's first final state | AC2, *several*, *chain*, *unchanged*. AC1 and AC3 stay green: their target is that state |
+// | `after_hooks`' `targetStatus` given as the state code `event.to` | **nothing: `outbox` 23 of 23, `workflow_engine` 69 of 69, this file 28 of 28.** No after-capable handler reads its payload (`core:continue_always` is the only one), so no test can see the after-chain's value. AC4's agreement is held by the code comment alone |
+
+/// A guard that refuses with `code` when `condition` holds against the LHCS §4
+/// payload.
+fn guard_refusing_when(condition: Value, code: &str) -> Value {
+    json!([{
+        "handler": "core:reject_when",
+        "config": { "condition": condition, "code": code, "message": code }
+    }])
+}
+
+/// [`workflow_with_a_service_state`], whose final state is `DONE`: a code that
+/// is not its status, `COMPLETED`.
+fn workflow_ending_in_done(key: &str, guards: Value) -> Value {
+    let mut definition = workflow_with_a_service_state(key, guards, None);
+
+    definition["states"][2]["code"] = json!("DONE");
+    definition["states"][2]["name"] = json!("Done");
+    definition["transitions"][1]["to"] = json!("DONE");
+
+    definition
+}
+
+/// [`workflow_with_a_service_state`], whose automatic edge reaches
+/// `MANAGER_APPROVAL`: a state a person acts in, whose status is
+/// `PENDING_APPROVAL`. Its approval leads on to `COMPLETED`.
+///
+/// **The first state is `IN_REVIEW` here, not `PENDING_APPROVAL`.** The guard
+/// runs inside the decision that left `SUBMITTED`, so the payload's
+/// `currentStatus` is the status that decision started from. Were that also
+/// `PENDING_APPROVAL`, a guard given `currentStatus` in place of `targetStatus`
+/// would pass, and this test could not tell the two apart.
+fn workflow_reaching_a_manager(key: &str, guards: Value) -> Value {
+    let mut definition = workflow_with_a_service_state(key, guards, None);
+
+    definition["states"][0]["mapsToDocumentStatus"] = json!("IN_REVIEW");
+    definition["states"].as_array_mut().expect("states").insert(
+        2,
+        json!({
+            "code": "MANAGER_APPROVAL", "name": "Manager approval",
+            "mapsToDocumentStatus": "PENDING_APPROVAL",
+            "task": { "taskDefinitionKey": "manager_approve",
+                      "taskName": "Approve as the manager",
+                      "assignment": { "assigneeType": "ROLE", "roleCode": APPROVER_ROLE } }
+        }),
+    );
+    definition["transitions"][1]["to"] = json!("MANAGER_APPROVAL");
+    definition["transitions"]
+        .as_array_mut()
+        .expect("transitions")
+        .push(json!({
+            "from": "MANAGER_APPROVAL", "to": "COMPLETED", "action": "APPROVE",
+            "allowedBy": format!("ROLE:{APPROVER_ROLE}")
+        }));
+
+    definition
+}
+
+/// **#679 AC1: a guard on an edge to a final state is given that state's
+/// status, not its code.** The guard refuses unless `targetStatus` is
+/// `COMPLETED`, and the edge's target is `DONE`.
+#[tokio::test]
+async fn a_guards_target_status_is_the_target_states_status_not_its_code() {
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+    let token = approver(&app, "systask.target.one").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &admin,
+        workflow_ending_in_done(
+            "stamped_target_one",
+            guard_refusing_when(
+                json!({ "!=": [{ "var": "targetStatus" }, "COMPLETED"] }),
+                "TARGET_STATUS_WRONG",
+            ),
+        ),
+    )
+    .await;
+    let type_id = document_type(&app, &admin, "STAMPED_TARGET_ONE", workflow).await;
+    let document = draft(&app, &token, type_id, 100).await;
+
+    submit(&app, &token, document).await;
+
+    let decided = approve(&app, &token, document).await;
+
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+    assert_eq!(state_of(&app, document).await, "DONE");
+    assert_eq!(status_of(&app, &token, document).await, "COMPLETED");
+    assert_eq!(
+        hook_runs(&app, document).await,
+        vec![("core:reject_when".to_owned(), "CONTINUE".to_owned())],
+        "the guard ran, and passed"
+    );
+}
+
+/// **#679 AC2: the same for a target a person acts in.** `MANAGER_APPROVAL` is
+/// not final, so a fix that mapped only a final state's status is red here.
+#[tokio::test]
+async fn a_guards_target_status_is_the_target_states_status_for_a_state_a_person_acts_in() {
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+    let token = approver(&app, "systask.target.two").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &admin,
+        workflow_reaching_a_manager(
+            "stamped_target_two",
+            guard_refusing_when(
+                json!({ "!=": [{ "var": "targetStatus" }, "PENDING_APPROVAL"] }),
+                "TARGET_STATUS_WRONG",
+            ),
+        ),
+    )
+    .await;
+    let type_id = document_type(&app, &admin, "STAMPED_TARGET_TWO", workflow).await;
+    let document = draft(&app, &token, type_id, 100).await;
+
+    submit(&app, &token, document).await;
+
+    let decided = approve(&app, &token, document).await;
+
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+    assert_eq!(state_of(&app, document).await, "MANAGER_APPROVAL");
+    assert_eq!(status_of(&app, &token, document).await, "PENDING_APPROVAL");
+    assert_eq!(tasks_for(&app, document, "manager_approve").await, 1);
+    assert_eq!(
+        hook_runs(&app, document).await,
+        vec![("core:reject_when".to_owned(), "CONTINUE".to_owned())],
+        "the guard ran, and passed"
+    );
+}
+
+/// **#679 AC3: a state code does not reach the guard.** AC1's edge, with a
+/// guard that refuses if `targetStatus` is the code `DONE`.
+#[tokio::test]
+async fn a_guard_cannot_match_the_target_state_code_through_target_status() {
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+    let token = approver(&app, "systask.target.three").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &admin,
+        workflow_ending_in_done(
+            "stamped_target_three",
+            guard_refusing_when(
+                json!({ "==": [{ "var": "targetStatus" }, "DONE"] }),
+                "SAW_THE_CODE",
+            ),
+        ),
+    )
+    .await;
+    let type_id = document_type(&app, &admin, "STAMPED_TARGET_THREE", workflow).await;
+    let document = draft(&app, &token, type_id, 100).await;
+
+    submit(&app, &token, document).await;
+
+    let decided = approve(&app, &token, document).await;
+
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+    assert_eq!(state_of(&app, document).await, "DONE");
+    assert_eq!(
+        hook_runs(&app, document).await,
+        vec![("core:reject_when".to_owned(), "CONTINUE".to_owned())],
+        "the guard ran, and passed"
+    );
+}
+
+/// The two states every fixture below starts from: an approval, then a service
+/// state whose `AUTO` edges the test declares.
+fn approval_then_stamping(submitted_status: &str) -> Value {
+    json!([
+        { "code": "SUBMITTED", "name": "Awaiting approval",
+          "mapsToDocumentStatus": submitted_status,
+          "task": { "taskDefinitionKey": "approve", "taskName": "Approve the request",
+                    "assignment": { "assigneeType": "ROLE", "roleCode": APPROVER_ROLE } } },
+        { "code": "STAMPING", "name": "Stamping", "mapsToDocumentStatus": "IN_REVIEW",
+          "task": { "taskDefinitionKey": "stamp", "taskName": "Stamp it",
+                    "taskType": "SERVICE_TASK",
+                    "assignment": { "assigneeType": "ROLE", "roleCode": APPROVER_ROLE } } }
+    ])
+}
+
+/// A definition of `states` after [`approval_then_stamping`]'s two, with the
+/// approval into `STAMPING` and then `transitions`.
+fn stamping_definition(
+    key: &str,
+    submitted_status: &str,
+    states: Value,
+    transitions: Value,
+) -> Value {
+    let mut all_states = approval_then_stamping(submitted_status);
+    let mut all_transitions = json!([
+        { "from": "SUBMITTED", "to": "STAMPING", "action": "APPROVE",
+          "allowedBy": format!("ROLE:{APPROVER_ROLE}") }
+    ]);
+
+    all_states
+        .as_array_mut()
+        .expect("states")
+        .extend(states.as_array().expect("states").iter().cloned());
+    all_transitions
+        .as_array_mut()
+        .expect("transitions")
+        .extend(transitions.as_array().expect("transitions").iter().cloned());
+
+    json!({
+        "workflowKey": key,
+        "version": "1.0.0",
+        "name": "Stamped approval",
+        "initialState": "SUBMITTED",
+        "states": all_states,
+        "transitions": all_transitions,
+        "variables": [
+            { "key": "amount", "dataType": "NUMBER", "source": { "var": "formData.amount" } }
+        ]
+    })
+}
+
+/// A state a person acts in, with its own task.
+fn human_state(code: &str, status: &str, task_key: &str) -> Value {
+    json!({
+        "code": code, "name": code, "mapsToDocumentStatus": status,
+        "task": { "taskDefinitionKey": task_key, "taskName": task_key,
+                  "assignment": { "assigneeType": "ROLE", "roleCode": APPROVER_ROLE } }
+    })
+}
+
+/// **#679, the independent campaign: of several `AUTO` edges, the guard is
+/// given the status of the edge that was chosen.**
+///
+/// `STAMPING` has two: a conditioned edge to `ESCALATED` (`PENDING_APPROVAL`)
+/// for an amount above 1000, and the fallback to `DONE` (`COMPLETED`). Each
+/// carries a guard that refuses unless `targetStatus` is its own target's.
+/// AC1 to AC3 have one `AUTO` edge each, so a payload read from the first or
+/// the last candidate rather than from `chosen` was green there.
+#[tokio::test]
+async fn of_several_automatic_edges_the_guard_is_given_the_chosen_edges_target_status() {
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+    let token = approver(&app, "systask.target.four").await;
+
+    let definition = stamping_definition(
+        "stamped_target_four",
+        "PENDING_APPROVAL",
+        json!([
+            human_state("ESCALATED", "PENDING_APPROVAL", "escalated_approve"),
+            { "code": "DONE", "name": "Done", "mapsToDocumentStatus": "COMPLETED",
+              "isFinal": true }
+        ]),
+        json!([
+            { "from": "STAMPING", "to": "ESCALATED", "action": "AUTO",
+              "condition": { ">": [{ "var": "variables.amount" }, 1000] },
+              "guards": guard_refusing_when(
+                  json!({ "!=": [{ "var": "targetStatus" }, "PENDING_APPROVAL"] }),
+                  "ESCALATED_STATUS_WRONG",
+              ) },
+            { "from": "STAMPING", "to": "DONE", "action": "AUTO",
+              "guards": guard_refusing_when(
+                  json!({ "!=": [{ "var": "targetStatus" }, "COMPLETED"] }),
+                  "DONE_STATUS_WRONG",
+              ) },
+            { "from": "ESCALATED", "to": "DONE", "action": "APPROVE",
+              "allowedBy": format!("ROLE:{APPROVER_ROLE}") }
+        ]),
+    );
+
+    let workflow = publish_workflow(&app, &admin, definition).await;
+    let type_id = document_type(&app, &admin, "STAMPED_TARGET_FOUR", workflow).await;
+
+    // The fallback, which is the last candidate.
+    let small = draft(&app, &token, type_id, 100).await;
+
+    submit(&app, &token, small).await;
+
+    let decided = approve(&app, &token, small).await;
+
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+    assert_eq!(state_of(&app, small).await, "DONE");
+    assert_eq!(
+        hook_runs(&app, small).await,
+        vec![("core:reject_when".to_owned(), "CONTINUE".to_owned())],
+        "the fallback's guard ran, and passed"
+    );
+
+    // The conditioned edge, which is the first.
+    let big = draft(&app, &token, type_id, 5000).await;
+
+    submit(&app, &token, big).await;
+
+    let decided = approve(&app, &token, big).await;
+
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+    assert_eq!(state_of(&app, big).await, "ESCALATED");
+    assert_eq!(status_of(&app, &token, big).await, "PENDING_APPROVAL");
+    assert_eq!(
+        hook_runs(&app, big).await,
+        vec![("core:reject_when".to_owned(), "CONTINUE".to_owned())],
+        "the conditioned edge's guard ran, and passed"
+    );
+}
+
+/// **#679, the independent campaign: in a chain of automatic steps, each guard
+/// is given its own edge's target status.**
+///
+/// `STAMPING` (`IN_REVIEW`) goes on to `SEALING` (`SUBMITTED`), a second
+/// service state, and that to `DONE` (`COMPLETED`). The first guard refuses
+/// unless `targetStatus` is `SUBMITTED`, the second unless it is `COMPLETED`.
+/// A guard given the status the whole advance settles in, which is the
+/// decision's eventual status rather than this edge's, is red on the first.
+#[tokio::test]
+async fn in_a_chain_of_automatic_steps_each_guard_is_given_its_own_targets_status() {
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+    let token = approver(&app, "systask.target.five").await;
+
+    let definition = stamping_definition(
+        "stamped_target_five",
+        "PENDING_APPROVAL",
+        json!([
+            { "code": "SEALING", "name": "Sealing", "mapsToDocumentStatus": "SUBMITTED",
+              "task": { "taskDefinitionKey": "seal", "taskName": "Seal it",
+                        "taskType": "SERVICE_TASK",
+                        "assignment": { "assigneeType": "ROLE", "roleCode": APPROVER_ROLE } } },
+            { "code": "DONE", "name": "Done", "mapsToDocumentStatus": "COMPLETED",
+              "isFinal": true }
+        ]),
+        json!([
+            { "from": "STAMPING", "to": "SEALING", "action": "AUTO",
+              "guards": guard_refusing_when(
+                  json!({ "!=": [{ "var": "targetStatus" }, "SUBMITTED"] }),
+                  "FIRST_STEP_STATUS_WRONG",
+              ) },
+            { "from": "SEALING", "to": "DONE", "action": "AUTO",
+              "guards": guard_refusing_when(
+                  json!({ "!=": [{ "var": "targetStatus" }, "COMPLETED"] }),
+                  "SECOND_STEP_STATUS_WRONG",
+              ) }
+        ]),
+    );
+
+    let workflow = publish_workflow(&app, &admin, definition).await;
+    let type_id = document_type(&app, &admin, "STAMPED_TARGET_FIVE", workflow).await;
+    let document = draft(&app, &token, type_id, 100).await;
+
+    submit(&app, &token, document).await;
+
+    let decided = approve(&app, &token, document).await;
+
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+    assert_eq!(state_of(&app, document).await, "DONE");
+    assert_eq!(status_of(&app, &token, document).await, "COMPLETED");
+    assert_eq!(
+        hook_runs(&app, document).await,
+        vec![
+            ("core:reject_when".to_owned(), "CONTINUE".to_owned()),
+            ("core:reject_when".to_owned(), "CONTINUE".to_owned()),
+        ],
+        "both guards ran, and passed"
+    );
+}
+
+/// **#679, the independent campaign: `targetStatus` is given when it is the
+/// status the document already has.**
+///
+/// LHCS §4 reads *when the action changes status*, and the criteria chose to
+/// give the value regardless, as the after-chain gives it. Every state here
+/// maps to `IN_REVIEW` until the last, so a guard nulling `targetStatus` when
+/// it equals either the source state's status or `currentStatus` is red.
+#[tokio::test]
+async fn a_guards_target_status_is_given_when_the_status_does_not_change() {
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+    let token = approver(&app, "systask.target.six").await;
+
+    let definition = stamping_definition(
+        "stamped_target_six",
+        "IN_REVIEW",
+        json!([
+            human_state("SECOND_LOOK", "IN_REVIEW", "second_look"),
+            { "code": "DONE", "name": "Done", "mapsToDocumentStatus": "COMPLETED",
+              "isFinal": true }
+        ]),
+        json!([
+            { "from": "STAMPING", "to": "SECOND_LOOK", "action": "AUTO",
+              "guards": guard_refusing_when(
+                  json!({ "!=": [{ "var": "targetStatus" }, "IN_REVIEW"] }),
+                  "TARGET_STATUS_DROPPED",
+              ) },
+            { "from": "SECOND_LOOK", "to": "DONE", "action": "APPROVE",
+              "allowedBy": format!("ROLE:{APPROVER_ROLE}") }
+        ]),
+    );
+
+    let workflow = publish_workflow(&app, &admin, definition).await;
+    let type_id = document_type(&app, &admin, "STAMPED_TARGET_SIX", workflow).await;
+    let document = draft(&app, &token, type_id, 100).await;
+
+    submit(&app, &token, document).await;
+
+    let decided = approve(&app, &token, document).await;
+
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+    assert_eq!(state_of(&app, document).await, "SECOND_LOOK");
+    assert_eq!(status_of(&app, &token, document).await, "IN_REVIEW");
+    assert_eq!(
+        hook_runs(&app, document).await,
+        vec![("core:reject_when".to_owned(), "CONTINUE".to_owned())],
+        "the guard ran, and passed"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // AC4, AC5 — the vocabulary is enforced at publish
 // ---------------------------------------------------------------------------
 

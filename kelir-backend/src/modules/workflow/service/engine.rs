@@ -963,6 +963,7 @@ async fn advance_automatically<'g>(
         instance_id,
         state,
         chosen,
+        target,
         actor,
         evaluation,
     )
@@ -1106,6 +1107,16 @@ async fn publish_transition(
 }
 
 /// One transition's `guards`, run as `before_workflow_transition`.
+///
+/// **A guard's `targetStatus` is `target`'s `mapsToDocumentStatus`**, the
+/// platform status LHCS §4 asks for, and not `chosen.to`, which is a state
+/// code ([#679]). It is what `after_hooks` gives an after-hook on the same
+/// transition, so a guard and an after-hook read one value for it. `target`
+/// is the state [`advance_automatically`] has already resolved and moves to,
+/// so the guard is judged against the move that is made, and the value is
+/// given even when it equals `currentStatus`, as the after-chain gives it.
+///
+/// [#679]: https://github.com/sujanto-gaws/kelir/issues/679
 #[allow(
     clippy::too_many_arguments,
     reason = "the payload's own fields, assembled where they are known"
@@ -1118,6 +1129,7 @@ async fn run_transition_guards(
     instance_id: Uuid,
     from: &State,
     chosen: &super::super::domain::Transition,
+    target: &State,
     actor: Option<Uuid>,
     evaluation: &EvaluationContext,
 ) -> Result<(), AppError> {
@@ -1175,7 +1187,7 @@ async fn run_transition_guards(
             .and_then(Value::as_str)
             .unwrap_or_default(),
         current_status: evaluation.document.get("status").and_then(Value::as_str),
-        target_status: Some(&chosen.to),
+        target_status: Some(target.maps_to_document_status.as_str()),
         actor_user_id: actor,
         form_data: evaluation.form_data.clone(),
         metadata,

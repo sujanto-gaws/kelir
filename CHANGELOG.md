@@ -454,6 +454,16 @@ While the major version is `0`, the public API may change in any release.
   cannot be stored answers 500 and leaves the old token usable, where it
   revoked the old token and the retry was taken for a replay. No migration,
   and no schema change.
+- **A workflow guard's `targetStatus` is the status the transition leads to**
+  ([#679](https://github.com/sujanto-gaws/kelir/issues/679)). A
+  `before_workflow_transition` guard on an automatic transition was given the
+  target state's code as `targetStatus`, where the Lifecycle Hook Contract §4
+  makes it a platform document status. So a guard that compared it to a
+  status, such as `COMPLETED`, matched only where the state was named after
+  its status, and one that compared it to the state's code matched where it
+  should not. It is now the target state's `mapsToDocumentStatus`, as an
+  after-hook on the same transition is given. No shipped handler reads the
+  field. No migration, and no schema change.
 - **A workflow revision being deleted no longer has an approval started on
   it** ([#712](https://github.com/sujanto-gaws/kelir/issues/712)).
   `DELETE /workflow/definitions/{id}` read the revision, checked for running
