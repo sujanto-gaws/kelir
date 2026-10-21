@@ -6,7 +6,7 @@ use uuid::Uuid;
 use super::domain::{
     open_tasks_refusal, published_definitions_refusal, validate_create_role, validate_create_user,
     validate_distinct_ids, validate_password_value, validate_update_role, with_staffing,
-    CreateRoleRequest, CreateUserRequest, Permission, Role, RoleQuery, TokenSubject,
+    CreateRoleRequest, CreateUserRequest, Permission, RevokeReason, Role, RoleQuery, TokenSubject,
     UpdateRoleRequest, UpdateUserRequest, User, UserQuery, UserStatus, ROLE_HAS_OPEN_TASKS,
     ROLE_NAMED_BY_PUBLISHED_DEFINITION,
 };
@@ -204,7 +204,8 @@ pub async fn update_user(
     // block new sign-ins. An access token already issued is not reached by
     // this: it works until it expires (SDD §11.1, decision D-104).
     if matches!(request.status, Some(status) if !status.can_sign_in()) {
-        let revoked = repo::revoke_all_for_user(&state.pool, id, "account deactivated").await?;
+        let revoked =
+            repo::revoke_all_for_user(&state.pool, id, RevokeReason::AccountDeactivated).await?;
         tracing::info!(user_id = %id, revoked, "revoked sessions for a deactivated account");
     }
 
@@ -263,7 +264,7 @@ pub async fn deactivate_user(
     // `middleware::auth` refuses a deleted user's token on its next request
     // (#650, decision D-105). Setting `status` to `INACTIVE` in `update_user`
     // is the other case, D-104's, and does not end a token.
-    repo::revoke_all_for_user(&state.pool, id, "account deleted").await?;
+    repo::revoke_all_for_user(&state.pool, id, RevokeReason::AccountDeleted).await?;
 
     audit::record_or_warn(
         &state.pool,
@@ -309,7 +310,7 @@ pub async fn set_password(
 
     // A password change revokes every refresh token: if the change was prompted
     // by a suspected compromise, leaving sessions renewable defeats the point.
-    repo::revoke_all_for_user(&state.pool, id, "password changed").await?;
+    repo::revoke_all_for_user(&state.pool, id, RevokeReason::PasswordChanged).await?;
 
     audit::record_or_warn(
         &state.pool,

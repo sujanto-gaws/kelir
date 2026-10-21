@@ -122,6 +122,114 @@ impl UserStatus {
     }
 }
 
+/// Why a refresh token was revoked: `refresh_tokens.revoked_reason` (#710).
+///
+/// The strings are the stored vocabulary, so [`as_str`](Self::as_str) never
+/// changes a spelling a row already carries. A refresh that meets a revoked
+/// token reads the reason back and asks [`is_replay_evidence`] what it means
+/// (SDD §11.1). Each revoke site passes one of these, so a new reason cannot
+/// be written until it has a class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevokeReason {
+    /// The refresh that spent the token issued its successor.
+    Rotated,
+    /// Its holder signed out.
+    SignedOut,
+    /// The reuse sweep ended it with the rest of its user's family.
+    RefreshTokenReuse,
+    /// The holder changed their own password, or an administrator set it.
+    PasswordChanged,
+    /// A reset link was redeemed.
+    PasswordReset,
+    /// `update_tenant` took the tenant out of `ACTIVE`.
+    TenantSuspended,
+    /// `delete_tenant`.
+    TenantDeleted,
+    /// `update_user` set a status that cannot sign in.
+    AccountDeactivated,
+    /// `delete_user`.
+    AccountDeleted,
+    /// A refresh found its user could not sign in.
+    AccountNotActive,
+    /// A refresh found its tenant refuses sessions (#649).
+    TenantNotActive,
+}
+
+impl RevokeReason {
+    /// Every reason. A test matches on each variant, so a twelfth that is not
+    /// added here fails to compile there.
+    pub const ALL: [Self; 11] = [
+        Self::Rotated,
+        Self::SignedOut,
+        Self::RefreshTokenReuse,
+        Self::PasswordChanged,
+        Self::PasswordReset,
+        Self::TenantSuspended,
+        Self::TenantDeleted,
+        Self::AccountDeactivated,
+        Self::AccountDeleted,
+        Self::AccountNotActive,
+        Self::TenantNotActive,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Rotated => "rotated",
+            Self::SignedOut => "signed out",
+            Self::RefreshTokenReuse => "refresh token reuse",
+            Self::PasswordChanged => "password changed",
+            Self::PasswordReset => "password reset",
+            Self::TenantSuspended => "tenant suspended",
+            Self::TenantDeleted => "tenant deleted",
+            Self::AccountDeactivated => "account deactivated",
+            Self::AccountDeleted => "account deleted",
+            Self::AccountNotActive => "account not active",
+            Self::TenantNotActive => "tenant not active",
+        }
+    }
+
+    /// The reason a stored string spells, or `None` for one this code does
+    /// not know: a row written by a later release, or by hand.
+    pub fn from_db(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|reason| reason.as_str() == value)
+    }
+
+    /// Whether a token revoked for this reason, presented again, means a copy
+    /// of it exists. Rotation, sign-out and the reuse sweep each revoke a
+    /// token its client should no longer hold. Every other reason is an
+    /// administrative act on a token its client still holds in good faith.
+    ///
+    /// No wildcard arm, so a new reason does not compile until it is
+    /// classified here.
+    fn marks_a_copy(self) -> bool {
+        match self {
+            Self::Rotated | Self::SignedOut | Self::RefreshTokenReuse => true,
+            Self::PasswordChanged
+            | Self::PasswordReset
+            | Self::TenantSuspended
+            | Self::TenantDeleted
+            | Self::AccountDeactivated
+            | Self::AccountDeleted
+            | Self::AccountNotActive
+            | Self::TenantNotActive => false,
+        }
+    }
+}
+
+/// Whether a revoked refresh token presented again is evidence of replay,
+/// given the `revoked_reason` stored with it (#710, SDD §11.1).
+///
+/// **Fails safe.** `None` and a string [`RevokeReason::from_db`] does not
+/// recognise are evidence: a missed alarm is the worse error, and a false one
+/// costs the user a sign-in.
+pub fn is_replay_evidence(reason: Option<&str>) -> bool {
+    reason
+        .and_then(RevokeReason::from_db)
+        .is_none_or(RevokeReason::marks_a_copy)
+}
+
 /// The user list's query string: paging, a search and a status.
 ///
 /// Unknown parameters are ignored, as [`Pagination`] ignores them everywhere;
@@ -866,6 +974,48 @@ mod tests {
         let mut placed: Vec<usize> = UserStatus::ALL.into_iter().map(place).collect();
         placed.sort_unstable();
         assert_eq!(placed, vec![0, 1, 2, 3]);
+    }
+
+    /// The strings are what stored rows carry, so renaming one strands every
+    /// token revoked under the old spelling in the fail-safe arm (#710). The
+    /// classification is the table in SDD §11.1. A twelfth reason fails to
+    /// compile in the `match` until it is placed, and the count of
+    /// administrative reasons then fails until it is classified on purpose.
+    #[test]
+    fn revoke_reason_classification_and_strings() {
+        let expected = |reason: RevokeReason| match reason {
+            RevokeReason::Rotated => ("rotated", true),
+            RevokeReason::SignedOut => ("signed out", true),
+            RevokeReason::RefreshTokenReuse => ("refresh token reuse", true),
+            RevokeReason::PasswordChanged => ("password changed", false),
+            RevokeReason::PasswordReset => ("password reset", false),
+            RevokeReason::TenantSuspended => ("tenant suspended", false),
+            RevokeReason::TenantDeleted => ("tenant deleted", false),
+            RevokeReason::AccountDeactivated => ("account deactivated", false),
+            RevokeReason::AccountDeleted => ("account deleted", false),
+            RevokeReason::AccountNotActive => ("account not active", false),
+            RevokeReason::TenantNotActive => ("tenant not active", false),
+        };
+
+        let mut spellings = std::collections::HashSet::new();
+        let mut administrative = 0;
+        for reason in RevokeReason::ALL {
+            let (text, replay) = expected(reason);
+            assert_eq!(reason.as_str(), text, "{reason:?}");
+            assert_eq!(RevokeReason::from_db(text), Some(reason), "{text}");
+            assert_eq!(is_replay_evidence(Some(text)), replay, "{text}");
+            assert!(spellings.insert(text), "{text} is spelled twice");
+            if !replay {
+                administrative += 1;
+            }
+        }
+        assert_eq!(spellings.len(), 11);
+        assert_eq!(administrative, 8);
+
+        // Fails safe: no reason, or one this code does not know, is evidence.
+        assert!(is_replay_evidence(None));
+        assert!(is_replay_evidence(Some("anything else")));
+        assert_eq!(RevokeReason::from_db("anything else"), None);
     }
 
     /// The live-holder count reads exactly the statuses that sign in (#508):

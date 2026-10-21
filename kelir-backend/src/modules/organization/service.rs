@@ -44,6 +44,7 @@ use crate::config::AppConfig;
 use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
 use crate::modules::audit::{self, domain::ObjectType, AuditEntry};
+use crate::modules::identity::domain::RevokeReason;
 use crate::modules::identity::service as identity;
 use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
@@ -496,7 +497,8 @@ pub async fn update_tenant(
     // (SDD §11.1, decision D-104). Suspension and deactivation are a status;
     // only deletion ends a token at once (D-105).
     if matches!(request.status, Some(status) if !status.admits_sign_in()) {
-        let revoked = repository::revoke_sessions(&state.pool, id, "tenant suspended").await?;
+        let revoked =
+            repository::revoke_sessions(&state.pool, id, RevokeReason::TenantSuspended).await?;
         tracing::info!(tenant_id = %id, revoked, "revoked sessions for a suspended tenant");
     }
 
@@ -559,7 +561,7 @@ pub async fn delete_tenant(
         return Err(AppError::not_found("Tenant"));
     }
 
-    let revoked = repository::revoke_sessions(&state.pool, id, "tenant deleted").await?;
+    let revoked = repository::revoke_sessions(&state.pool, id, RevokeReason::TenantDeleted).await?;
     tracing::info!(tenant_id = %id, revoked, "revoked sessions for a deleted tenant");
 
     audit::record_or_warn(

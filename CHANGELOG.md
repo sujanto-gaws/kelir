@@ -428,6 +428,32 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A refresh after an administrator revoked the token is no longer recorded
+  as token reuse** ([#710](https://github.com/sujanto-gaws/kelir/issues/710)). `POST /auth/refresh`
+  treated every revoked refresh token as a replay, so a client whose session
+  was ended by a password change, a reset, a suspension, a deletion or a
+  deactivation was recorded as `Security.RefreshTokenReused` (`TOKEN_REUSE`)
+  at its next refresh, and every refresh token of the user was revoked, one
+  signed in after the revoke included. The refresh now reads why the token
+  was revoked. A token revoked by a rotation, a sign-out or the reuse sweep,
+  or for a reason the code does not know, is still a replay. A token revoked
+  administratively is refused with the same 401 and body, writes no audit row,
+  revokes nothing else, and is logged at `info`. No migration, and no schema
+  change.
+- **Two refreshes of one token at once no longer both renew**
+  ([#751](https://github.com/sujanto-gaws/kelir/issues/751)). `POST /auth/refresh` read the token and
+  later rotated it without checking that the rotation changed a row, so two
+  refreshes that both read it live were both answered 200 with a new pair,
+  and a refresh that lost the token to an administrator's revoke still renewed
+  the session. The rotation now decides. The refresh that finds the token
+  already revoked is refused by the revoke's reason: the loser of two
+  refreshes is a replay, recorded as `TOKEN_REUSE`, and the user's refresh
+  tokens are revoked, the winner's new one included; one that lost to an
+  administrator's revoke is refused with nothing recorded. The rotation and
+  the new token's insert are now one transaction, so a refresh whose new token
+  cannot be stored answers 500 and leaves the old token usable, where it
+  revoked the old token and the retry was taken for a replay. No migration,
+  and no schema change.
 - **A workflow revision being deleted no longer has an approval started on
   it** ([#712](https://github.com/sujanto-gaws/kelir/issues/712)).
   `DELETE /workflow/definitions/{id}` read the revision, checked for running
