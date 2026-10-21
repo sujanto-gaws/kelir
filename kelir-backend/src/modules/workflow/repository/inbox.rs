@@ -161,9 +161,11 @@
 //!   (`repository::task::open_tasks_needing_roles`), and the stranded task
 //!   query does not. A reassign is refused as `TARGET_CANNOT_DECIDE`, because
 //!   no target could decide it either, so the remedy is data. Placing the
-//!   owner in a department, restoring a deleted one, or setting the requested
-//!   department brings the task back. For the requested department that is
-//!   SQL, because a submitted document is not editable.
+//!   owner in a department, restoring a deleted one, creating a live
+//!   department with the code an edge names, or setting the requested
+//!   department brings the task back. Restoring a department is SQL, since
+//!   no route restores one, and so is setting the requested department,
+//!   because a submitted document is not editable.
 //!
 //! **The unclaimed arm is unchanged.** An unclaimed task with such edges is
 //! still offered to its role's holders, and the first to claim it then loses
