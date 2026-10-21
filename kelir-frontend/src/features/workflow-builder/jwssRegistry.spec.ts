@@ -15,12 +15,13 @@ import {
  * The editor's vocabularies, and what it offers a condition (#426).
  *
  * **The variables are pinned to what the engine builds.** `service/engine.rs`
- * gives JSON Logic `document` as `{status, documentTypeId, documentNumber}`,
- * `actor` as `{userId}`, `formData` and `variables`. JWSS §6.1 also sketches
- * `document.amount`, `document.documentTypeKey`, `actor.roles` and
- * `actor.departmentId`; none is built, so a condition on one reads `null` and
- * silently takes the fallback. Offering one is the defect this test names.
- * Seen red, 2026-10-09, with `document.amount` added to the offered list.
+ * gives JSON Logic `document` as `{status, documentTypeId, documentNumber,
+ * documentTypeKey}`, `actor` as `{userId, roles, departmentId}`, `formData` and
+ * `variables`: JWSS §6.1's context in full since #706 (D-115 B). §6.1 dropped
+ * `document.amount` in the same change, and a document has no amount of its
+ * own, so a condition on it would read `null` and silently take the fallback.
+ * Offering it is the defect the second test names. Seen red, 2026-10-09, with
+ * `document.amount` added to the offered list.
  */
 
 describe('conditionVariables', () => {
@@ -35,21 +36,27 @@ describe('conditionVariables', () => {
       'document.documentTypeId',
       'document.documentNumber',
       'actor.userId',
+      'document.documentTypeKey',
+      'actor.roles',
+      'actor.departmentId',
       'variables.threshold',
     ])
   })
 
-  it('offers none of the §6.1 paths the engine does not build', () => {
+  it('does not offer document.amount, which §6.1 no longer has', () => {
     const offered = conditionVariables(starterDefinition()).map((variable) => variable.path)
 
-    for (const unbuilt of [
-      'document.amount',
-      'document.documentTypeKey',
-      'actor.roles',
-      'actor.departmentId',
-    ]) {
-      expect(offered).not.toContain(unbuilt)
-    }
+    expect(offered).not.toContain('document.amount')
+  })
+
+  it('gives actor.roles no scalar type, and the two text paths text', () => {
+    const typeOf = (path: string) =>
+      conditionVariables(starterDefinition()).find((variable) => variable.path === path)?.type
+
+    // An array: a condition tests it with `in`, not a comparison.
+    expect(typeOf('actor.roles')).toBeUndefined()
+    expect(typeOf('document.documentTypeKey')).toBe('text')
+    expect(typeOf('actor.departmentId')).toBe('text')
   })
 })
 

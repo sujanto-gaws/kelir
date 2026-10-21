@@ -629,6 +629,32 @@ pub async fn target_entity_type<'e, E: sqlx::PgExecutor<'e>>(
     Ok(row.flatten())
 }
 
+/// A type's `type_code`, exactly as stored: the `document.documentTypeKey` a
+/// workflow condition reads and the `documentTypeKey` a guard is given
+/// ([#706](https://github.com/sujanto-gaws/kelir/issues/706),
+/// [#755](https://github.com/sujanto-gaws/kelir/issues/755)).
+///
+/// **Not filtered on `deleted_at`**, as `hook::repository::hook_subject`'s
+/// join is not: the code is a fact about a document of the type, and the
+/// after-chain is given the same value. A plain read, which takes no lock.
+pub async fn type_code_of<'e, E: PgExecutor<'e>>(
+    executor: E,
+    tenant_id: Uuid,
+    document_type_id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar!(
+        r#"
+        SELECT type_code
+        FROM document_types
+        WHERE tenant_id = $1 AND id = $2
+        "#,
+        tenant_id,
+        document_type_id
+    )
+    .fetch_optional(executor)
+    .await
+}
+
 pub async fn workflow_binding<'e, E: sqlx::PgExecutor<'e>>(
     executor: E,
     tenant_id: Uuid,

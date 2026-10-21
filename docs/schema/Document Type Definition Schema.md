@@ -2,7 +2,7 @@
 **Version:** 1.0.0
 **Status:** Draft Standard
 **Target Stack:** Rust (Document Type Service), Vue.js (Document Type Builder)
-**Last updated:** 2026-10-10
+**Last updated:** 2026-10-21
 
 ---
 
@@ -105,9 +105,9 @@ Exactly one rule MUST omit `condition` (S3) — every document type always has a
 ```json
 "workflowSelectionRules": [
   { "workflowKey": "purchase_requisition_standard",
-    "condition": { "<=": [ { "var": "document.amount" }, 10000000 ] }, "priority": 10 },
+    "condition": { "<=": [ { "var": "formData.amount" }, 10000000 ] }, "priority": 10 },
   { "workflowKey": "purchase_requisition_high_value",
-    "condition": { ">":  [ { "var": "document.amount" }, 10000000 ] }, "priority": 20 },
+    "condition": { ">":  [ { "var": "formData.amount" }, 10000000 ] }, "priority": 20 },
   { "workflowKey": "purchase_requisition_standard" }
 ]
 ```
@@ -128,7 +128,7 @@ Enforced by the core `before_document_submit` handler `core:require_attachment`;
 ```json
 "attachmentRules": [
   { "category": "QUOTATION",
-    "requiredIf": { ">": [ { "var": "document.amount" }, 10000000 ] },
+    "requiredIf": { ">": [ { "var": "formData.amount" }, 10000000 ] },
     "allowedMimeTypes": ["application/pdf"] }
 ]
 ```
@@ -195,14 +195,14 @@ A document type failing any ERROR rule MUST remain `DRAFT`.
   "numbering": { "template": "PR-{year}-{sequence}", "sequenceScope": "YEAR", "sequencePadding": 6 },
   "workflowSelectionRules": [
     { "workflowKey": "purchase_requisition_standard",
-      "condition": { "<=": [ { "var": "document.amount" }, 10000000 ] }, "priority": 10 },
+      "condition": { "<=": [ { "var": "formData.amount" }, 10000000 ] }, "priority": 10 },
     { "workflowKey": "purchase_requisition_high_value",
-      "condition": { ">":  [ { "var": "document.amount" }, 10000000 ] }, "priority": 20 },
+      "condition": { ">":  [ { "var": "formData.amount" }, 10000000 ] }, "priority": 20 },
     { "workflowKey": "purchase_requisition_standard" }
   ],
   "attachmentRules": [
     { "category": "QUOTATION",
-      "requiredIf": { ">": [ { "var": "document.amount" }, 10000000 ] },
+      "requiredIf": { ">": [ { "var": "formData.amount" }, 10000000 ] },
       "allowedMimeTypes": ["application/pdf"] }
   ],
   "hooks": [
@@ -228,6 +228,16 @@ A document type failing any ERROR rule MUST remain `DRAFT`.
 | [JFSS Calculation Rule Registry](JFSS%20Calculation%20Rule%20Registry.md) | Permitted condition operators: its §2.5 conditional tier (S6) |
 | [architectures/01 §10.4, §12](../architectures/01.%20Basic%20Framework%20Concept%20and%20Architecture.md) | Document type concept and lifecycle |
 | [Database Schema §6](../design/02.%20Database%20Schema.md) | Normalized storage tables |
+
+---
+
+## 11. Revision History
+
+This specification is a **`Draft Standard`** ([naming convention](../standards/02.%20Naming%20Convention.md) §10.1), so a change is recorded here rather than by moving the version, as [JWSS](JSON%20Workflow%20Schema.md) §12 records its own. Changes before this table are dated in place (§1.1, §1.3, §4, S6).
+
+| Revision | Date | Change |
+| :--- | :--- | :--- |
+| **R-1** | 2026-10-21 | **§4's, §5's and §9's examples read the amount as `formData.amount`, not `document.amount`** — [#706](https://github.com/sujanto-gaws/kelir/issues/706), **D-115** B. **No change to the shape**: no property is added, removed or re-typed, and the meta-schema is untouched. The examples follow the condition context these conditions share with JWSS (§1.1), and [JWSS](JSON%20Workflow%20Schema.md) §6.1 drops `document.amount` in its R-17: a document has no amount of its own, so a condition wanting one reads the form. Nothing in Kelir evaluates a `workflowSelectionRules[].condition` or a `requiredIf` today, so no behaviour changes. |
 
 ---
 

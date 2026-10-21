@@ -114,8 +114,8 @@ const REGISTRY_OPAQUE: unknown[] = [
 const JWSS_CONDITIONS: CorpusEntry[] = [
   {
     id: 'JWSS §10 finance limit',
-    expr: { '<=': [{ var: 'document.amount' }, 10000000] },
-    data: { document: { amount: 45000000 } },
+    expr: { '<=': [{ var: 'formData.amount' }, 10000000] },
+    data: { formData: { amount: 45000000 } },
     tier: 'conditional',
   },
 ]

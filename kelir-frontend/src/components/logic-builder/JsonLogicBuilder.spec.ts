@@ -22,10 +22,12 @@ const FORM_FIELDS: LogicVariable[] = [
   { path: 'total', label: 'Total', type: 'number' },
 ]
 
-/** JWSS §6.1's context, as row 6 will build it; `formData.*` is free, so paths may be typed. */
+/**
+ * JWSS §6.1's context, as #706 builds it, which no longer has a document
+ * amount (D-115 B); `formData.*` is free, so paths may be typed.
+ */
 const JWSS_CONTEXT: LogicVariable[] = [
   { path: 'document.status', label: 'Document status', type: 'string' },
-  { path: 'document.amount', label: 'Document amount', type: 'number' },
   { path: 'document.documentTypeKey', label: 'Document type', type: 'string' },
   { path: 'actor.userId', label: 'Actor', type: 'string' },
   { path: 'actor.roles', label: 'Actor roles' },
@@ -317,7 +319,7 @@ describe('JsonLogicBuilder', () => {
 
   describe('the workflow builder input (C10)', () => {
     it('offers the JWSS §6.1 context, and takes a typed formData path', async () => {
-      const condition = { '<=': [{ var: 'document.amount' }, 10000000] }
+      const condition = { '===': [{ var: 'document.documentTypeKey' }, 'PURCHASE_ORDER'] }
       const wrapper = mountBuilder(condition, {
         variables: JWSS_CONTEXT,
         allowFreePaths: true,
@@ -325,7 +327,6 @@ describe('JsonLogicBuilder', () => {
 
       expect(optionLabels(wrapper, 'Expression, operand 1: variable')).toEqual([
         'Document status — document.status (string)',
-        'Document amount — document.amount (number)',
         'Document type — document.documentTypeKey (string)',
         'Actor — actor.userId (string)',
         'Actor roles — actor.roles',
@@ -334,7 +335,9 @@ describe('JsonLogicBuilder', () => {
 
       await byLabel(wrapper, 'Expression, operand 1: variable path').setValue('formData.total')
 
-      expect(lastEmitted(wrapper)).toEqual({ '<=': [{ var: 'formData.total' }, 10000000] })
+      expect(lastEmitted(wrapper)).toEqual({
+        '===': [{ var: 'formData.total' }, 'PURCHASE_ORDER'],
+      })
       expect(byLabel(wrapper, 'Expression, operand 1').text()).toContain(
         'Not in the offered variables',
       )
@@ -1052,7 +1055,7 @@ describe('JsonLogicBuilder at its edges (campaign, 2026-10-09)', () => {
 
     it('leaves a variable unfilled, not emitted, when its free path is blanked', async () => {
       const wrapper = mountBuilder(
-        { '<=': [{ var: 'document.amount' }, 10] },
+        { '===': [{ var: 'document.status' }, 'DRAFT'] },
         { variables: JWSS_CONTEXT, allowFreePaths: true },
       )
 
@@ -1067,7 +1070,7 @@ describe('JsonLogicBuilder at its edges (campaign, 2026-10-09)', () => {
 
       await byLabel(wrapper, 'Expression, operand 1: variable path').setValue('formData.x')
 
-      expect(lastEmitted(wrapper)).toEqual({ '<=': [{ var: 'formData.x' }, 10] })
+      expect(lastEmitted(wrapper)).toEqual({ '===': [{ var: 'formData.x' }, 'DRAFT'] })
     })
   })
 

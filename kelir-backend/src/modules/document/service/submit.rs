@@ -167,6 +167,17 @@ pub async fn submit_document(
     // condition as *has a number* would make it one the day something does.
     let resubmission = subject.status == DocumentStatus::Returned;
 
+    // **What a workflow condition reads about the type and the submitter**
+    // ([#706], JWSS §6.1), on the pool with the binding below and for the same
+    // reason: facts the request points at, resolved before the transaction
+    // opens. Plain reads that take no lock. A document's type never moves, so
+    // its key read here is the key of the document locked below.
+    //
+    // [#706]: https://github.com/sujanto-gaws/kelir/issues/706
+    let document_type_key =
+        engine::read_document_type_key(&state.pool, tenant_id, subject.document_type_id).await?;
+    let actor_facts = engine::read_actor_facts(&state.pool, tenant_id, actor).await?;
+
     let context = AllocationContext {
         at: Utc::now(),
         department_id: subject.requested_for_department_id,
@@ -373,10 +384,12 @@ pub async fn submit_document(
                 document: engine::document_facts(
                     DocumentStatus::Submitted,
                     subject.document_type_id,
+                    &document_type_key,
                     Some(&document_number),
                 ),
                 form_data: form_data.clone(),
                 variables: serde_json::json!({}),
+                actor: actor_facts,
             },
             actor,
         )
@@ -399,10 +412,12 @@ pub async fn submit_document(
                 document: engine::document_facts(
                     DocumentStatus::Submitted,
                     subject.document_type_id,
+                    &document_type_key,
                     Some(&document_number),
                 ),
                 form_data: form_data.clone(),
                 variables: serde_json::json!({}),
+                actor: actor_facts,
             },
             actor,
         )

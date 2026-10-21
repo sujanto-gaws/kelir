@@ -1985,3 +1985,349 @@ async fn a_stored_draft_naming_a_before_only_handler_is_refused_at_publication_i
     // The envelope's own message is not where the spaces were, and is read too.
     assert_reads_as_one_line(&publication.body["error"]);
 }
+
+// ---------------------------------------------------------------------------
+// #706 — the condition context the engine builds, at each of its three callers
+// ---------------------------------------------------------------------------
+//
+// A condition is evaluated against JWSS §6.1's context at three places: the
+// submit that starts an instance, the resubmission that moves it on from
+// `RETURNED`, and a decision. [`routed_everywhere`] puts one condition at each
+// of the three, so a caller that builds a different context from the others
+// routes its own step the other way and is named by the assertion that fails.
+
+/// A definition that evaluates `condition` at the start, at a resubmission and
+/// at a decision, and goes to a `MATCHED` state where it holds and an `OTHER`
+/// one where it does not.
+///
+/// `ROUTING` is the initial state and a service state, so the submit itself
+/// takes its `AUTO` edge. `RETURNED`'s `RESUBMIT` edges carry the condition,
+/// so the resubmission evaluates it. An approval reaches `CLOSING`, another
+/// service state, whose `AUTO` edges are evaluated in the decision's own
+/// transaction, against the decision's context.
+fn routed_everywhere(key: &str, condition: Value) -> Value {
+    let person = |code: &str| {
+        json!({
+            "code": code, "name": code, "mapsToDocumentStatus": "PENDING_APPROVAL",
+            "task": { "taskDefinitionKey": code.to_lowercase(), "taskName": code,
+                      "assignment": { "assigneeType": "ROLE", "roleCode": APPROVER_ROLE } }
+        })
+    };
+    let service = |code: &str| {
+        json!({
+            "code": code, "name": code, "mapsToDocumentStatus": "IN_REVIEW",
+            "task": { "taskDefinitionKey": code.to_lowercase(), "taskName": code,
+                      "taskType": "SERVICE_TASK",
+                      "assignment": { "assigneeType": "ROLE", "roleCode": APPROVER_ROLE } }
+        })
+    };
+    let finished = |code: &str| json!({ "code": code, "name": code, "mapsToDocumentStatus": "COMPLETED", "isFinal": true });
+    let decided = |from: &str, to: &str, action: &str| {
+        json!({ "from": from, "to": to, "action": action,
+                "allowedBy": format!("ROLE:{APPROVER_ROLE}") })
+    };
+
+    json!({
+        "workflowKey": key,
+        "version": "1.0.0",
+        "name": "Routed at every caller",
+        "initialState": "ROUTING",
+        "states": [
+            service("ROUTING"),
+            person("MATCHED"),
+            person("OTHER"),
+            { "code": "RETURNED", "name": "Sent back", "mapsToDocumentStatus": "RETURNED" },
+            service("CLOSING"),
+            finished("DONE_MATCHED"),
+            finished("DONE_OTHER")
+        ],
+        "transitions": [
+            { "from": "ROUTING", "to": "MATCHED", "action": "AUTO", "condition": condition },
+            { "from": "ROUTING", "to": "OTHER", "action": "AUTO" },
+            decided("MATCHED", "RETURNED", "RETURN"),
+            decided("OTHER", "RETURNED", "RETURN"),
+            { "from": "RETURNED", "to": "MATCHED", "action": "RESUBMIT", "allowedBy": "OWNER",
+              "condition": condition },
+            { "from": "RETURNED", "to": "OTHER", "action": "RESUBMIT", "allowedBy": "OWNER" },
+            decided("MATCHED", "CLOSING", "APPROVE"),
+            decided("OTHER", "CLOSING", "APPROVE"),
+            { "from": "CLOSING", "to": "DONE_MATCHED", "action": "AUTO", "condition": condition },
+            { "from": "CLOSING", "to": "DONE_OTHER", "action": "AUTO" }
+        ]
+    })
+}
+
+/// Decides the one open task on a document with `action`.
+async fn decide_open_task(
+    app: &TestApp,
+    token: &str,
+    document_id: Uuid,
+    action: &str,
+) -> common::TestResponse {
+    let task: Uuid = sqlx::query_scalar(
+        "SELECT id FROM workflow_tasks
+         WHERE document_id = $1 AND status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')
+           AND deleted_at IS NULL
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(document_id)
+    .fetch_one(&app.pool)
+    .await
+    .expect("an open task");
+
+    app.post(
+        &format!("/api/v1/workflow/tasks/{task}/decision"),
+        Some(token),
+        json!({ "action": action, "comment": "Routed by the test." }),
+    )
+    .await
+}
+
+/// Drafts a document of `type_id` as `owner`, submits it, has it returned,
+/// resubmits it, and has `decider` approve it. Gives the state the start, the
+/// resubmission and the decision each routed it to.
+async fn route_through_every_caller(
+    app: &TestApp,
+    owner: &str,
+    decider: &str,
+    type_id: Uuid,
+) -> [String; 3] {
+    let document = draft(app, owner, type_id, 100).await;
+
+    let submitted = submit(app, owner, document).await;
+    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+    let started = state_of(app, document).await;
+
+    let sent_back = decide_open_task(app, owner, document, "RETURN").await;
+    assert_eq!(sent_back.status, StatusCode::OK, "{}", sent_back.body);
+    assert_eq!(state_of(app, document).await, "RETURNED");
+
+    let resubmitted = submit(app, owner, document).await;
+    assert_eq!(resubmitted.status, StatusCode::OK, "{}", resubmitted.body);
+    let after_resubmission = state_of(app, document).await;
+
+    let approved = decide_open_task(app, decider, document, "APPROVE").await;
+    assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
+    let after_decision = state_of(app, document).await;
+
+    [started, after_resubmission, after_decision]
+}
+
+const MATCHED_EVERYWHERE: [&str; 3] = ["MATCHED", "MATCHED", "DONE_MATCHED"];
+const OTHER_EVERYWHERE: [&str; 3] = ["OTHER", "OTHER", "DONE_OTHER"];
+
+/// **#706 AC1: `document.documentTypeKey` is the type's stored `type_code`, at
+/// the start, at a resubmission and at a decision.** Two types bound to one
+/// definition, whose condition names the first type's code: the first routes
+/// to `MATCHED` at all three, the second to `OTHER` at all three.
+///
+/// The key is spelled as stored, upper case (DTDS §2), and the spelling is
+/// asserted by the match itself.
+#[tokio::test]
+async fn the_document_type_key_routes_at_the_start_a_resubmission_and_a_decision() {
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+    let token = approver(&app, "systask.key.one").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &admin,
+        routed_everywhere(
+            "routed_by_key",
+            json!({ "==": [{ "var": "document.documentTypeKey" }, "KEYED_ONE"] }),
+        ),
+    )
+    .await;
+    let keyed = document_type(&app, &admin, "KEYED_ONE", workflow).await;
+    let other = document_type(&app, &admin, "KEYED_TWO", workflow).await;
+
+    assert_eq!(
+        route_through_every_caller(&app, &token, &token, keyed).await,
+        MATCHED_EVERYWHERE,
+        "[start, resubmission, decision]: the condition on the type's key did not hold"
+    );
+    assert_eq!(
+        route_through_every_caller(&app, &token, &token, other).await,
+        OTHER_EVERYWHERE,
+        "[start, resubmission, decision]: another type's document matched the key"
+    );
+}
+
+/// **#706 AC5, with AC2 and AC3 at the two submit callers: the actor's three
+/// facts come from one builder at every caller, and the actor is the person
+/// acting.** The condition holds only for a user who is `owner`, holds
+/// `SYSTASK-SENIOR`, and sits in `department`. A caller that dropped any one
+/// fact, or built the actor from somebody else, routes its step to `OTHER`.
+///
+/// The third walk has `outsider` decide `owner`'s document: the decision's
+/// actor is the decider, so only that step goes the other way.
+#[tokio::test]
+async fn the_actors_facts_route_at_the_start_a_resubmission_and_a_decision() {
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+
+    let approving = approver_role(&app).await;
+    let senior = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "SYSTASK-SENIOR",
+        &[],
+    )
+    .await;
+    let department = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO departments (id, tenant_id, department_code, name)
+         VALUES ($1, $2, 'SYSTASK-DEPT', 'Systask department')",
+    )
+    .bind(department)
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .execute(&app.pool)
+    .await
+    .expect("insert the department");
+
+    let owner_id = fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "systask.actor.owner",
+        "systask.actor.owner@kelir.test",
+        common::ADMIN_PASSWORD,
+        &[approving, senior],
+    )
+    .await;
+    sqlx::query("UPDATE users SET department_id = $1 WHERE id = $2")
+        .bind(department)
+        .bind(owner_id)
+        .execute(&app.pool)
+        .await
+        .expect("place the owner in the department");
+    let owner = app
+        .sign_in("systask.actor.owner", common::ADMIN_PASSWORD)
+        .await;
+    let outsider = approver(&app, "systask.actor.outsider").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &admin,
+        routed_everywhere(
+            "routed_by_actor",
+            json!({ "and": [
+                { "==": [{ "var": "actor.userId" }, owner_id.to_string()] },
+                { "in": ["SYSTASK-SENIOR", { "var": "actor.roles" }] },
+                { "==": [{ "var": "actor.departmentId" }, department.to_string()] }
+            ] }),
+        ),
+    )
+    .await;
+    let type_id = document_type(&app, &admin, "ACTOR_ROUTED", workflow).await;
+
+    assert_eq!(
+        route_through_every_caller(&app, &owner, &owner, type_id).await,
+        MATCHED_EVERYWHERE,
+        "[start, resubmission, decision]: the acting user's facts did not reach the condition"
+    );
+    assert_eq!(
+        route_through_every_caller(&app, &outsider, &outsider, type_id).await,
+        OTHER_EVERYWHERE,
+        "[start, resubmission, decision]: another user's facts matched"
+    );
+    assert_eq!(
+        route_through_every_caller(&app, &owner, &outsider, type_id).await,
+        ["MATCHED", "MATCHED", "DONE_OTHER"],
+        "[start, resubmission, decision]: the decision's actor is the decider, not the owner"
+    );
+}
+
+/// **#755 (#706 AC11): a guard's `documentTypeKey` is the document type's
+/// `type_code`**, the value the after-chain is given. Two guards on the edge
+/// out of a `SERVICE_TASK`: the first refuses unless the key is the type's
+/// code, the second refuses when it is `""`, which is what the guard was
+/// given while it read a `typeCode` nothing set. Both pass, and the hook log
+/// shows each `CONTINUE`.
+#[tokio::test]
+async fn a_guards_document_type_key_is_the_document_types_code() {
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+    let token = approver(&app, "systask.guard.key").await;
+
+    let mut guards = guard_refusing_when(
+        json!({ "!=": [{ "var": "documentTypeKey" }, "STAMPED_GUARD_KEY"] }),
+        "TYPE_KEY_WRONG",
+    );
+    guards.as_array_mut().expect("guards").extend(
+        guard_refusing_when(
+            json!({ "==": [{ "var": "documentTypeKey" }, ""] }),
+            "TYPE_KEY_EMPTY",
+        )
+        .as_array()
+        .expect("guards")
+        .iter()
+        .cloned(),
+    );
+
+    let workflow = publish_workflow(
+        &app,
+        &admin,
+        workflow_ending_in_done("stamped_guard_key", guards),
+    )
+    .await;
+    let type_id = document_type(&app, &admin, "STAMPED_GUARD_KEY", workflow).await;
+    let document = draft(&app, &token, type_id, 100).await;
+
+    submit(&app, &token, document).await;
+
+    let decided = approve(&app, &token, document).await;
+
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+    assert_eq!(state_of(&app, document).await, "DONE");
+    assert_eq!(
+        hook_runs(&app, document).await,
+        vec![
+            ("core:reject_when".to_owned(), "CONTINUE".to_owned()),
+            ("core:reject_when".to_owned(), "CONTINUE".to_owned()),
+        ],
+        "both guards ran, and passed"
+    );
+}
+
+/// **#706 AC1: `document.documentTypeKey` is the type's code, and renaming the
+/// type does not move it.** A type is renamed after its workflow is bound; its
+/// documents still route on its `type_code`, at the start, at a resubmission
+/// and at a decision. The code is immutable (an update carries no
+/// `typeCode`), and the name is not the key.
+///
+/// Found by the `test-engineer` campaign on row 14: every other fixture names
+/// its type with its own code, so a key read from `name` passed every test.
+#[tokio::test]
+async fn a_renamed_types_documents_route_on_its_unchanged_code() {
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+    let token = approver(&app, "systask.key.renamed").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &admin,
+        routed_everywhere(
+            "routed_by_renamed_key",
+            json!({ "==": [{ "var": "document.documentTypeKey" }, "RENAMED_KEY"] }),
+        ),
+    )
+    .await;
+    let type_id = document_type(&app, &admin, "RENAMED_KEY", workflow).await;
+
+    let renamed = app
+        .put(
+            &format!("/api/v1/document-types/{type_id}"),
+            Some(&admin),
+            json!({ "name": "Requisition, renamed" }),
+        )
+        .await;
+    assert_eq!(renamed.status, StatusCode::OK, "{}", renamed.body);
+    assert_eq!(renamed.body["data"]["name"], "Requisition, renamed");
+    assert_eq!(renamed.body["data"]["typeCode"], "RENAMED_KEY");
+
+    assert_eq!(
+        route_through_every_caller(&app, &token, &token, type_id).await,
+        MATCHED_EVERYWHERE,
+        "[start, resubmission, decision]: a renamed type's documents did not route on its code"
+    );
+}

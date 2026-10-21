@@ -2398,3 +2398,145 @@ async fn a_refresh_whose_token_is_deleted_while_it_waits_is_refused_and_not_toke
 // | The loser's `rollback` removed | Survived, equivalent: the 0-row `UPDATE` holds no lock, and the drop rolls back |
 // | `mint_session` inside the transaction | Survived, equivalent: its reads go to the pool. It costs a second connection, which no test can see |
 // | `rotated == 0` read as `!= 1` | Not run, equivalent: `id` is the key |
+
+// ---------------------------------------------------------------------------
+// #706 — the token's `roles` claim honours the grant's window
+// ---------------------------------------------------------------------------
+
+/// The `roles` claim of an access token the application issued.
+fn roles_claim(access: &str) -> Vec<String> {
+    let claims = jsonwebtoken::decode::<Value>(
+        access,
+        &jsonwebtoken::DecodingKey::from_secret(common::JWT_SECRET.as_bytes()),
+        &jsonwebtoken::Validation::new(Algorithm::HS256),
+    )
+    .expect("the application's own token verifies under the test secret")
+    .claims;
+
+    serde_json::from_value(claims["roles"].clone())
+        .unwrap_or_else(|_| panic!("a roles claim in {claims}"))
+}
+
+/// **A grant outside its `valid_from`/`valid_to` window is not in the token's
+/// `roles`** ([#706](https://github.com/sujanto-gaws/kelir/issues/706)).
+/// `identity::repository::role_codes_for_user` is the one reader of a user's
+/// role codes: a workflow condition's `actor.roles` and the token's claim both
+/// come from it. The claim's `permissions` already left a grant outside its
+/// window out, and its `roles` now agree. One grant ended yesterday, one starts
+/// tomorrow, and one holds: the claim names the last alone.
+#[tokio::test]
+async fn a_role_grant_outside_its_window_is_not_in_the_tokens_roles() {
+    let app = TestApp::spawn().await;
+
+    let mut roles = Vec::new();
+    for code in ["SESSION-HELD", "SESSION-LAPSED", "SESSION-PENDING"] {
+        roles.push(
+            fixtures::create_role_with_permissions(
+                &app.pool,
+                fixtures::SYSTEM_TENANT_ID,
+                code,
+                &[],
+            )
+            .await,
+        );
+    }
+
+    let id = fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "session.windowed",
+        "session.windowed@kelir.test",
+        PASSWORD,
+        &roles,
+    )
+    .await;
+
+    for (role, window) in [
+        (roles[1], "valid_to = current_date - 1"),
+        (roles[2], "valid_from = current_date + 1"),
+    ] {
+        let windowed = sqlx::query(&format!(
+            "UPDATE user_roles SET {window} WHERE user_id = $1 AND role_id = $2"
+        ))
+        .bind(id)
+        .bind(role)
+        .execute(&app.pool)
+        .await
+        .expect("set the grant's window");
+        assert_eq!(windowed.rows_affected(), 1, "{window}");
+    }
+
+    let (access, _) = session_for(&app, "session.windowed").await;
+
+    assert_eq!(
+        roles_claim(&access),
+        ["SESSION-HELD"],
+        "a grant outside its window reached the token's roles"
+    );
+}
+
+/// **A grant on the first or the last day of its window is in the token's
+/// `roles`** ([#706](https://github.com/sujanto-gaws/kelir/issues/706)): the
+/// window is inclusive at both ends, as `permissions_for_user` and
+/// `workflow::repository::task::holds_role` read it. One grant starts today
+/// and one ends today, and the claim names both. `role_codes_for_user` is also
+/// what a workflow condition's `actor.roles` reads.
+///
+/// Found by the `test-engineer` campaign on row 14: the window's two
+/// boundaries could each be made exclusive with every test green.
+#[tokio::test]
+async fn a_role_grant_on_the_first_or_last_day_of_its_window_is_in_the_tokens_roles() {
+    let app = TestApp::spawn().await;
+
+    let mut roles = Vec::new();
+    for code in ["SESSION-ENDS-TODAY", "SESSION-STARTS-TODAY"] {
+        roles.push(
+            fixtures::create_role_with_permissions(
+                &app.pool,
+                fixtures::SYSTEM_TENANT_ID,
+                code,
+                &[],
+            )
+            .await,
+        );
+    }
+
+    let id = fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "session.boundary",
+        "session.boundary@kelir.test",
+        PASSWORD,
+        &roles,
+    )
+    .await;
+
+    for (role, window) in [
+        (
+            roles[0],
+            "valid_from = current_date - 7, valid_to = current_date",
+        ),
+        (
+            roles[1],
+            "valid_from = current_date, valid_to = current_date + 7",
+        ),
+    ] {
+        let windowed = sqlx::query(&format!(
+            "UPDATE user_roles SET {window} WHERE user_id = $1 AND role_id = $2"
+        ))
+        .bind(id)
+        .bind(role)
+        .execute(&app.pool)
+        .await
+        .expect("set the grant's window");
+        assert_eq!(windowed.rows_affected(), 1, "{window}");
+    }
+
+    let (access, _) = session_for(&app, "session.boundary").await;
+
+    assert_eq!(
+        roles_claim(&access),
+        ["SESSION-ENDS-TODAY", "SESSION-STARTS-TODAY"],
+        "a grant on a boundary day of its window was left out of the token's roles"
+    );
+}
