@@ -10191,6 +10191,13 @@ async fn a_requested_department_that_is_deleted_still_resolves_as_normalize_says
 /// The dashboard lists five, so its cards are not read row by row here; its
 /// two counts are compared with the inbox's.
 ///
+/// The campaign's rows pin what the SQL must not "improve" on: a scope of
+/// `""`, a lowercased reserved word, a code of another case or with a space
+/// all refuse; an owner since deactivated still resolves (Q4); a document
+/// with no creator, or one whose creator is another tenant's user, does not;
+/// and a requested department of another tenant resolves, because `normalize`
+/// takes the id as it is (pinned as-is, like AC10).
+///
 /// [#635]: https://github.com/sujanto-gaws/kelir/issues/635
 #[tokio::test]
 async fn the_inbox_and_the_engine_agree_on_which_department_edges_resolve() {
@@ -10201,6 +10208,12 @@ async fn the_inbox_and_the_engine_agree_on_which_department_edges_resolve() {
     let (holder_id, holder) = department_holder(&app, "TI-635-DASH", "ti.635.oracle", edge).await;
 
     let live = department(&app, "TI-635-OR-LIVE").await;
+    // Named apart from its code, so a lookup by name cannot pass for one by code.
+    sqlx::query("UPDATE departments SET name = 'The live department' WHERE id = $1")
+        .bind(live)
+        .execute(&app.pool)
+        .await
+        .expect("rename the department");
     let asleep = department(&app, "TI-635-OR-ASLEEP").await;
     set_department_status(&app, asleep, "INACTIVE").await;
     let owner_gone = department(&app, "TI-635-OR-OWNER-GONE").await;
@@ -10214,6 +10227,19 @@ async fn the_inbox_and_the_engine_agree_on_which_department_edges_resolve() {
     let (_, gone_owner) = placed_owner(&app, "ti.635.or.gone", Some(owner_gone)).await;
     let (abroad_owner_id, abroad_owner) = placed_owner(&app, "ti.635.or.abroad", None).await;
     place_user_in(&app, abroad_owner_id, Some(abroad)).await;
+    let (removed_owner_id, removed_owner) =
+        placed_owner(&app, "ti.635.or.removed", Some(live)).await;
+    // Another tenant's user, placed by SQL in this tenant's live department.
+    let foreigner = fixtures::create_user(
+        &app.pool,
+        elsewhere,
+        "ti.635.or.foreigner",
+        "ti.635.or.foreigner@example.test",
+        common::ADMIN_PASSWORD,
+        &[],
+    )
+    .await;
+    place_user_in(&app, foreigner, Some(live)).await;
 
     /// The case, the owner's token, the scope, the requested department, and
     /// whether the edge resolves.
@@ -10311,6 +10337,67 @@ async fn the_inbox_and_the_engine_agree_on_which_department_edges_resolve() {
             None,
             false,
         ),
+        // The campaign's rows. A scope is matched as written: no case folding,
+        // no trimming, and `""` is a code, not the absence of one.
+        ("scope empty", token.as_str(), Some(""), None, false),
+        (
+            "reserved word lowercased",
+            live_owner.as_str(),
+            Some("owner_department"),
+            None,
+            false,
+        ),
+        (
+            "requested word lowercased",
+            token.as_str(),
+            Some("requested_department"),
+            Some(live),
+            false,
+        ),
+        (
+            "code of another case",
+            token.as_str(),
+            Some("ti-635-or-live"),
+            None,
+            false,
+        ),
+        (
+            "code padded",
+            token.as_str(),
+            Some("TI-635-OR-LIVE "),
+            None,
+            false,
+        ),
+        // The owner, as `owner_department_of` reads them. These four are
+        // changed after the raise, below.
+        (
+            "owner removed",
+            removed_owner.as_str(),
+            Some("OWNER_DEPARTMENT"),
+            None,
+            true,
+        ),
+        (
+            "no owner",
+            token.as_str(),
+            Some("OWNER_DEPARTMENT"),
+            None,
+            false,
+        ),
+        (
+            "owner of another tenant",
+            token.as_str(),
+            Some("OWNER_DEPARTMENT"),
+            None,
+            false,
+        ),
+        (
+            "requested abroad",
+            token.as_str(),
+            Some("REQUESTED_DEPARTMENT"),
+            Some(live),
+            true,
+        ),
     ];
 
     let mut tasks = Vec::new();
@@ -10332,6 +10419,36 @@ async fn the_inbox_and_the_engine_agree_on_which_department_edges_resolve() {
     soft_delete_department(&app, owner_gone).await;
     soft_delete_department(&app, code_gone).await;
     soft_delete_department(&app, requested_gone).await;
+
+    let task_of = |name: &str| {
+        tasks
+            .iter()
+            .find(|(case, _, _)| *case == name)
+            .map(|(_, task, _)| *task)
+            .expect("the case")
+    };
+    let removed = app
+        .delete(
+            &format!("/api/v1/identity/users/{removed_owner_id}"),
+            Some(&token),
+        )
+        .await;
+    assert!(removed.status.is_success(), "{}", removed.body);
+    for (name, creator) in [
+        ("no owner", None),
+        ("owner of another tenant", Some(foreigner)),
+    ] {
+        sqlx::query(
+            "UPDATE documents SET created_by = $1
+              WHERE id = (SELECT document_id FROM workflow_tasks WHERE id = $2)",
+        )
+        .bind(creator)
+        .bind(task_of(name))
+        .execute(&app.pool)
+        .await
+        .expect("change the document's creator");
+    }
+    set_requested_department(&app, task_of("requested abroad"), Some(abroad)).await;
 
     let mut listed = Vec::new();
     for scope in ["open", "overdue"] {
@@ -10481,6 +10598,18 @@ async fn a_task_with_only_unresolvable_department_edges_cannot_be_reassigned() {
     cannot_decide(&to_user, "userId");
     let to_role = reassign(&app, &token, task, json!({ "roleCode": DEPT_EDGE_ROLE })).await;
     cannot_decide(&to_role, "roleCode");
+
+    // The finder Installation and Deployment §9 names for it: the Roles page's
+    // open tasks of the edges' role, through clause (b), since it is claimed.
+    let listed = open_tasks(&app, &token, edge, "").await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    assert_eq!(listed.body["meta"]["total"], 1, "{}", listed.body);
+    assert_eq!(
+        listed.body["data"][0]["id"],
+        task.to_string(),
+        "{}",
+        listed.body
+    );
 
     assert_eq!(
         task_holder(&app, task).await,
