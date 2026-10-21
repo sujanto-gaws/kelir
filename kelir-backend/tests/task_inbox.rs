@@ -9143,3 +9143,1477 @@ async fn the_decidability_check_reads_return_and_not_cancel() {
         accepted.body
     );
 }
+
+// ---------------------------------------------------------------------------
+// #635 — a claimed task whose department never resolves is not waiting either
+// ---------------------------------------------------------------------------
+
+// # Seen to fail (coding standard §2.9)
+//
+// At `a5ed7f3`, before the fix, AC1-AC4, AC5 (d), AC7, AC8, AC9 and AC11
+// were red, and AC6, AC10, AC14, AC15 and `workflow_engine.rs`'s AC12 green.
+//
+// Then each mutation of `with_claimed_clause!` was applied alone, the 26 #530
+// and #635 tests here run (with AC13, the lib's source scan, for M11, and
+// `workflow_engine.rs`'s owner-department tests for M12), and the mutation
+// reverted, on 2026-10-21. Every one reddened something:
+//
+// | Mutation | Reddened |
+// |---|---|
+// | M1 the department test removed | AC1, AC2, AC3, AC4, AC5, AC7, AC8, AC9, AC11 |
+// | M2 the `OWNER_DEPARTMENT` branch made `true` | AC1, AC2, AC5, AC7, AC8, AC9, AC11 |
+// | M3 the `REQUESTED_DEPARTMENT` branch made `true` | AC3, AC7, AC9, AC11 |
+// | M4 the code branch made `true` | AC4, AC5, AC11 |
+// | M4 the code branch's `deleted_at` dropped | AC4, AC11 |
+// | M5 the owner branch's `deleted_at` dropped | AC2, AC7, AC11 |
+// | M6 the owner branch's `dep.tenant_id` dropped | AC8, AC11 |
+// | M6 the code branch's `dep.tenant_id` dropped | AC4, AC11 |
+// | M7 the `ROLE` carve-out dropped | AC6, through its stray projection scope |
+// | M8 `REQUESTED_DEPARTMENT` given a liveness join | AC10, AC11 |
+// | M9 hidden when **any** edge is unresolved, not **all** | AC5, and four of #530's tests |
+// | M10 the `IS NULL` branch dropped | AC5, AC11, and two of #530's tests |
+// | M11 the clause dropped from `list_for_caller` | AC13, and 13 of the 26 |
+// | M11 the clause dropped from `count_for_caller` | AC13, and 13 of the 26 |
+// | M11 the clause dropped from `is_visible_to` | AC13, and 12 of the 26 |
+// | M12 `hold_deciding_roles` refuses, at the raise, a scope `normalize` refuses | AC12, `an_owner_department_edge_with_no_live_department_refuses_the_decision`, and the nine tests here that raise such a task |
+// | M13 the clause applied to the unclaimed arm | AC14, and #530's unclaimed-arm test |
+// | M14 the department read from the task's snapshot | AC1, AC2, AC3, AC6, AC7, AC8, AC10, AC11 |
+// | M15 the reserved words tested after the code lookup | AC9 |
+// | M16 the live-role `AND` made `OR` | AC1-AC5, AC7-AC9, AC11, and four of #530's tests |
+
+/// The role every #635 edge names and every #635 task is offered to.
+///
+/// Its holders hold it **unscoped**, which a department-scoped edge accepts
+/// (`repository::task::holds_role`), so a decision the engine refuses is
+/// refused for the edge's department as `ASSIGNMENT_UNRESOLVED` and never as
+/// a 403 for the holder.
+const DEPT_EDGE_ROLE: &str = "TI-635-EDGE";
+
+/// A `DEPARTMENT_ROLE` rule on [`DEPT_EDGE_ROLE`], scoped to `scope`, or
+/// unscoped when it is `None`.
+fn department_rule(scope: Option<&str>) -> Value {
+    let mut rule = json!({ "assigneeType": "DEPARTMENT_ROLE", "roleCode": DEPT_EDGE_ROLE });
+    if let Some(scope) = scope {
+        rule["departmentScope"] = json!(scope);
+    }
+    rule
+}
+
+/// A workflow offered to [`DEPT_EDGE_ROLE`] whose `APPROVE` and `REJECT` are
+/// both allowedBy [`department_rule`] with `scope`.
+fn department_scoped(key: &str, scope: Option<&str>) -> Value {
+    two_edge_workflow(
+        key,
+        DEPT_EDGE_ROLE,
+        department_rule(scope),
+        department_rule(scope),
+    )
+}
+
+/// The #635 holder: [`WAITING_PERMISSIONS`] and an unscoped grant of `edge`.
+async fn department_holder(
+    app: &TestApp,
+    base_code: &str,
+    username: &str,
+    edge: Uuid,
+) -> (Uuid, String) {
+    waiting_holder(app, base_code, username, &[edge]).await
+}
+
+/// Sets a user's `users.department_id`, which `OWNER_DEPARTMENT` reads
+/// (**D-99** = A).
+async fn place_user_in(app: &TestApp, user: Uuid, department: Option<Uuid>) {
+    sqlx::query("UPDATE users SET department_id = $1 WHERE id = $2")
+        .bind(department)
+        .bind(user)
+        .execute(&app.pool)
+        .await
+        .expect("place the user in a department");
+}
+
+async fn department_of_user(app: &TestApp, user: Uuid) -> Option<Uuid> {
+    sqlx::query_scalar("SELECT department_id FROM users WHERE id = $1")
+        .bind(user)
+        .fetch_one(&app.pool)
+        .await
+        .expect("read the user's department")
+}
+
+/// A user holding the administrator role, placed in `department`, who drafts
+/// and submits the documents whose owner an `OWNER_DEPARTMENT` scope reads.
+async fn placed_owner(app: &TestApp, username: &str, department: Option<Uuid>) -> (Uuid, String) {
+    let id = fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        username,
+        &format!("{username}@example.test"),
+        common::ADMIN_PASSWORD,
+        &[fixtures::ADMIN_ROLE_ID],
+    )
+    .await;
+    place_user_in(app, id, department).await;
+
+    (id, app.sign_in(username, common::ADMIN_PASSWORD).await)
+}
+
+/// A department of `tenant`, by code, for the cross-tenant cases.
+async fn department_in(app: &TestApp, tenant: Uuid, code: &str) -> Uuid {
+    let id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO departments (id, tenant_id, department_code, name) VALUES ($1, $2, $3, $3)",
+    )
+    .bind(id)
+    .bind(tenant)
+    .bind(code)
+    .execute(&app.pool)
+    .await
+    .expect("insert the department");
+    id
+}
+
+async fn set_department_status(app: &TestApp, department: Uuid, status: &str) {
+    sqlx::query("UPDATE departments SET status = $1 WHERE id = $2")
+        .bind(status)
+        .bind(department)
+        .execute(&app.pool)
+        .await
+        .expect("set the department's status");
+}
+
+/// Soft-deleted in SQL, for a department a live user still points at, which
+/// the API's delete refuses.
+async fn soft_delete_department(app: &TestApp, department: Uuid) {
+    sqlx::query("UPDATE departments SET deleted_at = now() WHERE id = $1")
+        .bind(department)
+        .execute(&app.pool)
+        .await
+        .expect("soft-delete the department");
+}
+
+/// Deleted through the API, which a department no live user points at allows.
+async fn delete_department_through_the_api(app: &TestApp, token: &str, department: Uuid) {
+    let deleted = app
+        .delete(
+            &format!("/api/v1/organization/departments/{department}"),
+            Some(token),
+        )
+        .await;
+    assert!(
+        deleted.status.is_success(),
+        "the API refused to delete the department: {}",
+        deleted.body
+    );
+}
+
+/// Sets the requested department of the task's document by SQL. A submitted
+/// document is not editable, so no route can.
+async fn set_requested_department(app: &TestApp, task: Uuid, department: Option<Uuid>) {
+    let updated = sqlx::query(
+        "UPDATE documents SET requested_for_department_id = $1
+          WHERE id = (SELECT document_id FROM workflow_tasks WHERE id = $2)",
+    )
+    .bind(department)
+    .bind(task)
+    .execute(&app.pool)
+    .await
+    .expect("set the requested department");
+    assert_eq!(
+        updated.rows_affected(),
+        1,
+        "the task's document was not found"
+    );
+}
+
+/// [`claimed_late_task`], with the document drafted and submitted by `owner`
+/// and requested for `requested`. `admin` publishes the workflow and the type.
+async fn owned_late_claim(
+    app: &TestApp,
+    admin: &str,
+    owner: &str,
+    holder: &str,
+    key: &str,
+    definition: Value,
+    requested: Option<Uuid>,
+) -> Uuid {
+    let workflow = publish_workflow_definition(app, admin, key, definition).await;
+    let type_id = document_type(app, admin, &key.to_uppercase(), workflow).await;
+
+    let mut body = json!({
+        "documentTypeId": type_id,
+        "title": key,
+        "formData": { "amount": 1_000 },
+    });
+    if let Some(department) = requested {
+        body["requestedForDepartmentId"] = json!(department);
+    }
+    let created = app.post("/api/v1/documents", Some(owner), body).await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let document = id_of(&created.body["data"]);
+
+    let submitted = app
+        .send(
+            Method::POST,
+            &format!("/api/v1/documents/{document}/submission"),
+            Some(owner),
+            None,
+        )
+        .await;
+    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+
+    let task = open_task_of(app, document).await;
+    claim(app, holder, task).await;
+    sqlx::query("UPDATE workflow_tasks SET due_at = now() - interval '1 day' WHERE id = $1")
+        .bind(task)
+        .execute(&app.pool)
+        .await
+        .expect("date the task a day late");
+
+    task
+}
+
+/// Asserts that `shown` is exactly what every surface lists, that each of them
+/// opens and passes the detail gate, and that each of `hidden` answers 404,
+/// fails the gate, and is still refused at every decision as
+/// `ASSIGNMENT_UNRESOLVED`, as before.
+async fn assert_waiting(
+    app: &TestApp,
+    holder_id: Uuid,
+    holder: &str,
+    shown: &[Uuid],
+    hidden: &[Uuid],
+    context: &str,
+) {
+    surfaces_of(app, holder).await.assert_all(shown, context);
+
+    for &task in shown {
+        let page = app.get(&format!("{TASKS}/{task}"), Some(holder)).await;
+        assert_eq!(page.status, StatusCode::OK, "{context}: {}", page.body);
+        assert!(
+            is_visible_to(app, holder_id, task).await,
+            "{context}: the detail gate refuses a task its holder can decide"
+        );
+    }
+
+    for &task in hidden {
+        let page = app.get(&format!("{TASKS}/{task}"), Some(holder)).await;
+        assert_eq!(
+            page.status,
+            StatusCode::NOT_FOUND,
+            "{context}: the page of a task nobody can decide still opens: {}",
+            page.body
+        );
+        assert!(
+            !is_visible_to(app, holder_id, task).await,
+            "{context}: the detail gate still admits a task nobody can decide"
+        );
+        assert_every_decision_refused(app, holder, task).await;
+    }
+}
+
+/// Asserts that `action` on `task` is refused as `ASSIGNMENT_UNRESOLVED`.
+async fn assert_unresolved(app: &TestApp, token: &str, task: Uuid, action: &str) {
+    let refused = decision(app, token, task, action).await;
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{action}: {}",
+        refused.body
+    );
+    assert!(
+        refused.body.to_string().contains("ASSIGNMENT_UNRESOLVED"),
+        "{action}: {}",
+        refused.body
+    );
+}
+
+async fn assert_decided(app: &TestApp, token: &str, task: Uuid, action: &str) {
+    let decided = decision(app, token, task, action).await;
+    assert_eq!(
+        decided.status,
+        StatusCode::OK,
+        "{action} on a task whose department resolves: {}",
+        decided.body
+    );
+}
+
+/// **A claimed task whose owner belongs to no department stops waiting**
+/// ([#635] AC1).
+///
+/// Both decision edges are `DEPARTMENT_ROLE` scoped to `OWNER_DEPARTMENT`, and
+/// the document's creator, the administrator, has no `users.department_id`.
+/// The submit raises the task, because `hold_deciding_roles` reads only the
+/// role (#689), the holder claims it, and it is late. It was on every surface
+/// while every decision refused as `ASSIGNMENT_UNRESOLVED`. It is reachable
+/// through the API alone: a user is created with no department.
+///
+/// **The control** is the same shape on a document whose creator is in a live
+/// department. It stays, and is approved.
+///
+/// [#635]: https://github.com/sujanto-gaws/kelir/issues/635
+#[tokio::test]
+async fn a_claimed_task_whose_owner_has_no_department_stops_waiting() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let administrator = administrator_id(&app).await;
+    assert_eq!(
+        department_of_user(&app, administrator).await,
+        None,
+        "the fixture's administrator belongs to a department, so this test is not \
+         testing an owner with none"
+    );
+
+    let edge = bare_role(&app, DEPT_EDGE_ROLE).await;
+    let (holder_id, holder) = department_holder(&app, "TI-635-DASH", "ti.635.none", edge).await;
+    let placed = department(&app, "TI-635-PLACED").await;
+    let (_, placed_token) = placed_owner(&app, "ti.635.placed", Some(placed)).await;
+
+    let unplaced = claimed_late_task(
+        &app,
+        &token,
+        &holder,
+        "ti_635_none",
+        department_scoped("ti_635_none", Some("OWNER_DEPARTMENT")),
+    )
+    .await;
+    let control = owned_late_claim(
+        &app,
+        &token,
+        &placed_token,
+        &holder,
+        "ti_635_placed",
+        department_scoped("ti_635_placed", Some("OWNER_DEPARTMENT")),
+        None,
+    )
+    .await;
+
+    assert_waiting(
+        &app,
+        holder_id,
+        &holder,
+        &[control],
+        &[unplaced],
+        "an owner with no department",
+    )
+    .await;
+
+    assert_decided(&app, &holder, control, "APPROVE").await;
+}
+
+/// **A claimed task whose owner's department is deleted stops waiting**
+/// ([#635] AC2), **and an `INACTIVE` one still resolves**.
+///
+/// The owner is in a live department, and the task is shown. Then the owner is
+/// deactivated, which `delete_department` no longer counts, and the department
+/// is deleted, both through the API. The task leaves every surface. The
+/// control's owner is in an `INACTIVE` department, which `normalize` does not
+/// refuse (the product owner's Q3), and it stays.
+///
+/// [#635]: https://github.com/sujanto-gaws/kelir/issues/635
+#[tokio::test]
+async fn a_claimed_task_whose_owner_department_is_deleted_stops_waiting() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let edge = bare_role(&app, DEPT_EDGE_ROLE).await;
+    let (holder_id, holder) = department_holder(&app, "TI-635-DASH", "ti.635.gone", edge).await;
+    let closing = department(&app, "TI-635-CLOSING").await;
+    let dormant = department(&app, "TI-635-DORMANT").await;
+    set_department_status(&app, dormant, "INACTIVE").await;
+    let (leaver_id, leaver) = placed_owner(&app, "ti.635.leaver", Some(closing)).await;
+    let (_, sleeper) = placed_owner(&app, "ti.635.sleeper", Some(dormant)).await;
+
+    let task = owned_late_claim(
+        &app,
+        &token,
+        &leaver,
+        &holder,
+        "ti_635_closing",
+        department_scoped("ti_635_closing", Some("OWNER_DEPARTMENT")),
+        None,
+    )
+    .await;
+    let control = owned_late_claim(
+        &app,
+        &token,
+        &sleeper,
+        &holder,
+        "ti_635_dormant",
+        department_scoped("ti_635_dormant", Some("OWNER_DEPARTMENT")),
+        None,
+    )
+    .await;
+
+    assert_waiting(
+        &app,
+        holder_id,
+        &holder,
+        &[task, control],
+        &[],
+        "while the owner's department is live",
+    )
+    .await;
+
+    let deactivated = app
+        .delete(&format!("/api/v1/identity/users/{leaver_id}"), Some(&token))
+        .await;
+    assert!(
+        deactivated.status.is_success(),
+        "the API refused to deactivate the owner: {}",
+        deactivated.body
+    );
+    delete_department_through_the_api(&app, &token, closing).await;
+
+    assert_waiting(
+        &app,
+        holder_id,
+        &holder,
+        &[control],
+        &[task],
+        "once the owner's department is deleted",
+    )
+    .await;
+
+    assert_decided(&app, &holder, control, "APPROVE").await;
+}
+
+/// **A claimed task whose document names no requested department stops
+/// waiting** ([#635] AC3).
+///
+/// Two ways: (a) the document was created with none, and (b) it had one, the
+/// task was shown, and the column was cleared by SQL after the claim. Both
+/// leave every surface. The control keeps its requested department, stays,
+/// and is approved.
+///
+/// [#635]: https://github.com/sujanto-gaws/kelir/issues/635
+#[tokio::test]
+async fn a_claimed_task_whose_requested_department_is_none_stops_waiting() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let edge = bare_role(&app, DEPT_EDGE_ROLE).await;
+    let (holder_id, holder) =
+        department_holder(&app, "TI-635-DASH", "ti.635.requested", edge).await;
+    let requested = department(&app, "TI-635-REQ").await;
+
+    let never = claimed_late_task(
+        &app,
+        &token,
+        &holder,
+        "ti_635_req_none",
+        department_scoped("ti_635_req_none", Some("REQUESTED_DEPARTMENT")),
+    )
+    .await;
+    let cleared = owned_late_claim(
+        &app,
+        &token,
+        &token,
+        &holder,
+        "ti_635_req_cleared",
+        department_scoped("ti_635_req_cleared", Some("REQUESTED_DEPARTMENT")),
+        Some(requested),
+    )
+    .await;
+    let control = owned_late_claim(
+        &app,
+        &token,
+        &token,
+        &holder,
+        "ti_635_req_kept",
+        department_scoped("ti_635_req_kept", Some("REQUESTED_DEPARTMENT")),
+        Some(requested),
+    )
+    .await;
+
+    assert_waiting(
+        &app,
+        holder_id,
+        &holder,
+        &[cleared, control],
+        &[never],
+        "a document created with no requested department",
+    )
+    .await;
+
+    set_requested_department(&app, cleared, None).await;
+
+    assert_waiting(
+        &app,
+        holder_id,
+        &holder,
+        &[control],
+        &[never, cleared],
+        "a requested department cleared after the claim",
+    )
+    .await;
+
+    assert_decided(&app, &holder, control, "APPROVE").await;
+}
+
+/// **A claimed task whose department code names no live department of its
+/// tenant stops waiting** ([#635] AC4).
+///
+/// Three codes: (a) one that never existed, which a publish does not check;
+/// (b) one deleted through the API after the task was raised and shown; and
+/// (c) one that only another tenant has. All three leave every surface. The
+/// control's code names a live department, and it stays and is approved.
+///
+/// [#635]: https://github.com/sujanto-gaws/kelir/issues/635
+#[tokio::test]
+async fn a_claimed_task_whose_department_code_names_no_live_department_stops_waiting() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let edge = bare_role(&app, DEPT_EDGE_ROLE).await;
+    let (holder_id, holder) = department_holder(&app, "TI-635-DASH", "ti.635.code", edge).await;
+    let closing = department(&app, "TI-635-CODE-CLOSING").await;
+    department(&app, "TI-635-CODE-LIVE").await;
+    let elsewhere = fixtures::create_tenant(&app.pool, "TNT-635", "Another tenant").await;
+    department_in(&app, elsewhere, "TI-635-CODE-ELSEWHERE").await;
+
+    let by_code = |key: &str, code: &str| department_scoped(key, Some(code));
+    let never = claimed_late_task(
+        &app,
+        &token,
+        &holder,
+        "ti_635_code_never",
+        by_code("ti_635_code_never", "TI-635-CODE-NEVER"),
+    )
+    .await;
+    let closed = claimed_late_task(
+        &app,
+        &token,
+        &holder,
+        "ti_635_code_closed",
+        by_code("ti_635_code_closed", "TI-635-CODE-CLOSING"),
+    )
+    .await;
+    let foreign = claimed_late_task(
+        &app,
+        &token,
+        &holder,
+        "ti_635_code_foreign",
+        by_code("ti_635_code_foreign", "TI-635-CODE-ELSEWHERE"),
+    )
+    .await;
+    let control = claimed_late_task(
+        &app,
+        &token,
+        &holder,
+        "ti_635_code_live",
+        by_code("ti_635_code_live", "TI-635-CODE-LIVE"),
+    )
+    .await;
+
+    assert_waiting(
+        &app,
+        holder_id,
+        &holder,
+        &[closed, control],
+        &[never, foreign],
+        "a code that never existed, or exists in another tenant only",
+    )
+    .await;
+
+    delete_department_through_the_api(&app, &token, closing).await;
+
+    assert_waiting(
+        &app,
+        holder_id,
+        &holder,
+        &[control],
+        &[never, closed, foreign],
+        "a code whose department is deleted after the raise",
+    )
+    .await;
+
+    assert_decided(&app, &holder, control, "APPROVE").await;
+}
+
+/// **A claimed task stays while one decision edge resolves through its
+/// department** ([#635] AC5).
+///
+/// Three mixed tasks, each with one unresolvable edge and one that resolves,
+/// each kept and then decided through the edge that resolves, after the other
+/// is seen refused:
+///
+/// * (a) `APPROVE` scoped to `OWNER_DEPARTMENT` with an owner who has none,
+///   and `REJECT` to a live department code. Rejected.
+/// * (b) `APPROVE` scoped to `REQUESTED_DEPARTMENT` on a document that names
+///   none, and `REJECT` allowedBy the plain role. Rejected.
+/// * (c) `APPROVE` on the role unscoped, and `REJECT` to a code that names
+///   nothing. Approved. The unscoped edge is the `IS NULL` branch.
+///
+/// (d) has both decision edges unresolvable beside a live `CANCEL` edge,
+/// which `decide()` cannot fire, and it leaves every surface.
+///
+/// [#635]: https://github.com/sujanto-gaws/kelir/issues/635
+#[tokio::test]
+async fn a_claimed_task_stays_while_one_decision_edge_resolves_through_its_department() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let edge = bare_role(&app, DEPT_EDGE_ROLE).await;
+    let (holder_id, holder) = department_holder(&app, "TI-635-DASH", "ti.635.one", edge).await;
+    department(&app, "TI-635-ONE-LIVE").await;
+
+    let owner_or_code = claimed_late_task(
+        &app,
+        &token,
+        &holder,
+        "ti_635_one_a",
+        two_edge_workflow(
+            "ti_635_one_a",
+            DEPT_EDGE_ROLE,
+            department_rule(Some("OWNER_DEPARTMENT")),
+            department_rule(Some("TI-635-ONE-LIVE")),
+        ),
+    )
+    .await;
+    let requested_or_role = claimed_late_task(
+        &app,
+        &token,
+        &holder,
+        "ti_635_one_b",
+        two_edge_workflow(
+            "ti_635_one_b",
+            DEPT_EDGE_ROLE,
+            department_rule(Some("REQUESTED_DEPARTMENT")),
+            json!(format!("ROLE:{DEPT_EDGE_ROLE}")),
+        ),
+    )
+    .await;
+    let unscoped_or_never = claimed_late_task(
+        &app,
+        &token,
+        &holder,
+        "ti_635_one_c",
+        two_edge_workflow(
+            "ti_635_one_c",
+            DEPT_EDGE_ROLE,
+            department_rule(None),
+            department_rule(Some("TI-635-ONE-NEVER")),
+        ),
+    )
+    .await;
+
+    let mut with_cancel = two_edge_workflow(
+        "ti_635_one_d",
+        DEPT_EDGE_ROLE,
+        department_rule(Some("OWNER_DEPARTMENT")),
+        department_rule(Some("TI-635-ONE-NEVER")),
+    );
+    with_cancel["transitions"]
+        .as_array_mut()
+        .expect("transitions")
+        .push(json!({
+            "from": "MANAGER_APPROVAL", "to": "REJECTED", "action": "CANCEL",
+            "allowedBy": { "assigneeType": "USER", "userId": holder_id }
+        }));
+    let beside_a_live_cancel =
+        claimed_late_task(&app, &token, &holder, "ti_635_one_d", with_cancel).await;
+
+    assert_waiting(
+        &app,
+        holder_id,
+        &holder,
+        &[owner_or_code, requested_or_role, unscoped_or_never],
+        &[beside_a_live_cancel],
+        "one decision edge resolves through its department",
+    )
+    .await;
+
+    assert_unresolved(&app, &holder, owner_or_code, "APPROVE").await;
+    assert_decided(&app, &holder, owner_or_code, "REJECT").await;
+    assert_unresolved(&app, &holder, requested_or_role, "APPROVE").await;
+    assert_decided(&app, &holder, requested_or_role, "REJECT").await;
+    assert_unresolved(&app, &holder, unscoped_or_never, "REJECT").await;
+    assert_decided(&app, &holder, unscoped_or_never, "APPROVE").await;
+}
+
+/// **A claimed task whose department scope resolves stays waiting** ([#635]
+/// AC6).
+///
+/// Four scopes that resolve: the owner's live department, a requested
+/// department, a live code, and the code of an `INACTIVE` department, which
+/// `direct` does not refuse. A fifth task is the `ROLE` carve-out's control: a
+/// plain `ROLE` edge whose **projection** row carries a stray
+/// `departmentScope` naming nothing. It is set by SQL on the projection, which
+/// is what the clause reads; the engine reads `definition_json`, and
+/// `normalize` ignores a scope on `ROLE` in any case. Each stays, and each is
+/// approved.
+///
+/// [#635]: https://github.com/sujanto-gaws/kelir/issues/635
+#[tokio::test]
+async fn a_claimed_task_with_a_resolving_department_scope_stays_waiting() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let edge = bare_role(&app, DEPT_EDGE_ROLE).await;
+    let (holder_id, holder) = department_holder(&app, "TI-635-DASH", "ti.635.ok", edge).await;
+    let home = department(&app, "TI-635-HOME").await;
+    let asleep = department(&app, "TI-635-ASLEEP").await;
+    set_department_status(&app, asleep, "INACTIVE").await;
+    let (_, owner) = placed_owner(&app, "ti.635.home", Some(home)).await;
+
+    let by_owner = owned_late_claim(
+        &app,
+        &token,
+        &owner,
+        &holder,
+        "ti_635_ok_owner",
+        department_scoped("ti_635_ok_owner", Some("OWNER_DEPARTMENT")),
+        None,
+    )
+    .await;
+    let by_requested = owned_late_claim(
+        &app,
+        &token,
+        &token,
+        &holder,
+        "ti_635_ok_req",
+        department_scoped("ti_635_ok_req", Some("REQUESTED_DEPARTMENT")),
+        Some(home),
+    )
+    .await;
+    let by_code = claimed_late_task(
+        &app,
+        &token,
+        &holder,
+        "ti_635_ok_code",
+        department_scoped("ti_635_ok_code", Some("TI-635-HOME")),
+    )
+    .await;
+    let by_inactive_code = claimed_late_task(
+        &app,
+        &token,
+        &holder,
+        "ti_635_ok_asleep",
+        department_scoped("ti_635_ok_asleep", Some("TI-635-ASLEEP")),
+    )
+    .await;
+    let stray = claimed_late_task(
+        &app,
+        &token,
+        &holder,
+        "ti_635_ok_stray",
+        workflow_for("ti_635_ok_stray", DEPT_EDGE_ROLE),
+    )
+    .await;
+    let strayed = sqlx::query(
+        "UPDATE workflow_transitions
+            SET allowed_by_json = allowed_by_json || '{\"departmentScope\": \"TI-635-NOWHERE\"}'
+          WHERE workflow_definition_id = (
+                SELECT i.workflow_definition_id FROM workflow_instances i
+                  JOIN workflow_tasks t ON t.workflow_instance_id = i.id
+                 WHERE t.id = $1)",
+    )
+    .bind(stray)
+    .execute(&app.pool)
+    .await
+    .expect("put a stray scope on the ROLE edges' projection");
+    assert_eq!(
+        strayed.rows_affected(),
+        2,
+        "both ROLE edges carry the scope"
+    );
+
+    let all = [by_owner, by_requested, by_code, by_inactive_code, stray];
+    assert_waiting(
+        &app,
+        holder_id,
+        &holder,
+        &all,
+        &[],
+        "a department scope that resolves",
+    )
+    .await;
+
+    for task in all {
+        assert_decided(&app, &holder, task, "APPROVE").await;
+    }
+}
+
+/// **A hidden claimed task comes back when its department resolves** ([#635]
+/// AC7).
+///
+/// Three hidden tasks: an owner with no department, an owner whose department
+/// is deleted, and a document with no requested department. Then the data is
+/// mended: the owner is placed in a department, the deleted one is restored,
+/// and the requested department is set. Each task is back on every surface,
+/// its page opens, and it is approved. The department is read live, not from
+/// the task's snapshot, which is `NULL` here because the task is offered to
+/// the plain role.
+///
+/// [#635]: https://github.com/sujanto-gaws/kelir/issues/635
+#[tokio::test]
+async fn a_hidden_claimed_task_returns_when_its_department_resolves() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let edge = bare_role(&app, DEPT_EDGE_ROLE).await;
+    let (holder_id, holder) = department_holder(&app, "TI-635-DASH", "ti.635.back", edge).await;
+    let found = department(&app, "TI-635-FOUND").await;
+    let reopened = department(&app, "TI-635-REOPENED").await;
+    let (homeless_id, homeless) = placed_owner(&app, "ti.635.homeless", None).await;
+    let (_, closed_owner) = placed_owner(&app, "ti.635.reopened", Some(reopened)).await;
+
+    let unplaced = owned_late_claim(
+        &app,
+        &token,
+        &homeless,
+        &holder,
+        "ti_635_back_unplaced",
+        department_scoped("ti_635_back_unplaced", Some("OWNER_DEPARTMENT")),
+        None,
+    )
+    .await;
+    let closed = owned_late_claim(
+        &app,
+        &token,
+        &closed_owner,
+        &holder,
+        "ti_635_back_closed",
+        department_scoped("ti_635_back_closed", Some("OWNER_DEPARTMENT")),
+        None,
+    )
+    .await;
+    let unrequested = claimed_late_task(
+        &app,
+        &token,
+        &holder,
+        "ti_635_back_unrequested",
+        department_scoped("ti_635_back_unrequested", Some("REQUESTED_DEPARTMENT")),
+    )
+    .await;
+    soft_delete_department(&app, reopened).await;
+
+    let all = [unplaced, closed, unrequested];
+    assert_waiting(
+        &app,
+        holder_id,
+        &holder,
+        &[],
+        &all,
+        "while no department resolves",
+    )
+    .await;
+
+    place_user_in(&app, homeless_id, Some(found)).await;
+    sqlx::query("UPDATE departments SET deleted_at = NULL WHERE id = $1")
+        .bind(reopened)
+        .execute(&app.pool)
+        .await
+        .expect("restore the department");
+    set_requested_department(&app, unrequested, Some(found)).await;
+
+    assert_waiting(
+        &app,
+        holder_id,
+        &holder,
+        &all,
+        &[],
+        "once each department resolves",
+    )
+    .await;
+
+    for task in all {
+        assert_decided(&app, &holder, task, "APPROVE").await;
+    }
+}
+
+/// **Another tenant's department does not resolve an `OWNER_DEPARTMENT`
+/// edge** ([#635] AC8).
+///
+/// The owner's `users.department_id` names another tenant's department, by
+/// SQL, as `workflow_engine.rs`'s `the_owners_department_is_read_in_this_tenant_only`
+/// does. `normalize` reads it as gone, and the task leaves every surface. The
+/// control's owner is in this tenant's department, and it stays.
+///
+/// [#635]: https://github.com/sujanto-gaws/kelir/issues/635
+#[tokio::test]
+async fn a_department_of_another_tenant_does_not_resolve_an_edge() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let edge = bare_role(&app, DEPT_EDGE_ROLE).await;
+    let (holder_id, holder) = department_holder(&app, "TI-635-DASH", "ti.635.abroad", edge).await;
+    let elsewhere = fixtures::create_tenant(&app.pool, "TNT-635-OWN", "Another tenant").await;
+    let foreign = department_in(&app, elsewhere, "TI-635-ABROAD").await;
+    let home = department(&app, "TI-635-AT-HOME").await;
+    let (crossed_id, crossed) = placed_owner(&app, "ti.635.crossed", None).await;
+    place_user_in(&app, crossed_id, Some(foreign)).await;
+    let (_, at_home) = placed_owner(&app, "ti.635.athome", Some(home)).await;
+
+    let task = owned_late_claim(
+        &app,
+        &token,
+        &crossed,
+        &holder,
+        "ti_635_abroad",
+        department_scoped("ti_635_abroad", Some("OWNER_DEPARTMENT")),
+        None,
+    )
+    .await;
+    let control = owned_late_claim(
+        &app,
+        &token,
+        &at_home,
+        &holder,
+        "ti_635_at_home",
+        department_scoped("ti_635_at_home", Some("OWNER_DEPARTMENT")),
+        None,
+    )
+    .await;
+
+    assert_waiting(
+        &app,
+        holder_id,
+        &holder,
+        &[control],
+        &[task],
+        "an owner placed in another tenant's department",
+    )
+    .await;
+
+    assert_decided(&app, &holder, control, "APPROVE").await;
+}
+
+/// **A department coded with a reserved word does not rescue the scope**
+/// ([#635] AC9).
+///
+/// No rule reserves `OWNER_DEPARTMENT` or `REQUESTED_DEPARTMENT` as a
+/// department code, so both are created through the API. `normalize` matches
+/// the reserved words before it reads a code, so an owner with no department,
+/// and a document with no requested department, still refuse, and both tasks
+/// leave every surface.
+///
+/// [#635]: https://github.com/sujanto-gaws/kelir/issues/635
+#[tokio::test]
+async fn a_department_coded_owner_department_does_not_rescue_the_scope() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let edge = bare_role(&app, DEPT_EDGE_ROLE).await;
+    let (holder_id, holder) = department_holder(&app, "TI-635-DASH", "ti.635.reserved", edge).await;
+
+    for code in ["OWNER_DEPARTMENT", "REQUESTED_DEPARTMENT"] {
+        let created = app
+            .post(
+                "/api/v1/organization/departments",
+                Some(&token),
+                json!({ "departmentId": code, "name": code }),
+            )
+            .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    }
+
+    let by_owner = claimed_late_task(
+        &app,
+        &token,
+        &holder,
+        "ti_635_reserved_owner",
+        department_scoped("ti_635_reserved_owner", Some("OWNER_DEPARTMENT")),
+    )
+    .await;
+    let by_requested = claimed_late_task(
+        &app,
+        &token,
+        &holder,
+        "ti_635_reserved_req",
+        department_scoped("ti_635_reserved_req", Some("REQUESTED_DEPARTMENT")),
+    )
+    .await;
+
+    assert_waiting(
+        &app,
+        holder_id,
+        &holder,
+        &[],
+        &[by_owner, by_requested],
+        "a department coded with a reserved word",
+    )
+    .await;
+}
+
+/// **A requested department that is deleted still resolves, as `normalize`
+/// says** ([#635] AC10).
+///
+/// `normalize` takes the document's `requested_for_department_id` as it is,
+/// and checks no liveness (filed apart). The clause matches it, so the task
+/// stays, and it is approved.
+///
+/// [#635]: https://github.com/sujanto-gaws/kelir/issues/635
+#[tokio::test]
+async fn a_requested_department_that_is_deleted_still_resolves_as_normalize_says() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let edge = bare_role(&app, DEPT_EDGE_ROLE).await;
+    let (holder_id, holder) = department_holder(&app, "TI-635-DASH", "ti.635.req.gone", edge).await;
+    let gone = department(&app, "TI-635-REQ-GONE").await;
+
+    let task = owned_late_claim(
+        &app,
+        &token,
+        &token,
+        &holder,
+        "ti_635_req_gone",
+        department_scoped("ti_635_req_gone", Some("REQUESTED_DEPARTMENT")),
+        Some(gone),
+    )
+    .await;
+    delete_department_through_the_api(&app, &token, gone).await;
+
+    assert_waiting(
+        &app,
+        holder_id,
+        &holder,
+        &[task],
+        &[],
+        "a requested department deleted after the raise",
+    )
+    .await;
+
+    assert_decided(&app, &holder, task, "APPROVE").await;
+}
+
+/// **The inbox and the engine agree on which department edges resolve**
+/// ([#635] AC11).
+///
+/// One task per case, each claimed by the holder and late, with both decision
+/// edges carrying the case's scope. For each, its presence on the open inbox,
+/// on the overdue inbox and at the detail gate is compared with what the
+/// engine answers its `APPROVE`: on the inbox **if and only if** the decision
+/// is not refused as `ASSIGNMENT_UNRESOLVED`, and decided with 200 when it is
+/// not. The expected answer is pinned too, so the two cannot agree by both
+/// being wrong.
+///
+/// The dashboard lists five, so its cards are not read row by row here; its
+/// two counts are compared with the inbox's.
+///
+/// The campaign's rows pin what the SQL must not "improve" on: a scope of
+/// `""`, a lowercased reserved word, a code of another case or with a space
+/// all refuse; an owner since deactivated still resolves (Q4); a document
+/// with no creator, or one whose creator is another tenant's user, does not;
+/// and a requested department of another tenant resolves, because `normalize`
+/// takes the id as it is (pinned as-is, like AC10).
+///
+/// [#635]: https://github.com/sujanto-gaws/kelir/issues/635
+#[tokio::test]
+async fn the_inbox_and_the_engine_agree_on_which_department_edges_resolve() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let edge = bare_role(&app, DEPT_EDGE_ROLE).await;
+    let (holder_id, holder) = department_holder(&app, "TI-635-DASH", "ti.635.oracle", edge).await;
+
+    let live = department(&app, "TI-635-OR-LIVE").await;
+    // Named apart from its code, so a lookup by name cannot pass for one by code.
+    sqlx::query("UPDATE departments SET name = 'The live department' WHERE id = $1")
+        .bind(live)
+        .execute(&app.pool)
+        .await
+        .expect("rename the department");
+    let asleep = department(&app, "TI-635-OR-ASLEEP").await;
+    set_department_status(&app, asleep, "INACTIVE").await;
+    let owner_gone = department(&app, "TI-635-OR-OWNER-GONE").await;
+    let code_gone = department(&app, "TI-635-OR-GONE").await;
+    let requested_gone = department(&app, "TI-635-OR-REQ-GONE").await;
+    let elsewhere = fixtures::create_tenant(&app.pool, "TNT-635-OR", "Another tenant").await;
+    let abroad = department_in(&app, elsewhere, "TI-635-OR-ABROAD").await;
+
+    let (_, live_owner) = placed_owner(&app, "ti.635.or.live", Some(live)).await;
+    let (_, asleep_owner) = placed_owner(&app, "ti.635.or.asleep", Some(asleep)).await;
+    let (_, gone_owner) = placed_owner(&app, "ti.635.or.gone", Some(owner_gone)).await;
+    let (abroad_owner_id, abroad_owner) = placed_owner(&app, "ti.635.or.abroad", None).await;
+    place_user_in(&app, abroad_owner_id, Some(abroad)).await;
+    let (removed_owner_id, removed_owner) =
+        placed_owner(&app, "ti.635.or.removed", Some(live)).await;
+    // Another tenant's user, placed by SQL in this tenant's live department.
+    let foreigner = fixtures::create_user(
+        &app.pool,
+        elsewhere,
+        "ti.635.or.foreigner",
+        "ti.635.or.foreigner@example.test",
+        common::ADMIN_PASSWORD,
+        &[],
+    )
+    .await;
+    place_user_in(&app, foreigner, Some(live)).await;
+
+    /// The case, the owner's token, the scope, the requested department, and
+    /// whether the edge resolves.
+    type Case<'a> = (&'a str, &'a str, Option<&'a str>, Option<Uuid>, bool);
+    let cases: Vec<Case> = vec![
+        ("no scope", token.as_str(), None, None, true),
+        (
+            "requested set",
+            token.as_str(),
+            Some("REQUESTED_DEPARTMENT"),
+            Some(live),
+            true,
+        ),
+        (
+            "requested none",
+            token.as_str(),
+            Some("REQUESTED_DEPARTMENT"),
+            None,
+            false,
+        ),
+        (
+            "requested deleted",
+            token.as_str(),
+            Some("REQUESTED_DEPARTMENT"),
+            Some(requested_gone),
+            true,
+        ),
+        (
+            "owner live",
+            live_owner.as_str(),
+            Some("OWNER_DEPARTMENT"),
+            None,
+            true,
+        ),
+        (
+            "owner inactive",
+            asleep_owner.as_str(),
+            Some("OWNER_DEPARTMENT"),
+            None,
+            true,
+        ),
+        (
+            "owner unset",
+            token.as_str(),
+            Some("OWNER_DEPARTMENT"),
+            None,
+            false,
+        ),
+        (
+            "owner gone",
+            gone_owner.as_str(),
+            Some("OWNER_DEPARTMENT"),
+            None,
+            false,
+        ),
+        (
+            "owner abroad",
+            abroad_owner.as_str(),
+            Some("OWNER_DEPARTMENT"),
+            None,
+            false,
+        ),
+        (
+            "code live",
+            token.as_str(),
+            Some("TI-635-OR-LIVE"),
+            None,
+            true,
+        ),
+        (
+            "code inactive",
+            token.as_str(),
+            Some("TI-635-OR-ASLEEP"),
+            None,
+            true,
+        ),
+        (
+            "code deleted",
+            token.as_str(),
+            Some("TI-635-OR-GONE"),
+            None,
+            false,
+        ),
+        (
+            "code never",
+            token.as_str(),
+            Some("TI-635-OR-NEVER"),
+            None,
+            false,
+        ),
+        (
+            "code abroad",
+            token.as_str(),
+            Some("TI-635-OR-ABROAD"),
+            None,
+            false,
+        ),
+        // The campaign's rows. A scope is matched as written: no case folding,
+        // no trimming, and `""` is a code, not the absence of one.
+        ("scope empty", token.as_str(), Some(""), None, false),
+        (
+            "reserved word lowercased",
+            live_owner.as_str(),
+            Some("owner_department"),
+            None,
+            false,
+        ),
+        (
+            "requested word lowercased",
+            token.as_str(),
+            Some("requested_department"),
+            Some(live),
+            false,
+        ),
+        (
+            "code of another case",
+            token.as_str(),
+            Some("ti-635-or-live"),
+            None,
+            false,
+        ),
+        (
+            "code padded",
+            token.as_str(),
+            Some("TI-635-OR-LIVE "),
+            None,
+            false,
+        ),
+        // The owner, as `owner_department_of` reads them. These four are
+        // changed after the raise, below.
+        (
+            "owner removed",
+            removed_owner.as_str(),
+            Some("OWNER_DEPARTMENT"),
+            None,
+            true,
+        ),
+        (
+            "no owner",
+            token.as_str(),
+            Some("OWNER_DEPARTMENT"),
+            None,
+            false,
+        ),
+        (
+            "owner of another tenant",
+            token.as_str(),
+            Some("OWNER_DEPARTMENT"),
+            None,
+            false,
+        ),
+        (
+            "requested abroad",
+            token.as_str(),
+            Some("REQUESTED_DEPARTMENT"),
+            Some(live),
+            true,
+        ),
+    ];
+
+    let mut tasks = Vec::new();
+    for (index, (case, owner, scope, requested, resolves)) in cases.iter().enumerate() {
+        let key = format!("ti_635_or_{index}");
+        let task = owned_late_claim(
+            &app,
+            &token,
+            owner,
+            &holder,
+            &key,
+            department_scoped(&key, *scope),
+            *requested,
+        )
+        .await;
+        tasks.push((*case, task, *resolves));
+    }
+
+    soft_delete_department(&app, owner_gone).await;
+    soft_delete_department(&app, code_gone).await;
+    soft_delete_department(&app, requested_gone).await;
+
+    let task_of = |name: &str| {
+        tasks
+            .iter()
+            .find(|(case, _, _)| *case == name)
+            .map(|(_, task, _)| *task)
+            .expect("the case")
+    };
+    let removed = app
+        .delete(
+            &format!("/api/v1/identity/users/{removed_owner_id}"),
+            Some(&token),
+        )
+        .await;
+    assert!(removed.status.is_success(), "{}", removed.body);
+    for (name, creator) in [
+        ("no owner", None),
+        ("owner of another tenant", Some(foreigner)),
+    ] {
+        sqlx::query(
+            "UPDATE documents SET created_by = $1
+              WHERE id = (SELECT document_id FROM workflow_tasks WHERE id = $2)",
+        )
+        .bind(creator)
+        .bind(task_of(name))
+        .execute(&app.pool)
+        .await
+        .expect("change the document's creator");
+    }
+    set_requested_department(&app, task_of("requested abroad"), Some(abroad)).await;
+
+    let mut listed = Vec::new();
+    for scope in ["open", "overdue"] {
+        let page = inbox_of(&app, &holder, &format!("scope={scope}&pageSize=100")).await;
+        assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+        let ids = ids_in(&page.body["data"]);
+        assert_eq!(
+            page.body["meta"]["total"],
+            json!(ids.len()),
+            "{}",
+            page.body
+        );
+        listed.push(ids);
+    }
+    assert_eq!(
+        listed[0], listed[1],
+        "every task is late, so open is overdue"
+    );
+
+    let summary = app.get("/api/v1/dashboard/summary", Some(&holder)).await;
+    assert_eq!(summary.status, StatusCode::OK, "{}", summary.body);
+    assert_eq!(
+        summary.body["data"]["tasksWaiting"],
+        json!(listed[0].len()),
+        "{}",
+        summary.body
+    );
+    assert_eq!(
+        summary.body["data"]["tasksOverdue"],
+        json!(listed[0].len()),
+        "{}",
+        summary.body
+    );
+
+    let mut disagreements = Vec::new();
+    for (case, task, resolves) in tasks {
+        let on_the_inbox = listed[0].contains(&task);
+        let through_the_gate = is_visible_to(&app, holder_id, task).await;
+
+        let decided = decision(&app, &holder, task, "APPROVE").await;
+        let unresolved = decided.status == StatusCode::UNPROCESSABLE_ENTITY
+            && decided.body.to_string().contains("ASSIGNMENT_UNRESOLVED");
+        if !unresolved {
+            assert_eq!(
+                decided.status,
+                StatusCode::OK,
+                "{case}: neither decided nor refused for its edge: {}",
+                decided.body
+            );
+        }
+
+        if on_the_inbox == unresolved {
+            disagreements.push(format!(
+                "{case}: on the inbox {on_the_inbox}, refused as unresolved {unresolved}"
+            ));
+        }
+        if through_the_gate != on_the_inbox {
+            disagreements.push(format!(
+                "{case}: the gate says {through_the_gate}, the inbox {on_the_inbox}"
+            ));
+        }
+        if unresolved == resolves {
+            disagreements.push(format!(
+                "{case}: expected to resolve {resolves}, the engine refused {unresolved}"
+            ));
+        }
+    }
+
+    assert!(
+        disagreements.is_empty(),
+        "the inbox and the engine disagree:\n{}",
+        disagreements.join("\n")
+    );
+}
+
+/// **An unclaimed task with unresolvable department edges is still offered**
+/// ([#635] AC14). A characterization, pinned as-is and not endorsed: the
+/// unclaimed arm is #507's, judged by the offered role, and this row does not
+/// change it (filed apart). Both candidates see the task on every surface and
+/// through the gate, and the first claims it.
+///
+/// [#635]: https://github.com/sujanto-gaws/kelir/issues/635
+#[tokio::test]
+async fn an_unclaimed_task_with_unresolvable_department_edges_is_still_offered() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let edge = bare_role(&app, DEPT_EDGE_ROLE).await;
+    let first = department_holder(&app, "TI-635-DASH-1", "ti.635.first", edge).await;
+    let second = department_holder(&app, "TI-635-DASH-2", "ti.635.second", edge).await;
+
+    let workflow = publish_workflow_definition(
+        &app,
+        &token,
+        "ti_635_unclaimed",
+        department_scoped("ti_635_unclaimed", Some("OWNER_DEPARTMENT")),
+    )
+    .await;
+    let type_id = document_type(&app, &token, "TI_635_UNCLAIMED", workflow).await;
+    let document = submitted_document(&app, &token, type_id, "ti_635_unclaimed").await;
+    let task = open_task_of(&app, document).await;
+    sqlx::query("UPDATE workflow_tasks SET due_at = now() - interval '1 day' WHERE id = $1")
+        .bind(task)
+        .execute(&app.pool)
+        .await
+        .expect("date the task a day late");
+
+    for (id, candidate) in [&first, &second] {
+        surfaces_of(&app, candidate)
+            .await
+            .assert_all(&[task], "an unclaimed task offered to the role");
+        assert!(is_visible_to(&app, *id, task).await);
+        let page = app.get(&format!("{TASKS}/{task}"), Some(candidate)).await;
+        assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+    }
+
+    claim(&app, &first.1, task).await;
+}
+
+/// **A task with only unresolvable department edges cannot be reassigned**
+/// ([#635] AC15), which is why Installation and Deployment §9 gives a data
+/// remedy and not a reassign. A user target holding the role unscoped, and the
+/// role itself, are each refused with `TARGET_CANNOT_DECIDE`, and the task is
+/// left as it was.
+///
+/// [#635]: https://github.com/sujanto-gaws/kelir/issues/635
+#[tokio::test]
+async fn a_task_with_only_unresolvable_department_edges_cannot_be_reassigned() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let edge = bare_role(&app, DEPT_EDGE_ROLE).await;
+    let (_, holder) = department_holder(&app, "TI-635-DASH-1", "ti.635.stuck", edge).await;
+    let (other_id, _) = department_holder(&app, "TI-635-DASH-2", "ti.635.target", edge).await;
+
+    let task = claimed_late_task(
+        &app,
+        &token,
+        &holder,
+        "ti_635_stuck",
+        department_scoped("ti_635_stuck", Some("OWNER_DEPARTMENT")),
+    )
+    .await;
+    let before = task_holder(&app, task).await;
+
+    let to_user = reassign(&app, &token, task, json!({ "userId": other_id })).await;
+    cannot_decide(&to_user, "userId");
+    let to_role = reassign(&app, &token, task, json!({ "roleCode": DEPT_EDGE_ROLE })).await;
+    cannot_decide(&to_role, "roleCode");
+
+    // The finder Installation and Deployment §9 names for it: the Roles page's
+    // open tasks of the edges' role, through clause (b), since it is claimed.
+    let listed = open_tasks(&app, &token, edge, "").await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    assert_eq!(listed.body["meta"]["total"], 1, "{}", listed.body);
+    assert_eq!(
+        listed.body["data"][0]["id"],
+        task.to_string(),
+        "{}",
+        listed.body
+    );
+
+    assert_eq!(
+        task_holder(&app, task).await,
+        before,
+        "a refused reassign moved the task"
+    );
+}

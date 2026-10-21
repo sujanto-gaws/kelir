@@ -4446,6 +4446,101 @@ async fn an_owner_department_edge_with_no_live_department_refuses_the_decision()
     }
 }
 
+/// [`returnable_workflow`] with `APPROVE`, `REJECT` and `RETURN` each allowed
+/// by the owner's department, and no reason demanded, so that a refusal can
+/// only be the edge's.
+fn owner_return_workflow(key: &str) -> Value {
+    let mut definition = returnable_workflow(key);
+    for transition in definition["transitions"]
+        .as_array_mut()
+        .expect("transitions")
+    {
+        if transition["action"] != "RESUBMIT" {
+            transition["allowedBy"] = owner_department_rule();
+            transition
+                .as_object_mut()
+                .expect("a transition")
+                .remove("requiresComment");
+        }
+    }
+    definition
+}
+
+/// **A task whose only decision edges are scoped to an owner's department that
+/// cannot resolve is raised, and then refused at every decision** ([#689]'s
+/// probe, closed by [#635]).
+///
+/// The task's own assignment is the plain role, so the submit reads no
+/// department: `hold_deciding_roles` checks only that the edges name a live
+/// role. Two owners, one with no department and one whose department was
+/// deleted before the submit, each have a document submitted with 200. Then
+/// `APPROVE`, `REJECT` and `RETURN` are each refused as `ASSIGNMENT_UNRESOLVED`
+/// at the edge's `departmentScope`, the task stays open, and the document stays
+/// `PENDING_APPROVAL`. This pins #689's answer, "it happens": the task is not
+/// refused at the raise, and `task_inbox.rs`'s #635 tests take it off its
+/// holder's surfaces once claimed.
+///
+/// [#635]: https://github.com/sujanto-gaws/kelir/issues/635
+/// [#689]: https://github.com/sujanto-gaws/kelir/issues/689
+#[tokio::test]
+async fn a_task_raised_with_only_unresolvable_owner_department_edges_is_refused_at_every_decision()
+{
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let gone = department(&app, "OD-689-GONE", "Closed").await;
+    let (_, approver) = holder_in(&app, "od.689.holder", None, &[]).await;
+    let (_, unplaced) = owner(&app, "od.689.none", None).await;
+    let (_, closed) = owner(&app, "od.689.gone", Some(gone)).await;
+    sqlx::query("UPDATE departments SET deleted_at = now() WHERE id = $1")
+        .bind(gone)
+        .execute(&app.pool)
+        .await
+        .expect("delete the department");
+
+    let workflow = publish_workflow(&app, &token, owner_return_workflow("wf_689")).await;
+    let type_id = document_type(&app, &token, "PR_689", Some(workflow)).await;
+
+    for (owner_token, why) in [
+        (unplaced, "no department"),
+        (closed, "a deleted department"),
+    ] {
+        let id = draft(&app, &owner_token, type_id).await;
+        let submitted = submit(&app, &token, id).await;
+        assert_eq!(
+            submitted.status,
+            StatusCode::OK,
+            "an owner with {why}: the submit was refused at the raise: {}",
+            submitted.body
+        );
+        let task = open_task_of(&app, id).await;
+
+        for action in ["APPROVE", "REJECT", "RETURN"] {
+            refused_decision(
+                &app,
+                &approver,
+                id,
+                action,
+                &format!("transitions.MANAGER_APPROVAL.{action}.allowedBy.departmentScope"),
+            )
+            .await;
+        }
+
+        assert_eq!(
+            open_task_of(&app, id).await,
+            task,
+            "an owner with {why}: the task is no longer the open one"
+        );
+        let (_, state, status) = instance_of(&app, id).await.expect("the instance");
+        assert_eq!(
+            (state.as_str(), status.as_str()),
+            ("MANAGER_APPROVAL", "RUNNING"),
+            "an owner with {why}"
+        );
+        assert_eq!(stored_status(&app, id).await, "PENDING_APPROVAL");
+    }
+}
+
 /// **A claim is the owner's department's, or an unscoped grant's** ([#579]
 /// criterion 7, FR-TASK-002).
 ///

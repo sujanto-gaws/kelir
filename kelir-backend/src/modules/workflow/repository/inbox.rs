@@ -89,12 +89,33 @@
 //! **Whether its decision is certain to be refused.** Only **decision edges**
 //! count: those out of the instance's current state whose action is `APPROVE`,
 //! `REJECT` or `RETURN`, the three `DecisionAction` can fire. An edge
-//! **resolves** when its `allowedBy` is `USER` or `OWNER`, or when it is `ROLE`
-//! or `DEPARTMENT_ROLE` and a live role in the tenant has its `roleCode`. An
-//! open task claimed by the caller is hidden when the state has at least one
-//! decision edge and none of them resolves. Matching by **code** is `direct`'s
-//! own match, so a live role that took a deleted one's code resolves the edge
-//! here as it does there.
+//! **resolves** when its `allowedBy` is `USER` or `OWNER`, when it is `ROLE` and
+//! a live role in the tenant has its `roleCode`, or when it is
+//! `DEPARTMENT_ROLE`, a live role has its `roleCode`, and its `departmentScope`
+//! resolves. An open task claimed by the caller is hidden when the state has at
+//! least one decision edge and none of them resolves. Matching by **code** is
+//! `direct`'s own match, so a live role that took a deleted one's code resolves
+//! the edge here as it does there.
+//!
+//! **A `departmentScope` resolves as `assignment::normalize` and `direct` read
+//! it** ([#635]). It is read at each query, as the engine reads it at each
+//! decision, and not from the task's `candidate_department_id`, which
+//! snapshots the task's own assignment and never an edge's.
+//!
+//! * **No scope** resolves.
+//! * **`REQUESTED_DEPARTMENT`** resolves when the document names a requested
+//!   department. A deleted one still resolves, because `normalize` does not
+//!   check it (filed apart).
+//! * **`OWNER_DEPARTMENT`** resolves when the creator's `users.department_id`
+//!   is a live department of the task's tenant. Neither the department's
+//!   `status` nor the creator's `deleted_at` is read, as `owner_department_of`
+//!   reads neither, so an `INACTIVE` department resolves.
+//! * **Anything else is a department code**, and resolves when the tenant has a
+//!   live department of that code.
+//!
+//! The two reserved words are matched before any code, as `normalize` matches
+//! them, so a department coded `OWNER_DEPARTMENT` does not rescue an owner with
+//! none. A scope on a `ROLE` edge is ignored, as `normalize` ignores it.
 //!
 //! The list of kinds is positive, and it is complete. `MANAGER_OF_OWNER` and
 //! `EXPRESSION` are refused when a definition is saved (**D-37**,
@@ -112,27 +133,46 @@
 //! `count_open_tasks_needing_role` reads them. The engine reads
 //! `definition_json`, and the projection is regenerated from it whole in the
 //! publish transaction, so for a published revision the two carry the same
-//! edges with the rule in its normalized form.
+//! edges with the rule in its normalized form. A rule with no scope is
+//! projected with `departmentScope` set to `null`, which `->>` reads as SQL
+//! `NULL`.
 //!
 //! **It errs toward visible, and it is not the engine.** It judges every
 //! decision edge out of the state, but a decision takes one: the edge its
-//! action and `condition` choose. So it does not re-derive `condition_json`,
-//! and it checks nothing `direct` checks beyond the role. A `DEPARTMENT_ROLE`
-//! edge whose department code names no live department, a `USER` edge naming a
-//! deleted user, and an `OWNER` edge on a document with no creator all refuse
-//! at the decision and still count as resolving here. Each of those keeps a
-//! task on the inbox that the engine would refuse, and none of them hides one
-//! the engine would accept. It applies to open tasks only, because a finished
-//! task is a record of what was done, and its instance's later edges say
-//! nothing about it.
+//! action and `condition` choose. So it does not re-derive `condition_json`.
+//! It checks the role and the department, and nothing else `direct` checks. A
+//! `USER` edge naming a deleted user, and an `OWNER` edge on a document with no
+//! creator, refuse at the decision and still count as resolving here (filed
+//! apart). Each keeps a task on the inbox that the engine would refuse, and
+//! neither hides one the engine would accept. It applies to open tasks only,
+//! because a finished task is a record of what was done, and its instance's
+//! later edges say nothing about it.
 //!
-//! **A hidden task is not lost.** It is residue from a role deleted before
-//! **D-89**'s refusal shipped, and an administrator finds it with the stranded
-//! task query in Installation and Deployment §9. That query is its only finder:
-//! a refused role delete lists the tasks of a role that is still live, and
-//! this role is already gone.
+//! **A hidden task is not lost**, and it is one of two kinds.
+//!
+//! * **Its edges name a deleted role.** This is residue from a role deleted
+//!   before **D-89**'s refusal shipped. An administrator finds it with the
+//!   stranded task query in Installation and Deployment §9. That query is its
+//!   only finder: a refused role delete lists the tasks of a role that is still
+//!   live, and this role is already gone.
+//! * **Its edges' department does not resolve.** This is reachable through the
+//!   API: a user created with no department is enough. The edges' role is
+//!   live, so the Roles screen's open-tasks list for that role finds the task
+//!   (`repository::task::open_tasks_needing_roles`), and the stranded task
+//!   query does not. A reassign is refused as `TARGET_CANNOT_DECIDE`, because
+//!   no target could decide it either, so the remedy is data. Placing the
+//!   owner in a department, restoring a deleted one, creating a live
+//!   department with the code an edge names, or setting the requested
+//!   department brings the task back. Restoring a department is SQL, since
+//!   no route restores one, and so is setting the requested department,
+//!   because a submitted document is not editable.
+//!
+//! **The unclaimed arm is unchanged.** An unclaimed task with such edges is
+//! still offered to its role's holders, and the first to claim it then loses
+//! sight of it (filed apart).
 //!
 //! [#530]: https://github.com/sujanto-gaws/kelir/issues/530
+//! [#635]: https://github.com/sujanto-gaws/kelir/issues/635
 //!
 //! # This lives in `workflow` and is called from `task_inbox`
 //!
@@ -352,6 +392,95 @@ pub struct InboxPage {
     pub matching: Option<i64>,
 }
 
+/// **#530's claimed-task clause, with #635's department test, written once.**
+///
+/// Each of [`list_for_caller`], [`count_for_caller`] and [`is_visible_to`] is
+/// written as `with_claimed_clause!(kind, head, tail, args…)`, and this splices
+/// the clause between the two halves of its statement. `kind` is `query` or
+/// `query_scalar`.
+///
+/// **A macro, because nothing else is both one text and checked.** `query!`
+/// takes string literals, joined by `+` if there are several, and no `const`
+/// or `concat!`, so the clause cannot be a named string. Three copies held
+/// identical by a test were the alternative, and #530 shipped that way. Here
+/// the text exists once, and `query!` still checks each statement whole
+/// against the schema at compile time. The `.sqlx/` entries are keyed on the
+/// joined text, so they change when this does.
+///
+/// The clause reads `t` (the task), `d` (its document), `i` (its instance) and
+/// `$2` (the caller), so each statement joins `documents d` and
+/// `workflow_instances i` and binds the caller second.
+macro_rules! with_claimed_clause {
+    ($kind:ident, $head:literal, $tail:literal $(, $arg:expr)* $(,)?) => {
+        sqlx::$kind!(
+            $head
+                + r#"
+          -- A claimed task nobody can decide is not waiting for its holder
+          -- (#530, #635). Written once, here, and spliced into
+          -- `list_for_caller`, `count_for_caller` and `is_visible_to`. It is
+          -- not `count_open_tasks_needing_role`'s clause, which asks whether
+          -- *some* edge names a role: this asks whether *no* decision edge
+          -- resolves. See "A claimed task nobody can decide" at the top of the
+          -- file.
+          AND (t.assignee_user_id IS DISTINCT FROM $2
+               OR t.status NOT IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')
+               -- No decision edge at all, as on a RETURNED correction task that
+               -- only RESUBMIT leaves: nothing to judge by, so it stays.
+               OR NOT EXISTS (SELECT 1 FROM workflow_transitions tr
+                              WHERE tr.tenant_id = t.tenant_id
+                                AND tr.workflow_definition_id = i.workflow_definition_id
+                                AND tr.from_state = i.current_state
+                                AND tr.action IN ('APPROVE', 'REJECT', 'RETURN'))
+               OR EXISTS (SELECT 1 FROM workflow_transitions tr
+                          WHERE tr.tenant_id = t.tenant_id
+                            AND tr.workflow_definition_id = i.workflow_definition_id
+                            AND tr.from_state = i.current_state
+                            AND tr.action IN ('APPROVE', 'REJECT', 'RETURN')
+                            AND (tr.allowed_by_json->>'assigneeType' IN ('USER', 'OWNER')
+                                 OR (tr.allowed_by_json->>'assigneeType'
+                                         IN ('ROLE', 'DEPARTMENT_ROLE')
+                                     AND EXISTS (SELECT 1 FROM roles live
+                                                 WHERE live.tenant_id = t.tenant_id
+                                                   AND live.role_code = tr.allowed_by_json->>'roleCode'
+                                                   AND live.deleted_at IS NULL)
+                                     -- The department, as `normalize` and
+                                     -- `direct` read it, live (#635). `ROLE`
+                                     -- ignores a scope, as `normalize` does.
+                                     -- The reserved words come before a code,
+                                     -- and no scope is spelled out, or every
+                                     -- unscoped DEPARTMENT_ROLE edge would fall
+                                     -- to the code lookup and fail it.
+                                     AND (tr.allowed_by_json->>'assigneeType' = 'ROLE'
+                                          OR CASE
+                                               WHEN tr.allowed_by_json->>'departmentScope' IS NULL
+                                                    THEN true
+                                               WHEN tr.allowed_by_json->>'departmentScope'
+                                                        = 'REQUESTED_DEPARTMENT'
+                                                    THEN d.requested_for_department_id IS NOT NULL
+                                               WHEN tr.allowed_by_json->>'departmentScope'
+                                                        = 'OWNER_DEPARTMENT'
+                                                    THEN EXISTS (
+                                                        SELECT 1 FROM users u
+                                                        JOIN departments dep
+                                                          ON dep.id = u.department_id
+                                                         AND dep.tenant_id = t.tenant_id
+                                                         AND dep.deleted_at IS NULL
+                                                        WHERE u.tenant_id = t.tenant_id
+                                                          AND u.id = d.created_by)
+                                               ELSE EXISTS (
+                                                        SELECT 1 FROM departments dep
+                                                        WHERE dep.tenant_id = t.tenant_id
+                                                          AND dep.deleted_at IS NULL
+                                                          AND dep.department_code
+                                                              = tr.allowed_by_json->>'departmentScope')
+                                             END)))))
+        "#
+                + $tail
+            $(, $arg)*
+        )
+    };
+}
+
 /// The caller's page of tasks.
 ///
 /// The document's title, reference and number are joined in rather than fetched
@@ -374,7 +503,8 @@ pub async fn list_for_caller(
 ) -> Result<InboxPage, sqlx::Error> {
     let (open_only, overdue_only, completed_only) = filters.scope.predicates();
 
-    let rows = sqlx::query!(
+    let rows = with_claimed_clause!(
+        query,
         r#"
         SELECT t.id, t.task_ref, t.workflow_instance_id, t.document_id,
                d.document_ref, d.document_number, d.title AS document_title,
@@ -424,33 +554,8 @@ pub async fn list_for_caller(
                            OR ur.department_id = t.candidate_department_id)
                 ))
           )
-          -- A claimed task nobody can decide is not waiting for its holder
-          -- (#530). The same clause is in `list_for_caller`, `count_for_caller`
-          -- and `is_visible_to`, and the three must stay identical. It is not
-          -- `count_open_tasks_needing_role`'s clause, which asks whether *some*
-          -- edge names a role: this asks whether *no* decision edge resolves.
-          -- See "A claimed task nobody can decide" at the top of the file.
-          AND (t.assignee_user_id IS DISTINCT FROM $2
-               OR t.status NOT IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')
-               -- No decision edge at all, as on a RETURNED correction task that
-               -- only RESUBMIT leaves: nothing to judge by, so it stays.
-               OR NOT EXISTS (SELECT 1 FROM workflow_transitions tr
-                              WHERE tr.tenant_id = t.tenant_id
-                                AND tr.workflow_definition_id = i.workflow_definition_id
-                                AND tr.from_state = i.current_state
-                                AND tr.action IN ('APPROVE', 'REJECT', 'RETURN'))
-               OR EXISTS (SELECT 1 FROM workflow_transitions tr
-                          WHERE tr.tenant_id = t.tenant_id
-                            AND tr.workflow_definition_id = i.workflow_definition_id
-                            AND tr.from_state = i.current_state
-                            AND tr.action IN ('APPROVE', 'REJECT', 'RETURN')
-                            AND (tr.allowed_by_json->>'assigneeType' IN ('USER', 'OWNER')
-                                 OR (tr.allowed_by_json->>'assigneeType'
-                                         IN ('ROLE', 'DEPARTMENT_ROLE')
-                                     AND EXISTS (SELECT 1 FROM roles live
-                                                 WHERE live.tenant_id = t.tenant_id
-                                                   AND live.role_code = tr.allowed_by_json->>'roleCode'
-                                                   AND live.deleted_at IS NULL)))))
+        "#,
+        r#"
           AND ($3 = false OR t.status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS'))
           -- Late, and still open. Spelled out rather than left to `NULL < now()`
           -- being unknown, because the other spelling of an undated task is one
@@ -555,7 +660,8 @@ pub async fn count_for_caller(
 ) -> Result<i64, sqlx::Error> {
     let (open_only, overdue_only, completed_only) = filters.scope.predicates();
 
-    sqlx::query_scalar!(
+    with_claimed_clause!(
+        query_scalar,
         r#"
         SELECT count(*)
         FROM workflow_tasks t
@@ -592,33 +698,8 @@ pub async fn count_for_caller(
                            OR ur.department_id = t.candidate_department_id)
                 ))
           )
-          -- A claimed task nobody can decide is not waiting for its holder
-          -- (#530). The same clause is in `list_for_caller`, `count_for_caller`
-          -- and `is_visible_to`, and the three must stay identical. It is not
-          -- `count_open_tasks_needing_role`'s clause, which asks whether *some*
-          -- edge names a role: this asks whether *no* decision edge resolves.
-          -- See "A claimed task nobody can decide" at the top of the file.
-          AND (t.assignee_user_id IS DISTINCT FROM $2
-               OR t.status NOT IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')
-               -- No decision edge at all, as on a RETURNED correction task that
-               -- only RESUBMIT leaves: nothing to judge by, so it stays.
-               OR NOT EXISTS (SELECT 1 FROM workflow_transitions tr
-                              WHERE tr.tenant_id = t.tenant_id
-                                AND tr.workflow_definition_id = i.workflow_definition_id
-                                AND tr.from_state = i.current_state
-                                AND tr.action IN ('APPROVE', 'REJECT', 'RETURN'))
-               OR EXISTS (SELECT 1 FROM workflow_transitions tr
-                          WHERE tr.tenant_id = t.tenant_id
-                            AND tr.workflow_definition_id = i.workflow_definition_id
-                            AND tr.from_state = i.current_state
-                            AND tr.action IN ('APPROVE', 'REJECT', 'RETURN')
-                            AND (tr.allowed_by_json->>'assigneeType' IN ('USER', 'OWNER')
-                                 OR (tr.allowed_by_json->>'assigneeType'
-                                         IN ('ROLE', 'DEPARTMENT_ROLE')
-                                     AND EXISTS (SELECT 1 FROM roles live
-                                                 WHERE live.tenant_id = t.tenant_id
-                                                   AND live.role_code = tr.allowed_by_json->>'roleCode'
-                                                   AND live.deleted_at IS NULL)))))
+        "#,
+        r#"
           AND ($3 = false OR t.status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS'))
           -- Late, and still open. Spelled out rather than left to `NULL < now()`
           -- being unknown, because the other spelling of an undated task is one
@@ -660,7 +741,8 @@ pub async fn is_visible_to(
     user_id: Uuid,
     task_id: Uuid,
 ) -> Result<bool, sqlx::Error> {
-    let found = sqlx::query_scalar!(
+    let found = with_claimed_clause!(
+        query_scalar,
         r#"
         SELECT 1 AS "found!"
         FROM workflow_tasks t
@@ -687,33 +769,8 @@ pub async fn is_visible_to(
                            OR ur.department_id = t.candidate_department_id)
                 ))
           )
-          -- A claimed task nobody can decide is not waiting for its holder
-          -- (#530). The same clause is in `list_for_caller`, `count_for_caller`
-          -- and `is_visible_to`, and the three must stay identical. It is not
-          -- `count_open_tasks_needing_role`'s clause, which asks whether *some*
-          -- edge names a role: this asks whether *no* decision edge resolves.
-          -- See "A claimed task nobody can decide" at the top of the file.
-          AND (t.assignee_user_id IS DISTINCT FROM $2
-               OR t.status NOT IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')
-               -- No decision edge at all, as on a RETURNED correction task that
-               -- only RESUBMIT leaves: nothing to judge by, so it stays.
-               OR NOT EXISTS (SELECT 1 FROM workflow_transitions tr
-                              WHERE tr.tenant_id = t.tenant_id
-                                AND tr.workflow_definition_id = i.workflow_definition_id
-                                AND tr.from_state = i.current_state
-                                AND tr.action IN ('APPROVE', 'REJECT', 'RETURN'))
-               OR EXISTS (SELECT 1 FROM workflow_transitions tr
-                          WHERE tr.tenant_id = t.tenant_id
-                            AND tr.workflow_definition_id = i.workflow_definition_id
-                            AND tr.from_state = i.current_state
-                            AND tr.action IN ('APPROVE', 'REJECT', 'RETURN')
-                            AND (tr.allowed_by_json->>'assigneeType' IN ('USER', 'OWNER')
-                                 OR (tr.allowed_by_json->>'assigneeType'
-                                         IN ('ROLE', 'DEPARTMENT_ROLE')
-                                     AND EXISTS (SELECT 1 FROM roles live
-                                                 WHERE live.tenant_id = t.tenant_id
-                                                   AND live.role_code = tr.allowed_by_json->>'roleCode'
-                                                   AND live.deleted_at IS NULL)))))
+        "#,
+        r#"
         "#,
         tenant_id,
         user_id,
@@ -723,4 +780,59 @@ pub async fn is_visible_to(
     .await?;
 
     Ok(found.is_some())
+}
+
+#[cfg(test)]
+mod tests {
+    /// **The claimed clause is written once, and all three statements read
+    /// it** ([#635] AC13).
+    ///
+    /// The list, its count and the detail gate each answer *is this task
+    /// waiting for me*, and [#279] is what it costs when they disagree. #530
+    /// kept three copies of the clause identical by hand. The clause is now
+    /// `with_claimed_clause!`'s text, and this reads the source for a copy
+    /// written back into a statement, or a statement that stopped splicing it.
+    ///
+    /// [#279]: https://github.com/sujanto-gaws/kelir/issues/279
+    /// [#635]: https://github.com/sujanto-gaws/kelir/issues/635
+    #[test]
+    fn the_claimed_clause_is_identical_in_all_three_statements() {
+        let source = include_str!("inbox.rs");
+        let code = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the code above the tests");
+
+        // The clause's first line of SQL, which nothing else in the file says.
+        let marker = "AND (t.assignee_user_id IS DISTINCT FROM $2";
+        assert_eq!(
+            code.matches(marker).count(),
+            1,
+            "the claimed clause is written more than once, or not at all"
+        );
+
+        let in_macro = code
+            .find("macro_rules! with_claimed_clause")
+            .expect("the macro");
+        let clause = code.find(marker).expect("the clause");
+        let first_statement = code.find("pub async fn ").expect("a statement");
+        assert!(
+            in_macro < clause && clause < first_statement,
+            "the clause is not the macro's text"
+        );
+
+        for name in ["list_for_caller", "count_for_caller", "is_visible_to"] {
+            let start = code
+                .find(&format!("pub async fn {name}("))
+                .unwrap_or_else(|| panic!("{name} is gone"));
+            let body = &code[start..];
+            let end = body[1..]
+                .find("\npub async fn ")
+                .map_or(body.len(), |at| at + 1);
+            assert!(
+                body[..end].contains("with_claimed_clause!("),
+                "{name} does not splice the claimed clause"
+            );
+        }
+    }
 }
