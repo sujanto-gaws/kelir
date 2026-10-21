@@ -420,12 +420,66 @@ pub fn dead_role_errors(
 }
 
 /// The refusal a publish gives for each `ROLE` rule carrying a
-/// `departmentScope` (**D-114**, [#613]). A stub until the check is written.
+/// `departmentScope` ([JWSS §5.3](../../../../../docs/schema/JSON%20Workflow%20Schema.md),
+/// **D-114** A, [#613]).
+///
+/// **A `ROLE` rule resolves tenant-wide, and takes no scope.**
+/// `service::assignment::normalize` builds a `ROLE` principal with no
+/// department and never reads the key, so a scope on one reads as "the
+/// approver of that department" and offers the task, or the decision, to every
+/// holder of the role in the tenant. `DEPARTMENT_ROLE` is the type that takes
+/// one. The meta-schema admits the key on every type, so this is a narrowing at
+/// publish, as [`dead_role_errors`] is, and not a shape rule.
+///
+/// **Pure, and the places are D-111's**: a state's `task.assignment` and a
+/// transition's `allowedBy`, states first, each in document order, one detail a
+/// place. The `"ROLE:X"` shorthand is a string and carries no scope, and an
+/// escalation's `assignment` is not read, because nothing executes it (JWSS
+/// §3.1). Any `departmentScope` key counts, `""` included: the author wrote one.
 ///
 /// [#613]: https://github.com/sujanto-gaws/kelir/issues/613
 pub fn role_scope_errors(definition: &Value) -> Vec<ValidationDetail> {
-    let _ = definition;
-    Vec::new()
+    let assignments = states(definition)
+        .iter()
+        .enumerate()
+        .filter_map(|(index, state)| {
+            let rule = state.get("task")?.get("assignment")?;
+            Some((format!("definition.states.{index}.task.assignment"), rule))
+        });
+    let edges = transitions(definition)
+        .iter()
+        .enumerate()
+        .filter_map(|(index, transition)| {
+            let rule = transition.get("allowedBy")?;
+            Some((format!("definition.transitions.{index}.allowedBy"), rule))
+        });
+
+    assignments
+        .chain(edges)
+        .filter_map(|(path, rule)| {
+            if rule.get("assigneeType").and_then(Value::as_str) != Some("ROLE") {
+                return None;
+            }
+
+            let scope = rule.get("departmentScope")?;
+            let scope = scope
+                .as_str()
+                .map_or_else(|| scope.to_string(), str::to_owned);
+
+            Some(detail(
+                format!("{path}.departmentScope"),
+                "roleScope",
+                ROLE_TAKES_NO_SCOPE,
+                format!(
+                    "`{scope}` is a department scope on a ROLE rule, and a ROLE rule takes \
+                     none: it is resolved across the whole tenant, so the scope would not \
+                     limit who is offered the task or may take the decision. Use \
+                     DEPARTMENT_ROLE to name a role within a department, or remove the \
+                     scope (JWSS §5.3)"
+                ),
+            ))
+        })
+        .collect()
 }
 
 /// JWSS §8's structural rules, in order, less the four this function does not own.
