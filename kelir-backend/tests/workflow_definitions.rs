@@ -2347,3 +2347,782 @@ async fn a_draft_edited_before_its_publish_takes_the_row_is_checked_as_edited() 
     );
     assert_eq!(status_of(&app, id).await, "DRAFT");
 }
+
+// ---------------------------------------------------------------------------
+// D-114 (#613) — publish refuses a `departmentScope` on a `ROLE` rule
+// ---------------------------------------------------------------------------
+
+/// A `ROLE` rule naming [`approval_workflow`]'s role, with a scope it does not
+/// take.
+fn scoped_role(scope: &str) -> Value {
+    json!({ "assigneeType": "ROLE", "roleCode": "WF-APPROVER", "departmentScope": scope })
+}
+
+fn takes_no_scope(paths: &[&str]) -> Vec<(String, String)> {
+    paths
+        .iter()
+        .map(|path| ((*path).to_owned(), "ROLE_TAKES_NO_SCOPE".to_owned()))
+        .collect()
+}
+
+/// How many rows the publish's projection wrote for definition `id`.
+async fn projected_rows(app: &TestApp, id: Uuid) -> i64 {
+    sqlx::query_scalar(
+        "SELECT (SELECT count(*) FROM workflow_states WHERE workflow_definition_id = $1) \
+              + (SELECT count(*) FROM workflow_transitions WHERE workflow_definition_id = $1)",
+    )
+    .bind(id)
+    .fetch_one(&app.pool)
+    .await
+    .expect("count the projection")
+}
+
+/// Writes `value` at `pointer` (a `{a,b,c}` text path) of a stored definition,
+/// behind the API's back, and reads it back so the fixture is known to hold.
+async fn stored_with(app: &TestApp, id: Uuid, pointer: &str, value: Value) {
+    let updated = sqlx::query(
+        "UPDATE workflow_definitions SET definition_json = jsonb_set(definition_json, $2::text[], $3) \
+         WHERE id = $1",
+    )
+    .bind(id)
+    .bind(pointer)
+    .bind(&value)
+    .execute(&app.pool)
+    .await
+    .expect("write the definition behind the API's back");
+    assert_eq!(updated.rows_affected(), 1);
+
+    let stored: Value = sqlx::query_scalar(
+        "SELECT definition_json #> $2::text[] FROM workflow_definitions WHERE id = $1",
+    )
+    .bind(id)
+    .bind(pointer)
+    .fetch_one(&app.pool)
+    .await
+    .expect("read the definition back");
+    assert_eq!(stored, value, "the fixture did not store the scope");
+}
+
+/// **A scope on a `ROLE` assignment is refused at publish** (**D-114** A, #613;
+/// JWSS §5.3). The engine resolves a `ROLE` rule tenant-wide and never reads its
+/// scope, so a definition saying "the approver of the requested department"
+/// would offer the task to every approver in the tenant. The save takes it, and
+/// the publish, which is where the author is, says to use `DEPARTMENT_ROLE`.
+#[tokio::test]
+async fn a_role_assignment_with_a_department_scope_is_refused_at_publish() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    role(&app, "WF-APPROVER").await;
+
+    let mut definition = approval_workflow("wf_role_scope");
+    definition["states"][0]["task"]["assignment"] = scoped_role("REQUESTED_DEPARTMENT");
+
+    let id = saved(&app, &token, "wf_role_scope", definition).await;
+    let refused = publish(&app, &token, id).await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a scoped ROLE rule was published: {}",
+        refused.body
+    );
+    assert_eq!(refused.body["success"], false);
+    assert_eq!(refused.body["error"]["code"], "VALIDATION_ERROR");
+    assert_eq!(
+        refusals(&refused),
+        takes_no_scope(&["definition.states.0.task.assignment.departmentScope"])
+    );
+
+    let detail = &refused.body["error"]["details"][0];
+    assert_eq!(detail["rule"], "roleScope");
+    let message = detail["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("`REQUESTED_DEPARTMENT`") && message.contains("DEPARTMENT_ROLE"),
+        "the refusal must name the scope and the type to use: {message}"
+    );
+
+    assert_eq!(status_of(&app, id).await, "DRAFT");
+    assert_eq!(
+        projected_rows(&app, id).await,
+        0,
+        "a refused publish projected"
+    );
+}
+
+/// **Every kind of scope is refused**: the two keywords, a department code, and
+/// `""`, which is a key the author wrote rather than no scope.
+#[tokio::test]
+async fn every_kind_of_scope_on_a_role_rule_is_refused() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    role(&app, "WF-APPROVER").await;
+
+    for (index, scope) in ["REQUESTED_DEPARTMENT", "OWNER_DEPARTMENT", "DEPT-FIN", ""]
+        .into_iter()
+        .enumerate()
+    {
+        let key = format!("wf_scope_kind_{index}");
+        let mut definition = approval_workflow(&key);
+        definition["states"][0]["task"]["assignment"] = scoped_role(scope);
+
+        let id = saved(&app, &token, &key, definition).await;
+        let refused = publish(&app, &token, id).await;
+
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "`{scope}` on a ROLE rule was published: {}",
+            refused.body
+        );
+        assert_eq!(
+            refusals(&refused),
+            takes_no_scope(&["definition.states.0.task.assignment.departmentScope"]),
+            "`{scope}`"
+        );
+        assert!(
+            refused.body["error"]["details"][0]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(&format!("`{scope}`"))),
+            "the refusal must name `{scope}`: {}",
+            refused.body
+        );
+        assert_eq!(status_of(&app, id).await, "DRAFT", "`{scope}`");
+    }
+}
+
+/// **A scope on a `ROLE` `allowedBy` is refused the same way**: the decision is
+/// checked tenant-wide as the task is offered tenant-wide.
+#[tokio::test]
+async fn a_role_allowed_by_with_a_department_scope_is_refused_at_publish() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    role(&app, "WF-APPROVER").await;
+
+    let mut definition = approval_workflow("wf_edge_scope");
+    definition["transitions"][0]["allowedBy"] = scoped_role("OWNER_DEPARTMENT");
+
+    let id = saved(&app, &token, "wf_edge_scope", definition).await;
+    let refused = publish(&app, &token, id).await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+    assert_eq!(
+        refusals(&refused),
+        takes_no_scope(&["definition.transitions.0.allowedBy.departmentScope"])
+    );
+    assert_eq!(status_of(&app, id).await, "DRAFT");
+}
+
+/// **A scope in each place is refused at each, in document order, in the
+/// S-rule shape**, so an author is told about all of them at once.
+#[tokio::test]
+async fn a_scope_on_each_role_rule_is_refused_at_each() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    role(&app, "WF-APPROVER").await;
+
+    let mut definition = approval_workflow("wf_scope_each");
+    definition["states"][0]["task"]["assignment"] = scoped_role("DEPT-FIN");
+    definition["transitions"][0]["allowedBy"] = scoped_role("REQUESTED_DEPARTMENT");
+    definition["transitions"][1]["allowedBy"] = scoped_role("OWNER_DEPARTMENT");
+
+    let id = saved(&app, &token, "wf_scope_each", definition).await;
+    let refused = publish(&app, &token, id).await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+    assert_eq!(
+        refusals(&refused),
+        takes_no_scope(&[
+            "definition.states.0.task.assignment.departmentScope",
+            "definition.transitions.0.allowedBy.departmentScope",
+            "definition.transitions.1.allowedBy.departmentScope",
+        ])
+    );
+
+    // The shape: an S-rule refusal, a state nothing routes to, refused at save.
+    let mut orphaned = approval_workflow("wf_scope_orphan");
+    orphaned["states"]
+        .as_array_mut()
+        .expect("states")
+        .push(json!({ "code": "ORPHAN", "name": "Orphan", "mapsToDocumentStatus": "IN_REVIEW" }));
+    let s_rule = create(&app, &token, "wf_scope_orphan", orphaned).await;
+    assert_eq!(s_rule.status, refused.status, "{}", s_rule.body);
+
+    let keys = |value: &Value| -> Vec<String> {
+        let mut keys: Vec<String> = value
+            .as_object()
+            .unwrap_or_else(|| panic!("an object: {value}"))
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    };
+
+    assert_eq!(keys(&refused.body), keys(&s_rule.body));
+    assert_eq!(refused.body["error"]["code"], s_rule.body["error"]["code"]);
+    assert_eq!(keys(&refused.body["error"]), keys(&s_rule.body["error"]));
+
+    for detail in refused.body["error"]["details"]
+        .as_array()
+        .expect("details")
+    {
+        assert_eq!(keys(detail), keys(&s_rule.body["error"]["details"][0]));
+        assert_eq!(detail["rule"], "roleScope");
+        assert!(
+            detail["message"]
+                .as_str()
+                .is_some_and(|message| !message.is_empty()),
+            "{detail}"
+        );
+    }
+}
+
+/// **The shorthand carries no scope, and a colon after the role code is not
+/// one.** `"ROLE:X"` is §5.2's string form, so a definition using it publishes
+/// as it did. `"ROLE:X:Y"` does not match the meta-schema's shorthand pattern,
+/// so it is a shape refusal at save, and at publish if it reached the row
+/// another way, and never a scope refusal.
+#[tokio::test]
+async fn a_shorthand_role_publishes_and_a_colon_suffix_is_not_a_scope() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    role(&app, "WF-APPROVER").await;
+
+    let id = saved(
+        &app,
+        &token,
+        "wf_shorthand_kept",
+        approval_workflow("wf_shorthand_kept"),
+    )
+    .await;
+    let published = publish(&app, &token, id).await;
+    assert_eq!(published.status, StatusCode::OK, "{}", published.body);
+    assert_eq!(status_of(&app, id).await, "ACTIVE");
+
+    let mut suffixed = approval_workflow("wf_colon_suffix");
+    suffixed["transitions"][1]["allowedBy"] = json!("ROLE:WF-APPROVER:DEPT-FIN");
+
+    let at_save = create(&app, &token, "wf_colon_suffix", suffixed.clone()).await;
+    assert_eq!(
+        at_save.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        at_save.body
+    );
+    let details = refusals(&at_save);
+    assert!(
+        details
+            .iter()
+            .any(|(path, code)| path == "definition.transitions.1.allowedBy"
+                && code == "INVALID_DEFINITION"),
+        "{}",
+        at_save.body
+    );
+    assert!(
+        details
+            .iter()
+            .all(|(_, code)| code != "ROLE_TAKES_NO_SCOPE"),
+        "a colon suffix was read as a scope: {}",
+        at_save.body
+    );
+
+    // Past the save, the publish's own conformance check refuses it first.
+    let smuggled = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO workflow_definitions
+            (id, tenant_id, workflow_key, name, version, jwss_version, definition_json,
+             initial_state, status)
+        VALUES ($1, $2, 'wf_colon_suffix', 'Suffixed', 1, '1.0.0', $3, 'MANAGER_APPROVAL', 'DRAFT')
+        "#,
+    )
+    .bind(smuggled)
+    .bind(common::fixtures::SYSTEM_TENANT_ID)
+    .bind(&suffixed)
+    .execute(&app.pool)
+    .await
+    .expect("write a definition the API would have refused");
+
+    let at_publish = publish(&app, &token, smuggled).await;
+    assert_eq!(
+        at_publish.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        at_publish.body
+    );
+    assert!(
+        refusals(&at_publish)
+            .iter()
+            .all(|(_, code)| code == "INVALID_DEFINITION"),
+        "{}",
+        at_publish.body
+    );
+    assert_eq!(status_of(&app, smuggled).await, "DRAFT");
+}
+
+/// **A scope and a dead role are told together, the scope first**, and each
+/// goes away as it is fixed: the scope removed leaves the dead role, and the
+/// role created lets the draft publish. **An S-rule fault hides both**: the
+/// conformance check runs first and its refusal is the whole answer.
+#[tokio::test]
+async fn a_scoped_role_rule_naming_a_dead_role_is_refused_for_both() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    // No `WF-APPROVER`.
+    let mut definition = approval_workflow("wf_scope_dead");
+    definition["states"][0]["task"]["assignment"] = scoped_role("DEPT-FIN");
+
+    let id = saved(&app, &token, "wf_scope_dead", definition).await;
+    let refused = publish(&app, &token, id).await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+    let mut expected = takes_no_scope(&["definition.states.0.task.assignment.departmentScope"]);
+    expected.extend(not_live(&[
+        "definition.states.0.task.assignment.roleCode",
+        "definition.transitions.0.allowedBy",
+        "definition.transitions.1.allowedBy",
+    ]));
+    assert_eq!(refusals(&refused), expected);
+
+    let unscoped = app
+        .put(
+            &format!("{DEFINITIONS}/{id}"),
+            Some(&token),
+            json!({ "definition": approval_workflow("wf_scope_dead") }),
+        )
+        .await;
+    assert_eq!(unscoped.status, StatusCode::OK, "{}", unscoped.body);
+
+    let still = publish(&app, &token, id).await;
+    assert_eq!(
+        still.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        still.body
+    );
+    assert_eq!(
+        refusals(&still),
+        not_live(&[
+            "definition.states.0.task.assignment.roleCode",
+            "definition.transitions.0.allowedBy",
+            "definition.transitions.1.allowedBy",
+        ])
+    );
+
+    role(&app, "WF-APPROVER").await;
+    let published = publish(&app, &token, id).await;
+    assert_eq!(published.status, StatusCode::OK, "{}", published.body);
+    assert_eq!(status_of(&app, id).await, "ACTIVE");
+
+    // An S-rule fault beside a scope: a dead end, written behind the API.
+    let mut stuck = approval_workflow("wf_scope_stuck");
+    stuck["states"][0]["task"]["assignment"] = scoped_role("DEPT-FIN");
+    stuck["states"]
+        .as_array_mut()
+        .expect("states")
+        .push(json!({ "code": "STUCK", "name": "Stuck", "mapsToDocumentStatus": "IN_REVIEW" }));
+    stuck["transitions"]
+        .as_array_mut()
+        .expect("transitions")
+        .push(json!({
+            "from": "MANAGER_APPROVAL", "to": "STUCK", "action": "RETURN",
+            "allowedBy": "ROLE:WF-APPROVER"
+        }));
+
+    let smuggled = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO workflow_definitions
+            (id, tenant_id, workflow_key, name, version, jwss_version, definition_json,
+             initial_state, status)
+        VALUES ($1, $2, 'wf_scope_stuck', 'Stuck', 1, '1.0.0', $3, 'MANAGER_APPROVAL', 'DRAFT')
+        "#,
+    )
+    .bind(smuggled)
+    .bind(common::fixtures::SYSTEM_TENANT_ID)
+    .bind(&stuck)
+    .execute(&app.pool)
+    .await
+    .expect("write a definition the API would have refused");
+
+    let s_rule = publish(&app, &token, smuggled).await;
+    assert_eq!(
+        s_rule.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        s_rule.body
+    );
+    let details = refusals(&s_rule);
+    assert!(
+        details.iter().any(|(_, code)| code == "DEAD_END_STATE"),
+        "{}",
+        s_rule.body
+    );
+    assert!(
+        details
+            .iter()
+            .all(|(_, code)| code != "ROLE_TAKES_NO_SCOPE"),
+        "an S-rule fault did not hide the scope: {}",
+        s_rule.body
+    );
+}
+
+/// **A `DEPARTMENT_ROLE` takes a scope, and still publishes with each kind**,
+/// in an assignment and in an `allowedBy`.
+#[tokio::test]
+async fn a_department_role_with_a_scope_still_publishes() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    role(&app, "WF-APPROVER").await;
+
+    for (index, scope) in ["REQUESTED_DEPARTMENT", "OWNER_DEPARTMENT", "DEPT-FIN"]
+        .into_iter()
+        .enumerate()
+    {
+        let key = format!("wf_department_scope_{index}");
+        let rule = json!({
+            "assigneeType": "DEPARTMENT_ROLE",
+            "roleCode": "WF-APPROVER",
+            "departmentScope": scope
+        });
+        let mut definition = approval_workflow(&key);
+        definition["states"][0]["task"]["assignment"] = rule.clone();
+        definition["transitions"][0]["allowedBy"] = rule;
+
+        let id = saved(&app, &token, &key, definition).await;
+        let published = publish(&app, &token, id).await;
+
+        assert_eq!(
+            published.status,
+            StatusCode::OK,
+            "a DEPARTMENT_ROLE scoped to `{scope}` was refused: {}",
+            published.body
+        );
+        assert_eq!(status_of(&app, id).await, "ACTIVE", "`{scope}`");
+    }
+}
+
+/// **A draft with a scoped `ROLE` rule is saved, not refused**: a create and
+/// an edit both take it. Save stays open for drafts, and the publish is where
+/// the scope is refused.
+#[tokio::test]
+async fn a_draft_with_a_scope_on_a_role_rule_is_saved_not_refused() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let mut definition = approval_workflow("wf_scope_draft");
+    definition["states"][0]["task"]["assignment"] = scoped_role("REQUESTED_DEPARTMENT");
+
+    let created = create(&app, &token, "wf_scope_draft", definition).await;
+    assert_eq!(
+        created.status,
+        StatusCode::CREATED,
+        "a save refused a scoped ROLE rule: {}",
+        created.body
+    );
+    let id = id_of(&created.body["data"]);
+
+    let mut edited = approval_workflow("wf_scope_draft");
+    edited["transitions"][1]["allowedBy"] = scoped_role("OWNER_DEPARTMENT");
+
+    let updated = app
+        .put(
+            &format!("{DEFINITIONS}/{id}"),
+            Some(&token),
+            json!({ "definition": edited }),
+        )
+        .await;
+    assert_eq!(
+        updated.status,
+        StatusCode::OK,
+        "an edit refused a scoped ROLE rule: {}",
+        updated.body
+    );
+    assert_eq!(status_of(&app, id).await, "DRAFT");
+}
+
+/// **A revision cloned from a published definition carrying a scope is a
+/// draft, refused at its publish.** Revision 1 got its scope behind the API's
+/// back, the shape a revision published before D-114 has; the clone copies it
+/// unvalidated, and the author is told when the clone is published. Revision 1
+/// is not re-checked and stays `ACTIVE`.
+#[tokio::test]
+async fn a_revision_of_a_published_definition_carrying_the_scope_is_a_draft_refused_at_publish() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let first = published(&app, &token, "wf_scope_revised").await;
+    stored_with(
+        &app,
+        first,
+        "{states,0,task,assignment,departmentScope}",
+        json!("OWNER_DEPARTMENT"),
+    )
+    .await;
+
+    let revision = app
+        .post(
+            &format!("{DEFINITIONS}/{first}/revisions"),
+            Some(&token),
+            json!({}),
+        )
+        .await;
+    assert_eq!(revision.status, StatusCode::CREATED, "{}", revision.body);
+    assert_eq!(revision.body["data"]["status"], "DRAFT");
+    assert_eq!(revision.body["data"]["version"], 2);
+    let second = id_of(&revision.body["data"]);
+
+    let refused = publish(&app, &token, second).await;
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a revision carrying a scoped ROLE rule was published: {}",
+        refused.body
+    );
+    assert_eq!(
+        refusals(&refused),
+        takes_no_scope(&["definition.states.0.task.assignment.departmentScope"])
+    );
+    assert_eq!(status_of(&app, second).await, "DRAFT");
+    assert_eq!(status_of(&app, first).await, "ACTIVE");
+}
+
+/// **A refused scope writes nothing**: the draft's JSON, its publication
+/// columns, its projection and the audit trail are as they were.
+#[tokio::test]
+async fn a_refused_scope_writes_nothing() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    role(&app, "WF-APPROVER").await;
+
+    let mut definition = approval_workflow("wf_scope_nothing");
+    definition["transitions"][0]["allowedBy"] = scoped_role("DEPT-FIN");
+
+    let id = saved(&app, &token, "wf_scope_nothing", definition).await;
+
+    let read = |app: &TestApp| {
+        let pool = app.pool.clone();
+        async move {
+            sqlx::query_as::<
+                _,
+                (
+                    Value,
+                    Option<chrono::DateTime<chrono::Utc>>,
+                    Option<Uuid>,
+                    String,
+                ),
+            >(
+                "SELECT definition_json, published_at, published_by, status \
+                 FROM workflow_definitions WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("read the draft")
+        }
+    };
+    let audited = |app: &TestApp| {
+        let pool = app.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM audit_events \
+                 WHERE object_id = $1 AND event_type = 'Workflow.Published'",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("count the publication audit rows")
+        }
+    };
+
+    let before = read(&app).await;
+    let audited_before = audited(&app).await;
+
+    let refused = publish(&app, &token, id).await;
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+
+    let after = read(&app).await;
+    assert_eq!(after, before, "a refused publish changed the draft");
+    assert_eq!(after.1, None, "a refused publish stamped published_at");
+    assert_eq!(after.3, "DRAFT");
+    assert_eq!(
+        projected_rows(&app, id).await,
+        0,
+        "a refused publish projected"
+    );
+    assert_eq!(
+        audited(&app).await,
+        audited_before,
+        "a refused publish was audited as published"
+    );
+}
+
+/// **A draft fixed after the refusal publishes**, either way the author may
+/// fix it: the scope removed, or the rule retyped to `DEPARTMENT_ROLE`.
+#[tokio::test]
+async fn a_draft_fixed_after_the_refusal_publishes() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    role(&app, "WF-APPROVER").await;
+
+    let fixes = [
+        json!({ "assigneeType": "ROLE", "roleCode": "WF-APPROVER" }),
+        json!({ "assigneeType": "DEPARTMENT_ROLE", "roleCode": "WF-APPROVER",
+                "departmentScope": "OWNER_DEPARTMENT" }),
+    ];
+
+    for (index, fix) in fixes.into_iter().enumerate() {
+        let key = format!("wf_scope_fixed_{index}");
+        let mut definition = approval_workflow(&key);
+        definition["states"][0]["task"]["assignment"] = scoped_role("OWNER_DEPARTMENT");
+
+        let id = saved(&app, &token, &key, definition.clone()).await;
+        let refused = publish(&app, &token, id).await;
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            refused.body
+        );
+
+        definition["states"][0]["task"]["assignment"] = fix.clone();
+        let edited = app
+            .put(
+                &format!("{DEFINITIONS}/{id}"),
+                Some(&token),
+                json!({ "definition": definition }),
+            )
+            .await;
+        assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
+
+        let published = publish(&app, &token, id).await;
+        assert_eq!(
+            published.status,
+            StatusCode::OK,
+            "the fix {fix} did not publish: {}",
+            published.body
+        );
+        assert_eq!(status_of(&app, id).await, "ACTIVE");
+    }
+}
+
+/// **A scope on an escalation's `ROLE` is not checked**: nothing executes
+/// `escalation.assignment` (JWSS §3.1), so D-114 reads the places D-111 reads.
+/// Whatever schedules escalations (FR-WF-010) must add it, and this test is the
+/// one that will then go red.
+#[tokio::test]
+async fn a_scope_on_an_escalation_role_is_not_checked() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    role(&app, "WF-APPROVER").await;
+
+    let mut definition = approval_workflow("wf_scope_escalation");
+    definition["states"][0]["task"]["escalation"] = json!({
+        "afterHours": 24,
+        "assignment": scoped_role("REQUESTED_DEPARTMENT")
+    });
+
+    let id = saved(&app, &token, "wf_scope_escalation", definition).await;
+    let published = publish(&app, &token, id).await;
+
+    assert_eq!(published.status, StatusCode::OK, "{}", published.body);
+    assert_eq!(status_of(&app, id).await, "ACTIVE");
+}
+
+/// **A scope added by an edit the publish waited on is checked as edited.**
+/// The mirror of `a_draft_edited_before_its_publish_takes_the_row_is_checked_as_edited`:
+/// the edit holds the row, the publish waits on it, and the scope check reads
+/// the copy the publish locked rather than one read before.
+#[tokio::test]
+async fn a_scope_added_to_a_draft_while_its_publish_waits_is_checked_as_edited() {
+    let app = std::sync::Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let tenant = common::fixtures::SYSTEM_TENANT_ID;
+
+    role(&app, "WF-APPROVER").await;
+    let id = saved(
+        &app,
+        &token,
+        "wf_scope_held",
+        approval_workflow("wf_scope_held"),
+    )
+    .await;
+
+    let mut scoped = approval_workflow("wf_scope_held");
+    scoped["states"][0]["task"]["assignment"] = scoped_role("REQUESTED_DEPARTMENT");
+
+    let mut editing = app.pool.begin().await.expect("a transaction");
+    let edited = definition_repo::update_draft(
+        &mut *editing,
+        tenant,
+        id,
+        &definition_repo::DefinitionFields {
+            name: None,
+            description: None,
+            definition_json: Some(&scoped),
+            initial_state: None,
+            jwss_version: None,
+        },
+        None,
+    )
+    .await
+    .expect("the edit runs");
+    assert_eq!(edited, 1);
+
+    let publishing = {
+        let app = std::sync::Arc::clone(&app);
+        let token = token.clone();
+        tokio::spawn(async move { publish(&app, &token, id).await })
+    };
+
+    let waited = waited_on_a_lock(&app, 1, &publishing).await;
+    editing.commit().await.expect("the edit commits");
+    let published = publishing.await.expect("the publish finished");
+
+    assert!(
+        waited,
+        "the publish did not wait on the edit's row: {} {}",
+        published.status, published.body
+    );
+    assert_eq!(
+        published.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a publish checked a copy older than the one it published: {}",
+        published.body
+    );
+    assert_eq!(
+        refusals(&published),
+        takes_no_scope(&["definition.states.0.task.assignment.departmentScope"])
+    );
+    assert_eq!(status_of(&app, id).await, "DRAFT");
+}

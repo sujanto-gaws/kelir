@@ -146,6 +146,10 @@ pub const RESOLVABLE_ASSIGNEE_TYPES: &[&str] = &["USER", "ROLE", "DEPARTMENT_ROL
 /// ([`dead_role_errors`]).
 pub const ROLE_NOT_LIVE: &str = "ROLE_NOT_LIVE";
 
+/// The detail code a publish refuses a `departmentScope` on a `ROLE` rule with
+/// ([`role_scope_errors`]).
+pub const ROLE_TAKES_NO_SCOPE: &str = "ROLE_TAKES_NO_SCOPE";
+
 /// The compiled meta-schema. Compiled once — compiling it per request would put
 /// ~6 KB of JSON Schema on the save path of every workflow.
 fn validator() -> &'static jsonschema::Validator {
@@ -413,6 +417,15 @@ pub fn dead_role_errors(
             )
         })
         .collect()
+}
+
+/// The refusal a publish gives for each `ROLE` rule carrying a
+/// `departmentScope` (**D-114**, [#613]). A stub until the check is written.
+///
+/// [#613]: https://github.com/sujanto-gaws/kelir/issues/613
+pub fn role_scope_errors(definition: &Value) -> Vec<ValidationDetail> {
+    let _ = definition;
+    Vec::new()
 }
 
 /// JWSS §8's structural rules, in order, less the four this function does not own.
@@ -798,5 +811,138 @@ mod tests {
             1
         );
         assert!(dead_role_errors(&[reference("p", "APPROVER")], &live).is_empty());
+    }
+
+    /// A definition with one task state and one edge, each holding `rule`.
+    fn with_rules(assignment: Value, allowed_by: Value) -> Value {
+        serde_json::json!({
+            "states": [
+                { "code": "A", "task": { "assignment": assignment } },
+                { "code": "DONE", "isFinal": true }
+            ],
+            "transitions": [
+                { "from": "A", "to": "DONE", "action": "APPROVE", "allowedBy": allowed_by }
+            ]
+        })
+    }
+
+    fn scoped(assignee_type: &str, scope: &str) -> Value {
+        serde_json::json!({
+            "assigneeType": assignee_type,
+            "roleCode": "APPROVER",
+            "userId": "00000000-0000-0000-0000-000000000000",
+            "departmentScope": scope
+        })
+    }
+
+    fn paths(details: &[ValidationDetail]) -> Vec<&str> {
+        details.iter().map(|detail| detail.path.as_str()).collect()
+    }
+
+    #[test]
+    fn role_scope_errors_refuses_a_scope_on_a_role_rule_at_the_scope() {
+        let definition = with_rules(scoped("ROLE", "REQUESTED_DEPARTMENT"), json_str("OWNER"));
+
+        let details = role_scope_errors(&definition);
+
+        assert_eq!(
+            paths(&details),
+            ["definition.states.0.task.assignment.departmentScope"]
+        );
+        assert_eq!(details[0].rule, "roleScope");
+        assert_eq!(details[0].code, ROLE_TAKES_NO_SCOPE);
+        assert!(
+            details[0].message.contains("`REQUESTED_DEPARTMENT`")
+                && details[0].message.contains("DEPARTMENT_ROLE"),
+            "{}",
+            details[0].message
+        );
+    }
+
+    #[test]
+    fn role_scope_errors_refuses_a_scope_on_a_role_allowed_by() {
+        let definition = with_rules(
+            serde_json::json!({ "assigneeType": "OWNER" }),
+            scoped("ROLE", "DEPT-FIN"),
+        );
+
+        assert_eq!(
+            paths(&role_scope_errors(&definition)),
+            ["definition.transitions.0.allowedBy.departmentScope"]
+        );
+    }
+
+    /// `""` is a scope the author wrote, and the key is what is refused.
+    #[test]
+    fn role_scope_errors_counts_an_empty_scope() {
+        let definition = with_rules(scoped("ROLE", ""), json_str("OWNER"));
+
+        let details = role_scope_errors(&definition);
+
+        assert_eq!(details.len(), 1);
+        assert!(details[0].message.contains("``"), "{}", details[0].message);
+    }
+
+    #[test]
+    fn role_scope_errors_reads_no_other_rule_and_no_escalation() {
+        let none = serde_json::json!({ "assigneeType": "ROLE", "roleCode": "APPROVER" });
+
+        for (assignment, allowed_by) in [
+            // No scope, and the shorthand, which cannot carry one.
+            (none.clone(), json_str("ROLE:APPROVER")),
+            (none.clone(), json_str("ROLE:APPROVER:DEPT-FIN")),
+            // Every other type with a scope.
+            (
+                scoped("DEPARTMENT_ROLE", "OWNER_DEPARTMENT"),
+                scoped("DEPARTMENT_ROLE", "DEPT-FIN"),
+            ),
+            (scoped("USER", "DEPT-FIN"), scoped("OWNER", "DEPT-FIN")),
+        ] {
+            let definition = with_rules(assignment.clone(), allowed_by.clone());
+            assert!(
+                role_scope_errors(&definition).is_empty(),
+                "{assignment} / {allowed_by}"
+            );
+        }
+
+        // Nothing executes an escalation (JWSS §3.1), so its rule is not read.
+        let mut definition = with_rules(none, json_str("OWNER"));
+        definition["states"][0]["task"]["escalation"] =
+            serde_json::json!({ "afterHours": 24, "assignment": scoped("ROLE", "DEPT-FIN") });
+        assert!(role_scope_errors(&definition).is_empty());
+    }
+
+    /// States before transitions, each in document order, one detail a place.
+    #[test]
+    fn role_scope_errors_refuses_each_place_in_document_order() {
+        let definition = serde_json::json!({
+            "states": [
+                { "code": "A", "task": { "assignment": scoped("ROLE", "OWNER_DEPARTMENT") } },
+                { "code": "B", "task": { "assignment": scoped("DEPARTMENT_ROLE", "DEPT-FIN") } },
+                { "code": "C", "task": { "assignment": scoped("ROLE", "DEPT-FIN") } },
+                { "code": "DONE", "isFinal": true }
+            ],
+            "transitions": [
+                { "from": "A", "to": "B", "action": "APPROVE",
+                  "allowedBy": scoped("ROLE", "REQUESTED_DEPARTMENT") },
+                { "from": "B", "to": "C", "action": "APPROVE", "allowedBy": "ROLE:APPROVER" },
+                { "from": "C", "to": "DONE", "action": "APPROVE",
+                  "allowedBy": scoped("ROLE", "") }
+            ]
+        });
+
+        assert_eq!(
+            paths(&role_scope_errors(&definition)),
+            [
+                "definition.states.0.task.assignment.departmentScope",
+                "definition.states.2.task.assignment.departmentScope",
+                "definition.transitions.0.allowedBy.departmentScope",
+                "definition.transitions.2.allowedBy.departmentScope",
+            ]
+        );
+    }
+
+    fn json_str(value: &str) -> Value {
+        Value::String(value.to_owned())
     }
 }

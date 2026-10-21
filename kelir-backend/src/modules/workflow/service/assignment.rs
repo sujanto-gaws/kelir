@@ -1132,6 +1132,44 @@ mod tests {
         );
     }
 
+    /// **A scope on a `ROLE` rule is not read** (**D-114**, [#613]). A publish
+    /// now refuses one; a revision published before that keeps resolving its
+    /// role tenant-wide, and a context that could supply no department is not
+    /// refused for one.
+    ///
+    /// [#613]: https://github.com/sujanto-gaws/kelir/issues/613
+    #[test]
+    fn a_role_rule_with_a_scope_still_resolves_tenant_wide() {
+        let context = AssignmentContext {
+            requested_department_id: None,
+            owner_department: OwnerDepartment::Unset,
+            ..context()
+        };
+
+        for scope in [
+            "OWNER_DEPARTMENT",
+            "REQUESTED_DEPARTMENT",
+            "DEPT-NOWHERE",
+            "",
+        ] {
+            let mut role = rule(AssigneeType::Role);
+            role.role_code = Some("FINANCE".to_owned());
+            role.department_scope = Some(scope.to_owned());
+
+            let principal = normalize(&role, context, "task.assignment", Question::Assignee)
+                .unwrap_or_else(|error| panic!("`{scope}` was read: {error:?}"));
+
+            assert_eq!(
+                principal,
+                Principal::Role {
+                    role_code: "FINANCE".to_owned(),
+                    department: None,
+                },
+                "`{scope}`"
+            );
+        }
+    }
+
     #[test]
     fn a_scope_the_document_cannot_supply_is_refused() {
         let context = AssignmentContext {
