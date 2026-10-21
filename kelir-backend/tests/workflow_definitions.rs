@@ -3126,3 +3126,128 @@ async fn a_scope_added_to_a_draft_while_its_publish_waits_is_checked_as_edited()
     );
     assert_eq!(status_of(&app, id).await, "DRAFT");
 }
+
+/// A workflow whose `ROLE` rules sit behind places that hold no rule: a final
+/// state first, then four task states, and an `AUTO` edge first, then three
+/// decided ones. The `USER` and `OWNER` rules carry a scope as well, and every
+/// scope is the same value.
+fn scopes_among_every_kind_of_place(key: &str) -> Value {
+    let scope = "DEPT-FIN";
+    let user = json!({ "assigneeType": "USER", "userId": Uuid::nil().to_string(),
+                       "departmentScope": scope });
+    let owner = json!({ "assigneeType": "OWNER", "departmentScope": scope });
+    let task = |code: &str, assignment: Value| {
+        json!({ "code": code, "name": code, "mapsToDocumentStatus": "PENDING_APPROVAL",
+                "task": { "taskDefinitionKey": code.to_lowercase(), "taskName": code,
+                          "assignment": assignment } })
+    };
+
+    json!({
+        "workflowKey": key, "version": "1.0.0", "name": "Scopes in every place",
+        "initialState": "A",
+        "states": [
+            { "code": "DONE", "name": "Done", "mapsToDocumentStatus": "COMPLETED", "isFinal": true },
+            task("A", scoped_role(scope)),
+            task("B", user.clone()),
+            task("C", owner.clone()),
+            task("D", scoped_role(scope))
+        ],
+        "transitions": [
+            { "from": "D", "to": "DONE", "action": "AUTO" },
+            { "from": "A", "to": "B", "action": "APPROVE", "allowedBy": scoped_role(scope) },
+            { "from": "B", "to": "C", "action": "APPROVE", "allowedBy": user },
+            { "from": "C", "to": "D", "action": "APPROVE", "allowedBy": owner }
+        ]
+    })
+}
+
+/// **Each scope is refused at its own index, once a place, and on a `ROLE`
+/// rule only** (JWSS §5.3). The index is the place's among all the states or
+/// all the transitions, not among the ones holding a rule; two places with the
+/// same scope are two details; a `USER` or `OWNER` rule's scope is not this
+/// refusal, and the definition publishes once only the `ROLE` scopes are gone.
+#[tokio::test]
+async fn each_scope_is_refused_at_its_own_index_and_only_on_a_role_rule() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    role(&app, "WF-APPROVER").await;
+
+    let mut definition = scopes_among_every_kind_of_place("wf_scope_places");
+    let id = saved(&app, &token, "wf_scope_places", definition.clone()).await;
+    let refused = publish(&app, &token, id).await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+    assert_eq!(
+        refusals(&refused),
+        takes_no_scope(&[
+            "definition.states.1.task.assignment.departmentScope",
+            "definition.states.4.task.assignment.departmentScope",
+            "definition.transitions.1.allowedBy.departmentScope",
+        ])
+    );
+
+    for pointer in [
+        "/states/1/task/assignment",
+        "/states/4/task/assignment",
+        "/transitions/1/allowedBy",
+    ] {
+        definition
+            .pointer_mut(pointer)
+            .and_then(Value::as_object_mut)
+            .unwrap_or_else(|| panic!("a rule at {pointer}"))
+            .remove("departmentScope");
+    }
+
+    let edited = app
+        .put(
+            &format!("{DEFINITIONS}/{id}"),
+            Some(&token),
+            json!({ "definition": definition }),
+        )
+        .await;
+    assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
+
+    let published = publish(&app, &token, id).await;
+    assert_eq!(
+        published.status,
+        StatusCode::OK,
+        "a scope on a USER or OWNER rule was refused: {}",
+        published.body
+    );
+    assert_eq!(status_of(&app, id).await, "ACTIVE");
+}
+
+/// **The scope details lead the 422 as a group**, not by where they sit: a
+/// scope on the second edge is told before a dead role on the first state.
+#[tokio::test]
+async fn a_scope_on_a_later_edge_is_told_ahead_of_a_dead_role_in_an_earlier_state() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    // No `WF-APPROVER`.
+    let mut definition = approval_workflow("wf_scope_later");
+    definition["transitions"][1]["allowedBy"] = scoped_role("DEPT-FIN");
+
+    let id = saved(&app, &token, "wf_scope_later", definition).await;
+    let refused = publish(&app, &token, id).await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+    let mut expected = takes_no_scope(&["definition.transitions.1.allowedBy.departmentScope"]);
+    expected.extend(not_live(&[
+        "definition.states.0.task.assignment.roleCode",
+        "definition.transitions.0.allowedBy",
+        "definition.transitions.1.allowedBy.roleCode",
+    ]));
+    assert_eq!(refusals(&refused), expected);
+}
