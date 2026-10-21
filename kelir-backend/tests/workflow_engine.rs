@@ -5422,3 +5422,395 @@ async fn a_published_role_rule_with_a_scope_keeps_assigning_tenant_wide() {
     );
     assert_eq!(stored_status(&app, id).await, "COMPLETED");
 }
+
+// ---------------------------------------------------------------------------
+// #706 — `actor.roles` and `actor.departmentId` at a decision
+// ---------------------------------------------------------------------------
+
+/// [`role_workflow`] whose approval goes to `MATCHED` where `condition` holds
+/// and to `UNMATCHED` where it does not. Both are final and `COMPLETED`, so
+/// the instance's state is the only thing that says which edge was taken.
+fn routed_decision(key: &str, condition: Value) -> Value {
+    let mut definition = role_workflow(key);
+    let states = definition["states"].as_array_mut().expect("states");
+    // `COMPLETED` is reached by nothing here, which S6 refuses.
+    states.retain(|state| state["code"] != "COMPLETED");
+
+    for code in ["MATCHED", "UNMATCHED"] {
+        states.push(json!({
+            "code": code, "name": code, "mapsToDocumentStatus": "COMPLETED", "isFinal": true
+        }));
+    }
+
+    definition["transitions"] = json!([
+        { "from": "MANAGER_APPROVAL", "to": "MATCHED", "action": "APPROVE",
+          "allowedBy": format!("ROLE:{APPROVER_ROLE}"), "condition": condition },
+        { "from": "MANAGER_APPROVAL", "to": "UNMATCHED", "action": "APPROVE",
+          "allowedBy": format!("ROLE:{APPROVER_ROLE}") },
+        { "from": "MANAGER_APPROVAL", "to": "REJECTED", "action": "REJECT",
+          "allowedBy": format!("ROLE:{APPROVER_ROLE}") }
+    ]);
+
+    definition
+}
+
+/// A document of `type_id`, drafted and submitted by `token` and approved by
+/// `decider`. Gives the state the approval reached, after asserting it was
+/// not refused: a condition that could not be evaluated is a 422, and a
+/// fallback taken because of one would be a different defect.
+async fn decided_state(app: &TestApp, token: &str, decider: &str, type_id: Uuid) -> String {
+    let id = draft(app, token, type_id).await;
+    let submitted = submit(app, token, id).await;
+    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+
+    let task = open_task_of(app, id).await;
+    let decided = decide(app, decider, task, "APPROVE").await;
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+
+    instance_of(app, id).await.expect("an instance").1
+}
+
+/// **#706 AC2: `actor.roles` is the decider's role codes, read at the
+/// decision.** A condition asking for `WF-SENIOR` routes its holder to
+/// `MATCHED` and an approver without it to `UNMATCHED`. Then the holder's
+/// grant is soft-deleted and they decide again **with the same token**, whose
+/// `roles` claim still names `WF-SENIOR`: the decision routes to `UNMATCHED`,
+/// so the roles are read fresh and not taken from the token.
+#[tokio::test]
+async fn a_condition_on_the_actors_roles_reads_the_deciders_roles_fresh() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let senior = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "WF-SENIOR",
+        &[],
+    )
+    .await;
+    let (senior_id, senior_token) = holder_in(&app, "wf.roles.senior", None, &[senior]).await;
+    let (_, plain_token) = holder_in(&app, "wf.roles.plain", None, &[]).await;
+
+    let workflow = publish_workflow(
+        &app,
+        &token,
+        routed_decision(
+            "wf_routed_roles",
+            json!({ "in": ["WF-SENIOR", { "var": "actor.roles" }] }),
+        ),
+    )
+    .await;
+    let type_id = document_type(&app, &token, "PR_ROUTED_ROLES", Some(workflow)).await;
+
+    assert_eq!(
+        decided_state(&app, &token, &senior_token, type_id).await,
+        "MATCHED",
+        "the holder of WF-SENIOR was not seen to hold it"
+    );
+    assert_eq!(
+        decided_state(&app, &token, &plain_token, type_id).await,
+        "UNMATCHED",
+        "an approver without WF-SENIOR was seen to hold it"
+    );
+
+    let removed =
+        sqlx::query("UPDATE user_roles SET deleted_at = now() WHERE user_id = $1 AND role_id = $2")
+            .bind(senior_id)
+            .bind(senior)
+            .execute(&app.pool)
+            .await
+            .expect("remove the grant");
+    assert_eq!(removed.rows_affected(), 1, "the grant was not removed");
+
+    assert_eq!(
+        decided_state(&app, &token, &senior_token, type_id).await,
+        "UNMATCHED",
+        "a removed role still matched: the roles were not read at the decision"
+    );
+}
+
+/// **#706 AC2: a grant past its `valid_to` is not in `actor.roles`.** The
+/// grant's window is the one `holds_role` and the permissions read apply:
+/// `valid_to` before today is a role the user no longer holds.
+#[tokio::test]
+async fn a_role_grant_past_its_valid_to_is_not_among_the_actors_roles() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let senior = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "WF-SENIOR",
+        &[],
+    )
+    .await;
+    let (senior_id, senior_token) = holder_in(&app, "wf.roles.lapsed", None, &[senior]).await;
+
+    let workflow = publish_workflow(
+        &app,
+        &token,
+        routed_decision(
+            "wf_routed_lapsed",
+            json!({ "in": ["WF-SENIOR", { "var": "actor.roles" }] }),
+        ),
+    )
+    .await;
+    let type_id = document_type(&app, &token, "PR_ROUTED_LAPSED", Some(workflow)).await;
+
+    assert_eq!(
+        decided_state(&app, &token, &senior_token, type_id).await,
+        "MATCHED"
+    );
+
+    let lapsed = sqlx::query(
+        "UPDATE user_roles SET valid_to = current_date - 1 WHERE user_id = $1 AND role_id = $2",
+    )
+    .bind(senior_id)
+    .bind(senior)
+    .execute(&app.pool)
+    .await
+    .expect("end the grant");
+    assert_eq!(lapsed.rows_affected(), 1, "the grant was not ended");
+
+    assert_eq!(
+        decided_state(&app, &token, &senior_token, type_id).await,
+        "UNMATCHED",
+        "a grant past its valid_to still matched"
+    );
+}
+
+/// **#706 AC3: `actor.departmentId` is the decider's `users.department_id`.**
+/// A condition naming departments X and W routes a decider in X to
+/// `MATCHED`, and one in Y, or in none, to `UNMATCHED`. The one in none reads
+/// `null`, and the decision is a 200: the condition is false, not an error.
+///
+/// **No liveness check**: W is soft-deleted before its member decides, and
+/// the stored id still matches. A condition reads a fact about the user, which
+/// stays true while the department is deleted; `OwnerDepartment` refuses a
+/// deleted department because assignment cannot resolve it, and this does not.
+#[tokio::test]
+async fn a_condition_on_the_actors_department_reads_the_deciders_department() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let x = department(&app, "WF-ROUTE-X", "Routed X").await;
+    let y = department(&app, "WF-ROUTE-Y", "Routed Y").await;
+    let w = department(&app, "WF-ROUTE-W", "Routed W").await;
+
+    let (in_x, in_x_token) = holder_in(&app, "wf.dept.x", None, &[]).await;
+    let (in_y, in_y_token) = holder_in(&app, "wf.dept.y", None, &[]).await;
+    let (_, nowhere_token) = holder_in(&app, "wf.dept.none", None, &[]).await;
+    let (in_w, in_w_token) = holder_in(&app, "wf.dept.w", None, &[]).await;
+    place_in(&app, in_x, Some(x)).await;
+    place_in(&app, in_y, Some(y)).await;
+    place_in(&app, in_w, Some(w)).await;
+
+    let workflow = publish_workflow(
+        &app,
+        &token,
+        routed_decision(
+            "wf_routed_department",
+            json!({ "or": [
+                { "==": [{ "var": "actor.departmentId" }, x.to_string()] },
+                { "==": [{ "var": "actor.departmentId" }, w.to_string()] }
+            ] }),
+        ),
+    )
+    .await;
+    let type_id = document_type(&app, &token, "PR_ROUTED_DEPT", Some(workflow)).await;
+
+    assert_eq!(
+        decided_state(&app, &token, &in_x_token, type_id).await,
+        "MATCHED",
+        "a decider in X was not seen in X"
+    );
+    assert_eq!(
+        decided_state(&app, &token, &in_y_token, type_id).await,
+        "UNMATCHED",
+        "a decider in Y was seen in X"
+    );
+    assert_eq!(
+        decided_state(&app, &token, &nowhere_token, type_id).await,
+        "UNMATCHED",
+        "a decider in no department matched"
+    );
+
+    let deleted = sqlx::query("UPDATE departments SET deleted_at = now() WHERE id = $1")
+        .bind(w)
+        .execute(&app.pool)
+        .await
+        .expect("delete W");
+    assert_eq!(deleted.rows_affected(), 1);
+
+    assert_eq!(
+        decided_state(&app, &token, &in_w_token, type_id).await,
+        "MATCHED",
+        "a deleted department's member was not given its stored id"
+    );
+}
+
+/// **#706 AC9: a revision already published is not re-checked.** One whose
+/// condition reads `document.amount`, which the publish now refuses, is
+/// written behind the API's back, the shape a revision published before #706
+/// has. It starts, and its decision routes as it did: `document.amount` reads
+/// as nothing, the condition is false, and the fallback is taken, silently.
+#[tokio::test]
+async fn a_published_revision_reading_document_amount_keeps_its_silent_fallback() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let decider = approver(&app, "wf.amount.kept").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &token,
+        routed_decision(
+            "wf_kept_amount",
+            json!({ ">": [{ "var": "formData.amount" }, 0] }),
+        ),
+    )
+    .await;
+    published_with(
+        &app,
+        workflow,
+        "{transitions,0,condition}",
+        json!({ ">": [{ "var": "document.amount" }, 0] }),
+    )
+    .await;
+    let type_id = document_type(&app, &token, "PR_KEPT_AMOUNT", Some(workflow)).await;
+
+    assert_eq!(
+        decided_state(&app, &token, &decider, type_id).await,
+        "UNMATCHED",
+        "document.amount is not built, so the condition is false and the fallback is taken"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #706 — the `test-engineer` campaign on row 14: the actor through delegation
+// and through an index
+// ---------------------------------------------------------------------------
+
+/// **#706: a delegated decision's actor is the delegate who decides, never the
+/// delegator** (JWSS §6.1; the actor is the person acting). The holder of the
+/// task, who alone holds `WF-HANDING`, claims it and hands it to a colleague,
+/// and the colleague approves. The condition holds only for the colleague's
+/// own facts: their `userId`, and no `WF-HANDING` among their roles. An actor
+/// built from the task's `delegated_from_user_id` routes to `UNMATCHED`.
+///
+/// Found by the `test-engineer` campaign on row 14: every other actor test
+/// decides an undelegated task, where the delegator is `None` and a build from
+/// it falls back to the decider.
+#[tokio::test]
+async fn a_delegated_decisions_actor_is_the_delegate_and_not_the_delegator() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let handing = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "WF-HANDING",
+        &[],
+    )
+    .await;
+    let (holder_id, holder_token) = holder_in(&app, "wf.delegated.holder", None, &[handing]).await;
+    let (delegate_id, delegate_token) = holder_in(&app, "wf.delegated.delegate", None, &[]).await;
+
+    let workflow = publish_workflow(
+        &app,
+        &token,
+        routed_decision(
+            "wf_routed_delegated",
+            json!({ "and": [
+                { "==": [{ "var": "actor.userId" }, delegate_id.to_string()] },
+                { "!": [{ "in": ["WF-HANDING", { "var": "actor.roles" }] }] }
+            ] }),
+        ),
+    )
+    .await;
+    let type_id = document_type(&app, &token, "PR_ROUTED_DELEGATED", Some(workflow)).await;
+
+    let id = draft(&app, &token, type_id).await;
+    let submitted = submit(&app, &token, id).await;
+    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+    let task = open_task_of(&app, id).await;
+
+    let claimed = claim(&app, &holder_token, task).await;
+    assert_eq!(claimed.status, StatusCode::OK, "{}", claimed.body);
+    let handed = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/delegation"),
+            Some(&holder_token),
+            json!({ "delegateUserId": delegate_id }),
+        )
+        .await;
+    assert_eq!(handed.status, StatusCode::OK, "{}", handed.body);
+
+    let delegator: Option<Uuid> =
+        sqlx::query_scalar("SELECT delegated_from_user_id FROM workflow_tasks WHERE id = $1")
+            .bind(task)
+            .fetch_one(&app.pool)
+            .await
+            .expect("read the task's delegator");
+    assert_eq!(delegator, Some(holder_id), "the task was not delegated");
+
+    let decided = decide(&app, &delegate_token, task, "APPROVE").await;
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+
+    assert_eq!(
+        instance_of(&app, id).await.expect("an instance").1,
+        "MATCHED",
+        "the delegated decision's actor was not the delegate who decided"
+    );
+}
+
+/// **#706: `actor.roles.<index>`, which a publish accepts, reads the role at
+/// that place in code order** through the engine's evaluator. A decider holding
+/// `WF-AA-FIRST` and the approver role reads `WF-AA-FIRST` at `0` and
+/// `WF-APPROVER` at `1`, and routes to `MATCHED`; an approver holding nothing
+/// else reads `WF-APPROVER` at `0` and routes to `UNMATCHED`, and the decision
+/// is a 200, not a refusal.
+///
+/// Found by the `test-engineer` campaign on row 14: the publish check accepts
+/// an index after `actor.roles`, and no test read one through `RuleEvaluator`,
+/// so a path the publish accepts and the engine reads as null would have been
+/// the silent fallback #706 ends.
+#[tokio::test]
+async fn an_index_into_the_actors_roles_reads_them_in_code_order() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let first = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "WF-AA-FIRST",
+        &[],
+    )
+    .await;
+    let (_, first_token) = holder_in(&app, "wf.roles.indexed", None, &[first]).await;
+    let (_, plain_token) = holder_in(&app, "wf.roles.unindexed", None, &[]).await;
+
+    let workflow = publish_workflow(
+        &app,
+        &token,
+        routed_decision(
+            "wf_routed_indexed",
+            json!({ "and": [
+                { "==": [{ "var": "actor.roles.0" }, "WF-AA-FIRST"] },
+                { "==": [{ "var": "actor.roles.1" }, APPROVER_ROLE] }
+            ] }),
+        ),
+    )
+    .await;
+    let type_id = document_type(&app, &token, "PR_ROUTED_INDEXED", Some(workflow)).await;
+
+    assert_eq!(
+        decided_state(&app, &token, &first_token, type_id).await,
+        "MATCHED",
+        "actor.roles.0 and actor.roles.1 did not read the roles in code order"
+    );
+    assert_eq!(
+        decided_state(&app, &token, &plain_token, type_id).await,
+        "UNMATCHED",
+        "an approver holding no WF-AA-FIRST matched"
+    );
+}

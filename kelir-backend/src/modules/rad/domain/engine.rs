@@ -177,23 +177,12 @@ struct References {
 }
 
 impl References {
-    /// A `var` path, as the key it addresses in this scope.
+    /// A path read in this scope, as the key it addresses.
     ///
     /// A dotted path reads *into* a value (`address.city`), so the dependency
     /// is on the value's own key and the remainder is a property of whatever
-    /// that key holds. A numeric path is a positional index into an array
-    /// scope, which is not a key at all.
-    fn add_path(&mut self, path: &Value) {
-        let path = match path {
-            Value::String(text) => text.as_str(),
-            // `{"var": ["total", 0]}` — the path with a default beside it.
-            Value::Array(items) => match items.first() {
-                Some(Value::String(text)) => text.as_str(),
-                _ => return,
-            },
-            _ => return,
-        };
-
+    /// that key holds. An empty path is the whole record.
+    fn add_path(&mut self, path: &str) {
         if path.is_empty() {
             self.whole_scope = true;
             return;
@@ -205,61 +194,98 @@ impl References {
             self.keys.insert(head.to_owned());
         }
     }
+}
 
-    /// `missing` and `missing_some` take *names*, not expressions.
-    fn add_names(&mut self, argument: &Value) {
-        match argument {
-            Value::Array(items) => {
-                for item in items {
-                    if item.is_string() {
-                        self.add_path(item);
-                    }
-                }
+/// Every key `expression` reads, in the scope `expression` is written in.
+///
+/// [`visit_paths`] decides what is read in this scope; this keeps each path's
+/// head, which is the key a dependency is on.
+fn collect_references(expression: &Value, found: &mut References) {
+    visit_paths(expression, &mut |path| found.add_path(path));
+}
+
+/// The path a `var` operand names: the string itself, or the first element of
+/// `[path, default]` when it is a string. Anything else names no path.
+fn var_path(operand: &Value) -> Option<&str> {
+    match operand {
+        Value::String(text) => Some(text),
+        // `{"var": ["total", 0]}` — the path with a default beside it.
+        Value::Array(items) => items.first().and_then(Value::as_str),
+        _ => None,
+    }
+}
+
+/// `missing` and `missing_some` take *names*, not expressions.
+fn visit_names<'a, F: FnMut(&'a str)>(argument: &'a Value, visit: &mut F) {
+    match argument {
+        Value::Array(items) => {
+            for name in items.iter().filter_map(Value::as_str) {
+                visit(name);
             }
-            other => self.add_path(other),
+        }
+        other => {
+            if let Some(path) = var_path(other) {
+                visit(path);
+            }
         }
     }
 }
 
-/// Every key `expression` reads, in the scope `expression` is written in.
+/// Every path `expression` reads **in the scope it is written in**, whole and
+/// in the order it reads them: each `var` path, and each name `missing` and
+/// `missing_some` ask about. An empty path is given as `""`, the whole scope;
+/// a `var` whose operand is not a string names no path and is not given.
 ///
 /// **The iterator operators are the reason this is a walk and not a search for
 /// `var`.** `map`, `filter`, `reduce`, `all`, `some` and `none` evaluate their
 /// first argument in the current scope and every later one against each *item*
 /// of what that produced — so in the registry §6.1 invoice,
 /// `{"map": [{"var": "line_items"}, {"*": [{"var": "unit_price"}, …]}]}` reads
-/// `line_items` here and `unit_price` in a row. Collecting `unit_price` as a
-/// dependency of the top-level scope would invent an edge to whatever top-level
-/// field happened to share the name, and an invented edge is an invented cycle:
-/// a definition refused at publish for a loop it does not have.
-fn collect_references(expression: &Value, found: &mut References) {
+/// `line_items` here and `unit_price` in a row. Only the first argument is
+/// walked; `reduce`'s initial value is not either.
+///
+/// **One walk, two readers** ([#706]). The form engine keeps each path's head
+/// as a dependency between fields, where a path read into the wrong scope
+/// would invent an edge, and an invented edge is an invented cycle: a
+/// definition refused at publish for a loop it does not have.
+/// `workflow::domain::jwss::condition_path_errors` keeps each whole path and
+/// refuses one the workflow engine does not build. Both take the scope rule
+/// from here, so they cannot disagree about which operand addresses an
+/// element and which addresses the context.
+///
+/// [#706]: https://github.com/sujanto-gaws/kelir/issues/706
+pub(crate) fn visit_paths<'a, F: FnMut(&'a str)>(expression: &'a Value, visit: &mut F) {
     match expression {
         Value::Object(map) => {
             for (operator, argument) in map {
                 match operator.as_str() {
-                    "var" => found.add_path(argument),
-                    "missing" => found.add_names(argument),
+                    "var" => {
+                        if let Some(path) = var_path(argument) {
+                            visit(path);
+                        }
+                    }
+                    "missing" => visit_names(argument, visit),
                     // `{"missing_some": [n, ["a", "b"]]}` — the count, then the
                     // names.
                     "missing_some" => match argument.as_array().and_then(|items| items.get(1)) {
-                        Some(names) => found.add_names(names),
-                        None => found.add_names(argument),
+                        Some(names) => visit_names(names, visit),
+                        None => visit_names(argument, visit),
                     },
                     "map" | "filter" | "reduce" | "all" | "some" | "none" => {
                         match argument.as_array().and_then(|items| items.first()) {
-                            Some(source) => collect_references(source, found),
+                            Some(source) => visit_paths(source, visit),
                             // The shorthand: the argument given directly rather
                             // than wrapped in a list.
-                            None => collect_references(argument, found),
+                            None => visit_paths(argument, visit),
                         }
                     }
-                    _ => collect_references(argument, found),
+                    _ => visit_paths(argument, visit),
                 }
             }
         }
         Value::Array(items) => {
             for item in items {
-                collect_references(item, found);
+                visit_paths(item, visit);
             }
         }
         _ => {}
@@ -1456,6 +1482,54 @@ mod tests {
         total["conditional"] = json!({"action": "hide", "logic": {"missing": ["amount"]}});
 
         assert_eq!(ordered(&[total, plain("amount")]), ["amount", "total"]);
+    }
+
+    fn paths(expression: &Value) -> Vec<&str> {
+        let mut found = Vec::new();
+        visit_paths(expression, &mut |path| found.push(path));
+        found
+    }
+
+    /// The walk both readers share (#706): whole paths, in the order they are
+    /// read, from `var`, `missing` and `missing_some`.
+    #[test]
+    fn visits_each_path_whole_and_in_the_order_it_is_read() {
+        let expression = json!({"and": [
+            {"var": "address.city"},
+            {"var": ["total", 0]},
+            {"missing": ["a.b", 3, "c"]},
+            {"missing_some": [1, ["d", "e.f"]]},
+            {"missing": "g"},
+            {"var": ""},
+            {"var": 2},
+            {"var": [{"var": "dynamic"}]}
+        ]});
+
+        assert_eq!(
+            paths(&expression),
+            ["address.city", "total", "a.b", "c", "d", "e.f", "g", ""]
+        );
+    }
+
+    /// Each iterator's first operand is read in this scope, and nothing after
+    /// it is: not the element-scoped operand, and not `reduce`'s initial value.
+    #[test]
+    fn visits_only_an_iterators_source() {
+        for operator in ["map", "filter", "all", "some", "none"] {
+            let expression = json!({operator: [{"var": "lines"}, {">": [{"var": "qty"}, 1]}]});
+
+            assert_eq!(paths(&expression), ["lines"], "{operator}");
+        }
+
+        let reduce = json!({"reduce": [
+            {"var": "lines"},
+            {"+": [{"var": "current.qty"}, {"var": "accumulator"}]},
+            {"var": "start"}
+        ]});
+        assert_eq!(paths(&reduce), ["lines"]);
+
+        // The shorthand, with the argument given directly.
+        assert_eq!(paths(&json!({"some": {"var": "lines"}})), ["lines"]);
     }
 
     // -- The definition gate -----------------------------------------------

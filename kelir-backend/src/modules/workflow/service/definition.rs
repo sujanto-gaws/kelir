@@ -381,6 +381,16 @@ pub async fn publish_definition(
     // details lead the same 422 as D-111's, so an author learns both at once.
     let mut refused = jwss::role_scope_errors(&before.definition);
 
+    // **Every path a condition or a variable `source` reads is one the engine
+    // builds** (**D-115** B, #706; JWSS §6.1, §6.4). An unbuilt path reads as
+    // null and the condition takes another branch without a word, so it is
+    // refused here, where the author is. At publish and not at save, as the
+    // scope check above is, and a revision already published is not
+    // re-checked: it keeps the fallback it was published with. Pure, so it
+    // runs before the roles are taken, and its details sit between the scope
+    // details and D-111's.
+    refused.extend(jwss::condition_path_errors(&before.definition));
+
     // **Every role it names is live, and stays live until this commits**
     // (**D-111**, #572; JWSS §5.3). At publish and not at save: liveness is a
     // fact about the tenant, not the document (ADR-0019), and a check at save

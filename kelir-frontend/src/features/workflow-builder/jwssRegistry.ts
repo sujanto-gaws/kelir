@@ -194,18 +194,23 @@ export function starterDefinition(): JwssDefinition {
 }
 
 /**
- * What a condition may read: the context the engine **actually builds**
- * (`workflow/service/engine.rs`, `EvaluationContext::as_json` and
- * `document_facts`), not the wider one JWSS §6.1 sketches.
+ * What a condition may read: JWSS §6.1's condition context, which the engine
+ * builds in full (`workflow/service/engine.rs`; #706, D-115 B).
  *
- * §6.1 also lists `document.amount`, `document.documentTypeKey`, `actor.roles`
- * and `actor.departmentId`, and the engine builds none of them. A condition on
- * one reads `null`, and a comparison against `null` is silently false, so the
- * route would take the fallback and report nothing. Offering them would put
- * that mistake one click away. `formData` is every field of the document's
- * form, which this editor cannot enumerate — a workflow is bound to a document
- * type, not a form — so a `formData.<key>` path is typed, and counts as
- * offered through {@link CONDITION_FREE_PREFIXES}.
+ * `document.documentTypeKey` is the document type's stored upper-case code,
+ * `actor.roles` the acting user's role codes, and `actor.departmentId` their
+ * department's id, or `null` when they have none. `actor.roles` is an array, so
+ * it has no scalar type: a condition tests it with `in`, as
+ * `{"in": ["APPROVER", {"var": "actor.roles"}]}`. The builder has no visual
+ * `in` (D-110), so that expression is written in its JSON box and saved as
+ * written.
+ *
+ * **`document.amount` is not offered, because §6.1 no longer has it.** A
+ * document has no amount of its own: the figure is a field of its form, and a
+ * condition reads it as `formData.amount`. `formData` is every field of the
+ * document's form, which this editor cannot enumerate (a workflow is bound to a
+ * document type, not a form), so a `formData.<key>` path is typed, and counts
+ * as offered through {@link CONDITION_FREE_PREFIXES}.
  */
 export function conditionVariables(definition: JwssDefinition): LogicVariable[] {
   return [
@@ -213,6 +218,9 @@ export function conditionVariables(definition: JwssDefinition): LogicVariable[] 
     { path: 'document.documentTypeId', label: 'Document type id', type: 'text' },
     { path: 'document.documentNumber', label: 'Document number', type: 'text' },
     { path: 'actor.userId', label: 'Acting user id', type: 'text' },
+    { path: 'document.documentTypeKey', label: 'Document type key', type: 'text' },
+    { path: 'actor.roles', label: 'Acting user roles' },
+    { path: 'actor.departmentId', label: 'Acting user department id', type: 'text' },
     ...(definition.variables ?? []).map((variable) => ({
       path: `variables.${variable.key}`,
       label: `Variable ${variable.key}`,

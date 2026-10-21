@@ -89,6 +89,7 @@ use serde_json::Value;
 use super::graph::RoleReference;
 use super::task_type;
 use crate::error::ValidationDetail;
+use crate::modules::rad::domain::engine::visit_paths;
 use crate::modules::rad::domain::jfss::{check_operators, CONDITIONAL_OPERATORS};
 
 /// The meta-schema, vendored into the crate.
@@ -149,6 +150,29 @@ pub const ROLE_NOT_LIVE: &str = "ROLE_NOT_LIVE";
 /// The detail code a publish refuses a `departmentScope` on a `ROLE` rule with
 /// ([`role_scope_errors`]).
 pub const ROLE_TAKES_NO_SCOPE: &str = "ROLE_TAKES_NO_SCOPE";
+
+/// The refusal for a condition reading a path the engine does not build
+/// ([#706](https://github.com/sujanto-gaws/kelir/issues/706), **D-115** B).
+pub const CONDITION_PATH_NOT_BUILT: &str = "CONDITION_PATH_NOT_BUILT";
+
+/// The keys of the `document` half of JWSS §6.1's condition context.
+///
+/// **The engine's builder is held to this list**:
+/// `service::engine::document_facts` spells these keys and no other, and its
+/// unit test asserts the two agree, so a key added to one and not the other is
+/// a failing test rather than a publish that refuses a path the engine builds.
+/// `amount` is absent on purpose (**D-115** B): a condition wanting the amount
+/// reads `formData.amount`.
+pub const DOCUMENT_FACTS: &[&str] = &[
+    "status",
+    "documentTypeId",
+    "documentNumber",
+    "documentTypeKey",
+];
+
+/// The keys of the `actor` half, held to `service::engine::actor_facts` the
+/// same way.
+pub const ACTOR_FACTS: &[&str] = &["userId", "roles", "departmentId"];
 
 /// The compiled meta-schema. Compiled once — compiling it per request would put
 /// ~6 KB of JSON Schema on the save path of every workflow.
@@ -480,6 +504,137 @@ pub fn role_scope_errors(definition: &Value) -> Vec<ValidationDetail> {
             ))
         })
         .collect()
+}
+
+/// The refusal a publish gives for each path a transition `condition` or a
+/// variable `source` reads that the engine does not build
+/// ([JWSS §6.1, §6.4](../../../../../docs/schema/JSON%20Workflow%20Schema.md),
+/// **D-115** B, [#706]).
+///
+/// **Why at publish.** A path the engine does not build reads as `null`, a
+/// comparison against `null` is false, and the condition takes another branch
+/// without a word: the silent fallback #706 is about. Refusing at evaluation
+/// would turn approvals already running into 422s, which JWSS §9 forbids, and
+/// could not tell an absent `formData.<key>` from a misspelt one. So this is a
+/// narrowing at publish, as [`role_scope_errors`] is, and a revision already
+/// published is not re-checked: it keeps the fallback it was published with.
+///
+/// **What is built**: [`DOCUMENT_FACTS`] under `document`, [`ACTOR_FACTS`]
+/// under `actor` (and an index after `actor.roles`), anything under
+/// `formData`, a key the definition declares under `variables`, and each bare
+/// root. A `source` reading `variables.*` at instance start reads an empty
+/// object, and a declared key is still accepted there.
+///
+/// **What is read is [`visit_paths`]'s**, the walk the form engine's
+/// dependency graph uses: each `var`, `missing` and `missing_some` path, and
+/// an iterator's source but not its element-scoped operands. One detail per
+/// distinct path per expression, in the order it is read, transitions before
+/// variables. `allowedBy.expression` and `assignment.expression` are not read:
+/// `EXPRESSION` is refused at save (JWSS §5.3).
+///
+/// **Pure**: it reads the definition and nothing else, and takes no lock.
+///
+/// [#706]: https://github.com/sujanto-gaws/kelir/issues/706
+pub fn condition_path_errors(definition: &Value) -> Vec<ValidationDetail> {
+    let variables = array(definition, "variables");
+    let declared: BTreeSet<&str> = variables
+        .iter()
+        .filter_map(|variable| variable.get("key")?.as_str())
+        .collect();
+
+    let conditions =
+        transitions(definition)
+            .iter()
+            .enumerate()
+            .filter_map(|(index, transition)| {
+                let condition = transition.get("condition")?;
+                Some((
+                    format!("definition.transitions.{index}.condition"),
+                    condition,
+                ))
+            });
+    let sources = variables
+        .iter()
+        .enumerate()
+        .filter_map(|(index, variable)| {
+            let source = variable.get("source")?;
+            Some((format!("definition.variables.{index}.source"), source))
+        });
+
+    let mut details = Vec::new();
+
+    for (path, expression) in conditions.chain(sources) {
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        let mut unbuilt: Vec<&str> = Vec::new();
+
+        visit_paths(expression, &mut |read| {
+            if !is_built(read, &declared) && seen.insert(read) {
+                unbuilt.push(read);
+            }
+        });
+
+        details.extend(unbuilt.into_iter().map(|read| {
+            detail(
+                path.clone(),
+                "conditionPath",
+                CONDITION_PATH_NOT_BUILT,
+                not_built_message(read),
+            )
+        }));
+    }
+
+    details
+}
+
+/// Whether the engine builds `path` in JWSS §6.1's context.
+///
+/// An empty path is no path: `{"var": ""}` reads the whole context, which is
+/// built.
+fn is_built(path: &str, declared: &BTreeSet<&str>) -> bool {
+    if path.is_empty() {
+        return true;
+    }
+
+    let (root, rest) = match path.split_once('.') {
+        Some((root, rest)) => (root, Some(rest)),
+        None => (path, None),
+    };
+
+    match (root, rest) {
+        ("document" | "actor" | "formData" | "variables", None) | ("formData", Some(_)) => true,
+        ("document", Some(key)) => DOCUMENT_FACTS.contains(&key),
+        ("actor", Some(key)) => {
+            ACTOR_FACTS.contains(&key)
+                || key.strip_prefix("roles.").is_some_and(|index| {
+                    !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
+                })
+        }
+        ("variables", Some(key)) => declared.contains(key.split('.').next().unwrap_or(key)),
+        _ => false,
+    }
+}
+
+/// What a refusal of `read` says: the path, why it is refused, and what the
+/// engine builds.
+fn not_built_message(read: &str) -> String {
+    let built = DOCUMENT_FACTS
+        .iter()
+        .map(|key| format!("document.{key}"))
+        .chain(ACTOR_FACTS.iter().map(|key| format!("actor.{key}")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let instead = if read == "document.amount" {
+        " The amount is not a document fact: read `formData.amount`."
+    } else {
+        ""
+    };
+
+    format!(
+        "`{read}` is not a path the engine builds, so it would read as null and the \
+         condition would take another branch without saying so. A condition reads \
+         {built}, formData.<key>, or variables.<key> for a variable this definition \
+         declares (JWSS §6.1).{instead}"
+    )
 }
 
 /// JWSS §8's structural rules, in order, less the four this function does not own.
@@ -998,5 +1153,268 @@ mod tests {
 
     fn json_str(value: &str) -> Value {
         Value::String(value.to_owned())
+    }
+
+    // -- #706: a condition path the engine does not build --------------------
+
+    /// A definition with one conditioned edge and the given variables.
+    fn reading(condition: Value, variables: Value) -> Value {
+        serde_json::json!({
+            "states": [{ "code": "A" }, { "code": "DONE", "isFinal": true }],
+            "transitions": [
+                { "from": "A", "to": "DONE", "action": "APPROVE", "condition": condition }
+            ],
+            "variables": variables
+        })
+    }
+
+    fn refused_reads(definition: &Value) -> Vec<(String, String)> {
+        condition_path_errors(definition)
+            .into_iter()
+            .map(|detail| {
+                assert_eq!(detail.code, CONDITION_PATH_NOT_BUILT);
+                assert_eq!(detail.rule, "conditionPath");
+                let read = detail
+                    .message
+                    .split('`')
+                    .nth(1)
+                    .expect("the message names the path in backticks")
+                    .to_owned();
+                (detail.path, read)
+            })
+            .collect()
+    }
+
+    fn var(path: &str) -> Value {
+        serde_json::json!({ "var": path })
+    }
+
+    #[test]
+    fn condition_path_errors_refuses_each_unbuilt_path_at_its_expression() {
+        for path in [
+            "document.amount",
+            "document.foo",
+            "document.status.code",
+            "actor.email",
+            "actor.roles.first",
+            "actor.roles.",
+            "actor.userId.x",
+            "amount",
+            "variables.undeclared",
+            "variables.",
+            "Document.status",
+        ] {
+            assert_eq!(
+                refused_reads(&reading(var(path), serde_json::json!([]))),
+                [(
+                    "definition.transitions.0.condition".to_owned(),
+                    path.to_owned()
+                )],
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn condition_path_errors_accepts_every_path_the_engine_builds() {
+        let variables =
+            serde_json::json!([{ "key": "amount", "source": { "var": "formData.amount" } }]);
+
+        for path in [
+            "document.status",
+            "document.documentTypeId",
+            "document.documentNumber",
+            "document.documentTypeKey",
+            "actor.userId",
+            "actor.roles",
+            "actor.roles.0",
+            "actor.roles.12",
+            "actor.departmentId",
+            "formData",
+            "formData.amount",
+            "formData.lines.0.qty",
+            "variables.amount",
+            "variables.amount.deeper",
+            "document",
+            "actor",
+            "variables",
+            "",
+        ] {
+            assert!(
+                condition_path_errors(&reading(var(path), variables.clone())).is_empty(),
+                "{path}"
+            );
+        }
+    }
+
+    /// The constants are what the engine builds, and the message names them.
+    #[test]
+    fn the_message_names_the_path_and_the_built_paths_and_the_amounts_place() {
+        let details = condition_path_errors(&reading(
+            serde_json::json!({ "and": [var("document.amount"), var("actor.email")] }),
+            serde_json::json!([]),
+        ));
+
+        assert_eq!(details.len(), 2);
+        for detail in &details {
+            for built in [
+                "document.status",
+                "document.documentTypeKey",
+                "actor.roles",
+                "actor.departmentId",
+                "formData.<key>",
+            ] {
+                assert!(
+                    detail.message.contains(built),
+                    "{built}: {}",
+                    detail.message
+                );
+            }
+        }
+        assert!(
+            details[0].message.contains("`formData.amount`"),
+            "{}",
+            details[0].message
+        );
+        assert!(
+            !details[1].message.contains("`formData.amount`"),
+            "{}",
+            details[1].message
+        );
+    }
+
+    #[test]
+    fn condition_path_errors_reads_missing_missing_some_and_a_default() {
+        let condition = serde_json::json!({ "or": [
+            { "missing": ["formData.a", "document.amount"] },
+            { "missing_some": [1, ["actor.email", "formData.b"]] },
+            { "var": ["document.foo", 0] },
+            { "missing": "variables.nope" }
+        ] });
+
+        assert_eq!(
+            refused_reads(&reading(condition, serde_json::json!([])))
+                .into_iter()
+                .map(|(_, read)| read)
+                .collect::<Vec<_>>(),
+            [
+                "document.amount",
+                "actor.email",
+                "document.foo",
+                "variables.nope"
+            ]
+        );
+    }
+
+    /// A `var` with a non-string path names no path.
+    #[test]
+    fn condition_path_errors_ignores_a_var_that_names_no_path() {
+        for operand in [
+            serde_json::json!(0),
+            serde_json::json!(null),
+            serde_json::json!([]),
+            serde_json::json!([1, "document.amount"]),
+        ] {
+            let condition = serde_json::json!({ "var": operand });
+
+            assert!(
+                condition_path_errors(&reading(condition, serde_json::json!([]))).is_empty(),
+                "{operand}"
+            );
+        }
+    }
+
+    /// AC8: the element-scoped operand addresses the element, and is not read;
+    /// the iterator's source is. `reduce`'s initial value is not read either,
+    /// which is the form engine's rule, shared.
+    #[test]
+    fn condition_path_errors_reads_an_iterators_source_and_not_its_element() {
+        for operator in ["map", "filter", "all", "some", "none", "reduce"] {
+            let accepted =
+                serde_json::json!({ operator: [var("formData.lines"), { ">": [var("qty"), 1] }] });
+            assert!(
+                condition_path_errors(&reading(accepted, serde_json::json!([]))).is_empty(),
+                "{operator}"
+            );
+
+            let refused =
+                serde_json::json!({ operator: [var("document.lines"), { ">": [var("qty"), 1] }] });
+            assert_eq!(
+                refused_reads(&reading(refused, serde_json::json!([])))
+                    .into_iter()
+                    .map(|(_, read)| read)
+                    .collect::<Vec<_>>(),
+                ["document.lines"],
+                "{operator}"
+            );
+        }
+
+        let reduce = serde_json::json!({ "reduce": [
+            var("formData.lines"),
+            { "+": [var("current.qty"), var("accumulator")] },
+            var("document.amount")
+        ] });
+        assert!(condition_path_errors(&reading(reduce, serde_json::json!([]))).is_empty());
+    }
+
+    /// One detail per distinct path per expression, in the order read; a path
+    /// read in two expressions is told at each; transitions before variables.
+    #[test]
+    fn condition_path_errors_tells_each_path_once_per_expression_in_order() {
+        let definition = serde_json::json!({
+            "states": [{ "code": "A" }, { "code": "B" }, { "code": "DONE", "isFinal": true }],
+            "transitions": [
+                { "from": "A", "to": "B", "action": "APPROVE",
+                  "condition": { "and": [var("document.foo"), var("amount"), var("document.foo")] } },
+                { "from": "A", "to": "DONE", "action": "REJECT" },
+                { "from": "B", "to": "DONE", "action": "APPROVE",
+                  "condition": var("document.foo") }
+            ],
+            "variables": [
+                { "key": "declared", "source": var("formData.amount") },
+                { "key": "computed",
+                  "source": { "+": [var("variables.declared"), var("variables.computed"),
+                                    var("variables.later"), var("actor.email")] } },
+                { "key": "unsourced" }
+            ]
+        });
+
+        assert_eq!(
+            refused_reads(&definition),
+            [
+                ("definition.transitions.0.condition", "document.foo"),
+                ("definition.transitions.0.condition", "amount"),
+                ("definition.transitions.2.condition", "document.foo"),
+                ("definition.variables.1.source", "variables.later"),
+                ("definition.variables.1.source", "actor.email"),
+            ]
+            .map(|(path, read)| (path.to_owned(), read.to_owned()))
+        );
+    }
+
+    /// AC8: `allowedBy.expression` and `assignment.expression` are not read:
+    /// `EXPRESSION` is refused at save.
+    #[test]
+    fn condition_path_errors_reads_no_assignment_expression() {
+        let rule = serde_json::json!({
+            "assigneeType": "EXPRESSION", "expression": var("document.amount")
+        });
+        let definition = serde_json::json!({
+            "states": [
+                { "code": "A", "task": { "assignment": rule.clone() } },
+                { "code": "DONE", "isFinal": true }
+            ],
+            "transitions": [
+                { "from": "A", "to": "DONE", "action": "APPROVE", "allowedBy": rule }
+            ]
+        });
+
+        assert!(condition_path_errors(&definition).is_empty());
+    }
+
+    #[test]
+    fn condition_path_errors_reads_nothing_from_a_definition_with_no_expressions() {
+        assert!(condition_path_errors(&serde_json::json!({})).is_empty());
+        assert!(condition_path_errors(&serde_json::json!({ "transitions": "x" })).is_empty());
     }
 }

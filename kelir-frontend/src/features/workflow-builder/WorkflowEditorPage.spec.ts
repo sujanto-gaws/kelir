@@ -430,8 +430,55 @@ describe('WorkflowEditorPage', () => {
         'document.documentTypeId',
         'document.documentNumber',
         'actor.userId',
+        'document.documentTypeKey',
+        'actor.roles',
+        'actor.departmentId',
         'variables.threshold',
       ])
+    })
+
+    it('takes an `in` on actor.roles written as JSON, and saves it as written', async () => {
+      // The builder has no visual `in` (D-110): an author writes the
+      // membership test in the condition's JSON box, and it is kept unchanged.
+      const page = await render()
+      const roleTest = { in: ['APPROVER', { var: 'actor.roles' }] }
+
+      await byLabel(page, 'Edit Transition 1 condition as JSON').trigger('click')
+      await page
+        .get('[aria-label="Transition 1 condition"] textarea')
+        .setValue(JSON.stringify(roleTest))
+
+      expect(page.get('[aria-label="Transition 1 condition"]').text()).toContain(
+        'cannot show this expression',
+      )
+
+      await save(page)
+
+      expect(lastWrite().definition.transitions[0].condition).toEqual(roleTest)
+    })
+
+    it('keeps an `in` on actor.roles under `and` as loaded, through an unrelated edit', async () => {
+      const roleTest = { in: ['APPROVER', { var: 'actor.roles' }] }
+      const condition = {
+        and: [{ '==': [{ var: 'document.status' }, 'PENDING_APPROVAL'] }, roleTest],
+      }
+      const loaded = jwss()
+
+      loaded.transitions[0].condition = condition
+      stored = record({ definition: loaded })
+
+      const page = await render()
+
+      // The comparison stays visual; only the membership test is the JSON box.
+      expect(page.find('[aria-label="Transition 1 condition, operand 1: operator"]').exists()).toBe(
+        true,
+      )
+      expect(byLabel(page, 'Transition 1 condition, operand 2').text()).toContain('Advanced')
+
+      await page.get('[data-testid="workflow-name"]').setValue('Renamed')
+      await save(page)
+
+      expect(lastWrite().definition.transitions[0].condition).toEqual(condition)
     })
   })
 

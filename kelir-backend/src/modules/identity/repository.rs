@@ -234,6 +234,14 @@ pub async fn permissions_for_user(
 
 /// Role codes the user holds in one tenant. Scoped for the same reason
 /// [`permissions_for_user`] is — these two are what the access token carries.
+///
+/// **Inside the grant's window**, as [`permissions_for_user`] and
+/// `workflow::repository::task::holds_role` read it: a grant whose
+/// `valid_from` is after today or whose `valid_to` is before it is not a role
+/// the user holds. This is the one reader of a user's role codes, so a
+/// workflow condition's `actor.roles` and the token's `roles` claim agree with
+/// each other and with the claim's `permissions`
+/// ([#706](https://github.com/sujanto-gaws/kelir/issues/706)).
 pub async fn role_codes_for_user(
     executor: impl PgExecutor<'_>,
     tenant_id: Uuid,
@@ -246,6 +254,8 @@ pub async fn role_codes_for_user(
         JOIN roles r ON r.id = ur.role_id AND r.tenant_id = ur.tenant_id
                     AND r.deleted_at IS NULL
         WHERE ur.tenant_id = $1 AND ur.user_id = $2 AND ur.deleted_at IS NULL
+          AND (ur.valid_from IS NULL OR ur.valid_from <= current_date)
+          AND (ur.valid_to IS NULL OR ur.valid_to >= current_date)
         ORDER BY 1
         "#,
         tenant_id,
@@ -253,6 +263,36 @@ pub async fn role_codes_for_user(
     )
     .fetch_all(executor)
     .await
+}
+
+/// The department a user sits in, `users.department_id` as stored: the
+/// `actor.departmentId` a workflow condition reads
+/// ([#706](https://github.com/sujanto-gaws/kelir/issues/706)).
+///
+/// **The department's own liveness is not read.** A condition reads a fact
+/// about the user, and it stays true while the department is soft-deleted;
+/// `workflow::service::assignment`'s `OwnerDepartment` refuses a deleted one
+/// because an assignment cannot resolve to it, and this is not that question.
+/// `None` for a user with no department, and for no such user. A plain read,
+/// which takes no lock.
+pub async fn department_of_user(
+    executor: impl PgExecutor<'_>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    let row = sqlx::query_scalar!(
+        r#"
+        SELECT department_id
+        FROM users
+        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+        "#,
+        tenant_id,
+        user_id
+    )
+    .fetch_optional(executor)
+    .await?;
+
+    Ok(row.flatten())
 }
 
 // ---------------------------------------------------------------------------

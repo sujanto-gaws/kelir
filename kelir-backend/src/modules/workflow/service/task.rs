@@ -916,6 +916,18 @@ pub async fn decide(
     )
     .await?;
 
+    // **What a condition reads about the type and the decider** ([#706], JWSS
+    // §6.1), on the pool with the owner's department above, before the
+    // transaction. The actor is the decider, never the delegator the task may
+    // be decided on behalf of. Plain reads that take no lock, so a role or a
+    // department changed between here and the commit is not seen, as the
+    // owner's department is not.
+    //
+    // [#706]: https://github.com/sujanto-gaws/kelir/issues/706
+    let document_type_key =
+        engine::read_document_type_key(&state.pool, tenant_id, document.document_type_id).await?;
+    let actor_facts = engine::read_actor_facts(&state.pool, tenant_id, Some(user_id)).await?;
+
     let mut transaction = state.pool.begin().await?;
 
     // **Instance first.** The check below reads the instance's state to choose a
@@ -1022,10 +1034,12 @@ pub async fn decide(
             document: engine::document_facts(
                 document.status,
                 document.document_type_id,
+                &document_type_key,
                 document.document_number.as_deref(),
             ),
             form_data: document.form_data.clone(),
             variables,
+            actor: actor_facts,
         },
         // The history row's provenance, and the third of the three places one
         // comment lands — the task (what was decided here), the decision record

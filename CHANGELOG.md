@@ -59,8 +59,10 @@ While the major version is `0`, the public API may change in any release.
   state's transitions under it. A state carries its task and who it is assigned
   to. A transition carries its action, target, who may take it, whether it
   requires a comment, and a condition built in the shared logic builder. The
-  builder offers only the context the engine fills in, not the amount or the
-  actor's roles that JWSS §6.1 names. **The server's verdict is the only one**:
+  builder offers only the context the engine fills in~~, not the amount or the
+  actor's roles that JWSS §6.1 names~~. (Struck 2026-10-21: since #706, under
+  *Fixed*, the engine builds the actor's roles, and JWSS §6.1 no longer names
+  the amount.) **The server's verdict is the only one**:
   a refusal at save or publish is drawn on the state or transition it names,
   S12's on the comment checkbox, and anything else is listed on the form.
   **A published revision opens read-only, says why, and offers a new
@@ -651,6 +653,37 @@ While the major version is `0`, the public API may change in any release.
   department resolves. A reassign is refused for every target, so the remedy
   is the data (Installation and Deployment §9). No migration, and no schema
   change.
+- **A workflow condition reads the document type's key and the acting user's
+  roles and department, and one reading a path the engine does not build is
+  refused at publish** ([#706](https://github.com/sujanto-gaws/kelir/issues/706),
+  decision **D-115** B; [#755](https://github.com/sujanto-gaws/kelir/issues/755)).
+  JWSS §6.1 names `document.documentTypeKey`, `actor.roles` and
+  `actor.departmentId`, and the engine built none of them, so a condition on
+  one read `null` and took the fallback edge without a warning. The engine now
+  builds all three: the type's `type_code` as stored, upper-case; the acting
+  user's role codes, read at the submit or decision; and the user's
+  `users.department_id`, `null` when there is none. `document.amount` is
+  dropped from JWSS §6.1 instead, because a document has no amount of its own:
+  a condition wanting it reads `formData.amount`. Publishing a definition now
+  answers 422 with a `CONDITION_PATH_NOT_BUILT` detail at each
+  `definition.transitions.N.condition` or `definition.variables.N.source` that
+  reads, through `var`, `missing` or `missing_some`, a path outside the
+  context, one per path, after any `ROLE_TAKES_NO_SCOPE` detail and before any
+  `ROLE_NOT_LIVE` detail, and the definition stays a draft. Saving a draft
+  does not check it. **Revisions already published are not re-checked, and
+  keep the silent fallback.** The workflow editor offers the three paths; a
+  test of whether the roles hold one is written with *Edit as JSON*, since the
+  builder draws no `in`. A
+  `before_workflow_transition` guard was given an empty `documentTypeKey`,
+  read from a key nothing set (#755); it is now the type's key, as an
+  after-hook on the same transition is given. The role reader now honours a
+  grant's `valid_from` and `valid_to` window
+  ([#706](https://github.com/sujanto-gaws/kelir/issues/706)), so a grant
+  outside its window is no longer in the sign-in `roles` claim or in the
+  roles `/auth/me` returns, which now agree with `permissions`, which always
+  excluded it; no document names the window. No migration and no schema
+  change: JWSS takes revision R-17, its meta-schema is untouched, and the
+  Document Type Definition Schema's examples read `formData.amount`.
 
 ### Known limitations
 

@@ -173,6 +173,13 @@ pub struct StartRequest<'a> {
 /// document — the submit has it locked, a decision has it read — and assembled
 /// into the specification's shape here, so the two cannot disagree about what
 /// `{"var": "formData.amount"}` addresses.
+///
+/// **What it holds is what a publish accepts** ([#706], **D-115** B).
+/// `jwss::condition_path_errors` refuses a path outside this shape, and the
+/// keys of `document` and `actor` are its `DOCUMENT_FACTS` and `ACTOR_FACTS`,
+/// which this module's tests hold the builders to.
+///
+/// [#706]: https://github.com/sujanto-gaws/kelir/issues/706
 pub struct EvaluationContext {
     /// The document's own facts. Built by [`document_facts`], which is the one
     /// place their spelling is decided.
@@ -182,46 +189,132 @@ pub struct EvaluationContext {
     /// The instance's variables, flat and keyed as the definition declared them.
     /// Empty at instance start, because they are what is being computed.
     pub variables: Value,
+    /// Who is acting. Built by [`actor_facts`], the one place its spelling is
+    /// decided, and read by [`read_actor_facts`].
+    pub actor: Value,
 }
 
 impl EvaluationContext {
-    fn as_json(&self, actor: Option<Uuid>) -> Value {
+    fn as_json(&self) -> Value {
         json!({
             "document": self.document,
             "formData": self.form_data,
             "variables": self.variables,
-            "actor": { "userId": actor },
+            "actor": self.actor,
         })
     }
 }
 
 /// The `document` half of JWSS §6.1's condition context.
 ///
-/// **One builder, called by both paths**, so a condition written against
+/// **One builder, called by every path**, so a condition written against
 /// `document.status` means the same thing at instance start as it does at the
 /// decision that follows. Two call sites each assembling their own object is
 /// two vocabularies, and a workflow author would have no way to tell which one
 /// their expression was being evaluated against.
 ///
-/// **`document.amount` is absent, and that is a limitation rather than an
-/// omission.** JWSS §6.1's own example reads `document.amount`, and
-/// `documents.amount` exists as a column "promoted from form data for workflow
-/// conditions" (Database Schema §6.6) — **written by nothing**. Until something
-/// promotes it, a condition wanting the figure reads `formData.amount`, which
-/// is the server's re-evaluated payload and is therefore the more trustworthy of
-/// the two anyway. Putting a null `amount` here would be worse than leaving it
-/// out: a JSON Logic comparison against null is silently false, so a routing
-/// rule would take the wrong branch and report nothing.
+/// **`documentTypeKey` is the type's `type_code` exactly as stored**: the
+/// upper-cased form of DTDS §2's lower-case key, and the value the after-chain
+/// is given as `documentTypeKey`. A condition comparing it with the lower-case
+/// spelling never matches; JWSS §6.1 says so.
+///
+/// **`document.amount` is not built, by decision** (**D-115** B, [#706]).
+/// `documents.amount` is written by nothing, and a null `amount` here would
+/// make every comparison against it silently false. A condition wanting the
+/// figure reads `formData.amount`, the server's re-evaluated payload, and a
+/// publish refuses `document.amount` with a message that says so.
+///
+/// [#706]: https://github.com/sujanto-gaws/kelir/issues/706
 pub fn document_facts(
     status: DocumentStatus,
     document_type_id: Uuid,
+    document_type_key: &str,
     document_number: Option<&str>,
 ) -> Value {
     json!({
         "status": status,
         "documentTypeId": document_type_id,
         "documentNumber": document_number,
+        "documentTypeKey": document_type_key,
     })
+}
+
+/// The `actor` half of JWSS §6.1's condition context: the person acting.
+///
+/// **One builder, as [`document_facts`] is for the other half** ([#706]).
+/// `userId`, `roles` and `departmentId` are spelled here and nowhere else, so
+/// the submit, the resubmission and the decision cannot give a condition
+/// three different actors.
+///
+/// **The actor is the person acting**: the submitter on a submit, the decider
+/// on a decision, and never the delegator a task is decided on behalf of.
+/// `roles` are role codes, sorted and each once, because every role reference
+/// in a definition is a code and a code is what moves between tenants.
+/// No actor is `{userId: null, roles: [], departmentId: null}`.
+///
+/// [#706]: https://github.com/sujanto-gaws/kelir/issues/706
+pub fn actor_facts(user_id: Option<Uuid>, roles: &[String], department_id: Option<Uuid>) -> Value {
+    let mut roles: Vec<&str> = roles.iter().map(String::as_str).collect();
+    roles.sort_unstable();
+    roles.dedup();
+
+    json!({
+        "userId": user_id,
+        "roles": roles,
+        "departmentId": department_id,
+    })
+}
+
+/// Reads the acting user's facts and builds [`actor_facts`] from them.
+///
+/// **Read fresh, not taken from the token.** An access token's `roles` are a
+/// snapshot from sign-in, and a condition routing on a role the user lost
+/// since would route on a fact that is no longer true. So the roles are
+/// `identity::repository::role_codes_for_user`'s, and the department is the
+/// stored `users.department_id`, with no check that the department is live.
+///
+/// **On the pool, before the caller's transaction opens**, as the owner's
+/// department is read for [`AssignmentContext::of_document`]: coding standard
+/// §2.5 allows one pooled connection a request, so `executor` is the pool, and
+/// both reads are plain `SELECT`s that take no lock. A change committed between
+/// this read and the caller's commit is not seen.
+pub async fn read_actor_facts<'e, E: sqlx::PgExecutor<'e> + Copy>(
+    executor: E,
+    tenant_id: Uuid,
+    actor: Option<Uuid>,
+) -> Result<Value, AppError> {
+    let Some(user_id) = actor else {
+        return Ok(actor_facts(None, &[], None));
+    };
+
+    let roles =
+        crate::modules::identity::repository::role_codes_for_user(executor, tenant_id, user_id)
+            .await?;
+    let department_id =
+        crate::modules::identity::repository::department_of_user(executor, tenant_id, user_id)
+            .await?;
+
+    Ok(actor_facts(Some(user_id), &roles, department_id))
+}
+
+/// A document type's key, for [`document_facts`]: its stored `type_code`.
+///
+/// On the pool before the caller's transaction, as [`read_actor_facts`] is.
+/// A document always has a type, so a type not found is an internal fault
+/// rather than a condition's business.
+pub async fn read_document_type_key<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
+    tenant_id: Uuid,
+    document_type_id: Uuid,
+) -> Result<String, AppError> {
+    crate::modules::document_type::repository::type_code_of(executor, tenant_id, document_type_id)
+        .await?
+        .ok_or_else(|| AppError::Internal {
+            source: anyhow::anyhow!(
+                "document type {document_type_id} of tenant {tenant_id} has no row to read its \
+                 type_code from"
+            ),
+        })
 }
 
 /// The instance a start produced, and the document status it projected.
@@ -561,7 +654,7 @@ pub async fn fire(
             break;
         };
 
-        let outcome = evaluate_condition(condition, evaluation, actor).map_err(|error| {
+        let outcome = evaluate_condition(condition, evaluation).map_err(|error| {
             // **The engine's own words go to the log and not to the caller.**
             // `EvaluationError::message` names operators and argument shapes;
             // `rad::evaluator` says it is diagnostic, and a routing expression
@@ -906,7 +999,7 @@ async fn advance_automatically<'g>(
             break;
         };
 
-        let outcome = evaluate_condition(condition, evaluation, actor).map_err(|error| {
+        let outcome = evaluate_condition(condition, evaluation).map_err(|error| {
             tracing::error!(
                 workflow = %graph.workflow_key,
                 from = %state.code,
@@ -1116,7 +1209,13 @@ async fn publish_transition(
 /// so the guard is judged against the move that is made, and the value is
 /// given even when it equals `currentStatus`, as the after-chain gives it.
 ///
+/// **Its `documentTypeKey` is the type's stored `type_code`** ([#755]),
+/// read from the evaluation's `document.documentTypeKey`. `after_hooks` gives
+/// an after-hook the same value from `hook_subject`, so the two chains read
+/// one key here too.
+///
 /// [#679]: https://github.com/sujanto-gaws/kelir/issues/679
+/// [#755]: https://github.com/sujanto-gaws/kelir/issues/755
 #[allow(
     clippy::too_many_arguments,
     reason = "the payload's own fields, assembled where they are known"
@@ -1181,9 +1280,13 @@ async fn run_transition_guards(
         source: hook::Source::Workflow,
         tenant_id,
         document_id,
+        // **The type's stored `type_code`** (#755): `document.documentTypeKey`,
+        // which `document_facts` builds from the value `hook_subject` gives the
+        // after-chain, so a guard and an after-hook read one key. It read
+        // `typeCode`, which nothing set, and every guard was given `""`.
         document_type_key: evaluation
             .document
-            .get("typeCode")
+            .get("documentTypeKey")
             .and_then(Value::as_str)
             .unwrap_or_default(),
         current_status: evaluation.document.get("status").and_then(Value::as_str),
@@ -1552,7 +1655,7 @@ async fn write_variables(
     // computes them, so a `source` reading another variable would be reading a
     // value that does not exist yet. JWSS gives no ordering between variable
     // declarations, so there is no correct order in which it could.
-    let context = request.evaluation.as_json(request.actor);
+    let context = request.evaluation.as_json();
 
     // One evaluator for the whole set, which is what `RuleEvaluator::new`'s own
     // documentation asks for: it holds the operator table, and building one per
@@ -1640,10 +1743,9 @@ async fn write_variables(
 fn evaluate_condition(
     condition: &Value,
     evaluation: &EvaluationContext,
-    actor: Option<Uuid>,
 ) -> Result<bool, crate::modules::rad::evaluator::EvaluationError> {
     RuleEvaluator::new()
-        .evaluate(condition, &evaluation.as_json(actor))
+        .evaluate(condition, &evaluation.as_json())
         .map(|value| value.as_bool().unwrap_or(false))
 }
 
@@ -1819,4 +1921,114 @@ fn reference_error(error: sqlx::Error) -> AppError {
 /// without widening `DecisionAction`.
 pub fn transition_of(action: DecisionAction) -> TransitionAction {
     action.transition()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::*;
+    use crate::modules::workflow::domain::jwss::{ACTOR_FACTS, DOCUMENT_FACTS};
+
+    fn keys(value: &Value) -> BTreeSet<&str> {
+        value
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect()
+    }
+
+    fn context(actor: Value) -> EvaluationContext {
+        EvaluationContext {
+            document: document_facts(
+                DocumentStatus::Submitted,
+                Uuid::nil(),
+                "PURCHASE_REQUISITION",
+                Some("PR-2026-000001"),
+            ),
+            form_data: json!({ "amount": 45_000_000 }),
+            variables: json!({}),
+            actor,
+        }
+    }
+
+    /// **#706 AC4**: no actor is a null user with no roles and no department.
+    #[test]
+    fn no_actor_is_a_null_user_with_no_roles_and_no_department() {
+        assert_eq!(
+            context(actor_facts(None, &[], None)).as_json()["actor"],
+            json!({ "userId": null, "roles": [], "departmentId": null })
+        );
+    }
+
+    /// **#706 AC4**, through the reader: no actor reads nothing. The pool
+    /// reaches no server, so a reader that went to the database is an error.
+    #[tokio::test]
+    async fn no_actor_is_built_without_a_read() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(50))
+            .connect_lazy("postgres://nobody@127.0.0.1:1/nothing")
+            .expect("a lazy pool");
+
+        let actor = read_actor_facts(&pool, Uuid::nil(), None)
+            .await
+            .expect("no actor needs no read");
+
+        assert_eq!(actor, actor_facts(None, &[], None));
+    }
+
+    /// **#706 AC5, AC6**: the context holds exactly the keys a publish
+    /// accepts, the builders spell them, and `document.amount` is not one.
+    #[test]
+    fn the_context_holds_exactly_the_keys_a_publish_accepts() {
+        let user = Uuid::now_v7();
+        let department = Uuid::now_v7();
+        let built = context(actor_facts(
+            Some(user),
+            &["APPROVER".to_owned()],
+            Some(department),
+        ))
+        .as_json();
+
+        assert_eq!(
+            keys(&built),
+            BTreeSet::from(["document", "formData", "variables", "actor"])
+        );
+        assert_eq!(
+            keys(&built["document"]),
+            DOCUMENT_FACTS.iter().copied().collect::<BTreeSet<_>>()
+        );
+        assert_eq!(
+            keys(&built["actor"]),
+            ACTOR_FACTS.iter().copied().collect::<BTreeSet<_>>()
+        );
+        assert!(built["document"].get("amount").is_none());
+
+        assert_eq!(
+            built["document"],
+            json!({
+                "status": "SUBMITTED",
+                "documentTypeId": Uuid::nil(),
+                "documentNumber": "PR-2026-000001",
+                "documentTypeKey": "PURCHASE_REQUISITION",
+            })
+        );
+        assert_eq!(
+            built["actor"],
+            json!({ "userId": user, "roles": ["APPROVER"], "departmentId": department })
+        );
+    }
+
+    /// `actor.roles` is codes, sorted, each once: a user granted one role in
+    /// two departments holds it once.
+    #[test]
+    fn the_actors_roles_are_sorted_codes_each_once() {
+        let roles = ["WF-SENIOR", "APPROVER", "WF-SENIOR", "AUDITOR"].map(str::to_owned);
+
+        assert_eq!(
+            actor_facts(None, &roles, None)["roles"],
+            json!(["APPROVER", "AUDITOR", "WF-SENIOR"])
+        );
+    }
 }
