@@ -641,9 +641,12 @@ While the major version is `0`, the public API may change in any release.
   `allowedBy` `OWNER_DEPARTMENT` while the owner has no live department,
   `REQUESTED_DEPARTMENT` while the document names none, or a department code
   naming no live department is raised, and every decision on it is refused
-  as `ASSIGNMENT_UNRESOLVED`. Once claimed, it stayed on its holder's inbox,
-  its count, both dashboard cards and its page. It is now left off them as
-  #530's tasks are, and its page answers 404; an unclaimed one is unchanged.
+  as `ASSIGNMENT_UNRESOLVED`. The submit that raises it still answers 200
+  when only its edges carry the scope (#689); one whose own `assignment`
+  cannot resolve is refused at the submit, as before. Once claimed, it stayed
+  on its holder's inbox, its count, both dashboard cards and its page. It is
+  now left off them as #530's tasks are, and its page answers 404; an
+  unclaimed one is unchanged.
   The edge reads its department live, so the task returns when the
   department resolves. A reassign is refused for every target, so the remedy
   is the data (Installation and Deployment §9). No migration, and no schema
