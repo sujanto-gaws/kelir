@@ -1,3 +1,5 @@
+import * as os from 'node:os'
+
 import { expect, test, type Page } from '@playwright/test'
 
 import { runSuffix, signInOverApi, type ApiSession } from '../support/api'
@@ -515,5 +517,466 @@ test('an administrator builds a workflow in the editor, and a document is approv
   } finally {
     await admin.close()
     await decider.close()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// #721: what one layout of a large definition costs, in Chromium
+// ---------------------------------------------------------------------------
+
+/**
+ * The read-only graph lays a definition out with dagre, synchronously, on the
+ * main thread (#721, Sprint 24 row 17). This test **measures** that at the
+ * five sizes #721 names, in a real browser, and asserts nothing about time.
+ * The remedy (a worker, a stated ceiling, or the graph declining above a size)
+ * is chosen on these numbers afterwards, so a threshold here would be the
+ * remedy decided in advance (AC11, AC14).
+ *
+ * # What the number is, and what it is not
+ *
+ * **Wall time from the click on *Graph* to the caption**, taken with
+ * `performance.now()` in the page: a capture listener stamps the click and a
+ * `MutationObserver` stamps the caption showing this draft's counts. In that
+ * window run dagre's layout **and** Vue Flow's first render of the nodes and
+ * edges, in one synchronous render: `WorkflowGraph.vue` reads the layout while
+ * it builds the nodes it hands Vue Flow, and draws the caption in the same
+ * pass. Dagre alone cannot be timed without instrumenting the product, which
+ * this row does not do (AC10).
+ *
+ * Beside it, **the long tasks that overlap the window**: their summed
+ * duration, their count and the longest. A long task is 50 ms or more of main
+ * thread the page could not answer input in, so the longest is how long the
+ * tab froze. Then the long tasks **after** the caption until the page is quiet,
+ * which is Vue Flow measuring the nodes, drawing the edges and fitting the
+ * view. Recorded, not asserted.
+ *
+ * **The jsdom figures in #721 are not comparable.** jsdom renders nothing, and
+ * its shape was not this one; the issue's table is not reproduced here as if
+ * it were the measured shape (AC6).
+ *
+ * # The shape, and why it is not quite `large()`'s
+ *
+ * `workflowGraph.shapes.spec.ts`'s `large()`: steps approving forward, each
+ * step after the first returning to the first step and rejecting to one final
+ * `REJECTED` state. **A draft save refuses that shape**: the save runs the
+ * structural rules, S9 among them, and `large()` maps no state to `COMPLETED`
+ * or `CANCELLED`. Posted on 2026-10-22, it came back `422` `S9`
+ * `NO_TERMINAL_STATUS`. So the last step approves into a final `COMPLETED`
+ * state, and N states are N−2 steps, `REJECTED` and `COMPLETED`, with 3N−8
+ * transitions. The counts are read from the definition built, and logged
+ * beside each size (AC5, AC6). Every edge names the first test's role in
+ * `allowedBy` (S5) and every step offers its task to it; a draft is never
+ * published, so the role check at publish (D-111) does not apply.
+ *
+ * # One layout per size, and the chunk already fetched
+ *
+ * One page, so one browser context, throughout. The *Graph* tab is opened
+ * once on the smallest draft first, which fetches the graph's lazy chunk
+ * (ADR-0046); that open is logged as a warm-up and is not a measured size
+ * (AC7). Each size is then a fresh page load with the tab closed, so the click
+ * lays the graph out once, smallest to largest (AC9).
+ *
+ * **A fresh load does not keep the chunk warm by itself.** The release stack
+ * serves the bundle with no `Cache-Control`, so Chromium holds the chunk only
+ * as long as its heuristic freshness lasts, and then asks for it again on the
+ * click. On 2026-10-22 that put the chunk's four files inside the measured
+ * window at 150 and at 300 states. So the warm-up records which files the
+ * click fetched, and each fresh load is given them before its click: the
+ * scripts as `modulepreload`, which puts them in the page's module map where
+ * the click's `import()` finds them, and the stylesheet as a stylesheet. **The
+ * test then asserts that nothing was fetched inside the window**, so a cold
+ * chunk fails the measurement rather than joining it.
+ */
+const LAYOUT_SIZES = [20, 40, 80, 150, 300] as const
+
+/**
+ * The test's own timeout (AC2), above the config's 60 s.
+ *
+ * jsdom took 43.7 s for one layout at 300 states. Chromium has not been
+ * measured, which is the point of the test, and on top of the layouts come six
+ * page loads in which the editor lists every state. Ten minutes leaves the
+ * 300-state case many times the jsdom figure before the test gives up.
+ */
+const LAYOUT_TEST_TIMEOUT = 10 * 60_000
+
+/**
+ * The wait for the caption, explicit because the config's 15 s `expect`
+ * timeout would otherwise govern it (AC2). Inside the test's own, and the only
+ * wait in this test that a slow layout can fail.
+ */
+const CAPTION_TIMEOUT = 5 * 60_000
+
+/** Loading the editor on a large draft lists every state. That is not measured. */
+const EDITOR_TIMEOUT = 2 * 60_000
+
+/** How long without a long task counts as quiet: before the click, and after the caption. */
+const QUIET_MS = 1_500
+
+/** The fixed tail of the caption `WorkflowGraph.vue` draws. */
+const CAPTION_TAIL = '. Read-only: change the workflow in the list.'
+
+/** A seeded draft, with the counts read from the definition that was posted. */
+interface LayoutDraft {
+  readonly id: string
+  readonly workflowKey: string
+  readonly size: number
+  readonly states: number
+  readonly transitions: number
+}
+
+/** What the page records. Stamps are `performance.now()`, in milliseconds. */
+interface LayoutProbe {
+  clickAt: number | null
+  captionAt: number | null
+  frameAt: number | null
+  longTasks: { start: number; duration: number }[]
+}
+
+type ProbedWindow = Window & { __layoutProbe?: LayoutProbe }
+
+/** The approval chain at `size` states, as described in the test's header. */
+function approvalChain(size: number, workflowKey: string) {
+  const steps = Array.from({ length: size - 2 }, (_, at) => `STEP_${at}`)
+  const allowedBy = `ROLE:${roleCode}`
+
+  const states: Record<string, unknown>[] = steps.map((code, at) => ({
+    code,
+    name: `Approval step ${at + 1}`,
+    mapsToDocumentStatus: 'PENDING_APPROVAL',
+    task: {
+      taskDefinitionKey: `step_${at}`,
+      taskName: `Approve at step ${at + 1}`,
+      assignment: { assigneeType: 'ROLE', roleCode },
+    },
+  }))
+  states.push(
+    { code: 'REJECTED', name: 'Rejected', mapsToDocumentStatus: 'REJECTED', isFinal: true },
+    // What S9 needs and `large()` lacks: the chain approves into it.
+    { code: 'COMPLETED', name: 'Completed', mapsToDocumentStatus: 'COMPLETED', isFinal: true },
+  )
+
+  const transitions: Record<string, unknown>[] = []
+  steps.forEach((code, at) => {
+    transitions.push({ from: code, to: steps[at + 1] ?? 'COMPLETED', action: 'APPROVE', allowedBy })
+
+    if (at > 0) {
+      transitions.push(
+        { from: code, to: steps[0], action: 'RETURN', allowedBy },
+        { from: code, to: 'REJECTED', action: 'REJECT', allowedBy },
+      )
+    }
+  })
+
+  return {
+    workflowKey,
+    version: '1.0.0',
+    name: `Layout at ${size} states ${suffix}`,
+    initialState: steps[0],
+    states,
+    transitions,
+  }
+}
+
+/** Posts one draft (AC3). Saved, never published. */
+async function seedLayoutDraft(size: number): Promise<LayoutDraft> {
+  const workflowKey = `e2e_layout_${size}_${suffix}`.toLowerCase()
+  const definition = approvalChain(size, workflowKey)
+
+  const created = await session.context.post(`${API_PREFIX}/workflow/definitions`, {
+    data: { workflowKey, name: definition.name, definition },
+  })
+
+  expect(
+    created.ok(),
+    `seeding the ${size}-state draft failed: ${created.status()} ${await created.text()}`,
+  ).toBeTruthy()
+
+  return {
+    id: ((await created.json()) as { data: { id: string } }).data.id,
+    workflowKey,
+    size,
+    states: definition.states.length,
+    transitions: definition.transitions.length,
+  }
+}
+
+function captionOf(draft: LayoutDraft): string {
+  return `${draft.states} states, ${draft.transitions} transitions${CAPTION_TAIL}`
+}
+
+/** A fresh load of the editor on a draft, with every state listed and the graph closed. */
+async function openEditor(page: Page, draft: LayoutDraft): Promise<void> {
+  await page.goto(`/admin/workflows/${draft.id}`)
+
+  await expect(page.getByTestId('workflow-key')).toHaveValue(draft.workflowKey, {
+    timeout: EDITOR_TIMEOUT,
+  })
+  await expect(page.getByTestId(`state-code-${draft.states - 1}`)).toHaveValue('COMPLETED', {
+    timeout: EDITOR_TIMEOUT,
+  })
+  await expect(page.getByTestId('workflow-graph')).toHaveCount(0)
+}
+
+/**
+ * Installs the page's clocks before the click (AC8).
+ *
+ * **The window is from the click to the caption showing this draft's
+ * counts.** The click is stamped by a capture listener, before the tab's own
+ * handler runs; the caption by a `MutationObserver`, which runs once the
+ * render that inserted it has finished. One frame later, two animation frames
+ * after the caption, `frameAt` is stamped, and the observer is read only after
+ * that.
+ */
+async function installProbe(page: Page, caption: string): Promise<void> {
+  await page.evaluate((expected) => {
+    const probe: LayoutProbe = { clickAt: null, captionAt: null, frameAt: null, longTasks: [] }
+    ;(window as ProbedWindow).__layoutProbe = probe
+
+    // `buffered`, so the page load's long tasks are there to wait out.
+    new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        probe.longTasks.push({ start: entry.startTime, duration: entry.duration })
+      }
+    }).observe({ type: 'longtask', buffered: true })
+
+    document.addEventListener(
+      'click',
+      (event) => {
+        if (
+          probe.clickAt === null &&
+          event.target instanceof Element &&
+          event.target.closest('[data-testid="view-graph"]')
+        ) {
+          probe.clickAt = performance.now()
+        }
+      },
+      { capture: true },
+    )
+
+    const watcher = new MutationObserver(() => {
+      const shown = document.querySelector('[data-testid="workflow-graph-summary"]')
+
+      // Whitespace collapsed, as Playwright's `toHaveText` reads it.
+      const text = shown?.textContent?.replace(/\s+/g, ' ').trim()
+
+      if (probe.clickAt === null || probe.captionAt !== null || text !== expected) {
+        return
+      }
+
+      probe.captionAt = performance.now()
+      watcher.disconnect()
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          probe.frameAt = performance.now()
+        }),
+      )
+    })
+    watcher.observe(document.body, { childList: true, subtree: true, characterData: true })
+  }, caption)
+}
+
+/** Waits until no long task has run for `QUIET_MS`, counting from the caption once it shows. */
+async function waitForQuiet(page: Page): Promise<void> {
+  await page.waitForFunction(
+    (quiet) => {
+      const probe = (window as ProbedWindow).__layoutProbe
+
+      if (probe === undefined) {
+        return false
+      }
+
+      const lastEnd = probe.longTasks.reduce(
+        (end, task) => Math.max(end, task.start + task.duration),
+        probe.captionAt ?? 0,
+      )
+
+      return performance.now() - lastEnd >= quiet
+    },
+    QUIET_MS,
+    { timeout: EDITOR_TIMEOUT, polling: 250 },
+  )
+}
+
+/**
+ * Clicks *Graph* and waits for the caption; returns one greppable line.
+ *
+ * **The caption reading exactly the seeded counts is the one assertion**
+ * (AC11): the graph drew every state and every transition of a large
+ * definition, and nothing as *not declared*.
+ */
+async function measureLayout(
+  page: Page,
+  draft: LayoutDraft,
+  chromium: string,
+): Promise<{ line: string; fetched: string[] }> {
+  const caption = captionOf(draft)
+
+  await installProbe(page, caption)
+  await waitForQuiet(page)
+
+  await page.getByTestId('view-graph').click()
+
+  await expect(page.getByTestId('workflow-graph-summary')).toHaveText(caption, {
+    timeout: CAPTION_TIMEOUT,
+  })
+  await page.waitForFunction(
+    () => typeof (window as ProbedWindow).__layoutProbe?.frameAt === 'number',
+    null,
+    { timeout: EDITOR_TIMEOUT },
+  )
+  await waitForQuiet(page)
+
+  const { probe, fetched } = await page.evaluate(() => {
+    const probe = (window as ProbedWindow).__layoutProbe as LayoutProbe
+    const fetched = performance
+      .getEntriesByType('resource')
+      .filter(
+        (entry) =>
+          entry.startTime >= (probe.clickAt ?? 0) &&
+          entry.startTime <= (probe.captionAt ?? 0) &&
+          (entry as PerformanceResourceTiming).transferSize > 0,
+      )
+      .map((entry) => new URL(entry.name).pathname)
+
+    return { probe, fetched }
+  })
+
+  const clickAt = probe.clickAt as number
+  const captionAt = probe.captionAt as number
+  const frameAt = probe.frameAt as number
+
+  // A task overlapping the window counts whole. The click's own task began
+  // before the listener stamped it, and the render ends after the observer
+  // stamped the caption, so the layout's task straddles both edges.
+  const within = probe.longTasks.filter(
+    (task) => task.start <= captionAt && task.start + task.duration >= clickAt,
+  )
+  const after = probe.longTasks.filter((task) => task.start > captionAt)
+  const settledAt = after.reduce((end, task) => Math.max(end, task.start + task.duration), frameAt)
+
+  const sum = (tasks: { duration: number }[]) =>
+    Math.round(tasks.reduce((total, task) => total + task.duration, 0))
+  const longest = Math.round(Math.max(0, ...within.map((task) => task.duration)))
+
+  const line = [
+    `#721 layout: size=${draft.size}`,
+    `states=${draft.states}`,
+    `transitions=${draft.transitions}`,
+    `wall_ms=${Math.round(captionAt - clickAt)}`,
+    `longtask_ms=${sum(within)}`,
+    `longtasks=${within.length}`,
+    `longtask_max_ms=${longest}`,
+    `frame_ms=${Math.round(frameAt - clickAt)}`,
+    `after_longtask_ms=${sum(after)}`,
+    `after_longtasks=${after.length}`,
+    `settled_ms=${Math.round(settledAt - clickAt)}`,
+    // What the page fetched inside the window, by path. The graph's chunk
+    // here would mean the warm-up did not warm it.
+    `fetched=${fetched.length}${fetched.length > 0 ? `[${fetched.join(',')}]` : ''}`,
+    `chromium=${chromium}`,
+  ].join(' ')
+
+  return { line, fetched }
+}
+
+/** The files under `/assets/` the page fetched since `since`, by path. */
+async function assetsFetchedSince(page: Page, since: number): Promise<string[]> {
+  return page.evaluate(
+    (from) =>
+      performance
+        .getEntriesByType('resource')
+        .filter((entry) => entry.startTime >= from)
+        .map((entry) => new URL(entry.name).pathname)
+        .filter((path) => path.startsWith('/assets/')),
+    since,
+  )
+}
+
+/**
+ * Hands a fresh load the graph's chunk before its click (see the test's
+ * header). The `href` is the path, as the bundle's own preload helper writes
+ * it, so the helper finds the links and adds none of its own.
+ */
+async function preloadChunk(page: Page, chunk: readonly string[]): Promise<void> {
+  await page.evaluate(
+    (paths) =>
+      Promise.all(
+        paths.map(
+          (path) =>
+            new Promise<void>((resolve, reject) => {
+              const link = document.createElement('link')
+              link.rel = path.endsWith('.css') ? 'stylesheet' : 'modulepreload'
+              link.href = path
+              link.onload = () => resolve()
+              link.onerror = () => reject(new Error(`could not preload ${path}`))
+              document.head.append(link)
+            }),
+        ),
+      ).then(() => undefined),
+    [...chunk],
+  )
+}
+
+/** Records a line where a reader of the run will find it (AC12). */
+function record(type: string, line: string): void {
+  console.log(line)
+  test.info().annotations.push({ type, description: line })
+}
+
+test('the graph of a large draft is laid out and drawn once per size, and the time it takes is recorded', async ({
+  browser,
+}) => {
+  test.setTimeout(LAYOUT_TEST_TIMEOUT)
+
+  const chromium = browser.version()
+  const cpus = os.cpus()
+  record(
+    '#721 machine',
+    `#721 layout machine: chromium=${chromium} cpu="${cpus[0]?.model.trim() ?? 'unknown'}" ` +
+      `threads=${cpus.length} memory_gb=${Math.round(os.totalmem() / 2 ** 30)} ` +
+      `os=${os.platform()}-${os.release()}`,
+  )
+
+  const drafts: LayoutDraft[] = []
+  for (const size of LAYOUT_SIZES) {
+    drafts.push(await seedLayoutDraft(size))
+  }
+
+  const page = await browser.newPage()
+
+  try {
+    const { username, password } = credentials()
+    await signIn(page, username, password)
+
+    // --- Warm-up: the chunk is fetched here, and this open is not a size ----
+    const smallest = drafts[0]
+    await openEditor(page, smallest)
+    const warmFrom = await page.evaluate(() => performance.now())
+    const warmStart = Date.now()
+    await page.getByTestId('view-graph').click()
+    await expect(page.getByTestId('workflow-graph-summary')).toHaveText(captionOf(smallest), {
+      timeout: CAPTION_TIMEOUT,
+    })
+    const warmMs = Date.now() - warmStart
+    const chunk = await assetsFetchedSince(page, warmFrom)
+    record(
+      '#721 warm-up',
+      `#721 layout warm-up, not a measurement: size=${smallest.size} ` +
+        `click_to_caption_ms=${warmMs} (Playwright clock) chunk=[${chunk.join(',')}]`,
+    )
+    expect(chunk, 'opening the graph fetched no chunk, so there is nothing to warm').not.toEqual([])
+
+    // --- One layout per size, each on a fresh load, smallest first ----------
+    for (const draft of drafts) {
+      await openEditor(page, draft)
+      await preloadChunk(page, chunk)
+
+      const { line, fetched } = await measureLayout(page, draft, chromium)
+      record('#721 layout', line)
+      // Not a time: whether the number is the layout's alone (AC7).
+      expect(fetched, `fetched inside the measured window at ${draft.size} states`).toEqual([])
+    }
+  } finally {
+    await page.close()
   }
 })
