@@ -6,11 +6,11 @@ import type { Page, PageQuery } from '@/types/api'
 /**
  * A paginated list whose page, search and filters live in the URL.
  *
- * [`usePaginatedList`](./usePaginatedList.ts) drives the identity tables, whose
- * endpoints take paging and nothing else — it says so, and offering controls it
- * could not honour would have been worse than offering none. The master-data
- * role views do take search and filters (FR-MDM-008), so this is the shape for
- * them; the two are kept apart rather than one grown a mode flag, because a
+ * [`usePaginatedList`](./usePaginatedList.ts) drives the tables that offer
+ * paging and nothing else — it says so, and offering controls it could not
+ * honour would have been worse than offering none. The master-data role views
+ * do take search and filters (FR-MDM-008), and the document type, role and
+ * tenant tables take a search (#598), so this is the shape for them; the two are kept apart rather than one grown a mode flag, because a
  * list with no filters and a list with filters are different components on the
  * screen as well as in the code.
  *

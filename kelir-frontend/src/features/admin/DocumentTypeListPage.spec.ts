@@ -1,6 +1,7 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 
 import DocumentTypeListPage from './DocumentTypeListPage.vue'
 import {
@@ -59,8 +60,11 @@ const EVERY_PERMISSION = [
   'document-type:delete',
 ]
 
+const blank = { template: '<div />' }
+
 describe('DocumentTypeListPage', () => {
   let backend: FakeBackendHandle
+  let router: Router
   let rows: unknown[]
   /** What a `GET /document-types/{id}` answers. */
   let detail: { status: number; body: unknown }
@@ -111,10 +115,18 @@ describe('DocumentTypeListPage', () => {
 
   afterEach(() => backend.restore())
 
-  async function render(permissions: string[] = EVERY_PERMISSION): Promise<VueWrapper> {
+  async function render(permissions: string[] = EVERY_PERMISSION, query = ''): Promise<VueWrapper> {
     useAuthStore().$patch({ user: principal(permissions) })
 
-    const wrapper = mount(DocumentTypeListPage)
+    // **The page and the search live in the URL** (#598).
+    router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/admin/document-types', name: 'admin-document-types', component: blank }],
+    })
+    await router.push(`/admin/document-types${query}`)
+    await router.isReady()
+
+    const wrapper = mount(DocumentTypeListPage, { global: { plugins: [router] } })
 
     for (let round = 0; round < 5; round += 1) {
       await flushPromises()
@@ -122,6 +134,34 @@ describe('DocumentTypeListPage', () => {
 
     return wrapper
   }
+
+  it('sends the search and the page in the URL to the server (#598)', async () => {
+    await render(undefined, '?search=acme&page=2')
+
+    const reads = backend.requests.filter((request) => request.url === '/document-types')
+    const last = reads[reads.length - 1]
+
+    expect(last?.params).toMatchObject({ search: 'acme', page: 2 })
+  })
+
+  it('writes a search to the URL and returns to page 1 (#598)', async () => {
+    const wrapper = await render(undefined, '?page=3')
+    const search = wrapper.get('[data-testid="types-search"]')
+
+    await search.setValue('  acme  ')
+    await search.trigger('change')
+    await flushPromises()
+
+    expect(router.currentRoute.value.query).toEqual({ search: 'acme' })
+  })
+
+  it('says nothing matches a search, rather than that there is nothing (#598)', async () => {
+    rows = []
+
+    const wrapper = await render(undefined, '?search=nothing')
+
+    expect(wrapper.text()).toContain('No document types match this search.')
+  })
 
   it('lists the types the API returned', async () => {
     const wrapper = await render()

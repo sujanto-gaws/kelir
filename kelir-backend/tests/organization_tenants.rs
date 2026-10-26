@@ -1139,6 +1139,103 @@ async fn a_deleted_tenant_leaves_the_list_and_admits_nobody() {
     assert_eq!(refused.status, StatusCode::UNAUTHORIZED);
 }
 
+/// The tenant codes on one page of the list, in the order the server gave them.
+fn tenant_codes(listed: &common::TestResponse) -> Vec<String> {
+    listed
+        .data()
+        .as_array()
+        .unwrap_or_else(|| panic!("a list response: {}", listed.body))
+        .iter()
+        .filter_map(|tenant| tenant["tenantCode"].as_str().map(str::to_owned))
+        .collect()
+}
+
+fn listed_total(listed: &common::TestResponse) -> u64 {
+    listed.body["meta"]["total"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("a meta.total: {}", listed.body))
+}
+
+/// The tenant table's search ([#598]), held as `list_search.rs` holds the
+/// other lists' (#525).
+///
+/// - `search` is a case-insensitive substring of the code or the name.
+/// - `_` matches itself, so `ZZXSEEK` is not found.
+/// - `meta.total` counts the matches.
+/// - A blank search is no search, and a padded one is the search.
+/// - A deleted tenant stays out whatever the search.
+///
+/// The list is newest first. The tenants sought are a day old and
+/// twenty-five fillers are new, so the first page does not reach them.
+///
+/// [#598]: https://github.com/sujanto-gaws/kelir/issues/598
+#[tokio::test]
+async fn a_tenant_is_found_by_its_code_or_name_past_the_first_page() {
+    let app = multi_tenant_app().await;
+    let token = administering_token(&app).await;
+
+    sqlx::query(
+        r"INSERT INTO tenants (id, tenant_code, name, created_at)
+          SELECT gen_random_uuid(), 'FILLER_' || n, 'Filler ' || n, now()
+          FROM generate_series(1, 25) AS n",
+    )
+    .execute(&app.pool)
+    .await
+    .expect("the fillers");
+    sqlx::query(
+        r"INSERT INTO tenants (id, tenant_code, name, created_at, deleted_at) VALUES
+            (gen_random_uuid(), 'ZZ_SEEK_1', 'First sought', now() - interval '1 day', NULL),
+            (gen_random_uuid(), 'ZZ_NAMED', 'Named zz_seek too', now() - interval '25 hours', NULL),
+            (gen_random_uuid(), 'ZZXSEEK', 'A wildcard would find this', now() - interval '1 day', NULL),
+            (gen_random_uuid(), 'ZZ_SEEK_GONE', 'Deleted', now() - interval '1 day', now())",
+    )
+    .execute(&app.pool)
+    .await
+    .expect("the tenants sought");
+
+    let first_page = app.get(TENANTS, Some(&token)).await;
+    assert_eq!(first_page.status, StatusCode::OK, "{}", first_page.body);
+    assert!(
+        !tenant_codes(&first_page).contains(&"ZZ_SEEK_1".to_owned()),
+        "the tenants sought did not sort past the first page"
+    );
+
+    // Lower case against upper-case codes; ZZ_NAMED by its name; newest first.
+    let searched = app
+        .get(&format!("{TENANTS}?search=zz_seek"), Some(&token))
+        .await;
+    assert_eq!(searched.status, StatusCode::OK, "{}", searched.body);
+    assert_eq!(
+        tenant_codes(&searched),
+        ["ZZ_SEEK_1", "ZZ_NAMED"],
+        "{}",
+        searched.body
+    );
+    assert_eq!(listed_total(&searched), 2, "{}", searched.body);
+
+    let padded = app
+        .get(&format!("{TENANTS}?search=%20zz_seek%20"), Some(&token))
+        .await;
+    assert_eq!(listed_total(&padded), 2, "padded search: {}", padded.body);
+
+    let blank = app
+        .get(&format!("{TENANTS}?search=%20%20"), Some(&token))
+        .await;
+    assert_eq!(blank.status, StatusCode::OK, "{}", blank.body);
+    assert_eq!(
+        listed_total(&blank),
+        listed_total(&first_page),
+        "{}",
+        blank.body
+    );
+
+    let nul = app
+        .get(&format!("{TENANTS}?search=a%00b"), Some(&token))
+        .await;
+    assert_eq!(nul.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", nul.body);
+    assert_eq!(nul.body["error"]["details"][0]["path"], "search");
+}
+
 #[tokio::test]
 async fn creating_a_tenant_is_recorded_against_the_tenant_that_created_it() {
     // Audit answers "who did this". A record filed under the *new* tenant would

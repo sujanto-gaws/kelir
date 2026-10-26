@@ -8,7 +8,7 @@ import {
 } from "../support/documents";
 import { API_PREFIX, credentials } from "../support/env";
 import { publishForm } from "../support/forms";
-import { pageUntilVisible } from "../support/paging";
+import { searchTable } from "../support/table-search";
 import {
   addApprover,
   bindWorkflow,
@@ -161,11 +161,12 @@ test("an administrator deletes a role an open task needs, and is shown the task 
   await page.getByRole("link", { name: "Roles" }).click();
   await expect(page).toHaveURL(/\/admin\/roles/);
 
-  // The run's own role, on whichever page its code sorts it to (#521).
+  // The run's own role, found by its code wherever it sorts (#598).
   const roleRow = page
     .getByRole("table")
     .getByRole("row", { name: new RegExp(roleCode) });
-  await pageUntilVisible(page, roleRow);
+  await searchTable(page, "roles-search", roleCode);
+  await expect(roleRow).toBeVisible();
 
   // --- Delete it, and confirm --------------------------------------------------
   await roleRow.getByRole("button", { name: "Delete" }).click();
@@ -209,9 +210,9 @@ test("an administrator deletes a role an open task needs, and is shown the task 
   await refused.getByRole("button", { name: "Close" }).last().click();
   await expect(refused).toHaveCount(0);
 
+  // The reload keeps the search for its code.
   await page.reload();
-  await pageUntilVisible(
-    page,
+  await expect(
     page.getByRole("table").getByRole("row", { name: new RegExp(roleCode) }),
-  );
+  ).toBeVisible();
 });

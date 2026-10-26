@@ -4,6 +4,7 @@ use uuid::Uuid;
 
 use super::domain::{Tenant, TenantStatus};
 use crate::modules::identity::domain::RevokeReason;
+use crate::utils::search::like_contains;
 
 /// A tenant row as the administration surface reads it.
 ///
@@ -86,11 +87,17 @@ pub async fn find_live_status(
 /// `user_count` counts live users only. A soft-deleted account is not somebody
 /// whose session suspension would stop being renewed, and the number exists to
 /// answer exactly that question.
+///
+/// `search` is a case-insensitive substring of the code or the name (#598),
+/// already trimmed, with blank as `None`. Changed together with [`count`].
 pub async fn list(
     executor: impl PgExecutor<'_>,
+    search: Option<&str>,
     limit: i64,
     offset: i64,
 ) -> Result<Vec<TenantRecord>, sqlx::Error> {
+    let search = search.map(like_contains);
+
     let rows = sqlx::query!(
         r#"
         SELECT t.id, t.tenant_code, t.name, t.status, t.created_at,
@@ -101,9 +108,11 @@ pub async fn list(
                ) AS "user_count!"
         FROM tenants t
         WHERE t.deleted_at IS NULL
+          AND ($1::text IS NULL OR t.tenant_code ILIKE $1 OR t.name ILIKE $1)
         ORDER BY t.created_at DESC, t.tenant_code
-        LIMIT $1 OFFSET $2
+        LIMIT $2 OFFSET $3
         "#,
+        search,
         limit,
         offset
     )
@@ -175,11 +184,26 @@ const TENANT_CODE_LOCK_CLASS: i32 = 0x544E_4344;
 /// The key within the class. One, since the lock is deployment-wide.
 const TENANT_CODE_LOCK_KEY: &str = "tenant_code";
 
-pub async fn count(executor: impl PgExecutor<'_>) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar!("SELECT count(*) FROM tenants WHERE deleted_at IS NULL")
-        .fetch_one(executor)
-        .await
-        .map(|count| count.unwrap_or(0))
+/// How many live tenants match the list's search (#598); `None` counts them
+/// all. Changed together with [`list`].
+pub async fn count(
+    executor: impl PgExecutor<'_>,
+    search: Option<&str>,
+) -> Result<i64, sqlx::Error> {
+    let search = search.map(like_contains);
+
+    sqlx::query_scalar!(
+        r#"
+        SELECT count(*)
+        FROM tenants
+        WHERE deleted_at IS NULL
+          AND ($1::text IS NULL OR tenant_code ILIKE $1 OR name ILIKE $1)
+        "#,
+        search,
+    )
+    .fetch_one(executor)
+    .await
+    .map(|count| count.unwrap_or(0))
 }
 
 pub async fn find(

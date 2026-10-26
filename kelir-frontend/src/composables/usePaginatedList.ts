@@ -10,10 +10,10 @@ import type { Page, PageQuery } from '@/types/api'
  * The backend's `meta` reports `total` only — no `totalPages`, no `hasNext` —
  * so the page count is derived here rather than in every table.
  *
- * There are no search, filter or sort parameters on the identity list endpoints
- * (`ORDER BY username` and `ORDER BY role_code` are fixed server-side), so this
- * deliberately offers none: a control that silently did nothing would be worse
- * than its absence.
+ * It offers no search, filter or sort, deliberately: a control that silently
+ * did nothing would be worse than its absence. A table that offers a search
+ * uses [`useQueryBackedList`](./useQueryBackedList.ts) instead, as the document
+ * type, role and tenant tables have since #598.
  */
 export interface PaginatedList<T> {
   items: Ref<T[]>
