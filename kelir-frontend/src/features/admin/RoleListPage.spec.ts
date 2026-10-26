@@ -175,6 +175,81 @@ describe('RoleListPage', () => {
     expect(wrapper.get('[data-testid="roles-empty"]').text()).toBe('No roles match this search.')
   })
 
+  it('shows the search the URL holds and keeps it across a page turn (#598)', async () => {
+    handler = (request) =>
+      request.url === '/identity/permissions'
+        ? permissionsReply([])
+        : rolesReply([clerkRole], { page: 1, pageSize: 20, total: 40 })
+
+    const wrapper = await mountPage(['identity:role:read'], '?search=acme')
+
+    expect((wrapper.get('[data-testid="roles-search"]').element as HTMLInputElement).value).toBe(
+      'acme',
+    )
+
+    await buttonLabelled(wrapper.findAll('button'), 'Next')?.trigger('click')
+    await flushPromises()
+
+    expect(router.currentRoute.value.query).toEqual({ search: 'acme', page: '2' })
+  })
+
+  it('steps back a page when a delete empties the last one (#598)', async () => {
+    handler = (request) =>
+      request.url === '/identity/permissions'
+        ? permissionsReply([])
+        : rolesReply([clerkRole], { page: 2, pageSize: 1, total: 2 })
+
+    const wrapper = await mountPage(['identity:role:read', 'identity:role:delete'], '?page=2')
+
+    await buttonLabelled(rowsOf(wrapper)[0].findAll('button'), 'Delete')?.trigger('click')
+
+    handler = (request) => {
+      if (request.method === 'delete') {
+        return { status: 204 }
+      }
+
+      return request.url === '/identity/permissions'
+        ? permissionsReply([])
+        : rolesReply([adminRole], { page: 1, pageSize: 1, total: 1 })
+    }
+
+    await buttonLabelled(wrapper.find('[role="dialog"]').findAll('button'), 'Delete')?.trigger(
+      'click',
+    )
+    await flushPromises()
+
+    expect(router.currentRoute.value.query).toEqual({ page: '1' })
+  })
+
+  it('stays on its page when a delete leaves rows on it (#598)', async () => {
+    handler = (request) =>
+      request.url === '/identity/permissions'
+        ? permissionsReply([])
+        : rolesReply([adminRole, clerkRole], { page: 2, pageSize: 2, total: 4 })
+
+    const wrapper = await mountPage(['identity:role:read', 'identity:role:delete'], '?page=2')
+
+    await buttonLabelled(rowsOf(wrapper)[1].findAll('button'), 'Delete')?.trigger('click')
+
+    handler = (request) => {
+      if (request.method === 'delete') {
+        return { status: 204 }
+      }
+
+      return request.url === '/identity/permissions'
+        ? permissionsReply([])
+        : rolesReply([adminRole], { page: 2, pageSize: 2, total: 3 })
+    }
+
+    await buttonLabelled(wrapper.find('[role="dialog"]').findAll('button'), 'Delete')?.trigger(
+      'click',
+    )
+    await flushPromises()
+
+    expect(router.currentRoute.value.query).toEqual({ page: '2' })
+    expect(rowsOf(wrapper)).toHaveLength(1)
+  })
+
   it('hides every action from a caller who can only read', async () => {
     const wrapper = await mountPage(['identity:role:read'])
     const buttons = wrapper.findAll('button')

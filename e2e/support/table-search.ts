@@ -20,14 +20,26 @@ import type { Page } from '@playwright/test'
  * assertion reads the searched rows, and not the page that was on screen
  * before. A reload keeps the search, because the URL holds it.
  *
+ * **A search the URL already holds sends nothing**, because the route does not
+ * change, so there is no answer to wait for: the rows on screen are already
+ * that search's. `term` is compared as the box trims it.
+ *
  * [#503]: https://github.com/sujanto-gaws/kelir/issues/503
  * [#521]: https://github.com/sujanto-gaws/kelir/issues/521
  * [#598]: https://github.com/sujanto-gaws/kelir/issues/598
  */
 export async function searchTable(page: Page, searchTestId: string, term: string): Promise<void> {
   const search = page.getByTestId(searchTestId)
+  const wanted = term.trim()
+
+  if (new URL(page.url()).searchParams.get('search') === wanted) {
+    await search.fill(term)
+    await search.press('Enter')
+    return
+  }
+
   const answered = page.waitForResponse(
-    (response) => new URL(response.url()).searchParams.get('search') === term,
+    (response) => new URL(response.url()).searchParams.get('search') === wanted,
   )
 
   await search.fill(term)

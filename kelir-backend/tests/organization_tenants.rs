@@ -1236,6 +1236,48 @@ async fn a_tenant_is_found_by_its_code_or_name_past_the_first_page() {
     assert_eq!(nul.body["error"]["details"][0]["path"], "search");
 }
 
+/// A searched tenant list pages through its matches ([#598]).
+///
+/// `meta.total` is every match, and page two holds the match page one did not.
+/// An offset dropped from the statement, or swapped with the limit when the
+/// search took `$1`, would serve page one twice.
+///
+/// [#598]: https://github.com/sujanto-gaws/kelir/issues/598
+#[tokio::test]
+async fn a_searched_tenant_list_pages_through_its_matches() {
+    let app = multi_tenant_app().await;
+    let token = administering_token(&app).await;
+
+    sqlx::query(
+        r"INSERT INTO tenants (id, tenant_code, name, created_at) VALUES
+            (gen_random_uuid(), 'PG_SEEK_NEW', 'Newer', now() - interval '1 hour'),
+            (gen_random_uuid(), 'PG_SEEK_OLD', 'Older', now() - interval '2 hours')",
+    )
+    .execute(&app.pool)
+    .await
+    .expect("the tenants paged through");
+
+    let first = app
+        .get(
+            &format!("{TENANTS}?search=pg_seek&pageSize=1"),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+    assert_eq!(tenant_codes(&first), ["PG_SEEK_NEW"], "{}", first.body);
+    assert_eq!(listed_total(&first), 2, "{}", first.body);
+
+    let second = app
+        .get(
+            &format!("{TENANTS}?search=pg_seek&pageSize=1&page=2"),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(second.status, StatusCode::OK, "{}", second.body);
+    assert_eq!(tenant_codes(&second), ["PG_SEEK_OLD"], "{}", second.body);
+    assert_eq!(listed_total(&second), 2, "{}", second.body);
+}
+
 #[tokio::test]
 async fn creating_a_tenant_is_recorded_against_the_tenant_that_created_it() {
     // Audit answers "who did this". A record filed under the *new* tenant would

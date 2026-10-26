@@ -214,6 +214,51 @@ describe('TenantListPage', () => {
     expect(router.currentRoute.value.query).toEqual({ page: '1' })
   })
 
+  it('stays on its page when a delete leaves rows on it (#598)', async () => {
+    handler = () => ({
+      status: 200,
+      body: listBody([platform, acme], { page: 2, pageSize: 2, total: 4 }),
+    })
+
+    const wrapper = await mountPage(
+      ['organization:tenant:read', 'organization:tenant:manage'],
+      '?page=2',
+    )
+
+    await buttonLabelled(rowsOf(wrapper)[1].findAll('button'), 'Delete')?.trigger('click')
+
+    handler = (request) =>
+      request.method === 'delete'
+        ? { status: 204 }
+        : { status: 200, body: listBody([platform], { page: 2, pageSize: 2, total: 3 }) }
+
+    await buttonLabelled(wrapper.find('[role="dialog"]').findAll('button'), 'Delete')?.trigger(
+      'click',
+    )
+    await flushPromises()
+
+    expect(router.currentRoute.value.query).toEqual({ page: '2' })
+    expect(rowsOf(wrapper)).toHaveLength(1)
+  })
+
+  it('shows the search the URL holds and keeps it across a page turn (#598)', async () => {
+    handler = () => ({
+      status: 200,
+      body: listBody([acme], { page: 1, pageSize: 20, total: 40 }),
+    })
+
+    const wrapper = await mountPage(['organization:tenant:read'], '?search=acme')
+
+    expect((wrapper.get('[data-testid="tenants-search"]').element as HTMLInputElement).value).toBe(
+      'acme',
+    )
+
+    await buttonLabelled(wrapper.findAll('button'), 'Next')?.trigger('click')
+    await flushPromises()
+
+    expect(router.currentRoute.value.query).toEqual({ search: 'acme', page: '2' })
+  })
+
   it('sends the search and the page in the URL to the server (#598)', async () => {
     await mountPage(['organization:tenant:read'], '?search=acme&page=2')
 

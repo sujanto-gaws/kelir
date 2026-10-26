@@ -66,6 +66,8 @@ describe('DocumentTypeListPage', () => {
   let backend: FakeBackendHandle
   let router: Router
   let rows: unknown[]
+  /** The list's `meta`; unset, one page holding every row. */
+  let listMeta: { page: number; pageSize: number; total: number } | undefined
   /** What a `GET /document-types/{id}` answers. */
   let detail: { status: number; body: unknown }
 
@@ -74,6 +76,7 @@ describe('DocumentTypeListPage', () => {
     window.localStorage.clear()
 
     rows = [summary()]
+    listMeta = undefined
     detail = {
       status: 200,
       body: {
@@ -108,7 +111,11 @@ describe('DocumentTypeListPage', () => {
 
       return {
         status: 200,
-        body: { success: true, data: rows, meta: { page: 1, pageSize: 20, total: rows.length } },
+        body: {
+          success: true,
+          data: rows,
+          meta: listMeta ?? { page: 1, pageSize: 20, total: rows.length },
+        },
       }
     })
   })
@@ -133,6 +140,20 @@ describe('DocumentTypeListPage', () => {
     }
 
     return wrapper
+  }
+
+  /** Confirms the open delete dialog and lets the list read itself again. */
+  async function confirmIn(wrapper: VueWrapper): Promise<void> {
+    const confirm = wrapper
+      .find('[role="dialog"]')
+      .findAll('button')
+      .find((button) => button.text() === 'Delete')
+
+    await confirm?.trigger('click')
+
+    for (let round = 0; round < 5; round += 1) {
+      await flushPromises()
+    }
   }
 
   it('sends the search and the page in the URL to the server (#598)', async () => {
@@ -161,6 +182,53 @@ describe('DocumentTypeListPage', () => {
     const wrapper = await render(undefined, '?search=nothing')
 
     expect(wrapper.text()).toContain('No document types match this search.')
+  })
+
+  it('shows the search the URL holds and keeps it across a page turn (#598)', async () => {
+    listMeta = { page: 1, pageSize: 20, total: 40 }
+
+    const wrapper = await render(undefined, '?search=acme')
+
+    expect((wrapper.get('[data-testid="types-search"]').element as HTMLInputElement).value).toBe(
+      'acme',
+    )
+
+    await wrapper.get('[data-testid="next-page"]').trigger('click')
+    await flushPromises()
+
+    expect(router.currentRoute.value.query).toEqual({ search: 'acme', page: '2' })
+  })
+
+  it('steps back a page when a delete empties the last one (#598)', async () => {
+    listMeta = { page: 2, pageSize: 1, total: 2 }
+
+    const wrapper = await render(undefined, '?page=2')
+
+    await wrapper.get('[data-testid="delete-PURCHASE_REQUISITION"]').trigger('click')
+
+    listMeta = { page: 1, pageSize: 1, total: 1 }
+
+    await confirmIn(wrapper)
+
+    expect(router.currentRoute.value.query).toEqual({ page: '1' })
+  })
+
+  it('stays on its page when a delete leaves rows on it (#598)', async () => {
+    rows = [summary(), summary({ id: 'other', typeCode: 'EXPENSE_CLAIM' })]
+    listMeta = { page: 2, pageSize: 2, total: 4 }
+
+    const wrapper = await render(undefined, '?page=2')
+
+    await wrapper.get('[data-testid="delete-PURCHASE_REQUISITION"]').trigger('click')
+
+    rows = [summary({ id: 'other', typeCode: 'EXPENSE_CLAIM' })]
+    listMeta = { page: 2, pageSize: 2, total: 3 }
+
+    await confirmIn(wrapper)
+
+    expect(router.currentRoute.value.query).toEqual({ page: '2' })
+    expect(wrapper.find('[data-testid="type-PURCHASE_REQUISITION"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="type-EXPENSE_CLAIM"]').exists()).toBe(true)
   })
 
   it('lists the types the API returned', async () => {
