@@ -7,6 +7,7 @@
 //! that stop.
 
 use serde_json::{json, Value};
+use sqlx::PgExecutor;
 use uuid::Uuid;
 
 use super::domain::{
@@ -158,7 +159,7 @@ pub async fn create_facility(
     // holds rather than what the request asked for (#135). The two differ even
     // on a create: a name is trimmed on the way in, and a reference is stored
     // against the code the resolver found.
-    let created = load(state, tenant_id, id).await?;
+    let created = load(&state.pool, tenant_id, id).await?;
 
     audit::record_or_warn(
         &state.pool,
@@ -264,12 +265,16 @@ pub async fn update_facility(
         return Err(AppError::not_found("Facility"));
     }
 
-    transaction.commit().await?;
-
     // The row as it now is, against the row as it was. `load` was already the
     // last thing this function did; reading it here rather than after the audit
     // write is what gives the record an *after* to compare against (#135).
-    let after = load(state, tenant_id, id).await?;
+    // And before the commit, while this transaction still holds the row: a
+    // delete waiting on that lock would otherwise commit first and leave a read
+    // after the commit with nothing, answering 404 for a change that
+    // committed, with no audit row (#787).
+    let after = load(&mut *transaction, tenant_id, id).await?;
+
+    transaction.commit().await?;
     let (old_value, new_value) = facility_changes(&before, &after).halves();
 
     audit::record_or_warn(
@@ -557,8 +562,12 @@ fn address_json(address: Option<&PostalAddress>) -> Result<Value, AppError> {
     }
 }
 
-async fn load(state: &AppState, tenant_id: Uuid, id: Uuid) -> Result<Facility, AppError> {
-    repo::find_facility(&state.pool, tenant_id, id)
+async fn load<'e, E: PgExecutor<'e>>(
+    executor: E,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<Facility, AppError> {
+    repo::find_facility(executor, tenant_id, id)
         .await?
         .ok_or_else(|| AppError::not_found("Facility"))
 }

@@ -7,7 +7,7 @@
 //! statement.
 
 use serde_json::Value;
-use sqlx::{PgExecutor, PgPool};
+use sqlx::{PgConnection, PgExecutor, PgPool};
 use uuid::Uuid;
 
 use crate::utils::search::like_contains;
@@ -120,8 +120,22 @@ pub async fn list_lists(
         .collect())
 }
 
-pub async fn find_list<'e, E: PgExecutor<'e> + Copy>(
-    executor: E,
+/// A list definition with its columns and filters.
+pub async fn find_list(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<Option<ListDefinition>, sqlx::Error> {
+    find_list_in(&mut *pool.acquire().await?, tenant_id, id).await
+}
+
+/// [`find_list`] on the caller's connection, such as its transaction ([#787]): a
+/// write reads back the row it answers with before it commits, so a delete
+/// waiting on its lock cannot leave that read with nothing.
+///
+/// [#787]: https://github.com/sujanto-gaws/kelir/issues/787
+pub async fn find_list_in(
+    connection: &mut PgConnection,
     tenant_id: Uuid,
     id: Uuid,
 ) -> Result<Option<ListDefinition>, sqlx::Error> {
@@ -135,7 +149,7 @@ pub async fn find_list<'e, E: PgExecutor<'e> + Copy>(
         tenant_id,
         id
     )
-    .fetch_optional(executor)
+    .fetch_optional(&mut *connection)
     .await?
     else {
         return Ok(None);
@@ -149,8 +163,8 @@ pub async fn find_list<'e, E: PgExecutor<'e> + Copy>(
         default_sort: row.default_sort_json,
         page_size: row.page_size,
         status: ListStatus::from_db(&row.status),
-        columns: columns_of(executor, tenant_id, id).await?,
-        filters: filters_of(executor, tenant_id, id).await?,
+        columns: columns_of(&mut *connection, tenant_id, id).await?,
+        filters: filters_of(&mut *connection, tenant_id, id).await?,
         created_at: row.created_at,
         updated_at: row.updated_at,
     }))
@@ -181,11 +195,13 @@ pub async fn find_list<'e, E: PgExecutor<'e> + Copy>(
 /// is [`find_list`]'s**, and that one is covered — `rad_list_render.rs` asks
 /// this tenant for another tenant's list id and asserts a 404, and
 /// `rad_permissions.rs` asserts the same for the storage read.
-pub async fn find_list_by_key<'e, E: PgExecutor<'e> + Copy>(
-    executor: E,
+pub async fn find_list_by_key(
+    pool: &PgPool,
     tenant_id: Uuid,
     list_key: &str,
 ) -> Result<Option<ListDefinition>, sqlx::Error> {
+    let mut connection = pool.acquire().await?;
+
     let Some(id) = sqlx::query_scalar!(
         r#"
         SELECT id
@@ -195,7 +211,7 @@ pub async fn find_list_by_key<'e, E: PgExecutor<'e> + Copy>(
         tenant_id,
         list_key,
     )
-    .fetch_optional(executor)
+    .fetch_optional(&mut *connection)
     .await?
     else {
         return Ok(None);
@@ -204,7 +220,7 @@ pub async fn find_list_by_key<'e, E: PgExecutor<'e> + Copy>(
     // Resolved to an id and then read through `find_list`, so the children come
     // back through exactly one statement each. Two full readers would be two
     // places to forget a column when §5.7 grows one.
-    find_list(executor, tenant_id, id).await
+    find_list_in(&mut connection, tenant_id, id).await
 }
 
 async fn columns_of<'e, E: PgExecutor<'e>>(

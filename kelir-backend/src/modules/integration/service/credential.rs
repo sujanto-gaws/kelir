@@ -6,6 +6,7 @@
 //! never read, so there is none to leak into a response or a log line.
 
 use serde_json::json;
+use sqlx::PgExecutor;
 use uuid::Uuid;
 
 use super::require_system;
@@ -102,7 +103,7 @@ pub async fn create_credential(
     )
     .await?;
 
-    let created = load(state, tenant_id, system_id, id).await?;
+    let created = load(&state.pool, tenant_id, system_id, id).await?;
 
     // The reference is in the record, and it is readable there under
     // `integration:credential:read` alone — `ObjectType::readable_by` says so —
@@ -159,8 +160,14 @@ pub async fn update_credential(
         request.valid_to.unwrap_or(before.valid_to),
     )?;
 
+    // The write and the read of what it wrote, in one transaction: a delete
+    // sent meanwhile waits on the row the write holds rather than landing
+    // between the two, which answered 500 for a change that committed, with no
+    // audit row (#787).
+    let mut transaction = state.pool.begin().await?;
+
     let affected = repo::update_credential(
-        &state.pool,
+        &mut *transaction,
         tenant_id,
         system_id,
         id,
@@ -179,7 +186,9 @@ pub async fn update_credential(
         return Err(credential_not_found());
     }
 
-    let after = load(state, tenant_id, system_id, id).await?;
+    let after = load(&mut *transaction, tenant_id, system_id, id).await?;
+
+    transaction.commit().await?;
 
     let mut changes = ChangeSet::new();
     changes.field(
@@ -263,13 +272,13 @@ pub async fn delete_credential(
     Ok(())
 }
 
-async fn load(
-    state: &AppState,
+async fn load<'e, E: PgExecutor<'e>>(
+    executor: E,
     tenant_id: Uuid,
     system_id: Uuid,
     id: Uuid,
 ) -> Result<IntegrationCredential, AppError> {
-    repo::find_credential(&state.pool, tenant_id, system_id, id)
+    repo::find_credential(executor, tenant_id, system_id, id)
         .await?
         .ok_or_else(|| AppError::Internal {
             source: anyhow::anyhow!("integration credential {id} vanished after it was written"),

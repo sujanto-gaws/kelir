@@ -5,6 +5,7 @@
 //! the roles of one party.
 
 use serde_json::json;
+use sqlx::PgConnection;
 use uuid::Uuid;
 
 use super::domain::{
@@ -34,7 +35,13 @@ pub async fn get_party_roles(
         .await?
         .ok_or_else(|| AppError::not_found("Party"))?;
 
-    load_roles(state, tenant_id, party_id, &party.party_code).await
+    load_roles(
+        &mut *state.pool.acquire().await?,
+        tenant_id,
+        party_id,
+        &party.party_code,
+    )
+    .await
 }
 
 /// Gives a party a role, or restates the one it already holds.
@@ -320,32 +327,32 @@ pub async fn remove_role(
 /// a profile row that outlived its role could not appear here even if one
 /// existed.
 pub(super) async fn load_roles(
-    state: &AppState,
+    connection: &mut PgConnection,
     tenant_id: Uuid,
     party_id: Uuid,
     party_code: &str,
 ) -> Result<PartyRoles, AppError> {
-    let roles = repo::list_party_roles(&state.pool, tenant_id, party_id).await?;
+    let roles = repo::list_party_roles(&mut *connection, tenant_id, party_id).await?;
     let holds = |code: &str| roles.iter().any(|role| role.role_type_id == code);
 
     let profiles = PartyProfiles {
         supplier: if holds("SUPPLIER") {
-            repo::find_supplier_profile(&state.pool, tenant_id, party_id, party_code).await?
+            repo::find_supplier_profile(&mut *connection, tenant_id, party_id, party_code).await?
         } else {
             None
         },
         customer: if holds("CUSTOMER") {
-            repo::find_customer_profile(&state.pool, tenant_id, party_id, party_code).await?
+            repo::find_customer_profile(&mut *connection, tenant_id, party_id, party_code).await?
         } else {
             None
         },
         employee: if holds("EMPLOYEE") {
-            repo::find_employee_profile(&state.pool, tenant_id, party_id, party_code).await?
+            repo::find_employee_profile(&mut *connection, tenant_id, party_id, party_code).await?
         } else {
             None
         },
         contact: if holds("CONTACT") {
-            repo::find_contact_profile(&state.pool, tenant_id, party_id, party_code).await?
+            repo::find_contact_profile(&mut *connection, tenant_id, party_id, party_code).await?
         } else {
             None
         },

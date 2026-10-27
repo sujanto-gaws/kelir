@@ -15,6 +15,7 @@
 //!   it, because a delete can land in between.
 
 use serde_json::json;
+use sqlx::PgExecutor;
 use uuid::Uuid;
 
 use super::department::{
@@ -115,7 +116,7 @@ pub async fn create_department(
     // Read back before the record is written (#135): the code is trimmed on the
     // way in, and the references are stored against the codes the resolver
     // found.
-    let created = load(state, tenant_id, id).await?;
+    let created = load(&state.pool, tenant_id, id).await?;
 
     audit::record_or_warn(
         &state.pool,
@@ -213,9 +214,13 @@ pub async fn update_department(
         return Err(AppError::not_found("Department"));
     }
 
-    transaction.commit().await?;
+    // Read back before the commit, while this transaction still holds the row:
+    // a delete waiting on that lock would otherwise commit first and leave a
+    // read after the commit with nothing, answering 500 for a change that
+    // committed, with no audit row (#787).
+    let after = load(&mut *transaction, tenant_id, id).await?;
 
-    let after = load(state, tenant_id, id).await?;
+    transaction.commit().await?;
 
     // What changed, not what was requested (#135).
     let mut changes = ChangeSet::new();
@@ -419,8 +424,12 @@ fn duplicate_to_conflict(error: sqlx::Error) -> AppError {
     }
 }
 
-async fn load(state: &AppState, tenant_id: Uuid, id: Uuid) -> Result<Department, AppError> {
-    repo::find_department(&state.pool, tenant_id, id)
+async fn load<'e, E: PgExecutor<'e>>(
+    executor: E,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<Department, AppError> {
+    repo::find_department(executor, tenant_id, id)
         .await?
         .ok_or_else(|| AppError::Internal {
             source: anyhow::anyhow!("department {id} vanished after it was written"),

@@ -12,6 +12,7 @@
 //! [#341]: https://github.com/sujanto-gaws/kelir/issues/341
 
 use serde_json::json;
+use sqlx::PgExecutor;
 use uuid::Uuid;
 
 use super::super::domain::menu::{
@@ -100,7 +101,7 @@ pub async fn create_menu(
     // Read back before the record is written, so the record says what the row
     // holds rather than what the request asked for (#135) — keys are trimmed
     // and defaults fill fields the caller omitted, so the two differ here.
-    let created = load(state, tenant_id, id).await?;
+    let created = load(&state.pool, tenant_id, id).await?;
 
     audit::record_or_warn(
         &state.pool,
@@ -138,7 +139,7 @@ pub async fn update_menu(
 
     let tenant_id = caller.tenant_id();
     let actor = Some(caller.user_id());
-    let before = load(state, tenant_id, id).await?;
+    let before = load(&state.pool, tenant_id, id).await?;
 
     // **The cycle check, and it runs only when the parent moves.** Re-walking a
     // tree that has not changed would put a recursive query on every label
@@ -153,8 +154,14 @@ pub async fn update_menu(
         refuse_a_cycle(state, tenant_id, id, parent).await?;
     }
 
+    // The write and the read of what it wrote, in one transaction: a delete
+    // sent meanwhile waits on the row the write holds rather than landing
+    // between the two, which answered 500 for a change that committed, with no
+    // audit row (#787).
+    let mut transaction = state.pool.begin().await?;
+
     let updated = repo::update_menu(
-        &state.pool,
+        &mut *transaction,
         tenant_id,
         id,
         &MenuFields {
@@ -188,7 +195,9 @@ pub async fn update_menu(
         return Err(AppError::not_found("Menu entry"));
     }
 
-    let after = load(state, tenant_id, id).await?;
+    let after = load(&mut *transaction, tenant_id, id).await?;
+
+    transaction.commit().await?;
     let (old, new) = changes(&before, &after).halves();
 
     audit::record_or_warn(
@@ -220,7 +229,7 @@ pub async fn delete_menu(
 
     let tenant_id = caller.tenant_id();
     let actor = Some(caller.user_id());
-    let before = load(state, tenant_id, id).await?;
+    let before = load(&state.pool, tenant_id, id).await?;
 
     if repo::soft_delete(&state.pool, tenant_id, id, actor).await? == 0 {
         return Err(AppError::not_found("Menu entry"));
@@ -312,8 +321,12 @@ async fn refuse_a_cycle(
     Ok(())
 }
 
-async fn load(state: &AppState, tenant_id: Uuid, id: Uuid) -> Result<MenuEntry, AppError> {
-    repo::find_menu(&state.pool, tenant_id, id)
+async fn load<'e, E: PgExecutor<'e>>(
+    executor: E,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<MenuEntry, AppError> {
+    repo::find_menu(executor, tenant_id, id)
         .await?
         .ok_or_else(|| AppError::not_found("Menu entry"))
 }

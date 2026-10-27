@@ -18,6 +18,7 @@
 //! by anything Sprint 9 has to remember.
 
 use serde_json::json;
+use sqlx::PgConnection;
 use uuid::Uuid;
 
 use super::domain::{
@@ -275,9 +276,13 @@ pub async fn update_type(
         repo::replace_workflows(&mut transaction, tenant_id, id, workflows, actor).await?;
     }
 
-    transaction.commit().await?;
+    // Read back before the commit, while this transaction still holds the row:
+    // a delete waiting on that lock would otherwise commit first and leave a
+    // read after the commit with nothing, answering 500 for a change that
+    // committed, with no audit row (#787).
+    let after = load_in(&mut transaction, tenant_id, id).await?;
 
-    let after = load(state, tenant_id, id).await?;
+    transaction.commit().await?;
 
     // What changed, not what was requested (#135).
     let mut changes = ChangeSet::new();
@@ -608,7 +613,16 @@ fn insert_error(error: sqlx::Error) -> AppError {
 }
 
 async fn load(state: &AppState, tenant_id: Uuid, id: Uuid) -> Result<DocumentType, AppError> {
-    repo::find_type(&state.pool, tenant_id, id)
+    load_in(&mut *state.pool.acquire().await?, tenant_id, id).await
+}
+
+/// [`load`] on the caller's transaction, before it commits (#787).
+async fn load_in(
+    connection: &mut PgConnection,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<DocumentType, AppError> {
+    repo::find_type_in(connection, tenant_id, id)
         .await?
         .ok_or_else(|| AppError::Internal {
             source: anyhow::anyhow!("document type {id} vanished after it was written"),

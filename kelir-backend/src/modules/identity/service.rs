@@ -198,6 +198,14 @@ pub async fn update_user(
         repo::replace_user_roles(&mut transaction, tenant_id, id, role_ids).await?;
     }
 
+    // Read back before the commit, while this transaction still holds the row:
+    // a delete waiting on that lock would otherwise commit first and leave a
+    // read after the commit with nothing, answering 404 for a change that
+    // committed and was audited (#787).
+    let user = repo::find_user_in(&mut transaction, tenant_id, id)
+        .await?
+        .ok_or_else(|| AppError::not_found("User"))?;
+
     transaction.commit().await?;
 
     // Deactivating an account must stop its sessions being renewed, not merely
@@ -234,7 +242,7 @@ pub async fn update_user(
     )
     .await;
 
-    get_user_unchecked(state, tenant_id, id).await
+    Ok(user)
 }
 
 pub async fn deactivate_user(
@@ -560,6 +568,14 @@ pub async fn update_role(
         repo::replace_role_permissions(&mut transaction, tenant_id, id, permission_ids).await?;
     }
 
+    // Read back before the commit, while this transaction still holds the row:
+    // a delete waiting on that lock would otherwise commit first and leave a
+    // read after the commit with nothing, answering 404 for a change that
+    // committed and was audited (#787).
+    let role = repo::find_role_in(&mut transaction, tenant_id, id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Role"))?;
+
     transaction.commit().await?;
 
     audit_permission_change(
@@ -572,9 +588,7 @@ pub async fn update_role(
     )
     .await;
 
-    repo::find_role(&state.pool, tenant_id, id)
-        .await?
-        .ok_or_else(|| AppError::not_found("Role"))
+    Ok(role)
 }
 
 pub async fn delete_role(
