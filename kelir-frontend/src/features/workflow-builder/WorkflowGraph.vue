@@ -43,7 +43,7 @@ import {
  * position — goes back into the definition. The list beside it is where a
  * workflow is edited, and the list is this picture's text alternative.
  *
- * **Laid out on every load**, by `workflowGraphLayout`, and again whenever
+ * **Laid out on every load at or under the ceiling**, by `workflowGraphLayout`, and again whenever
  * what it draws changes: a state or transition edited, an undo, a redo, or the
  * server's copy after a save. An edit to the name, the key or the description
  * draws nothing, so it neither lays the graph out again nor refits the
