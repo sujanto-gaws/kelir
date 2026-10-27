@@ -521,18 +521,32 @@ test('an administrator builds a workflow in the editor, and a document is approv
 })
 
 // ---------------------------------------------------------------------------
-// #721: what one layout of a large definition costs, in Chromium
+// #721: the graph's ceiling, in Chromium — timed under it, declined above it
 // ---------------------------------------------------------------------------
 
 /**
  * The read-only graph lays a definition out with dagre, synchronously, on the
- * main thread (#721, Sprint 24 row 17). This test **measures** that at the
- * five sizes #721 names, in a real browser, and asserts nothing about time.
- * The remedy (a worker, a stated ceiling, or the graph declining above a size)
- * is chosen on these numbers afterwards, so a threshold here would be the
- * remedy decided in advance (AC11, AC14).
+ * main thread (ADR-0046 §3.3). #772 measured that here at five sizes, and the
+ * product owner chose the remedy on its numbers (#721, 2026-10-26): **a
+ * ceiling of 80 states or 240 transitions, whichever is reached first**. Above
+ * it the *Graph* tab lays nothing out and says so in a sentence, and the editor
+ * does not fetch the graph's chunk at all. This test holds both sides of it in
+ * a real browser, and still asserts nothing about time.
  *
- * # What the number is, and what it is not
+ * - **At 20, 40 and 80 states the layout is timed, as #772 timed it.** All
+ *   three are at or under the ceiling on both counts (80 states and 232
+ *   transitions is the largest), so they are still laid out, and 80 pins the
+ *   boundary's lower side from the inside.
+ * - **At 150 and 300 states the decline is asserted, and nothing is timed.**
+ *   Both are above on both counts (442 and 892 transitions). They are no longer
+ *   laid out, so there is no layout to time: what they cost before the ceiling
+ *   (7.6 s and 45 s on the laptop, #772) is what the ceiling removed, and most
+ *   of what #772 added to the `End-to-end (browser)` job. Each asserts the
+ *   sentence with its seeded counts, no graph and no caption, and **no file
+ *   under `/assets/` requested after the click**: the chunk holding dagre and
+ *   Vue Flow is not fetched for a draft it would not draw (#721 AC3).
+ *
+ * # What the timed number is, and what it is not
  *
  * **Wall time from the click on *Graph* to the caption**, taken with
  * `performance.now()` in the page: a capture listener stamps the click and a
@@ -540,8 +554,7 @@ test('an administrator builds a workflow in the editor, and a document is approv
  * window run dagre's layout **and** Vue Flow's first render of the nodes and
  * edges, in one synchronous render: `WorkflowGraph.vue` reads the layout while
  * it builds the nodes it hands Vue Flow, and draws the caption in the same
- * pass. Dagre alone cannot be timed without instrumenting the product, which
- * this row does not do (AC10).
+ * pass. Dagre alone cannot be timed without instrumenting the product.
  *
  * Beside it, **the long tasks that overlap the window**: their summed
  * duration, their count and the longest. A long task is 50 ms or more of main
@@ -549,10 +562,6 @@ test('an administrator builds a workflow in the editor, and a document is approv
  * tab froze. Then the long tasks **after** the caption until the page is quiet,
  * which is Vue Flow measuring the nodes, drawing the edges and fitting the
  * view. Recorded, not asserted.
- *
- * **The jsdom figures in #721 are not comparable.** jsdom renders nothing, and
- * its shape was not this one; the issue's table is not reproduced here as if
- * it were the measured shape (AC6).
  *
  * # The shape, and why it is not quite `large()`'s
  *
@@ -564,50 +573,75 @@ test('an administrator builds a workflow in the editor, and a document is approv
  * `NO_TERMINAL_STATUS`. So the last step approves into a final `COMPLETED`
  * state, and N states are N−2 steps, `REJECTED` and `COMPLETED`, with 3N−8
  * transitions. The counts are read from the definition built, and logged
- * beside each size (AC5, AC6). Every edge names the first test's role in
- * `allowedBy` (S5) and every step offers its task to it; a draft is never
- * published, so the role check at publish (D-111) does not apply.
+ * beside each size. Every edge names the first test's role in `allowedBy` (S5)
+ * and every step offers its task to it; a draft is never published, so the
+ * role check at publish (D-111) does not apply.
  *
- * # One layout per size, and the chunk already fetched
+ * # One layout per timed size, and the chunk already fetched
  *
  * One page, so one browser context, throughout. The *Graph* tab is opened
  * once on the smallest draft first, which fetches the graph's lazy chunk
- * (ADR-0046); that open is logged as a warm-up and is not a measured size
- * (AC7). Each size is then a fresh page load with the tab closed, so the click
- * lays the graph out once, smallest to largest (AC9).
+ * (ADR-0046); that open is logged as a warm-up and is not a timed size. Each
+ * size is then a fresh page load with the tab closed, smallest to largest.
  *
  * **A fresh load does not keep the chunk warm by itself.** The release stack
- * serves the bundle with no `Cache-Control`, so Chromium holds the chunk only
- * as long as its heuristic freshness lasts, and then asks for it again on the
- * click. On 2026-10-22 that put the chunk's four files inside the measured
- * window at 150 and at 300 states. So the warm-up records which files the
- * click fetched, and each fresh load is given them before its click: the
- * scripts as `modulepreload`, which puts them in the page's module map where
- * the click's `import()` finds them, and the stylesheet as a stylesheet. **The
- * test then asserts that nothing was fetched inside the window**, so a cold
- * chunk fails the measurement rather than joining it.
+ * serves the bundle with no `Cache-Control` (#771), so Chromium holds the
+ * chunk only as long as its heuristic freshness lasts, and then asks for it
+ * again on the click. So the warm-up records which files the click fetched,
+ * and each **timed** load is given them before its click: the scripts as
+ * `modulepreload`, which puts them in the page's module map where the click's
+ * `import()` finds them, and the stylesheet as a stylesheet. The test then
+ * asserts that nothing was fetched inside the timed window, so a cold chunk
+ * fails the measurement rather than joining it. **The declined sizes are not
+ * given the chunk**: a fresh load has an empty module map, so a page that
+ * reached for the graph would have to request it, and the test asserts it did
+ * not.
  */
-const LAYOUT_SIZES = [20, 40, 80, 150, 300] as const
+const TIMED_SIZES = [20, 40, 80] as const
+
+/** Above the ceiling on both counts: declined, and not timed. */
+const DECLINED_SIZES = [150, 300] as const
 
 /**
- * The test's own timeout (AC2), above the config's 60 s.
- *
- * jsdom took 43.7 s for one layout at 300 states. Chromium has not been
- * measured, which is the point of the test, and on top of the layouts come six
- * page loads in which the editor lists every state. Ten minutes leaves the
- * 300-state case many times the jsdom figure before the test gives up.
+ * The ceiling as the reader is told it, **written here and not imported**:
+ * `WORKFLOW_GRAPH_CEILING` is the product's, and a spec that read it would
+ * move with it. A ceiling moved in the product fails the sentence below, and
+ * the sizes' sides are checked against these numbers before anything is
+ * clicked, so a change to the seeded shape cannot carry a size across unseen.
  */
-const LAYOUT_TEST_TIMEOUT = 10 * 60_000
+const CEILING = { states: 80, transitions: 240 } as const
+
+/**
+ * The test's own timeout, above the config's 60 s. **About twice the whole
+ * test as last measured**: 2.3 min on the laptop on 2026-10-27, loaded by a
+ * `cargo` build beside it, so a slow figure. Nearly all of it is the six
+ * editor loads (`EDITOR_TIMEOUT`) and the waits for quiet around the timed
+ * layouts; no layout above 80 states is left in it. #772's ten minutes held
+ * a 45 s layout at 300 states, which the ceiling removed (#721 AC9).
+ */
+const LAYOUT_TEST_TIMEOUT = 5 * 60_000
 
 /**
  * The wait for the caption, explicit because the config's 15 s `expect`
- * timeout would otherwise govern it (AC2). Inside the test's own, and the only
- * wait in this test that a slow layout can fail.
+ * timeout would otherwise govern it. **Ten times the slowest layout still
+ * timed**: 80 states, 2.0 s at worst of five on the laptop (#772; its median
+ * 1.9 s, CI's runner 0.89 s). #772's one outlier was 2.7 times its median, at
+ * 150 states, which ten times leaves room for.
  */
-const CAPTION_TIMEOUT = 5 * 60_000
+const CAPTION_TIMEOUT = 20_000
 
-/** Loading the editor on a large draft lists every state. That is not measured. */
-const EDITOR_TIMEOUT = 2 * 60_000
+/**
+ * Loading the editor on a draft lists every state, and the 300-state draft is
+ * still loaded to see its decline, so this is the slowest step left. **Nearly
+ * four times that load as measured**: 19.9–24.3 s by Playwright's clock in
+ * three runs on the laptop on 2026-10-27, loaded by a `cargo` build beside it.
+ * Not three times: in a fourth run one load of the 150-state draft took 66 s
+ * on the same loaded laptop (6.9–13.2 s in the others), so 75 s would have
+ * been a coin toss there. Every load logs a `#721 editor:` line, so the next
+ * reading of this figure is in the run's own log. It also bounds the waits for
+ * quiet, which follow loads no larger than 80 states.
+ */
+const EDITOR_TIMEOUT = 90_000
 
 /** How long without a long task counts as quiet: before the click, and after the caption. */
 const QUIET_MS = 1_500
@@ -677,7 +711,7 @@ function approvalChain(size: number, workflowKey: string) {
   }
 }
 
-/** Posts one draft (AC3). Saved, never published. */
+/** Posts one draft. Saved, never published. */
 async function seedLayoutDraft(size: number): Promise<LayoutDraft> {
   const workflowKey = `e2e_layout_${size}_${suffix}`.toLowerCase()
   const definition = approvalChain(size, workflowKey)
@@ -700,12 +734,36 @@ async function seedLayoutDraft(size: number): Promise<LayoutDraft> {
   }
 }
 
+/** Whether a draft is above the ceiling: either count alone, strictly above. */
+function isAboveCeiling(draft: LayoutDraft): boolean {
+  return draft.states > CEILING.states || draft.transitions > CEILING.transitions
+}
+
 function captionOf(draft: LayoutDraft): string {
   return `${draft.states} states, ${draft.transitions} transitions${CAPTION_TAIL}`
 }
 
-/** A fresh load of the editor on a draft, with every state listed and the graph closed. */
-async function openEditor(page: Page, draft: LayoutDraft): Promise<void> {
+/**
+ * The sentence the *Graph* tab shows above the ceiling (#721 AC5). Every code
+ * the chain names is declared, so no `(N not declared)` follows the states.
+ */
+function declineOf(draft: LayoutDraft): string {
+  return (
+    `This workflow has ${draft.states} states and ${draft.transitions} transitions. ` +
+    `The graph shows up to ${CEILING.states} states or ${CEILING.transitions} transitions, ` +
+    'whichever is reached first, so it is not drawn. ' +
+    'Use the List tab to read and change the workflow.'
+  )
+}
+
+/**
+ * A fresh load of the editor on a draft, with every state listed and the graph
+ * closed. Returns how long that took, by Playwright's clock, from the
+ * navigation to the last state listed: the figure `EDITOR_TIMEOUT` is sized on.
+ */
+async function openEditor(page: Page, draft: LayoutDraft): Promise<number> {
+  const start = Date.now()
+
   await page.goto(`/admin/workflows/${draft.id}`)
 
   await expect(page.getByTestId('workflow-key')).toHaveValue(draft.workflowKey, {
@@ -714,65 +772,79 @@ async function openEditor(page: Page, draft: LayoutDraft): Promise<void> {
   await expect(page.getByTestId(`state-code-${draft.states - 1}`)).toHaveValue('COMPLETED', {
     timeout: EDITOR_TIMEOUT,
   })
+
+  const loadMs = Date.now() - start
+
   await expect(page.getByTestId('workflow-graph')).toHaveCount(0)
+  record(
+    '#721 editor',
+    `#721 editor: size=${draft.size} states=${draft.states} transitions=${draft.transitions} ` +
+      `load_ms=${loadMs} (Playwright clock)`,
+  )
+
+  return loadMs
 }
 
 /**
- * Installs the page's clocks before the click (AC8).
+ * Installs the page's clocks before the click.
  *
- * **The window is from the click to the caption showing this draft's
- * counts.** The click is stamped by a capture listener, before the tab's own
+ * **The window is from the click to the element `testId` names showing the
+ * text expected**: the caption with this draft's counts under the ceiling, the
+ * sentence that declines above it. The click is stamped by a capture listener, before the tab's own
  * handler runs; the caption by a `MutationObserver`, which runs once the
  * render that inserted it has finished. One frame later, two animation frames
  * after the caption, `frameAt` is stamped, and the observer is read only after
  * that.
  */
-async function installProbe(page: Page, caption: string): Promise<void> {
-  await page.evaluate((expected) => {
-    const probe: LayoutProbe = { clickAt: null, captionAt: null, frameAt: null, longTasks: [] }
-    ;(window as ProbedWindow).__layoutProbe = probe
+async function installProbe(page: Page, testId: string, text: string): Promise<void> {
+  await page.evaluate(
+    ([testId, expected]) => {
+      const probe: LayoutProbe = { clickAt: null, captionAt: null, frameAt: null, longTasks: [] }
+      ;(window as ProbedWindow).__layoutProbe = probe
 
-    // `buffered`, so the page load's long tasks are there to wait out.
-    new PerformanceObserver((list) => {
-      for (const entry of list.getEntries()) {
-        probe.longTasks.push({ start: entry.startTime, duration: entry.duration })
-      }
-    }).observe({ type: 'longtask', buffered: true })
-
-    document.addEventListener(
-      'click',
-      (event) => {
-        if (
-          probe.clickAt === null &&
-          event.target instanceof Element &&
-          event.target.closest('[data-testid="view-graph"]')
-        ) {
-          probe.clickAt = performance.now()
+      // `buffered`, so the page load's long tasks are there to wait out.
+      new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          probe.longTasks.push({ start: entry.startTime, duration: entry.duration })
         }
-      },
-      { capture: true },
-    )
+      }).observe({ type: 'longtask', buffered: true })
 
-    const watcher = new MutationObserver(() => {
-      const shown = document.querySelector('[data-testid="workflow-graph-summary"]')
-
-      // Whitespace collapsed, as Playwright's `toHaveText` reads it.
-      const text = shown?.textContent?.replace(/\s+/g, ' ').trim()
-
-      if (probe.clickAt === null || probe.captionAt !== null || text !== expected) {
-        return
-      }
-
-      probe.captionAt = performance.now()
-      watcher.disconnect()
-      requestAnimationFrame(() =>
-        requestAnimationFrame(() => {
-          probe.frameAt = performance.now()
-        }),
+      document.addEventListener(
+        'click',
+        (event) => {
+          if (
+            probe.clickAt === null &&
+            event.target instanceof Element &&
+            event.target.closest('[data-testid="view-graph"]')
+          ) {
+            probe.clickAt = performance.now()
+          }
+        },
+        { capture: true },
       )
-    })
-    watcher.observe(document.body, { childList: true, subtree: true, characterData: true })
-  }, caption)
+
+      const watcher = new MutationObserver(() => {
+        const shown = document.querySelector(`[data-testid="${testId}"]`)
+
+        // Whitespace collapsed, as Playwright's `toHaveText` reads it.
+        const text = shown?.textContent?.replace(/\s+/g, ' ').trim()
+
+        if (probe.clickAt === null || probe.captionAt !== null || text !== expected) {
+          return
+        }
+
+        probe.captionAt = performance.now()
+        watcher.disconnect()
+        requestAnimationFrame(() =>
+          requestAnimationFrame(() => {
+            probe.frameAt = performance.now()
+          }),
+        )
+      })
+      watcher.observe(document.body, { childList: true, subtree: true, characterData: true })
+    },
+    [testId, text] as const,
+  )
 }
 
 /** Waits until no long task has run for `QUIET_MS`, counting from the caption once it shows. */
@@ -798,11 +870,18 @@ async function waitForQuiet(page: Page): Promise<void> {
 }
 
 /**
- * Clicks *Graph* and waits for the caption; returns one greppable line.
+ * Clicks *Graph*, waits for the caption, and checks what was drawn; returns
+ * one greppable line.
  *
- * **The caption reading exactly the seeded counts is the one assertion**
- * (AC11): the graph drew every state and every transition of a large
- * definition, and nothing as *not declared*.
+ * **The caption reading exactly the seeded counts proves the mapping counted
+ * them and the layout ran**, and no more: the caption is computed from the
+ * mapping (`workflowGraphCountOf`), and it renders in the same pass as the
+ * nodes, which read the layout. It does not prove that anything was drawn.
+ * **What Vue Flow drew is counted separately**, once the page is quiet and
+ * outside the timed window: one `.vue-flow__node` per seeded state and one
+ * `.vue-flow__edge` per seeded transition (#791). Where dagre placed them is
+ * not checked here; `WorkflowGraph.spec.ts` and `workflowGraphLayout`'s specs
+ * own that.
  */
 async function measureLayout(
   page: Page,
@@ -811,7 +890,7 @@ async function measureLayout(
 ): Promise<{ line: string; fetched: string[] }> {
   const caption = captionOf(draft)
 
-  await installProbe(page, caption)
+  await installProbe(page, 'workflow-graph-summary', caption)
   await waitForQuiet(page)
 
   await page.getByTestId('view-graph').click()
@@ -822,9 +901,14 @@ async function measureLayout(
   await page.waitForFunction(
     () => typeof (window as ProbedWindow).__layoutProbe?.frameAt === 'number',
     null,
-    { timeout: EDITOR_TIMEOUT },
+    { timeout: CAPTION_TIMEOUT },
   )
   await waitForQuiet(page)
+
+  const drawn = page.getByTestId('workflow-graph')
+  await expect(drawn.locator('.vue-flow__node')).toHaveCount(draft.states)
+  await expect(drawn.locator('.vue-flow__edge')).toHaveCount(draft.transitions)
+  await expect(page.getByTestId('workflow-graph-declined')).toHaveCount(0)
 
   const { probe, fetched } = await page.evaluate(() => {
     const probe = (window as ProbedWindow).__layoutProbe as LayoutProbe
@@ -879,6 +963,95 @@ async function measureLayout(
   return { line, fetched }
 }
 
+/**
+ * Clicks *Graph* on a draft above the ceiling and checks the decline; returns
+ * one greppable line. No time is asserted, and the page is not waited quiet
+ * before the click: the times are logged for the log's sake only. `wall_ms` is
+ * the page's clock from the click's dispatch to the sentence, as `wall_ms` is
+ * for a layout; `click_to_sentence_ms` is Playwright's, from the call to the
+ * sentence, so it also holds whatever the click's dispatch waited behind: the
+ * page load's long tasks (`before_longtask_ms`) and Playwright's own
+ * actionability checks on a page listing every state (`of_which_click_ms`).
+ *
+ * **Two witnesses that the chunk was not requested.** The test's resource
+ * timing read (`assetsFetchedSince`) sees a file once its response has ended,
+ * so it is read after a pause of `QUIET_MS`, time enough for a chunk on the
+ * stack's own network to arrive; Playwright's `request` event sees a request
+ * as it is sent, so one still in flight is counted too. Both must be empty.
+ */
+async function checkDecline(page: Page, draft: LayoutDraft): Promise<string> {
+  const requested: string[] = []
+  const onRequest = (request: { url(): string }) => {
+    const path = new URL(request.url()).pathname
+
+    if (path.startsWith('/assets/')) {
+      requested.push(path)
+    }
+  }
+
+  const expected = declineOf(draft)
+  await installProbe(page, 'workflow-graph-declined', expected)
+  const clickFrom = await page.evaluate(() => performance.now())
+  page.on('request', onRequest)
+
+  try {
+    const start = Date.now()
+    await page.getByTestId('view-graph').click()
+    const clickedMs = Date.now() - start
+
+    const sentence = page.getByTestId('workflow-graph-declined')
+    await expect(sentence).toHaveText(expected)
+    const shownMs = Date.now() - start
+
+    await expect(sentence).toHaveAttribute('role', 'status')
+    await expect(page.getByTestId('workflow-graph')).toHaveCount(0)
+    await expect(page.getByTestId('workflow-graph-summary')).toHaveCount(0)
+
+    // The one fixed wait in this test, and not a time asserted: see above.
+    await page.waitForTimeout(QUIET_MS)
+    const fetched = await assetsFetchedSince(page, clickFrom)
+    const probe = await page.evaluate(() => (window as ProbedWindow).__layoutProbe as LayoutProbe)
+    const clickAt = probe.clickAt ?? Number.NaN
+    const shownAt = probe.captionAt ?? Number.NaN
+    const sum = (tasks: { duration: number }[]) =>
+      Math.round(tasks.reduce((total, task) => total + task.duration, 0))
+    const within = probe.longTasks.filter(
+      (task) => task.start <= shownAt && task.start + task.duration >= clickAt,
+    )
+    const before = probe.longTasks.filter(
+      (task) => task.start + task.duration >= clickFrom && task.start + task.duration <= clickAt,
+    )
+
+    const line = [
+      `#721 decline: size=${draft.size}`,
+      `states=${draft.states}`,
+      `transitions=${draft.transitions}`,
+      `shown=${await sentence.isVisible()}`,
+      `fetched=${fetched.length}${fetched.length > 0 ? `[${fetched.join(',')}]` : ''}`,
+      `requested=${requested.length}${requested.length > 0 ? `[${requested.join(',')}]` : ''}`,
+      `wall_ms=${Math.round(shownAt - clickAt)}`,
+      `longtask_ms=${sum(within)}`,
+      `longtasks=${within.length}`,
+      `before_longtask_ms=${sum(before)}`,
+      `click_to_sentence_ms=${shownMs}`,
+      `of_which_click_ms=${clickedMs}`,
+      '(not asserted)',
+    ].join(' ')
+
+    expect(fetched, `files under /assets/ fetched after the click at ${draft.size} states`).toEqual(
+      [],
+    )
+    expect(
+      requested,
+      `files under /assets/ requested after the click at ${draft.size} states`,
+    ).toEqual([])
+
+    return line
+  } finally {
+    page.off('request', onRequest)
+  }
+}
+
 /** The files under `/assets/` the page fetched since `since`, by path. */
 async function assetsFetchedSince(page: Page, since: number): Promise<string[]> {
   return page.evaluate(
@@ -917,13 +1090,13 @@ async function preloadChunk(page: Page, chunk: readonly string[]): Promise<void>
   )
 }
 
-/** Records a line where a reader of the run will find it (AC12). */
+/** Records a line where a reader of the run will find it. */
 function record(type: string, line: string): void {
   console.log(line)
   test.info().annotations.push({ type, description: line })
 }
 
-test('the graph of a large draft is laid out and drawn once per size, and the time it takes is recorded', async ({
+test('the graph is laid out and timed at or under its ceiling, and declined above it without fetching its chunk', async ({
   browser,
 }) => {
   test.setTimeout(LAYOUT_TEST_TIMEOUT)
@@ -937,9 +1110,28 @@ test('the graph of a large draft is laid out and drawn once per size, and the ti
       `os=${os.platform()}-${os.release()}`,
   )
 
-  const drafts: LayoutDraft[] = []
-  for (const size of LAYOUT_SIZES) {
-    drafts.push(await seedLayoutDraft(size))
+  const timed: LayoutDraft[] = []
+  for (const size of TIMED_SIZES) {
+    timed.push(await seedLayoutDraft(size))
+  }
+  const declined: LayoutDraft[] = []
+  for (const size of DECLINED_SIZES) {
+    declined.push(await seedLayoutDraft(size))
+  }
+
+  // Each size on the side of the ceiling this test takes it for, on the
+  // counts actually posted: a shape that grew a transition would otherwise
+  // carry 80 states across without a word.
+  for (const draft of timed) {
+    expect(isAboveCeiling(draft), `${draft.size} states, ${draft.transitions} transitions`).toBe(
+      false,
+    )
+  }
+  for (const draft of declined) {
+    expect(
+      draft.states > CEILING.states && draft.transitions > CEILING.transitions,
+      `${draft.size} states, ${draft.transitions} transitions, above on both counts`,
+    ).toBe(true)
   }
 
   const page = await browser.newPage()
@@ -949,7 +1141,7 @@ test('the graph of a large draft is laid out and drawn once per size, and the ti
     await signIn(page, username, password)
 
     // --- Warm-up: the chunk is fetched here, and this open is not a size ----
-    const smallest = drafts[0]
+    const smallest = timed[0]
     await openEditor(page, smallest)
     const warmFrom = await page.evaluate(() => performance.now())
     const warmStart = Date.now()
@@ -966,15 +1158,22 @@ test('the graph of a large draft is laid out and drawn once per size, and the ti
     )
     expect(chunk, 'opening the graph fetched no chunk, so there is nothing to warm').not.toEqual([])
 
-    // --- One layout per size, each on a fresh load, smallest first ----------
-    for (const draft of drafts) {
+    // --- One layout per timed size, each on a fresh load, smallest first ----
+    for (const draft of timed) {
       await openEditor(page, draft)
       await preloadChunk(page, chunk)
 
       const { line, fetched } = await measureLayout(page, draft, chromium)
       record('#721 layout', line)
-      // Not a time: whether the number is the layout's alone (AC7).
+      // Not a time: whether the number is the layout's alone.
       expect(fetched, `fetched inside the measured window at ${draft.size} states`).toEqual([])
+    }
+
+    // --- Above the ceiling: a fresh load, no chunk handed to it, no layout --
+    for (const draft of declined) {
+      await openEditor(page, draft)
+
+      record('#721 decline', await checkDecline(page, draft))
     }
   } finally {
     await page.close()
