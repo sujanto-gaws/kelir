@@ -1,6 +1,6 @@
 # Kelir Software Requirements Specification
 
-**Status:** Draft · **Last updated:** 2026-10-09
+**Status:** Draft · **Last updated:** 2026-10-27
 
 The companion Solution Blueprint formerly bundled in this file now lives in the System Design Document: `docs/design/01. System Design Document.md`.
 
@@ -414,7 +414,7 @@ Note: FR-RAD-013 was added in v0.10 (decision **D-109**). FR-RAD-002 is met by t
 
 Note: FR-WF-016 is planned for a later phase.
 
-Note: FR-WF-018 was added in v0.10 (decision **D-109**). FR-WF-001, FR-WF-002 and FR-WF-003 are met by the definition API and the JWSS; this requirement is authoring a definition from the browser. **The editor is a list**: the definition's states, with a table of each state's transitions under it. A graph of the same definition is drawn read-only, laid out on every load, so no layout is stored and the JWSS is unchanged (**D-95**). **It is not a drag-and-drop designer**; editing on the graph would need its own decision on where a layout lives. Conditions are edited in the expression builder FR-RAD-013 describes (**D-86**, **D-95**, **D-110**). **Publishing a revision does not retire the one before it**: an administrator retires a revision explicitly, under its own permission, and instances already running keep the revision they started on (**D-101**, **D-108**). The pair comes before the hardening sprints (**D-98**). §10's *Drag-and-drop workflow designer* is struck in v0.10, and its note says what is built instead.
+Note: FR-WF-018 was added in v0.10 (decision **D-109**). FR-WF-001, FR-WF-002 and FR-WF-003 are met by the definition API and the JWSS; this requirement is authoring a definition from the browser. **The editor is a list**: the definition's states, with a table of each state's transitions under it. A graph of the same definition is drawn read-only, laid out on every load, so no layout is stored and the JWSS is unchanged (**D-95**). Above 80 states or 240 transitions, whichever is reached first, the graph is not drawn and the list is named instead (added 2026-10-27, [#721](https://github.com/sujanto-gaws/kelir/issues/721); the requirement is unchanged). **It is not a drag-and-drop designer**; editing on the graph would need its own decision on where a layout lives. Conditions are edited in the expression builder FR-RAD-013 describes (**D-86**, **D-95**, **D-110**). **Publishing a revision does not retire the one before it**: an administrator retires a revision explicitly, under its own permission, and instances already running keep the revision they started on (**D-101**, **D-108**). The pair comes before the hardening sprints (**D-98**). §10's *Drag-and-drop workflow designer* is struck in v0.10, and its note says what is built instead.
 
 ---
 
