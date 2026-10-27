@@ -226,7 +226,14 @@ pub async fn sign_in(
         identity_repo::lock_password_hash_for_session(&mut *transaction, tenant_id, credentials.id)
             .await?;
 
-    if current.as_deref() != Some(credentials.password_hash.as_str()) {
+    // A user deleted during the verify is refused here too: the lock reads only
+    // a live row.
+    let refused = match current.as_deref() {
+        Some(hash) if hash == credentials.password_hash => None,
+        Some(_) => Some("the password changed during the sign-in"),
+        None => Some("the user was deleted during the sign-in"),
+    };
+    if let Some(reason) = refused {
         transaction.rollback().await?;
 
         // Not counted towards a lockout: the password was right when it was
@@ -241,7 +248,7 @@ pub async fn sign_in(
                 object_id: credentials.id,
                 actor_user_id: Some(credentials.id),
                 ip_address,
-                reason: Some("the password changed during the sign-in"),
+                reason: Some(reason),
                 old_value: None,
                 new_value: None,
             },

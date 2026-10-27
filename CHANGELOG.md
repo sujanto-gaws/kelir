@@ -466,8 +466,10 @@ While the major version is `0`, the public API may change in any release.
   row `FOR SHARE` before they store a token, so the two cannot interleave.
   A sign-in that verified a password changed since is refused with 401 and
   a `Security.SignInFailed` row, *the password changed during the
-  sign-in*, which does not count towards a lockout. The reset's revoke now
-  rolls back with a failed reset instead of running after its commit.
+  sign-in*, which does not count towards a lockout; one whose user was
+  deleted meanwhile is refused the same way, with its own reason. The
+  reset's revoke now rolls back with a failed reset instead of running
+  after its commit.
 
 - **An update that a delete follows no longer answers 500 or 404, in eight
   more modules** ([#787](https://github.com/sujanto-gaws/kelir/issues/787)).
