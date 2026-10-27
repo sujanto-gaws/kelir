@@ -2296,6 +2296,9 @@ where
 /// The advisory key the gate waits on; the issue's number.
 const GATE: i64 = 712;
 
+/// The advisory key [`Gate::close_reads`] waits on; its issue's number.
+const READ_GATE: i64 = 785;
+
 /// A `BEFORE <event>` trigger on a table that takes a shared advisory lock
 /// this test holds exclusively on a connection of its own, so the first
 /// request to write that table stops there holding every lock it took before
@@ -2305,6 +2308,8 @@ const GATE: i64 = 712;
 /// [#663]: https://github.com/sujanto-gaws/kelir/issues/663
 struct Gate {
     connection: PgConnection,
+    /// The advisory key the gate's function waits on.
+    key: i64,
 }
 
 impl Gate {
@@ -2337,7 +2342,86 @@ impl Gate {
             .await
             .expect("close the gate");
 
-        Gate { connection }
+        Gate {
+            connection,
+            key: GATE,
+        }
+    }
+
+    /// A gate on the plain reads of the `workflow_definitions` rows that
+    /// `predicate` matches ([#785]). `predicate` is SQL over `row_status` and
+    /// `row_name`.
+    ///
+    /// **It stops the read a request runs on the pool after its commit**, and
+    /// nothing else: a statement with no transaction id that takes no row
+    /// lock (`FOR UPDATE`, `FOR NO KEY UPDATE`, `FOR SHARE`, `FOR KEY SHARE`). A statement in a transaction that has written or locked a
+    /// row has an id, and a row lock is taken before its recheck reads the
+    /// new row, so neither stops.
+    ///
+    /// **A stopped read then sees what a read run at that moment would.** It
+    /// took its snapshot before it was stopped, so the row it returns is the
+    /// row as it was then. Once the gate opens, the function asks again, with
+    /// the fresh snapshot each statement in it takes, whether the row has been
+    /// deleted since, and drops it if so.
+    ///
+    /// A trigger cannot stop a `SELECT`, and row-level security does not apply
+    /// to a superuser, which CI's role is. So the table is renamed and a view
+    /// of its name put in its place, whose `WHERE` calls the gate's function.
+    /// The service's statements name `workflow_definitions`, so they read,
+    /// lock and write through the view; the foreign keys and any trigger stay
+    /// on the table. Close a [`Gate::close`] first, since its trigger goes on
+    /// the table by name.
+    ///
+    /// [#785]: https://github.com/sujanto-gaws/kelir/issues/785
+    async fn close_reads(app: &TestApp, predicate: &str) -> Self {
+        for statement in [
+            format!(
+                "CREATE FUNCTION test_read_gate(row_id uuid, row_status text, row_name text)
+                 RETURNS boolean LANGUAGE plpgsql AS $$
+                 BEGIN
+                     IF ({predicate})
+                        AND txid_current_if_assigned() IS NULL
+                        AND current_query()
+                            !~* '\\mFOR\\s+(NO\\s+KEY\\s+UPDATE|UPDATE|KEY\\s+SHARE|SHARE)\\M' THEN
+                         PERFORM pg_advisory_xact_lock_shared({READ_GATE});
+                         RETURN NOT EXISTS (
+                             SELECT 1 FROM workflow_definitions_stored
+                             WHERE id = row_id AND deleted_at IS NOT NULL
+                         );
+                     END IF;
+                     RETURN true;
+                 END
+                 $$"
+            ),
+            "ALTER TABLE workflow_definitions RENAME TO workflow_definitions_stored".to_owned(),
+            "CREATE VIEW workflow_definitions AS
+             SELECT * FROM workflow_definitions_stored WHERE test_read_gate(id, status, name)"
+                .to_owned(),
+        ] {
+            sqlx::query(&statement)
+                .execute(&app.pool)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "the read gate: {error}
+{statement}"
+                    )
+                });
+        }
+
+        let mut connection = PgConnection::connect_with(&app.pool.connect_options())
+            .await
+            .expect("the read gate's connection");
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(READ_GATE)
+            .execute(&mut connection)
+            .await
+            .expect("close the read gate");
+
+        Gate {
+            connection,
+            key: READ_GATE,
+        }
     }
 
     /// The backend of the request `running`, once it is stopped at the gate.
@@ -2355,7 +2439,7 @@ impl Gate {
                    AND NOT granted
                    AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
             )
-            .bind(GATE)
+            .bind(self.key)
             .fetch_optional(&app.pool)
             .await
             .expect("read pg_locks");
@@ -2374,9 +2458,23 @@ impl Gate {
         }
     }
 
+    /// Whether a request is stopped at the gate now.
+    async fn holds_a_waiter(&self, app: &TestApp) -> bool {
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_locks
+              WHERE locktype = 'advisory' AND objid::text::bigint = $1 AND objsubid = 1
+                AND NOT granted
+                AND database = (SELECT oid FROM pg_database WHERE datname = current_database()))",
+        )
+        .bind(self.key)
+        .fetch_one(&app.pool)
+        .await
+        .expect("read pg_locks")
+    }
+
     async fn open(mut self) {
         sqlx::query("SELECT pg_advisory_unlock($1)")
-            .bind(GATE)
+            .bind(self.key)
             .execute(&mut self.connection)
             .await
             .expect("open the gate");
@@ -3562,4 +3660,212 @@ async fn the_deadlock_guard_counts_a_deadlock_it_is_shown() {
         deadlocks + 1,
         "the guard did not count the deadlock PostgreSQL detected"
     );
+}
+
+// ===========================================================================
+// #785: a request reads back the row it changed before it commits
+// ===========================================================================
+//
+// A publish, a deprecate and a draft's edit used to commit and then read their
+// row back on the pool, for the answer and the audit row. A delete that
+// committed in between left that read with nothing, and the request answered
+// 500 for a change that had committed, with no audit row. CI met it once, in
+// `a_delete_waiting_on_a_deprecate_deletes_it_and_each_audits_once`, where the
+// gap is open only by chance. [`Gate::close_reads`] holds it open: it stops
+// that read, and only that read, until the delete has answered.
+
+/// The `event_type` audit rows written about `id`.
+async fn audit_rows(app: &TestApp, id: Uuid, event_type: &str) -> Vec<AuditRow> {
+    sqlx::query_as(
+        "SELECT action, object_type, actor_user_id, old_value_json, new_value_json \
+         FROM audit_events WHERE object_id = $1 AND event_type = $2 \
+         ORDER BY created_at, id",
+    )
+    .bind(id)
+    .bind(event_type)
+    .fetch_all(&app.pool)
+    .await
+    .expect("read the audit rows")
+}
+
+/// **A deprecate a waiting delete follows still answers 200 and audits**
+/// ([#785]). The gate holds the deprecate at its `UPDATE`, the delete waits on
+/// its `FOR UPDATE`, and the read gate stops any read of the `DEPRECATED`
+/// row on the pool, so the delete commits before such a read could run. The
+/// deprecate's answer and its `Workflow.Deprecated` row come from its own
+/// transaction.
+///
+/// [#785]: https://github.com/sujanto-gaws/kelir/issues/785
+#[tokio::test]
+async fn a_deprecate_a_waiting_delete_follows_answers_and_audits() {
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+
+    let id = published(&app, &token, "dep_read_back").await;
+
+    let gate = Gate::close(&app, "UPDATE", "workflow_definitions").await;
+    let reads = Gate::close_reads(&app, "row_status = 'DEPRECATED'").await;
+
+    let deprecating = sent(&app, {
+        let token = token.clone();
+        move |app| async move { deprecate(&app, &token, id).await }
+    });
+    let deprecator = gate.parked(&app, &deprecating, "the deprecate").await;
+
+    let deleting = sent(&app, {
+        let token = token.clone();
+        move |app| async move { delete_revision(&app, &token, id).await }
+    });
+    let (_, deleting) = waits_on(&app, deprecator, deleting, "the delete").await;
+
+    gate.open().await;
+    let deleted = answer(deleting, "the delete").await;
+    reads.open().await;
+    let deprecated = answer(deprecating, "the deprecate").await;
+
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
+    assert_eq!(
+        deprecated.status,
+        StatusCode::OK,
+        "a deprecate that committed answered as if it had not: {}",
+        deprecated.body
+    );
+    assert_eq!(deprecated.body["data"]["status"], "DEPRECATED");
+
+    let deprecations = deprecation_records(&app, id).await;
+    assert_eq!(deprecations.len(), 1, "{deprecations:?}");
+    assert_eq!(deprecations[0].4["status"], "DEPRECATED");
+
+    // The deprecate committed before the delete read the row, so the answer
+    // and the audit row are not a change that was rolled back.
+    let deletions = deletion_records(&app, id).await;
+    assert_eq!(deletions.len(), 1, "{deletions:?}");
+    assert_eq!(deletions[0]["status"], "DEPRECATED", "{}", deletions[0]);
+}
+
+/// **A publish a waiting delete follows still answers 200 and audits**
+/// ([#785]). The deprecate's race on the publish path: the gate holds the
+/// publish at its `UPDATE`, the delete waits on its `FOR UPDATE`, and the
+/// read gate stops any read of the `ACTIVE` row on the pool. A revision no
+/// approval runs on can be deleted once it is published, so the delete
+/// deletes it.
+///
+/// [#785]: https://github.com/sujanto-gaws/kelir/issues/785
+#[tokio::test]
+async fn a_publish_a_waiting_delete_follows_answers_and_audits() {
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+
+    approver_role(&app, fixtures::SYSTEM_TENANT_ID).await;
+    let id = saved(&app, &token, "pub_read_back").await;
+
+    let gate = Gate::close(&app, "UPDATE", "workflow_definitions").await;
+    let reads = Gate::close_reads(&app, "row_status = 'ACTIVE'").await;
+
+    let publishing = sent(&app, {
+        let token = token.clone();
+        move |app| async move { publish(&app, &token, id).await }
+    });
+    let publisher = gate.parked(&app, &publishing, "the publish").await;
+
+    let deleting = sent(&app, {
+        let token = token.clone();
+        move |app| async move { delete_revision(&app, &token, id).await }
+    });
+    let (_, deleting) = waits_on(&app, publisher, deleting, "the delete").await;
+
+    gate.open().await;
+    let deleted = answer(deleting, "the delete").await;
+    reads.open().await;
+    let published = answer(publishing, "the publish").await;
+
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
+    assert_eq!(
+        published.status,
+        StatusCode::OK,
+        "a publish that committed answered as if it had not: {}",
+        published.body
+    );
+    assert_eq!(published.body["data"]["status"], "ACTIVE");
+
+    let publications = audit_rows(&app, id, "Workflow.Published").await;
+    assert_eq!(publications.len(), 1, "{publications:?}");
+    assert_eq!(publications[0].4["status"], "ACTIVE");
+
+    let deletions = deletion_records(&app, id).await;
+    assert_eq!(deletions.len(), 1, "{deletions:?}");
+    assert_eq!(deletions[0]["status"], "ACTIVE", "{}", deletions[0]);
+}
+
+/// **A draft's edit a delete follows at once still answers 200 and audits**
+/// ([#785]). An edit holds no lock a delete waits on before it writes, so the
+/// delete is sent once the edit has either answered or been stopped at a read
+/// of its renamed row on the pool. Either way the delete commits first, and
+/// the edit's answer and its `Workflow.Updated` row come from its own
+/// transaction.
+///
+/// [#785]: https://github.com/sujanto-gaws/kelir/issues/785
+#[tokio::test]
+async fn a_draft_edit_a_delete_follows_answers_and_audits() {
+    const RENAMED: &str = "Renamed before the delete";
+
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+
+    let id = saved(&app, &token, "edit_read_back").await;
+
+    let reads = Gate::close_reads(&app, &format!("row_name = '{RENAMED}'")).await;
+
+    let editing = sent(&app, {
+        let token = token.clone();
+        move |app| async move {
+            app.put(
+                &format!("{DEFINITIONS}/{id}"),
+                Some(&token),
+                json!({ "name": RENAMED }),
+            )
+            .await
+        }
+    });
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while !editing.is_finished() && !reads.holds_a_waiter(&app).await {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the edit neither answered nor reached the read gate"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Sent and awaited with a deadline: a delete the read gate stopped by
+    // mistake would otherwise hang the test, since the gate opens after it.
+    let deleting = sent(&app, {
+        let token = token.clone();
+        move |app| async move { delete_revision(&app, &token, id).await }
+    });
+    let deleted = answer(deleting, "the delete").await;
+    reads.open().await;
+    let edited = answer(editing, "the edit").await;
+
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
+    assert_eq!(
+        edited.status,
+        StatusCode::OK,
+        "an edit that committed answered as if it had not: {}",
+        edited.body
+    );
+    assert_eq!(edited.body["data"]["name"], RENAMED);
+
+    let updates = audit_rows(&app, id, "Workflow.Updated").await;
+    assert_eq!(updates.len(), 1, "{updates:?}");
+    assert_eq!(updates[0].4["name"], RENAMED);
+
+    // The edit committed: the deleted row carries the new name. Read from the
+    // table, since the view stands in for it and hides a deleted row.
+    let stored: String =
+        sqlx::query_scalar("SELECT name FROM workflow_definitions_stored WHERE id = $1")
+            .bind(id)
+            .fetch_one(&app.pool)
+            .await
+            .expect("read the deleted row");
+    assert_eq!(stored, RENAMED, "an edit answered 200 and was rolled back");
 }
