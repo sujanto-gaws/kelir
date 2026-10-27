@@ -10,7 +10,8 @@
 //!
 //! [`ReadGate`] holds the gap open: it stops the update's read after its commit,
 //! and only that read, until the delete has answered (`common::gate`). One test
-//! per update, each staged the same way by [`raced`].
+//! per update, each staged the same way by [`raced`], and one of the gate itself
+//! (`the_read_gate_drops_a_row_deleted_while_its_read_waited`).
 //!
 //! [#785]: https://github.com/sujanto-gaws/kelir/issues/785
 //! [#787]: https://github.com/sujanto-gaws/kelir/issues/787
@@ -20,7 +21,7 @@ mod common;
 use std::sync::Arc;
 
 use axum::http::{Method, StatusCode};
-use common::gate::{a_delete_follows, ReadGate};
+use common::gate::{a_delete_follows, ReadGate, PATIENCE};
 use common::{fixtures, TestApp};
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -42,6 +43,11 @@ struct Case<'a> {
     delete: String,
     /// The field of the update's `data` that shows the change.
     answered: &'a str,
+    /// A child row the update writes in the same transaction, as a JSON
+    /// pointer into the answer and the value it must hold there. The read back
+    /// before the commit has to come after that write too: read before it, or
+    /// on another connection, it answers the children as they were.
+    child: Option<(&'a str, Value)>,
     /// The update's audit `event_type`.
     event: &'a str,
 }
@@ -56,6 +62,7 @@ impl<'a> Case<'a> {
             update: (Method::PUT, String::new(), None),
             delete: String::new(),
             answered: "",
+            child: None,
             event: "",
         }
     }
@@ -105,6 +112,14 @@ async fn raced(app: &Arc<TestApp>, token: &str, case: Case<'_>) {
         "{}",
         raced.updated.body
     );
+    if let Some((pointer, expected)) = &case.child {
+        assert_eq!(
+            raced.updated.body.pointer(pointer),
+            Some(expected),
+            "the answer's children are not the ones the update wrote: {}",
+            raced.updated.body
+        );
+    }
 
     let audited: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM audit_events WHERE object_id = $1 AND event_type = $2",
@@ -523,14 +538,28 @@ async fn a_role_edit_a_delete_follows_answers_and_audits() {
     )
     .await;
     let uri = format!("/api/v1/identity/roles/{id}");
+    let permission: Uuid = sqlx::query_scalar(
+        "SELECT id FROM permissions WHERE permission_code = 'identity:user:read'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .expect("identity:user:read is in the seeded catalogue");
 
     raced(
         &app,
         &token,
         Case {
-            update: put(uri.clone(), json!({ "name": RENAMED })),
+            update: put(
+                uri.clone(),
+                json!({ "name": RENAMED, "permissionIds": [permission] }),
+            ),
             delete: uri,
             answered: "name",
+            // No other test reads the permissions an update answers with.
+            child: Some((
+                "/data/permissions/0/permissionCode",
+                json!("identity:user:read"),
+            )),
             event: "Role.Updated",
             ..Case::new("roles", id, "name")
         },
@@ -551,17 +580,125 @@ async fn a_user_edit_a_delete_follows_answers_and_audits() {
     )
     .await;
     let uri = format!("/api/v1/identity/users/{id}");
+    let role = created(
+        &app,
+        &token,
+        "/api/v1/identity/roles",
+        json!({ "roleCode": "ROLE-USER-READ-BACK", "name": "Granted on the update" }),
+    )
+    .await;
 
     raced(
         &app,
         &token,
         Case {
-            update: put(uri.clone(), json!({ "displayName": RENAMED })),
+            update: put(
+                uri.clone(),
+                json!({ "displayName": RENAMED, "roleIds": [role] }),
+            ),
             delete: uri,
             answered: "displayName",
+            // No other test reads the roles an update answers with.
+            child: Some(("/data/roles/0/roleCode", json!("ROLE-USER-READ-BACK"))),
             event: "User.Updated",
             ..Case::new("users", id, "display_name")
         },
     )
     .await;
+}
+
+/// **The gate the races above stand on drops a row deleted while its read
+/// waited.** Each race proves its update only while [`ReadGate`] holds the gap
+/// open the way a delete landing in it would. Without the fresh look the gate
+/// takes once it opens, a read stopped after the commit returns the row as its
+/// snapshot saw it, so an update that reads back after its commit answers 200
+/// with its audit row, and all but one of the races pass against the code
+/// #787 fixed. This drives the gate directly, so that a gate left
+/// toothless goes red here rather than turning those races green.
+///
+/// It also shows the one-shot claim: a second plain read of the row, as a
+/// delete's own read is, is not stopped behind the first. Without it the
+/// races still fail against the old code, but as "the delete never answered"
+/// after the patience runs out, not as the 500 or 404 they are for.
+#[tokio::test]
+async fn the_read_gate_drops_a_row_deleted_while_its_read_waited() {
+    const READ: &str = "SELECT label FROM rad_menus WHERE id = $1 AND deleted_at IS NULL";
+
+    let (app, token) = staged().await;
+    let id = created(
+        &app,
+        &token,
+        "/api/v1/rad/menus",
+        json!({ "menuKey": "menu-gate-self-test", "label": "Documents", "routePath": "/documents" }),
+    )
+    .await;
+
+    let mut reads = ReadGate::close(
+        &app,
+        "rad_menus",
+        &format!("r.label = '{RENAMED}'"),
+        "r.deleted_at IS NOT NULL",
+    )
+    .await;
+
+    // A write that committed, and a plain read of its row after the commit.
+    sqlx::query("UPDATE rad_menus SET label = $2 WHERE id = $1")
+        .bind(id)
+        .bind(RENAMED)
+        .execute(&app.pool)
+        .await
+        .expect("the write");
+    let reading = {
+        let pool = app.pool.clone();
+        tokio::spawn(async move {
+            sqlx::query_scalar::<_, String>(READ)
+                .bind(id)
+                .fetch_optional(&pool)
+                .await
+                .expect("the stopped read")
+        })
+    };
+
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while !reads.holds_a_waiter(&app).await {
+        assert!(
+            !reading.is_finished(),
+            "a plain read after the commit was not stopped"
+        );
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "a plain read after the commit never reached the gate"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let second: Option<String> = tokio::time::timeout(
+        PATIENCE,
+        sqlx::query_scalar(READ).bind(id).fetch_optional(&app.pool),
+    )
+    .await
+    .expect("a second read was stopped behind the first")
+    .expect("the second read");
+    assert_eq!(second.as_deref(), Some(RENAMED));
+
+    tokio::time::timeout(
+        PATIENCE,
+        sqlx::query("UPDATE rad_menus SET deleted_at = now() WHERE id = $1")
+            .bind(id)
+            .execute(&app.pool),
+    )
+    .await
+    .expect("the delete was stopped")
+    .expect("the delete");
+    reads.open().await;
+
+    let stopped = tokio::time::timeout(PATIENCE, reading)
+        .await
+        .expect("the stopped read never answered")
+        .expect("the stopped read panicked");
+    assert_eq!(
+        stopped, None,
+        "the gate returned a row deleted while its read waited, as the read's \
+         snapshot saw it"
+    );
 }
