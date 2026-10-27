@@ -878,3 +878,37 @@ async fn the_first_administrators_fields_are_bounded_under_its_own_paths() {
             .expect("count runs");
     assert_eq!(tenants, 0, "a refused tenant must not be created");
 }
+
+/// **[#610]: an update is refused for its body before the user is read.**
+/// `update_user` runs `validate_update_user` before `find_user`, and the 422
+/// description says "checked before the user is read": a body that would be
+/// refused, sent to an id that names no user, is a 422 for the body and not a
+/// 404 for the id. The control is the same id with a valid body: 404.
+///
+/// [#610]: https://github.com/sujanto-gaws/kelir/issues/610
+#[tokio::test]
+async fn an_invalid_update_is_refused_before_the_user_is_looked_up() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let uri = format!("/api/v1/identity/users/{}", Uuid::now_v7());
+
+    let refused = app
+        .put(
+            &uri,
+            Some(&token),
+            json!({ "email": email_of(321), "displayName": "\u{200B}" }),
+        )
+        .await;
+    assert_eq!(
+        placed_details(&refused),
+        [
+            detail("email", "maxLength", "TOO_LONG"),
+            detail("displayName", "required", "REQUIRED"),
+        ]
+    );
+
+    let missing = app
+        .put(&uri, Some(&token), json!({ "displayName": "Renamed" }))
+        .await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND, "{}", missing.body);
+}

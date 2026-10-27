@@ -2188,3 +2188,50 @@ async fn the_tenant_code_lock_does_not_hold_up_department_hierarchy_writes() {
 
     holder.rollback().await.expect("releases the lock");
 }
+
+/// **#610 on the tenant route, at each bound.** The first administrator's
+/// username, email and display name are counted on the trimmed value, and
+/// `provision_tenant_identity` stores that same trimmed value. Exactly 64, 320
+/// and 200 characters, padded with whitespace, create the tenant and are
+/// stored as the 64, 320 and 200. A store that kept the padding would pass the
+/// check and reach `VARCHAR(64)` as a 500, the failure #610 removed from the
+/// user route. `the_first_administrators_fields_are_bounded_under_its_own_paths`
+/// in `identity_users` holds the refusals one over.
+#[tokio::test]
+async fn a_first_administrator_at_each_bound_is_created_and_stored_trimmed() {
+    let app = multi_tenant_app().await;
+    let token = administering_token(&app).await;
+
+    let username = "a".repeat(64);
+    let domain = "@kelir.test";
+    let email = format!("{}{domain}", "e".repeat(320 - domain.len()));
+    let display_name = "é".repeat(200);
+
+    let created = app
+        .post(
+            TENANTS,
+            Some(&token),
+            json!({
+                "tenantCode": "BOUND",
+                "name": "Bound Limited",
+                "administrator": {
+                    "username": format!("  {username}  "),
+                    "email": format!(" {email} "),
+                    "displayName": format!("\u{00A0}{display_name}\u{00A0}"),
+                    "password": "a-sufficiently-long-password",
+                },
+            }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+    let stored: (String, String, String) = sqlx::query_as(
+        "SELECT u.username, u.email, u.display_name \
+         FROM users u JOIN tenants t ON t.id = u.tenant_id \
+         WHERE t.tenant_code = 'BOUND'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .expect("the first administrator exists");
+    assert_eq!(stored, (username, email, display_name));
+}
