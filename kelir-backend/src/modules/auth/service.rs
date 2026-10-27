@@ -212,7 +212,48 @@ pub async fn sign_in(
         return Err(AppError::Unauthorized);
     }
 
-    let issued = issue_session(state, credentials.id, tenant_id, &credentials.username).await?;
+    // **The token is stored under the user's row, and only while the hash
+    // verified above is still the one stored** (ADR-0048, #788). The verify
+    // takes as long as Argon2 does. A password change, a reset or an
+    // administrator's set-password that committed during it revoked the tokens
+    // that existed then, and a token stored after it would outlive it: so the
+    // sign-in is refused, as it would have been had it started a moment later.
+    let minted = mint_session(state, credentials.id, tenant_id, &credentials.username).await?;
+
+    let mut transaction = state.pool.begin().await?;
+
+    let current =
+        identity_repo::lock_password_hash_for_session(&mut *transaction, tenant_id, credentials.id)
+            .await?;
+
+    if current.as_deref() != Some(credentials.password_hash.as_str()) {
+        transaction.rollback().await?;
+
+        // Not counted towards a lockout: the password was right when it was
+        // checked, and nobody guessed anything.
+        audit::record_or_warn(
+            &state.pool,
+            AuditEntry {
+                tenant_id,
+                event_type: "Security.SignInFailed",
+                action: "LOGIN_FAILED",
+                object_type: ObjectType::User,
+                object_id: credentials.id,
+                actor_user_id: Some(credentials.id),
+                ip_address,
+                reason: Some("the password changed during the sign-in"),
+                old_value: None,
+                new_value: None,
+            },
+        )
+        .await;
+
+        return Err(AppError::Unauthorized);
+    }
+
+    let issued = store_session(&mut *transaction, minted, None).await?;
+
+    transaction.commit().await?;
 
     identity_repo::record_successful_login(&state.pool, tenant_id, credentials.id).await?;
 
@@ -258,6 +299,11 @@ pub async fn sign_in(
 /// new token's insert are one transaction, so a failed insert leaves the old
 /// token live, and a loser waiting on the row sweeps after the winner's new
 /// token is stored.
+///
+/// **The rotation takes the user's row `FOR SHARE` first** (ADR-0048, #756). A
+/// password change, a reset or a set-password takes that row and revokes every
+/// token in one transaction, so a rotation either stores its new token before
+/// that revoke reads, or finds its token already revoked.
 pub async fn refresh(
     state: &AppState,
     presented_token: &str,
@@ -324,6 +370,22 @@ pub async fn refresh(
     let minted = mint_session(state, stored.user_id, stored.tenant_id, &user.username).await?;
 
     let mut transaction = state.pool.begin().await?;
+
+    // The user's row before the token's (ADR-0048, #756). A password write
+    // that took the row first has committed its revoke by the time this lock
+    // is granted, so the rotation below finds the token revoked. One that comes
+    // after waits for the new token to commit, and its revoke then sees it.
+    if identity_repo::lock_password_hash_for_session(
+        &mut *transaction,
+        stored.tenant_id,
+        stored.user_id,
+    )
+    .await?
+    .is_none()
+    {
+        // Deleted since the read above.
+        return Err(AppError::Unauthorized);
+    }
 
     let rotated =
         identity_repo::revoke_refresh_token(&mut *transaction, stored.id, RevokeReason::Rotated)
@@ -461,18 +523,6 @@ pub async fn sign_out(
     Ok(())
 }
 
-/// Issues an access/refresh pair and stores the refresh digest.
-async fn issue_session(
-    state: &AppState,
-    user_id: Uuid,
-    tenant_id: Uuid,
-    username: &str,
-) -> Result<SignedIn, AppError> {
-    let minted = mint_session(state, user_id, tenant_id, username).await?;
-
-    store_session(&state.pool, minted, None).await
-}
-
 /// A session signed but not yet stored: [`store_session`] makes it one.
 struct MintedSession {
     signed_in: SignedIn,
@@ -481,7 +531,8 @@ struct MintedSession {
 }
 
 /// Reads what the access token carries, signs it, and generates the refresh
-/// token. Writes nothing, so a refresh does it before its transaction opens.
+/// token. Writes nothing, so a sign-in and a refresh do it before their
+/// transaction opens.
 async fn mint_session(
     state: &AppState,
     user_id: Uuid,
@@ -514,8 +565,9 @@ async fn mint_session(
     })
 }
 
-/// Stores a minted session's refresh digest on `executor`: the pool for a
-/// sign-in, the rotation's transaction for a refresh (#751).
+/// Stores a minted session's refresh digest in the caller's transaction, which
+/// holds the user's row `FOR SHARE` (ADR-0048): a sign-in's, or a refresh's
+/// rotation (#751).
 async fn store_session(
     executor: impl PgExecutor<'_>,
     minted: MintedSession,
@@ -612,7 +664,15 @@ pub async fn change_own_password(
             source: anyhow::anyhow!("password hashing task failed: {error}"),
         })??;
 
-    identity_repo::set_password_hash(&state.pool, tenant_id, user_id, &hash).await?;
+    // The hash and the revoke in one transaction, the `UPDATE` first, so the
+    // user's row is held until every token is revoked (ADR-0048). A sign-in or
+    // a rotation storing a token takes that row `FOR SHARE` first: it either
+    // commits before the `UPDATE`, and the revoke below sees its token, or it
+    // waits for this commit and finds the change. A revoke run after the
+    // commit, as it was, missed a token a rotation stored in between (#756).
+    let mut transaction = state.pool.begin().await?;
+
+    identity_repo::set_password_hash(&mut *transaction, tenant_id, user_id, &hash).await?;
 
     // Every refresh token is revoked: if the change was prompted by a suspected
     // compromise, leaving them alive defeats the point. The caller signs in
@@ -632,9 +692,15 @@ pub async fn change_own_password(
     // does not reach this: it reads whether the token's tenant and user are
     // deleted, and a password is neither. Closing this window needs a
     // per-request revocation check, which nothing has decided.
-    let revoked =
-        identity_repo::revoke_all_for_user(&state.pool, user_id, RevokeReason::PasswordChanged)
-            .await?;
+    let revoked = identity_repo::revoke_all_for_user(
+        &mut *transaction,
+        user_id,
+        RevokeReason::PasswordChanged,
+    )
+    .await?;
+
+    transaction.commit().await?;
+
     tracing::info!(user_id = %user_id, revoked, "password changed; sessions revoked");
 
     audit::record_or_warn(
