@@ -26,6 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::{Method, StatusCode};
+use common::gate::{a_delete_follows, ReadGate};
 use common::{deadlocks_once_settled, deadlocks_so_far, fixtures, TestApp};
 use kelir_backend::modules::workflow::repository::definition as definition_repo;
 use serde_json::{json, Value};
@@ -2296,9 +2297,6 @@ where
 /// The advisory key the gate waits on; the issue's number.
 const GATE: i64 = 712;
 
-/// The advisory key [`Gate::close_reads`] waits on; its issue's number.
-const READ_GATE: i64 = 785;
-
 /// A `BEFORE <event>` trigger on a table that takes a shared advisory lock
 /// this test holds exclusively on a connection of its own, so the first
 /// request to write that table stops there holding every lock it took before
@@ -2308,8 +2306,6 @@ const READ_GATE: i64 = 785;
 /// [#663]: https://github.com/sujanto-gaws/kelir/issues/663
 struct Gate {
     connection: PgConnection,
-    /// The advisory key the gate's function waits on.
-    key: i64,
 }
 
 impl Gate {
@@ -2342,86 +2338,7 @@ impl Gate {
             .await
             .expect("close the gate");
 
-        Gate {
-            connection,
-            key: GATE,
-        }
-    }
-
-    /// A gate on the plain reads of the `workflow_definitions` rows that
-    /// `predicate` matches ([#785]). `predicate` is SQL over `row_status` and
-    /// `row_name`.
-    ///
-    /// **It stops the read a request runs on the pool after its commit**, and
-    /// nothing else: a statement with no transaction id that takes no row
-    /// lock (`FOR UPDATE`, `FOR NO KEY UPDATE`, `FOR SHARE`, `FOR KEY SHARE`). A statement in a transaction that has written or locked a
-    /// row has an id, and a row lock is taken before its recheck reads the
-    /// new row, so neither stops.
-    ///
-    /// **A stopped read then sees what a read run at that moment would.** It
-    /// took its snapshot before it was stopped, so the row it returns is the
-    /// row as it was then. Once the gate opens, the function asks again, with
-    /// the fresh snapshot each statement in it takes, whether the row has been
-    /// deleted since, and drops it if so.
-    ///
-    /// A trigger cannot stop a `SELECT`, and row-level security does not apply
-    /// to a superuser, which CI's role is. So the table is renamed and a view
-    /// of its name put in its place, whose `WHERE` calls the gate's function.
-    /// The service's statements name `workflow_definitions`, so they read,
-    /// lock and write through the view; the foreign keys and any trigger stay
-    /// on the table. Close a [`Gate::close`] first, since its trigger goes on
-    /// the table by name.
-    ///
-    /// [#785]: https://github.com/sujanto-gaws/kelir/issues/785
-    async fn close_reads(app: &TestApp, predicate: &str) -> Self {
-        for statement in [
-            format!(
-                "CREATE FUNCTION test_read_gate(row_id uuid, row_status text, row_name text)
-                 RETURNS boolean LANGUAGE plpgsql AS $$
-                 BEGIN
-                     IF ({predicate})
-                        AND txid_current_if_assigned() IS NULL
-                        AND current_query()
-                            !~* '\\mFOR\\s+(NO\\s+KEY\\s+UPDATE|UPDATE|KEY\\s+SHARE|SHARE)\\M' THEN
-                         PERFORM pg_advisory_xact_lock_shared({READ_GATE});
-                         RETURN NOT EXISTS (
-                             SELECT 1 FROM workflow_definitions_stored
-                             WHERE id = row_id AND deleted_at IS NOT NULL
-                         );
-                     END IF;
-                     RETURN true;
-                 END
-                 $$"
-            ),
-            "ALTER TABLE workflow_definitions RENAME TO workflow_definitions_stored".to_owned(),
-            "CREATE VIEW workflow_definitions AS
-             SELECT * FROM workflow_definitions_stored WHERE test_read_gate(id, status, name)"
-                .to_owned(),
-        ] {
-            sqlx::query(&statement)
-                .execute(&app.pool)
-                .await
-                .unwrap_or_else(|error| {
-                    panic!(
-                        "the read gate: {error}
-{statement}"
-                    )
-                });
-        }
-
-        let mut connection = PgConnection::connect_with(&app.pool.connect_options())
-            .await
-            .expect("the read gate's connection");
-        sqlx::query("SELECT pg_advisory_lock($1)")
-            .bind(READ_GATE)
-            .execute(&mut connection)
-            .await
-            .expect("close the read gate");
-
-        Gate {
-            connection,
-            key: READ_GATE,
-        }
+        Gate { connection }
     }
 
     /// The backend of the request `running`, once it is stopped at the gate.
@@ -2439,7 +2356,7 @@ impl Gate {
                    AND NOT granted
                    AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
             )
-            .bind(self.key)
+            .bind(GATE)
             .fetch_optional(&app.pool)
             .await
             .expect("read pg_locks");
@@ -2458,23 +2375,9 @@ impl Gate {
         }
     }
 
-    /// Whether a request is stopped at the gate now.
-    async fn holds_a_waiter(&self, app: &TestApp) -> bool {
-        sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM pg_locks
-              WHERE locktype = 'advisory' AND objid::text::bigint = $1 AND objsubid = 1
-                AND NOT granted
-                AND database = (SELECT oid FROM pg_database WHERE datname = current_database()))",
-        )
-        .bind(self.key)
-        .fetch_one(&app.pool)
-        .await
-        .expect("read pg_locks")
-    }
-
     async fn open(mut self) {
         sqlx::query("SELECT pg_advisory_unlock($1)")
-            .bind(self.key)
+            .bind(GATE)
             .execute(&mut self.connection)
             .await
             .expect("open the gate");
@@ -3671,8 +3574,12 @@ async fn the_deadlock_guard_counts_a_deadlock_it_is_shown() {
 // committed in between left that read with nothing, and the request answered
 // 500 for a change that had committed, with no audit row. CI met it once, in
 // `a_delete_waiting_on_a_deprecate_deletes_it_and_each_audits_once`, where the
-// gap is open only by chance. [`Gate::close_reads`] holds it open: it stops
+// gap is open only by chance. [`ReadGate`] holds it open: it stops
 // that read, and only that read, until the delete has answered.
+
+/// The table [`ReadGate`] stands in for, and what a deleted row of it is.
+const DEFINITIONS_TABLE: &str = "workflow_definitions";
+const DELETED: &str = "r.deleted_at IS NOT NULL";
 
 /// The `event_type` audit rows written about `id`.
 async fn audit_rows(app: &TestApp, id: Uuid, event_type: &str) -> Vec<AuditRow> {
@@ -3704,7 +3611,8 @@ async fn a_deprecate_a_waiting_delete_follows_answers_and_audits() {
     let id = published(&app, &token, "dep_read_back").await;
 
     let gate = Gate::close(&app, "UPDATE", "workflow_definitions").await;
-    let reads = Gate::close_reads(&app, "row_status = 'DEPRECATED'").await;
+    let mut reads =
+        ReadGate::close(&app, DEFINITIONS_TABLE, "r.status = 'DEPRECATED'", DELETED).await;
 
     let deprecating = sent(&app, {
         let token = token.clone();
@@ -3760,7 +3668,7 @@ async fn a_publish_a_waiting_delete_follows_answers_and_audits() {
     let id = saved(&app, &token, "pub_read_back").await;
 
     let gate = Gate::close(&app, "UPDATE", "workflow_definitions").await;
-    let reads = Gate::close_reads(&app, "row_status = 'ACTIVE'").await;
+    let mut reads = ReadGate::close(&app, DEFINITIONS_TABLE, "r.status = 'ACTIVE'", DELETED).await;
 
     let publishing = sent(&app, {
         let token = token.clone();
@@ -3814,37 +3722,35 @@ async fn a_draft_edit_a_delete_follows_answers_and_audits() {
 
     let id = saved(&app, &token, "edit_read_back").await;
 
-    let reads = Gate::close_reads(&app, &format!("row_name = '{RENAMED}'")).await;
+    let reads = ReadGate::close(
+        &app,
+        DEFINITIONS_TABLE,
+        &format!("r.name = '{RENAMED}'"),
+        DELETED,
+    )
+    .await;
 
-    let editing = sent(&app, {
-        let token = token.clone();
-        move |app| async move {
-            app.put(
-                &format!("{DEFINITIONS}/{id}"),
-                Some(&token),
-                json!({ "name": RENAMED }),
-            )
-            .await
-        }
-    });
-    let deadline = tokio::time::Instant::now() + PATIENCE;
-    while !editing.is_finished() && !reads.holds_a_waiter(&app).await {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the edit neither answered nor reached the read gate"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-
-    // Sent and awaited with a deadline: a delete the read gate stopped by
-    // mistake would otherwise hang the test, since the gate opens after it.
-    let deleting = sent(&app, {
-        let token = token.clone();
-        move |app| async move { delete_revision(&app, &token, id).await }
-    });
-    let deleted = answer(deleting, "the delete").await;
-    reads.open().await;
-    let edited = answer(editing, "the edit").await;
+    let raced = a_delete_follows(
+        &app,
+        reads,
+        {
+            let (app, token) = (Arc::clone(&app), token.clone());
+            async move {
+                app.put(
+                    &format!("{DEFINITIONS}/{id}"),
+                    Some(&token),
+                    json!({ "name": RENAMED }),
+                )
+                .await
+            }
+        },
+        {
+            let (app, token) = (Arc::clone(&app), token.clone());
+            async move { delete_revision(&app, &token, id).await }
+        },
+    )
+    .await;
+    let (edited, deleted) = (raced.updated, raced.deleted);
 
     assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
     assert_eq!(

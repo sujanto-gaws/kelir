@@ -3,7 +3,7 @@
 //! Tenant-scoped and soft-delete aware throughout, for the reasons the RAD
 //! repository states.
 
-use sqlx::{PgExecutor, PgPool};
+use sqlx::{PgConnection, PgExecutor, PgPool};
 use uuid::Uuid;
 
 use crate::utils::search::like_contains;
@@ -173,8 +173,22 @@ pub async fn list_types(
         .collect())
 }
 
-pub async fn find_type<'e, E: PgExecutor<'e> + Copy>(
-    executor: E,
+/// A type with its workflow bindings.
+pub async fn find_type(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<Option<DocumentType>, sqlx::Error> {
+    find_type_in(&mut *pool.acquire().await?, tenant_id, id).await
+}
+
+/// [`find_type`] on the caller's connection, such as its transaction ([#787]): a
+/// write reads back the row it answers with before it commits, so a delete
+/// waiting on its lock cannot leave that read with nothing.
+///
+/// [#787]: https://github.com/sujanto-gaws/kelir/issues/787
+pub async fn find_type_in(
+    connection: &mut PgConnection,
     tenant_id: Uuid,
     id: Uuid,
 ) -> Result<Option<DocumentType>, sqlx::Error> {
@@ -189,7 +203,7 @@ pub async fn find_type<'e, E: PgExecutor<'e> + Copy>(
         tenant_id,
         id
     )
-    .fetch_optional(executor)
+    .fetch_optional(&mut *connection)
     .await?
     else {
         return Ok(None);
@@ -207,7 +221,7 @@ pub async fn find_type<'e, E: PgExecutor<'e> + Copy>(
         retention_policy_id: row.retention_policy_id,
         target_entity_type: row.target_entity_type,
         status: DocumentTypeStatus::from_db(&row.status),
-        workflows: workflows_of(executor, tenant_id, id).await?,
+        workflows: workflows_of(&mut *connection, tenant_id, id).await?,
         created_at: row.created_at,
         updated_at: row.updated_at,
     }))

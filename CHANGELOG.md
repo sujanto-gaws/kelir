@@ -452,6 +452,18 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **An update that a delete follows no longer answers 500 or 404, in eight
+  more modules** ([#787](https://github.com/sujanto-gaws/kelir/issues/787)).
+  A document, a comment, a document type, a department, a list, a facility,
+  a party, an integration credential, a form's edit and its publish, a menu
+  entry, a tenant, a role and a user each read back the row after its commit,
+  for its answer and most for its audit row. A delete that committed in
+  between left that read with nothing: the change had committed, but the
+  request answered 500 (404 for a facility, a party, a menu entry, a role and
+  a user) and, except for the tenant, role and user, wrote no `…Updated` audit
+  row. Each now reads back inside its transaction, before the commit; the
+  single-statement updates (credential, form, menu, tenant) now run their
+  write and that read in one transaction. No migration, and no schema change.
 - **A workflow publish, deprecate or draft edit that a delete follows no
   longer answers 500**
   ([#785](https://github.com/sujanto-gaws/kelir/issues/785)). Each read

@@ -479,8 +479,13 @@ pub async fn update_tenant(
         ));
     }
 
+    // The write and the read of what it wrote, in one transaction: a delete
+    // sent meanwhile waits on the row the write holds rather than landing
+    // between the two, which answered 500 for a change that committed (#787).
+    let mut transaction = state.pool.begin().await?;
+
     let updated = repository::update_fields(
-        &state.pool,
+        &mut *transaction,
         id,
         request.name.as_deref().map(str::trim),
         request.status.map(TenantStatus::as_db),
@@ -491,6 +496,15 @@ pub async fn update_tenant(
     if updated == 0 {
         return Err(AppError::not_found("Tenant"));
     }
+
+    let after = repository::find(&mut *transaction, id)
+        .await?
+        .map(|record| view(record, administering.id))
+        .ok_or_else(|| AppError::Internal {
+            source: anyhow::anyhow!("tenant {id} vanished between writing and reading it"),
+        })?;
+
+    transaction.commit().await?;
 
     // Taking a tenant offline must stop its users' sessions being renewed, not
     // merely stop new sign-ins. `resolve_for_sign_in` refuses a suspended
@@ -530,7 +544,7 @@ pub async fn update_tenant(
     )
     .await;
 
-    get_tenant_unchecked(state, id, administering.id).await
+    Ok(after)
 }
 
 /// Soft-deletes a tenant and revokes its refresh tokens.

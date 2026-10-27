@@ -274,13 +274,17 @@ pub async fn edit_comment(
     )
     .await?;
 
-    transaction.commit().await?;
-
-    let stored = repo::find_comment(&state.pool, tenant_id, comment_id)
+    // Read back before the commit, while this transaction still holds the row:
+    // a delete waiting on that lock would otherwise commit first and leave a
+    // read after the commit with nothing, answering 500 for a change that
+    // committed, with no audit row (#787).
+    let stored = repo::find_comment(&mut *transaction, tenant_id, comment_id)
         .await?
         .ok_or_else(|| AppError::Internal {
             source: anyhow::anyhow!("comment {comment_id} vanished after it was edited"),
         })?;
+
+    transaction.commit().await?;
 
     audit::record_or_warn(
         &state.pool,

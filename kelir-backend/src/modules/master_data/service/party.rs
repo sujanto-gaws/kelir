@@ -6,6 +6,7 @@
 //! `service::create_party` still names this function.
 
 use serde_json::{json, Value};
+use sqlx::PgConnection;
 use uuid::Uuid;
 
 use super::domain::{
@@ -54,7 +55,7 @@ pub async fn get_party(
 ) -> Result<PartyAggregate, AppError> {
     caller.require(PARTY_READ)?;
 
-    load_aggregate(state, caller, id).await
+    load_aggregate(&mut *state.pool.acquire().await?, caller, id).await
 }
 
 pub async fn create_party(
@@ -246,7 +247,7 @@ pub async fn create_party(
     )
     .await;
 
-    load_aggregate(state, caller, id).await
+    load_aggregate(&mut *state.pool.acquire().await?, caller, id).await
 }
 
 pub async fn update_party(
@@ -439,15 +440,22 @@ pub async fn update_party(
         .await?;
     }
 
-    transaction.commit().await?;
-
     // The row as it now is, against the row as it was, and only the fields that
     // moved (#135). A second reading of the same row rather than a projection
     // of the aggregate below: `before` is that row, and two readings of one
     // shape are what make the comparison mean anything.
-    let after = repo::find_party(&state.pool, tenant_id, id)
+    //
+    // Both read before the commit, while this transaction still holds the row:
+    // a delete waiting on that lock would otherwise commit first and leave a
+    // read after the commit with nothing, answering 404 for a change that
+    // committed, with no audit row (#787).
+    let after = repo::find_party(&mut *transaction, tenant_id, id)
         .await?
         .ok_or_else(|| AppError::not_found("Party"))?;
+    let answer = load_aggregate(&mut transaction, caller, id).await?;
+
+    transaction.commit().await?;
+
     let (old_value, new_value) = party_changes(&before, &after).halves();
 
     audit::record_or_warn(
@@ -471,7 +479,7 @@ pub async fn update_party(
     )
     .await;
 
-    load_aggregate(state, caller, id).await
+    Ok(answer)
 }
 
 /// What one update moved, in the vocabulary the API publishes.
@@ -603,12 +611,12 @@ pub async fn delete_party(
 // ---------------------------------------------------------------------------
 
 async fn load_aggregate(
-    state: &AppState,
+    connection: &mut PgConnection,
     caller: &Authenticated,
     id: Uuid,
 ) -> Result<PartyAggregate, AppError> {
     let tenant_id = caller.tenant_id();
-    let party = repo::find_party(&state.pool, tenant_id, id)
+    let party = repo::find_party(&mut *connection, tenant_id, id)
         .await?
         .ok_or_else(|| AppError::not_found("Party"))?;
 
@@ -616,7 +624,7 @@ async fn load_aggregate(
     // caller without `master-data:party-role:read` gets an aggregate with
     // neither member rather than one with two empty ones.
     let (roles, profiles) = if caller.claims.has_permission(ROLE_READ) {
-        let held = load_roles(state, tenant_id, id, &party.party_code).await?;
+        let held = load_roles(&mut *connection, tenant_id, id, &party.party_code).await?;
         (Some(held.roles), Some(held.profiles))
     } else {
         (None, None)
@@ -624,12 +632,12 @@ async fn load_aggregate(
 
     let (person, party_group) = match party.party_type {
         PartyType::Person => (
-            repo::find_person(&state.pool, tenant_id, id, &party.party_code).await?,
+            repo::find_person(&mut *connection, tenant_id, id, &party.party_code).await?,
             None,
         ),
         PartyType::PartyGroup => (
             None,
-            repo::find_party_group(&state.pool, tenant_id, id, &party.party_code).await?,
+            repo::find_party_group(&mut *connection, tenant_id, id, &party.party_code).await?,
         ),
     };
 
@@ -643,12 +651,12 @@ async fn load_aggregate(
         description: party.description,
         person,
         party_group,
-        identifications: repo::list_identifications(&state.pool, tenant_id, id).await?,
-        statuses: repo::list_statuses(&state.pool, tenant_id, id).await?,
-        relationships_from: repo::list_relationships(&state.pool, tenant_id, id, true).await?,
-        relationships_to: repo::list_relationships(&state.pool, tenant_id, id, false).await?,
-        classifications: repo::list_classifications(&state.pool, tenant_id, id).await?,
-        contact_mechanisms: repo::list_contact_mechs(&state.pool, tenant_id, id).await?,
+        identifications: repo::list_identifications(&mut *connection, tenant_id, id).await?,
+        statuses: repo::list_statuses(&mut *connection, tenant_id, id).await?,
+        relationships_from: repo::list_relationships(&mut *connection, tenant_id, id, true).await?,
+        relationships_to: repo::list_relationships(&mut *connection, tenant_id, id, false).await?,
+        classifications: repo::list_classifications(&mut *connection, tenant_id, id).await?,
+        contact_mechanisms: repo::list_contact_mechs(&mut *connection, tenant_id, id).await?,
         roles,
         profiles,
         additional_attributes: party.attributes_json,

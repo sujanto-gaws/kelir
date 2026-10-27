@@ -8,6 +8,7 @@
 //! [`create_revision`] exists beside [`update_form`] rather than inside it.
 
 use serde_json::{json, Value};
+use sqlx::PgExecutor;
 use uuid::Uuid;
 
 use super::super::domain::{
@@ -122,7 +123,7 @@ pub async fn create_form(
 
     // Read back before the record is written, so the record says what the row
     // holds rather than what the request asked for (#135).
-    let created = load(state, tenant_id, id).await?;
+    let created = load(&state.pool, tenant_id, id).await?;
 
     audit::record_or_warn(
         &state.pool,
@@ -174,8 +175,14 @@ pub async fn update_form(
         return Err(published_is_immutable(&before));
     }
 
+    // The write and the read of what it wrote, in one transaction: a delete
+    // sent meanwhile waits on the row the write holds rather than landing
+    // between the two, which answered 500 for a change that committed, with no
+    // audit row (#787).
+    let mut transaction = state.pool.begin().await?;
+
     let affected = repo::update_draft(
-        &state.pool,
+        &mut *transaction,
         tenant_id,
         id,
         &FormFields {
@@ -192,14 +199,16 @@ pub async fn update_form(
     // statement is what makes that a refusal rather than an edit to a revision
     // that had just become immutable.
     if affected == 0 {
-        let now = repo::find_form(&state.pool, tenant_id, id)
+        let now = repo::find_form(&mut *transaction, tenant_id, id)
             .await?
             .ok_or_else(|| AppError::not_found("Form definition"))?;
 
         return Err(published_is_immutable(&now));
     }
 
-    let after = load(state, tenant_id, id).await?;
+    let after = load(&mut *transaction, tenant_id, id).await?;
+
+    transaction.commit().await?;
 
     // What changed, not what was requested (#135). The definition is compared
     // rather than stored: a caller who resends an identical document has
@@ -273,7 +282,13 @@ pub async fn publish_form(
         return Err(AppError::validation(details));
     }
 
-    if repo::publish(&state.pool, tenant_id, id, actor).await? == 0 {
+    // The publish and the read of what it wrote, in one transaction: a delete
+    // sent meanwhile waits on the row the write holds rather than landing
+    // between the two, which answered 500 for a change that committed, with no
+    // audit row (#787).
+    let mut transaction = state.pool.begin().await?;
+
+    if repo::publish(&mut *transaction, tenant_id, id, actor).await? == 0 {
         // Somebody else published it first. Their name is on it, which is
         // correct — the second call did not publish anything.
         return Err(AppError::conflict(format!(
@@ -282,7 +297,9 @@ pub async fn publish_form(
         )));
     }
 
-    let after = load(state, tenant_id, id).await?;
+    let after = load(&mut *transaction, tenant_id, id).await?;
+
+    transaction.commit().await?;
 
     audit::record_or_warn(
         &state.pool,
@@ -366,7 +383,7 @@ pub async fn create_revision(
     .await
     .map_err(duplicate_to_conflict)?;
 
-    let created = load(state, tenant_id, new_id).await?;
+    let created = load(&state.pool, tenant_id, new_id).await?;
 
     audit::record_or_warn(
         &state.pool,
@@ -480,8 +497,12 @@ fn duplicate_to_conflict(error: sqlx::Error) -> AppError {
 ///
 /// It was just written inside this request, so a miss means the row is gone —
 /// which is a 500 and not a 404, and saying so keeps the two apart.
-async fn load(state: &AppState, tenant_id: Uuid, id: Uuid) -> Result<Form, AppError> {
-    repo::find_form(&state.pool, tenant_id, id)
+async fn load<'e, E: PgExecutor<'e>>(
+    executor: E,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<Form, AppError> {
+    repo::find_form(executor, tenant_id, id)
         .await?
         .ok_or_else(|| AppError::Internal {
             source: anyhow::anyhow!("form {id} vanished after it was written"),

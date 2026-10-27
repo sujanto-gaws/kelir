@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
-use sqlx::{PgExecutor, PgPool};
+use sqlx::{PgConnection, PgExecutor, PgPool};
 use uuid::Uuid;
 
 use crate::utils::search::like_contains;
@@ -507,6 +507,19 @@ pub async fn find_user(
     tenant_id: Uuid,
     id: Uuid,
 ) -> Result<Option<User>, sqlx::Error> {
+    find_user_in(&mut *pool.acquire().await?, tenant_id, id).await
+}
+
+/// [`find_user`] on the caller's connection, such as its transaction
+/// ([#787]): an update reads back the user it answers with before it commits,
+/// so a delete waiting on its lock cannot leave that read with nothing.
+///
+/// [#787]: https://github.com/sujanto-gaws/kelir/issues/787
+pub async fn find_user_in(
+    connection: &mut PgConnection,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<Option<User>, sqlx::Error> {
     let Some(row) = sqlx::query!(
         r#"
         SELECT id, username, email, display_name, status, department_id,
@@ -517,7 +530,7 @@ pub async fn find_user(
         tenant_id,
         id
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await?
     else {
         return Ok(None);
@@ -534,7 +547,7 @@ pub async fn find_user(
         last_login_at: row.last_login_at,
         locked_until: row.locked_until,
         created_at: row.created_at,
-        roles: roles_of_user(pool, tenant_id, row.id).await?,
+        roles: roles_of_user(&mut *connection, tenant_id, row.id).await?,
     }))
 }
 
@@ -783,6 +796,19 @@ pub async fn find_role(
     tenant_id: Uuid,
     id: Uuid,
 ) -> Result<Option<Role>, sqlx::Error> {
+    find_role_in(&mut *pool.acquire().await?, tenant_id, id).await
+}
+
+/// [`find_role`] on the caller's connection, such as its transaction
+/// ([#787]): an update reads back the role it answers with before it commits,
+/// so a delete waiting on its lock cannot leave that read with nothing.
+///
+/// [#787]: https://github.com/sujanto-gaws/kelir/issues/787
+pub async fn find_role_in(
+    connection: &mut PgConnection,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<Option<Role>, sqlx::Error> {
     let Some(row) = sqlx::query!(
         r#"
         SELECT id, role_code, name, description, is_system
@@ -792,7 +818,7 @@ pub async fn find_role(
         tenant_id,
         id
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await?
     else {
         return Ok(None);
@@ -804,7 +830,7 @@ pub async fn find_role(
         name: row.name,
         description: row.description,
         is_system: row.is_system,
-        permissions: permissions_of_role(pool, row.id).await?,
+        permissions: permissions_of_role(&mut *connection, row.id).await?,
         live_holders: None,
         open_tasks: None,
     }))

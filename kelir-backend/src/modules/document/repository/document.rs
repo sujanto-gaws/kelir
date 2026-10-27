@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use sqlx::PgExecutor;
+use sqlx::{PgConnection, PgExecutor, PgPool};
 use uuid::Uuid;
 
 use super::super::domain::{Document, DocumentPriority, DocumentStatus, EntityType};
@@ -393,8 +393,21 @@ pub async fn soft_delete<'e, E: PgExecutor<'e>>(
 }
 
 /// Loads a document whole, with its metadata.
-pub async fn find_document<'e, E: PgExecutor<'e> + Copy>(
-    executor: E,
+pub async fn find_document(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<Option<Document>, sqlx::Error> {
+    find_document_in(&mut *pool.acquire().await?, tenant_id, id).await
+}
+
+/// [`find_document`] on the caller's connection, such as its transaction ([#787]): a
+/// write reads back the row it answers with before it commits, so a delete
+/// waiting on its lock cannot leave that read with nothing.
+///
+/// [#787]: https://github.com/sujanto-gaws/kelir/issues/787
+pub async fn find_document_in(
+    connection: &mut PgConnection,
     tenant_id: Uuid,
     id: Uuid,
 ) -> Result<Option<Document>, sqlx::Error> {
@@ -410,7 +423,7 @@ pub async fn find_document<'e, E: PgExecutor<'e> + Copy>(
         tenant_id,
         id
     )
-    .fetch_optional(executor)
+    .fetch_optional(&mut *connection)
     .await?
     else {
         return Ok(None);
@@ -426,7 +439,7 @@ pub async fn find_document<'e, E: PgExecutor<'e> + Copy>(
         status: DocumentStatus::from_db(&row.status),
         priority: DocumentPriority::from_db(&row.priority),
         form_data: row.form_data_json,
-        metadata: super::metadata::metadata_of(executor, tenant_id, id).await?,
+        metadata: super::metadata::metadata_of(&mut *connection, tenant_id, id).await?,
         // `from_db` refuses a value this build does not know rather than
         // guessing, so an `entity_type` written by a future release reads back
         // as no link instead of as the wrong link. See `domain::link`.

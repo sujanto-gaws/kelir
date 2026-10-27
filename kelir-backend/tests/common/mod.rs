@@ -49,6 +49,7 @@
 )]
 
 pub mod fixtures;
+pub mod gate;
 
 use std::env;
 use std::net::SocketAddr;
