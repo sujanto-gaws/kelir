@@ -310,7 +310,11 @@ pub async fn set_password(
             source: anyhow::anyhow!("password hashing task failed: {error}"),
         })??;
 
-    let updated = repo::set_password_hash(&state.pool, caller.tenant_id(), id, &hash).await?;
+    // The hash and the revoke in one transaction, the `UPDATE` first, so the
+    // user's row is held until every token is revoked (ADR-0048, #756, #788).
+    let mut transaction = state.pool.begin().await?;
+
+    let updated = repo::set_password_hash(&mut *transaction, caller.tenant_id(), id, &hash).await?;
 
     if updated == 0 {
         return Err(AppError::not_found("User"));
@@ -318,7 +322,9 @@ pub async fn set_password(
 
     // A password change revokes every refresh token: if the change was prompted
     // by a suspected compromise, leaving sessions renewable defeats the point.
-    repo::revoke_all_for_user(&state.pool, id, RevokeReason::PasswordChanged).await?;
+    repo::revoke_all_for_user(&mut *transaction, id, RevokeReason::PasswordChanged).await?;
+
+    transaction.commit().await?;
 
     audit::record_or_warn(
         &state.pool,

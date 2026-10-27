@@ -300,17 +300,20 @@ pub async fn reset_password(
     // a mailbox behind them.
     identity_repo::invalidate_reset_tokens_for_user(&mut transaction, stored.user_id).await?;
 
-    transaction.commit().await?;
-
-    // Refresh tokens are revoked after the commit, not inside it: a revoke that
-    // rolled back with a failed password change would cut sessions short for
-    // nothing.
+    // Refresh tokens are revoked inside the transaction, after the `UPDATE` of
+    // the user's row (ADR-0048). A sign-in or a rotation storing a token takes
+    // that row `FOR SHARE` first, so it either committed before the `UPDATE`
+    // and is revoked here, or waits for this commit and finds the new hash. A
+    // revoke after the commit, as it was, missed a token a rotation stored in
+    // between (#756). A reset that rolls back keeps the sessions with it.
     let revoked = identity_repo::revoke_all_for_user(
-        &state.pool,
+        &mut *transaction,
         stored.user_id,
         RevokeReason::PasswordReset,
     )
     .await?;
+
+    transaction.commit().await?;
 
     tracing::info!(user_id = %stored.user_id, revoked, "password reset");
 

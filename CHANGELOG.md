@@ -452,6 +452,25 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A password write now ends every refresh token, including one stored
+  while it ran**
+  ([#756](https://github.com/sujanto-gaws/kelir/issues/756),
+  [#788](https://github.com/sujanto-gaws/kelir/issues/788),
+  [ADR-0048](docs/architectures/adr/0048.%20The%20User's%20Row%20Before%20Any%20Refresh%20Token,%20and%20a%20Password%20Write%20Revokes%20in%20Its%20Own%20Transaction.md)).
+  A password change, a reset and an administrator's set-password revoke
+  the user's refresh tokens with one statement, which saw only the tokens
+  committed when it started. A refresh rotating at that moment, or a
+  sign-in that had verified the old password, stored a token after it, and
+  that token lived its 30 days. Each password write now updates the hash
+  and revokes in one transaction; a sign-in and a refresh take the user's
+  row `FOR SHARE` before they store a token, so the two cannot interleave.
+  A sign-in that verified a password changed since is refused with 401 and
+  a `Security.SignInFailed` row, *the password changed during the
+  sign-in*, which does not count towards a lockout; one whose user was
+  deleted meanwhile is refused the same way, with its own reason. The
+  reset's revoke now rolls back with a failed reset instead of running
+  after its commit.
+
 - **An update that a delete follows no longer answers 500 or 404, in eight
   more modules** ([#787](https://github.com/sujanto-gaws/kelir/issues/787)).
   A document, a comment, a document type, a department, a list, a facility,

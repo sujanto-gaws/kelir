@@ -2540,3 +2540,991 @@ async fn a_role_grant_on_the_first_or_last_day_of_its_window_is_in_the_tokens_ro
         "a grant on a boundary day of its window was left out of the token's roles"
     );
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0048: the user's row before the token's (#756, #788)
+//
+// A password change, a reset and an administrator's set-password take the
+// user's row with their `UPDATE` and revoke every refresh token in the same
+// transaction. A sign-in and a refresh's rotation take that row `FOR SHARE`
+// before they store a token, and a sign-in re-reads the hash it verified
+// under it. So a password write and a stored token cannot interleave.
+//
+// **Staged with a trigger**: a `BEFORE INSERT` on `refresh_tokens` waits on an
+// advisory lock the test holds, so a sign-in or a rotation is held at its
+// token's insert, the moment #756's and #788's probes held them.
+// ---------------------------------------------------------------------------
+
+/// The advisory key the insert gate waits on; the two issues' numbers.
+const INSERT_GATE: i64 = 756_788;
+
+/// A `BEFORE INSERT` trigger on `refresh_tokens` that waits on [`INSERT_GATE`],
+/// held by a connection of the test's own until [`InsertGate::open`].
+struct InsertGate {
+    connection: PgConnection,
+}
+
+impl InsertGate {
+    async fn close(app: &TestApp) -> Self {
+        execute(
+            app,
+            &format!(
+                "CREATE FUNCTION test_hold_refresh_insert() RETURNS trigger
+                 LANGUAGE plpgsql AS $$
+                 BEGIN
+                     PERFORM pg_advisory_xact_lock_shared({INSERT_GATE});
+                     RETURN NEW;
+                 END
+                 $$"
+            ),
+        )
+        .await;
+        execute(
+            app,
+            "CREATE TRIGGER test_hold_refresh_insert BEFORE INSERT ON refresh_tokens
+             FOR EACH ROW EXECUTE FUNCTION test_hold_refresh_insert()",
+        )
+        .await;
+
+        let mut connection = PgConnection::connect_with(&app.pool.connect_options())
+            .await
+            .expect("the gate's connection");
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(INSERT_GATE)
+            .execute(&mut connection)
+            .await
+            .expect("closes the gate");
+
+        InsertGate { connection }
+    }
+
+    /// Returns once a token's insert waits at the gate.
+    async fn holds(&self, app: &TestApp, running: &JoinHandle<common::TestResponse>) {
+        let deadline = tokio::time::Instant::now() + PATIENCE;
+        loop {
+            let held: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity
+                 WHERE datname = current_database() AND wait_event_type = 'Lock'
+                   AND query ~ '^\\s*INSERT INTO refresh_tokens'",
+            )
+            .fetch_one(&app.pool)
+            .await
+            .expect("reads pg_stat_activity");
+            if held == 1 {
+                return;
+            }
+            assert!(!running.is_finished(), "the token's insert was not held");
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the token's insert was not held"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    async fn open(mut self, app: &TestApp) {
+        sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(INSERT_GATE)
+            .execute(&mut self.connection)
+            .await
+            .expect("opens the gate");
+        self.connection
+            .close()
+            .await
+            .expect("closes the gate's connection");
+        execute(
+            app,
+            "DROP TRIGGER test_hold_refresh_insert ON refresh_tokens",
+        )
+        .await;
+        execute(app, "DROP FUNCTION test_hold_refresh_insert()").await;
+    }
+}
+
+/// How many statements wait on a lock in this database now.
+async fn waiting_on_locks(app: &TestApp) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM pg_stat_activity
+         WHERE datname = current_database() AND wait_event_type = 'Lock'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .expect("reads pg_stat_activity")
+}
+
+/// Returns once `running` has answered or waits on a lock beside the held
+/// insert. A password write that holds no lock the held path holds answers;
+/// one that conflicts with it waits.
+async fn answered_or_waiting(app: &TestApp, running: &JoinHandle<common::TestResponse>) {
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while !running.is_finished() && waiting_on_locks(app).await < 2 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the password write neither answered nor waited"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// The ways a password is written. Each revokes every refresh token.
+#[derive(Clone, Copy, Debug)]
+enum PasswordWrite {
+    /// `POST /auth/change-password`, by the account holder.
+    OwnChange,
+    /// `POST /identity/users/{id}/password`, by an administrator.
+    SetByAdministrator,
+    /// `POST /auth/reset-password`, with the token a forgot-password mail
+    /// carries.
+    ResetByLink,
+}
+
+impl PasswordWrite {
+    /// The token the write is sent with: the holder's `access` for
+    /// [`PasswordWrite::OwnChange`], an administrator's for
+    /// [`PasswordWrite::SetByAdministrator`], and the reset token mailed to
+    /// `username` for [`PasswordWrite::ResetByLink`]. Taken before the insert
+    /// gate closes, since signing in stores a token.
+    async fn caller(self, app: &TestApp, access: &str, username: &str) -> String {
+        match self {
+            PasswordWrite::OwnChange => access.to_owned(),
+            PasswordWrite::SetByAdministrator => app.administrator_token().await,
+            PasswordWrite::ResetByLink => {
+                let asked = app
+                    .post(
+                        "/api/v1/auth/forgot-password",
+                        None,
+                        json!({ "username": username }),
+                    )
+                    .await;
+                assert!(asked.status.is_success(), "{}", asked.body);
+
+                let sent = app.mail_delivered(1).await;
+                let body = &sent.last().expect("a reset mail was delivered").body;
+                let marker = "token=";
+                let start = body.find(marker).expect("the mail carries a link") + marker.len();
+                body[start..]
+                    .chars()
+                    .take_while(|character| character.is_ascii_alphanumeric())
+                    .collect()
+            }
+        }
+    }
+
+    /// Sends the write in the background, with [`PasswordWrite::caller`]'s token.
+    fn sent(
+        self,
+        app: &Arc<TestApp>,
+        user_id: Uuid,
+        caller: &str,
+    ) -> JoinHandle<common::TestResponse> {
+        let app = Arc::clone(app);
+        let caller = caller.to_owned();
+        tokio::spawn(async move {
+            match self {
+                PasswordWrite::OwnChange => change_own_password(&app, &caller).await,
+                PasswordWrite::SetByAdministrator => {
+                    app.post(
+                        &format!("/api/v1/identity/users/{user_id}/password"),
+                        Some(&caller),
+                        json!({ "password": NEW_PASSWORD }),
+                    )
+                    .await
+                }
+                PasswordWrite::ResetByLink => {
+                    app.post(
+                        "/api/v1/auth/reset-password",
+                        None,
+                        json!({ "token": caller, "newPassword": NEW_PASSWORD }),
+                    )
+                    .await
+                }
+            }
+        })
+    }
+}
+
+/// #756: a password write that lands while a refresh is rotating ends the
+/// rotation's new token. The rotation is held at its new token's insert,
+/// holding the user's row `FOR SHARE`; the write waits on that row, and its
+/// revoke, run after the rotation commits, sees the new token.
+///
+/// Before ADR-0048 the write's revoke waited on the old token's row and
+/// skipped it once the rotation committed, and the new token, inserted after
+/// the revoke's snapshot, lived on for its 30 days.
+async fn a_password_write_during_a_rotation_ends_its_new_token(write: PasswordWrite) {
+    let app = Arc::new(TestApp::spawn().await);
+    let user_id = user(&app, "rotating.user").await;
+    let (access, token) = session_for(&app, "rotating.user").await;
+    let caller = write.caller(&app, &access, "rotating.user").await;
+
+    let gate = InsertGate::close(&app).await;
+    let rotating = refresh_in_background(&app, &token);
+    gate.holds(&app, &rotating).await;
+
+    let writing = write.sent(&app, user_id, &caller);
+    answered_or_waiting(&app, &writing).await;
+
+    gate.open(&app).await;
+    let rotated = answer(rotating).await;
+    let written = answer(writing).await;
+
+    assert_eq!(
+        written.status,
+        StatusCode::NO_CONTENT,
+        "{write:?}: {}",
+        written.body
+    );
+    assert_eq!(
+        rotated.status,
+        StatusCode::OK,
+        "{write:?}: {}",
+        rotated.body
+    );
+
+    let new_token = rotated.data()["refreshToken"]
+        .as_str()
+        .expect("refreshToken is a string")
+        .to_owned();
+    assert_eq!(
+        (
+            live_refresh_tokens(&app, user_id).await,
+            refreshed(&app, &new_token).await.status
+        ),
+        (0, StatusCode::UNAUTHORIZED),
+        "{write:?}: a token a rotation stored during the password write outlived it"
+    );
+}
+
+#[tokio::test]
+async fn a_password_change_during_a_rotation_ends_its_new_token() {
+    a_password_write_during_a_rotation_ends_its_new_token(PasswordWrite::OwnChange).await;
+}
+
+#[tokio::test]
+async fn a_password_set_by_an_administrator_during_a_rotation_ends_its_new_token() {
+    a_password_write_during_a_rotation_ends_its_new_token(PasswordWrite::SetByAdministrator).await;
+}
+
+/// #788: a password write that lands while a sign-in is storing its token
+/// ends that token. The sign-in verified the old password and is held at its
+/// token's insert, holding the user's row `FOR SHARE`; the write waits on that
+/// row, and its revoke, run after the sign-in commits, sees the token.
+///
+/// Before ADR-0048 a sign-in took no lock, so the write ran through, and the
+/// sign-in's token, inserted after the revoke, lived on for its 30 days.
+async fn a_password_write_during_a_sign_in_ends_its_token(write: PasswordWrite) {
+    let app = Arc::new(TestApp::spawn().await);
+    let user_id = user(&app, "signing.user").await;
+    let (access, _) = session_for(&app, "signing.user").await;
+    let caller = write.caller(&app, &access, "signing.user").await;
+
+    let gate = InsertGate::close(&app).await;
+    let signing_in = {
+        let app = Arc::clone(&app);
+        tokio::spawn(async move {
+            app.post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "signing.user", "password": PASSWORD }),
+            )
+            .await
+        })
+    };
+    gate.holds(&app, &signing_in).await;
+
+    let writing = write.sent(&app, user_id, &caller);
+    answered_or_waiting(&app, &writing).await;
+
+    gate.open(&app).await;
+    let signed_in = answer(signing_in).await;
+    let written = answer(writing).await;
+
+    assert_eq!(
+        written.status,
+        StatusCode::NO_CONTENT,
+        "{write:?}: {}",
+        written.body
+    );
+    assert_eq!(
+        signed_in.status,
+        StatusCode::OK,
+        "{write:?}: {}",
+        signed_in.body
+    );
+
+    let token = signed_in.data()["refreshToken"]
+        .as_str()
+        .expect("refreshToken is a string")
+        .to_owned();
+    assert_eq!(
+        (
+            live_refresh_tokens(&app, user_id).await,
+            refreshed(&app, &token).await.status
+        ),
+        (0, StatusCode::UNAUTHORIZED),
+        "{write:?}: a session signed in with the old password, overlapping the write, outlived it"
+    );
+}
+
+#[tokio::test]
+async fn a_password_change_during_a_sign_in_ends_its_token() {
+    a_password_write_during_a_sign_in_ends_its_token(PasswordWrite::OwnChange).await;
+}
+
+#[tokio::test]
+async fn a_password_set_by_an_administrator_during_a_sign_in_ends_its_token() {
+    a_password_write_during_a_sign_in_ends_its_token(PasswordWrite::SetByAdministrator).await;
+}
+
+/// #788, the other order: a password write that commits while a sign-in is
+/// verifying the old password refuses the sign-in. The test writes the hash in
+/// a transaction of its own and holds it; the sign-in reads the old hash,
+/// verifies the old password, and waits on the user's row; the write commits;
+/// the sign-in reads the new hash under the lock and is refused.
+///
+/// Refused as a wrong password is, with an audit row that says why, and not
+/// counted towards a lockout: nobody guessed anything.
+#[tokio::test]
+async fn a_sign_in_that_verified_a_password_written_since_is_refused() {
+    let app = Arc::new(TestApp::spawn().await);
+    let user_id = user(&app, "overtaken.user").await;
+
+    let mut writing = PgConnection::connect_with(&app.pool.connect_options())
+        .await
+        .expect("the write's connection");
+    sqlx::query("BEGIN")
+        .execute(&mut writing)
+        .await
+        .expect("begins the write");
+    sqlx::query("UPDATE users SET password_hash = 'written elsewhere' WHERE id = $1")
+        .bind(user_id)
+        .execute(&mut writing)
+        .await
+        .expect("writes the hash");
+
+    let signing_in = {
+        let app = Arc::clone(&app);
+        tokio::spawn(async move {
+            app.post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "overtaken.user", "password": PASSWORD }),
+            )
+            .await
+        })
+    };
+
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while waiting_on_locks(&app).await < 1 {
+        if signing_in.is_finished() {
+            let answered = answer(signing_in).await;
+            panic!(
+                "the sign-in did not wait on the user's row: it answered {} {}",
+                answered.status, answered.body
+            );
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the sign-in was never seen waiting"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    sqlx::query("COMMIT")
+        .execute(&mut writing)
+        .await
+        .expect("commits the write");
+    let signed_in = answer(signing_in).await;
+
+    assert_eq!(
+        signed_in.status,
+        StatusCode::UNAUTHORIZED,
+        "{}",
+        signed_in.body
+    );
+    assert_eq!(live_refresh_tokens(&app, user_id).await, 0);
+
+    let reasons: Vec<Option<String>> = sqlx::query_scalar(
+        "SELECT reason FROM audit_events
+         WHERE object_id = $1 AND event_type = 'Security.SignInFailed'",
+    )
+    .bind(user_id)
+    .fetch_all(&app.pool)
+    .await
+    .expect("reads the audit rows");
+    assert_eq!(
+        reasons,
+        [Some("the password changed during the sign-in".to_owned())]
+    );
+
+    let failures: i32 = sqlx::query_scalar("SELECT failed_login_count FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&app.pool)
+        .await
+        .expect("reads the failure count");
+    assert_eq!(
+        failures, 0,
+        "a sign-in overtaken by a password write counted as a guess"
+    );
+}
+
+/// ADR-0048: the sign-in's lock reads only a live user, so a user deleted
+/// while the sign-in verified its password is refused there, 401, with a
+/// reason that says so and not that the password changed. The test holds the
+/// delete's transaction open until the sign-in is seen waiting on the row.
+#[tokio::test]
+async fn a_sign_in_whose_user_is_deleted_during_its_verify_is_refused_and_says_why() {
+    let app = Arc::new(TestApp::spawn().await);
+    let user_id = user(&app, "deleted.mid.sign.in").await;
+
+    let mut deleting = PgConnection::connect_with(&app.pool.connect_options())
+        .await
+        .expect("the delete's connection");
+    sqlx::query("BEGIN")
+        .execute(&mut deleting)
+        .await
+        .expect("begins the delete");
+    sqlx::query("UPDATE users SET deleted_at = now() WHERE id = $1")
+        .bind(user_id)
+        .execute(&mut deleting)
+        .await
+        .expect("deletes the user");
+
+    let signing_in = {
+        let app = Arc::clone(&app);
+        tokio::spawn(async move {
+            app.post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "deleted.mid.sign.in", "password": PASSWORD }),
+            )
+            .await
+        })
+    };
+
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while waiting_on_locks(&app).await < 1 {
+        if signing_in.is_finished() {
+            let answered = answer(signing_in).await;
+            panic!(
+                "the sign-in did not wait on the user's row: it answered {} {}",
+                answered.status, answered.body
+            );
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the sign-in was never seen waiting"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    sqlx::query("COMMIT")
+        .execute(&mut deleting)
+        .await
+        .expect("commits the delete");
+    let signed_in = answer(signing_in).await;
+
+    assert_eq!(
+        signed_in.status,
+        StatusCode::UNAUTHORIZED,
+        "{}",
+        signed_in.body
+    );
+    assert_eq!(live_refresh_tokens(&app, user_id).await, 0);
+
+    let reasons: Vec<Option<String>> = sqlx::query_scalar(
+        "SELECT reason FROM audit_events
+         WHERE object_id = $1 AND event_type = 'Security.SignInFailed'",
+    )
+    .bind(user_id)
+    .fetch_all(&app.pool)
+    .await
+    .expect("reads the audit rows");
+    assert_eq!(
+        reasons,
+        [Some("the user was deleted during the sign-in".to_owned())]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0048, the closing gate's additions (test-engineer, 2026-10-27)
+//
+// The five tests above stage a token writer that takes the user's row first,
+// for the two authenticated password writes. They prove the lock and the
+// sign-in's comparison; a revoke moved after the write's commit passes all
+// five, since a token committed before the write's `UPDATE` is seen by any
+// later revoke. These add what a mutation campaign found unproven:
+// - the reset path in the two tests above;
+// - the order the ADR names second, a password write that holds the row
+//   before a rotation reaches it (this catches a rotation that locks its token
+//   before its user: the two deadlock);
+// - a refresh whose user is deleted while it waits for the row;
+// - a password write that fails at its commit (a revoke run on the pool
+//   before the commit survives everything else);
+// - a password write held at its revoke, after its `UPDATE`
+//   ([`RevokeGate`]): the one deterministic proof that the revoke runs in the
+//   write's transaction.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_password_reset_during_a_rotation_ends_its_new_token() {
+    a_password_write_during_a_rotation_ends_its_new_token(PasswordWrite::ResetByLink).await;
+}
+
+#[tokio::test]
+async fn a_password_reset_during_a_sign_in_ends_its_token() {
+    a_password_write_during_a_sign_in_ends_its_token(PasswordWrite::ResetByLink).await;
+}
+
+/// The advisory key [`PasswordGate`] waits on.
+const PASSWORD_GATE: i64 = 756_789;
+
+/// An `AFTER UPDATE` trigger on `users` that waits on [`PASSWORD_GATE`] when
+/// a row's `password_hash` changes. A password write is held after its
+/// `UPDATE`, holding the user's row, and before its revoke.
+struct PasswordGate {
+    connection: PgConnection,
+}
+
+impl PasswordGate {
+    async fn close(app: &TestApp) -> Self {
+        execute(
+            app,
+            &format!(
+                "CREATE FUNCTION test_hold_password_write() RETURNS trigger
+                 LANGUAGE plpgsql AS $$
+                 BEGIN
+                     PERFORM pg_advisory_xact_lock_shared({PASSWORD_GATE});
+                     RETURN NULL;
+                 END
+                 $$"
+            ),
+        )
+        .await;
+        execute(
+            app,
+            "CREATE TRIGGER test_hold_password_write AFTER UPDATE OF password_hash ON users
+             FOR EACH ROW WHEN (OLD.password_hash IS DISTINCT FROM NEW.password_hash)
+             EXECUTE FUNCTION test_hold_password_write()",
+        )
+        .await;
+
+        let mut connection = PgConnection::connect_with(&app.pool.connect_options())
+            .await
+            .expect("the gate's connection");
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(PASSWORD_GATE)
+            .execute(&mut connection)
+            .await
+            .expect("closes the gate");
+
+        PasswordGate { connection }
+    }
+
+    /// Returns once a password write's `UPDATE` waits at the gate.
+    async fn holds(&self, app: &TestApp, running: &JoinHandle<common::TestResponse>) {
+        let deadline = tokio::time::Instant::now() + PATIENCE;
+        loop {
+            let held: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity
+                 WHERE datname = current_database() AND wait_event_type = 'Lock'
+                   AND query ~ '^\\s*UPDATE users\\s+SET password_hash'",
+            )
+            .fetch_one(&app.pool)
+            .await
+            .expect("reads pg_stat_activity");
+            if held == 1 {
+                return;
+            }
+            assert!(!running.is_finished(), "the password write was not held");
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the password write was not held"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Lets the held write go on. The trigger stays until [`Self::remove`],
+    /// once the paths it held have answered: a `DROP TRIGGER` waiting on the
+    /// table would queue every later lock on `users` behind it.
+    async fn open(mut self) {
+        sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(PASSWORD_GATE)
+            .execute(&mut self.connection)
+            .await
+            .expect("opens the gate");
+        self.connection
+            .close()
+            .await
+            .expect("closes the gate's connection");
+    }
+
+    async fn remove(app: &TestApp) {
+        execute(app, "DROP TRIGGER test_hold_password_write ON users").await;
+        execute(app, "DROP FUNCTION test_hold_password_write()").await;
+    }
+}
+
+/// ADR-0048 §3 A, the second order: a password write that took the user's row
+/// first holds it until its revoke has committed, so a rotation that reaches
+/// the lock then finds its token revoked, and #710's branch refuses it as
+/// `password changed`, with no sweep and no reuse row.
+///
+/// A rotation that took its token's row before the user's (the order the ADR
+/// rules out) deadlocks here: the write's revoke waits on the token's row, and
+/// the rotation waits on the user's.
+async fn a_password_write_that_holds_the_row_refuses_a_rotation_waiting_on_it(
+    write: PasswordWrite,
+) {
+    let app = Arc::new(TestApp::spawn().await);
+    let user_id = user(&app, "overtaking.user").await;
+    let (access, token) = session_for(&app, "overtaking.user").await;
+    let caller = write.caller(&app, &access, "overtaking.user").await;
+
+    let gate = PasswordGate::close(&app).await;
+    let writing = write.sent(&app, user_id, &caller);
+    gate.holds(&app, &writing).await;
+
+    let rotating = refresh_in_background(&app, &token);
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while !rotating.is_finished() && waiting_on_locks(&app).await < 2 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{write:?}: the rotation neither answered nor waited"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    gate.open().await;
+    let written = answer(writing).await;
+    let rotated = answer(rotating).await;
+    PasswordGate::remove(&app).await;
+
+    assert_eq!(
+        written.status,
+        StatusCode::NO_CONTENT,
+        "{write:?}: {}",
+        written.body
+    );
+    assert_eq!(
+        (
+            rotated.status,
+            live_refresh_tokens(&app, user_id).await,
+            reuse_rows(&app, user_id).await
+        ),
+        (StatusCode::UNAUTHORIZED, 0, 0),
+        "{write:?}: a rotation that waited on a password write's row was not refused \
+         as that write's revoke; body {}",
+        rotated.body
+    );
+}
+
+#[tokio::test]
+async fn a_password_change_that_holds_the_row_refuses_a_rotation_waiting_on_it() {
+    a_password_write_that_holds_the_row_refuses_a_rotation_waiting_on_it(PasswordWrite::OwnChange)
+        .await;
+}
+
+#[tokio::test]
+async fn a_password_set_by_an_administrator_that_holds_the_row_refuses_a_rotation_waiting_on_it() {
+    a_password_write_that_holds_the_row_refuses_a_rotation_waiting_on_it(
+        PasswordWrite::SetByAdministrator,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_password_reset_that_holds_the_row_refuses_a_rotation_waiting_on_it() {
+    a_password_write_that_holds_the_row_refuses_a_rotation_waiting_on_it(
+        PasswordWrite::ResetByLink,
+    )
+    .await;
+}
+
+/// ADR-0048: the rotation's lock reads the user again, so a user deleted
+/// while the rotation waited for the row is refused there, 401, and nothing is
+/// stored. The test holds the delete's transaction open until the rotation is
+/// seen waiting on the row.
+#[tokio::test]
+async fn a_refresh_whose_user_is_deleted_while_it_waits_for_the_row_is_refused() {
+    let app = Arc::new(TestApp::spawn().await);
+    let user_id = user(&app, "vanishing.user").await;
+    let (_, token) = session_for(&app, "vanishing.user").await;
+
+    let mut deleting = PgConnection::connect_with(&app.pool.connect_options())
+        .await
+        .expect("the delete's connection");
+    sqlx::query("BEGIN")
+        .execute(&mut deleting)
+        .await
+        .expect("begins the delete");
+    sqlx::query("UPDATE users SET deleted_at = now() WHERE id = $1")
+        .bind(user_id)
+        .execute(&mut deleting)
+        .await
+        .expect("deletes the user");
+
+    let refreshing = refresh_in_background(&app, &token);
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while waiting_on_locks(&app).await < 1 {
+        if refreshing.is_finished() {
+            let answered = answer(refreshing).await;
+            panic!(
+                "the refresh did not wait on the user's row: it answered {} {}",
+                answered.status, answered.body
+            );
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the refresh was never seen waiting"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    sqlx::query("COMMIT")
+        .execute(&mut deleting)
+        .await
+        .expect("commits the delete");
+    let refreshed = answer(refreshing).await;
+
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM refresh_tokens WHERE user_id = $1")
+        .bind(user_id)
+        .fetch_one(&app.pool)
+        .await
+        .expect("counts the user's tokens");
+    assert_eq!(
+        (refreshed.status, stored),
+        (StatusCode::UNAUTHORIZED, 1),
+        "a refresh of a user deleted at its lock was not refused before it stored a token; \
+         body {}",
+        refreshed.body
+    );
+}
+
+/// ADR-0048 §3 C: inside the transaction, a revoke rolls back with the
+/// password change, so a write that fails at its commit keeps the sessions.
+/// The failure is a deferred constraint trigger that raises at the commit of
+/// any transaction that changed a `password_hash`.
+async fn a_password_write_that_fails_at_its_commit_keeps_the_sessions(write: PasswordWrite) {
+    let app = Arc::new(TestApp::spawn().await);
+    let user_id = user(&app, "unchanged.user").await;
+    let (access, token) = session_for(&app, "unchanged.user").await;
+    let caller = write.caller(&app, &access, "unchanged.user").await;
+
+    execute(
+        &app,
+        "CREATE FUNCTION test_fail_password_commit() RETURNS trigger
+         LANGUAGE plpgsql AS $$
+         BEGIN
+             RAISE EXCEPTION 'test: the password write fails at its commit';
+         END
+         $$",
+    )
+    .await;
+    execute(
+        &app,
+        "CREATE CONSTRAINT TRIGGER test_fail_password_commit AFTER UPDATE ON users
+         DEFERRABLE INITIALLY DEFERRED
+         FOR EACH ROW WHEN (OLD.password_hash IS DISTINCT FROM NEW.password_hash)
+         EXECUTE FUNCTION test_fail_password_commit()",
+    )
+    .await;
+
+    let written = answer(write.sent(&app, user_id, &caller)).await;
+
+    execute(&app, "DROP TRIGGER test_fail_password_commit ON users").await;
+    execute(&app, "DROP FUNCTION test_fail_password_commit()").await;
+
+    assert!(
+        written.status.is_server_error(),
+        "{write:?}: the commit's failure was not an error: {} {}",
+        written.status,
+        written.body
+    );
+    assert_eq!(
+        (
+            live_refresh_tokens(&app, user_id).await,
+            refreshed(&app, &token).await.status
+        ),
+        (1, StatusCode::OK),
+        "{write:?}: a password write that rolled back still ended the sessions"
+    );
+}
+
+#[tokio::test]
+async fn a_password_change_that_fails_at_its_commit_keeps_the_sessions() {
+    a_password_write_that_fails_at_its_commit_keeps_the_sessions(PasswordWrite::OwnChange).await;
+}
+
+#[tokio::test]
+async fn a_password_set_by_an_administrator_that_fails_at_its_commit_keeps_the_sessions() {
+    a_password_write_that_fails_at_its_commit_keeps_the_sessions(PasswordWrite::SetByAdministrator)
+        .await;
+}
+
+#[tokio::test]
+async fn a_password_reset_that_fails_at_its_commit_keeps_the_sessions() {
+    a_password_write_that_fails_at_its_commit_keeps_the_sessions(PasswordWrite::ResetByLink).await;
+}
+
+/// The advisory key [`RevokeGate`] waits on.
+const REVOKE_GATE: i64 = 756_790;
+
+/// A `BEFORE UPDATE … FOR EACH STATEMENT` trigger on `refresh_tokens` that
+/// waits on [`REVOKE_GATE`] in a user-wide revoke (`revoke_all_for_user`).
+///
+/// A statement trigger fires after the statement's snapshot is taken and
+/// before it reaches any row. So the held revoke holds no token's row, and
+/// will not see a token committed while it waits: #756's window, staged.
+struct RevokeGate {
+    connection: PgConnection,
+}
+
+impl RevokeGate {
+    async fn close(app: &TestApp) -> Self {
+        execute(
+            app,
+            &format!(
+                "CREATE FUNCTION test_hold_user_revoke() RETURNS trigger
+                 LANGUAGE plpgsql AS $$
+                 BEGIN
+                     IF current_query() ~ 'WHERE user_id = \\$1 AND revoked_at IS NULL' THEN
+                         PERFORM pg_advisory_xact_lock_shared({REVOKE_GATE});
+                     END IF;
+                     RETURN NULL;
+                 END
+                 $$"
+            ),
+        )
+        .await;
+        execute(
+            app,
+            "CREATE TRIGGER test_hold_user_revoke BEFORE UPDATE ON refresh_tokens
+             FOR EACH STATEMENT EXECUTE FUNCTION test_hold_user_revoke()",
+        )
+        .await;
+
+        let mut connection = PgConnection::connect_with(&app.pool.connect_options())
+            .await
+            .expect("the gate's connection");
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(REVOKE_GATE)
+            .execute(&mut connection)
+            .await
+            .expect("closes the gate");
+
+        RevokeGate { connection }
+    }
+
+    /// Returns once a user-wide revoke waits at the gate.
+    async fn holds(&self, app: &TestApp, running: &JoinHandle<common::TestResponse>) {
+        let deadline = tokio::time::Instant::now() + PATIENCE;
+        loop {
+            let held: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity
+                 WHERE datname = current_database() AND wait_event_type = 'Lock'
+                   AND query ~ 'WHERE user_id = \\$1 AND revoked_at IS NULL'",
+            )
+            .fetch_one(&app.pool)
+            .await
+            .expect("reads pg_stat_activity");
+            if held == 1 {
+                return;
+            }
+            assert!(!running.is_finished(), "the revoke was not held");
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the revoke was not held"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    async fn open(mut self) {
+        sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(REVOKE_GATE)
+            .execute(&mut self.connection)
+            .await
+            .expect("opens the gate");
+        self.connection
+            .close()
+            .await
+            .expect("closes the gate's connection");
+    }
+
+    async fn remove(app: &TestApp) {
+        execute(app, "DROP TRIGGER test_hold_user_revoke ON refresh_tokens").await;
+        execute(app, "DROP FUNCTION test_hold_user_revoke()").await;
+    }
+}
+
+/// ADR-0048 §2: a password write revokes in its own transaction, so it holds
+/// the user's row until the revoke has run. The write is held at its revoke,
+/// after its `UPDATE`; a rotation then waits on the user's row, and finds its
+/// token revoked once the write commits.
+///
+/// A revoke run after the commit, on its own, leaves the row free: the
+/// rotation stores its new token while the revoke waits, and the revoke, whose
+/// snapshot is older, never sees it (#756). The five tests above do not reach
+/// that: a token writer that took the row first commits before the write's
+/// `UPDATE`, and any revoke after it sees the token, inside the transaction or
+/// not.
+async fn a_password_write_holds_the_row_until_its_revoke_has_run(write: PasswordWrite) {
+    let app = Arc::new(TestApp::spawn().await);
+    let user_id = user(&app, "revoking.user").await;
+    let (access, token) = session_for(&app, "revoking.user").await;
+    let caller = write.caller(&app, &access, "revoking.user").await;
+
+    let gate = RevokeGate::close(&app).await;
+    let writing = write.sent(&app, user_id, &caller);
+    gate.holds(&app, &writing).await;
+
+    let rotating = refresh_in_background(&app, &token);
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while !rotating.is_finished() && waiting_on_locks(&app).await < 2 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{write:?}: the rotation neither answered nor waited"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    gate.open().await;
+    let written = answer(writing).await;
+    let rotated = answer(rotating).await;
+    RevokeGate::remove(&app).await;
+
+    assert_eq!(
+        written.status,
+        StatusCode::NO_CONTENT,
+        "{write:?}: {}",
+        written.body
+    );
+    assert_eq!(
+        (
+            rotated.status,
+            live_refresh_tokens(&app, user_id).await,
+            reuse_rows(&app, user_id).await
+        ),
+        (StatusCode::UNAUTHORIZED, 0, 0),
+        "{write:?}: a rotation renewed while the password write's revoke waited; body {}",
+        rotated.body
+    );
+}
+
+#[tokio::test]
+async fn a_password_change_holds_the_row_until_its_revoke_has_run() {
+    a_password_write_holds_the_row_until_its_revoke_has_run(PasswordWrite::OwnChange).await;
+}
+
+#[tokio::test]
+async fn a_password_set_by_an_administrator_holds_the_row_until_its_revoke_has_run() {
+    a_password_write_holds_the_row_until_its_revoke_has_run(PasswordWrite::SetByAdministrator)
+        .await;
+}
+
+#[tokio::test]
+async fn a_password_reset_holds_the_row_until_its_revoke_has_run() {
+    a_password_write_holds_the_row_until_its_revoke_has_run(PasswordWrite::ResetByLink).await;
+}

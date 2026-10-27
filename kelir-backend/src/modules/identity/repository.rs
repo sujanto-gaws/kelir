@@ -377,6 +377,10 @@ pub async fn revoke_refresh_token(
 
 /// Revokes every live token for a user: on a password change or reset, an
 /// account taken out of use, and when a refresh meets replay evidence.
+///
+/// **On a password write it runs in that write's transaction, after the
+/// `UPDATE` of the user's row** (ADR-0048). Run later, on its own, it misses a
+/// token a rotation stored in between (#756).
 pub async fn revoke_all_for_user(
     executor: impl PgExecutor<'_>,
     user_id: Uuid,
@@ -390,6 +394,43 @@ pub async fn revoke_all_for_user(
     .execute(executor)
     .await
     .map(|result| result.rows_affected())
+}
+
+/// The user's password hash, read under `FOR SHARE` on the user's row by a
+/// path about to store a refresh token: a sign-in, and a refresh's rotation
+/// (ADR-0048; #756, #788).
+///
+/// **The `users` row before any `refresh_tokens` row.** A password write takes
+/// the row with its `UPDATE` and revokes the user's tokens in the same
+/// transaction, so the two cannot interleave:
+/// - a token stored under this lock commits before the password write takes
+///   the row, and that write's revoke, a later statement, sees it;
+/// - a path that reaches this lock after a password write took the row waits
+///   until the write commits, and then reads the hash it wrote.
+///
+/// `FOR SHARE`, not `FOR KEY SHARE`: only `FOR SHARE` conflicts with the
+/// `FOR NO KEY UPDATE` that a password write's `UPDATE` takes. Nothing takes a
+/// user `FOR UPDATE`, so the `FOR KEY SHARE` every stamping foreign key takes
+/// on the acting user still conflicts with nothing (record 23 §5.1).
+///
+/// `None` for a user deleted since the caller read it.
+pub async fn lock_password_hash_for_session(
+    executor: impl PgExecutor<'_>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar!(
+        r#"
+        SELECT password_hash
+        FROM users
+        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+        FOR SHARE
+        "#,
+        tenant_id,
+        user_id
+    )
+    .fetch_optional(executor)
+    .await
 }
 
 // ---------------------------------------------------------------------------
