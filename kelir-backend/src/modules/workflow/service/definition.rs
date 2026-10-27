@@ -72,13 +72,21 @@
 //! locked: `repo::has_live_instances` is a plain read, and no instance,
 //! document or document type is touched.
 //!
+//! **A path that changes a revision reads it back before it commits** ([#785]):
+//! a publish, a deprecate and a draft's edit answer and audit with the row as
+//! their own transaction left it. Read after the commit, a delete waiting on
+//! the row's lock could remove it first, and the request answered 500 for a
+//! change that had committed, with no audit row. A create and a new revision
+//! read back on the pool: their id is new, and nobody else can name it until
+//! the request answers.
+//!
 //! That is what keeps them out of a cycle with the paths that take a revision
 //! later. A submit holds its document and the document's type when
 //! `engine::start` takes the revision `FOR SHARE`, and a binding holds the type
 //! when `repo::lock_bindable_definition` does. A path that held any of those,
 //! or took one after the revision, would deadlock with them. A draft's edit is
-//! one `UPDATE` of the row on the pool, and a decision reads the revision
-//! without a lock.
+//! one `UPDATE` of the row and a read of it, in one transaction, and a
+//! decision reads the revision without a lock.
 //!
 //! **This says what the paths lock. It is not a complete lock order**
 //! (ADR-0042 §2).
@@ -88,10 +96,12 @@
 //! [#573]: https://github.com/sujanto-gaws/kelir/issues/573
 //! [#613]: https://github.com/sujanto-gaws/kelir/issues/613
 //! [#712]: https://github.com/sujanto-gaws/kelir/issues/712
+//! [#785]: https://github.com/sujanto-gaws/kelir/issues/785
 
 use std::collections::BTreeSet;
 
 use serde_json::{json, Value};
+use sqlx::PgExecutor;
 use uuid::Uuid;
 
 use super::super::domain::{
@@ -199,7 +209,7 @@ pub async fn create_definition(
 
     // Read back before the record is written, so the record says what the row
     // holds rather than what the request asked for (#135).
-    let created = load(state, tenant_id, id).await?;
+    let created = load(&state.pool, tenant_id, id).await?;
 
     audit::record_or_warn(
         &state.pool,
@@ -255,8 +265,13 @@ pub async fn update_definition(
     let next_initial = request.definition.as_ref().map(initial_state);
     let next_jwss = request.definition.as_ref().map(jwss_version);
 
+    // The write and the read-back in one transaction, so the row read is the
+    // row written: a delete of the draft waits on this `UPDATE`'s lock rather
+    // than landing between the two (#785).
+    let mut transaction = state.pool.begin().await?;
+
     let affected = repo::update_draft(
-        &state.pool,
+        &mut *transaction,
         tenant_id,
         id,
         &repo::DefinitionFields {
@@ -275,14 +290,16 @@ pub async fn update_definition(
     // statement is what makes that a refusal rather than an edit to a revision
     // that had just become immutable.
     if affected == 0 {
-        let now = repo::find_definition(&state.pool, tenant_id, id)
+        let now = repo::find_definition(&mut *transaction, tenant_id, id)
             .await?
             .ok_or_else(|| AppError::not_found("Workflow definition"))?;
 
         return Err(published_is_immutable(&now));
     }
 
-    let after = load(state, tenant_id, id).await?;
+    let after = load(&mut *transaction, tenant_id, id).await?;
+
+    transaction.commit().await?;
 
     let mut changes = ChangeSet::new();
     changes.field("name", &before.name, &after.name);
@@ -434,9 +451,11 @@ pub async fn publish_definition(
     // committed without them would produce a definition nothing could start.
     projection::replace(&mut transaction, tenant_id, id, &graph, actor).await?;
 
-    transaction.commit().await?;
+    // Read under the lock, before the commit releases it to a waiting delete
+    // (#785).
+    let after = load(&mut *transaction, tenant_id, id).await?;
 
-    let after = load(state, tenant_id, id).await?;
+    transaction.commit().await?;
 
     audit::record_or_warn(
         &state.pool,
@@ -521,9 +540,11 @@ pub async fn deprecate_definition(
         )));
     }
 
-    transaction.commit().await?;
+    // Read under the lock, before the commit releases it to a waiting delete
+    // (#785).
+    let after = load(&mut *transaction, tenant_id, id).await?;
 
-    let after = load(state, tenant_id, id).await?;
+    transaction.commit().await?;
 
     audit::record_or_warn(
         &state.pool,
@@ -609,7 +630,7 @@ pub async fn create_revision(
     .await
     .map_err(duplicate_to_conflict)?;
 
-    let created = load(state, tenant_id, new_id).await?;
+    let created = load(&state.pool, tenant_id, new_id).await?;
 
     audit::record_or_warn(
         &state.pool,
@@ -792,9 +813,15 @@ fn trimmed(value: Option<&str>) -> Option<&str> {
 /// `None`.
 ///
 /// It was just written inside this request, so a miss means the row is gone —
-/// which is a 500 and not a 404, and saying so keeps the two apart.
-async fn load(state: &AppState, tenant_id: Uuid, id: Uuid) -> Result<WorkflowDefinition, AppError> {
-    repo::find_definition(&state.pool, tenant_id, id)
+/// which is a 500 and not a 404, and saying so keeps the two apart. A path that
+/// changed an existing row passes its transaction, so nothing can remove the
+/// row before this reads it (#785); the module documentation says which.
+async fn load<'e, E: PgExecutor<'e>>(
+    executor: E,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<WorkflowDefinition, AppError> {
+    repo::find_definition(executor, tenant_id, id)
         .await?
         .ok_or_else(|| AppError::Internal {
             source: anyhow::anyhow!("workflow definition {id} vanished after it was written"),

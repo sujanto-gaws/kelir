@@ -452,6 +452,16 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A workflow publish, deprecate or draft edit that a delete follows no
+  longer answers 500**
+  ([#785](https://github.com/sujanto-gaws/kelir/issues/785)). Each read
+  back the revision after its commit, for its answer and its audit row. A
+  delete of the same revision that committed in between, typically one
+  that had been waiting on the publish's or the deprecate's lock, left
+  that read with nothing: the change had committed, but the request
+  answered 500 and wrote no `Workflow.Published`, `Workflow.Deprecated` or
+  `Workflow.Updated` audit row. Each now reads the revision inside its
+  transaction, before the commit. No migration, and no schema change.
 - **A refresh after an administrator revoked the token is no longer recorded
   as token reuse** ([#710](https://github.com/sujanto-gaws/kelir/issues/710)). `POST /auth/refresh`
   treated every revoked refresh token as a replay, so a client whose session
