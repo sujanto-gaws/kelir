@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { computed, ref } from 'vue'
 
 import { Alert } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -17,7 +16,8 @@ import {
 } from '@/components/ui/table'
 import { deleteTenant, listTenants } from '@/api/organization'
 import { toApiError } from '@/api/client'
-import { useQueryBackedList, type ListQuery } from '@/composables/useQueryBackedList'
+import { useListRoute } from '@/composables/useListRoute'
+import { useQueryBackedList } from '@/composables/useQueryBackedList'
 import { useAuthStore } from '@/stores/auth'
 import { TENANT_STATUS_LABELS, type Tenant } from '@/types/organization'
 import ConfirmDialog from './ConfirmDialog.vue'
@@ -37,67 +37,16 @@ import TenantFormDialog from './TenantFormDialog.vue'
  * **The URL holds the page and the search** (#598), as on the external system
  * list: both go to the server as they are, and nothing is narrowed here.
  */
-const route = useRoute()
-const router = useRouter()
 const auth = useAuthStore()
 
 const canManage = computed(() => auth.can('organization:tenant:manage'))
 
 const tenants = useQueryBackedList<Tenant>(listTenants)
 
-const currentQuery = computed<ListQuery>(() => {
-  const query: ListQuery = {}
-
-  for (const [key, value] of Object.entries(route.query)) {
-    const first = Array.isArray(value) ? value[0] : value
-
-    if (typeof first === 'string' && first !== '') {
-      query[key] = first
-    }
-  }
-
-  return query
-})
-
-/** Any change but the page itself goes back to page 1. */
-function navigate(changes: ListQuery, resetPage = true): void {
-  const next: ListQuery = { ...currentQuery.value, ...changes }
-
-  if (resetPage) {
-    delete next.page
-  }
-
-  for (const [key, value] of Object.entries(next)) {
-    if (value === '') {
-      delete next[key]
-    }
-  }
-
-  void router.push({ name: 'admin-tenants', query: next })
-}
+const { navigate, refresh, goToPage } = useListRoute(tenants, () => ({ name: 'admin-tenants' }))
 
 function setSearch(value: string): void {
   navigate({ search: value.trim() })
-}
-
-function goToPage(next: number): void {
-  navigate({ page: String(Math.min(Math.max(1, next), tenants.totalPages.value)) }, false)
-}
-
-/**
- * Read the page again, after a save or a delete.
- *
- * A delete can empty the last page, so it steps back a page rather than leave
- * the person on one that no longer exists. The URL changes, and the watch
- * below reads the page it names.
- */
-async function refresh(afterDelete = false): Promise<void> {
-  if (afterDelete && tenants.items.value.length === 1 && tenants.page.value > 1) {
-    goToPage(tenants.page.value - 1)
-    return
-  }
-
-  await tenants.apply(currentQuery.value)
 }
 
 const isFormOpen = ref(false)
@@ -180,14 +129,6 @@ async function confirmDelete(): Promise<void> {
     isDeleting.value = false
   }
 }
-
-watch(
-  () => route.query,
-  () => {
-    void tenants.apply(currentQuery.value)
-  },
-  { immediate: true, deep: true },
-)
 </script>
 
 <template>
@@ -218,9 +159,7 @@ watch(
 
     <Alert v-if="tenants.error.value" variant="destructive">
       <p>{{ tenants.error.value }}</p>
-      <Button variant="outline" size="sm" class="mt-3" @click="tenants.apply(currentQuery)">
-        Try again
-      </Button>
+      <Button variant="outline" size="sm" class="mt-3" @click="refresh()">Try again</Button>
     </Alert>
 
     <p v-if="tenants.isLoading.value" class="text-sm text-muted-foreground">Loading tenants…</p>

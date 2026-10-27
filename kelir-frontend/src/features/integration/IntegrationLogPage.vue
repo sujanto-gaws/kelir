@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
-import { RouterLink, useRoute, useRouter } from 'vue-router'
+import { computed, onMounted, ref } from 'vue'
+import { RouterLink, useRouter } from 'vue-router'
 
 import { listExternalSystems, listIntegrationLogs } from '@/api/integration'
 import { Alert } from '@/components/ui/alert'
@@ -17,7 +17,8 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { useQueryBackedList, type ListQuery } from '@/composables/useQueryBackedList'
+import { useListRoute } from '@/composables/useListRoute'
+import { useQueryBackedList } from '@/composables/useQueryBackedList'
 import { useAuthStore } from '@/stores/auth'
 import {
   INTEGRATION_LOG_STATUS_LABELS,
@@ -54,7 +55,6 @@ import {
  * log reader need not hold: without it the chooser is disabled and says why,
  * and a system is shown as text.
  */
-const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 
@@ -73,27 +73,15 @@ const MAX_SYSTEM_PAGES = 10
 const systems = ref<{ value: string; label: string }[]>([])
 const systemsError = ref('')
 
-const currentQuery = computed<ListQuery>(() => {
-  const query: ListQuery = {}
-
-  for (const [key, value] of Object.entries(route.query)) {
-    const first = Array.isArray(value) ? value[0] : value
-
-    if (typeof first === 'string' && first !== '') {
-      query[key] = first
-    }
-  }
-
-  return query
-})
-
-/** The list's own query: everything but the open row. */
-const listQuery = computed<ListQuery>(() => {
-  const rest: ListQuery = { ...currentQuery.value }
-  delete rest[DETAIL_KEY]
-
-  return rest
-})
+/**
+ * The list's own query is everything but the open row, so opening and closing
+ * a row changes the URL and does not reload the rows under it.
+ */
+const { currentQuery, listQuery, navigate, refresh, goToPage } = useListRoute(
+  list,
+  () => ({ name: 'admin-integration-logs' }),
+  { exclude: [DETAIL_KEY] },
+)
 
 /**
  * The row the URL names, as written: the dialog opens for any value, and one
@@ -154,23 +142,6 @@ async function loadSystems(): Promise<void> {
   }
 }
 
-/** Any change but the page itself goes back to page 1, and closes the detail. */
-function navigate(changes: ListQuery, resetPage = true): void {
-  const next: ListQuery = { ...listQuery.value, ...changes }
-
-  if (resetPage) {
-    delete next.page
-  }
-
-  for (const [key, value] of Object.entries(next)) {
-    if (value === '') {
-      delete next[key]
-    }
-  }
-
-  void router.push({ name: 'admin-integration-logs', query: next })
-}
-
 function setFilter(key: string, value: string): void {
   navigate({ [key]: value.trim() })
 }
@@ -198,28 +169,12 @@ const isRangeInverted = computed(() => {
   return Boolean(from && to) && new Date(to).getTime() < new Date(from).getTime()
 })
 
-function goToPage(next: number): void {
-  navigate({ page: String(Math.min(Math.max(1, next), list.totalPages.value)) }, false)
-}
-
 function openDetail(row: IntegrationLogSummary): void {
   void router.push({
     name: 'admin-integration-logs',
     query: { ...listQuery.value, [DETAIL_KEY]: row.id },
   })
 }
-
-/**
- * Re-read only when the list's own query changes: opening and closing a row
- * changes the URL too, and must not reload the rows under it.
- */
-watch(
-  () => JSON.stringify(listQuery.value),
-  () => {
-    void list.apply(listQuery.value)
-  },
-  { immediate: true },
-)
 
 onMounted(() => {
   void loadSystems()
@@ -328,9 +283,7 @@ onMounted(() => {
 
     <Alert v-if="list.error.value" variant="destructive" data-testid="integration-logs-error">
       <p>{{ list.error.value }}</p>
-      <Button variant="outline" size="sm" class="mt-3" @click="list.apply(listQuery)">
-        Try again
-      </Button>
+      <Button variant="outline" size="sm" class="mt-3" @click="refresh()">Try again</Button>
     </Alert>
 
     <p v-if="list.isLoading.value" class="text-sm text-muted-foreground" role="status">

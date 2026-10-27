@@ -10,15 +10,17 @@ import type { Page, PageQuery } from '@/types/api'
  * paging and nothing else — it says so, and offering controls it could not
  * honour would have been worse than offering none. The master-data role views
  * do take search and filters (FR-MDM-008), and the document type, role and
- * tenant tables take a search (#598), so this is the shape for them; the two are kept apart rather than one grown a mode flag, because a
- * list with no filters and a list with filters are different components on the
- * screen as well as in the code.
+ * tenant tables take a search (#598), so this is the shape for them. The two
+ * are kept apart rather than one grown a mode flag, because a list with no
+ * filters and a list with filters are different components on the screen as
+ * well as in the code.
  *
  * **The query string is the state, not a copy of it.** A filtered list has to
  * be linkable and has to survive a reload (#101 AC3), which means the URL is
  * the single source of truth and the composable reads it rather than shadowing
  * it. Every mutator writes the URL; the caller re-applies from the URL when it
- * changes, and one code path loads.
+ * changes, and one code path loads. [`useListRoute`](./useListRoute.ts) is
+ * that caller's half: it reads the URL, writes changes to it and loads from it.
  *
  * **Nothing is filtered here.** `apply` sends the parameters and renders what
  * comes back. Narrowing a fetched page on the client would be the failure

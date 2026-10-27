@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
-import { RouterLink, useRoute, useRouter } from 'vue-router'
+import { computed, ref } from 'vue'
+import { RouterLink, useRouter } from 'vue-router'
 
 import { listExternalSystems } from '@/api/integration'
 import { Alert } from '@/components/ui/alert'
@@ -17,7 +17,8 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { useQueryBackedList, type ListQuery } from '@/composables/useQueryBackedList'
+import { useListRoute } from '@/composables/useListRoute'
+import { useQueryBackedList } from '@/composables/useQueryBackedList'
 import { useAuthStore } from '@/stores/auth'
 import {
   AUTH_TYPE_LABELS,
@@ -42,7 +43,6 @@ import ExternalSystemFormDialog from './ExternalSystemFormDialog.vue'
  * everything after registering happens — its endpoints and credential
  * references are managed there.
  */
-const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 
@@ -55,43 +55,12 @@ const typeOptions = optionsOf(EXTERNAL_SYSTEM_TYPE_LABELS)
 
 const isRegisterOpen = ref(false)
 
-const currentQuery = computed<ListQuery>(() => {
-  const query: ListQuery = {}
-
-  for (const [key, value] of Object.entries(route.query)) {
-    const first = Array.isArray(value) ? value[0] : value
-
-    if (typeof first === 'string' && first !== '') {
-      query[key] = first
-    }
-  }
-
-  return query
-})
-
-/** Any change but the page itself goes back to page 1. */
-function navigate(changes: ListQuery, resetPage = true): void {
-  const next: ListQuery = { ...currentQuery.value, ...changes }
-
-  if (resetPage) {
-    delete next.page
-  }
-
-  for (const [key, value] of Object.entries(next)) {
-    if (value === '') {
-      delete next[key]
-    }
-  }
-
-  void router.push({ name: 'admin-external-systems', query: next })
-}
+const { navigate, refresh, goToPage } = useListRoute(list, () => ({
+  name: 'admin-external-systems',
+}))
 
 function setFilter(key: string, value: string): void {
   navigate({ [key]: value.trim() })
-}
-
-function goToPage(next: number): void {
-  navigate({ page: String(Math.min(Math.max(1, next), list.totalPages.value)) }, false)
 }
 
 function statusVariant(status: ExternalSystemStatus): 'default' | 'secondary' | 'outline' {
@@ -105,14 +74,6 @@ function statusVariant(status: ExternalSystemStatus): 'default' | 'secondary' | 
 function afterRegister(system: ExternalSystem): void {
   void router.push({ name: 'admin-external-system', params: { id: system.id } })
 }
-
-watch(
-  () => route.query,
-  () => {
-    void list.apply(currentQuery.value)
-  },
-  { immediate: true, deep: true },
-)
 </script>
 
 <template>
@@ -174,9 +135,7 @@ watch(
 
     <Alert v-if="list.error.value" variant="destructive" data-testid="external-systems-error">
       <p>{{ list.error.value }}</p>
-      <Button variant="outline" size="sm" class="mt-3" @click="list.apply(currentQuery)">
-        Try again
-      </Button>
+      <Button variant="outline" size="sm" class="mt-3" @click="refresh()">Try again</Button>
     </Alert>
 
     <p v-if="list.isLoading.value" class="text-sm text-muted-foreground">

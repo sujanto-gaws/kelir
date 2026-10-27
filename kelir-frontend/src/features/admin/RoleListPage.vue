@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, useTemplateRef, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { computed, onMounted, ref, useTemplateRef } from 'vue'
 
 import { Alert } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -17,7 +16,8 @@ import {
 } from '@/components/ui/table'
 import { deleteRole, listPermissions, listRoles } from '@/api/identity'
 import { toApiError } from '@/api/client'
-import { useQueryBackedList, type ListQuery } from '@/composables/useQueryBackedList'
+import { useListRoute } from '@/composables/useListRoute'
+import { useQueryBackedList } from '@/composables/useQueryBackedList'
 import { useAuthStore } from '@/stores/auth'
 import {
   ROLE_HAS_OPEN_TASKS,
@@ -59,65 +59,13 @@ const canReassign = computed(() => auth.can('workflow:task:reassign'))
 const SYSTEM_ROLE_REFUSAL =
   'System roles cannot be deleted; a tenant would be left unable to grant permissions'
 
-const route = useRoute()
-const router = useRouter()
-
 /** The page and the search live in the URL (#598), as on the tenant list. */
 const roles = useQueryBackedList<Role>(listRoles)
 
-const currentQuery = computed<ListQuery>(() => {
-  const query: ListQuery = {}
-
-  for (const [key, value] of Object.entries(route.query)) {
-    const first = Array.isArray(value) ? value[0] : value
-
-    if (typeof first === 'string' && first !== '') {
-      query[key] = first
-    }
-  }
-
-  return query
-})
-
-/** Any change but the page itself goes back to page 1. */
-function navigate(changes: ListQuery, resetPage = true): void {
-  const next: ListQuery = { ...currentQuery.value, ...changes }
-
-  if (resetPage) {
-    delete next.page
-  }
-
-  for (const [key, value] of Object.entries(next)) {
-    if (value === '') {
-      delete next[key]
-    }
-  }
-
-  void router.push({ name: 'admin-roles', query: next })
-}
+const { navigate, refresh, goToPage } = useListRoute(roles, () => ({ name: 'admin-roles' }))
 
 function setSearch(value: string): void {
   navigate({ search: value.trim() })
-}
-
-function goToPage(next: number): void {
-  navigate({ page: String(Math.min(Math.max(1, next), roles.totalPages.value)) }, false)
-}
-
-/**
- * Read the page again, after a save or a delete.
- *
- * A delete can empty the last page, so it steps back a page rather than leave
- * the person on one that no longer exists. The URL changes, and the watch
- * below reads the page it names.
- */
-async function refresh(afterDelete = false): Promise<void> {
-  if (afterDelete && roles.items.value.length === 1 && roles.page.value > 1) {
-    goToPage(roles.page.value - 1)
-    return
-  }
-
-  await roles.apply(currentQuery.value)
 }
 
 const permissions = ref<Permission[]>([])
@@ -246,14 +194,6 @@ async function onReassigned(): Promise<void> {
   await Promise.all([openTasks.value?.refresh(), refresh()])
 }
 
-watch(
-  () => route.query,
-  () => {
-    void roles.apply(currentQuery.value)
-  },
-  { immediate: true, deep: true },
-)
-
 onMounted(async () => {
   await loadPermissions()
 })
@@ -286,9 +226,7 @@ onMounted(async () => {
 
     <Alert v-if="roles.error.value" variant="destructive">
       <p>{{ roles.error.value }}</p>
-      <Button variant="outline" size="sm" class="mt-3" @click="roles.apply(currentQuery)">
-        Try again
-      </Button>
+      <Button variant="outline" size="sm" class="mt-3" @click="refresh()">Try again</Button>
     </Alert>
 
     <Alert v-if="permissionsError" variant="destructive">

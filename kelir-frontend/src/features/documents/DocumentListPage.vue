@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { computed } from 'vue'
+import { useRouter } from 'vue-router'
 
 import { listDocuments } from '@/api/documents'
 import { Alert } from '@/components/ui/alert'
@@ -17,7 +17,8 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { useQueryBackedList, type ListQuery } from '@/composables/useQueryBackedList'
+import { useListRoute } from '@/composables/useListRoute'
+import { useQueryBackedList } from '@/composables/useQueryBackedList'
 import { useAuthStore } from '@/stores/auth'
 import {
   DOCUMENT_PRIORITY_LABELS,
@@ -32,8 +33,8 @@ import {
  * **The URL is the state**, exactly as the master-data list has it (#101 AC3):
  * page, search and filters are read from the query string and written back to
  * it, so a filtered list can be linked to and survives a reload. Nothing
- * shadows them — a control writes the URL and the watcher loads, which is the
- * only path that loads.
+ * shadows them — a control writes the URL and `useListRoute` loads from it,
+ * which is the only path that loads.
  *
  * **Nothing is narrowed here.** Every parameter goes on the wire. On this
  * surface that is more than a performance rule: the list's visibility rule is
@@ -45,7 +46,6 @@ import {
  * surfaces the same capability, so there is no second search page to keep in
  * step with this one.
  */
-const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 
@@ -73,50 +73,10 @@ const priorityOptions = Object.entries(DOCUMENT_PRIORITY_LABELS).map(([value, la
 /** Whether this caller may start a document at all. */
 const canCreate = computed(() => auth.can('document:create'))
 
-/** The query string as flat strings, which is what the composable applies. */
-const currentQuery = computed<ListQuery>(() => {
-  const query: ListQuery = {}
-
-  for (const [key, value] of Object.entries(route.query)) {
-    const first = Array.isArray(value) ? value[0] : value
-
-    if (typeof first === 'string' && first !== '') {
-      query[key] = first
-    }
-  }
-
-  return query
-})
-
-/**
- * Writes a change to the URL, and lets the watcher load.
- *
- * Any change other than the page itself sends the caller back to page 1:
- * staying on page 7 of a list that has just been narrowed to two rows would
- * show an empty table and a pager that disagrees with it.
- */
-function navigate(changes: ListQuery, resetPage = true): void {
-  const next: ListQuery = { ...currentQuery.value, ...changes }
-
-  if (resetPage) {
-    delete next.page
-  }
-
-  for (const [key, value] of Object.entries(next)) {
-    if (value === '') {
-      delete next[key]
-    }
-  }
-
-  void router.push({ name: 'documents', query: next })
-}
+const { navigate, refresh, goToPage } = useListRoute(list, () => ({ name: 'documents' }))
 
 function setFilter(key: string, value: string): void {
   navigate({ [key]: value })
-}
-
-function goToPage(next: number): void {
-  navigate({ page: String(Math.min(Math.max(1, next), list.totalPages.value)) }, false)
 }
 
 function openDocument(id: string): void {
@@ -141,17 +101,6 @@ function statusVariant(status: DocumentStatus): 'default' | 'secondary' | 'destr
 
   return 'secondary'
 }
-
-// One load path: the URL changed, so re-apply it. Mounting counts, which is
-// what `immediate` is for — a deep-linked filtered page must load its filters
-// rather than the whole population and then narrow.
-watch(
-  () => route.query,
-  () => {
-    void list.apply(currentQuery.value)
-  },
-  { immediate: true, deep: true },
-)
 </script>
 
 <template>
@@ -214,9 +163,7 @@ watch(
 
     <Alert v-if="list.error.value" variant="destructive" data-testid="documents-error">
       <p>{{ list.error.value }}</p>
-      <Button variant="outline" size="sm" class="mt-3" @click="list.apply(currentQuery)">
-        Try again
-      </Button>
+      <Button variant="outline" size="sm" class="mt-3" @click="refresh()">Try again</Button>
     </Alert>
 
     <p v-if="list.isLoading.value" class="text-sm text-muted-foreground">Loading documents…</p>
