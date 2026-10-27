@@ -86,7 +86,7 @@ async fn get_user(
     responses(
         (status = 201, description = "Created", body = User),
         (status = 409, description = "Username or email already in use"),
-        (status = 422, description = "Validation failed")
+        (status = 422, description = "VALIDATION_ERROR, one detail per field, collected: username blank (REQUIRED), over 64 characters once trimmed (TOO_LONG) or with a character other than a letter, digit, dot, dash or underscore (INVALID_FORMAT), the first of these that applies (#610); email over 320 characters once trimmed (TOO_LONG), else not shaped like an address (INVALID_FORMAT); password under 12 characters (TOO_SHORT); displayName blank (REQUIRED) or over 200 characters once trimmed (TOO_LONG); a role id listed twice in roleIds (DUPLICATE_IN_ARRAY). Blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#616)")
     ),
     security(("bearer" = []))
 )]
@@ -108,7 +108,7 @@ async fn create_user(
     request_body = UpdateUserRequest,
     responses(
         (status = 200, description = "Updated", body = User),
-        (status = 422, description = "Validation failed, including a role id listed twice in roleIds")
+        (status = 422, description = "VALIDATION_ERROR, one detail per field, collected, checked before the user is read: a present email over 320 characters once trimmed (TOO_LONG), else not shaped like an address (INVALID_FORMAT); a present displayName blank (REQUIRED) or over 200 characters once trimmed (TOO_LONG) (#610); a role id listed twice in roleIds (DUPLICATE_IN_ARRAY). An absent field is left as it is. Blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#616)")
     ),
     security(("bearer" = []))
 )]
@@ -207,7 +207,7 @@ async fn get_role(
     request_body = CreateRoleRequest,
     responses(
         (status = 201, description = "Created", body = Role),
-        (status = 422, description = "VALIDATION_ERROR, a detail per field: roleCode or name blank (REQUIRED) or longer than its column, 64 and 200 characters once trimmed (TOO_LONG) (#575); a permission id listed twice in permissionIds (DUPLICATE_IN_ARRAY)")
+        (status = 422, description = "VALIDATION_ERROR, a detail per field: roleCode or name blank (REQUIRED) or longer than its column, 64 and 200 characters once trimmed (TOO_LONG) (#575); a permission id listed twice in permissionIds (DUPLICATE_IN_ARRAY). Blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#616)")
     ),
     security(("bearer" = []))
 )]
@@ -229,7 +229,7 @@ async fn create_role(
     request_body = UpdateRoleRequest,
     responses(
         (status = 200, description = "Updated", body = Role),
-        (status = 422, description = "VALIDATION_ERROR, a detail per field: a present name blank (REQUIRED) or over 200 characters once trimmed (TOO_LONG) (#575); a permission id listed twice in permissionIds (DUPLICATE_IN_ARRAY)")
+        (status = 422, description = "VALIDATION_ERROR, a detail per field: a present name blank (REQUIRED) or over 200 characters once trimmed (TOO_LONG) (#575); a permission id listed twice in permissionIds (DUPLICATE_IN_ARRAY). Blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#616)")
     ),
     security(("bearer" = []))
 )]

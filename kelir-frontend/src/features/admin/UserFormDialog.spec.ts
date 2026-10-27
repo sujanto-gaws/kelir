@@ -236,6 +236,37 @@ describe('UserFormDialog', () => {
     expect(wrapper.find('#user-display-name-error').text()).toBe('Display name is required')
   })
 
+  it('places the server refusal of an over-long username under the username field', async () => {
+    // #610: the server bounds the username at 64 characters, and the dialog
+    // checks no length itself, so the server's 422 is what the user sees.
+    handler = () => ({
+      status: 422,
+      body: errorBody('VALIDATION_ERROR', 'Validation failed', [
+        {
+          path: 'username',
+          rule: 'maxLength',
+          code: 'TOO_LONG',
+          message: 'Username must be at most 64 characters',
+        },
+      ]),
+    })
+
+    const wrapper = mountDialog(null)
+
+    await fillCreateForm(wrapper)
+    await wrapper.find('#user-username').setValue('u'.repeat(65))
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    const sent = backend.requests.filter((request) => request.method === 'post')
+    expect(sent).toHaveLength(1)
+    expect(sent[0]?.body).toMatchObject({ username: 'u'.repeat(65) })
+    expect(wrapper.find('#user-username-error').text()).toBe(
+      'Username must be at most 64 characters',
+    )
+    expect(wrapper.emitted('saved')).toBeUndefined()
+  })
+
   it('surfaces a denial instead of closing over an unchanged user', async () => {
     handler = () => ({
       status: 403,
