@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test'
 
 import { runSuffix } from '../support/api'
 import { credentials } from '../support/env'
-import { pageUntilVisible } from '../support/paging'
+import { searchTable } from '../support/table-search'
 
 /**
  * Sign in, reach the tenant list, create a tenant with its first administrator
@@ -73,15 +73,17 @@ test('an administrator creates a tenant and the person who will run it', async (
   // performed from. Asserting it before creating anything is what makes the
   // assertion afterwards mean the row is new.
   //
-  // **Found on whichever page it is on** (#521). The list shows 20 tenants,
-  // newest first, so the deployment's own tenant is the last row of the last
-  // page: on page one only while the deployment holds fewer than twenty-one.
-  // The screen has no search, so the pages are turned.
+  // **Found by searching for it** (#598). The list shows 20 tenants, newest
+  // first, so the deployment's own tenant is the last row of the last page:
+  // on page one only while the deployment holds fewer than twenty-one.
   const table = page.getByRole('table')
   const deployment = table.getByRole('row', { name: /SYSTEM/ })
-  await pageUntilVisible(page, deployment)
+  await searchTable(page, 'tenants-search', 'SYSTEM')
   await expect(deployment).toContainText('This deployment')
-  await expect(table.getByRole('row', { name: new RegExp(tenant.code) })).toHaveCount(0)
+
+  // Nothing matches the new tenant's code yet.
+  await searchTable(page, 'tenants-search', tenant.code)
+  await expect(page.getByTestId('tenants-empty')).toHaveText('No tenants match this search.')
 
   // --- Create it -----------------------------------------------------------
   await page.getByRole('button', { name: 'New tenant' }).click()
@@ -109,11 +111,10 @@ test('an administrator creates a tenant and the person who will run it', async (
 
   // --- It is there, with its administrator counted -------------------------
   //
-  // The list refreshed the page it was on, which may be the last one. The walk
-  // starts again from page one, and is not told where the new row should be.
+  // Read again from the server. The reload keeps the search for the new code,
+  // which matched nothing before the create.
   await page.reload()
   const row = table.getByRole('row', { name: new RegExp(tenant.code) })
-  await pageUntilVisible(page, row)
   await expect(row).toContainText(tenant.name)
   await expect(row).toContainText('Active')
   // One user: the administrator created alongside it. A zero here would be the

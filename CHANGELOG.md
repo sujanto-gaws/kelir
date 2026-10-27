@@ -53,6 +53,12 @@ While the major version is `0`, the public API may change in any release.
 
 ### Added
 
+- **The document type, role and tenant tables search**
+  ([#598](https://github.com/sujanto-gaws/kelir/issues/598)). Each has a
+  search box above it that matches the code or the name on the server, and the
+  page and the search are kept in the address bar, as on the other lists.
+  `GET /organization/tenants` takes `search`; the document type and role lists
+  have taken it since #525.
 - **Workflows are authored in the browser** ([#426](https://github.com/sujanto-gaws/kelir/issues/426),
   FR-WF-018, decision **D-95**). **Workflows** at `/admin/workflows` lists every
   revision, and opening one is the editor: a list of states with a table of each

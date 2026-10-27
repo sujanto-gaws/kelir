@@ -36,7 +36,7 @@ use uuid::Uuid;
 
 use super::domain::{
     normalize_tenant_code, refuse_shared_secret_namespace, validate_create_tenant,
-    validate_update_tenant, CreateTenantRequest, Tenant, TenantStatus, TenantView,
+    validate_update_tenant, CreateTenantRequest, Tenant, TenantQuery, TenantStatus, TenantView,
     UpdateTenantRequest, MAX_TENANT_CODE_LEN,
 };
 use super::repository::{self, TenantRecord};
@@ -46,8 +46,9 @@ use crate::middleware::auth::Authenticated;
 use crate::modules::audit::{self, domain::ObjectType, AuditEntry};
 use crate::modules::identity::domain::RevokeReason;
 use crate::modules::identity::service as identity;
-use crate::response::{PageMeta, Pagination};
+use crate::response::PageMeta;
 use crate::state::AppState;
+use crate::utils::search::search_term;
 
 /// Why a sign-in could not be attributed to a tenant.
 ///
@@ -328,13 +329,17 @@ fn view(record: TenantRecord, administering_id: Uuid) -> TenantView {
 pub async fn list_tenants(
     state: &AppState,
     caller: &Authenticated,
-    pagination: &Pagination,
+    query: &TenantQuery,
 ) -> Result<(Vec<TenantView>, PageMeta), AppError> {
     let administering =
         require_tenant_administrator(state, caller, "organization:tenant:read").await?;
 
-    let total = repository::count(&state.pool).await?;
-    let tenants = repository::list(&state.pool, pagination.limit(), pagination.offset()).await?;
+    let pagination = query.pagination();
+    let search = search_term(query.search.as_deref())?;
+
+    let total = repository::count(&state.pool, search).await?;
+    let tenants =
+        repository::list(&state.pool, search, pagination.limit(), pagination.offset()).await?;
 
     Ok((
         tenants

@@ -1,6 +1,7 @@
 import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount, type DOMWrapper, type VueWrapper } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 
 import RoleListPage from './RoleListPage.vue'
 import { registerSessionBridge } from '@/api/session'
@@ -87,13 +88,29 @@ function signIn(permissions: string[]): void {
   useAuthStore().user = user
 }
 
-async function mountPage(permissions: string[]): Promise<VueWrapper> {
-  // Seed before mounting: `onMounted` fires on the first render, and the
-  // controls it decides on are gated by these codes.
+const blank = { template: '<div />' }
+
+/** The router the last `mountPage` mounted with, so a test can read the URL. */
+let router: Router
+
+async function mountPage(permissions: string[], query = ''): Promise<VueWrapper> {
+  // Seed before mounting: the controls are gated by these codes.
   signIn(permissions)
 
-  const wrapper = mount(RoleListPage)
-  await flushPromises()
+  // **The page and the search live in the URL** (#598), so the page mounts at
+  // its route and loads from what the route says.
+  router = createRouter({
+    history: createMemoryHistory(),
+    routes: [{ path: '/admin/roles', name: 'admin-roles', component: blank }],
+  })
+  await router.push(`/admin/roles${query}`)
+  await router.isReady()
+
+  const wrapper = mount(RoleListPage, { global: { plugins: [router] } })
+
+  for (let round = 0; round < 4; round += 1) {
+    await flushPromises()
+  }
 
   return wrapper
 }
@@ -127,6 +144,110 @@ describe('RoleListPage', () => {
   afterEach(() => {
     backend.restore()
     registerSessionBridge(null)
+  })
+
+  it('sends the search and the page in the URL to the server (#598)', async () => {
+    await mountPage(['identity:role:read'], '?search=acme&page=2')
+
+    const reads = backend.requests.filter((request) => request.url === '/identity/roles')
+    const last = reads[reads.length - 1]
+
+    expect(last?.params).toMatchObject({ search: 'acme', page: 2 })
+  })
+
+  it('writes a search to the URL and returns to page 1 (#598)', async () => {
+    const wrapper = await mountPage(['identity:role:read'], '?page=3')
+    const search = wrapper.get('[data-testid="roles-search"]')
+
+    await search.setValue('  acme  ')
+    await search.trigger('change')
+    await flushPromises()
+
+    expect(router.currentRoute.value.query).toEqual({ search: 'acme' })
+  })
+
+  it('says nothing matches a search, rather than that there is nothing (#598)', async () => {
+    handler = (request) =>
+      request.url === '/identity/permissions' ? permissionsReply([]) : rolesReply([])
+
+    const wrapper = await mountPage(['identity:role:read'], '?search=nothing')
+
+    expect(wrapper.get('[data-testid="roles-empty"]').text()).toBe('No roles match this search.')
+  })
+
+  it('shows the search the URL holds and keeps it across a page turn (#598)', async () => {
+    handler = (request) =>
+      request.url === '/identity/permissions'
+        ? permissionsReply([])
+        : rolesReply([clerkRole], { page: 1, pageSize: 20, total: 40 })
+
+    const wrapper = await mountPage(['identity:role:read'], '?search=acme')
+
+    expect((wrapper.get('[data-testid="roles-search"]').element as HTMLInputElement).value).toBe(
+      'acme',
+    )
+
+    await buttonLabelled(wrapper.findAll('button'), 'Next')?.trigger('click')
+    await flushPromises()
+
+    expect(router.currentRoute.value.query).toEqual({ search: 'acme', page: '2' })
+  })
+
+  it('steps back a page when a delete empties the last one (#598)', async () => {
+    handler = (request) =>
+      request.url === '/identity/permissions'
+        ? permissionsReply([])
+        : rolesReply([clerkRole], { page: 2, pageSize: 1, total: 2 })
+
+    const wrapper = await mountPage(['identity:role:read', 'identity:role:delete'], '?page=2')
+
+    await buttonLabelled(rowsOf(wrapper)[0].findAll('button'), 'Delete')?.trigger('click')
+
+    handler = (request) => {
+      if (request.method === 'delete') {
+        return { status: 204 }
+      }
+
+      return request.url === '/identity/permissions'
+        ? permissionsReply([])
+        : rolesReply([adminRole], { page: 1, pageSize: 1, total: 1 })
+    }
+
+    await buttonLabelled(wrapper.find('[role="dialog"]').findAll('button'), 'Delete')?.trigger(
+      'click',
+    )
+    await flushPromises()
+
+    expect(router.currentRoute.value.query).toEqual({ page: '1' })
+  })
+
+  it('stays on its page when a delete leaves rows on it (#598)', async () => {
+    handler = (request) =>
+      request.url === '/identity/permissions'
+        ? permissionsReply([])
+        : rolesReply([adminRole, clerkRole], { page: 2, pageSize: 2, total: 4 })
+
+    const wrapper = await mountPage(['identity:role:read', 'identity:role:delete'], '?page=2')
+
+    await buttonLabelled(rowsOf(wrapper)[1].findAll('button'), 'Delete')?.trigger('click')
+
+    handler = (request) => {
+      if (request.method === 'delete') {
+        return { status: 204 }
+      }
+
+      return request.url === '/identity/permissions'
+        ? permissionsReply([])
+        : rolesReply([adminRole], { page: 2, pageSize: 2, total: 3 })
+    }
+
+    await buttonLabelled(wrapper.find('[role="dialog"]').findAll('button'), 'Delete')?.trigger(
+      'click',
+    )
+    await flushPromises()
+
+    expect(router.currentRoute.value.query).toEqual({ page: '2' })
+    expect(rowsOf(wrapper)).toHaveLength(1)
   })
 
   it('hides every action from a caller who can only read', async () => {

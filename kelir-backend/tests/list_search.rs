@@ -495,6 +495,8 @@ async fn each_list_documents_its_search_and_status() {
         ("/api/v1/workflow/definitions", true),
         ("/api/v1/identity/users", true),
         ("/api/v1/identity/roles", false),
+        // The tenant table's search (#598), held in `organization_tenants.rs`.
+        ("/api/v1/organization/tenants", false),
     ] {
         let names: Vec<&str> = document.body["paths"][path]["get"]["parameters"]
             .as_array()

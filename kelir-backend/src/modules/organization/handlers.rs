@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 use super::department::{CreateDepartmentRequest, Department, UpdateDepartmentRequest};
 use super::department_service;
-use super::domain::{CreateTenantRequest, TenantView, UpdateTenantRequest};
+use super::domain::{CreateTenantRequest, TenantQuery, TenantView, UpdateTenantRequest};
 use super::service;
 use crate::error::AppError;
 use crate::extract::{JsonBody, PathParam, QueryParams};
@@ -52,7 +52,7 @@ pub fn routes() -> Router<AppState> {
 
 #[utoipa::path(
     get, path = "/api/v1/organization/tenants", tag = "organization",
-    params(Pagination),
+    params(TenantQuery),
     responses(
         (status = 200, description = "Tenants", body = [TenantView]),
         (status = 403, description = "Missing organization:tenant:read, or not signed in to the administering tenant")
@@ -62,9 +62,9 @@ pub fn routes() -> Router<AppState> {
 async fn list_tenants(
     State(state): State<AppState>,
     caller: Authenticated,
-    QueryParams(pagination): QueryParams<Pagination>,
+    QueryParams(query): QueryParams<TenantQuery>,
 ) -> Result<Json<ListEnvelope<TenantView>>, AppError> {
-    let (tenants, meta) = service::list_tenants(&state, &caller, &pagination).await?;
+    let (tenants, meta) = service::list_tenants(&state, &caller, &query).await?;
 
     Ok(Json(ListEnvelope::new(tenants, meta)))
 }

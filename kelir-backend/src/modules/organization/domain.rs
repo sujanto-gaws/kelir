@@ -1,10 +1,11 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::error::{AppError, ValidationDetail};
 use crate::modules::integration::domain::secret::namespaces_overlap;
+use crate::response::Pagination;
 
 /// Lifecycle state of a tenant (`tenants.status`, database schema §1.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -102,6 +103,34 @@ pub struct TenantView {
     /// affects is the one fact the confirmation needs.
     pub user_count: i64,
     pub created_at: DateTime<Utc>,
+}
+
+/// The tenant list's query string: paging and a search.
+///
+/// The tenant table's search ([#598](https://github.com/sujanto-gaws/kelir/issues/598)),
+/// shaped as [`RoleQuery`](crate::modules::identity::domain::RoleQuery) is. There is
+/// no `status` filter: #598 asked for a search, and an unknown parameter is
+/// ignored, as [`Pagination`] ignores them everywhere.
+#[derive(Debug, Clone, Default, Deserialize, IntoParams)]
+#[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
+pub struct TenantQuery {
+    /// 1-based page number; absent or below 1 is 1.
+    pub page: Option<u32>,
+    /// Rows per page, clamped to `response::MAX_PAGE_SIZE`.
+    pub page_size: Option<u32>,
+    /// Case-insensitive substring of the tenant code or the name. `%`, `_` and `\` in
+    /// it match themselves; a blank search is no search.
+    pub search: Option<String>,
+}
+
+impl TenantQuery {
+    pub fn pagination(&self) -> Pagination {
+        Pagination {
+            page: self.page,
+            page_size: self.page_size,
+        }
+    }
 }
 
 /// Creating a tenant creates its first administrator in the same transaction.

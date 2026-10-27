@@ -7,7 +7,7 @@ import { signInOverApi, runSuffix, type ApiSession } from '../support/api'
 import { chooseDocumentType, chooseOption } from '../support/choosers'
 import { credentials } from '../support/env'
 import { publishForm, type SeededForm } from '../support/forms'
-import { pageUntilVisible } from '../support/paging'
+import { searchTable } from '../support/table-search'
 
 /**
  * An administrator configures a document type through a screen, and a document
@@ -121,13 +121,13 @@ test('an administrator configures a document type through a screen, and a docume
 
   await expect(page.getByTestId('document-type-dialog')).toBeHidden()
 
-  // **The row is then found on whichever page it landed on** (#521). The list
+  // **The row is then found by searching for its code** (#598). The list
   // shows 20 types ordered by code, so on a database that already holds twenty
   // types this one is not on page one, and the numbering button below is on
-  // its row. The screen has no search, so the pages are turned. Reloaded
-  // first, so the walk starts from page one and not from a refresh in flight.
+  // its row. Reloaded first, so the search starts from a fresh list and not
+  // from a refresh in flight.
   await page.reload()
-  await pageUntilVisible(page, page.getByTestId(`type-${typeCode}`))
+  await searchTable(page, 'types-search', typeCode)
   await expect(page.getByTestId(`type-${typeCode}`)).toContainText('Bound')
 
   // --- Give it a numbering rule --------------------------------------------

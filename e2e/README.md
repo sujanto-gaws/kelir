@@ -125,8 +125,12 @@ follow:
    on page one and is the only row there. A rehearsal, or a second run on one
    stack, is not empty. Reach this run's row by its suffix: through the
    screen's search or filter where it has one, by the save's own response, or
-   by opening the row's page. Where a screen has none of those, turn its pages
-   with `pageUntilVisible` in `support/paging.ts`. Never wait for a row on the
+   by opening the row's page. ~~Where a screen has none of those, turn its pages
+   with `pageUntilVisible` in `support/paging.ts`.~~ **The document type, role
+   and tenant tables search** since [#598](https://github.com/sujanto-gaws/kelir/issues/598),
+   and they were the screens that needed the pages turned: use `searchTable` in
+   `support/table-search.ts`, which waits for the server's answer to the search.
+   `pageUntilVisible` is removed (corrected 2026-10-27). Never wait for a row on the
    first page, count rows across the tenant, or take `.first()` of a list
    other runs write to.
 

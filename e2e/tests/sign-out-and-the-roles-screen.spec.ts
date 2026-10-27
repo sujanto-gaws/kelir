@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 
 import { credentials } from '../support/env'
-import { pageUntilVisible } from '../support/paging'
+import { searchTable } from '../support/table-search'
 
 /**
  * Signing out, and the roles screen — the two surfaces [record 14][record] §6
@@ -68,13 +68,13 @@ test('an administrator reads the roles screen, signs out, and cannot get back in
   // drew about the attachment and comment panels, whose flows asserted only
   // that they render empty.
   //
-  // **Found on whichever page it is on** (#521). The list shows 20 roles
-  // ordered by code, and every run of this suite adds five whose codes start
-  // `E2E-`, which sorts ahead of `ROLE-`. So `ROLE-ADMIN` leaves page one on
-  // the fifth run against one database. The screen has no search, so the
-  // pages are turned.
+  // **Found by searching for it** (#598). The list shows 20 roles ordered by
+  // code, and every run of this suite adds five whose codes start `E2E-`,
+  // which sorts ahead of `ROLE-`. So `ROLE-ADMIN` leaves page one on the fifth
+  // run against one database.
   const table = page.getByRole('table')
-  await pageUntilVisible(page, table.getByRole('row', { name: /ROLE-ADMIN/ }))
+  await searchTable(page, 'roles-search', 'ROLE-ADMIN')
+  await expect(table.getByRole('row', { name: /ROLE-ADMIN/ })).toBeVisible()
 
   // The `Permissions` column is the one thing this screen exists to show that a
   // list of names would not.

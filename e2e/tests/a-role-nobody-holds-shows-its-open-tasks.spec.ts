@@ -8,7 +8,7 @@ import {
 } from "../support/documents";
 import { API_PREFIX, credentials } from "../support/env";
 import { publishForm } from "../support/forms";
-import { pageUntilVisible } from "../support/paging";
+import { searchTable } from "../support/table-search";
 import {
   addApprover,
   bindWorkflow,
@@ -135,11 +135,12 @@ test("an administrator finds a role whose last holder left, reassigns its open t
   await page.getByRole("link", { name: "Roles" }).click();
   await expect(page).toHaveURL(/\/admin\/roles/);
 
-  // On whichever page its code sorts it to (#521).
+  // Found by its code, wherever it sorts (#598).
   const row = page
     .getByRole("table")
     .getByRole("row", { name: new RegExp(strandedRoleCode) });
-  await pageUntilVisible(page, row);
+  await searchTable(page, "roles-search", strandedRoleCode);
+  await expect(row).toBeVisible();
 
   const notice = row.getByTestId("role-stranded-tasks");
 

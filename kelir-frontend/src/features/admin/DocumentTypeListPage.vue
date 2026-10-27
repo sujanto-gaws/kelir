@@ -1,11 +1,14 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 
 import { deleteDocumentType, getDocumentType, listDocumentTypes } from '@/api/document-types'
 import { toApiError } from '@/api/client'
 import { Alert } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import {
   Table,
   TableBody,
@@ -14,7 +17,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { usePaginatedList } from '@/composables/usePaginatedList'
+import { useQueryBackedList, type ListQuery } from '@/composables/useQueryBackedList'
 import { useAuthStore } from '@/stores/auth'
 import type { DocumentType, DocumentTypeSummary } from '@/types/document-type'
 
@@ -35,14 +38,74 @@ import NumberingRuleDialog from './NumberingRuleDialog.vue'
  * they are: the route needs `document-type:read`, and each action is offered
  * only to a caller who holds its own permission — a button that always answers
  * 403 says the product is broken rather than that this person may not do it.
+ *
+ * **The URL holds the page and the search** (#598), as on the external system
+ * list: both go to the server as they are, and nothing is narrowed here.
  */
+const route = useRoute()
+const router = useRouter()
 const auth = useAuthStore()
 
 const canCreate = computed(() => auth.can('document-type:create'))
 const canUpdate = computed(() => auth.can('document-type:update'))
 const canDelete = computed(() => auth.can('document-type:delete'))
 
-const types = usePaginatedList<DocumentTypeSummary>(listDocumentTypes)
+const types = useQueryBackedList<DocumentTypeSummary>(listDocumentTypes)
+
+const currentQuery = computed<ListQuery>(() => {
+  const query: ListQuery = {}
+
+  for (const [key, value] of Object.entries(route.query)) {
+    const first = Array.isArray(value) ? value[0] : value
+
+    if (typeof first === 'string' && first !== '') {
+      query[key] = first
+    }
+  }
+
+  return query
+})
+
+/** Any change but the page itself goes back to page 1. */
+function navigate(changes: ListQuery, resetPage = true): void {
+  const next: ListQuery = { ...currentQuery.value, ...changes }
+
+  if (resetPage) {
+    delete next.page
+  }
+
+  for (const [key, value] of Object.entries(next)) {
+    if (value === '') {
+      delete next[key]
+    }
+  }
+
+  void router.push({ name: 'admin-document-types', query: next })
+}
+
+function setSearch(value: string): void {
+  navigate({ search: value.trim() })
+}
+
+function goToPage(next: number): void {
+  navigate({ page: String(Math.min(Math.max(1, next), types.totalPages.value)) }, false)
+}
+
+/**
+ * Read the page again, after a save or a delete.
+ *
+ * A delete can empty the last page, so it steps back a page rather than leave
+ * the person on one that no longer exists. The URL changes, and the watch
+ * below reads the page it names.
+ */
+async function refresh(afterDelete = false): Promise<void> {
+  if (afterDelete && types.items.value.length === 1 && types.page.value > 1) {
+    goToPage(types.page.value - 1)
+    return
+  }
+
+  await types.apply(currentQuery.value)
+}
 
 const isFormOpen = ref(false)
 /**
@@ -94,7 +157,7 @@ function closeForm(): void {
 async function afterSave(): Promise<void> {
   closeForm()
   isNumberingOpen.value = false
-  await types.refresh()
+  await refresh()
 }
 
 function confirmDelete(row: DocumentTypeSummary): void {
@@ -117,7 +180,7 @@ async function remove(): Promise<void> {
     await deleteDocumentType(target.id)
     isConfirmOpen.value = false
     confirming.value = null
-    await types.refresh()
+    await refresh(true)
   } catch (failure) {
     // **Shown rather than swallowed**, and the backend's own words: a type with
     // documents refuses deletion, and the reason is the thing the person
@@ -132,9 +195,13 @@ function statusVariant(status: DocumentTypeSummary['status']): 'default' | 'seco
   return status === 'ACTIVE' ? 'default' : 'secondary'
 }
 
-onMounted(() => {
-  void types.load()
-})
+watch(
+  () => route.query,
+  () => {
+    void types.apply(currentQuery.value)
+  },
+  { immediate: true, deep: true },
+)
 </script>
 
 <template>
@@ -150,6 +217,18 @@ onMounted(() => {
       <Button v-if="canCreate" data-testid="new-document-type" @click="startCreating">
         New document type
       </Button>
+    </div>
+
+    <div class="max-w-sm space-y-2">
+      <Label for="types-search">Search</Label>
+      <Input
+        id="types-search"
+        data-testid="types-search"
+        type="search"
+        :model-value="types.filters.value.search ?? ''"
+        placeholder="Code or name"
+        @change="setSearch(($event.target as HTMLInputElement).value)"
+      />
     </div>
 
     <Alert v-if="types.error.value" variant="destructive" data-testid="types-error">
@@ -224,7 +303,11 @@ onMounted(() => {
 
         <TableRow v-if="!types.isLoading.value && types.items.value.length === 0">
           <TableCell colspan="6" class="text-center text-sm text-muted-foreground">
-            No document types yet.
+            {{
+              types.filters.value.search
+                ? 'No document types match this search.'
+                : 'No document types yet.'
+            }}
           </TableCell>
         </TableRow>
       </TableBody>
@@ -239,7 +322,7 @@ onMounted(() => {
           variant="secondary"
           :disabled="!types.hasPrevious.value"
           data-testid="previous-page"
-          @click="types.goToPage(types.page.value - 1)"
+          @click="goToPage(types.page.value - 1)"
         >
           Previous
         </Button>
@@ -247,7 +330,7 @@ onMounted(() => {
           variant="secondary"
           :disabled="!types.hasNext.value"
           data-testid="next-page"
-          @click="types.goToPage(types.page.value + 1)"
+          @click="goToPage(types.page.value + 1)"
         >
           Next
         </Button>

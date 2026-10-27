@@ -1,9 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 
 import { Alert } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import {
   Table,
   TableBody,
@@ -14,7 +17,7 @@ import {
 } from '@/components/ui/table'
 import { deleteTenant, listTenants } from '@/api/organization'
 import { toApiError } from '@/api/client'
-import { usePaginatedList } from '@/composables/usePaginatedList'
+import { useQueryBackedList, type ListQuery } from '@/composables/useQueryBackedList'
 import { useAuthStore } from '@/stores/auth'
 import { TENANT_STATUS_LABELS, type Tenant } from '@/types/organization'
 import ConfirmDialog from './ConfirmDialog.vue'
@@ -30,12 +33,72 @@ import TenantFormDialog from './TenantFormDialog.vue'
  * What keeps the screen from appearing where it would only refuse is that a
  * tenant's own administrator is never granted `organization:tenant:*` in the
  * first place (decision **D-18**).
+ *
+ * **The URL holds the page and the search** (#598), as on the external system
+ * list: both go to the server as they are, and nothing is narrowed here.
  */
+const route = useRoute()
+const router = useRouter()
 const auth = useAuthStore()
 
 const canManage = computed(() => auth.can('organization:tenant:manage'))
 
-const tenants = usePaginatedList<Tenant>(listTenants)
+const tenants = useQueryBackedList<Tenant>(listTenants)
+
+const currentQuery = computed<ListQuery>(() => {
+  const query: ListQuery = {}
+
+  for (const [key, value] of Object.entries(route.query)) {
+    const first = Array.isArray(value) ? value[0] : value
+
+    if (typeof first === 'string' && first !== '') {
+      query[key] = first
+    }
+  }
+
+  return query
+})
+
+/** Any change but the page itself goes back to page 1. */
+function navigate(changes: ListQuery, resetPage = true): void {
+  const next: ListQuery = { ...currentQuery.value, ...changes }
+
+  if (resetPage) {
+    delete next.page
+  }
+
+  for (const [key, value] of Object.entries(next)) {
+    if (value === '') {
+      delete next[key]
+    }
+  }
+
+  void router.push({ name: 'admin-tenants', query: next })
+}
+
+function setSearch(value: string): void {
+  navigate({ search: value.trim() })
+}
+
+function goToPage(next: number): void {
+  navigate({ page: String(Math.min(Math.max(1, next), tenants.totalPages.value)) }, false)
+}
+
+/**
+ * Read the page again, after a save or a delete.
+ *
+ * A delete can empty the last page, so it steps back a page rather than leave
+ * the person on one that no longer exists. The URL changes, and the watch
+ * below reads the page it names.
+ */
+async function refresh(afterDelete = false): Promise<void> {
+  if (afterDelete && tenants.items.value.length === 1 && tenants.page.value > 1) {
+    goToPage(tenants.page.value - 1)
+    return
+  }
+
+  await tenants.apply(currentQuery.value)
+}
 
 const isFormOpen = ref(false)
 const editing = ref<Tenant | null>(null)
@@ -91,7 +154,7 @@ const deleteDescription = computed(() => {
 })
 
 async function onSaved(): Promise<void> {
-  await tenants.refresh()
+  await refresh()
 }
 
 async function confirmDelete(): Promise<void> {
@@ -108,7 +171,7 @@ async function confirmDelete(): Promise<void> {
     await deleteTenant(target.id)
     isConfirmOpen.value = false
     confirming.value = null
-    await tenants.refresh()
+    await refresh(true)
   } catch (error) {
     // Includes the 400 for the administering tenant — the server's own wording,
     // not ours.
@@ -118,9 +181,13 @@ async function confirmDelete(): Promise<void> {
   }
 }
 
-onMounted(async () => {
-  await tenants.load()
-})
+watch(
+  () => route.query,
+  () => {
+    void tenants.apply(currentQuery.value)
+  },
+  { immediate: true, deep: true },
+)
 </script>
 
 <template>
@@ -137,16 +204,34 @@ onMounted(async () => {
       <Button v-if="canManage" @click="openCreate()">New tenant</Button>
     </div>
 
+    <div class="max-w-sm space-y-2">
+      <Label for="tenants-search">Search</Label>
+      <Input
+        id="tenants-search"
+        data-testid="tenants-search"
+        type="search"
+        :model-value="tenants.filters.value.search ?? ''"
+        placeholder="Code or name"
+        @change="setSearch(($event.target as HTMLInputElement).value)"
+      />
+    </div>
+
     <Alert v-if="tenants.error.value" variant="destructive">
       <p>{{ tenants.error.value }}</p>
-      <Button variant="outline" size="sm" class="mt-3" @click="tenants.load()">Try again</Button>
+      <Button variant="outline" size="sm" class="mt-3" @click="tenants.apply(currentQuery)">
+        Try again
+      </Button>
     </Alert>
 
     <p v-if="tenants.isLoading.value" class="text-sm text-muted-foreground">Loading tenants…</p>
 
     <template v-else-if="!tenants.error.value">
-      <p v-if="tenants.items.value.length === 0" class="text-sm text-muted-foreground">
-        No tenants to show.
+      <p
+        v-if="tenants.items.value.length === 0"
+        class="text-sm text-muted-foreground"
+        data-testid="tenants-empty"
+      >
+        {{ tenants.filters.value.search ? 'No tenants match this search.' : 'No tenants to show.' }}
       </p>
 
       <Table v-else>
@@ -207,7 +292,7 @@ onMounted(async () => {
             variant="outline"
             size="sm"
             :disabled="!tenants.hasPrevious.value"
-            @click="tenants.goToPage(tenants.page.value - 1)"
+            @click="goToPage(tenants.page.value - 1)"
           >
             Previous
           </Button>
@@ -215,7 +300,7 @@ onMounted(async () => {
             variant="outline"
             size="sm"
             :disabled="!tenants.hasNext.value"
-            @click="tenants.goToPage(tenants.page.value + 1)"
+            @click="goToPage(tenants.page.value + 1)"
           >
             Next
           </Button>

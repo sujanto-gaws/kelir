@@ -1,5 +1,5 @@
-import { deleteItem, getItem, getPage, postItem, putItem } from './client'
-import type { Page, PageQuery } from '@/types/api'
+import { deleteItem, getItem, getPage, postItem, putItem, withoutBlanks } from './client'
+import type { Page, SearchPageQuery } from '@/types/api'
 import type { CreateTenantRequest, Tenant, UpdateTenantRequest } from '@/types/organization'
 
 /**
@@ -21,9 +21,13 @@ import type { CreateTenantRequest, Tenant, UpdateTenantRequest } from '@/types/o
 
 const TENANTS = '/organization/tenants'
 
-/** Paginated. `page` is 1-based; `pageSize` is clamped server-side to 1..=100. */
-export function listTenants(query: PageQuery = {}): Promise<Page<Tenant>> {
-  return getPage<Tenant>(TENANTS, query)
+/**
+ * Paginated. `page` is 1-based; `pageSize` is clamped server-side to 1..=100.
+ * `search` matches the tenant code and the name (#598). The table offers no
+ * status filter.
+ */
+export function listTenants(query: SearchPageQuery = {}): Promise<Page<Tenant>> {
+  return getPage<Tenant>(TENANTS, withoutBlanks(query))
 }
 
 export function getTenant(id: string): Promise<Tenant> {

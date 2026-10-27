@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT count(*)\n        FROM tenants\n        WHERE deleted_at IS NULL\n          AND ($1::text IS NULL OR tenant_code ILIKE $1 OR name ILIKE $1)\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "3a1f3432ab9909d8bd57c851896f72f396586238ac1422632ba9a46e8d5d4656"
+}
