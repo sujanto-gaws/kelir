@@ -17,7 +17,8 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { useQueryBackedList, type ListQuery } from '@/composables/useQueryBackedList'
+import { useListRoute } from '@/composables/useListRoute'
+import { useQueryBackedList } from '@/composables/useQueryBackedList'
 import { DOCUMENT_PRIORITY_LABELS, DOCUMENT_STATUS_LABELS } from '@/types/document'
 import type { ListRow, RadAction, RenderableColumn, RenderableList } from '@/types/rad'
 
@@ -72,20 +73,12 @@ const rows = useQueryBackedList<ListRow>((query) =>
   listRenderedRows(definition.value?.id ?? '', query),
 )
 
-/** The query string as flat strings, which is what the composable applies. */
-const currentQuery = computed<ListQuery>(() => {
-  const query: ListQuery = {}
-
-  for (const [key, value] of Object.entries(route.query)) {
-    const first = Array.isArray(value) ? value[0] : value
-
-    if (typeof first === 'string' && first !== '') {
-      query[key] = first
-    }
-  }
-
-  return query
-})
+/** Loaded by the watch at the end, once the definition is there to ask with. */
+const { currentQuery, navigate, goToPage } = useListRoute(
+  rows,
+  () => ({ name: 'rendered-list', params: { listKey: listKey.value } }),
+  { load: false },
+)
 
 /**
  * The sort in force: the URL's, or the definition's own where the URL is silent.
@@ -125,22 +118,6 @@ function sortMarker(column: RenderableColumn): string {
   return sort.value?.descending ? '↓' : '↑'
 }
 
-function navigate(changes: ListQuery, resetPage = true): void {
-  const next: ListQuery = { ...currentQuery.value, ...changes }
-
-  if (resetPage) {
-    delete next.page
-  }
-
-  for (const [key, value] of Object.entries(next)) {
-    if (value === '') {
-      delete next[key]
-    }
-  }
-
-  void router.push({ name: 'rendered-list', params: { listKey: listKey.value }, query: next })
-}
-
 /** Clicking a header cycles ascending, descending, then back to the default. */
 function toggleSort(column: RenderableColumn): void {
   if (!column.sortable) {
@@ -154,10 +131,6 @@ function toggleSort(column: RenderableColumn): void {
 
 function setFilter(key: string, value: string): void {
   navigate({ [key]: value })
-}
-
-function goToPage(next: number): void {
-  navigate({ page: String(Math.min(Math.max(1, next), rows.totalPages.value)) }, false)
 }
 
 /**

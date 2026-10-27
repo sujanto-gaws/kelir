@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { computed, ref } from 'vue'
 
 import { deleteDocumentType, getDocumentType, listDocumentTypes } from '@/api/document-types'
 import { toApiError } from '@/api/client'
@@ -17,7 +16,8 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { useQueryBackedList, type ListQuery } from '@/composables/useQueryBackedList'
+import { useListRoute } from '@/composables/useListRoute'
+import { useQueryBackedList } from '@/composables/useQueryBackedList'
 import { useAuthStore } from '@/stores/auth'
 import type { DocumentType, DocumentTypeSummary } from '@/types/document-type'
 
@@ -42,8 +42,6 @@ import NumberingRuleDialog from './NumberingRuleDialog.vue'
  * **The URL holds the page and the search** (#598), as on the external system
  * list: both go to the server as they are, and nothing is narrowed here.
  */
-const route = useRoute()
-const router = useRouter()
 const auth = useAuthStore()
 
 const canCreate = computed(() => auth.can('document-type:create'))
@@ -52,59 +50,12 @@ const canDelete = computed(() => auth.can('document-type:delete'))
 
 const types = useQueryBackedList<DocumentTypeSummary>(listDocumentTypes)
 
-const currentQuery = computed<ListQuery>(() => {
-  const query: ListQuery = {}
-
-  for (const [key, value] of Object.entries(route.query)) {
-    const first = Array.isArray(value) ? value[0] : value
-
-    if (typeof first === 'string' && first !== '') {
-      query[key] = first
-    }
-  }
-
-  return query
-})
-
-/** Any change but the page itself goes back to page 1. */
-function navigate(changes: ListQuery, resetPage = true): void {
-  const next: ListQuery = { ...currentQuery.value, ...changes }
-
-  if (resetPage) {
-    delete next.page
-  }
-
-  for (const [key, value] of Object.entries(next)) {
-    if (value === '') {
-      delete next[key]
-    }
-  }
-
-  void router.push({ name: 'admin-document-types', query: next })
-}
+const { navigate, refresh, goToPage } = useListRoute(types, () => ({
+  name: 'admin-document-types',
+}))
 
 function setSearch(value: string): void {
   navigate({ search: value.trim() })
-}
-
-function goToPage(next: number): void {
-  navigate({ page: String(Math.min(Math.max(1, next), types.totalPages.value)) }, false)
-}
-
-/**
- * Read the page again, after a save or a delete.
- *
- * A delete can empty the last page, so it steps back a page rather than leave
- * the person on one that no longer exists. The URL changes, and the watch
- * below reads the page it names.
- */
-async function refresh(afterDelete = false): Promise<void> {
-  if (afterDelete && types.items.value.length === 1 && types.page.value > 1) {
-    goToPage(types.page.value - 1)
-    return
-  }
-
-  await types.apply(currentQuery.value)
 }
 
 const isFormOpen = ref(false)
@@ -194,14 +145,6 @@ async function remove(): Promise<void> {
 function statusVariant(status: DocumentTypeSummary['status']): 'default' | 'secondary' {
   return status === 'ACTIVE' ? 'default' : 'secondary'
 }
-
-watch(
-  () => route.query,
-  () => {
-    void types.apply(currentQuery.value)
-  },
-  { immediate: true, deep: true },
-)
 </script>
 
 <template>

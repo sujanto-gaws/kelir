@@ -16,7 +16,8 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { useQueryBackedList, type ListQuery } from '@/composables/useQueryBackedList'
+import { useListRoute } from '@/composables/useListRoute'
+import { useQueryBackedList } from '@/composables/useQueryBackedList'
 import { TASK_STATUS_LABELS, type InboxScope, type InboxTask } from '@/types/workflow'
 
 /**
@@ -107,39 +108,14 @@ const emptyMessage = computed(() => {
 /** Whether the list being shown is one of finished work. */
 const showingCompleted = computed(() => list.filters.value.scope === 'completed')
 
-const currentQuery = computed<ListQuery>(() => {
-  const query: ListQuery = {}
-
-  for (const [key, value] of Object.entries(route.query)) {
-    const first = Array.isArray(value) ? value[0] : value
-
-    if (typeof first === 'string' && first !== '') {
-      query[key] = first
-    }
-  }
-
-  return query
-})
-
-function navigate(changes: ListQuery, resetPage = true): void {
-  const next: ListQuery = { ...currentQuery.value, ...changes }
-
-  if (resetPage) {
-    delete next.page
-  }
-
-  for (const [key, value] of Object.entries(next)) {
-    if (value === '') {
-      delete next[key]
-    }
-  }
-
-  void router.push({ name: 'tasks', query: next })
-}
-
-function goToPage(next: number): void {
-  navigate({ page: String(Math.min(Math.max(1, next), list.totalPages.value)) }, false)
-}
+/** Loaded by the watch below, which also fills the search box. */
+const { currentQuery, navigate, refresh, goToPage } = useListRoute(
+  list,
+  () => ({ name: 'tasks' }),
+  {
+    load: false,
+  },
+)
 
 /**
  * The deadline as a person reads it.
@@ -216,9 +192,7 @@ watch(
 
     <Alert v-if="list.error.value" variant="destructive" data-testid="tasks-error">
       <p>{{ list.error.value }}</p>
-      <Button variant="outline" size="sm" class="mt-3" @click="list.apply(currentQuery)">
-        Try again
-      </Button>
+      <Button variant="outline" size="sm" class="mt-3" @click="refresh()">Try again</Button>
     </Alert>
 
     <p v-if="list.isLoading.value" class="text-sm text-muted-foreground">Loading tasks…</p>
