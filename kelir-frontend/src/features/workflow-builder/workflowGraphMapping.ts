@@ -22,7 +22,8 @@ import { TRANSITION_ACTIONS } from './jwssRegistry'
  * the server's verdict is the only verdict (#426 AC3), and a graph that
  * refused to draw a draft would hide the mistake it could show. A state code a
  * transition or the initial state names, and no state declares, becomes a node
- * marked as not declared, so the edge still has both ends.
+ * marked as not declared, so the edge still has both ends. **The graph declines
+ * on size alone**, above `WORKFLOW_GRAPH_CEILING` (#721), never on validity.
  */
 
 /** One node: a declared state, or a code something names that no state declares. */
@@ -231,4 +232,80 @@ export function workflowGraphOf(definition: WorkflowGraphSource): WorkflowGraph 
   })
 
   return { nodes, edges }
+}
+
+/**
+ * The largest workflow the graph is drawn for (#721): above **either** number
+ * the *Graph* tab draws nothing and says so, and the list is where the workflow
+ * is read. The product owner's choice, 2026-10-26: whichever is reached first.
+ *
+ * **Why there is a ceiling at all.** dagre lays out on the main thread
+ * ([ADR-0046] §3.3), and its time grows faster than the definition. In
+ * Chromium on the laptop (#772) 80 states took 1.9 s, and the larger sizes
+ * measured held the tab far longer; above this the picture is not worth the
+ * wait, and the list says everything it would.
+ *
+ * **Checked before the graph's chunk is fetched**: the editor reads it, not
+ * `WorkflowGraph.vue`, so a declined draft imports neither dagre nor Vue Flow.
+ * That is why it lives here, in a module that imports neither.
+ *
+ * [ADR-0046]: ../../../../docs/architectures/adr/0046.%20The%20Builders%20Drag%20with%20Vue%20Draggable%20Plus%20and%20Draw%20with%20Vue%20Flow%20and%20Dagre,%20Off%20the%20First-Load%20Path.md
+ */
+export const WORKFLOW_GRAPH_CEILING = { states: 80, transitions: 240 } as const
+
+/** How big a definition's graph is: what the caption says, and what the ceiling is checked on. */
+export interface WorkflowGraphCount {
+  /** Every node the graph draws: the declared states and the codes not declared. */
+  states: number
+  /** The states the definition declares, two sharing a code being two. */
+  declared: number
+  /** The codes the initial state or a transition names and no state declares. */
+  undeclared: number
+  transitions: number
+}
+
+/**
+ * The size of the graph `workflowGraphOf` would draw, without drawing it: one
+ * node per declared state, one per code not declared, one edge per transition.
+ *
+ * **The caption and the decline both read this**, so they cannot count
+ * differently. It reads the same codes `workflowGraphOf` does: a blank initial
+ * state names nothing, and every transition's two ends name a code, whatever
+ * they hold.
+ */
+export function workflowGraphCountOf(definition: WorkflowGraphSource): WorkflowGraphCount {
+  const states = definition.states ?? []
+  const transitions = definition.transitions ?? []
+  const declared = new Set(states.map((state) => state.code))
+  const undeclared = new Set<string>()
+
+  function names(code: string): void {
+    if (!declared.has(code)) {
+      undeclared.add(code)
+    }
+  }
+
+  if (definition.initialState) {
+    names(definition.initialState)
+  }
+
+  for (const transition of transitions) {
+    names(transition.from)
+    names(transition.to)
+  }
+
+  return {
+    states: states.length + undeclared.size,
+    declared: states.length,
+    undeclared: undeclared.size,
+    transitions: transitions.length,
+  }
+}
+
+/** Whether a graph of this size is declined: **above** the ceiling on either count, each alone. */
+export function isAboveGraphCeiling(count: WorkflowGraphCount): boolean {
+  return (
+    count.states > WORKFLOW_GRAPH_CEILING.states ||
+    count.transitions > WORKFLOW_GRAPH_CEILING.transitions
+  )
 }

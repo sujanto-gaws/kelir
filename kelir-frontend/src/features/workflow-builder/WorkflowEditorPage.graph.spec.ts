@@ -5,6 +5,8 @@ import type { Router } from 'vue-router'
 import type { FakeBackendHandle, FakeReply, RecordedRequest } from '@/lib/testing/fake-backend'
 import type { JwssDefinition } from '@/types/workflow'
 
+import { WORKFLOW_GRAPH_CEILING } from './workflowGraphMapping'
+
 /**
  * The editor's graph view (#687, **D-95** A): a tab beside the list, loaded
  * off the first-load path, showing the draft and writing nothing back.
@@ -31,6 +33,8 @@ const graph = {
   fail: false,
   /** While set, the import waits for it, as a chunk on a slow network does. */
   hold: null as Promise<void> | null,
+  /** How many states each definition the graph was handed had, one entry per render. */
+  drawn: [] as number[],
 }
 
 function mockGraph(): void {
@@ -54,8 +58,13 @@ function mockGraph(): void {
       default: defineComponent({
         name: 'WorkflowGraph',
         props: { definition: { type: Object, required: true } },
-        setup: (props) => () =>
-          h('div', { 'data-testid': 'graph-stub' }, (props.definition as JwssDefinition).name),
+        setup: (props) => () => {
+          const definition = props.definition as JwssDefinition
+
+          graph.drawn.push(definition.states.length)
+
+          return h('div', { 'data-testid': 'graph-stub' }, definition.name)
+        },
       }),
     }
   })
@@ -127,6 +136,44 @@ function record(definition: JwssDefinition = jwss()) {
   }
 }
 
+const { states: STATES, transitions: TRANSITIONS } = WORKFLOW_GRAPH_CEILING
+
+/**
+ * A workflow of `states` states in a ring and `transitions` transitions round
+ * it, every code declared, named for its size. `undeclared` sends that many of
+ * the first transitions to a code no state declares, each its own.
+ */
+function sized(states: number, transitions: number, undeclared = 0): JwssDefinition {
+  const codes = Array.from({ length: states }, (_, at) => `STEP_${at}`)
+
+  return {
+    workflowKey: 'purchase_approval',
+    version: '1.0.0',
+    name: `${states} states`,
+    initialState: codes[0],
+    states: codes.map((code) => ({
+      code,
+      name: code,
+      mapsToDocumentStatus: 'PENDING_APPROVAL' as const,
+    })),
+    transitions: Array.from({ length: transitions }, (_, at) => ({
+      from: codes[at % states],
+      to: at < undeclared ? `NOWHERE_${at}` : codes[(at + 1) % states],
+      action: 'APPROVE' as const,
+    })),
+  }
+}
+
+/** The decline, as AC5 of #721 words it, with the ceiling read from where it is set. */
+function declineSentence(states: string, transitions: string): string {
+  return (
+    `This workflow has ${states} and ${transitions}. ` +
+    `The graph shows up to ${STATES} states or ${TRANSITIONS} transitions, ` +
+    'whichever is reached first, so it is not drawn. ' +
+    'Use the List tab to read and change the workflow.'
+  )
+}
+
 /** The keys of every object anywhere in a value. */
 function keysIn(value: unknown, into = new Set<string>()): Set<string> {
   if (value !== null && typeof value === 'object') {
@@ -160,6 +207,7 @@ describe('WorkflowEditorPage, the graph view', () => {
     graph.imports = 0
     graph.fail = false
     graph.hold = null
+    graph.drawn = []
     wrapper = null
     stored = record()
     refuse = null
@@ -516,5 +564,242 @@ describe('WorkflowEditorPage, the graph view', () => {
       expect(graph.imports).toBe(2)
       expect(page.find('[data-testid="graph-stub"]').exists()).toBe(true)
     })
+  })
+
+  // #721: above the ceiling the Graph tab says so, and fetches nothing.
+  describe('declined above the ceiling', () => {
+    function declined(page: VueWrapper) {
+      return page.find('[data-testid="workflow-graph-declined"]')
+    }
+
+    it('draws a workflow at the ceiling on both counts: the graph is imported once and shown', async () => {
+      stored = record(sized(STATES, TRANSITIONS))
+
+      const page = await render()
+
+      await openGraph(page)
+
+      expect(graph.imports).toBe(1)
+      expect(page.find('[data-testid="graph-stub"]').exists()).toBe(true)
+      expect(graph.drawn).toContain(STATES)
+      expect(declined(page).exists()).toBe(false)
+    }, 30_000)
+
+    it.each([
+      ['one state above', STATES + 1, TRANSITIONS, 0, `${STATES + 1} states`],
+      ['one transition above', STATES, TRANSITIONS + 1, 0, `${STATES} states`],
+      [
+        'the ceiling declared and one code not declared',
+        STATES,
+        TRANSITIONS,
+        1,
+        `${STATES + 1} states (1 not declared)`,
+      ],
+    ])(
+      'declines %s: nothing imported, nothing drawn, and the counts said',
+      async (_, states, transitions, undeclared, statesSaid) => {
+        stored = record(sized(states, transitions, undeclared))
+
+        const page = await render()
+
+        await openGraph(page)
+
+        expect(graph.imports).toBe(0)
+        expect(graph.drawn).toEqual([])
+        expect(page.find('[data-testid="graph-stub"]').exists()).toBe(false)
+        expect(page.find('[data-testid="workflow-graph"]').exists()).toBe(false)
+        expect(page.find('[data-testid="workflow-graph-summary"]').exists()).toBe(false)
+
+        const sentence = page.get('#workflow-view-graph [data-testid="workflow-graph-declined"]')
+
+        expect(sentence.text()).toBe(declineSentence(statesSaid, `${transitions} transitions`))
+        expect(sentence.attributes('role')).toBe('status')
+        expect(page.get('#workflow-view-graph').attributes('hidden')).toBeUndefined()
+        // The tab stays, and the list beside it is mounted and still edits.
+        expect(page.get('[data-testid="view-graph"]').attributes('aria-selected')).toBe('true')
+        expect(page.findAll('[data-testid^="state-"][aria-label]')).toHaveLength(states)
+
+        await page.get('[data-testid="view-list"]').trigger('click')
+        await page.get('[data-testid="workflow-name"]').setValue('Edited beside the decline')
+        await openGraph(page)
+
+        expect(page.get('[data-testid="undo"]').attributes('disabled')).toBeUndefined()
+        expect(declined(page).exists()).toBe(true)
+        expect(graph.imports).toBe(0)
+      },
+      30_000,
+    )
+
+    it('says one state and one transition in the singular, and the codes not declared', async () => {
+      const cases: [JwssDefinition, string][] = [
+        [sized(STATES + 1, 1), declineSentence(`${STATES + 1} states`, '1 transition')],
+        [
+          sized(STATES, 1, 1),
+          declineSentence(`${STATES + 1} states (1 not declared)`, '1 transition'),
+        ],
+        [sized(1, TRANSITIONS + 1), declineSentence('1 state', `${TRANSITIONS + 1} transitions`)],
+      ]
+
+      for (const [definition, said] of cases) {
+        stored = record(definition)
+
+        const page = await render()
+
+        await openGraph(page)
+
+        expect(declined(page).text()).toBe(said)
+        page.unmount()
+        wrapper = null
+      }
+
+      expect(graph.imports).toBe(0)
+    }, 30_000)
+
+    it('flips to the sentence when a state is added while the graph shows, and back on Undo, fetching once', async () => {
+      stored = record(sized(STATES, 1))
+
+      const page = await render()
+
+      await openGraph(page)
+      expect(page.find('[data-testid="graph-stub"]').exists()).toBe(true)
+      expect(graph.imports).toBe(1)
+
+      // The list is hidden, not gone, while the graph shows.
+      await page.get('[data-testid="add-state-wait"]').trigger('click')
+      await settle()
+
+      expect(page.find('[data-testid="graph-stub"]').exists()).toBe(false)
+      expect(declined(page).text()).toBe(declineSentence(`${STATES + 1} states`, '1 transition'))
+      // The graph was unmounted, never handed the definition above the ceiling.
+      expect(graph.drawn).not.toContain(STATES + 1)
+
+      await page.get('[data-testid="undo"]').trigger('click')
+      await settle()
+
+      expect(declined(page).exists()).toBe(false)
+      expect(page.find('[data-testid="graph-stub"]').exists()).toBe(true)
+      expect(graph.drawn[graph.drawn.length - 1]).toBe(STATES)
+      expect(graph.imports).toBe(1)
+
+      await page.get('[data-testid="redo"]').trigger('click')
+      await settle()
+
+      expect(declined(page).exists()).toBe(true)
+      expect(graph.drawn).not.toContain(STATES + 1)
+    }, 30_000)
+
+    it('flips to the graph when a state is removed while the sentence shows, fetching it then and once', async () => {
+      stored = record(sized(STATES + 1, 1))
+
+      const page = await render()
+
+      await openGraph(page)
+      expect(declined(page).exists()).toBe(true)
+      expect(graph.imports).toBe(0)
+
+      // The last state: no transition leaves it, so removing it removes no transition.
+      await page.get(`[data-testid="remove-state-${STATES}"]`).trigger('click')
+      await settle()
+
+      expect(declined(page).exists()).toBe(false)
+      expect(page.find('[data-testid="graph-stub"]').exists()).toBe(true)
+      expect(graph.imports).toBe(1)
+
+      await page.get('[data-testid="undo"]').trigger('click')
+      await settle()
+      expect(declined(page).exists()).toBe(true)
+
+      await page.get('[data-testid="redo"]').trigger('click')
+      await settle()
+
+      expect(page.find('[data-testid="graph-stub"]').exists()).toBe(true)
+      expect(graph.imports).toBe(1)
+      expect(graph.drawn).not.toContain(STATES + 1)
+    }, 30_000)
+
+    it('flips when a save brings back a copy above the ceiling while the graph shows', async () => {
+      stored = record(sized(STATES, 1))
+
+      const page = await render()
+
+      await openGraph(page)
+      expect(page.find('[data-testid="graph-stub"]').exists()).toBe(true)
+
+      backend.restore()
+      backend = (await import('@/lib/testing/fake-backend')).installFakeBackend(() => ({
+        status: 200,
+        body: { success: true, data: record(sized(STATES + 1, 1)) },
+      }))
+      await page.get('[data-testid="save-workflow"]').trigger('click')
+      await settle()
+
+      expect(page.find('[data-testid="graph-stub"]').exists()).toBe(false)
+      expect(declined(page).exists()).toBe(true)
+      expect(graph.drawn).not.toContain(STATES + 1)
+    }, 30_000)
+
+    // The test-engineer campaign over row 5 (2026-10-28): the save's reply
+    // is a draft like any other, in the down direction too.
+    it('flips to the graph when a save brings back a copy under the ceiling while the sentence shows, fetching it then', async () => {
+      stored = record(sized(STATES + 1, 1))
+
+      const page = await render()
+
+      await openGraph(page)
+      expect(declined(page).exists()).toBe(true)
+      expect(graph.imports).toBe(0)
+
+      backend.restore()
+      backend = (await import('@/lib/testing/fake-backend')).installFakeBackend(() => ({
+        status: 200,
+        body: { success: true, data: record(sized(STATES, 1)) },
+      }))
+      await page.get('[data-testid="save-workflow"]').trigger('click')
+      await settle()
+
+      expect(declined(page).exists()).toBe(false)
+      expect(page.find('[data-testid="graph-stub"]').exists()).toBe(true)
+      expect(graph.imports).toBe(1)
+      expect(graph.drawn).not.toContain(STATES + 1)
+    }, 30_000)
+
+    // The same campaign: the chunk can arrive after the draft has crossed the
+    // ceiling, and what arrives must not be drawn for the larger draft.
+    it('draws nothing when the draft crosses the ceiling while the chunk is in flight, and draws on that chunk coming back down', async () => {
+      let arrive!: () => void
+
+      graph.hold = new Promise<void>((resolve) => {
+        arrive = resolve
+      })
+      stored = record(sized(STATES, 1))
+
+      const page = await render()
+
+      await openGraph(page)
+      expect(graph.imports).toBe(1)
+      expect(page.find('[data-testid="graph-stub"]').exists()).toBe(false)
+
+      // Above the ceiling before the chunk arrives.
+      await page.get('[data-testid="add-state-wait"]').trigger('click')
+      await settle()
+      expect(declined(page).exists()).toBe(true)
+
+      arrive()
+      await settle()
+
+      expect(page.find('[data-testid="graph-stub"]').exists()).toBe(false)
+      expect(declined(page).text()).toBe(declineSentence(`${STATES + 1} states`, '1 transition'))
+      expect(graph.drawn).not.toContain(STATES + 1)
+
+      // Back under it: drawn on the chunk that arrived, not fetched again.
+      await page.get('[data-testid="undo"]').trigger('click')
+      await settle()
+
+      expect(declined(page).exists()).toBe(false)
+      expect(page.find('[data-testid="graph-stub"]').exists()).toBe(true)
+      expect(graph.drawn[graph.drawn.length - 1]).toBe(STATES)
+      expect(graph.drawn).not.toContain(STATES + 1)
+      expect(graph.imports).toBe(1)
+    }, 30_000)
   })
 })

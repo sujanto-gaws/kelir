@@ -32,6 +32,8 @@ import { conditionVariables, STATE_KINDS, starterDefinition, type StateKind } fr
 import { useWorkflowDeprecation } from './useWorkflowDeprecation'
 import { useWorkflowDraft } from './useWorkflowDraft'
 import WorkflowDeprecateDialog from './WorkflowDeprecateDialog.vue'
+import WorkflowGraphDeclined from './WorkflowGraphDeclined.vue'
+import { isAboveGraphCeiling, workflowGraphCountOf } from './workflowGraphMapping'
 import WorkflowStateCard from './WorkflowStateCard.vue'
 import WorkflowTransitionRow from './WorkflowTransitionRow.vue'
 import { addressOf, placeVerdict } from './workflowVerdict'
@@ -128,16 +130,17 @@ const deprecation = useWorkflowDeprecation()
  *
  * **The list stays mounted while the graph shows**, hidden: a logic builder
  * holding an operand not yet filled in keeps it. **The graph is mounted only
- * while it shows**, so every time it is opened it is laid out afresh.
+ * while it shows**, so every time it is opened it is laid out afresh, **unless
+ * the draft is above the ceiling** (`graphDeclined`), when nothing is laid out.
  */
 const view = ref<'list' | 'graph'>('list')
 
 /**
  * The graph, **off the first-load path** ([ADR-0046]). Vue Flow and dagre are
  * imported by `WorkflowGraph.vue` alone, and this edge is what keeps them a
- * chunk of their own: fetched the first time somebody opens the *Graph* tab,
- * never by a session that does not. `scripts/check-bundle-split.mjs` fails the
- * build when they are not.
+ * chunk of their own: fetched the first time somebody opens the *Graph* tab on
+ * a draft at or under the ceiling (`graphDeclined`), never by a session that
+ * does not. `scripts/check-bundle-split.mjs` fails the build when they are not.
  *
  * [ADR-0046]: ../../../../docs/architectures/adr/0046.%20The%20Builders%20Drag%20with%20Vue%20Draggable%20Plus%20and%20Draw%20with%20Vue%20Flow%20and%20Dagre,%20Off%20the%20First-Load%20Path.md
  */
@@ -156,6 +159,20 @@ const WorkflowGraph = defineAsyncComponent({
       'The graph could not be drawn. The list holds the same workflow.',
     ),
 })
+
+/**
+ * The draft's graph size, and whether it is above the ceiling (#721): then the
+ * *Graph* tab says so in a sentence, and `WorkflowGraph` is neither mounted nor
+ * fetched. **Checked here, before the async component**, because a check in
+ * the graph itself would come after its chunk, and dagre and Vue Flow with it.
+ *
+ * **Read from the draft, reactively**: an edit, an undo, a redo or a save's
+ * reply that crosses the ceiling flips the panel while the tab is open. Going
+ * up unmounts the graph before it is handed the larger draft; coming down
+ * mounts it on the chunk already fetched, if it was.
+ */
+const graphCount = computed(() => workflowGraphCountOf(definition.value))
+const graphDeclined = computed(() => isAboveGraphCeiling(graphCount.value))
 
 const VIEWS = [
   { value: 'list', label: 'List' },
@@ -718,7 +735,10 @@ onMounted(() => {
         aria-labelledby="workflow-view-graph-tab"
         :hidden="view !== 'graph'"
       >
-        <WorkflowGraph v-if="view === 'graph'" :definition="definition" />
+        <template v-if="view === 'graph'">
+          <WorkflowGraphDeclined v-if="graphDeclined" :count="graphCount" />
+          <WorkflowGraph v-else :definition="definition" />
+        </template>
       </div>
 
       <div

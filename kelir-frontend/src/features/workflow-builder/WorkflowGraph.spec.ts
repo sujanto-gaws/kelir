@@ -5,7 +5,9 @@ import { press, tabTo } from '@/lib/testing/keyboard'
 import type { JwssDefinition } from '@/types/workflow'
 
 import WorkflowGraph from './WorkflowGraph.vue'
+import WorkflowGraphDeclined from './WorkflowGraphDeclined.vue'
 import { pathThrough } from './workflowGraphLayout'
+import { WORKFLOW_GRAPH_CEILING, workflowGraphCountOf } from './workflowGraphMapping'
 
 /**
  * The read-only graph (#687, **D-95** A).
@@ -411,5 +413,61 @@ describe('WorkflowGraph', () => {
 
       expect(controls.props('showInteractive')).toBe(false)
     })
+  })
+
+  // #721: the caption and the editor's decline count with one function.
+  describe('counted as the ceiling counts', () => {
+    const { states: STATES, transitions: TRANSITIONS } = WORKFLOW_GRAPH_CEILING
+
+    /**
+     * One step under the ceiling: one state fewer than it declared, plus one
+     * code a transition names and no state declares, and every transition it
+     * allows.
+     */
+    function underTheCeiling(): JwssDefinition {
+      const codes = Array.from({ length: STATES - 1 }, (_, at) => `STEP_${at}`)
+
+      return {
+        ...definition(),
+        initialState: codes[0],
+        states: codes.map((code) => ({
+          code,
+          name: code,
+          mapsToDocumentStatus: 'PENDING_APPROVAL' as const,
+        })),
+        transitions: Array.from({ length: TRANSITIONS }, (_, at) => ({
+          from: codes[at % codes.length],
+          to: at === 0 ? 'NOWHERE' : codes[(at + 1) % codes.length],
+          action: 'APPROVE' as const,
+        })),
+      }
+    }
+
+    it('gives the counts the decline gives one state later', () => {
+      const under = underTheCeiling()
+      const over = { ...under, states: [...under.states, { ...under.states[0], code: 'ONE_MORE' }] }
+
+      expect(render(under).get('[data-testid="workflow-graph-summary"]').text()).toBe(
+        `${STATES - 1} states, ${TRANSITIONS} transitions, 1 not declared. ` +
+          'Read-only: change the workflow in the list.',
+      )
+      expect(workflowGraphCountOf(under)).toEqual({
+        states: STATES,
+        declared: STATES - 1,
+        undeclared: 1,
+        transitions: TRANSITIONS,
+      })
+
+      // The same definition with one state more: one more declared, the same
+      // code not declared, the same transitions.
+      const declined = mount(WorkflowGraphDeclined, {
+        props: { count: workflowGraphCountOf(over) },
+      })
+
+      expect(declined.text()).toContain(
+        `This workflow has ${STATES + 1} states (1 not declared) and ${TRANSITIONS} transitions.`,
+      )
+      declined.unmount()
+    }, 30_000)
   })
 })
