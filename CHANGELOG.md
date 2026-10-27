@@ -50,6 +50,17 @@ While the major version is `0`, the public API may change in any release.
   deprecate workflow revisions. `0051` adds one permission and its grant,
   rewords `workflow:definition:delete`'s description, and changes no schema,
   so the previous image runs against the schema it leaves (release process §6).
+- **`PUT /api/v1/identity/users/{id}` refuses a blank `displayName`**
+  ([#610](https://github.com/sujanto-gaws/kelir/issues/610),
+  [#616](https://github.com/sujanto-gaws/kelir/issues/616)). It validated no
+  field, and stored a blank display name as an empty string. A present
+  `displayName` is now held to the create rules: blank, including one of only
+  invisible characters, is 422 `REQUIRED` at `displayName`, and one over 200
+  characters is `TOO_LONG`. A client that cleared a display name by sending
+  `""` must send a name or leave the field out; an absent field is left as
+  it is. A display name or role name stored blank or invisible before the
+  upgrade is not repaired, and an edit that sends it back unchanged is
+  refused until it is given a visible one.
 
 ### Added
 
@@ -452,6 +463,39 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A username, email or display name longer than its column is a 422 and
+  not a 500** ([#610](https://github.com/sujanto-gaws/kelir/issues/610)).
+  Nothing bounded them, so a username over 64 characters, an email over 320
+  or a display name over 200 reached the database and answered 500.
+  `POST /api/v1/identity/users`, `PUT /api/v1/identity/users/{id}` and a
+  tenant's first administrator on `POST /api/v1/organization/tenants` now
+  refuse one with 422 `VALIDATION_ERROR` and a `TOO_LONG` detail at its path
+  (`administrator.username` and so on for the tenant), counted in characters
+  of the trimmed value, which is what is stored, as #575 counts a role's code
+  and name. Every field is reported at once, one detail each. A username is
+  checked for blank, then length, then its characters, so a 65-character
+  username with a space in it is `TOO_LONG` alone. The update now validates
+  its body, so a blank `displayName` there is newly refused (*Upgrade
+  notes*, above). Nothing is written on a refusal. No migration, and no
+  schema change.
+- **A role code, role name, username or display name of only invisible
+  characters is blank** ([#616](https://github.com/sujanto-gaws/kelir/issues/616)).
+  The server's blank check was Rust's `trim()`, which knows whitespace and not
+  the format characters that draw nothing, so a role code or name, or a
+  display name, of one U+200B ZERO WIDTH SPACE, U+200C, U+200D, U+2060 or
+  U+FEFF was stored and listed with no visible name, and such a username was
+  refused as `INVALID_FORMAT`. Each is now 422 `REQUIRED` at its path: a
+  `roleCode` or `name` on a role create, a `name` on a role update, and a
+  `username` or `displayName` on a user create, a user update or a tenant's
+  first administrator. Blank is one function, `is_blank_text`, and one set of
+  code points (coding standard §2.6). What is stored is unchanged: the value
+  `trim()` leaves, so a visible value with an invisible character at its edge
+  is kept as sent, and that character counts towards the length. An email is
+  unchanged, and a blank one is still `INVALID_FORMAT`. The dialogs' own blank
+  check is unchanged and stays a pre-check; the server's `REQUIRED` is shown
+  under the field. Other modules keep their own blank checks until
+  [#797](https://github.com/sujanto-gaws/kelir/issues/797). No migration, and
+  no schema change.
 - **A password write now ends every refresh token, including one stored
   while it ran**
   ([#756](https://github.com/sujanto-gaws/kelir/issues/756),
