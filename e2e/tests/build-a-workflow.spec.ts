@@ -632,14 +632,15 @@ const CAPTION_TIMEOUT = 20_000
 
 /**
  * Loading the editor on a draft lists every state, and the 300-state draft is
- * still loaded to see its decline, so this is the slowest step left. **Nearly
- * four times that load as measured**: 19.9–24.3 s by Playwright's clock in
- * three runs on the laptop on 2026-10-27, loaded by a `cargo` build beside it.
- * Not three times: in a fourth run one load of the 150-state draft took 66 s
- * on the same loaded laptop (6.9–13.2 s in the others), so 75 s would have
- * been a coin toss there. Every load logs a `#721 editor:` line, so the next
- * reading of this figure is in the run's own log. It also bounds the waits for
- * quiet, which follow loads no larger than 80 states.
+ * still loaded to see its decline, so this is the slowest step left. **About
+ * 3.4 times the slowest such load measured**: 19.9–26.5 s by Playwright's
+ * clock on the laptop on 2026-10-27, loaded by a `cargo` build beside it, and
+ * 22.9 s in the whole suite on four pinned threads in Linux. The 57–66 s loads
+ * of the 150-state draft seen before `whenPresent` were Playwright's failure
+ * snapshot, not the editor (see `whenPresent`). Every load logs a
+ * `#721 editor:` line, so the next reading of this figure is in the run's own
+ * log. It also bounds the waits for quiet, which follow loads no larger than
+ * 80 states.
  */
 const EDITOR_TIMEOUT = 90_000
 
@@ -757,21 +758,48 @@ function declineOf(draft: LayoutDraft): string {
 }
 
 /**
+ * Waits until an element with this test id is in the page, **by the browser's
+ * own `querySelector`, and only then lets an `expect` read it.**
+ *
+ * **Why not `expect(locator)` alone, on these pages** (#801's first CI run).
+ * Each poll of a locator `expect` that does not match takes an ARIA snapshot
+ * for the failure message, and one whose element is not found yet takes it of
+ * the whole `document.body` (`ariaSnapshotForExpectFailure`, Playwright
+ * 1.62). A poll that misses while the editor is still loading, and whose
+ * snapshot then runs once the list is drawn, walks the whole list computing
+ * an accessible name for every element. Profiled on a 4-thread Linux run of
+ * the whole suite, that was 48.8 s of a 55.8 s wait at 150 states; at 300
+ * states (3.5 million DOM nodes) it held the page for the rest of the test, so
+ * the `expect` failed with *element(s) not found* on an editor already drawn,
+ * and the page could not even be closed. **This wait never snapshots**, and
+ * the `expect` after it finds its element on the first poll; if the value is
+ * wrong, its snapshot is of that one element.
+ */
+async function whenPresent(page: Page, testId: string, timeout: number): Promise<void> {
+  await page.waitForFunction(
+    (id) => document.querySelector(`[data-testid="${id}"]`) !== null,
+    testId,
+    { timeout, polling: 250 },
+  )
+}
+
+/**
  * A fresh load of the editor on a draft, with every state listed and the graph
  * closed. Returns how long that took, by Playwright's clock, from the
  * navigation to the last state listed: the figure `EDITOR_TIMEOUT` is sized on.
+ *
+ * The last state's row is waited for first (`whenPresent`): the starter
+ * definition the page holds while loading has no row of that index, so it is
+ * there only once this draft is drawn.
  */
 async function openEditor(page: Page, draft: LayoutDraft): Promise<number> {
   const start = Date.now()
 
   await page.goto(`/admin/workflows/${draft.id}`)
 
-  await expect(page.getByTestId('workflow-key')).toHaveValue(draft.workflowKey, {
-    timeout: EDITOR_TIMEOUT,
-  })
-  await expect(page.getByTestId(`state-code-${draft.states - 1}`)).toHaveValue('COMPLETED', {
-    timeout: EDITOR_TIMEOUT,
-  })
+  await whenPresent(page, `state-code-${draft.states - 1}`, EDITOR_TIMEOUT)
+  await expect(page.getByTestId('workflow-key')).toHaveValue(draft.workflowKey)
+  await expect(page.getByTestId(`state-code-${draft.states - 1}`)).toHaveValue('COMPLETED')
 
   const loadMs = Date.now() - start
 
@@ -790,11 +818,11 @@ async function openEditor(page: Page, draft: LayoutDraft): Promise<number> {
  *
  * **The window is from the click to the element `testId` names showing the
  * text expected**: the caption with this draft's counts under the ceiling, the
- * sentence that declines above it. The click is stamped by a capture listener, before the tab's own
- * handler runs; the caption by a `MutationObserver`, which runs once the
- * render that inserted it has finished. One frame later, two animation frames
- * after the caption, `frameAt` is stamped, and the observer is read only after
- * that.
+ * sentence that declines above it. The click is stamped by a capture
+ * listener, before the tab's own handler runs; the caption by a
+ * `MutationObserver`, which runs once the render that inserted it has
+ * finished. One frame later, two animation frames after the caption,
+ * `frameAt` is stamped, and the observer is read only after that.
  */
 async function installProbe(page: Page, testId: string, text: string): Promise<void> {
   await page.evaluate(
@@ -895,9 +923,8 @@ async function measureLayout(
 
   await page.getByTestId('view-graph').click()
 
-  await expect(page.getByTestId('workflow-graph-summary')).toHaveText(caption, {
-    timeout: CAPTION_TIMEOUT,
-  })
+  await whenPresent(page, 'workflow-graph-summary', CAPTION_TIMEOUT)
+  await expect(page.getByTestId('workflow-graph-summary')).toHaveText(caption)
   await page.waitForFunction(
     () => typeof (window as ProbedWindow).__layoutProbe?.frameAt === 'number',
     null,
@@ -1000,6 +1027,7 @@ async function checkDecline(page: Page, draft: LayoutDraft): Promise<string> {
     const clickedMs = Date.now() - start
 
     const sentence = page.getByTestId('workflow-graph-declined')
+    await whenPresent(page, 'workflow-graph-declined', CAPTION_TIMEOUT)
     await expect(sentence).toHaveText(expected)
     const shownMs = Date.now() - start
 
@@ -1146,9 +1174,8 @@ test('the graph is laid out and timed at or under its ceiling, and declined abov
     const warmFrom = await page.evaluate(() => performance.now())
     const warmStart = Date.now()
     await page.getByTestId('view-graph').click()
-    await expect(page.getByTestId('workflow-graph-summary')).toHaveText(captionOf(smallest), {
-      timeout: CAPTION_TIMEOUT,
-    })
+    await whenPresent(page, 'workflow-graph-summary', CAPTION_TIMEOUT)
+    await expect(page.getByTestId('workflow-graph-summary')).toHaveText(captionOf(smallest))
     const warmMs = Date.now() - warmStart
     const chunk = await assetsFetchedSince(page, warmFrom)
     record(
