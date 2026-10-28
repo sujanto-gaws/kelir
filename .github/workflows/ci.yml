@@ -185,15 +185,22 @@ jobs:
         # different). The digests are new, because the compressed layers were
         # no longer held anywhere to re-push. **amd64 only**, which is what
         # every runner and the staging host are.
+        #
+        # **The store has a key, the development compose file's** (#778,
+        # ADR-0049). The backend asks for SSE-S3 on every write, and a MinIO
+        # without a key refuses that write, so without it every attachment
+        # test fails. The bucket encrypts by default, as `minio-init` sets it.
         run: |
           docker run -d --name minio --network host \
             -e MINIO_ROOT_USER=minioadmin \
             -e MINIO_ROOT_PASSWORD=minioadmin \
+            -e MINIO_KMS_SECRET_KEY=kelir-development:w7GPk50m0UH2qkpB+MZbHBZD4Tcd0+nwJx3VzoopMkk= \
             ghcr.io/sujanto-gaws/minio:RELEASE.2025-09-07T16-13-09Z server /data
           docker run --rm --network host --entrypoint sh ghcr.io/sujanto-gaws/mc:RELEASE.2025-08-13T08-35-41Z -c \
             "until mc alias set ci http://localhost:9000 minioadmin minioadmin; \
              do sleep 1; done \
-             && mc mb --ignore-existing ci/kelir-test"
+             && mc mb --ignore-existing ci/kelir-test \
+             && mc encrypt set sse-s3 ci/kelir-test"
 
       - name: Install rustfmt and clippy
         run: rustup component add rustfmt clippy
@@ -405,6 +412,10 @@ jobs:
         # default (host.docker.internal) because that is where the service
         # container's published port is reachable from inside the stack.
         #
+        # **The store key is a CI-only one** (#778): deploy.sh refuses the
+        # development key in a release `.env`. The recipients are declared and
+        # empty, because this stack runs no backup.
+        #
         # **The last two lines are what make a test call answerable** (#593).
         # `KELIR_COMPOSE_OVERLAY` has deploy.sh layer `docker-compose.e2e.yml`
         # over the release compose file, which starts a stand-in upstream on a
@@ -421,6 +432,8 @@ jobs:
           KELIR_JWT_SECRET=ci-only-jwt-secret-Xr4Lm8Qp2ZvT6Ns1
           KELIR_MINIO_USER=ci-only-minio-user
           KELIR_MINIO_PASSWORD=ci-only-minio-password-9Hd3Bs
+          KELIR_MINIO_KMS_SECRET_KEY=ci-only-store:QWx3n6S0n1W2pmKqzS5c8vQ1yYxR9mZ3u0dLk4hTfE8=
+          KELIR_BACKUP_AGE_RECIPIENTS=
           KELIR_TRUSTED_PROXY_HOPS=1
           KELIR_BOOTSTRAP_ADMIN_USERNAME=admin
           KELIR_BOOTSTRAP_ADMIN_PASSWORD=ci-only-bootstrap-password-4Tz9wK
