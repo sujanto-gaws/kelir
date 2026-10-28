@@ -160,8 +160,11 @@ fi
 scheme="${KELIR_BACKUP_MINIO_URL%%://*}"
 export MC_HOST_kelir="${scheme}://${minio_user}:${minio_password}@${KELIR_BACKUP_MINIO_URL#*://}"
 
+# `--log-driver none`: the store half's plaintext leaves `mc` on stdout, and
+# Docker's default json-file driver writes a container's stdout to a file under
+# /var/lib/docker before `--rm` removes it. With no driver, nothing is kept.
 in_mc() {
-    docker run --rm -i --network "${KELIR_BACKUP_NETWORK}" \
+    docker run --rm -i --log-driver none --network "${KELIR_BACKUP_NETWORK}" \
         -e MC_HOST_kelir -e KELIR_BACKUP_BUCKET="${KELIR_BACKUP_BUCKET}" \
         --entrypoint bash "${mc_image}" "$@"
 }

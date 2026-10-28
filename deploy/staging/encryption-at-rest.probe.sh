@@ -232,6 +232,24 @@ no_credential_in_argv() {
     ! grep -E '^[0-9]+ +execve\(' "$1" | grep -q -F -e 'MC_HOST_kelir=' -e "${2:0:12}"
 }
 
+# AC1 again: the store half's plaintext leaves `mc` on its container's stdout,
+# and Docker's default `json-file` driver writes a container's stdout to a log
+# file under /var/lib/docker before `--rm` removes it. So every container the
+# run started must have had no log driver.
+containers_log_nothing() {
+    local runs
+    runs="$(grep -E '^[0-9]+ +execve\("[^"]*/docker", \["docker", "run"' "$1" || true)"
+    echo "        $(grep -c . <<< "${runs}") docker run(s) traced"
+    [[ -n "${runs}" ]] && ! grep -v -q -F '"--log-driver", "none"' <<< "${runs}"
+}
+
+# After a refused restore: the object the archive cut short is not in the
+# store under its key, so nothing serves its first bytes as the whole file.
+absent_from_scratch_store() {
+    ! in_mc "mc stat kelir/${BUCKET}/$1" < /dev/null > "${work}/stat.log" 2>&1 \
+        || { echo "        it is there: $(grep -o -E '(Size|size)[^,]*' "${work}/stat.log" | head -1)"; return 1; }
+}
+
 # A restore that exits non-zero, given a store archive that is not whole.
 restore_refuses() {
     if "$@" > "${work}/restore-refusal.log" 2>&1; then
@@ -290,6 +308,8 @@ probe_backup() {
     check "every file the run wrote began as age ciphertext, but for names and sizes" \
         wrote_no_plaintext "${work}/trace" "${dir}"
     check "the database was dumped before the store was listed (AC11)" dumped_before_listed "${work}/trace"
+    check "every container the run started had no log driver, so no stdout reached a log file" \
+        containers_log_nothing "${work}/trace"
 
     echo "AC9 who wrote it, and what a command line showed"
     check "the backup directory is root's, mode 700" mode_is "root 700" "${dir}"
@@ -355,6 +375,7 @@ probe_backup() {
     check "sizes that do not add up to the header: refused" restore_refuses restore_crafted
     archive_of 'kelir-objects 1\n2 10\n5 probe/a\n5 probe/b\nAAAAABBB'
     check "an archive cut short inside an object: refused" restore_refuses restore_crafted
+    check "and the object it cut short is not left in the store" absent_from_scratch_store probe/b
     archive_of 'kelir-objects 1\n2 10\n5 probe/a\n5 probe/b\nAAAAABBBBBX'
     check "bytes after the last object: refused" restore_refuses restore_crafted
     psql -q -d postgres -c 'DROP DATABASE kelir_probe_restore'

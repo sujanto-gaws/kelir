@@ -15,9 +15,11 @@
 #
 # **The manifest is checked again as it is read**: its sizes must add up to
 # its header, each object must arrive whole, and nothing may follow the last.
-# A failure stops the restore with a non-zero exit. Objects written before it
-# stay in the target; run it again over the same target once the cause is
-# fixed, since each write replaces the object of that key.
+# A failure stops the restore with a non-zero exit. Objects written whole
+# before it stay in the target; an object the archive cut short is removed,
+# not left with its first bytes under its key. Run it again over the same
+# target once the cause is fixed, since each write replaces the object of
+# that key.
 #
 # Settings, as kelir-backup takes them: KELIR_APP_DIR, KELIR_ENV_FILE (the
 # target store's KELIR_MINIO_USER and KELIR_MINIO_PASSWORD), KELIR_COMPOSE_PROJECT,
@@ -115,8 +117,14 @@ for (( index = 0; index < count; index++ )); do
         | mc pipe --quiet --enc-s3 "kelir/${KELIR_BACKUP_BUCKET}" \
             "kelir/${KELIR_BACKUP_BUCKET}/${keys[index]}" > /dev/null
     wait $!
-    [[ "$(< "${counted}.n")" == "${sizes[index]}" ]] \
-        || fail "${keys[index]} arrived with $(< "${counted}.n") of ${sizes[index]} bytes; the archive is cut short"
+    # `mc pipe` stores whatever reached it, and the download does not check an
+    # object against its checksum, so a short object is removed, not left
+    # under its real key.
+    if [[ "$(< "${counted}.n")" != "${sizes[index]}" ]]; then
+        mc rm --quiet "kelir/${KELIR_BACKUP_BUCKET}/${keys[index]}" > /dev/null \
+            || fail "${keys[index]} arrived with $(< "${counted}.n") of ${sizes[index]} bytes and could not be removed; remove it before serving this store"
+        fail "${keys[index]} arrived with $(< "${counted}.n") of ${sizes[index]} bytes; the archive is cut short, and that object was removed"
+    fi
 done
 
 [[ "$(head -c 1 | wc -c)" == "0" ]] || fail "bytes follow the last object in the manifest"
