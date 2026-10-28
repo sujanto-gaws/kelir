@@ -19,10 +19,12 @@
 #
 # **It runs as root in a Linux container, never on the host it protects and
 # never against the kelir-staging stack.** The container needs age, jq,
-# pg_dump, pg_restore, psql, runuser, ps, a Docker CLI and the Docker socket.
-# `postgres:16` with `apt-get install age jq docker-cli procps` is one:
+# pg_dump, pg_restore, psql, runuser, ps, strace, a Docker CLI and the Docker
+# socket. `postgres:16` with `apt-get install age jq docker-cli procps strace`
+# is one. `backup` also needs `--cap-add SYS_PTRACE`, so strace can name the
+# file each write goes to:
 #
-#   docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+#   docker run --rm --cap-add SYS_PTRACE -v /var/run/docker.sock:/var/run/docker.sock \
 #     -v "$PWD:/work:ro" --volumes-from <project>-minio-1:ro \
 #     --network <project>_default -e KELIR_BACKUP_NETWORK=<project>_default ... \
 #     <that image> /work/deploy/staging/encryption-at-rest.probe.sh objects <marker>
@@ -111,6 +113,15 @@ probe_objects() {
     echo "The store reports $(wc -l < "${work}/stats") objects"
     check "the store reports every object as SSE-S3" \
         bash -c '! grep -v -F "\"X-Amz-Server-Side-Encryption\":\"AES256\"" "$1"' _ "${work}/stats"
+
+    # **The bucket encrypts what does not ask** (AC3). Every writer Kelir ships
+    # asks, so no object above tells a bucket with the default from one
+    # without it; the setting itself is the evidence.
+    local default
+    default="$(in_mc "mc encrypt info --json kelir/${BUCKET}" < /dev/null 2>&1 || true)"
+    echo "        ${default:0:200}"
+    check "the bucket encrypts by default (SSE-S3)" \
+        bash -c '[[ "$1" == *"\"algorithm\":\"AES256\""* ]]' _ "${default}"
 }
 
 # ---------------------------------------------------------------------------
@@ -145,6 +156,91 @@ holds_no() { ! grep -q -F -e "$1" "$2"; }
 mode_is() { [[ "$(stat -c '%U %a' "$2")" == "$1" ]]; }
 count_rows() { psql -tA -d "$1" -c "SELECT (SELECT count(*) FROM documents) || ' documents, ' || (SELECT count(*) FROM attachments) || ' attachments'"; }
 
+# **AC1's "not even briefly", read off the system calls** (#778). The backup
+# runs under strace, and every regular file it wrote is listed with the first
+# bytes written to it. A plaintext dump or object written to a file and removed
+# again leaves nothing on disk for a later look to find; its write is in the
+# trace. A FIFO the run made (`mknod S_IFIFO`) is a pipe, not the disk, so it
+# is left out. A write whose file strace could not name is listed as one
+# nobody can vouch for: without CAP_SYS_PTRACE that is every write `pg_dump`
+# makes once it is `postgres`, and the check fails rather than pass blind.
+first_writes() {
+    awk '
+        match($0, /mknod(at)?\([^"]*"[^"]+", S_IFIFO/) {
+            path = substr($0, RSTART, RLENGTH)
+            sub(/^[^"]*"/, "", path)
+            sub(/", S_IFIFO$/, "", path)
+            fifo[path] = 1
+            next
+        }
+        match($0, /(write|pwrite64|writev)\([0-9]+<\/[^>]*>, (\[\{iov_base=)?"/) {
+            call = substr($0, RSTART, RLENGTH)
+            path = call
+            sub(/^[a-z0-9]+\([0-9]+</, "", path)
+            sub(/>, .*$/, "", path)
+            if (path ~ /^\/(dev|proc|sys)\// || path in seen) next
+            seen[path] = 1
+            order[++n] = path
+            bytes[path] = substr($0, RSTART + RLENGTH, 40)
+        }
+        /^[0-9]+ +(copy_file_range|sendfile|splice|tee)\(.*<\// { order[++n] = "unread:" $0 }
+        match($0, /^[0-9]+ +(write|pwrite64|writev)\([0-9]+, /) {
+            call = substr($0, 1, RLENGTH - 2)
+            gsub(/ +/, " ", call)
+            if (!(call in unnamed)) { unnamed[call] = 1; order[++n] = "a write strace could not name, by pid " call }
+        }
+        END {
+            for (i = 1; i <= n; i++) {
+                if (!(order[i] in fifo)) printf "%s\t%s\n", order[i], bytes[order[i]]
+            }
+        }' "$1"
+}
+
+# Every file the traced run wrote began as age ciphertext, except what AC1
+# leaves readable: the store's listing and the manifest, which bash keeps in
+# its here-string files (`sh-thd.*`), and the byte count. Those are names and
+# sizes, never in the backup directory.
+wrote_no_plaintext() {
+    local trace="$1" dir="$2" path bytes name offenders=''
+    while IFS=$'\t' read -r path bytes; do
+        [[ -n "${path}" ]] || continue
+        [[ "${bytes}" == "${AGE_HEADER}"* ]] && continue
+        name="$(basename "${path}")"
+        if [[ "${path}" != "${dir}/"* && ( "${name}" == sh-thd.* || "${name}" == count ) ]] \
+            && [[ "${bytes}" == '{\"status\":'* || "${bytes}" =~ ^[0-9] ]]; then
+            continue
+        fi
+        offenders+="        ${path} began \"${bytes}\""$'\n'
+    done < <(first_writes "${trace}")
+    [[ -z "${offenders}" ]] || { printf '%s' "${offenders}"; return 1; }
+}
+
+# AC11: the database first, then the store. Read off the same trace, by the
+# first pg_dump and the first docker the run started.
+dumped_before_listed() {
+    local dumped listed
+    dumped="$(grep -n -m1 -E 'execve\("[^"]*/pg_dump"' "$1" | cut -d: -f1)"
+    listed="$(grep -n -m1 -E 'execve\("[^"]*/docker"' "$1" | cut -d: -f1)"
+    echo "        first pg_dump at trace line ${dumped:-none}, first docker at ${listed:-none}"
+    [[ -n "${dumped}" && -n "${listed}" ]] && (( dumped < listed ))
+}
+
+# AC9, without sampling: no program the run started was given MinIO's pair in
+# its arguments. `-e MC_HOST_kelir` names the variable; a value after it would
+# be the pair.
+no_credential_in_argv() {
+    ! grep -E '^[0-9]+ +execve\(' "$1" | grep -q -F -e 'MC_HOST_kelir=' -e "${2:0:12}"
+}
+
+# A restore that exits non-zero, given a store archive that is not whole.
+restore_refuses() {
+    if "$@" > "${work}/restore-refusal.log" 2>&1; then
+        echo "        it exited 0:"; sed 's/^/        /' "${work}/restore-refusal.log"
+        return 1
+    fi
+    echo "        $(tail -1 "${work}/restore-refusal.log")"
+}
+
 probe_backup() {
     local marker="${1:?usage: $0 backup <marker>}"
     local identity="${work}/identity" env_file="${work}/env" dir="${work}/backups"
@@ -169,7 +265,10 @@ probe_backup() {
     ( while :; do ps -eo args; docker ps --no-trunc --format '{{.Command}}'; sleep 0.2; done ) \
         > "${work}/command-lines" 2>&1 &
     local sampler=$!
-    run_backup "${env_file}" "${dir}" | sed 's/^/        /'
+    strace -f -qq -y -s 64 -o "${work}/trace" \
+        -e trace=execve,mknod,mknodat,write,pwrite64,writev,copy_file_range,sendfile,splice,tee \
+        env KELIR_ENV_FILE="${env_file}" KELIR_BACKUP_DIR="${dir}" KELIR_BACKUP_DB_OS_USER=postgres "${BACKUP}" \
+        | sed 's/^/        /'
     kill "${sampler}"
 
     local dumps objects stamp
@@ -187,12 +286,19 @@ probe_backup() {
     check "the store archive's first line is ${AGE_HEADER}" first_line_is_age "${objects}"
     check "a raw read of the store archive finds no '${marker}'" holds_no "${marker}" "${objects}"
 
+    echo "AC1 what the run wrote to a file, from its system calls ($(wc -l < "${work}/trace") traced)"
+    check "every file the run wrote began as age ciphertext, but for names and sizes" \
+        wrote_no_plaintext "${work}/trace" "${dir}"
+    check "the database was dumped before the store was listed (AC11)" dumped_before_listed "${work}/trace"
+
     echo "AC9 who wrote it, and what a command line showed"
     check "the backup directory is root's, mode 700" mode_is "root 700" "${dir}"
     check "the dump archive is root's, mode 600" mode_is "root 600" "${dumps}"
     check "the store archive is root's, mode 600" mode_is "root 600" "${objects}"
     check "no command line showed MinIO's password ($(sort -u "${work}/command-lines" | wc -l) seen)" \
         holds_no "${password}" "${work}/command-lines"
+    check "no program the run started had MinIO's pair in its arguments (traced)" \
+        no_credential_in_argv "${work}/trace" "${password}"
 
     echo "AC11 retention, by file age, over both halves"
     check "the pair past 14 days is gone" test ! -e "${dir}/kelir-20200101T000000Z.dump.age" -a ! -e "${dir}/kelir-20200101T000000Z.objects.age"
@@ -231,6 +337,26 @@ probe_backup() {
                      [[ \"\${got}\" == \"\${sum}\" ]] || echo \"\${key}\"
                  done")"
     check "every restored attachment's sha256 equals its row's checksum" test -z "${mismatches}"
+
+    # **The restore checks the manifest again as it reads** (settled point 5).
+    # Each archive here is encrypted to the same recipient and differs from a
+    # whole one in one way; the first is whole, so a refusal is the archive's.
+    echo "Settled point 5 the restore refuses a store archive that is not whole"
+    local recipient
+    recipient="$(age-keygen -y "${identity}")"
+    archive_of() { printf '%b' "$1" | age -r "${recipient}" > "${work}/crafted.age"; }
+    restore_crafted() {
+        KELIR_RESTORE_IDENTITY="${identity}" KELIR_ENV_FILE="${work}/scratch-env" \
+            KELIR_BACKUP_MINIO_URL="http://${scratch_store}:9000" "${RESTORE}" "${work}/crafted.age"
+    }
+    archive_of 'kelir-objects 1\n2 10\n5 probe/a\n5 probe/b\nAAAAABBBBB'
+    check "a whole archive restores" restore_crafted
+    archive_of 'kelir-objects 1\n2 11\n5 probe/a\n5 probe/b\nAAAAABBBBB'
+    check "sizes that do not add up to the header: refused" restore_refuses restore_crafted
+    archive_of 'kelir-objects 1\n2 10\n5 probe/a\n5 probe/b\nAAAAABBB'
+    check "an archive cut short inside an object: refused" restore_refuses restore_crafted
+    archive_of 'kelir-objects 1\n2 10\n5 probe/a\n5 probe/b\nAAAAABBBBBX'
+    check "bytes after the last object: refused" restore_refuses restore_crafted
     psql -q -d postgres -c 'DROP DATABASE kelir_probe_restore'
 
     echo "AC6 the upgrade's plaintext dumps"
@@ -251,6 +377,9 @@ probe_backup() {
     echo 'KELIR_BACKUP_AGE_RECIPIENTS=' >> "${work}/no-recipient"
     check "no recipient: refused, and no file" \
         refused_and_wrote_nothing "${dir}" run_backup "${work}/no-recipient" "${dir}"
+    check "a database it cannot dump: refused, and neither file of the pair" \
+        refused_and_wrote_nothing "${dir}" env KELIR_DB_NAME=kelir_probe_no_such_database \
+            KELIR_ENV_FILE="${env_file}" KELIR_BACKUP_DIR="${dir}" KELIR_BACKUP_DB_OS_USER=postgres "${BACKUP}"
     check "a store it cannot reach: refused, and neither file of the pair" \
         refused_and_wrote_nothing "${dir}" env KELIR_BACKUP_NETWORK=none \
             KELIR_ENV_FILE="${env_file}" KELIR_BACKUP_DIR="${dir}" KELIR_BACKUP_DB_OS_USER=postgres "${BACKUP}"
