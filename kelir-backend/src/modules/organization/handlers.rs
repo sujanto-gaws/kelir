@@ -94,7 +94,7 @@ async fn get_tenant(
     responses(
         (status = 201, description = "Created, with its first administrator", body = TenantView),
         (status = 409, description = "The tenant code, or the administrator's username or email, is already in use"),
-        (status = 422, description = "Validation failed. A tenantCode detail coded SECRET_NAMESPACE_IN_USE refuses a code whose integration secret prefix (KELIR_INTEGRATION_SECRET_<CODE>__, the code upper case with - as _) equals a live tenant's or starts or is started by it, such as A_B beside A-B or ACME__X beside ACME (#655); it names no other tenant's code")
+        (status = 422, description = "Validation failed. A tenantCode detail coded SECRET_NAMESPACE_IN_USE refuses a code whose integration secret prefix (KELIR_INTEGRATION_SECRET_<CODE>__, the code upper case with - as _) equals a live tenant's or starts or is started by it, such as A_B beside A-B or ACME__X beside ACME (#655); it names no other tenant's code. The administrator's fields are checked as a created user's are, under administrator.username, administrator.email and administrator.displayName: username or displayName blank (REQUIRED); username, email or displayName over 64, 320 or 200 characters once trimmed (TOO_LONG); a username with a character other than a letter, digit, dot, dash or underscore, or an email not shaped like an address (INVALID_FORMAT) (#610, #616)")
     ),
     security(("bearer" = []))
 )]

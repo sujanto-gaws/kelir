@@ -282,6 +282,50 @@ async fn every_identity_route_refuses_a_caller_holding_no_permission() {
     assert_eq!(roles, 0, "a refused request still created a role");
 }
 
+/// **#610: the permission is checked before the body.** `create_user` and
+/// `update_user` now check every sized field, and a caller without
+/// `identity:user:create` or `identity:user:update` sending a body those checks
+/// would refuse is still answered 403, not 422. The refusal says what the
+/// caller may not do, not what is wrong with a request it may not make.
+#[tokio::test]
+async fn an_invalid_user_body_from_a_caller_without_permission_is_forbidden() {
+    let app = TestApp::spawn().await;
+    let token = token_for_a_user_without_roles(&app).await;
+
+    let created = app
+        .post(
+            "/api/v1/identity/users",
+            Some(&token),
+            json!({
+                "username": "u".repeat(65),
+                "email": "",
+                "password": "short",
+                "displayName": "\u{200B}",
+            }),
+        )
+        .await;
+    let updated = app
+        .put(
+            &format!("/api/v1/identity/users/{}", Uuid::now_v7()),
+            Some(&token),
+            json!({ "email": "", "displayName": "d".repeat(201) }),
+        )
+        .await;
+
+    for (route, response) in [
+        ("POST /identity/users", created),
+        ("PUT /identity/users/{id}", updated),
+    ] {
+        assert_eq!(
+            response.status,
+            StatusCode::FORBIDDEN,
+            "{route}: {}",
+            response.body
+        );
+        assert_eq!(response.error_code(), Some("FORBIDDEN"), "{route}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tenant scoping (database schema §1.5)
 // ---------------------------------------------------------------------------

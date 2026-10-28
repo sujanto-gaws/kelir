@@ -768,6 +768,107 @@ async fn unicode_whitespace_is_blank_and_trimmed_from_a_role_code_and_name() {
     assert_eq!(stored_name(&app, id).await, renamed);
 }
 
+/// The five code points #616 names. None is `char::is_whitespace`, so
+/// `str::trim` kept each and a value of them alone was not blank.
+const ZERO_WIDTH: [char; 5] = ['\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}', '\u{FEFF}'];
+
+/// **[#616]: a role code or name of zero-width characters alone is blank.**
+/// #575 made whitespace blank; these five are not whitespace, so a role with
+/// a code or name that shows nothing was stored. Each is now `REQUIRED` at its
+/// own path, on create and on update, and nothing is written or changed.
+///
+/// [#616]: https://github.com/sujanto-gaws/kelir/issues/616
+#[tokio::test]
+async fn zero_width_characters_alone_are_blank_in_a_role_code_and_name() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let created = app
+        .post(
+            "/api/v1/identity/roles",
+            Some(&token),
+            json!({ "roleCode": "ROLE-ZERO-WIDTH", "name": "Before" }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let id = role_id(&app, "ROLE-ZERO-WIDTH").await;
+
+    for c in ZERO_WIDTH {
+        let blank = format!("{c}{c}");
+
+        let blank_code = app
+            .post(
+                "/api/v1/identity/roles",
+                Some(&token),
+                json!({ "roleCode": blank, "name": "Blank Code" }),
+            )
+            .await;
+        assert_refused_at(&blank_code, "roleCode", "REQUIRED");
+        assert_eq!(roles_with_code(&app, &blank).await, 0);
+
+        let blank_name = app
+            .post(
+                "/api/v1/identity/roles",
+                Some(&token),
+                json!({ "roleCode": "ROLE-BLANK-NAME", "name": format!(" {c} ") }),
+            )
+            .await;
+        assert_refused_at(&blank_name, "name", "REQUIRED");
+        assert_eq!(roles_with_code(&app, "ROLE-BLANK-NAME").await, 0);
+
+        let renamed = app
+            .put(
+                &format!("/api/v1/identity/roles/{id}"),
+                Some(&token),
+                json!({ "name": c.to_string() }),
+            )
+            .await;
+        assert_refused_at(&renamed, "name", "REQUIRED");
+        assert_eq!(
+            stored_name(&app, id).await,
+            "Before",
+            "a refused update must leave the name as it was"
+        );
+    }
+}
+
+/// **What is stored is unchanged ([#616]).** Only a value that is wholly
+/// blank is refused. A code with a zero-width character at its edge is
+/// accepted and stored as it came, because the store trims with `str::trim`,
+/// which keeps the character; and since the length counts that same value, a
+/// zero-width character at the edge of 64 characters makes 65 and is refused,
+/// rather than reaching `VARCHAR(64)`.
+///
+/// [#616]: https://github.com/sujanto-gaws/kelir/issues/616
+#[tokio::test]
+async fn a_zero_width_character_at_the_edge_is_stored_as_sent_and_counted() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let lookalike = "\u{200B}ROLE-LOOKALIKE";
+    let created = app
+        .post(
+            "/api/v1/identity/roles",
+            Some(&token),
+            json!({ "roleCode": format!(" {lookalike} "), "name": "Lookalike" }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    assert_eq!(roles_with_code(&app, lookalike).await, 1);
+    assert_eq!(roles_with_code(&app, "ROLE-LOOKALIKE").await, 0);
+
+    let edged = format!("{}\u{200B}", "C".repeat(64));
+    let refused = app
+        .post(
+            "/api/v1/identity/roles",
+            Some(&token),
+            json!({ "roleCode": edged, "name": "Edged" }),
+        )
+        .await;
+    assert_refused_at(&refused, "roleCode", "TOO_LONG");
+    assert_eq!(roles_with_code(&app, &"C".repeat(64)).await, 0);
+}
+
 /// **[#575]: a role's code is fixed once created.** An update that carries a
 /// `roleCode`, even a blank one, is refused as an unknown field rather than
 /// silently ignored; and an explicit `null` name leaves the name as a missing

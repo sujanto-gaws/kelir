@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use super::domain::{
     open_tasks_refusal, published_definitions_refusal, validate_create_role, validate_create_user,
-    validate_distinct_ids, validate_password_value, validate_update_role, with_staffing,
+    validate_password_value, validate_update_role, validate_update_user, with_staffing,
     CreateRoleRequest, CreateUserRequest, Permission, RevokeReason, Role, RoleQuery, TokenSubject,
     UpdateRoleRequest, UpdateUserRequest, User, UserQuery, UserStatus, ROLE_HAS_OPEN_TASKS,
     ROLE_NAMED_BY_PUBLISHED_DEFINITION,
@@ -161,10 +161,10 @@ pub async fn update_user(
     request: UpdateUserRequest,
 ) -> Result<User, AppError> {
     caller.require("identity:user:update")?;
-
-    if let Some(role_ids) = &request.role_ids {
-        validate_distinct_ids("roleIds", "role", role_ids)?;
-    }
+    // A present `email` or `displayName` is held to the create rules (#610);
+    // a repeated role id is refused as on create (#469). All before anything
+    // is read or written.
+    validate_update_user(&request)?;
 
     let tenant_id = caller.tenant_id();
     let before = repo::find_user(&state.pool, tenant_id, id)

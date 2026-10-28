@@ -474,3 +474,441 @@ async fn a_repeated_role_id_is_refused_on_create_and_on_update() {
         "a refused update must leave the one grant in place"
     );
 }
+
+/// The five code points #616 names. None is `char::is_whitespace`, so
+/// `str::trim` kept each and a value of them alone was not blank.
+const ZERO_WIDTH: [char; 5] = ['\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}', '\u{FEFF}'];
+
+/// `(path, rule, code)` of every detail in a 422 `VALIDATION_ERROR`, in order.
+fn placed_details(response: &common::TestResponse) -> Vec<(String, String, String)> {
+    assert_eq!(
+        response.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        response.body
+    );
+    assert_eq!(response.error_code(), Some("VALIDATION_ERROR"));
+    response.body["error"]["details"]
+        .as_array()
+        .expect("details is an array")
+        .iter()
+        .map(|detail| {
+            let text = |key: &str| detail[key].as_str().unwrap_or_default().to_owned();
+            (text("path"), text("rule"), text("code"))
+        })
+        .collect()
+}
+
+fn detail(path: &str, rule: &str, code: &str) -> (String, String, String) {
+    (path.to_owned(), rule.to_owned(), code.to_owned())
+}
+
+/// An address of exactly `length` characters.
+fn email_of(length: usize) -> String {
+    let domain = "@kelir.test";
+    format!("{}{domain}", "e".repeat(length - domain.len()))
+}
+
+async fn count_rows(app: &TestApp, sql: &str) -> i64 {
+    sqlx::query_scalar(sql)
+        .fetch_one(&app.pool)
+        .await
+        .expect("count runs")
+}
+
+/// Rows a refused create must not leave: users, their grants, and the
+/// `User.*` audit events.
+async fn written_rows(app: &TestApp) -> (i64, i64, i64) {
+    (
+        count_rows(app, "SELECT count(*) FROM users").await,
+        count_rows(app, "SELECT count(*) FROM user_roles").await,
+        count_rows(
+            app,
+            "SELECT count(*) FROM audit_events WHERE event_type LIKE 'User.%'",
+        )
+        .await,
+    )
+}
+
+async fn stored_user(app: &TestApp, id: Uuid) -> (String, String, String) {
+    sqlx::query_as("SELECT username, email, display_name FROM users WHERE id = $1")
+        .bind(id)
+        .fetch_one(&app.pool)
+        .await
+        .expect("the user exists")
+}
+
+/// **[#610]: a username over `users.username VARCHAR(64)` answered 500.** It
+/// is a 422 at `username`, naming the bound, padded or not, and no user, no
+/// grant and no audit event is written. The positive control is
+/// `a_username_of_64_characters_is_created_and_stored_trimmed`.
+///
+/// [#610]: https://github.com/sujanto-gaws/kelir/issues/610
+#[tokio::test]
+async fn a_username_over_64_characters_is_refused_and_nothing_is_written() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let before = written_rows(&app).await;
+
+    let long = "u".repeat(65);
+    for username in [long.clone(), format!("  {long}  ")] {
+        let mut body = payload("long.username");
+        body["username"] = json!(username);
+        body["roleIds"] = json!([fixtures::ADMIN_ROLE_ID.to_string()]);
+
+        let refused = app.post("/api/v1/identity/users", Some(&token), body).await;
+        assert_eq!(
+            placed_details(&refused),
+            [detail("username", "maxLength", "TOO_LONG")]
+        );
+        let message = refused.body["error"]["details"][0]["message"]
+            .as_str()
+            .expect("message");
+        assert!(message.contains("64"), "{message}");
+    }
+
+    assert_eq!(
+        written_rows(&app).await,
+        before,
+        "a refused create must write no user, no grant and no audit event"
+    );
+}
+
+/// The positive control for #610's username: exactly 64 characters is
+/// created, and 64 padded with whitespace is created and stored as the 64,
+/// because the check counts what the store keeps.
+#[tokio::test]
+async fn a_username_of_64_characters_is_created_and_stored_trimmed() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for (sent, stored) in [
+        ("a".repeat(64), "a".repeat(64)),
+        (format!("  {}  ", "b".repeat(64)), "b".repeat(64)),
+    ] {
+        let mut body = payload("placeholder");
+        body["username"] = json!(sent);
+        body["email"] = json!(format!("{}@kelir.test", &stored[..1]));
+
+        let created = app.post("/api/v1/identity/users", Some(&token), body).await;
+        assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+        let id = user_id_of(&app, &stored).await;
+        assert_eq!(stored_user(&app, id).await.0, stored);
+    }
+}
+
+/// **[#610]: `email` and `displayName` had no length check.** One over each
+/// column is a 422 at the field and writes nothing; exactly at each column,
+/// padded, is created and stored trimmed. A display name is counted in
+/// characters: 200 of `é` is 400 bytes.
+///
+/// [#610]: https://github.com/sujanto-gaws/kelir/issues/610
+#[tokio::test]
+async fn an_email_or_display_name_over_its_column_is_refused_on_create() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let before = written_rows(&app).await;
+
+    let mut long_email = payload("long.email");
+    long_email["email"] = json!(email_of(321));
+    assert_eq!(
+        placed_details(
+            &app.post("/api/v1/identity/users", Some(&token), long_email)
+                .await
+        ),
+        [detail("email", "maxLength", "TOO_LONG")]
+    );
+
+    let mut long_name = payload("long.name");
+    long_name["displayName"] = json!("é".repeat(201));
+    assert_eq!(
+        placed_details(
+            &app.post("/api/v1/identity/users", Some(&token), long_name)
+                .await
+        ),
+        [detail("displayName", "maxLength", "TOO_LONG")]
+    );
+
+    assert_eq!(written_rows(&app).await, before);
+
+    let mut at_bounds = payload("at.bounds");
+    at_bounds["email"] = json!(format!(" {} ", email_of(320)));
+    at_bounds["displayName"] = json!(format!("\u{00A0}{}\u{00A0}", "é".repeat(200)));
+    let created = app
+        .post("/api/v1/identity/users", Some(&token), at_bounds)
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+    let id = user_id_of(&app, "at.bounds").await;
+    let (_, email, display_name) = stored_user(&app, id).await;
+    assert_eq!(email, email_of(320));
+    assert_eq!(display_name, "é".repeat(200));
+}
+
+/// **[#610]: one request, three long fields, three details** in field order,
+/// as `creating_a_user_reports_every_invalid_field_at_once` holds for the
+/// other refusals. A long username with a space in it is `TOO_LONG`, not
+/// `INVALID_FORMAT`: blank, then length, then characters.
+///
+/// [#610]: https://github.com/sujanto-gaws/kelir/issues/610
+#[tokio::test]
+async fn every_long_user_field_is_reported_at_once_in_field_order() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let refused = app
+        .post(
+            "/api/v1/identity/users",
+            Some(&token),
+            json!({
+                "username": format!("long name{}", "u".repeat(56)),
+                "email": email_of(321),
+                "password": PASSWORD,
+                "displayName": "d".repeat(201),
+            }),
+        )
+        .await;
+
+    assert_eq!(
+        placed_details(&refused),
+        [
+            detail("username", "maxLength", "TOO_LONG"),
+            detail("email", "maxLength", "TOO_LONG"),
+            detail("displayName", "maxLength", "TOO_LONG"),
+        ]
+    );
+}
+
+/// **[#610], the update route.** `PUT /identity/users/{id}` checked no field:
+/// a blank display name was stored, and an over-long email or display name
+/// answered 500. A present field is now held to the create rules, and a
+/// refusal leaves the stored row as it was. An absent field is left alone,
+/// and each bound exactly is accepted and stored trimmed.
+///
+/// [#610]: https://github.com/sujanto-gaws/kelir/issues/610
+#[tokio::test]
+async fn an_update_holds_a_present_email_and_display_name_to_the_create_rules() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let created = app
+        .post("/api/v1/identity/users", Some(&token), payload("edited"))
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let id = user_id_of(&app, "edited").await;
+    let original = stored_user(&app, id).await;
+    let uri = format!("/api/v1/identity/users/{id}");
+
+    let mut cases = vec![
+        (
+            json!({ "email": email_of(321) }),
+            detail("email", "maxLength", "TOO_LONG"),
+        ),
+        (
+            json!({ "email": "" }),
+            detail("email", "format", "INVALID_FORMAT"),
+        ),
+        (
+            json!({ "displayName": "" }),
+            detail("displayName", "required", "REQUIRED"),
+        ),
+        (
+            json!({ "displayName": " \t " }),
+            detail("displayName", "required", "REQUIRED"),
+        ),
+        (
+            json!({ "displayName": "d".repeat(201) }),
+            detail("displayName", "maxLength", "TOO_LONG"),
+        ),
+    ];
+    for c in ZERO_WIDTH {
+        cases.push((
+            json!({ "displayName": c.to_string() }),
+            detail("displayName", "required", "REQUIRED"),
+        ));
+    }
+
+    for (body, expected) in cases {
+        let refused = app.put(&uri, Some(&token), body.clone()).await;
+        assert_eq!(placed_details(&refused), [expected], "{body}");
+        assert_eq!(
+            stored_user(&app, id).await,
+            original,
+            "a refused update must leave the user as it was: {body}"
+        );
+    }
+
+    let renamed = "é".repeat(200);
+    let updated = app
+        .put(
+            &uri,
+            Some(&token),
+            json!({
+                "email": format!(" {} ", email_of(320)),
+                "displayName": format!("\u{3000}{renamed}\u{3000}"),
+            }),
+        )
+        .await;
+    assert_eq!(updated.status, StatusCode::OK, "{}", updated.body);
+    assert_eq!(
+        stored_user(&app, id).await,
+        (original.0.clone(), email_of(320), renamed.clone())
+    );
+
+    // Absent fields are left as they are.
+    let untouched = app
+        .put(&uri, Some(&token), json!({ "status": "ACTIVE" }))
+        .await;
+    assert_eq!(untouched.status, StatusCode::OK, "{}", untouched.body);
+    assert_eq!(
+        stored_user(&app, id).await,
+        (original.0, email_of(320), renamed)
+    );
+}
+
+/// **[#616]: a username or display name of zero-width characters alone is
+/// blank.** `str::trim` kept each of the five, so the username was refused
+/// for its characters rather than as missing, and the display name was
+/// stored. Each is now `REQUIRED` at its own path, alone, and nothing is
+/// written.
+///
+/// [#616]: https://github.com/sujanto-gaws/kelir/issues/616
+#[tokio::test]
+async fn a_username_or_display_name_of_zero_width_characters_is_required() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let before = written_rows(&app).await;
+
+    for c in ZERO_WIDTH {
+        let mut blank_username = payload("zero.width");
+        blank_username["username"] = json!(format!("{c}{c}"));
+        assert_eq!(
+            placed_details(
+                &app.post("/api/v1/identity/users", Some(&token), blank_username)
+                    .await
+            ),
+            [detail("username", "required", "REQUIRED")],
+            "U+{:04X}",
+            c as u32
+        );
+
+        let mut blank_name = payload("zero.width");
+        blank_name["displayName"] = json!(format!(" {c} "));
+        assert_eq!(
+            placed_details(
+                &app.post("/api/v1/identity/users", Some(&token), blank_name)
+                    .await
+            ),
+            [detail("displayName", "required", "REQUIRED")],
+            "U+{:04X}",
+            c as u32
+        );
+    }
+
+    assert_eq!(written_rows(&app).await, before);
+}
+
+/// **[#610] and [#616] on the tenant route.** A tenant's first administrator
+/// is created by `provision_tenant_identity`, which runs the create-user rules
+/// and reports them under `administrator.*`, the paths the tenant form has.
+/// The long fields and the zero-width blanks are refused there too, and the
+/// tenant is not created.
+///
+/// [#610]: https://github.com/sujanto-gaws/kelir/issues/610
+/// [#616]: https://github.com/sujanto-gaws/kelir/issues/616
+#[tokio::test]
+async fn the_first_administrators_fields_are_bounded_under_its_own_paths() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let tenant = |administrator: serde_json::Value| {
+        json!({
+            "tenantCode": "BOUNDED",
+            "name": "Bounded Limited",
+            "administrator": administrator,
+        })
+    };
+
+    let long = app
+        .post(
+            "/api/v1/organization/tenants",
+            Some(&token),
+            tenant(json!({
+                "username": "a".repeat(65),
+                "email": email_of(321),
+                "displayName": "d".repeat(201),
+                "password": PASSWORD,
+            })),
+        )
+        .await;
+    assert_eq!(
+        placed_details(&long),
+        [
+            detail("administrator.username", "maxLength", "TOO_LONG"),
+            detail("administrator.email", "maxLength", "TOO_LONG"),
+            detail("administrator.displayName", "maxLength", "TOO_LONG"),
+        ]
+    );
+
+    let blank = app
+        .post(
+            "/api/v1/organization/tenants",
+            Some(&token),
+            tenant(json!({
+                "username": "\u{200B}",
+                "email": "bounded@kelir.test",
+                "displayName": "\u{FEFF}",
+                "password": PASSWORD,
+            })),
+        )
+        .await;
+    assert_eq!(
+        placed_details(&blank),
+        [
+            detail("administrator.username", "required", "REQUIRED"),
+            detail("administrator.displayName", "required", "REQUIRED"),
+        ]
+    );
+
+    let tenants: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM tenants WHERE tenant_code = 'BOUNDED'")
+            .fetch_one(&app.pool)
+            .await
+            .expect("count runs");
+    assert_eq!(tenants, 0, "a refused tenant must not be created");
+}
+
+/// **[#610]: an update is refused for its body before the user is read.**
+/// `update_user` runs `validate_update_user` before `find_user`, and the 422
+/// description says "checked before the user is read": a body that would be
+/// refused, sent to an id that names no user, is a 422 for the body and not a
+/// 404 for the id. The control is the same id with a valid body: 404.
+///
+/// [#610]: https://github.com/sujanto-gaws/kelir/issues/610
+#[tokio::test]
+async fn an_invalid_update_is_refused_before_the_user_is_looked_up() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let uri = format!("/api/v1/identity/users/{}", Uuid::now_v7());
+
+    let refused = app
+        .put(
+            &uri,
+            Some(&token),
+            json!({ "email": email_of(321), "displayName": "\u{200B}" }),
+        )
+        .await;
+    assert_eq!(
+        placed_details(&refused),
+        [
+            detail("email", "maxLength", "TOO_LONG"),
+            detail("displayName", "required", "REQUIRED"),
+        ]
+    );
+
+    let missing = app
+        .put(&uri, Some(&token), json!({ "displayName": "Renamed" }))
+        .await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND, "{}", missing.body);
+}

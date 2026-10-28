@@ -9,6 +9,7 @@ use crate::error::{AppError, ValidationDetail};
 use crate::modules::workflow::domain::{DefinitionNamingRole, WorkflowDefinitionStatus};
 use crate::response::Pagination;
 use crate::utils::serde::present_or_absent;
+use crate::utils::text::is_blank_text;
 
 /// Whether a row an access token names is there, and whether it is deleted
 /// (#650, decision D-105; ADR-0045).
@@ -379,9 +380,14 @@ pub struct Permission {
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateUserRequest {
+    /// Required; at most 64 characters once trimmed; letters, digits, dot,
+    /// dash and underscore. Stored trimmed.
     pub username: String,
+    /// At most 320 characters once trimmed, and shaped like an address.
+    /// Stored trimmed.
     pub email: String,
     pub password: String,
+    /// Required; at most 200 characters once trimmed. Stored trimmed.
     pub display_name: String,
     pub department_id: Option<Uuid>,
     #[serde(default)]
@@ -391,7 +397,11 @@ pub struct CreateUserRequest {
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateUserRequest {
+    /// Absent leaves the address as it is; present, it is held to the create
+    /// rules: at most 320 characters once trimmed, and shaped like an address.
     pub email: Option<String>,
+    /// Absent leaves the name as it is; present, it is held to the create
+    /// rules: not blank, at most 200 characters once trimmed.
     pub display_name: Option<String>,
     pub status: Option<UserStatus>,
     /// The department the user belongs to (FR-IDM-008, per decision **D-8**).
@@ -433,35 +443,80 @@ pub struct UpdateRoleRequest {
 /// mostly produce predictable substitutions.
 pub const MIN_PASSWORD_LENGTH: usize = 12;
 
+/// `users.username VARCHAR(64)` (`0004_string_lengths.sql`).
+pub const MAX_USERNAME_LENGTH: usize = 64;
+
+/// `users.email VARCHAR(320)` (`0004_string_lengths.sql`), RFC 5321's maximum.
+pub const MAX_USER_EMAIL_LENGTH: usize = 320;
+
+/// `users.display_name VARCHAR(200)` (`0004_string_lengths.sql`).
+pub const MAX_USER_DISPLAY_NAME_LENGTH: usize = 200;
+
 /// Validates a create-user payload, collecting every problem rather than
 /// stopping at the first — a form should be able to mark all its bad fields at
 /// once (JSON Form Schema S10.3).
+///
+/// **[#610]: a long username answered 500.** Nothing bounded `username`,
+/// `email` or `displayName`, so a value over its column reached the insert and
+/// came back as `INTERNAL_ERROR`. Each is now counted as [#575] counts a role's
+/// code and name: in characters of the trimmed value, the value
+/// `create_user` stores. A username is checked for blank, then length, then
+/// its characters, and reports the first that fails.
+///
+/// [#575]: https://github.com/sujanto-gaws/kelir/issues/575
+/// [#610]: https://github.com/sujanto-gaws/kelir/issues/610
 pub fn validate_create_user(request: &CreateUserRequest) -> Result<(), AppError> {
     let mut details = Vec::new();
 
     validate_username(&request.username, &mut details);
     validate_email(&request.email, &mut details);
     validate_password(&request.password, &mut details);
-
-    if request.display_name.trim().is_empty() {
-        details.push(ValidationDetail::new(
-            "displayName",
-            "required",
-            "REQUIRED",
-            "Display name is required",
-        ));
-    }
-
+    bounded_text(
+        &request.display_name,
+        "displayName",
+        "Display name",
+        MAX_USER_DISPLAY_NAME_LENGTH,
+        &mut details,
+    );
     repeated_ids("roleIds", "role", &request.role_ids, &mut details);
 
-    if details.is_empty() {
-        Ok(())
-    } else {
-        Err(AppError::validation(details))
-    }
+    finish(details)
 }
 
-/// Refuses a list of grants that names one id twice.
+/// Validates an update-user payload. An absent `email` or `displayName` is
+/// left as it is; a present one is held to the create rules, so an edit cannot
+/// store what a create could not ([#610]). Before this, a blank display name
+/// was stored and an over-long one answered 500. A repeated role id is
+/// reported beside them ([#469]).
+///
+/// [#469]: https://github.com/sujanto-gaws/kelir/issues/469
+/// [#610]: https://github.com/sujanto-gaws/kelir/issues/610
+pub fn validate_update_user(request: &UpdateUserRequest) -> Result<(), AppError> {
+    let mut details = Vec::new();
+
+    if let Some(email) = &request.email {
+        validate_email(email, &mut details);
+    }
+
+    if let Some(display_name) = &request.display_name {
+        bounded_text(
+            display_name,
+            "displayName",
+            "Display name",
+            MAX_USER_DISPLAY_NAME_LENGTH,
+            &mut details,
+        );
+    }
+
+    if let Some(role_ids) = &request.role_ids {
+        repeated_ids("roleIds", "role", role_ids, &mut details);
+    }
+
+    finish(details)
+}
+
+/// One detail for every id that repeats an earlier one, naming both positions:
+/// a list of grants that names one id twice is refused.
 ///
 /// **[#469](https://github.com/sujanto-gaws/kelir/issues/469): a repeated id
 /// answered 500.** `replace_role_permissions` and `replace_user_roles` insert
@@ -477,18 +532,6 @@ pub fn validate_create_user(request: &CreateUserRequest) -> Result<(), AppError>
 /// meaning the set. The code is `DUPLICATE_IN_ARRAY`, the one JFSS §10.3 already
 /// uses for an array whose items must be unique, and the path is the repeat's
 /// own index, so a form can put the message on the entry to remove.
-pub fn validate_distinct_ids(field: &str, noun: &str, ids: &[Uuid]) -> Result<(), AppError> {
-    let mut details = Vec::new();
-    repeated_ids(field, noun, ids, &mut details);
-
-    if details.is_empty() {
-        Ok(())
-    } else {
-        Err(AppError::validation(details))
-    }
-}
-
-/// One detail for every id that repeats an earlier one, naming both positions.
 fn repeated_ids(field: &str, noun: &str, ids: &[Uuid], details: &mut Vec<ValidationDetail>) {
     for (index, id) in ids.iter().enumerate() {
         if let Some(first) = ids[..index].iter().position(|earlier| earlier == id) {
@@ -526,14 +569,14 @@ pub const MAX_ROLE_NAME_LENGTH: usize = 200;
 pub fn validate_create_role(request: &CreateRoleRequest) -> Result<(), AppError> {
     let mut details = Vec::new();
 
-    bounded_role_text(
+    bounded_text(
         &request.role_code,
         "roleCode",
         "Role code",
         MAX_ROLE_CODE_LENGTH,
         &mut details,
     );
-    bounded_role_text(
+    bounded_text(
         &request.name,
         "name",
         "Name",
@@ -559,7 +602,7 @@ pub fn validate_update_role(request: &UpdateRoleRequest) -> Result<(), AppError>
     let mut details = Vec::new();
 
     if let Some(name) = &request.name {
-        bounded_role_text(name, "name", "Name", MAX_ROLE_NAME_LENGTH, &mut details);
+        bounded_text(name, "name", "Name", MAX_ROLE_NAME_LENGTH, &mut details);
     }
 
     if let Some(permission_ids) = &request.permission_ids {
@@ -569,30 +612,41 @@ pub fn validate_update_role(request: &UpdateRoleRequest) -> Result<(), AppError>
     finish(details)
 }
 
-/// Required, and at most `max` characters once trimmed.
-fn bounded_role_text(
+/// Required, and at most `max` characters once trimmed. One detail at most:
+/// blank (`REQUIRED`) is reported before too long (`TOO_LONG`). Returns whether
+/// the value passed, so a caller with a further rule checks it only then.
+///
+/// Blank is [`is_blank_text`]: whitespace, or a code point that shows nothing,
+/// such as U+200B ([#616]). The length is counted on `str::trim`'s value,
+/// which is what the services store: an invisible character at the edge is
+/// kept, so it is counted.
+///
+/// [#616]: https://github.com/sujanto-gaws/kelir/issues/616
+fn bounded_text(
     value: &str,
     path: &str,
     label: &str,
     max: usize,
     details: &mut Vec<ValidationDetail>,
-) {
-    let trimmed = value.trim();
-
-    if trimmed.is_empty() {
+) -> bool {
+    if is_blank_text(value) {
         details.push(ValidationDetail::new(
             path,
             "required",
             "REQUIRED",
             format!("{label} is required"),
         ));
-    } else if trimmed.chars().count() > max {
+        false
+    } else if value.trim().chars().count() > max {
         details.push(ValidationDetail::new(
             path,
             "maxLength",
             "TOO_LONG",
             format!("{label} must be at most {max} characters"),
         ));
+        false
+    } else {
+        true
     }
 }
 
@@ -615,17 +669,24 @@ pub fn validate_password_value(password: &str) -> Result<(), AppError> {
     }
 }
 
+/// Blank, then too long, then a character outside the set: one detail, the
+/// first that fails ([#610]). A 65-character username with a space in it is
+/// `TOO_LONG`, not `INVALID_FORMAT`.
+///
+/// [#610]: https://github.com/sujanto-gaws/kelir/issues/610
 fn validate_username(username: &str, details: &mut Vec<ValidationDetail>) {
-    let trimmed = username.trim();
+    if !bounded_text(
+        username,
+        "username",
+        "Username",
+        MAX_USERNAME_LENGTH,
+        details,
+    ) {
+        return;
+    }
 
-    if trimmed.is_empty() {
-        details.push(ValidationDetail::new(
-            "username",
-            "required",
-            "REQUIRED",
-            "Username is required",
-        ));
-    } else if !trimmed
+    if !username
+        .trim()
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
     {
@@ -638,10 +699,25 @@ fn validate_username(username: &str, details: &mut Vec<ValidationDetail>) {
     }
 }
 
+/// Too long, then the shape: one detail, the first that fails ([#610]). A
+/// blank address is `INVALID_FORMAT`, as it was: it has no `@`.
+///
+/// [#610]: https://github.com/sujanto-gaws/kelir/issues/610
 fn validate_email(email: &str, details: &mut Vec<ValidationDetail>) {
+    let trimmed = email.trim();
+
+    if trimmed.chars().count() > MAX_USER_EMAIL_LENGTH {
+        details.push(ValidationDetail::new(
+            "email",
+            "maxLength",
+            "TOO_LONG",
+            format!("Email must be at most {MAX_USER_EMAIL_LENGTH} characters"),
+        ));
+        return;
+    }
+
     // Deliberately shallow: the only reliable proof an address exists is
     // delivering to it, and strict patterns reject valid addresses.
-    let trimmed = email.trim();
     let plausible = trimmed.contains('@')
         && !trimmed.starts_with('@')
         && !trimmed.ends_with('@')
@@ -866,27 +942,36 @@ mod tests {
     /// test where the refusal is expected.
     ///
     /// [#469]: https://github.com/sujanto-gaws/kelir/issues/469
+    /// Held through `validate_update_user`, which has carried the update
+    /// route's check since #610 (it was `validate_distinct_ids`, called alone).
     #[test]
     fn a_repeated_id_is_refused_at_its_own_index() {
         let read = Uuid::from_u128(1);
         let create = Uuid::from_u128(2);
+        let update = |role_ids: Vec<Uuid>| UpdateUserRequest {
+            email: None,
+            display_name: None,
+            status: None,
+            department_id: None,
+            role_ids: Some(role_ids),
+        };
 
         let details = details_of(
-            validate_distinct_ids("permissionIds", "permission", &[read, create, read, read])
+            validate_update_user(&update(vec![read, create, read, read]))
                 .expect_err("a repeated id is refused"),
         );
         let paths: Vec<&str> = details.iter().map(|d| d.path.as_str()).collect();
-        assert_eq!(paths, ["permissionIds.2", "permissionIds.3"]);
+        assert_eq!(paths, ["roleIds.2", "roleIds.3"]);
         assert!(details.iter().all(|d| d.code == "DUPLICATE_IN_ARRAY"));
         assert!(
             details[0].message.contains(&read.to_string())
-                && details[0].message.contains("permissionIds.0"),
+                && details[0].message.contains("roleIds.0"),
             "{}",
             details[0].message
         );
 
-        assert!(validate_distinct_ids("permissionIds", "permission", &[read, create]).is_ok());
-        assert!(validate_distinct_ids("permissionIds", "permission", &[]).is_ok());
+        assert!(validate_update_user(&update(vec![read, create])).is_ok());
+        assert!(validate_update_user(&update(Vec::new())).is_ok());
     }
 
     #[test]
@@ -1187,6 +1272,334 @@ mod tests {
                     "DUPLICATE_IN_ARRAY".to_owned()
                 ),
             ]
+        );
+    }
+
+    /// The five code points #616 names. None is `char::is_whitespace`, so
+    /// `str::trim` kept each.
+    const ZERO_WIDTH: [char; 5] = ['\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}', '\u{FEFF}'];
+
+    fn create_user_request(username: &str, email: &str, display_name: &str) -> CreateUserRequest {
+        CreateUserRequest {
+            username: username.to_owned(),
+            email: email.to_owned(),
+            display_name: display_name.to_owned(),
+            ..request()
+        }
+    }
+
+    fn update_user_request(email: Option<&str>, display_name: Option<&str>) -> UpdateUserRequest {
+        UpdateUserRequest {
+            email: email.map(str::to_owned),
+            display_name: display_name.map(str::to_owned),
+            status: None,
+            department_id: None,
+            role_ids: None,
+        }
+    }
+
+    /// An address of exactly `length` characters, `local` repeated before
+    /// `@kelir.test`.
+    fn email_of(local: char, length: usize) -> String {
+        let domain = "@kelir.test";
+        format!(
+            "{}{domain}",
+            local.to_string().repeat(length - domain.chars().count())
+        )
+    }
+
+    /// **[#610]: a username over `users.username VARCHAR(64)` is `TOO_LONG`.**
+    /// 64 characters pass, padded or not, because the check counts the
+    /// trimmed value the store keeps; 65 are refused, padded or not, with a
+    /// message naming the bound.
+    ///
+    /// [#610]: https://github.com/sujanto-gaws/kelir/issues/610
+    #[test]
+    fn a_username_is_bounded_in_characters_of_the_trimmed_value() {
+        let at = "u".repeat(MAX_USERNAME_LENGTH);
+        let over = "u".repeat(MAX_USERNAME_LENGTH + 1);
+
+        for username in [at.clone(), format!("  {at}  "), format!("\t{at}\u{00A0}")] {
+            assert!(
+                validate_create_user(&create_user_request(&username, "u@kelir.test", "U")).is_ok(),
+                "{username:?}"
+            );
+        }
+
+        for username in [over.clone(), format!("  {over}  ")] {
+            let details = details_of(
+                validate_create_user(&create_user_request(&username, "u@kelir.test", "U"))
+                    .expect_err("too long"),
+            );
+            assert_eq!(details.len(), 1, "{details:?}");
+            assert_eq!(details[0].path, "username");
+            assert_eq!(details[0].rule, "maxLength");
+            assert_eq!(details[0].code, "TOO_LONG");
+            assert!(details[0].message.contains("64"), "{}", details[0].message);
+        }
+    }
+
+    /// **[#610]: one detail per path, blank then long then characters.** A
+    /// 65-character username with a space is too long, not badly formed; a
+    /// username of zero-width characters is blank, not badly formed ([#616]),
+    /// even 65 of them; a zero-width character at the edge of 64 is kept by
+    /// `str::trim`, so it is counted and makes 65.
+    ///
+    /// [#610]: https://github.com/sujanto-gaws/kelir/issues/610
+    /// [#616]: https://github.com/sujanto-gaws/kelir/issues/616
+    #[test]
+    fn a_username_is_checked_for_blank_then_length_then_characters() {
+        let placed_username = |username: &str| {
+            placed(
+                validate_create_user(&create_user_request(username, "u@kelir.test", "U"))
+                    .expect_err("refused"),
+            )
+        };
+        let at_username = |code: &str| [("username".to_owned(), code.to_owned())];
+
+        assert_eq!(placed_username(""), at_username("REQUIRED"));
+        for c in ZERO_WIDTH {
+            assert_eq!(placed_username(&c.to_string()), at_username("REQUIRED"));
+            assert_eq!(
+                placed_username(&format!(" {c}{c} ")),
+                at_username("REQUIRED")
+            );
+        }
+        assert_eq!(
+            placed_username(&"\u{200B}".repeat(MAX_USERNAME_LENGTH + 1)),
+            at_username("REQUIRED")
+        );
+
+        let spaced = format!("john doe{}", "x".repeat(MAX_USERNAME_LENGTH - 7));
+        assert_eq!(spaced.chars().count(), MAX_USERNAME_LENGTH + 1);
+        assert_eq!(placed_username(&spaced), at_username("TOO_LONG"));
+        assert_eq!(placed_username("john doe"), at_username("INVALID_FORMAT"));
+
+        let edged = format!("\u{200B}{}", "u".repeat(MAX_USERNAME_LENGTH));
+        assert_eq!(placed_username(&edged), at_username("TOO_LONG"));
+    }
+
+    /// **[#610]: an email over 320 and a display name over 200 characters are
+    /// `TOO_LONG`.** Counted in characters, not bytes, of the trimmed value:
+    /// `é` is two bytes and each bound is met exactly. The email's length is
+    /// checked before its shape, one detail; a blank email stays
+    /// `INVALID_FORMAT`, as before, and a display name of zero-width
+    /// characters is blank ([#616]).
+    ///
+    /// [#610]: https://github.com/sujanto-gaws/kelir/issues/610
+    /// [#616]: https://github.com/sujanto-gaws/kelir/issues/616
+    #[test]
+    fn an_email_and_a_display_name_are_bounded_in_characters_of_the_trimmed_value() {
+        let at_email = email_of('é', MAX_USER_EMAIL_LENGTH);
+        let at_name = "é".repeat(MAX_USER_DISPLAY_NAME_LENGTH);
+        assert!(at_email.len() > MAX_USER_EMAIL_LENGTH);
+        assert!(validate_create_user(&create_user_request(
+            "u",
+            &format!(" {at_email} "),
+            &format!("\u{3000}{at_name}\u{3000}")
+        ))
+        .is_ok());
+
+        let over_email = email_of('é', MAX_USER_EMAIL_LENGTH + 1);
+        let over_name = "é".repeat(MAX_USER_DISPLAY_NAME_LENGTH + 1);
+        let details = details_of(
+            validate_create_user(&create_user_request("u", &over_email, &over_name))
+                .expect_err("too long"),
+        );
+        assert_eq!(
+            details
+                .iter()
+                .map(|d| (d.path.as_str(), d.rule.as_str(), d.code.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("email", "maxLength", "TOO_LONG"),
+                ("displayName", "maxLength", "TOO_LONG"),
+            ]
+        );
+        assert!(details[0].message.contains("320"), "{}", details[0].message);
+        assert!(details[1].message.contains("200"), "{}", details[1].message);
+
+        // Too long and badly shaped: the length is the one reported.
+        let spaced = format!("a b{}", email_of('e', MAX_USER_EMAIL_LENGTH - 2));
+        assert_eq!(spaced.chars().count(), MAX_USER_EMAIL_LENGTH + 1);
+        assert_eq!(
+            placed(
+                validate_create_user(&create_user_request("u", &spaced, "U")).expect_err("long")
+            ),
+            [("email".to_owned(), "TOO_LONG".to_owned())]
+        );
+
+        for blank in ["", "  ", "\u{200B}"] {
+            assert_eq!(
+                placed(
+                    validate_create_user(&create_user_request("u", blank, "U")).expect_err("blank")
+                ),
+                [("email".to_owned(), "INVALID_FORMAT".to_owned())],
+                "{blank:?}"
+            );
+        }
+
+        for c in ZERO_WIDTH {
+            assert_eq!(
+                placed(
+                    validate_create_user(&create_user_request("u", "u@kelir.test", &c.to_string()))
+                        .expect_err("blank")
+                ),
+                [("displayName".to_owned(), "REQUIRED".to_owned())],
+                "U+{:04X}",
+                c as u32
+            );
+        }
+        assert_eq!(
+            placed(
+                validate_create_user(&create_user_request(
+                    "u",
+                    "u@kelir.test",
+                    &"\u{FEFF}".repeat(MAX_USER_DISPLAY_NAME_LENGTH + 1)
+                ))
+                .expect_err("blank")
+            ),
+            [("displayName".to_owned(), "REQUIRED".to_owned())]
+        );
+    }
+
+    /// The three sized fields over their bounds are reported together, in
+    /// field order, not the first alone.
+    #[test]
+    fn every_sized_user_field_over_its_bound_is_reported_at_once() {
+        let request = create_user_request(
+            &"u".repeat(MAX_USERNAME_LENGTH + 1),
+            &email_of('e', MAX_USER_EMAIL_LENGTH + 1),
+            &"d".repeat(MAX_USER_DISPLAY_NAME_LENGTH + 1),
+        );
+
+        assert_eq!(
+            placed(validate_create_user(&request).expect_err("too long")),
+            [
+                ("username".to_owned(), "TOO_LONG".to_owned()),
+                ("email".to_owned(), "TOO_LONG".to_owned()),
+                ("displayName".to_owned(), "TOO_LONG".to_owned()),
+            ]
+        );
+    }
+
+    /// **[#610], the update route.** An absent field is left alone; a present
+    /// one is held to the create rules. A blank display name, which was
+    /// stored, is `REQUIRED`; a repeated role id is reported beside it.
+    ///
+    /// [#610]: https://github.com/sujanto-gaws/kelir/issues/610
+    #[test]
+    fn a_user_update_checks_a_present_email_and_display_name_only() {
+        assert!(validate_update_user(&update_user_request(None, None)).is_ok());
+        assert!(validate_update_user(&update_user_request(
+            Some(&format!(" {} ", email_of('é', MAX_USER_EMAIL_LENGTH))),
+            Some(&format!(" {} ", "é".repeat(MAX_USER_DISPLAY_NAME_LENGTH)))
+        ))
+        .is_ok());
+
+        let refused = |email: Option<&str>, display_name: Option<&str>| {
+            placed(
+                validate_update_user(&update_user_request(email, display_name))
+                    .expect_err("refused"),
+            )
+        };
+        let one = |path: &str, code: &str| [(path.to_owned(), code.to_owned())];
+
+        assert_eq!(
+            refused(Some(&email_of('e', MAX_USER_EMAIL_LENGTH + 1)), None),
+            one("email", "TOO_LONG")
+        );
+        assert_eq!(refused(Some(""), None), one("email", "INVALID_FORMAT"));
+        assert_eq!(
+            refused(Some("not-an-email"), None),
+            one("email", "INVALID_FORMAT")
+        );
+        assert_eq!(refused(None, Some("")), one("displayName", "REQUIRED"));
+        assert_eq!(refused(None, Some(" \t ")), one("displayName", "REQUIRED"));
+        for c in ZERO_WIDTH {
+            assert_eq!(
+                refused(None, Some(&c.to_string())),
+                one("displayName", "REQUIRED")
+            );
+        }
+        assert_eq!(
+            refused(None, Some(&"d".repeat(MAX_USER_DISPLAY_NAME_LENGTH + 1))),
+            one("displayName", "TOO_LONG")
+        );
+
+        let role = Uuid::from_u128(9);
+        let mut request = update_user_request(Some("x"), Some(" "));
+        request.role_ids = Some(vec![role, role]);
+        assert_eq!(
+            placed(validate_update_user(&request).expect_err("refused")),
+            [
+                ("email".to_owned(), "INVALID_FORMAT".to_owned()),
+                ("displayName".to_owned(), "REQUIRED".to_owned()),
+                ("roleIds.1".to_owned(), "DUPLICATE_IN_ARRAY".to_owned()),
+            ]
+        );
+    }
+
+    /// **[#616]: a role code or name of zero-width characters alone is
+    /// blank**, on create and on update, and wins over its length.
+    ///
+    /// [#616]: https://github.com/sujanto-gaws/kelir/issues/616
+    #[test]
+    fn a_role_code_or_name_of_zero_width_characters_is_blank() {
+        for c in ZERO_WIDTH {
+            let blank = format!("{c} {c}");
+            assert_eq!(
+                placed(
+                    validate_create_role(&create_role_request(&blank, &blank)).expect_err("blank")
+                ),
+                [
+                    ("roleCode".to_owned(), "REQUIRED".to_owned()),
+                    ("name".to_owned(), "REQUIRED".to_owned()),
+                ],
+                "U+{:04X}",
+                c as u32
+            );
+            assert_eq!(
+                placed(
+                    validate_update_role(&UpdateRoleRequest {
+                        name: Some(c.to_string()),
+                        description: None,
+                        permission_ids: None,
+                    })
+                    .expect_err("blank")
+                ),
+                [("name".to_owned(), "REQUIRED".to_owned())],
+                "U+{:04X}",
+                c as u32
+            );
+        }
+
+        let long_blank = "\u{200B}".repeat(MAX_ROLE_CODE_LENGTH + 1);
+        assert_eq!(
+            placed(
+                validate_create_role(&create_role_request(&long_blank, "Name")).expect_err("blank")
+            ),
+            [("roleCode".to_owned(), "REQUIRED".to_owned())]
+        );
+    }
+
+    /// **What is stored is unchanged ([#616]).** A visible code with a
+    /// zero-width character at its edge is not blank and is accepted, as it
+    /// came. `str::trim` keeps that character, so the length counts it: one at
+    /// the edge of a 64-character code makes 65.
+    ///
+    /// [#616]: https://github.com/sujanto-gaws/kelir/issues/616
+    #[test]
+    fn a_zero_width_character_at_the_edge_is_kept_and_counted() {
+        assert!(
+            validate_create_role(&create_role_request("\u{200B}ADMIN", "Admin\u{FEFF}")).is_ok()
+        );
+
+        let edged = format!("{}\u{200B}", "C".repeat(MAX_ROLE_CODE_LENGTH));
+        assert_eq!(edged.trim().chars().count(), MAX_ROLE_CODE_LENGTH + 1);
+        assert_eq!(
+            placed(validate_create_role(&create_role_request(&edged, "Name")).expect_err("long")),
+            [("roleCode".to_owned(), "TOO_LONG".to_owned())]
         );
     }
 }

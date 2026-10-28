@@ -192,6 +192,36 @@ describe('RoleFormDialog', () => {
     expect(wrapper.emitted('saved')).toBeUndefined()
   })
 
+  it('places the server refusal of a zero-width name under the name field', async () => {
+    // #616: the server counts U+200B as blank. JavaScript's trim() does not, so
+    // the dialog's presence pre-check lets it through, and the server's 422 is
+    // what the user sees. The dialog keeps no list of its own (§3.4).
+    handler = () => ({
+      status: 422,
+      body: errorBody('VALIDATION_ERROR', 'Validation failed', [
+        {
+          path: 'name',
+          rule: 'required',
+          code: 'REQUIRED',
+          message: 'Name is required',
+        },
+      ]),
+    })
+
+    const wrapper = mountDialog(null)
+
+    await wrapper.find('#role-code').setValue('ROLE-ZERO-WIDTH')
+    await wrapper.find('#role-name').setValue('​')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(backend.requests).toHaveLength(1)
+    expect(lastRequest(backend)?.body).toMatchObject({ name: '​' })
+    expect(wrapper.find('#role-name-error').text()).toBe('Name is required')
+    expect(wrapper.find('#role-code-error').exists()).toBe(false)
+    expect(wrapper.emitted('saved')).toBeUndefined()
+  })
+
   it('does not submit a role without a code or a name', async () => {
     // A pre-check only: the server refuses both too (#575), but a blank field
     // need not cost a round trip.
