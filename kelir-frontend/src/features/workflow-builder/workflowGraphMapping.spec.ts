@@ -7,9 +7,13 @@ import {
   CONDITION_MARKER,
   drawnPartsOf,
   FALLBACK_MARKER,
+  isAboveGraphCeiling,
+  WORKFLOW_GRAPH_CEILING,
+  workflowGraphCountOf,
   workflowGraphOf,
   type WorkflowGraph,
   type WorkflowGraphNode,
+  type WorkflowGraphSource,
 } from './workflowGraphMapping'
 
 /**
@@ -577,5 +581,120 @@ describe('drawnPartsOf', () => {
     edited.transitions[1].requiresComment = true
 
     expect(JSON.stringify(drawnPartsOf(edited))).toBe(before)
+  })
+})
+
+describe('the ceiling (#721)', () => {
+  const { states: STATES, transitions: TRANSITIONS } = WORKFLOW_GRAPH_CEILING
+
+  /**
+   * `states` declared states in a ring, and `transitions` transitions around
+   * it: every code a transition names is declared, so the counts are the
+   * arrays' lengths.
+   */
+  function sized(states: number, transitions: number): WorkflowGraphSource {
+    const codes = Array.from({ length: states }, (_, at) => `S_${at}`)
+
+    return {
+      initialState: codes[0],
+      states: codes.map((code) => ({ code, name: code })),
+      transitions: Array.from({ length: transitions }, (_, at) => ({
+        from: codes[at % states],
+        to: codes[(at + 1) % states],
+        action: 'APPROVE' as const,
+      })),
+    }
+  }
+
+  /** `sized`, with its first transition sent to a code no state declares. */
+  function withUndeclared(states: number, transitions: number): WorkflowGraphSource {
+    const given = sized(states, transitions)
+
+    given.transitions![0].to = 'NOWHERE'
+
+    return given
+  }
+
+  // The product owner's numbers (2026-10-26, #721), pinned once here: every
+  // other size in these specs is read from the constant, so without this a
+  // ceiling moved by one would move its own tables with it.
+  it('is 80 states and 240 transitions, one number each', () => {
+    expect(WORKFLOW_GRAPH_CEILING).toEqual({ states: 80, transitions: 240 })
+  })
+
+  // Both sides of each boundary, each count alone: "above", never "at or above".
+  it.each([
+    ['at both ceilings', STATES, TRANSITIONS, false],
+    ['one state above', STATES + 1, TRANSITIONS, true],
+    ['one transition above', STATES, TRANSITIONS + 1, true],
+    ['one above on both', STATES + 1, TRANSITIONS + 1, true],
+    ['one under on both', STATES - 1, TRANSITIONS - 1, false],
+    ['one state above with few transitions', STATES + 1, 1, true],
+    ['one transition above with few states', 2, TRANSITIONS + 1, true],
+  ])('%s (%i states, %i transitions): declined is %s', (_, states, transitions, declined) => {
+    const count = workflowGraphCountOf(sized(states, transitions))
+
+    expect(count).toEqual({ states, declared: states, undeclared: 0, transitions })
+    expect(isAboveGraphCeiling(count)).toBe(declined)
+  })
+
+  it('draws a definition with no states and no transitions, and one with neither array', () => {
+    const none = { states: 0, declared: 0, undeclared: 0, transitions: 0 }
+
+    expect(workflowGraphCountOf(sized(0, 0))).toEqual(none)
+    expect(workflowGraphCountOf({})).toEqual(none)
+    expect(isAboveGraphCeiling(workflowGraphCountOf({}))).toBe(false)
+  })
+
+  it('counts a code no state declares as a state: the ceiling declared, plus one, declines', () => {
+    const over = workflowGraphCountOf(withUndeclared(STATES, 1))
+    const under = workflowGraphCountOf(withUndeclared(STATES - 1, 1))
+
+    expect(over).toEqual({ states: STATES + 1, declared: STATES, undeclared: 1, transitions: 1 })
+    expect(isAboveGraphCeiling(over)).toBe(true)
+    expect(under).toEqual({ states: STATES, declared: STATES - 1, undeclared: 1, transitions: 1 })
+    expect(isAboveGraphCeiling(under)).toBe(false)
+  })
+
+  it('counts two states sharing a code as two, as the graph draws them', () => {
+    const given = sized(STATES + 1, 1)
+
+    // The last state takes the first one's code; no transition names the last.
+    given.states![STATES].code = 'S_0'
+
+    expect(workflowGraphCountOf(given)).toMatchObject({ states: STATES + 1, declared: STATES + 1 })
+    expect(isAboveGraphCeiling(workflowGraphCountOf(given))).toBe(true)
+  })
+
+  it('counts an initial state no state declares, and not a blank one', () => {
+    const given = sized(2, 1)
+
+    given.initialState = 'NOWHERE'
+    expect(workflowGraphCountOf(given)).toMatchObject({ states: 3, undeclared: 1 })
+
+    given.initialState = ''
+    expect(workflowGraphCountOf(given)).toMatchObject({ states: 2, undeclared: 0 })
+  })
+
+  it('counts what the graph draws: its nodes, its undeclared nodes and its edges', () => {
+    const odd = purchase()
+
+    odd.initialState = 'NOWHERE'
+    odd.states.push({ ...odd.states[0], name: '' })
+    odd.transitions.push(
+      { from: 'GHOST', to: 'DONE', action: 'AUTO' },
+      { from: 'GHOST', to: 'NOWHERE', action: 'APPROVE' },
+    )
+
+    for (const definition of [purchase(), starterDefinition(), odd, withUndeclared(5, 9)]) {
+      const graph = workflowGraphOf(definition)
+
+      expect(workflowGraphCountOf(definition)).toEqual({
+        states: graph.nodes.length,
+        declared: graph.nodes.filter((node) => node.declared).length,
+        undeclared: graph.nodes.filter((node) => !node.declared).length,
+        transitions: graph.edges.length,
+      })
+    }
   })
 })

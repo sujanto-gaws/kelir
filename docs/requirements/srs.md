@@ -1,6 +1,6 @@
 # Kelir Software Requirements Specification
 
-**Status:** Draft · **Last updated:** 2026-10-09
+**Status:** Draft · **Last updated:** 2026-10-27
 
 The companion Solution Blueprint formerly bundled in this file now lives in the System Design Document: `docs/design/01. System Design Document.md`.
 
@@ -414,7 +414,7 @@ Note: FR-RAD-013 was added in v0.10 (decision **D-109**). FR-RAD-002 is met by t
 
 Note: FR-WF-016 is planned for a later phase.
 
-Note: FR-WF-018 was added in v0.10 (decision **D-109**). FR-WF-001, FR-WF-002 and FR-WF-003 are met by the definition API and the JWSS; this requirement is authoring a definition from the browser. **The editor is a list**: the definition's states, with a table of each state's transitions under it. A graph of the same definition is drawn read-only, laid out on every load, so no layout is stored and the JWSS is unchanged (**D-95**). **It is not a drag-and-drop designer**; editing on the graph would need its own decision on where a layout lives. Conditions are edited in the expression builder FR-RAD-013 describes (**D-86**, **D-95**, **D-110**). **Publishing a revision does not retire the one before it**: an administrator retires a revision explicitly, under its own permission, and instances already running keep the revision they started on (**D-101**, **D-108**). The pair comes before the hardening sprints (**D-98**). §10's *Drag-and-drop workflow designer* is struck in v0.10, and its note says what is built instead.
+Note: FR-WF-018 was added in v0.10 (decision **D-109**). FR-WF-001, FR-WF-002 and FR-WF-003 are met by the definition API and the JWSS; this requirement is authoring a definition from the browser. **The editor is a list**: the definition's states, with a table of each state's transitions under it. A graph of the same definition is drawn read-only, laid out on every load, so no layout is stored and the JWSS is unchanged (**D-95**). Above 80 states or 240 transitions, whichever is reached first, the graph is not drawn and the list is named instead (added 2026-10-27, [#721](https://github.com/sujanto-gaws/kelir/issues/721); the requirement is unchanged). **It is not a drag-and-drop designer**; editing on the graph would need its own decision on where a layout lives. Conditions are edited in the expression builder FR-RAD-013 describes (**D-86**, **D-95**, **D-110**). **Publishing a revision does not retire the one before it**: an administrator retires a revision explicitly, under its own permission, and instances already running keep the revision they started on (**D-101**, **D-108**). The pair comes before the hardening sprints (**D-98**). §10's *Drag-and-drop workflow designer* is struck in v0.10, and its note says what is built instead.
 
 ---
 
@@ -851,7 +851,7 @@ Dynamic third-party plugin marketplace
 
 ~~Drag-and-drop form builder with advanced logic~~
 
-> **Struck 2026-10-09, v0.10 (decision D-109).** Both were prioritized by **D-86**, **D-95** and **D-98**, and the builder pair is now FR-RAD-013 (§4.5) and FR-WF-018 (§4.8). **Neither struck line describes what is built.** The workflow builder is a **list editor**: a state list with a transition table under each state, beside a **read-only graph** laid out on every load, with no stored layout (**D-95**). **It is not a drag-and-drop designer**, and editing on the graph is not decided. The form builder does use drag-and-drop: a palette offering only the types the renderer draws, and a canvas that nests panel, fieldset, columns and tabs (**D-86**). Its logic is visual only for comparisons, `and`, `or` and `not`, arithmetic and `var`; any other expression opens as raw JSON, marked advanced, and is never rewritten (**D-110**). Retiring a workflow revision is an explicit action (**D-101**). §9 names neither requirement, so MVP scope is unchanged.
+> **Struck 2026-10-09, v0.10 (decision D-109).** Both were prioritized by **D-86**, **D-95** and **D-98**, and the builder pair is now FR-RAD-013 (§4.5) and FR-WF-018 (§4.8). **Neither struck line describes what is built.** The workflow builder is a **list editor**: a state list with a transition table under each state, beside a **read-only graph** ~~laid out on every load~~ laid out on every load at or under its ceiling of 80 states or 240 transitions (restated 2026-10-27, [#721](https://github.com/sujanto-gaws/kelir/issues/721)), with no stored layout (**D-95**). **It is not a drag-and-drop designer**, and editing on the graph is not decided. The form builder does use drag-and-drop: a palette offering only the types the renderer draws, and a canvas that nests panel, fieldset, columns and tabs (**D-86**). Its logic is visual only for comparisons, `and`, `or` and `not`, arithmetic and `var`; any other expression opens as raw JSON, marked advanced, and is never rewritten (**D-110**). Retiring a workflow revision is an explicit action (**D-101**). §9 names neither requirement, so MVP scope is unchanged.
 
 ```text
 Mobile native application

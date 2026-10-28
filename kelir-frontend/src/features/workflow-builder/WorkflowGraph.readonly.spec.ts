@@ -288,7 +288,8 @@ describe('WorkflowGraph, whatever Vue Flow emits', () => {
     // jsdom, one layout: 20 states and 55 transitions 0.2 s, 40 and 115 0.8 s,
     // 80 and 235 3.0 s, 150 and 441 5.1 s), and JWSS sets no maximum, so typing
     // a name beside a large graph stalled the page on every keystroke. One
-    // layout of a large definition is still that slow: #721.
+    // layout of a large definition is still that slow, so above
+    // `WORKFLOW_GRAPH_CEILING` the editor does not lay one out at all (#721).
     it('does not lay the graph out again for a change it does not draw', async () => {
       const page = render(definition())
 

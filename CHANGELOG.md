@@ -212,7 +212,9 @@ While the major version is `0`, the public API may change in any release.
   and its fallback is marked *otherwise* (JWSS §1.1, S7). A code a transition
   names and no state declares is drawn as a dashed *not declared* box, so the
   arrow keeps both ends. **It is laid out automatically every time it is
-  opened, and no layout is stored**: nothing is written into the definition,
+  opened, and no layout is stored** (up to 80 states or 240 transitions since
+  [#721](https://github.com/sujanto-gaws/kelir/issues/721), under *Changed*;
+  corrected 2026-10-27): nothing is written into the definition,
   and `jwss-meta-v1.0.0.json` is unchanged. It follows the draft as it changes,
   an undo and a save's reply included, and nothing in it edits; an edit to
   the name, key or description draws nothing, so it keeps the reader's zoom
@@ -460,6 +462,23 @@ While the major version is `0`, the public API may change in any release.
   published are not re-checked, and keep assigning tenant-wide.** No
   migration and no schema change: JWSS takes revision R-16, and its
   meta-schema is untouched.
+
+- **The workflow graph is not drawn above 80 states or 240 transitions,
+  whichever is reached first** ([#721](https://github.com/sujanto-gaws/kelir/issues/721),
+  approved by the product owner on 2026-10-26). One layout of a large
+  definition held the tab for seconds: 1.9 s at 80 states and 45 s at 300 on
+  a laptop. Above the ceiling the **Graph** tab shows one sentence instead,
+  announced as a status: how many states and transitions it has, the ceiling,
+  and that the **List** tab reads and changes the workflow. Each count is
+  checked alone, so 81 states or 241 transitions declines and 80 and 240 is
+  drawn; a code no state declares counts as a state, as the graph would draw
+  it. **The check runs before the graph's chunk is loaded**, so a declined
+  workflow fetches neither dagre nor Vue Flow. An edit, an undo or a save
+  that crosses the ceiling while the tab is open swaps the graph and the
+  sentence. The ceiling is one constant, and the graph's caption counts with
+  the same function as the check. The measurement in
+  `build-a-workflow.spec.ts` still times 20, 40 and 80 states, and checks the
+  decline at 150 and 300.
 
 ### Fixed
 

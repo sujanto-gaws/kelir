@@ -20,6 +20,7 @@ import type { JwssDefinition } from '@/types/workflow'
 
 import {
   drawnPartsOf,
+  workflowGraphCountOf,
   workflowGraphOf,
   type WorkflowGraphEdge,
   type WorkflowGraphNode,
@@ -42,17 +43,24 @@ import {
  * position — goes back into the definition. The list beside it is where a
  * workflow is edited, and the list is this picture's text alternative.
  *
- * **Laid out on every load**, by `workflowGraphLayout`, and again whenever
+ * **Laid out on every load at or under the ceiling**, by `workflowGraphLayout`, and again whenever
  * what it draws changes: a state or transition edited, an undo, a redo, or the
  * server's copy after a save. An edit to the name, the key or the description
  * draws nothing, so it neither lays the graph out again nor refits the
  * reader's zoom (`drawnPartsOf`). No layout is stored, so
  * `jwss-meta-v1.0.0.json` is unchanged.
  *
+ * **Loaded only at or under the ceiling** (#721, `WORKFLOW_GRAPH_CEILING`):
+ * above it the editor shows `WorkflowGraphDeclined` and never mounts, or
+ * fetches, this component. **The gate is the editor's, not this one's**: it
+ * has to run before the chunk, so this component draws whatever it is handed,
+ * and its caption counts with the same `workflowGraphCountOf` the gate does.
+ *
  * **Off the first-load path** ([ADR-0046]): this component is the only module
  * that imports `@vue-flow/*` and `@dagrejs/dagre`, and the editor reaches it
- * through `defineAsyncComponent`. `npm run check:bundle` fails the build when
- * either library, or Vue Flow's stylesheets, reach a first-load chunk.
+ * through `defineAsyncComponent`, which it does not reach above the ceiling.
+ * `npm run check:bundle` fails the build when either library, or Vue Flow's
+ * stylesheets, reach a first-load chunk.
  *
  * **Zoom and fit by keyboard**: the controls are buttons with names, so Tab
  * reaches them and Enter presses them. A pointer pans and zooms as Vue Flow
@@ -74,7 +82,8 @@ const { fitView, zoomIn, zoomOut } = useVueFlow(flowId)
 // same string does not trigger what reads it: an edit to anything the graph
 // does not draw neither lays it out again nor fits the view.
 const drawingKey = computed(() => JSON.stringify(drawnPartsOf(props.definition)))
-const graph = computed(() => workflowGraphOf(JSON.parse(drawingKey.value) as WorkflowGraphSource))
+const drawn = computed(() => JSON.parse(drawingKey.value) as WorkflowGraphSource)
+const graph = computed(() => workflowGraphOf(drawn.value))
 const layout = computed(() => layoutWorkflowGraph(graph.value))
 
 const nodes = computed<Node<WorkflowGraphNode>[]>(() =>
@@ -110,10 +119,9 @@ const edges = computed<Edge<RoutedEdge>[]>(() => {
   }))
 })
 
+// Counted as the editor's ceiling counts (#721), so the two cannot disagree.
 const summary = computed(() => {
-  const states = graph.value.nodes.filter((node) => node.declared).length
-  const undeclared = graph.value.nodes.length - states
-  const transitions = graph.value.edges.length
+  const { declared: states, undeclared, transitions } = workflowGraphCountOf(drawn.value)
 
   return [
     `${states} ${states === 1 ? 'state' : 'states'}`,
