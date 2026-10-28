@@ -54,7 +54,7 @@ export DEBIAN_FRONTEND=noninteractive
 
 log "Installing base packages"
 apt-get update -qq
-apt-get install -y -qq ca-certificates curl gnupg ufw jq
+apt-get install -y -qq ca-certificates curl gnupg ufw jq age
 
 # ---------------------------------------------------------------------------
 # 2. Docker Engine, from Docker's own repository
@@ -192,46 +192,72 @@ ufw --force enable >/dev/null
 # 6. Daily backup (NFR-AVA-004: daily automated backups, RPO <= 24 h)
 # ---------------------------------------------------------------------------
 
+#
+# **Each backup is a pair, encrypted to the operator's age recipients** (#778,
+# ADR-0049 §2): `kelir-<stamp>.dump.age`, the database, and
+# `kelir-<stamp>.objects.age`, the object store. The commands are files beside
+# this script, installed rather than written from a heredoc, so they can be
+# run and probed elsewhere (`encryption-at-rest.probe.sh`).
+#
+# **The unit runs as root.** It reads MinIO's pair from .env (root, 600) and
+# reaches MinIO through Docker; `postgres` can do neither, and putting it in
+# the `docker` group would make it root-equivalent without letting it read
+# .env. `pg_dump` still runs as `postgres`, through `runuser`, so peer
+# authentication is unchanged.
+
 log "Installing the daily backup timer"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for command_file in kelir-backup.sh kelir-restore-objects.sh; do
+    [[ -f "${SCRIPT_DIR}/${command_file}" ]] \
+        || die "${command_file} must sit beside this script (copy deploy/staging/ whole)"
+done
+
+install -m 0755 -o root -g root "${SCRIPT_DIR}/kelir-backup.sh" /usr/local/bin/kelir-backup
+install -m 0755 -o root -g root "${SCRIPT_DIR}/kelir-restore-objects.sh" /usr/local/bin/kelir-restore-objects
+
+# Root's now, where it was postgres's: the archives are written by root.
 mkdir -p "${KELIR_BACKUP_DIR}"
-chown postgres:postgres "${KELIR_BACKUP_DIR}"
+chown -R root:root "${KELIR_BACKUP_DIR}"
 chmod 700 "${KELIR_BACKUP_DIR}"
 
-cat > /usr/local/bin/kelir-backup <<EOF
-#!/usr/bin/env bash
-# Daily logical backup of the Kelir database. Installed by provision-ubuntu-24.sh.
-set -euo pipefail
+# **The upgrade leaves no plaintext dump** (#778, AC6). A pre-#778 unit wrote
+# `<db>-<stamp>.dump` in the clear; each becomes `<name>.age`, with its date
+# kept for retention, once the recipients are in .env. Removing the plaintext
+# file does not scrub its blocks (Installation guide §8).
+if compgen -G "${KELIR_BACKUP_DIR}/*.dump" >/dev/null; then
+    if grep -qE '^[[:space:]]*KELIR_BACKUP_AGE_RECIPIENTS=.*age1' "${ENV_FILE}"; then
+        log "Encrypting the plaintext dumps an earlier unit left"
+        KELIR_APP_DIR="${KELIR_APP_DIR}" KELIR_BACKUP_DIR="${KELIR_BACKUP_DIR}" \
+            /usr/local/bin/kelir-backup --encrypt-old-dumps
+    else
+        die "${KELIR_BACKUP_DIR} holds plaintext dumps; set KELIR_BACKUP_AGE_RECIPIENTS in ${ENV_FILE} and run this again to encrypt them"
+    fi
+fi
 
-stamp="\$(date -u +%Y%m%dT%H%M%SZ)"
-target="${KELIR_BACKUP_DIR}/${KELIR_DB_NAME}-\${stamp}.dump"
-
-# Custom format so pg_restore can do a selective or parallel restore.
-pg_dump --format=custom --file="\${target}" "${KELIR_DB_NAME}"
-chmod 600 "\${target}"
-
-find "${KELIR_BACKUP_DIR}" -name '${KELIR_DB_NAME}-*.dump' \\
-    -mtime +${KELIR_BACKUP_RETENTION_DAYS} -delete
-
-echo "backup written: \${target}"
-EOF
-chmod 755 /usr/local/bin/kelir-backup
+grep -qE '^[[:space:]]*KELIR_BACKUP_AGE_RECIPIENTS=.*age1' "${ENV_FILE}" \
+    || warn "KELIR_BACKUP_AGE_RECIPIENTS is not set in ${ENV_FILE}; every backup fails, and so does every deploy, until it is"
 
 cat > /etc/systemd/system/kelir-backup.service <<EOF
 [Unit]
-Description=Kelir database backup
-After=postgresql.service
+Description=Kelir backup: the database and the object store, encrypted
+After=postgresql.service docker.service
 Requires=postgresql.service
+Wants=docker.service
 
 [Service]
 Type=oneshot
-User=postgres
+User=root
+Environment=KELIR_APP_DIR=${KELIR_APP_DIR}
+Environment=KELIR_BACKUP_DIR=${KELIR_BACKUP_DIR}
+Environment=KELIR_BACKUP_RETENTION_DAYS=${KELIR_BACKUP_RETENTION_DAYS}
+Environment=KELIR_DB_NAME=${KELIR_DB_NAME}
 ExecStart=/usr/local/bin/kelir-backup
 EOF
 
 cat > /etc/systemd/system/kelir-backup.timer <<'EOF'
 [Unit]
-Description=Daily Kelir database backup
+Description=Daily Kelir backup
 
 [Timer]
 OnCalendar=*-*-* 02:30:00
@@ -259,14 +285,17 @@ $(printf '\033[1;32m==> kelir-staging-01 provisioned\033[0m')
   PostgreSQL        ${PG_VERSION}, listening for the docker bridge (${DOCKER_GATEWAY})
   Database          ${KELIR_DB_NAME}, owned by ${KELIR_DB_USER}
   Application dir   ${KELIR_APP_DIR}
-  Backups           ${KELIR_BACKUP_DIR}, daily 02:30 UTC, kept ${KELIR_BACKUP_RETENTION_DAYS} days
+  Backups           ${KELIR_BACKUP_DIR}, daily 02:30 UTC, kept ${KELIR_BACKUP_RETENTION_DAYS} days,
+                    the database and the object store, encrypted with age
   Firewall          22, 80, 443 open; PostgreSQL not exposed
 
 Next:
 
-  1. Copy deploy/staging/{docker-compose.staging.yml,Caddyfile,deploy.sh} to ${KELIR_APP_DIR}
+  1. Copy deploy/staging/{docker-compose.staging.yml,Caddyfile,deploy.sh,.env.staging.example} to ${KELIR_APP_DIR}
   2. Fill in the remaining secrets in ${ENV_FILE}
-     (KELIR_DB_PASSWORD is already set; generate KELIR_JWT_SECRET and the MinIO pair)
+     (KELIR_DB_PASSWORD is already set; generate KELIR_JWT_SECRET, the MinIO
+     pair and KELIR_MINIO_KMS_SECRET_KEY, and add KELIR_BACKUP_AGE_RECIPIENTS
+     from an identity made on another machine: Installation guide §6.3)
   3. Point staging.kelir.gawshub.com at this host, then:
        cd ${KELIR_APP_DIR} && ./deploy.sh 0.1.0
 

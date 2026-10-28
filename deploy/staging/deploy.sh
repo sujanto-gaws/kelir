@@ -198,6 +198,34 @@ for required in KELIR_DB_PASSWORD KELIR_JWT_SECRET KELIR_MINIO_USER KELIR_MINIO_
     esac
 done
 
+# **The store key** (NFR-SEC-009, ADR-0049 §2). MinIO encrypts every object
+# under it, and its shape is `<name>:<32 bytes in base64>`, so anything else is
+# a placeholder. The development key is refused by value: it is published in
+# `deploy/docker/docker-compose.yml`, so it protects nothing.
+store_key="${KELIR_MINIO_KMS_SECRET_KEY:-}"
+generate_store_key="printf 'kelir-store:%s\\n' \"\$(openssl rand -base64 32)\""
+
+[[ -n "${store_key}" ]] \
+    || die "KELIR_MINIO_KMS_SECRET_KEY is empty in .env; generate one with: ${generate_store_key}"
+[[ "${store_key}" != 'kelir-development:w7GPk50m0UH2qkpB+MZbHBZD4Tcd0+nwJx3VzoopMkk=' ]] \
+    || die "KELIR_MINIO_KMS_SECRET_KEY is the published development key; generate one with: ${generate_store_key}"
+[[ "${store_key}" =~ ^[A-Za-z0-9_-]+:[A-Za-z0-9+/]{43}=$ ]] \
+    || die "KELIR_MINIO_KMS_SECRET_KEY is not a generated key (<name>:<32 bytes in base64>); generate one with: ${generate_store_key}"
+
+# **An installed backup unit must be this release's** (#778, AC10). Checked
+# here, before any image is pulled or built, because the pre-deploy backup in
+# section 3 runs whatever is installed: a unit from before #778 writes a
+# plaintext dump and leaves the attachments out, and would pass. Its script
+# carries a format stamp; provision-ubuntu-24.sh installs the current one.
+KELIR_BACKUP_COMMAND="${KELIR_BACKUP_COMMAND:-/usr/local/bin/kelir-backup}"
+backup_unit=''
+
+if systemctl list-unit-files kelir-backup.service >/dev/null 2>&1; then
+    backup_unit=1
+    grep -qxF '# kelir-backup-format: 2' "${KELIR_BACKUP_COMMAND}" 2>/dev/null \
+        || die "the installed ${KELIR_BACKUP_COMMAND} predates #778: it does not encrypt its archives or take the object store. Re-run provision-ubuntu-24.sh to replace it, then deploy again"
+fi
+
 # The bootstrap administrator is all-or-nothing, which is the backend's own rule
 # (`config::bootstrap_admin`): username without password is a startup error, and
 # both unset is a deployment that intends to create its first user another way.
@@ -281,9 +309,16 @@ fi
 # Back up first: a migration that fails halfway is exactly when yesterday's dump
 # is not good enough.
 
-if systemctl list-unit-files kelir-backup.service >/dev/null 2>&1; then
+#
+# **No unit, no backup, said out loud** (#778). The local deployment has no
+# timer, and a host provisioned without one has nothing to run; both go on,
+# and neither is silent about it.
+
+if [[ -n "${backup_unit}" ]]; then
     log "Taking a pre-deploy backup"
     sudo systemctl start kelir-backup || die "pre-deploy backup failed — not deploying"
+else
+    printf '\033[1;33mwarning:\033[0m no kelir-backup unit is installed, so no pre-deploy backup is taken\n' >&2
 fi
 
 log "Starting ${VERSION}"

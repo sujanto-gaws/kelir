@@ -129,31 +129,63 @@ services:
     environment:
       - MINIO_ROOT_USER=minioadmin
       - MINIO_ROOT_PASSWORD=minioadmin
+      # **The development store key, published here, and so protecting
+      # nothing** (ADR-0049 §2). It exists so this stack and CI take the
+      # release's path: the backend asks for SSE-S3 on every write, and a MinIO
+      # without a key refuses that write. `deploy.sh` refuses this value in a
+      # release `.env`.
+      - MINIO_KMS_SECRET_KEY=kelir-development:w7GPk50m0UH2qkpB+MZbHBZD4Tcd0+nwJx3VzoopMkk=
     ports:
       - "${KELIR_MINIO_PORT:-9000}:9000"
       - "${KELIR_MINIO_CONSOLE_PORT:-9001}:9001"
 
-  # One shot: creates the bucket and exits. **The application does not create
-  # it** — a process that can create buckets can create the one an attacker
-  # names, and the backend is given credentials for putting and getting objects
-  # in a bucket somebody else provisioned. MinIO has been in this stack since
-  # Sprint 0 with nothing using it; #244 is what puts the first byte in it.
+  # One shot: creates the bucket, makes it encrypt by default, re-encrypts
+  # anything stored before the key, and exits. **The application does not
+  # create the bucket** — a process that can create buckets can create the one
+  # an attacker names, and the backend is given credentials for putting and
+  # getting objects in a bucket somebody else provisioned.
+  #
+  # **The script is the staging compose file's, word for word**, where its
+  # shape and the re-encrypt pass are explained. A developer's MinIO from
+  # before #778 is upgraded by the same pass the first time this runs.
   minio-init:
     image: ghcr.io/sujanto-gaws/mc:RELEASE.2025-08-13T08-35-41Z
     depends_on:
       - minio
-    entrypoint: sh
-    # One physical line: a folded scalar keeps more-indented lines literal, so a
-    # split `command` arrives as several shell commands. See the staging stack,
-    # where that shipped and the exit demo found it.
-    #
-    # **It ends by checking what it was for** — the Sprint 12 retrospective's
-    # second action. `mc mb` is not evidence that a bucket exists: a shell that
-    # cannot find a command still exits 0 if the last one succeeded, which is
-    # exactly how this container reported success while creating nothing. The
-    # trailing `mc ls kelir/kelir` fails loudly when the bucket is absent, so
-    # `depends_on` and a person reading `docker compose ps` both learn it.
-    command: -c "until mc alias set kelir http://minio:9000 minioadmin minioadmin; do sleep 1; done && mc mb --ignore-existing kelir/kelir && mc ls kelir/kelir"
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    entrypoint: [bash, -c]
+    command:
+      - |
+        set -euo pipefail
+        until mc alias set kelir http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" > /dev/null; do sleep 1; done
+        mc mb --ignore-existing kelir/kelir
+        mc encrypt set sse-s3 kelir/kelir > /dev/null
+        [[ "$$(mc encrypt info --json kelir/kelir)" == *'"algorithm":"AES256"'* ]] \
+          || { echo "minio-init: kelir/kelir does not encrypt by default" >&2; exit 1; }
+        unencrypted() {
+          local listing stats line pattern='"name":"kelir/([^"\\]+)"'
+          listing="$$(mc ls --recursive --json kelir/kelir)"
+          [[ -n "$$listing" ]] || return 0
+          stats="$$(mc stat --recursive --json kelir/kelir)"
+          while IFS= read -r line; do
+            [[ "$$line" == *'"status":"success"'* && "$$line" =~ $$pattern ]] \
+              || { echo "minio-init: cannot read an object's state: $$line" >&2; return 1; }
+            [[ "$$line" == *'"X-Amz-Server-Side-Encryption":"AES256"'* ]] || printf '%s\n' "$${BASH_REMATCH[1]}"
+          done <<< "$$stats"
+        }
+        started=$$SECONDS
+        rewritten=0
+        keys="$$(unencrypted)"
+        while IFS= read -r key; do
+          [[ -n "$$key" ]] || continue
+          mc cp --quiet --enc-s3 kelir/kelir "kelir/kelir/$$key" "kelir/kelir/$$key" > /dev/null
+          rewritten=$$((rewritten + 1))
+        done <<< "$$keys"
+        remaining="$$(unencrypted)"
+        [[ -z "$$remaining" ]] || { echo "minio-init: still unencrypted: $$remaining" >&2; exit 1; }
+        echo "minio-init: kelir/kelir encrypts by default; re-encrypted $$rewritten object(s) in $$((SECONDS - started))s"
 
   # Reserved by the system design since 2026-08-11 and filled by #246. **Sized
   # 2026-08-31 rather than guessed**: ~1 GB resident, almost all of it the

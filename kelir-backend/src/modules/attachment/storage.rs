@@ -31,12 +31,16 @@
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use object_store::aws::AmazonS3Builder;
+use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, PutPayload};
 
 use crate::config::AppConfig;
 use crate::error::AppError;
+
+/// `x-amz-server-side-encryption`'s value for SSE-S3: the store encrypts under
+/// its own key (`MINIO_KMS_SECRET_KEY`).
+const SSE_S3: &str = "AES256";
 
 /// The object store this process writes attachments to.
 #[derive(Clone)]
@@ -121,15 +125,29 @@ impl ObjectStorage {
         // HTTP on 9000 and a deployment that terminates TLS elsewhere is the
         // ordinary case. A production endpoint is an `https://` URL and this
         // flag then changes nothing.
-        let built = AmazonS3Builder::new()
-            .with_endpoint(&config.storage_endpoint)
-            .with_bucket_name(&config.storage_bucket)
-            .with_access_key_id(&config.storage_access_key)
-            .with_secret_access_key(&config.storage_secret_key)
-            .with_region(&config.storage_region)
-            .with_allow_http(true)
-            .with_virtual_hosted_style_request(false)
-            .build();
+        //
+        // **Every write asks for SSE-S3, and nothing turns that off**
+        // (NFR-SEC-009, ADR-0049 §2). A bucket default is a property of the
+        // deployment nothing here can see; the request is what makes a store
+        // without a key refuse the write, so an upload fails where somebody
+        // sees it rather than landing in plaintext. Set on the store, so it
+        // covers `PutObject`, `CreateMultipartUpload` and `CopyObject` alike.
+        // `S3EncryptionConfigKey` is not exported by `object_store` 0.12, so
+        // the key is named by its string.
+        let built = "aws_server_side_encryption"
+            .parse::<AmazonS3ConfigKey>()
+            .and_then(|server_side_encryption| {
+                AmazonS3Builder::new()
+                    .with_endpoint(&config.storage_endpoint)
+                    .with_bucket_name(&config.storage_bucket)
+                    .with_access_key_id(&config.storage_access_key)
+                    .with_secret_access_key(&config.storage_secret_key)
+                    .with_region(&config.storage_region)
+                    .with_allow_http(true)
+                    .with_virtual_hosted_style_request(false)
+                    .with_config(server_side_encryption, SSE_S3)
+                    .build()
+            });
 
         match built {
             Ok(store) => Self::S3 {
@@ -189,5 +207,136 @@ impl ObjectStorage {
                 ),
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! **The request is read off the wire**, from a socket this test owns,
+    //! because what NFR-SEC-009 needs is the header MinIO receives. A store
+    //! with a key encrypts either way when the bucket default is set, so a
+    //! test against MinIO cannot tell a backend that asks from one that
+    //! relies on the default (ADR-0049 §3, *fails closed*).
+
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::task::JoinHandle;
+
+    /// Answers one request with `reply` and hands back the request's head,
+    /// lower-cased so the header can be matched whatever case it was sent in.
+    async fn one_request(reply: String) -> (String, JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("a port");
+        let endpoint = format!("http://{}", listener.local_addr().expect("an address"));
+
+        let served = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("a request");
+            let mut received = Vec::new();
+            let mut chunk = [0_u8; 4096];
+
+            let head_end = loop {
+                let read = socket.read(&mut chunk).await.expect("the request");
+                assert!(read > 0, "the client hung up before its head ended");
+                received.extend_from_slice(&chunk[..read]);
+
+                if let Some(at) = received.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break at + 4;
+                }
+            };
+
+            let head = String::from_utf8_lossy(&received[..head_end]).to_lowercase();
+            let body_length: usize = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .map_or(0, |value| value.trim().parse().expect("a length"));
+
+            while received.len() < head_end + body_length {
+                let read = socket.read(&mut chunk).await.expect("the body");
+                assert!(read > 0, "the client hung up mid-body");
+                received.extend_from_slice(&chunk[..read]);
+            }
+
+            socket.write_all(reply.as_bytes()).await.expect("the reply");
+            socket.shutdown().await.ok();
+
+            head
+        });
+
+        (endpoint, served)
+    }
+
+    fn storage_at(endpoint: String) -> Arc<dyn ObjectStore> {
+        let mut config = AppConfig::test_default();
+        config.storage_endpoint = endpoint;
+
+        match ObjectStorage::from_config(&config) {
+            ObjectStorage::S3 { store, .. } => store,
+            ObjectStorage::Unavailable { reason } => panic!("no store was built: {reason}"),
+        }
+    }
+
+    fn asks_for_sse_s3(head: &str) -> bool {
+        head.lines()
+            .any(|line| line.trim_end() == "x-amz-server-side-encryption: aes256")
+    }
+
+    /// The one writer the product has (#778, AC3). Seen red, 2026-10-28.
+    #[tokio::test]
+    async fn every_object_written_asks_the_store_to_encrypt_it() {
+        let (endpoint, served) = one_request(
+            "HTTP/1.1 200 OK\r\nETag: \"row2\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_owned(),
+        )
+        .await;
+
+        let mut config = AppConfig::test_default();
+        config.storage_endpoint = endpoint;
+        ObjectStorage::from_config(&config)
+            .put(
+                "tenants/t/documents/d/attachments/a/q.pdf",
+                Bytes::from_static(b"%PDF-1.7"),
+            )
+            .await
+            .expect("the scripted store accepts the write");
+
+        let head = served.await.expect("the request was served");
+        assert!(head.starts_with("put "), "{head}");
+        assert!(
+            asks_for_sse_s3(&head),
+            "the write did not ask for SSE-S3:\n{head}"
+        );
+    }
+
+    /// **A multipart upload asks when it is created**, which is where S3 takes
+    /// SSE-S3 for one; its parts carry the header only for SSE-C. Nothing
+    /// writes multipart today, and a writer that does inherits the setting
+    /// because it is on the store, not on [`ObjectStorage::put`]. Seen red,
+    /// 2026-10-28.
+    #[tokio::test]
+    async fn a_multipart_upload_asks_the_store_to_encrypt_it_too() {
+        let body = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+            <InitiateMultipartUploadResult><Bucket>kelir</Bucket><Key>k</Key>\
+            <UploadId>row2</UploadId></InitiateMultipartUploadResult>";
+        let (endpoint, served) = one_request(format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{body}",
+            body.len()
+        ))
+        .await;
+
+        storage_at(endpoint)
+            .put_multipart(&ObjectPath::from("tenants/t/large.pdf"))
+            .await
+            .expect("the scripted store starts the upload");
+
+        let head = served.await.expect("the request was served");
+        assert!(
+            head.starts_with("post ") && head.contains("?uploads"),
+            "{head}"
+        );
+        assert!(
+            asks_for_sse_s3(&head),
+            "the upload did not ask for SSE-S3:\n{head}"
+        );
     }
 }

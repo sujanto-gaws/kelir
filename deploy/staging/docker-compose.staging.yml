@@ -141,33 +141,76 @@ services:
     environment:
       MINIO_ROOT_USER: ${KELIR_MINIO_USER:?set KELIR_MINIO_USER}
       MINIO_ROOT_PASSWORD: ${KELIR_MINIO_PASSWORD:?set KELIR_MINIO_PASSWORD}
+      # **The store key** (NFR-SEC-009, ADR-0049): every object is encrypted
+      # under it (SSE-S3), and so is MinIO's own configuration. It lives in
+      # `.env` and nowhere in an image or the `minio-data` volume. Losing it
+      # loses the store's contents; the Installation guide §8 says what brings
+      # them back.
+      MINIO_KMS_SECRET_KEY: ${KELIR_MINIO_KMS_SECRET_KEY:?set KELIR_MINIO_KMS_SECRET_KEY; the Installation guide §6.3 generates one}
     volumes:
       - minio-data:/data
 
-  # One shot: creates the bucket the backend expects and exits. **The
-  # application does not create it** — a process that can create buckets can
-  # create the one an attacker names — so the deployment provisions it, exactly
-  # as `deploy/docker` and CI's backend job do.
+  # One shot: creates the bucket the backend expects, makes it encrypt by
+  # default, re-encrypts anything stored before the key, and exits. **The
+  # application does not create the bucket** — a process that can create
+  # buckets can create the one an attacker names — so the deployment
+  # provisions it, exactly as `deploy/docker` and CI's backend job do. The
+  # development compose file runs the same script.
   minio-init:
     image: ghcr.io/sujanto-gaws/mc:RELEASE.2025-08-13T08-35-41Z
     depends_on:
       - minio
-    entrypoint: sh
-    # **One physical line, and that is not a style choice.** A folded scalar
-    # keeps more-indented lines literal rather than folding them, so a `command`
-    # split for readability arrives as several shell commands: the first ran
-    # `mc alias set` with no credentials and the next two tried to execute the
-    # username and the password. The bucket was never created and every upload
-    # answered `NoSuchBucket`, which the Sprint 12 exit demo found and nothing
-    # else could — no test reads this file.
+    environment:
+      MINIO_ROOT_USER: ${KELIR_MINIO_USER:?set KELIR_MINIO_USER}
+      MINIO_ROOT_PASSWORD: ${KELIR_MINIO_PASSWORD:?set KELIR_MINIO_PASSWORD}
+    # **The script is one argument to `bash -c`, in a literal block.** Until
+    # #778 it was one physical line, because a *folded* scalar keeps
+    # more-indented lines literal, and a `command` split that way arrived as
+    # several shell commands: the bucket was never created and every upload
+    # answered `NoSuchBucket` (the Sprint 12 exit demo). A literal block (`|`)
+    # as one list item keeps every newline and is still one argument. `$$` is
+    # compose's escape for a `$` the shell is to see.
     #
-    # **And it ends by checking what it was for**, which is the half that would
-    # have caught the above without a demo. `mc mb` succeeding proves nothing:
-    # a shell that cannot find a command still exits 0 if the last one
-    # succeeded, so this container reported success while creating nothing. The
-    # trailing `mc ls kelir/kelir` fails when the bucket is not there, and a
-    # one-shot container that fails is one somebody sees.
-    command: -c "until mc alias set kelir http://minio:9000 ${KELIR_MINIO_USER:?set KELIR_MINIO_USER} ${KELIR_MINIO_PASSWORD:?set KELIR_MINIO_PASSWORD}; do sleep 1; done && mc mb --ignore-existing kelir/kelir && mc ls kelir/kelir"
+    # **It ends by checking what it was for**: that the bucket encrypts by
+    # default, and that no object is left unencrypted. A one-shot container
+    # that fails is one somebody sees, and the backend waits for this one.
+    #
+    # **The re-encrypt pass is the upgrade from a store without a key** (#778,
+    # AC6). It rewrites through the S3 API, by a server-side copy onto itself,
+    # each object MinIO does not report as SSE-S3, soft-deleted ones included.
+    # The copy gives the object a new modification time and may give it a new
+    # ETag; Kelir reads neither. After one complete pass it finds nothing.
+    entrypoint: [bash, -c]
+    command:
+      - |
+        set -euo pipefail
+        until mc alias set kelir http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" > /dev/null; do sleep 1; done
+        mc mb --ignore-existing kelir/kelir
+        mc encrypt set sse-s3 kelir/kelir > /dev/null
+        [[ "$$(mc encrypt info --json kelir/kelir)" == *'"algorithm":"AES256"'* ]] \
+          || { echo "minio-init: kelir/kelir does not encrypt by default" >&2; exit 1; }
+        unencrypted() {
+          local listing stats line pattern='"name":"kelir/([^"\\]+)"'
+          listing="$$(mc ls --recursive --json kelir/kelir)"
+          [[ -n "$$listing" ]] || return 0
+          stats="$$(mc stat --recursive --json kelir/kelir)"
+          while IFS= read -r line; do
+            [[ "$$line" == *'"status":"success"'* && "$$line" =~ $$pattern ]] \
+              || { echo "minio-init: cannot read an object's state: $$line" >&2; return 1; }
+            [[ "$$line" == *'"X-Amz-Server-Side-Encryption":"AES256"'* ]] || printf '%s\n' "$${BASH_REMATCH[1]}"
+          done <<< "$$stats"
+        }
+        started=$$SECONDS
+        rewritten=0
+        keys="$$(unencrypted)"
+        while IFS= read -r key; do
+          [[ -n "$$key" ]] || continue
+          mc cp --quiet --enc-s3 kelir/kelir "kelir/kelir/$$key" "kelir/kelir/$$key" > /dev/null
+          rewritten=$$((rewritten + 1))
+        done <<< "$$keys"
+        remaining="$$(unencrypted)"
+        [[ -z "$$remaining" ]] || { echo "minio-init: still unencrypted: $$remaining" >&2; exit 1; }
+        echo "minio-init: kelir/kelir encrypts by default; re-encrypted $$rewritten object(s) in $$((SECONDS - started))s"
 
   # The virus scanner (#246, **D-4**). **Sized 2026-08-31 rather than guessed**:
   # ~1 GB resident, almost all of it the signature set, 25 MiB scanned in

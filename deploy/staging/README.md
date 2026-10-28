@@ -3,7 +3,7 @@
 This directory holds the release deployment: the compose file, the single-origin
 Caddy configuration, the host provisioning script and the deploy scripts.
 
-**Five of the six files run today. One has never run, and one of the five has never run the way it was written for: both describe a host that does not exist.** (Corrected 2026-10-01: this said two of five, and counted `deploy.sh` as unused although `deploy-local.sh` runs it.)
+**Five of the six deployment files run today, and the three #778 added run in a container (below). One has never run, and one of the five has never run the way it was written for: both describe a host that does not exist.** (Corrected 2026-10-01: this said two of five, and counted `deploy.sh` as unused although `deploy-local.sh` runs it.)
 
 | File | State |
 |---|---|
@@ -13,6 +13,8 @@ Caddy configuration, the host provisioning script and the deploy scripts.
 | `Caddyfile` | In use by the compose file; TLS applies only to a hostname deployment |
 | `deploy.sh` | **In use through `deploy-local.sh`**, which sets the address and hands over to it: the secret checks, the image build, `compose up`, the overlay when `KELIR_COMPOSE_OVERLAY` names one, the service check and the smoke test are all this script. **Unused as a command of its own**, the per-release deploy to `kelir-staging-01` |
 | `provision-ubuntu-24.sh` | **Unused.** One-time setup of `kelir-staging-01` |
+| `kelir-backup.sh`, `kelir-restore-objects.sh` | **Unused on a host, run in a container** ([#778](https://github.com/sujanto-gaws/kelir/issues/778)). The provisioner installs them as `/usr/local/bin/kelir-backup` and `kelir-restore-objects`: the encrypted backup pair and the store half's restore. Their settings let them run against any stack, which is how they were rehearsed |
+| `encryption-at-rest.probe.sh` | **A probe, run by hand in a Linux container** (#778, ADR-0049 §5): the store's files and both archives read raw, the backup's refusals, and `deploy.sh`'s |
 
 ## Why the unused ones are still here
 

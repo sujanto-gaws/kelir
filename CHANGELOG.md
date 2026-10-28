@@ -61,8 +61,54 @@ While the major version is `0`, the public API may change in any release.
   it is. A display name or role name stored blank or invisible before the
   upgrade is not repaired, and an edit that sends it back unchanged is
   refused until it is given a visible one.
+- **Attachments and backups are encrypted at rest, and the upgrade needs two
+  keys and a re-run of the provisioner**
+  ([#778](https://github.com/sujanto-gaws/kelir/issues/778), NFR-SEC-009,
+  [ADR-0049](docs/architectures/adr/0049.%20The%20Object%20Store%20Encrypts%20Attachments%20Under%20Its%20Own%20Key,%20and%20a%20Backup%20Is%20Encrypted%20to%20a%20Key%20the%20Host%20Does%20Not%20Hold.md)).
+  Before deploying:
+  1. **Generate the store key** on the host and add it to `.env` as
+     `KELIR_MINIO_KMS_SECRET_KEY`:
+     `printf 'kelir-store:%s\n' "$(openssl rand -base64 32)"`. Keep a copy off
+     the host. `deploy.sh` refuses a `.env` without it.
+  2. **Generate the backup identity on another machine** (`age-keygen -o
+     kelir-backup.key`) and add its `age1...` recipient to `.env` as
+     `KELIR_BACKUP_AGE_RECIPIENTS`. The local deployment, which has no backup
+     timer, may leave it empty, but the line must be there.
+  3. **On a staging host, re-run `provision-ubuntu-24.sh`** from a copy of
+     `deploy/staging/` whole. It installs `age`, the new backup and restore
+     commands, and a unit that runs as root; it makes the backup directory
+     root's and encrypts each plaintext dump the old unit left. Removing a
+     plaintext dump does not scrub its blocks. `deploy.sh` refuses to deploy
+     over the old unit.
+
+  **The first start after the upgrade is slower, once**: `minio-init`
+  re-encrypts every stored object before the backend starts
+  (515 objects, about 1 GiB, in 52 s on a laptop; a later start rewrites
+  nothing, in 4 s). **Backups take the attachments from the first backup
+  after the upgrade, and none before** (**D-122**). **Do not restore
+  `v0.9.0`'s compose file** after the upgrade: MinIO would start without its
+  key, and every object would be unreadable. `./deploy.sh <previous-version>`
+  is safe, since it changes the images and keeps the compose file and `.env`.
+  **A developer's MinIO needs the key too**: recreate it with
+  `docker compose -f deploy/docker/docker-compose.yml up -d --force-recreate
+  minio minio-init`, or every upload fails: MinIO answers the write
+  `501 Not Implemented`.
 
 ### Added
+
+- **Attachments and backups are encrypted at rest**
+  ([#778](https://github.com/sujanto-gaws/kelir/issues/778), NFR-SEC-009,
+  ADR-0049). MinIO encrypts every object under its own key (SSE-S3), the
+  backend asks for that on every write, and a store without a key refuses the
+  write. `minio-init` makes SSE-S3 the bucket's default and re-encrypts what an
+  older store holds. **A backup is now a pair under one stamp**,
+  `kelir-<stamp>.dump.age` and `kelir-<stamp>.objects.age`: the database and
+  every object in the bucket (**D-122**), each streamed through `age` to
+  recipients whose private key the host does not hold. `kelir-restore-objects`
+  writes a store archive back into any MinIO, under any key. Both commands are
+  files in `deploy/staging/`, and `encryption-at-rest.probe.sh` reads the
+  store's files and both archives raw. Installation and Deployment §8 says what
+  each key protects and what is lost without it.
 
 - **The document type, role and tenant tables search**
   ([#598](https://github.com/sujanto-gaws/kelir/issues/598)). Each has a
@@ -335,6 +381,13 @@ While the major version is `0`, the public API may change in any release.
 
 ### Changed
 
+- **The backup unit runs as root, and `deploy.sh` checks it before
+  deploying** ([#778](https://github.com/sujanto-gaws/kelir/issues/778)). The
+  unit reads MinIO's pair from `.env` and reaches MinIO through Docker;
+  `pg_dump` still runs as `postgres`. `deploy.sh` refuses an installed backup
+  command from before #778, before it pulls or builds anything, and with no
+  backup unit installed it deploys without a pre-deploy backup and now says so
+  on stderr.
 - **The texts that told an administrator to retire a workflow revision now
   name what does it** ([#573](https://github.com/sujanto-gaws/kelir/issues/573)).
   Deleting a revision that approvals still run on is refused, as before, and
