@@ -1,6 +1,6 @@
 # Kelir Software Requirements Specification
 
-**Status:** Draft · **Last updated:** 2026-10-27
+**Status:** Draft · **Last updated:** 2026-10-28
 
 The companion Solution Blueprint formerly bundled in this file now lives in the System Design Document: `docs/design/01. System Design Document.md`.
 
@@ -628,6 +628,8 @@ File upload: depends on network and file size
 | NFR-SEC-008 | Authentication endpoints must be rate limited: 5 failed logins trigger a 15-minute lockout |
 | NFR-SEC-009 | Attachments and backups must be encrypted at rest |
 | NFR-SEC-010 | Data in transit must use TLS 1.2 or higher |
+
+Note: NFR-SEC-010 is read by decision **D-119** (2026-10-28; the requirement is unchanged). It is met by TLS at the edge Caddy serves, which holds today, and on the backend's connection to PostgreSQL, the one internal hop the design takes off the host, which holds once #803 has merged. The object store and the virus scanner are reached only inside the deployment's private network, and SMTP uses STARTTLS for any host that is not local. The database half is built by [#803](https://github.com/sujanto-gaws/kelir/issues/803).
 
 ---
 
