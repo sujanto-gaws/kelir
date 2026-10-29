@@ -100,15 +100,15 @@ While the major version is `0`, the public API may change in any release.
   1. a `KELIR_DATABASE_URL` at a non-local host whose server offers no TLS,
      refused at the first connection, or whose URL carries `sslmode=disable`,
      `allow` or `prefer`, refused before any connection;
-  2. a staging or local deployment whose `KELIR_DB_HOST` is anything but
-     `host.docker.internal`, a Docker bridge IP such as `172.17.0.1`
-     included;
+  2. a staging or local deployment whose `KELIR_DB_HOST` is not one of the
+     local hosts below, a Docker bridge IP such as `172.17.0.1` included;
   3. a developer's `DATABASE_URL` or `KELIR_DATABASE_URL` at a PostgreSQL on
      another machine.
 
   There are two ways out: **turn TLS on at the server**, or **reach it through
-  a local host** (`localhost`, `127.0.0.1`, `::1`, `host.docker.internal`,
-  `postgres` or a socket path). There is no switch that turns the rule off.
+  a local host** (`localhost`, `127.0.0.1`, `::1`, `[::1]`,
+  `host.docker.internal`, `postgres` or a socket path, compared
+  case-insensitively and exactly). There is no switch that turns the rule off.
   Existing `.env` files need no new line: the two settings are empty by
   default.
 
@@ -404,13 +404,13 @@ While the major version is `0`, the public API may change in any release.
   **D-119** C). The backend forced `sslmode=prefer` on every connection, which
   falls back to plaintext without a word and overrode any `sslmode` in
   `KELIR_DATABASE_URL`. Now a host other than `localhost`, `127.0.0.1`, `::1`,
-  `host.docker.internal`, `postgres` or a socket path dials with `require` at
+  `[::1]`, `host.docker.internal`, `postgres` or a socket path dials with `require` at
   least, and the URL's `sslmode` is honoured; a weaker one at such a host is
   refused at startup. `KELIR_DATABASE_SSL_MODE` (`require` or `verify-full`)
   raises the mode on any host, and `verify-full` checks the server's
   certificate against `KELIR_DATABASE_SSL_ROOT_CERT`. `require` encrypts and
-  does not authenticate the server; `verify-full` does both. A local host keeps
-  `prefer`. The staging compose file passes both settings through, empty by
+  does not authenticate the server; `verify-full` does both. A local host dials
+  with the URL's `sslmode`, or `prefer` when it has none. The staging compose file passes both settings through, empty by
   default, and mounts `db-tls/` beside it read-only at `/etc/kelir/db-tls`.
 - **The backup unit runs as root, and `deploy.sh` checks it before
   deploying** ([#778](https://github.com/sujanto-gaws/kelir/issues/778)). The

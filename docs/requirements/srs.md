@@ -1,6 +1,6 @@
 # Kelir Software Requirements Specification
 
-**Status:** Draft · **Last updated:** 2026-10-28
+**Status:** Draft · **Last updated:** 2026-10-29
 
 The companion Solution Blueprint formerly bundled in this file now lives in the System Design Document: `docs/design/01. System Design Document.md`.
 
@@ -629,7 +629,7 @@ File upload: depends on network and file size
 | NFR-SEC-009 | Attachments and backups must be encrypted at rest |
 | NFR-SEC-010 | Data in transit must use TLS 1.2 or higher |
 
-Note: NFR-SEC-010 is read by decision **D-119** (2026-10-28; the requirement is unchanged). It is met by TLS at the edge Caddy serves, which holds today, and on the backend's connection to PostgreSQL, the one internal hop the design takes off the host, which holds once #803 has merged. The object store and the virus scanner are reached only inside the deployment's private network, and SMTP uses STARTTLS for any host that is not local. The database half is built by [#803](https://github.com/sujanto-gaws/kelir/issues/803).
+Note: NFR-SEC-010 is read by decision **D-119** (2026-10-28; the requirement is unchanged). It is met by TLS at the edge Caddy serves, which holds today, and on the backend's connection to PostgreSQL, the one internal hop the design takes off the host, which ~~holds once #803 has merged~~ holds since #803. The object store and the virus scanner are reached only inside the deployment's private network, and SMTP uses STARTTLS for any host that is not local. ~~The database half is built by [#803](https://github.com/sujanto-gaws/kelir/issues/803).~~ The database half was built by [#803](https://github.com/sujanto-gaws/kelir/issues/803): a database host that is not local is reached over TLS 1.2 or higher or not at all, and a local one is exempt by design ([SDD](../design/01.%20System%20Design%20Document.md) §13.2). *(Restated 2026-10-29.)*
 
 ---
 
