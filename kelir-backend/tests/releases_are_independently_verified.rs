@@ -99,7 +99,10 @@
 //!     row in the block — see *Rule 10, hardened 2026-09-16* below. **And by
 //!     [#486](https://github.com/sujanto-gaws/kelir/issues/486)** (Sprint 21
 //!     row 2): a row starts at any CommonMark list marker, not only `- ` — see
-//!     *Rule 10, every list marker, 2026-09-26* below.
+//!     *Rule 10, every list marker, 2026-09-26* below. **And by
+//!     [#563](https://github.com/sujanto-gaws/kelir/issues/563)** (Sprint 25
+//!     row 14): a lazy line at column 0 does not end the block — see *Rule 10,
+//!     a lazy line at column 0, 2026-10-29* below.
 //!
 //! Rules 11 and 12 are [#484](https://github.com/sujanto-gaws/kelir/issues/484),
 //! Sprint 21 row 4, and they are the first that read `git` rather than the
@@ -810,6 +813,73 @@
 //!   including prose that happens to start `Reader session:`. From record 19
 //!   on that costs a refusal by rule 13. Below it, rule 14 skips such a
 //!   record, as it skips one with no line.
+//!
+//! # Rule 10, a lazy line at column 0, 2026-10-29 (#563)
+//!
+//! The `test-engineer` gate on [#486](https://github.com/sujanto-gaws/kelir/issues/486):
+//! [`follow_up_block`] ended the block at the first non-blank line not
+//! indented with a space or a tab, and so at a wrapped line written back at
+//! column 0. **CommonMark reads that line as a lazy continuation** of the row
+//! above it, and the list goes on. Under `two:`, record 07's filed row, a
+//! column-0 wrapped line and record 07's unfiled row under `  * ` (P27) or
+//! `  - ` (P28) **passed**, and so did the same with the wrapped line indented
+//! only by a non-breaking space (P29). The stated limit named a column-0
+//! sibling item, and none of the three is one. **It predates #486**: P28's
+//! marker is the `- ` the rule has always read.
+//!
+//! **The fix is [`starts_a_block`].** A line at column 0 still ends the block
+//! after a blank line, which is where records 06 to 09 put their closing
+//! paragraph, and when it starts a block of its own: a list marker, `>`, an
+//! ATX heading, a fence or a thematic break. Any other line is joined to the
+//! item above it, and the walk reads on. A line led by a non-breaking space or
+//! other Unicode whitespace is at column 0, as it is to CommonMark, so it is
+//! text whatever follows the whitespace.
+//!
+//! **Probes, committed.** `a_lazy_line_at_column_0_does_not_hide_the_rows_after_it`
+//! sends P27, P28 and P29, then P29 with two em spaces, P29 with a `* ` after
+//! the non-breaking space, a column-0 `#404`, which is not a heading, and
+//! `<details>`, a stated limit. Each is refused, quoting the row, and each has
+//! a control with the later row filed, which is accepted. It also sends two
+//! lazy lines under the answer. `a_column_0_line_that_ends_the_list_still_ends_the_block`
+//! sends P30, a column-0 line after a blank line (plain, and led by a
+//! non-breaking space), and fourteen block starts directly after a row. Each
+//! is accepted, with the unfiled row under it unread.
+//!
+//! **Seen red.** Baseline before the change: 54 passed. The two new tests run
+//! against it: the first was red on P27 with `Unfiled([])`. Run one by one,
+//! every probe in it passed the old rule, and the answer with lazy lines read
+//! `Unreadable`. The second was green, because it holds edges the old rule
+//! already drew; mutations 3, 4, 8 and 9 below are its reds. After: 56. Nine
+//! mutations, each applied alone, the suite run, and the file restored:
+//!
+//! | # | Mutation | Red |
+//! |---|---|---|
+//! | 1 | A column-0 line ends the block, as before | `a_lazy_line_…` |
+//! | 2 | A lazy line read as a row | `a_lazy_line_…` (a second unfiled row) |
+//! | 3 | A blank line before column 0 no longer ends the block | `a_column_0_line_…` (P30) |
+//! | 4 | A column-0 list marker no longer ends it | `a_column_0_line_…`, and `the_shapes_rule_10_accepts_are_still_accepted` (record 02's next item) |
+//! | 5 | [`starts_a_block`] reads a block after Unicode whitespace | `a_lazy_line_…` (`* ` after a non-breaking space) |
+//! | 6 | Unicode whitespace read as indentation | both new tests |
+//! | 7 | Any line opening `#` is a heading | `a_lazy_line_…` (`#404`) |
+//! | 8 | A bare marker not read | `a_column_0_line_…` (`-`) |
+//! | 9 | No thematic break | `a_column_0_line_…` |
+//!
+//! **Historic sweep.** `projects/releases/` and `projects/verifications/`
+//! were restored from each of the 86 first-parent `main` commits that touched
+//! them, up to `e2b0c4d`, into a scratch tree, and the suite run over each
+//! with the test binary before the change and after it. **No test the two
+//! share changed verdict on any of the 86**, and both new tests were green on
+//! every tree, since neither reads a file. The 25 trees since `13e1e76` are
+//! green under both binaries; older trees are red under both, for rules and
+//! fixtures younger than the tree, as #486's and #483's sweeps found.
+//!
+//! **Positive control, last.** A wrapped line at column 0 and then
+//! `  * **A probe follow-up, unfiled** · **reproduced** · **not yet filed**`,
+//! written under record 09's last row in a scratch copy of the tree: the
+//! binary before the change passed it, 54 of 54. After: `a_final_record_names_an_issue_for_every_follow_up`
+//! red, quoting the row, and the other 55 green. With a line holding only a
+//! non-breaking space put above the wrapped line, both binaries passed it,
+//! which is the first stated limit rule 10 now names.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -1348,9 +1418,21 @@ fn unresolved(cited: &str, on_disk: &BTreeSet<String>) -> Option<String> {
 ///
 /// # Where the block ends, and where it does not
 ///
-/// **It ends at the first non-blank line back at column 0** — the next
-/// top-level item, the block-quoted note every record carries after its
-/// Aftermath, or prose — so that note is not mistaken for a follow-up.
+/// **It ends at a line back at column 0 that CommonMark ends the list at**:
+/// one after a blank line, such as the closing paragraph every record carries
+/// after its Aftermath, or one that starts a block of its own
+/// ([`starts_a_block`]) — the next top-level item, the block-quoted note, a
+/// heading, a fence or a thematic break — so that note is not mistaken for a
+/// follow-up.
+///
+/// **It does not end at a lazy continuation line**, and until
+/// [#563](https://github.com/sujanto-gaws/kelir/issues/563) it did: it ended
+/// at the first non-blank line back at column 0. A wrapped line at column 0
+/// directly under a row joins the row's paragraph, and the list goes on under
+/// it, so the rows below it are follow-ups a reader sees. **A line indented
+/// only with a non-breaking space or other Unicode whitespace is at column 0**,
+/// as it is to CommonMark, which indents with spaces and tabs alone: it is text
+/// joined to the item above it, never a row, whatever it opens with.
 ///
 /// **It does not end at a blank line or at an indented line that is not a list
 /// item**, and until [#467](https://github.com/sujanto-gaws/kelir/issues/467) it
@@ -1391,23 +1473,30 @@ fn follow_up_block(body: &str) -> Option<(String, Vec<String>)> {
         .trim()
         .to_owned();
     let mut rows: Vec<String> = Vec::new();
+    let mut after_blank = false;
 
     for line in lines {
         let trimmed = line.trim();
 
         if trimmed.is_empty() {
             // Shape C: a blank line makes the list loose, and does not end it.
+            after_blank = true;
             continue;
         }
 
-        if !line.starts_with([' ', '\t']) {
+        // #563: a line not indented with a space or a tab is at column 0, and
+        // only a lazy continuation line keeps the list going there.
+        let indented = line.starts_with([' ', '\t']);
+        if !indented && (after_blank || starts_a_block(line)) {
             break;
         }
+        after_blank = false;
 
-        if after_list_marker(line).is_some() || trimmed.starts_with("~~") {
+        if indented && (after_list_marker(line).is_some() || trimmed.starts_with("~~")) {
             rows.push(trimmed.to_owned());
         } else {
-            // Shape D: a wrapped line belongs to the item above it.
+            // Shape D, and a lazy line: a wrapped line belongs to the item
+            // above it.
             let item = rows.last_mut().unwrap_or(&mut answer);
             item.push(' ');
             item.push_str(trimmed);
@@ -1453,6 +1542,42 @@ fn after_list_marker(line: &str) -> Option<&str> {
     };
 
     rest.strip_prefix([' ', '\t'])
+}
+
+/// Whether a line at column 0 starts a block of its own, and so ends the
+/// follow-up list rather than continuing the row above it lazily
+/// ([#563](https://github.com/sujanto-gaws/kelir/issues/563)).
+///
+/// The blocks CommonMark starts there under a list item: a list marker —
+/// any, since the line is no longer inside the item, so a bare marker and
+/// `2. ` start a list too — a `>`, an ATX heading, a fence, or a thematic
+/// break. **A line that opens with whitespace starts none of them**: a space
+/// or a tab never reaches here, and a non-breaking space is text.
+///
+/// **An HTML block is not among them**, and that costs a refusal, not a
+/// pass: a row after `<details>` is read, where CommonMark would render it as
+/// raw HTML.
+fn starts_a_block(line: &str) -> bool {
+    if line.starts_with(char::is_whitespace) {
+        return false;
+    }
+
+    let bare = line.trim_end();
+    let hashes = bare.bytes().take_while(|&byte| byte == b'#').count();
+    let heading = (1..=6).contains(&hashes)
+        && matches!(bare.as_bytes().get(hashes), None | Some(b' ' | b'\t'));
+    let marks: Vec<char> = bare.chars().filter(|c| !matches!(c, ' ' | '\t')).collect();
+    let thematic_break =
+        marks.len() >= 3 && ['*', '-', '_'].iter().any(|m| marks.iter().all(|c| c == m));
+
+    // A bare marker ending its line is read with the space it lacks.
+    after_list_marker(line).is_some()
+        || after_list_marker(&format!("{bare} ")) == Some("")
+        || bare.starts_with('>')
+        || heading
+        || bare.starts_with("```")
+        || bare.starts_with("~~~")
+        || thematic_break
 }
 
 /// Whether a follow-up row **opens with** a link to an issue.
@@ -2459,10 +2584,11 @@ fn the_pre_rule_releases_are_named_rather_than_silently_skipped() {
 ///
 /// - **A follow-up written back at column 0**, as a sibling of the
 ///   `- **Follow-ups filed:**` item rather than a row under it. The block ends
-///   there, because a column-0 line is where the block-quoted note and the
-///   next top-level item begin, and nothing in the line says which it is.
-///   Markdown renders it outside the follow-up list too, so a reader sees the
-///   same edge the walk does.
+///   there, because a column-0 list marker is where the next top-level item
+///   begins. Markdown renders it outside the follow-up list too, so a reader
+///   sees the same edge the walk does. **Since [#563](https://github.com/sujanto-gaws/kelir/issues/563)
+///   that is the only column-0 text the block ends at directly under a row**:
+///   a lazy continuation line is read, and so are the rows after it.
 /// - **A follow-up under another label** — `- **Issues found post-release:**`,
 ///   or record 02's `- **Carried into the sprint plan:**`. Rule 10 reads the
 ///   one label the template gives follow-ups.
@@ -2484,6 +2610,18 @@ fn the_pre_rule_releases_are_named_rather_than_silently_skipped() {
 ///   one: its indented lines opening `-`, `*`, `+` or `N.` are read as rows.
 ///   Before #486 only its `- ` lines were. That costs a refusal, not a pass, and
 ///   no record `main` has held carries one.
+///
+/// Two more, drawn 2026-10-29 when [#563](https://github.com/sujanto-gaws/kelir/issues/563)
+/// read past a lazy line at column 0:
+///
+/// - **A line holding only a non-breaking space is blank here**, because
+///   `trim()` strips Unicode whitespace, and CommonMark reads it as text. A
+///   column-0 line after it then ends the block, where CommonMark reads it as
+///   lazy and keeps the list going. **That costs a pass**: a row after the two
+///   is not read. No record `main` holds carries such a line.
+/// - **An HTML block is not one of the blocks [`starts_a_block`] knows**, so a
+///   row after `<details>` at column 0 is read, where CommonMark renders it as
+///   raw HTML. That costs a refusal, not a pass.
 #[test]
 fn a_final_record_names_an_issue_for_every_follow_up() {
     let mut unfiled: Vec<String> = Vec::new();
@@ -2520,9 +2658,11 @@ fn a_final_record_names_an_issue_for_every_follow_up() {
 
     assert!(
         unfiled.is_empty(),
-        "a `Final` release record carries a follow-up with no issue (#445, #467, #486):\n  {}\n\n\
+        "a `Final` release record carries a follow-up with no issue (#445, #467, #486, #563):\n  \
+         {}\n\n\
          Every row under `{FOLLOW_UPS_LABEL}` opens with a link to {ISSUE_URL}<number> — \
-         including rows after a blank line, rows after a wrapped line, rows nested under \
+         including rows after a blank line, rows after a wrapped line, rows after a wrapped \
+         line back at column 0, rows nested under \
          another row, rows under any list marker (`-`, `*`, `+`, `2.`, `2)`), and rows under \
          an answer of `none`. **Opening with it, not merely \
          containing it**: record 07's own bad row cited \
@@ -3030,6 +3170,120 @@ fn record_07_at_00a27b4_and_the_earlier_probes_are_still_refused() {
         Aftermath::Unreadable,
         "an answer that promises a follow-up with no row under it"
     );
+}
+
+// ---------------------------------------------------------------------------
+// A lazy line at column 0 (#563)
+// ---------------------------------------------------------------------------
+
+/// A wrapped line of record 07's filed row, as #563's probes wrote it.
+const WRAPPED: &str = "and the issue carries the reproduction in full";
+
+/// Record 07's filed row, `between`, and then `row` under `marker`: the shape
+/// of #563's probes.
+fn row_after(between: &str, row: &str, marker: &str) -> String {
+    record_with_follow_ups(&format!(
+        "- **Follow-ups filed:** two:\n{RECORD_07_FILED_ROW}\n{between}\n{}",
+        under_marker(row, marker)
+    ))
+}
+
+/// **A lazy line at column 0 does not hide the rows after it**
+/// ([#563](https://github.com/sujanto-gaws/kelir/issues/563)).
+///
+/// The `test-engineer` gate on [#486](https://github.com/sujanto-gaws/kelir/issues/486)
+/// wrote a filed row, a wrapped line back at column 0, and record 07's unfiled
+/// row under it. CommonMark reads the column-0 line as a lazy continuation of
+/// the row above, and the list goes on, so a reader sees the unfiled row as
+/// the next follow-up. The walk ended the block at the column-0 line, and
+/// passed. A line indented only with a non-breaking space is the same line to
+/// CommonMark, which indents with spaces and tabs alone.
+#[test]
+fn a_lazy_line_at_column_0_does_not_hide_the_rows_after_it() {
+    let nbsp = format!("\u{a0}{WRAPPED}");
+    let em_spaces = format!("\u{2003}\u{2003}{WRAPPED}");
+    let nbsp_marker = format!("\u{a0}\u{a0}* {WRAPPED}");
+
+    for (probe, between, marker) in [
+        ("P27", WRAPPED, "* "),
+        ("P28", WRAPPED, "- "),
+        ("P29", nbsp.as_str(), "* "),
+        ("P29 with two em spaces", em_spaces.as_str(), "* "),
+        ("P29, `* ` after the space", nbsp_marker.as_str(), "* "),
+        ("an issue number, not a heading", "#404 carries it", "* "),
+        ("an HTML tag, a stated limit", "<details>", "* "),
+    ] {
+        let unfiled = row_after(between, RECORD_07_UNFILED_ROW, marker);
+        assert!(
+            refuses_the_unfiled_row(&unfiled),
+            "{probe}: record 07's unfiled row under {marker:?}, after a lazy line {between:?}, \
+             went unread or was not alone: {:?}",
+            read_aftermath(&unfiled)
+        );
+
+        let filed = row_after(between, RECORD_07_FILED_ROW, marker);
+        assert!(
+            accepted(&filed),
+            "{probe}'s control: the later row filed, and the lazy line joined to the row above \
+             it rather than read as a row: {:?}",
+            read_aftermath(&filed)
+        );
+    }
+
+    let under_the_answer = record_with_follow_ups(&format!(
+        "- **Follow-ups filed:** two,\nboth below:\n{RECORD_07_FILED_ROW}\n{WRAPPED}\n\
+         and wrapped again\n{}",
+        under_marker(RECORD_07_UNFILED_ROW, "* ")
+    ));
+    assert!(
+        refuses_the_unfiled_row(&under_the_answer),
+        "a lazy line under the answer joins the answer, and two lazy lines in a row are one \
+         paragraph: {:?}",
+        read_aftermath(&under_the_answer)
+    );
+}
+
+/// **The block still ends where CommonMark ends the list**
+/// ([#563](https://github.com/sujanto-gaws/kelir/issues/563)): at a column-0
+/// line after a blank line, and at a column-0 line that starts a block of its
+/// own, even directly after a row. Each is followed by record 07's unfiled
+/// row, which a reader sees outside the follow-up list.
+#[test]
+fn a_column_0_line_that_ends_the_list_still_ends_the_block() {
+    // P30: the closing paragraph of records 06 to 09 follows a blank line.
+    for between in [format!("\n{WRAPPED}"), format!("\n\u{a0}{WRAPPED}")] {
+        let p30 = row_after(&between, RECORD_07_UNFILED_ROW, "* ");
+        assert!(
+            accepted(&p30),
+            "P30: a column-0 line after a blank line ends the list, and the row under it is \
+             another list's: {:?}",
+            read_aftermath(&p30)
+        );
+    }
+
+    for opener in [
+        "- another top-level item",
+        "* another top-level item",
+        "+ another top-level item",
+        "1. an ordered list",
+        "2) an ordered list",
+        "-",
+        "> a note",
+        "# A heading",
+        "###### A heading",
+        "```",
+        "~~~",
+        "---",
+        "***",
+        "___",
+    ] {
+        let body = row_after(opener, RECORD_07_UNFILED_ROW, "* ");
+        assert!(
+            accepted(&body),
+            "{opener:?} at column 0, directly after a row, starts a block of its own: {:?}",
+            read_aftermath(&body)
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
