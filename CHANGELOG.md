@@ -564,6 +564,34 @@ While the major version is `0`, the public API may change in any release.
   `build-a-workflow.spec.ts` still times 20, 40 and 80 states, and checks the
   decline at 150 and 300.
 
+- **A release record's follow-up after a wrapped line at column 0 is read**
+  ([#563](https://github.com/sujanto-gaws/kelir/issues/563)). Rule 10 of
+  `releases_are_independently_verified.rs` ended a record's follow-up list at
+  the first line not indented with a space or a tab. So a wrapped line written
+  back at column 0, or indented only with a non-breaking space, hid every
+  follow-up row after it, though Markdown still shows those rows in the list.
+  Such a line now joins the row above it, and the rows after it are read. The
+  list still ends at a column-0 line after a blank line, and at one that
+  starts a block of its own: a list item, a quote, a heading, a fence or a
+  thematic break. No release record on `main`, now or at any earlier commit,
+  changes verdict.
+
+- **A release record's pass is read from its *Independent pass* row**
+  ([#568](https://github.com/sujanto-gaws/kelir/issues/568)). Rules 1, 2 and
+  7 of `releases_are_independently_verified.rs` read every path to a
+  verification record anywhere in a record: in a link's title, in a second
+  `(…)` after a link, in a code span, in a fenced block or in prose. So a
+  record whose row copied an earlier release's citation passed whenever a
+  newer record's path appeared anywhere else in it. From `v0.5.0`, the first
+  record with the row, they now read only the links the Pre-flight table's
+  *Independent pass* row renders, at `HEAD` and at the tag: not a link that
+  a `|` splits across two cells, one inside an HTML comment or tag, or one
+  in a fenced block that a fence line with text after it did not close. A
+  record with no such row is refused, naming it. Records 03 and 04, which cite their pass
+  elsewhere, are read as before. The checks that a citation resolves and that
+  its reader built none of the release still read every citation. No release
+  record on `main`, now or at any earlier commit, changes verdict.
+
 ### Fixed
 
 - **A username, email or display name longer than its column is a 422 and

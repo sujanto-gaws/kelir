@@ -51,6 +51,9 @@
 //! walked through with a synthetic record while the suite stayed green.
 //!
 //! 1. **A governed release record cites at least one verification record.**
+//!    From [`FIRST_PASS_ROW_RELEASE`] on, rules 1, 2 and 7 read only the
+//!    links in its Pre-flight *Independent pass* row — see *Rules 1, 2 and 7,
+//!    the Independent pass row, 2026-10-29* below.
 //! 2. **At least one record it cites is cited by no earlier release.** Rule 1
 //!    alone is satisfied by pointing at a pass from three phases ago; this is
 //!    what makes each release bring a reading of its own. A citation is the
@@ -73,7 +76,8 @@
 //!    every sprint, and eight of them were old enough to have read nothing in
 //!    the release naming them. Since [#483](https://github.com/sujanto-gaws/kelir/issues/483),
 //!    a release that cites something and points at no numbered record is
-//!    refused rather than skipped.
+//!    refused rather than skipped. From `v0.5.0`, it reads the *Independent
+//!    pass* row's links ([#568](https://github.com/sujanto-gaws/kelir/issues/568)).
 //! 8. **A release record's header status is a word the process defines.** Door
 //!    C: a status the detector could not parse left the record ungoverned
 //!    rather than red.
@@ -99,7 +103,10 @@
 //!     row in the block — see *Rule 10, hardened 2026-09-16* below. **And by
 //!     [#486](https://github.com/sujanto-gaws/kelir/issues/486)** (Sprint 21
 //!     row 2): a row starts at any CommonMark list marker, not only `- ` — see
-//!     *Rule 10, every list marker, 2026-09-26* below.
+//!     *Rule 10, every list marker, 2026-09-26* below. **And by
+//!     [#563](https://github.com/sujanto-gaws/kelir/issues/563)** (Sprint 25
+//!     row 14): a lazy line at column 0 does not end the block — see *Rule 10,
+//!     a lazy line at column 0, 2026-10-29* below.
 //!
 //! Rules 11 and 12 are [#484](https://github.com/sujanto-gaws/kelir/issues/484),
 //! Sprint 21 row 4, and they are the first that read `git` rather than the
@@ -112,7 +119,9 @@
 //! 12. **That record, as it stood at the tag, already cites its pass**: a
 //!     status the process defines (`Draft` is expected, `Final` is never
 //!     required), and a citation that resolves, is new and is above the
-//!     high-water mark. See *Rules 11 and 12, 2026-09-26* below.
+//!     high-water mark. See *Rules 11 and 12, 2026-09-26* below. Rules 1, 2
+//!     and 7 are read here from the *Independent pass* row, from `v0.5.0` on,
+//!     and rule 6 reads every citation.
 //!
 //! Rules 13 and 14 are [#549](https://github.com/sujanto-gaws/kelir/issues/549),
 //! Sprint 21 row 19: [#448](https://github.com/sujanto-gaws/kelir/issues/448)'s
@@ -182,17 +191,48 @@
 //!   `NN.` prefix, so `08. Release v0.7.1.md` landing before `07.` changes no
 //!   answer. Rule 5 requires the prefix to be two digits; it does not require
 //!   the series to be dense or ordered.
-//! - **Cite a record by a link this file does not read as a citation.** A
-//!   citation is a path containing `verifications/` in lower case, bounded by
+//! - **Cite a record by a link this file does not read as a citation.** In
+//!   [`citations`], which rules 6, 13 and 14 read, a citation is a path
+//!   containing `verifications/` in lower case, bounded by
 //!   `(`, `)`, a space, a tab or a line end, or a `:` before it, whose path
 //!   part, before any `?query` or `#fragment`, ends `.md`. So
-//!   `../Verifications/…`, `..\verifications\…`, a path in a code span and one
-//!   ending `/` are not citations, as they were not before
+//!   `../Verifications/…`, `..\verifications\…`, a path in a code span with
+//!   no space around it and one ending `/` are not citations, as they were not before
 //!   [#483](https://github.com/sujanto-gaws/kelir/issues/483). Nor are an HTML
 //!   `href="…"`, an angle-bracket destination `(<…>)`, or any citation on a
-//!   line ending CRLF, where the `\r` stays on the path. **That can only
-//!   cost a release**: a citation not read cannot be rule 2's new record or
-//!   rule 7's high one, and a release left citing nothing is refused by rule 1.
+//!   line ending CRLF, where the `\r` stays on the path. **For rules 1, 2 and
+//!   7 below [`FIRST_PASS_ROW_RELEASE`] that can only cost a release**: a
+//!   citation not read cannot be rule 2's new record or rule 7's high one, and
+//!   a release left citing nothing is refused by rule 1. **Rule 14 reads it
+//!   too, and there a citation not read is a reader not checked**:
+//!   [#623](https://github.com/sujanto-gaws/kelir/issues/623) holds that.
+//! - **Link a record in its *Independent pass* row in a form the row reader
+//!   does not read** ([#568](https://github.com/sujanto-gaws/kelir/issues/568)).
+//!   From [`FIRST_PASS_ROW_RELEASE`] on, rules 1, 2 and 7 read
+//!   [`pass_row_citations`]: a `## Pre-flight` table row opening with `|`
+//!   whose first cell is *Independent pass*, and in it the inline and
+//!   reference links a renderer draws. An angle-bracket destination `(<…>)`
+//!   and an HTML `href` are not read, and a row with no opening `|`, or with
+//!   a first cell spelt `_Independent pass_`, is not found. **For the release
+//!   whose row it is, that costs the release, not a pass**: rules 1, 2 and 7
+//!   read nothing else, so a link they miss cannot be the new one or the high
+//!   one. **For a later release it can be a pass**: a record an earlier row
+//!   links in such a form is not in the *seen* set, so citing it again is new
+//!   to rule 2, and rule 7 accepts it when it is above the earlier rows'
+//!   readable citations. **And some shapes are read that a renderer would
+//!   not link, which can be a pass**: a reference definition is read wherever
+//!   it stands outside a fence or a comment, inside a paragraph or at any
+//!   indentation; a row indented four spaces, a code block, is read as a row;
+//!   a row or a definition inside an HTML block other than a comment, such as
+//!   `<details>` or `<div>`, is read, where a renderer shows it as raw text;
+//!   and a heading in setext form, `Notes` over `-----`, ends no section, so
+//!   an *Independent pass* row under it is read as Pre-flight's. Each needs
+//!   CommonMark's block structure — paragraph continuation, the HTML block
+//!   start conditions — which this file does not parse. In the other
+//!   direction, costing the release: a link whose text holds an image,
+//!   `[![badge](…)](…)`, a definition inside a block quote or a list item, and
+//!   a Pre-flight heading at level 3, in setext form or with closing `#`s, are
+//!   not read. No record `main` holds has any of these.
 //! - **Point a symbolic link at an old record.** Rule 6 refuses a record that
 //!   is itself a link, by the directory entry's own type, and [`normalised_citation`]
 //!   resolves `..` lexically, so a linked folder on the path is not followed.
@@ -810,8 +850,216 @@
 //!   including prose that happens to start `Reader session:`. From record 19
 //!   on that costs a refusal by rule 13. Below it, rule 14 skips such a
 //!   record, as it skips one with no line.
+//!
+//! # Rule 10, a lazy line at column 0, 2026-10-29 (#563)
+//!
+//! The `test-engineer` gate on [#486](https://github.com/sujanto-gaws/kelir/issues/486):
+//! [`follow_up_block`] ended the block at the first non-blank line not
+//! indented with a space or a tab, and so at a wrapped line written back at
+//! column 0. **CommonMark reads that line as a lazy continuation** of the row
+//! above it, and the list goes on. Under `two:`, record 07's filed row, a
+//! column-0 wrapped line and record 07's unfiled row under `  * ` (P27) or
+//! `  - ` (P28) **passed**, and so did the same with the wrapped line indented
+//! only by a non-breaking space (P29). The stated limit named a column-0
+//! sibling item, and none of the three is one. **It predates #486**: P28's
+//! marker is the `- ` the rule has always read.
+//!
+//! **The fix is [`starts_a_block`].** A line at column 0 still ends the block
+//! after a blank line, which is where records 06 to 09 put their closing
+//! paragraph, and when it starts a block of its own: a list marker, `>`, an
+//! ATX heading, a fence or a thematic break. Any other line is joined to the
+//! item above it, and the walk reads on. A line led by a non-breaking space or
+//! other Unicode whitespace is at column 0, as it is to CommonMark, so it is
+//! text whatever follows the whitespace.
+//!
+//! **Probes, committed.** `a_lazy_line_at_column_0_does_not_hide_the_rows_after_it`
+//! sends P27, P28 and P29, then P29 with two em spaces, P29 with a `* ` after
+//! the non-breaking space, a column-0 `#404`, which is not a heading, and
+//! `<details>`, a stated limit. Each is refused, quoting the row, and each has
+//! a control with the later row filed, which is accepted. It also sends two
+//! lazy lines under the answer. `a_column_0_line_that_ends_the_list_still_ends_the_block`
+//! sends P30, a column-0 line after a blank line (plain, and led by a
+//! non-breaking space), and fourteen block starts directly after a row. Each
+//! is accepted, with the unfiled row under it unread.
+//!
+//! **Seen red.** Baseline before the change: 54 passed. The two new tests run
+//! against it: the first was red on P27 with `Unfiled([])`. Run one by one,
+//! every probe in it passed the old rule, and the answer with lazy lines read
+//! `Unreadable`. The second was green, because it holds edges the old rule
+//! already drew; mutations 3, 4, 8 and 9 below are its reds. After: 56. Nine
+//! mutations, each applied alone, the suite run, and the file restored:
+//!
+//! | # | Mutation | Red |
+//! |---|---|---|
+//! | 1 | A column-0 line ends the block, as before | `a_lazy_line_…` |
+//! | 2 | A lazy line read as a row | `a_lazy_line_…` (a second unfiled row) |
+//! | 3 | A blank line before column 0 no longer ends the block | `a_column_0_line_…` (P30) |
+//! | 4 | A column-0 list marker no longer ends it | `a_column_0_line_…`, and `the_shapes_rule_10_accepts_are_still_accepted` (record 02's next item) |
+//! | 5 | [`starts_a_block`] reads a block after Unicode whitespace | `a_lazy_line_…` (`* ` after a non-breaking space) |
+//! | 6 | Unicode whitespace read as indentation | both new tests |
+//! | 7 | Any line opening `#` is a heading | `a_lazy_line_…` (`#404`) |
+//! | 8 | A bare marker not read | `a_column_0_line_…` (`-`) |
+//! | 9 | No thematic break | `a_column_0_line_…` |
+//!
+//! **Historic sweep.** `projects/releases/` and `projects/verifications/`
+//! were restored from each of the 86 first-parent `main` commits that touched
+//! them, up to `e2b0c4d`, into a scratch tree, and the suite run over each
+//! with the test binary before the change and after it. **No test the two
+//! share changed verdict on any of the 86**, and both new tests were green on
+//! every tree, since neither reads a file. The 25 trees since `13e1e76` are
+//! green under both binaries; older trees are red under both, for rules and
+//! fixtures younger than the tree, as #486's and #483's sweeps found.
+//!
+//! **Positive control, last.** A wrapped line at column 0 and then
+//! `  * **A probe follow-up, unfiled** · **reproduced** · **not yet filed**`,
+//! written under record 09's last row in a scratch copy of the tree: the
+//! binary before the change passed it, 54 of 54. After: `a_final_record_names_an_issue_for_every_follow_up`
+//! red, quoting the row, and the other 55 green. With a line holding only a
+//! non-breaking space put above the wrapped line, both binaries passed it,
+//! which is the first stated limit rule 10 now names.
+//!
+//! # Rules 1, 2 and 7, the Independent pass row, 2026-10-29 (#568)
+//!
+//! The `test-engineer` gate on [#483](https://github.com/sujanto-gaws/kelir/issues/483):
+//! rules 2 and 7 read every `verifications/` path in a record's body. A
+//! record whose *Independent pass* row copied record 15, which `v0.7.0` had
+//! cited, passed both whenever record 19's path stood anywhere else in it —
+//! in a padded code span in prose (the gate's P3: 29 of 29 green), a link's
+//! title, a second `(…)` after a link, a fenced block, or a prose link. **It
+//! predates #483**: the rules read the whole body before it too.
+//!
+//! **The fix is a second reader, not a narrower [`citations`].**
+//! [`pass_row_citations`] finds the `## Pre-flight` table's rows whose first
+//! cell is *Independent pass* ([`pass_rows`]), outside fences, and reads in
+//! them only the destinations a renderer links ([`link_destinations`]): an
+//! inline link's, its title skipped, and a reference link's, from its
+//! definition, with code spans blanked first. (The `test-engineer` gate
+//! tightened it: see the next section.) Rules 1, 2 and 7 read it from
+//! [`FIRST_PASS_ROW_RELEASE`], `v0.5.0`, the first record with the row; rule
+//! 12's forms of them read it through [`refused_at_tag`] and
+//! [`earlier_releases`]; and so the *seen* set and the high-water mark are
+//! rows too. Records 03 and 04 cite their pass elsewhere and are read whole,
+//! as before. **[`citations`] is unchanged**, and rules 6, 13 and 14 keep it:
+//! rule 14 must not read less, because a narrower reader there could miss a
+//! reader who built the release. A record with no row is refused by rule 1
+//! naming the row, rather than as citing nothing.
+//!
+//! **Probes, committed.** `rules_2_7_and_12_read_only_the_independent_pass_row`
+//! sends a `v0.8.0` whose row copies record 15 after a `v0.7.0` citing it,
+//! with record 19 in ten places a reader does not follow as the row's link:
+//! P3's padded code span in prose, a title, a second target, a fenced fake
+//! row, a padded code span and a link in a code span in the row, a prose
+//! link, a definition the row does not use, a *Tag pushed* row naming the
+//! pass row (record 09's Ship row has the shape), and an *Independent pass*
+//! row in another section. Each is refused by rules 2, 7 and 12. The
+//! controls, a new link inline, beside the copied one and by reference, are
+//! accepted, and so is a `v0.8.0` citing record 16 that `v0.7.0` linked only
+//! in prose. `the_independent_pass_row_is_read_from_the_pre_flight_section`
+//! reads the row in every reference form and its first cell in any case, and
+//! reads no image, angle-bracket destination, fenced definition or undefined
+//! label; it finds no row under another label, in another section or in a
+//! fence, and pins the four stated limits. `the_records_from_v0_5_0_on_cite_their_pass_in_the_row`
+//! reads records 05 to 09 from disk as their rows cite, 09 to 21, and finds
+//! no row in 03 or 04. `a_record_is_read_by_its_row_from_v0_5_0_on` sends
+//! record 03's and record 04's shapes, accepted at `v0.3.0` and `v0.4.0`, and
+//! refused from `v0.5.0` by rules 1 and 12 naming the row.
+//! `rule_14_reads_a_citation_outside_the_independent_pass_row` holds rule
+//! 14's reach: a row citing record 19 and a prose link to a record whose
+//! reader built the range.
+//!
+//! **Seen red.** Baseline before the change: 56 passed. With
+//! [`pass_row_citations`] stubbed to answer the whole body — the reading rules
+//! 1, 2 and 7 did — four of the five new tests were red. Run one by one, all
+//! ten probes passed rules 2, 7 and 12, and record 05's row read 09 and 10.
+//! The rule 14 test was green, as it must be against rule 14 unchanged; its
+//! red is mutation 12. After: 61. Fifteen mutations, each applied alone, the
+//! suite run, and the file restored:
+//!
+//! | # | Mutation | Red |
+//! |---|---|---|
+//! | 1 | The row reader reads the whole body | four of the new tests |
+//! | 2 | A title read with the destination | `rules_2_7_and_12_…` |
+//! | 3 | Code spans read | `rules_2_7_and_12_…` |
+//! | 4 | Fenced lines read as rows | `rules_2_7_and_12_…`, `the_independent_pass_row_…` |
+//! | 5 | Fenced definitions read | `the_independent_pass_row_…` |
+//! | 6 | Rows read past `## Pre-flight` | `rules_2_7_and_12_…`, `the_independent_pass_row_…` |
+//! | 7 | Any cell naming the pass row | the same two |
+//! | 8 | [`FIRST_PASS_ROW_RELEASE`] lowered to `v0.3.0` | `a_governed_release_cites_a_verification_record`, naming records 03 and 04, and `a_record_is_read_by_its_row_…` |
+//! | 9 | [`earlier_releases`] reads the whole body | `rules_2_7_and_12_…` (record 16 in `v0.7.0`'s prose) |
+//! | 10 | [`refused_at_tag`] compares the whole body | `rules_2_7_and_12_…` |
+//! | 11 | [`refused_at_tag`] asks only whether the body cites anything | `a_record_is_read_by_its_row_…` |
+//! | 12 | Rule 14 reads the row | `rule_14_reads_a_citation_outside_…` |
+//! | 13 | Every definition read | `rules_2_7_and_12_…` |
+//! | 14 | An image read as a link | `the_independent_pass_row_…` |
+//! | 15 | A second target read | `rules_2_7_and_12_…` |
+//!
+//! **Mutation 11 had nothing to redden it in the first version of the
+//! tests**, found by reading [`refused_at_tag`] rather than by running it: a
+//! record with no row and a prose citation would have passed rule 12. The
+//! rule 12 assertion in `a_record_is_read_by_its_row_…` was added for it.
+//!
+//! **Historic sweep, over both changes**: the same 86 trees, the binary from
+//! before #563 against the binary after this change. **No test the two share
+//! changed verdict on any of the 86**, and the 25 trees since `13e1e76` are
+//! green under the binary before. Two new tests read the disk and are red on
+//! older trees, as #483's `a_citation_outside_the_verifications_folder_is_refused`
+//! was: `the_records_from_v0_5_0_on_cite_their_pass_in_the_row` on the 79
+//! before `f42a4c4`, where record 09's row first cited record 21, and
+//! `rules_2_7_and_12_read_only_the_independent_pass_row` on the 61 before
+//! `13e1e76`, which added record 19: its controls cite record 19, and rule 12
+//! resolves it on disk.
+//!
+//! **Positive control, last.** In a scratch copy of the tree, a synthetic
+//! `25. A Probe Pass.md` whose reader is in no commit, and a `Final`
+//! `10. Release v0.10.0.md` with the Aftermath `none`, run against the binary
+//! before both changes and after them:
+//!
+//! | Record 10 | Before | After |
+//! |---|---|---|
+//! | The row links record 25 | 54 of 54 | 61 of 61 |
+//! | The row copies record 21, and prose links record 25 | 54 of 54 | red: `each_release_brings_a_pass_no_earlier_release_cited`, `each_release_cites_a_record_written_after_every_earlier_citation` |
+//! | No *Independent pass* row, and prose links record 25 | 54 of 54 | red: `a_governed_release_cites_a_verification_record`, naming the row |
+//!
+//! Nothing else was red, and the scratch copy was removed.
+//!
+//! # The `test-engineer` gate on #563 and #568, 2026-10-29
+//!
+//! Each shape below was rendered by GitHub's own Markdown endpoint and set
+//! beside what the readers took in.
+//!
+//! **Eight rows the row reader read a link from where GitHub draws none**,
+//! each a copied row that passed rules 2, 7 and 12 with record 19 beside it:
+//! a `|` in a link's text or in its title, which splits the cell before any
+//! link is read; an HTML comment, or a tag's attribute, in the row; a fake
+//! row in an HTML comment block; a fake row after a fence line with text
+//! after it, or after one indented four spaces, neither of which closes the
+//! block; and a row under a heading indented two spaces, which ended no
+//! section. **Fixed**: [`cells`] splits the row as GitHub does,
+//! [`without_code_or_html`] blanks raw HTML as well as code spans,
+//! [`rendered_lines`] skips comment blocks and closes a fence only as
+//! CommonMark does, and [`section_title`] reads a heading indented up to
+//! three spaces. **And one for rule 10**: a column-0 ```` ```a`b ```` is text,
+//! since a backtick fence's info string holds no backtick, yet it ended the
+//! follow-up block and hid the row after it; [`opening_fence`] decides now.
+//! Each is a probe in `rules_2_7_and_12_…` or `a_lazy_line_…`, red before the
+//! fix. The shapes left unparsed are in the stated limits.
+//!
+//! **Mutations.** Forty-six, each applied alone and the suite run: the
+//! criteria's eleven, all red, and thirty-five more drawn from where
+//! CommonMark and the code could part. Twenty-four survived the tests as
+//! built. Twenty-two are red now, on probes added to the five tests, and
+//! `governed_from` was split from [`governed`] so that a fixture reaches rules
+//! 2 and 7 at `HEAD`: reading the whole body there had survived every test.
+//! Two are equivalent. Reading an angle-bracket destination differs only for
+//! `(<…verifications/NN….md#f>)`, which GitHub does link, so it would read a
+//! link the stated limit leaves to
+//! [#623](https://github.com/sujanto-gaws/kelir/issues/623). Leaving a
+//! destination's parentheses unbalanced differs only for a name holding `(`
+//! before `.md`, which no verification record has, and rule 6, reading every
+//! citation, refuses such a citation either way. Seven more undo the fixes one
+//! at a time, and each is red.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -875,6 +1123,27 @@ const FIRST_AFTERMATH_GOVERNED_RELEASE: (u32, u32, u32) = (0, 7, 0);
 /// is a claim that `v0.7.0` or `v0.8.0` did not cite its pass before it tagged,
 /// and both did.
 const FIRST_TAG_GOVERNED_RELEASE: (u32, u32, u32) = (0, 7, 0);
+
+/// The first release whose citations rules 1, 2 and 7 read from its
+/// *Independent pass* row alone, as `(major, minor, patch)`
+/// ([#568](https://github.com/sujanto-gaws/kelir/issues/568)). Rules 6, 13
+/// and 14 read every citation in the body, at any version.
+///
+/// **Higher than [`FIRST_GOVERNED_RELEASE`], because the row is younger than
+/// the gate.** [Record 03](../../projects/releases/03.%20Release%20v0.3.0.md)
+/// cites its pass in a prose link below its Ship table, and
+/// [record 04](../../projects/releases/04.%20Release%20v0.4.0.md) in its *Docs
+/// current* row. Neither has an *Independent pass* row, so reading only the
+/// row would leave both citing nothing, and rule 1 would refuse two settled
+/// records. [Record 05](../../projects/releases/05.%20Release%20v0.5.0.md) is
+/// the first with the row, and from it on every record's row cites its pass:
+/// 05 cites record 09, 06 cites 13, 07 cites 15, 08 cites 16 and 17, and 09
+/// cites 19, 20 and 21.
+///
+/// **Lowering this is a claim that records 03 and 04 should be amended.
+/// Raising it lets a record from `v0.5.0` on pass rules 2 and 7 on a citation
+/// outside its row again.**
+const FIRST_PASS_ROW_RELEASE: (u32, u32, u32) = (0, 5, 0);
 
 /// The Aftermath heading rule 10 looks for.
 const AFTERMATH_HEADING: &str = "## Aftermath";
@@ -1169,6 +1438,17 @@ fn release_records() -> Vec<((u32, u32, u32), String, String)> {
 /// ends `.md`. The links are percent-encoded
 /// relative paths (`../verifications/13.%20Sprint%2013%20Independent%20Pass.md`).
 ///
+/// # Who reads this, since #568
+///
+/// **Rules 6, 13 and 14 at any version, and rules 1, 2 and 7 below
+/// [`FIRST_PASS_ROW_RELEASE`].** It reads a path anywhere in the body — in a
+/// title, a second `(…)` after a link, a padded code span, a fenced block or
+/// prose — which is what let a copied *Independent pass* row pass rules 2 and
+/// 7 ([#568](https://github.com/sujanto-gaws/kelir/issues/568)). From the
+/// floor on those rules read [`pass_row_citations`] instead. **This is not
+/// narrowed in place**, because rule 14 reads it: a reader there that read
+/// less could miss a reader who built the release.
+///
 /// # The spelling is not the identity
 ///
 /// Until [#483](https://github.com/sujanto-gaws/kelir/issues/483) this kept
@@ -1181,9 +1461,12 @@ fn release_records() -> Vec<((u32, u32, u32), String, String)> {
 /// every rule that compares citations compares that.
 ///
 /// So the prefix is kept now, because a path cannot be resolved without it.
-/// **A token this does not keep can only cost a release**: it is not a
-/// citation, so it cannot be the new one rule 2 wants or the high one rule 7
-/// wants, and a release left citing nothing is refused by rule 1.
+/// **For rules 1, 2 and 7 below [`FIRST_PASS_ROW_RELEASE`], a token this does
+/// not keep can only cost a release**: it is not a citation, so it cannot be
+/// the new one rule 2 wants or the high one rule 7 wants, and a release left
+/// citing nothing is refused by rule 1. **Rules 6, 13 and 14 read this too**,
+/// and there a token not kept is a link not resolved and a reader not checked
+/// ([#623](https://github.com/sujanto-gaws/kelir/issues/623)).
 ///
 /// # Why this still does not check that the file exists
 ///
@@ -1348,9 +1631,21 @@ fn unresolved(cited: &str, on_disk: &BTreeSet<String>) -> Option<String> {
 ///
 /// # Where the block ends, and where it does not
 ///
-/// **It ends at the first non-blank line back at column 0** — the next
-/// top-level item, the block-quoted note every record carries after its
-/// Aftermath, or prose — so that note is not mistaken for a follow-up.
+/// **It ends at a line back at column 0 that CommonMark ends the list at**:
+/// one after a blank line, such as the closing paragraph every record carries
+/// after its Aftermath, or one that starts a block of its own
+/// ([`starts_a_block`]) — the next top-level item, the block-quoted note, a
+/// heading, a fence or a thematic break — so that note is not mistaken for a
+/// follow-up.
+///
+/// **It does not end at a lazy continuation line**, and until
+/// [#563](https://github.com/sujanto-gaws/kelir/issues/563) it did: it ended
+/// at the first non-blank line back at column 0. A wrapped line at column 0
+/// directly under a row joins the row's paragraph, and the list goes on under
+/// it, so the rows below it are follow-ups a reader sees. **A line indented
+/// only with a non-breaking space or other Unicode whitespace is at column 0**,
+/// as it is to CommonMark, which indents with spaces and tabs alone: it is text
+/// joined to the item above it, never a row, whatever it opens with.
 ///
 /// **It does not end at a blank line or at an indented line that is not a list
 /// item**, and until [#467](https://github.com/sujanto-gaws/kelir/issues/467) it
@@ -1391,23 +1686,30 @@ fn follow_up_block(body: &str) -> Option<(String, Vec<String>)> {
         .trim()
         .to_owned();
     let mut rows: Vec<String> = Vec::new();
+    let mut after_blank = false;
 
     for line in lines {
         let trimmed = line.trim();
 
         if trimmed.is_empty() {
             // Shape C: a blank line makes the list loose, and does not end it.
+            after_blank = true;
             continue;
         }
 
-        if !line.starts_with([' ', '\t']) {
+        // #563: a line not indented with a space or a tab is at column 0, and
+        // only a lazy continuation line keeps the list going there.
+        let indented = line.starts_with([' ', '\t']);
+        if !indented && (after_blank || starts_a_block(line)) {
             break;
         }
+        after_blank = false;
 
-        if after_list_marker(line).is_some() || trimmed.starts_with("~~") {
+        if indented && (after_list_marker(line).is_some() || trimmed.starts_with("~~")) {
             rows.push(trimmed.to_owned());
         } else {
-            // Shape D: a wrapped line belongs to the item above it.
+            // Shape D, and a lazy line: a wrapped line belongs to the item
+            // above it.
             let item = rows.last_mut().unwrap_or(&mut answer);
             item.push(' ');
             item.push_str(trimmed);
@@ -1453,6 +1755,41 @@ fn after_list_marker(line: &str) -> Option<&str> {
     };
 
     rest.strip_prefix([' ', '\t'])
+}
+
+/// Whether a line at column 0 starts a block of its own, and so ends the
+/// follow-up list rather than continuing the row above it lazily
+/// ([#563](https://github.com/sujanto-gaws/kelir/issues/563)).
+///
+/// The blocks CommonMark starts there under a list item: a list marker —
+/// any, since the line is no longer inside the item, so a bare marker and
+/// `2. ` start a list too — a `>`, an ATX heading, a fence, or a thematic
+/// break. **A line that opens with whitespace starts none of them**: a space
+/// or a tab never reaches here, and a non-breaking space is text.
+///
+/// **An HTML block is not among them**, and that costs a refusal, not a
+/// pass: a row after `<details>` is read, where CommonMark would render it as
+/// raw HTML.
+fn starts_a_block(line: &str) -> bool {
+    if line.starts_with(char::is_whitespace) {
+        return false;
+    }
+
+    let bare = line.trim_end();
+    let hashes = bare.bytes().take_while(|&byte| byte == b'#').count();
+    let heading = (1..=6).contains(&hashes)
+        && matches!(bare.as_bytes().get(hashes), None | Some(b' ' | b'\t'));
+    let marks: Vec<char> = bare.chars().filter(|c| !matches!(c, ' ' | '\t')).collect();
+    let thematic_break =
+        marks.len() >= 3 && ['*', '-', '_'].iter().any(|m| marks.iter().all(|c| c == m));
+
+    // A bare marker ending its line is read with the space it lacks.
+    after_list_marker(line).is_some()
+        || after_list_marker(&format!("{bare} ")) == Some("")
+        || bare.starts_with('>')
+        || heading
+        || opening_fence(line).is_some()
+        || thematic_break
 }
 
 /// Whether a follow-up row **opens with** a link to an issue.
@@ -1589,11 +1926,444 @@ fn read_aftermath(body: &str) -> Aftermath {
     )
 }
 
+/// The run of fence characters a line opens with, as its character, its
+/// length and the text after it: three or more backticks or tildes, indented
+/// at most three spaces. Four spaces make an indented code line, not a fence.
+fn fence(line: &str) -> Option<(char, usize, &str)> {
+    let rest = line.trim_start_matches(' ');
+    let mark = rest.chars().next().filter(|c| matches!(c, '`' | '~'))?;
+    let length = rest.chars().take_while(|c| *c == mark).count();
+
+    (line.len() - rest.len() <= 3 && length >= 3).then(|| (mark, length, &rest[length..]))
+}
+
+/// The fence a line opens a fenced code block with, as its character and
+/// length. **A backtick fence's info string holds no backtick**: ```` ```a`b ````
+/// is text, and so a lazy line to [`follow_up_block`].
+fn opening_fence(line: &str) -> Option<(char, usize)> {
+    let (mark, length, info) = fence(line)?;
+
+    (mark == '~' || !info.contains('`')).then_some((mark, length))
+}
+
+/// The lines of `body` a renderer reads as Markdown: outside fenced code
+/// blocks and outside HTML comment blocks.
+///
+/// A fenced block closes at a fence of its own character, at least as long
+/// as the one that opened it, **with nothing after it**: ```` ``` text ```` and
+/// a fence indented four spaces are lines inside the block, not its end. A
+/// comment block opens at a line starting `<!--` and runs to the line holding
+/// `-->`, and every line of it is raw HTML, which a renderer hides.
+fn rendered_lines(body: &str) -> Vec<&str> {
+    let mut open: Option<(char, usize)> = None;
+    let mut in_comment = false;
+    let mut lines = Vec::new();
+
+    for line in body.lines() {
+        if in_comment {
+            in_comment = !line.contains("-->");
+            continue;
+        }
+
+        if let Some((mark, length)) = open {
+            let closes = fence(line).is_some_and(|(closing, at_least, after)| {
+                closing == mark && at_least >= length && after.trim().is_empty()
+            });
+            if closes {
+                open = None;
+            }
+            continue;
+        }
+
+        let rest = line.trim_start_matches(' ');
+        if let Some(opened) = opening_fence(line) {
+            open = Some(opened);
+        } else if line.len() - rest.len() <= 3 && rest.starts_with("<!--") {
+            in_comment = !rest[4..].contains("-->");
+        } else {
+            lines.push(line);
+        }
+    }
+
+    lines
+}
+
+/// The title of a level-1 or level-2 ATX heading, indented up to three
+/// spaces as CommonMark allows: a section boundary.
+fn section_title(line: &str) -> Option<&str> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    let line = if indent <= 3 { &line[indent..] } else { line };
+    let hashes = line.bytes().take_while(|&byte| byte == b'#').count();
+    let rest = line.get(hashes..)?;
+
+    ((1..=2).contains(&hashes) && (rest.is_empty() || rest.starts_with([' ', '\t'])))
+        .then(|| rest.trim())
+}
+
+/// The rows of the `## Pre-flight` table whose first cell reads *Independent
+/// pass* ([#568](https://github.com/sujanto-gaws/kelir/issues/568)), outside
+/// fenced code and HTML comments ([`rendered_lines`]): the row the template
+/// gives the citation.
+///
+/// The first cell is compared with every `*` and every space taken out, in
+/// any case, so `**Independent pass**` (records 07 to 09) and `Independent
+/// pass` (records 05 and 06) are both the row. **Only the first cell, and only
+/// in that section**: record 09's *Tag pushed* row in its `## Ship` table
+/// mentions the *Independent pass* row, and is not it.
+fn pass_rows(body: &str) -> Vec<&str> {
+    let mut in_pre_flight = false;
+    let mut rows = Vec::new();
+
+    for line in rendered_lines(body) {
+        if let Some(title) = section_title(line) {
+            in_pre_flight = title.eq_ignore_ascii_case("Pre-flight");
+            continue;
+        }
+
+        let Some(cells) = line.trim_start().strip_prefix('|') else {
+            continue;
+        };
+        let first: String = cells
+            .split('|')
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .filter(|c| *c != '*' && !c.is_whitespace())
+            .collect();
+
+        if in_pre_flight && first.eq_ignore_ascii_case("independentpass") {
+            rows.push(line);
+        }
+    }
+
+    rows
+}
+
+/// `text` as characters, with every code span and every piece of raw HTML
+/// blanked to spaces, so nothing inside one reads as a link. A run of
+/// backticks opens a span that the next run of the same length closes; a run
+/// nothing closes is literal. Raw HTML is [`raw_html_end`]'s: a comment, or a
+/// tag with whatever its attributes hold, which a renderer does not draw.
+fn without_code_or_html(text: &str) -> Vec<char> {
+    let mut chars: Vec<char> = text.chars().collect();
+    let mut at = 0;
+
+    while at < chars.len() {
+        if chars[at] == '\\' {
+            at += 2;
+            continue;
+        }
+        if chars[at] == '<' {
+            match raw_html_end(&chars, at) {
+                Some(end) => {
+                    chars[at..end].fill(' ');
+                    at = end;
+                }
+                None => at += 1,
+            }
+            continue;
+        }
+        if chars[at] != '`' {
+            at += 1;
+            continue;
+        }
+
+        let run = chars[at..].iter().take_while(|c| **c == '`').count();
+        let close = (at + run..chars.len()).find(|&from| {
+            chars[from] == '`'
+                && chars[from - 1] != '`'
+                && chars[from..].iter().take_while(|c| **c == '`').count() == run
+        });
+
+        match close {
+            Some(close) => {
+                chars[at..close + run].fill(' ');
+                at = close + run;
+            }
+            None => at += run,
+        }
+    }
+
+    chars
+}
+
+/// The index after the raw HTML that opens at `open`, a `<`: an HTML
+/// comment `<!-- … -->`, or an opening or closing tag, `<span title="…">` or
+/// `</span>`, its quoted attribute values read through. `None` when what
+/// follows the `<` is neither, and the `<` is text. **An `<a href="…">` is
+/// a tag like any other**, so its destination is not read
+/// ([#623](https://github.com/sujanto-gaws/kelir/issues/623) names it).
+fn raw_html_end(chars: &[char], open: usize) -> Option<usize> {
+    let rest = &chars[open..];
+    if rest.starts_with(&['<', '!', '-', '-']) {
+        return (open + 4..chars.len())
+            .find(|&at| chars[at..].starts_with(&['-', '-', '>']))
+            .map(|at| at + 3);
+    }
+
+    let name = open + 1 + usize::from(chars.get(open + 1) == Some(&'/'));
+    if !chars.get(name).is_some_and(char::is_ascii_alphabetic) {
+        return None;
+    }
+
+    let mut at = name;
+    while let Some(&c) = chars.get(at) {
+        match c {
+            '>' => return Some(at + 1),
+            '"' | '\'' => at = chars[at + 1..].iter().position(|q| *q == c)? + at + 1,
+            '<' => return None,
+            _ => {}
+        }
+        at += 1;
+    }
+
+    None
+}
+
+/// The destination of an inline link whose `(` is at `open`, and the index
+/// after its closing `)` — or `None` when what follows is not a destination,
+/// an optional title and a `)`, and so is not a link at all.
+///
+/// The destination ends at whitespace or at the `)` that balances the `(`,
+/// and **the title after it is skipped, never read**: `[x](15 "see 19")` links
+/// to record 15. **A destination in angle brackets, `(<…>)`, is not read**
+/// ([#623](https://github.com/sujanto-gaws/kelir/issues/623) names it).
+fn inline_destination(chars: &[char], open: usize) -> Option<(String, usize)> {
+    let past_spaces = |mut at: usize| {
+        while chars.get(at).is_some_and(|c| matches!(c, ' ' | '\t')) {
+            at += 1;
+        }
+        at
+    };
+
+    let start = past_spaces(open + 1);
+    if chars.get(start) == Some(&'<') {
+        return None;
+    }
+
+    let mut at = start;
+    let mut depth = 0;
+    while let Some(&c) = chars.get(at) {
+        match c {
+            '\\' => at += 1,
+            '(' => depth += 1,
+            ')' if depth == 0 => break,
+            ')' => depth -= 1,
+            ' ' | '\t' => break,
+            _ => {}
+        }
+        at += 1;
+    }
+    let destination: String = chars[start..at.min(chars.len())].iter().collect();
+
+    at = past_spaces(at);
+    if let Some(&quote) = chars.get(at).filter(|c| matches!(c, '"' | '\'' | '(')) {
+        let closing = if quote == '(' { ')' } else { quote };
+        at += 1;
+        while chars.get(at).is_some_and(|c| *c != closing) {
+            if chars[at] == '\\' {
+                at += 1;
+            }
+            at += 1;
+        }
+        chars.get(at)?;
+        at = past_spaces(at + 1);
+    }
+
+    (chars.get(at) == Some(&')')).then(|| (destination, at + 1))
+}
+
+/// A link label as CommonMark matches it: in any case, its whitespace runs
+/// one space.
+fn label_key(label: &str) -> String {
+    label
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// Every reference definition `[label]: destination` in `body`, outside
+/// fenced code, by [`label_key`]. The first definition of a label is the one
+/// a link uses.
+fn reference_definitions(body: &str) -> BTreeMap<String, String> {
+    let mut definitions = BTreeMap::new();
+
+    for line in rendered_lines(body) {
+        let Some((label, rest)) = line
+            .trim_start()
+            .strip_prefix('[')
+            .and_then(|rest| rest.split_once("]:"))
+        else {
+            continue;
+        };
+        let Some(destination) = rest.split_whitespace().next() else {
+            continue;
+        };
+
+        if !label.trim().is_empty() && !label.contains('[') && !destination.starts_with('<') {
+            definitions
+                .entry(label_key(label))
+                .or_insert_with(|| destination.to_owned());
+        }
+    }
+
+    definitions
+}
+
+/// Every link destination `text` renders, in order
+/// ([#568](https://github.com/sujanto-gaws/kelir/issues/568)): an inline
+/// link's `](destination)`, and a reference link's — full `[text][label]`,
+/// collapsed `[label][]` or shortcut `[label]` — from its definition.
+///
+/// **Rendered, and nothing else.** Code spans and raw HTML are blanked
+/// first, a title is skipped, a second `(…)` after a link is text, and an
+/// image is not a link. It reads one table cell: [`pass_row_citations`] hands
+/// it the row's cells, and the definitions come from the whole body, because
+/// a reference link's destination is written wherever its definition is.
+fn link_destinations(text: &str, definitions: &BTreeMap<String, String>) -> Vec<String> {
+    let chars = without_code_or_html(text);
+    let mut destinations = Vec::new();
+    let mut opens: Vec<usize> = Vec::new();
+    let mut at = 0;
+
+    while at < chars.len() {
+        match chars[at] {
+            '\\' => at += 1,
+            '[' => opens.push(at),
+            ']' => {
+                if let Some(open) = opens.pop() {
+                    let image = open > 0 && chars[open - 1] == '!';
+                    let link_text: String = chars[open + 1..at].iter().collect();
+                    let defined = |label: &str| definitions.get(&label_key(label)).cloned();
+
+                    let link = match chars.get(at + 1) {
+                        Some('(') => inline_destination(&chars, at + 1),
+                        Some('[') => {
+                            chars[at + 2..]
+                                .iter()
+                                .position(|c| *c == ']')
+                                .and_then(|length| {
+                                    let close = at + 2 + length;
+                                    let label: String = chars[at + 2..close].iter().collect();
+                                    let label = if label.trim().is_empty() {
+                                        &link_text
+                                    } else {
+                                        &label
+                                    };
+                                    defined(label).map(|destination| (destination, close + 1))
+                                })
+                        }
+                        _ => defined(&link_text).map(|destination| (destination, at + 1)),
+                    };
+
+                    if let Some((destination, end)) = link {
+                        if !image {
+                            destinations.push(destination);
+                        }
+                        opens.clear();
+                        at = end;
+                        continue;
+                    }
+                }
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+
+    destinations
+}
+
+/// The verification records the *Independent pass* row links to, as written —
+/// or `None` when the record has no such row
+/// ([#568](https://github.com/sujanto-gaws/kelir/issues/568)).
+///
+/// [`pass_rows`] finds the row, [`cells`] splits it, and
+/// [`link_destinations`] reads what each cell links to; a destination is a citation on [`citations`]' terms, a path through
+/// `verifications/` whose path part ends `.md`, so the row's link to the
+/// folder itself is not one.
+fn pass_row_citations(body: &str) -> Option<BTreeSet<String>> {
+    let rows = pass_rows(body);
+    if rows.is_empty() {
+        return None;
+    }
+
+    let definitions = reference_definitions(body);
+    Some(
+        rows.iter()
+            .flat_map(|row| cells(row))
+            .flat_map(|cell| link_destinations(cell, &definitions))
+            .filter(|cited| cited.contains("verifications/") && path_part(cited).ends_with(".md"))
+            .collect(),
+    )
+}
+
+/// A table row's cells, split as GitHub splits them before it reads any
+/// link: at every `|` no backslash escapes, inside a link or a code span
+/// too. So `[Record 19 | the pass](…)` is two cells of text, and no link.
+fn cells(row: &str) -> Vec<&str> {
+    let mut cells = Vec::new();
+    let mut from = 0;
+    let mut escaped = false;
+
+    for (at, c) in row.char_indices() {
+        if c == '|' && !escaped {
+            cells.push(&row[from..at]);
+            from = at + 1;
+        }
+        escaped = c == '\\' && !escaped;
+    }
+    cells.push(&row[from..]);
+
+    cells
+}
+
+/// The citations rules 1, 2 and 7 read from a release record: from
+/// [`FIRST_PASS_ROW_RELEASE`] on, the *Independent pass* row's alone; below
+/// it, every citation in the body.
+fn pass_citations(version: (u32, u32, u32), body: &str) -> BTreeSet<String> {
+    if version < FIRST_PASS_ROW_RELEASE {
+        citations(body)
+    } else {
+        pass_row_citations(body).unwrap_or_default()
+    }
+}
+
+/// Rule 1's judgement of one record: why it cites no verification record, or
+/// `None` when it cites one. **From [`FIRST_PASS_ROW_RELEASE`] on, a record
+/// with no *Independent pass* row is told so**, rather than that it cites
+/// nothing, since the row is what to add.
+fn uncited(version: (u32, u32, u32), body: &str) -> Option<String> {
+    if version >= FIRST_PASS_ROW_RELEASE && pass_row_citations(body).is_none() {
+        return Some("has no `Independent pass` row in its `## Pre-flight` table".to_owned());
+    }
+
+    pass_citations(version, body).is_empty().then(|| {
+        if version >= FIRST_PASS_ROW_RELEASE {
+            "its `Independent pass` row links to no verification record".to_owned()
+        } else {
+            "cites no verification record".to_owned()
+        }
+    })
+}
+
+/// A release record as the rules that compare citations carry it.
+fn as_release(version: (u32, u32, u32), name: &str, body: &str) -> Release {
+    (version, name.to_owned(), pass_citations(version, body))
+}
+
 fn governed() -> Vec<Release> {
-    release_records()
+    governed_from(release_records())
+}
+
+/// The governed releases among `records`, each read by [`as_release`]: the
+/// releases rules 2 and 7 judge at `HEAD`.
+fn governed_from(records: Vec<((u32, u32, u32), String, String)>) -> Vec<Release> {
+    records
         .into_iter()
         .filter(|(version, _, body)| *version >= FIRST_GOVERNED_RELEASE && says_final(body))
-        .map(|(version, name, body)| (version, name, citations(&body)))
+        .map(|(version, name, body)| as_release(version, &name, &body))
         .collect()
 }
 
@@ -1816,7 +2586,8 @@ fn verification_files_at_tag(tag: &str) -> BTreeSet<String> {
 /// A record is `Draft` until after its tag, and the next release can tag
 /// before it goes `Final`: record 07 went `Final` two days after `v0.7.0`. So
 /// counting only `Final` records would let a tag recycle the citations of a
-/// release still in `Draft`.
+/// release still in `Draft`. Each is read by [`as_release`], so from
+/// [`FIRST_PASS_ROW_RELEASE`] on its *Independent pass* row is what it cited.
 fn earlier_releases(
     records: &[((u32, u32, u32), String, String)],
     version: (u32, u32, u32),
@@ -1824,7 +2595,7 @@ fn earlier_releases(
     let mut earlier: Vec<Release> = records
         .iter()
         .filter(|(at, ..)| *at < version)
-        .map(|(at, name, body)| (*at, name.clone(), citations(body)))
+        .map(|(at, name, body)| as_release(*at, name, body))
         .collect();
     earlier.sort_by_key(|(at, ..)| *at);
     earlier
@@ -1870,7 +2641,9 @@ fn record_at_tag(version: (u32, u32, u32), listing: &[String]) -> Result<String,
 /// state a status the process defines, once — **`Draft` is the expected
 /// answer**, since the Ship rows are written after the tag — and must cite a
 /// record that resolves, is new against `earlier` and is above its high-water
-/// mark: rules 1, 2, 4, 6, 7, 8 and 9, through their own functions.
+/// mark: rules 1, 2, 4, 6, 7, 8 and 9, through their own functions. **Rules 1,
+/// 2 and 7 read the *Independent pass* row** from [`FIRST_PASS_ROW_RELEASE`]
+/// on, as they do at `HEAD`, and rule 6 reads every citation.
 fn refused_at_tag(
     label: &str,
     version: (u32, u32, u32),
@@ -1888,20 +2661,21 @@ fn refused_at_tag(
         ));
     }
 
-    let cited = citations(body);
-    if cited.is_empty() {
-        refused.push(format!("{label} — cites no verification record"));
+    if let Some(why) = uncited(version, body) {
+        refused.push(format!("{label} — {why}"));
         return refused;
     }
 
-    for record in &cited {
+    // Rule 6 reads every citation in the body; rules 2 and 7, from the floor
+    // on, the Independent pass row's (#568).
+    for record in &citations(body) {
         if let Some(why) = unresolved(record, on_disk) {
             refused.push(format!("{label} — cites {record}, {why}"));
         }
     }
 
     let mut releases = earlier.to_vec();
-    releases.push((version, label.to_owned(), cited));
+    releases.push(as_release(version, label, body));
     let own = format!("{label} — ");
     refused.extend(
         recycled(&releases)
@@ -1914,17 +2688,25 @@ fn refused_at_tag(
 }
 
 /// Rule 1. **A release that shipped says which pass read it.**
+///
+/// **In its *Independent pass* row** from [`FIRST_PASS_ROW_RELEASE`] on, since
+/// [#568](https://github.com/sujanto-gaws/kelir/issues/568): a record with no
+/// such row is refused naming the row, and so is a row that links to no
+/// verification record, wherever else the body cites one.
 #[test]
 fn a_governed_release_cites_a_verification_record() {
-    let silent: Vec<_> = governed()
+    let silent: Vec<_> = release_records()
         .into_iter()
-        .filter(|(.., cited)| cited.is_empty())
-        .map(|(_, name, _)| name)
+        .filter(|(version, _, body)| *version >= FIRST_GOVERNED_RELEASE && says_final(body))
+        .filter_map(|(version, name, body)| {
+            uncited(version, &body).map(|why| format!("{name} — {why}"))
+        })
         .collect();
 
     assert!(
         silent.is_empty(),
-        "a Final release record cites no verification record (sprint plan §2, #392):\n  {}\n\n\
+        "a Final release record cites no verification record (sprint plan §2, #392, #568):\n  \
+         {}\n\n\
          Add the record the release rests on to projects/verifications/ and link it from the \
          Pre-flight table's `Independent pass` row. A release record goes Final when the \
          release is done, and it is not done while nobody outside the work has read it.",
@@ -1948,6 +2730,11 @@ fn a_governed_release_cites_a_verification_record() {
 /// through [`normalised_citation`], so `./15…` is record 15 and not a new
 /// string, and a citation that points outside `projects/verifications/` is not
 /// a new record either. A release whose every citation is refused is red here.
+///
+/// **Read from the *Independent pass* row, since [#568](https://github.com/sujanto-gaws/kelir/issues/568)**,
+/// from [`FIRST_PASS_ROW_RELEASE`] on, for this release and for every earlier
+/// one: a path elsewhere in the record is neither the new record nor a spent
+/// one.
 #[test]
 fn each_release_brings_a_pass_no_earlier_release_cited() {
     let recycled = recycled(&governed());
@@ -2128,9 +2915,16 @@ fn a_cited_verification_record_exists() {
 /// The rule: *a governed release cites a record numbered above every record any
 /// earlier release cited.* Records are numbered in the order they are written,
 /// so a number above the high-water mark is a record written after the last
-/// release read anything. It holds against all five governed releases —
+/// release read anything. It held against the five governed releases when it
+/// landed —
 /// `v0.3.0` → 03; `v0.4.0` → 06 > 03; `v0.5.0` → 09, 10 > 06; `v0.6.0` → 13, 14
 /// > 10; `v0.7.0` → 15 > 14 — and it refuses the probe, which cites 01.
+///
+/// **Since [#568](https://github.com/sujanto-gaws/kelir/issues/568) it reads
+/// the *Independent pass* row** from [`FIRST_PASS_ROW_RELEASE`] on, and holds
+/// against all seven: `v0.3.0` and `v0.4.0` are read whole, as before, then
+/// `v0.5.0` → 09 > 06; `v0.6.0` → 13 > 09; `v0.7.0` → 15 >
+/// 13; `v0.8.0` → 16, 17 > 15; `v0.9.0` → 19, 20, 21 > 17.
 ///
 /// A release citing nothing at all is rule 1's, not this one's, so this stays
 /// silent about it rather than reporting the same record twice with two
@@ -2459,10 +3253,13 @@ fn the_pre_rule_releases_are_named_rather_than_silently_skipped() {
 ///
 /// - **A follow-up written back at column 0**, as a sibling of the
 ///   `- **Follow-ups filed:**` item rather than a row under it. The block ends
-///   there, because a column-0 line is where the block-quoted note and the
-///   next top-level item begin, and nothing in the line says which it is.
-///   Markdown renders it outside the follow-up list too, so a reader sees the
-///   same edge the walk does.
+///   there, because a column-0 list marker is where the next top-level item
+///   begins. Markdown renders it outside the follow-up list too, so a reader
+///   sees the same edge the walk does. **Since [#563](https://github.com/sujanto-gaws/kelir/issues/563)
+///   that is the first of the column-0 lines the block ends at directly under
+///   a row**: a quote, a heading, a fence or a thematic break ends it too
+///   ([`starts_a_block`]), and a lazy continuation line is read, and so are
+///   the rows after it.
 /// - **A follow-up under another label** — `- **Issues found post-release:**`,
 ///   or record 02's `- **Carried into the sprint plan:**`. Rule 10 reads the
 ///   one label the template gives follow-ups.
@@ -2484,6 +3281,18 @@ fn the_pre_rule_releases_are_named_rather_than_silently_skipped() {
 ///   one: its indented lines opening `-`, `*`, `+` or `N.` are read as rows.
 ///   Before #486 only its `- ` lines were. That costs a refusal, not a pass, and
 ///   no record `main` has held carries one.
+///
+/// Two more, drawn 2026-10-29 when [#563](https://github.com/sujanto-gaws/kelir/issues/563)
+/// read past a lazy line at column 0:
+///
+/// - **A line holding only a non-breaking space is blank here**, because
+///   `trim()` strips Unicode whitespace, and CommonMark reads it as text. A
+///   column-0 line after it then ends the block, where CommonMark reads it as
+///   lazy and keeps the list going. **That costs a pass**: a row after the two
+///   is not read. No record `main` holds carries such a line.
+/// - **An HTML block is not one of the blocks [`starts_a_block`] knows**, so a
+///   row after `<details>` at column 0 is read, where CommonMark renders it as
+///   raw HTML. That costs a refusal, not a pass.
 #[test]
 fn a_final_record_names_an_issue_for_every_follow_up() {
     let mut unfiled: Vec<String> = Vec::new();
@@ -2520,9 +3329,11 @@ fn a_final_record_names_an_issue_for_every_follow_up() {
 
     assert!(
         unfiled.is_empty(),
-        "a `Final` release record carries a follow-up with no issue (#445, #467, #486):\n  {}\n\n\
+        "a `Final` release record carries a follow-up with no issue (#445, #467, #486, #563):\n  \
+         {}\n\n\
          Every row under `{FOLLOW_UPS_LABEL}` opens with a link to {ISSUE_URL}<number> — \
-         including rows after a blank line, rows after a wrapped line, rows nested under \
+         including rows after a blank line, rows after a wrapped line, rows after a wrapped \
+         line back at column 0, rows nested under \
          another row, rows under any list marker (`-`, `*`, `+`, `2.`, `2)`), and rows under \
          an answer of `none`. **Opening with it, not merely \
          containing it**: record 07's own bad row cited \
@@ -3033,6 +3844,136 @@ fn record_07_at_00a27b4_and_the_earlier_probes_are_still_refused() {
 }
 
 // ---------------------------------------------------------------------------
+// A lazy line at column 0 (#563)
+// ---------------------------------------------------------------------------
+
+/// A wrapped line of record 07's filed row, as #563's probes wrote it.
+const WRAPPED: &str = "and the issue carries the reproduction in full";
+
+/// Record 07's filed row, `between`, and then `row` under `marker`: the shape
+/// of #563's probes.
+fn row_after(between: &str, row: &str, marker: &str) -> String {
+    record_with_follow_ups(&format!(
+        "- **Follow-ups filed:** two:\n{RECORD_07_FILED_ROW}\n{between}\n{}",
+        under_marker(row, marker)
+    ))
+}
+
+/// **A lazy line at column 0 does not hide the rows after it**
+/// ([#563](https://github.com/sujanto-gaws/kelir/issues/563)).
+///
+/// The `test-engineer` gate on [#486](https://github.com/sujanto-gaws/kelir/issues/486)
+/// wrote a filed row, a wrapped line back at column 0, and record 07's unfiled
+/// row under it. CommonMark reads the column-0 line as a lazy continuation of
+/// the row above, and the list goes on, so a reader sees the unfiled row as
+/// the next follow-up. The walk ended the block at the column-0 line, and
+/// passed. A line indented only with a non-breaking space is the same line to
+/// CommonMark, which indents with spaces and tabs alone.
+#[test]
+fn a_lazy_line_at_column_0_does_not_hide_the_rows_after_it() {
+    let nbsp = format!("\u{a0}{WRAPPED}");
+    let em_spaces = format!("\u{2003}\u{2003}{WRAPPED}");
+    let nbsp_marker = format!("\u{a0}\u{a0}* {WRAPPED}");
+
+    for (probe, between, marker) in [
+        ("P27", WRAPPED, "* "),
+        ("P28", WRAPPED, "- "),
+        ("P29", nbsp.as_str(), "* "),
+        ("P29 with two em spaces", em_spaces.as_str(), "* "),
+        ("P29, `* ` after the space", nbsp_marker.as_str(), "* "),
+        ("an issue number, not a heading", "#404 carries it", "* "),
+        ("an HTML tag, a stated limit", "<details>", "* "),
+        ("seven hashes, not a heading", "####### seven", "* "),
+        ("two dashes, not a thematic break", "--", "* "),
+        ("a backtick after three, not a fence", "```a`b", "* "),
+    ] {
+        let unfiled = row_after(between, RECORD_07_UNFILED_ROW, marker);
+        assert!(
+            refuses_the_unfiled_row(&unfiled),
+            "{probe}: record 07's unfiled row under {marker:?}, after a lazy line {between:?}, \
+             went unread or was not alone: {:?}",
+            read_aftermath(&unfiled)
+        );
+
+        let filed = row_after(between, RECORD_07_FILED_ROW, marker);
+        assert!(
+            accepted(&filed),
+            "{probe}'s control: the later row filed, and the lazy line joined to the row above \
+             it rather than read as a row: {:?}",
+            read_aftermath(&filed)
+        );
+    }
+
+    let under_the_answer = record_with_follow_ups(&format!(
+        "- **Follow-ups filed:** two,\nboth below:\n{RECORD_07_FILED_ROW}\n{WRAPPED}\n\
+         and wrapped again\n{}",
+        under_marker(RECORD_07_UNFILED_ROW, "* ")
+    ));
+    assert!(
+        refuses_the_unfiled_row(&under_the_answer),
+        "a lazy line under the answer joins the answer, and two lazy lines in a row are one \
+         paragraph: {:?}",
+        read_aftermath(&under_the_answer)
+    );
+
+    let after_a_loose_row = record_with_follow_ups(&format!(
+        "- **Follow-ups filed:** two:\n{RECORD_07_FILED_ROW}\n\n{RECORD_07_FILED_ROW}\n{WRAPPED}\n{}",
+        under_marker(RECORD_07_UNFILED_ROW, "* ")
+    ));
+    assert!(
+        refuses_the_unfiled_row(&after_a_loose_row),
+        "a blank line earlier in the list does not end it at a later lazy line: {:?}",
+        read_aftermath(&after_a_loose_row)
+    );
+}
+
+/// **The block still ends where CommonMark ends the list**
+/// ([#563](https://github.com/sujanto-gaws/kelir/issues/563)): at a column-0
+/// line after a blank line, and at a column-0 line that starts a block of its
+/// own, even directly after a row. Each is followed by record 07's unfiled
+/// row, which a reader sees outside the follow-up list.
+#[test]
+fn a_column_0_line_that_ends_the_list_still_ends_the_block() {
+    // P30: the closing paragraph of records 06 to 09 follows a blank line.
+    for between in [format!("\n{WRAPPED}"), format!("\n\u{a0}{WRAPPED}")] {
+        let p30 = row_after(&between, RECORD_07_UNFILED_ROW, "* ");
+        assert!(
+            accepted(&p30),
+            "P30: a column-0 line after a blank line ends the list, and the row under it is \
+             another list's: {:?}",
+            read_aftermath(&p30)
+        );
+    }
+
+    for opener in [
+        "- another top-level item",
+        "* another top-level item",
+        "+ another top-level item",
+        "1. an ordered list",
+        "2) an ordered list",
+        "-",
+        "> a note",
+        "# A heading",
+        "###### A heading",
+        "#",
+        "##\tA heading after a tab",
+        "```",
+        "~~~",
+        "---",
+        "***",
+        "___",
+        "_ _ _",
+    ] {
+        let body = row_after(opener, RECORD_07_UNFILED_ROW, "* ");
+        assert!(
+            accepted(&body),
+            "{opener:?} at column 0, directly after a row, starts a block of its own: {:?}",
+            read_aftermath(&body)
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Where a citation points (#483)
 // ---------------------------------------------------------------------------
 
@@ -3513,6 +4454,8 @@ fn record_at_its_tag(status: &str, cited: &[&str]) -> String {
         "# Release v0.8.0 — 2099-01-01\n\
          \n\
          **Status:** {status} · **Last updated:** 2099-01-01\n\
+         \n\
+         ## Pre-flight\n\
          \n\
          | **Independent pass** | … | {} |\n",
         links.join(" · ")
@@ -5091,5 +6034,602 @@ fn a_separator_byte_in_a_message_does_not_hide_its_session() {
          {:?} {:?}",
         merge[0].paths,
         merge[1].paths
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The Independent pass row (#568)
+// ---------------------------------------------------------------------------
+
+/// A `Final` `v0.8.0` whose *Independent pass* row carries `row` as its
+/// evidence, with `after` under the Pre-flight table and a Ship section below.
+/// The row's *Check* cell links the folder, as records 07 to 09 do.
+fn record_with_pass_row(row: &str, after: &str) -> String {
+    format!(
+        "# Release v0.8.0 — 2099-01-01\n\
+         \n\
+         **Status:** Final · **Last updated:** 2099-01-01\n\
+         \n\
+         ## Pre-flight\n\
+         \n\
+         | Step | Check | Evidence |\n\
+         |---|---|---|\n\
+         | **Independent pass** | A record in [`projects/verifications/`](../verifications/) | {row} |\n\
+         | Scope verified | Every committed FR ID traced | a report |\n\
+         \n\
+         {after}\n\
+         \n\
+         ## Ship\n\
+         \n\
+         | Step | Evidence |\n\
+         |---|---|\n\
+         | Tag pushed | `v0.8.0` |\n"
+    )
+}
+
+/// The numbers of the records a body's *Independent pass* row points at, or
+/// `None` when it has no row.
+fn pass_row_numbers(body: &str) -> Option<Vec<u32>> {
+    pass_row_citations(body).map(|cited| {
+        cited_records(&cited)
+            .iter()
+            .filter_map(|record| record_number(record))
+            .collect()
+    })
+}
+
+/// **The row is the Pre-flight table's *Independent pass* row, and what it
+/// cites is what it links to** ([#568](https://github.com/sujanto-gaws/kelir/issues/568)).
+#[test]
+fn the_independent_pass_row_is_read_from_the_pre_flight_section() {
+    let r16 = RECORD_16_CITED;
+    let r19 = RECORD_19_CITED;
+
+    for (row, after, numbers, how) in [
+        (
+            format!("[Record 16]({r16}) · [Record 19]({r19})"),
+            String::new(),
+            vec![16, 19],
+            "two links; the folder link in the Check cell is not a citation",
+        ),
+        (
+            "[Record 16][r16]".to_owned(),
+            format!("[r16]: {r16}"),
+            vec![16],
+            "a full reference",
+        ),
+        (
+            "[r16][]".to_owned(),
+            format!("[R16]:  {r16}"),
+            vec![16],
+            "a collapsed reference, its label in another case",
+        ),
+        (
+            "[r16]".to_owned(),
+            format!("[r16]:{r16}"),
+            vec![16],
+            "a shortcut reference, no space after the colon",
+        ),
+        (
+            format!("[`#404` — a code span in the link text]({r16}#7-findings)"),
+            String::new(),
+            vec![16],
+            "a code span in the text, and a fragment",
+        ),
+        (
+            format!("![record 16]({r16})"),
+            String::new(),
+            vec![],
+            "an image is not a link",
+        ),
+        (
+            format!("[record 16](<{r16}>)"),
+            String::new(),
+            vec![],
+            "an angle-bracket destination, #623's, is not read",
+        ),
+        (
+            "[r16][]".to_owned(),
+            format!("```\n[r16]: {r16}\n```"),
+            vec![],
+            "a definition in a fence defines nothing",
+        ),
+        (
+            "[r16][]".to_owned(),
+            format!("A paragraph's first line\n[r16]: {r16}"),
+            vec![16],
+            "a stated limit: a definition inside a paragraph is read",
+        ),
+        (
+            "[Record 16] with no definition".to_owned(),
+            String::new(),
+            vec![],
+            "brackets with no definition are text",
+        ),
+        (
+            format!("[a]({r16} 'single') · [b]({r19} (parenthesised))"),
+            String::new(),
+            vec![16, 19],
+            "a title in single quotes and in parentheses",
+        ),
+        (
+            format!("[record 19]({r19} trailing)"),
+            String::new(),
+            vec![],
+            "text after a destination that is no title: not a link",
+        ),
+        (
+            "[r16][]".to_owned(),
+            format!("[r16]: {r16}\n\n[r16]: {r19}"),
+            vec![16],
+            "the first definition of a label is the one used",
+        ),
+        (
+            "[Record   16][]".to_owned(),
+            format!("[record 16]: {r16}"),
+            vec![16],
+            "a label's whitespace runs are one space",
+        ),
+        (
+            format!("[see [the note](https://example.com) here]({r19})"),
+            String::new(),
+            vec![],
+            "a link inside link text: the outer brackets are text",
+        ),
+        (
+            format!("\\` [record 16]({r16}) `"),
+            String::new(),
+            vec![16],
+            "an escaped backtick opens no code span",
+        ),
+        (
+            format!("[record 16]({r16}) <b>bold</b> and 1 < 2"),
+            String::new(),
+            vec![16],
+            "a tag beside the link, and a `<` that opens none",
+        ),
+        (
+            "[r16][]".to_owned(),
+            format!("```\n[r16]: {r19}\n````\n\n[r16]: {r16}"),
+            vec![16],
+            "a longer fence closes the block",
+        ),
+        (
+            "[r16][]".to_owned(),
+            format!("```\n~~~\n[r16]: {r19}\n```\n\n[r16]: {r16}"),
+            vec![16],
+            "a fence of the other character does not",
+        ),
+        (
+            "[r16][]".to_owned(),
+            format!("~~struck~~ opens a line\n\n[r16]: {r16}"),
+            vec![16],
+            "two tildes are a strikethrough, not a fence",
+        ),
+        (
+            "[r16][]".to_owned(),
+            format!("<!--\n[r16]: {r19}\n-->\n\n[r16]: {r16}"),
+            vec![16],
+            "a definition in an HTML comment defines nothing",
+        ),
+        (
+            format!("` a `` b ` [Record 16]({r16}) `"),
+            String::new(),
+            vec![16],
+            "a code span is closed by a run of its own length, not by part of a longer one",
+        ),
+        (
+            "[Record 19][r[19]".to_owned(),
+            format!("[r[19]: {r19}"),
+            vec![],
+            "a label holding `[` is no label",
+        ),
+        (
+            "[r16][ ]".to_owned(),
+            format!("[r16]: {r16}"),
+            vec![16],
+            "brackets holding only a space are no label, so the text is a shortcut",
+        ),
+    ] {
+        assert_eq!(
+            pass_row_numbers(&record_with_pass_row(&row, &after)),
+            Some(numbers),
+            "{how}: {row}"
+        );
+    }
+
+    let house = record_with_pass_row(&format!("[Record 16]({r16})"), "");
+    for (from, to, numbers, how) in [
+        (
+            "| **Independent pass** |",
+            "| independent PASS |",
+            Some(vec![16]),
+            "any case, no bold",
+        ),
+        (
+            "| **Independent pass** |",
+            "| Independent pass |",
+            Some(vec![16]),
+            "records 05 and 06",
+        ),
+        (
+            "| **Independent pass** |",
+            "| Independent passes |",
+            None,
+            "another label",
+        ),
+        (
+            "## Pre-flight",
+            "## Preflight",
+            None,
+            "no Pre-flight section",
+        ),
+        (
+            "## Pre-flight",
+            "## Ship",
+            None,
+            "the row under another section",
+        ),
+        (
+            "| **Independent pass** |",
+            "```\n| **Independent pass** |",
+            None,
+            "the row inside a fence",
+        ),
+        (
+            "| **Independent pass** |",
+            "**Independent pass** |",
+            None,
+            "a stated limit: a row with no opening `|` is not found",
+        ),
+        (
+            "| **Independent pass** |",
+            "| _Independent pass_ |",
+            None,
+            "a stated limit: a first cell in `_` is not found",
+        ),
+        (
+            "| **Independent pass** |",
+            "    | **Independent pass** |",
+            Some(vec![16]),
+            "a stated limit: a row indented four spaces, a code block, is read",
+        ),
+        (
+            "| **Independent pass** |",
+            "   | **Independent pass** |",
+            Some(vec![16]),
+            "a row indented three spaces",
+        ),
+        (
+            "## Pre-flight",
+            "## Pre-flight\n\n### Before the tag",
+            Some(vec![16]),
+            "a level-3 heading inside Pre-flight does not leave it",
+        ),
+    ] {
+        assert_eq!(
+            pass_row_numbers(&house.replacen(from, to, 1)),
+            numbers,
+            "{how}"
+        );
+    }
+}
+
+/// **Records 05 to 09 are read as their rows cite**, and records 03 and 04,
+/// below [`FIRST_PASS_ROW_RELEASE`], have no row to read.
+#[test]
+fn the_records_from_v0_5_0_on_cite_their_pass_in_the_row() {
+    let directory = repository_root().join(RELEASES);
+    let read =
+        |name: &str| fs::read_to_string(directory.join(name)).expect("the record is readable");
+
+    for (name, numbers) in [
+        ("05. Release v0.5.0.md", vec![9]),
+        ("06. Release v0.6.0.md", vec![13]),
+        ("07. Release v0.7.0.md", vec![15]),
+        ("08. Release v0.8.0.md", vec![16, 17]),
+        ("09. Release v0.9.0.md", vec![19, 20, 21]),
+    ] {
+        assert_eq!(pass_row_numbers(&read(name)), Some(numbers), "{name}");
+    }
+
+    for name in ["03. Release v0.3.0.md", "04. Release v0.4.0.md"] {
+        let body = read(name);
+        assert!(
+            pass_row_citations(&body).is_none() && !citations(&body).is_empty(),
+            "{name} cites its pass outside any Independent pass row, which is why the floor is \
+             above it"
+        );
+    }
+}
+
+/// **Rules 2, 7 and 12 read the row, and nothing else in the record**
+/// ([#568](https://github.com/sujanto-gaws/kelir/issues/568)).
+///
+/// The gate on [#483](https://github.com/sujanto-gaws/kelir/issues/483)
+/// planted P3: a row copying record 15, which `v0.7.0` cited, and record 19 in
+/// a code span in prose. All 29 tests were green. Each probe here is that
+/// shape with record 19 somewhere else a reader does not follow as the row's
+/// link, refused by rule 2, rule 7 and rule 12; the controls are accepted.
+#[test]
+fn rules_2_7_and_12_read_only_the_independent_pass_row() {
+    let r15 = RECORD_15_CITED;
+    let r16 = RECORD_16_CITED;
+    let r19 = RECORD_19_CITED;
+    let copied = format!("[Record 15]({r15})");
+    let on_disk = verification_files();
+
+    // Rules 2 and 7 judge both as `HEAD` holds them; rule 12 judges v0.8.0 at
+    // its tag, against the release before it.
+    let judge = |v0_7_0: &str, body: &str| {
+        let records = vec![
+            (
+                (0, 7, 0),
+                "07. Release v0.7.0.md".to_owned(),
+                v0_7_0.to_owned(),
+            ),
+            (
+                (0, 8, 0),
+                "08. Release v0.8.0.md".to_owned(),
+                body.to_owned(),
+            ),
+        ];
+        let releases = governed_from(records.clone());
+        let earlier = earlier_releases(&records, (0, 8, 0));
+        (
+            recycled(&releases).len(),
+            backward(&releases).len(),
+            refused_at_tag("08 at v0.8.0", (0, 8, 0), body, &earlier, &on_disk),
+        )
+    };
+    let v0_7_0 = record_with_pass_row(&copied, "");
+
+    for (probe, row, after) in [
+        (
+            "P3: a padded code span in prose",
+            copied.clone(),
+            format!("The rest was read in ` {r19} `."),
+        ),
+        (
+            "a title",
+            format!("[Record 15]({r15} \"see {r19} now\")"),
+            String::new(),
+        ),
+        (
+            "a second target",
+            format!("[Record 15]({r15})({r19})"),
+            String::new(),
+        ),
+        (
+            "a fenced line",
+            copied.clone(),
+            format!("```text\n| **Independent pass** | … | [Record 19]({r19}) |\n```"),
+        ),
+        (
+            "a padded code span in the row",
+            format!("{copied} and ` {r19} `"),
+            String::new(),
+        ),
+        (
+            "a link in a code span in the row",
+            format!("{copied} and `[Record 19]({r19})`"),
+            String::new(),
+        ),
+        (
+            "a prose link",
+            copied.clone(),
+            format!("Record 19 read the rest: [record 19]({r19})."),
+        ),
+        (
+            "a definition the row does not use",
+            copied.clone(),
+            format!("[r19]: {r19}"),
+        ),
+        (
+            "a row naming the pass row, as record 09's Tag pushed row does",
+            copied.clone(),
+            format!("| Tag pushed | the *Independent pass* row's [record 19]({r19}) |"),
+        ),
+        (
+            "an Independent pass row in another section",
+            copied.clone(),
+            format!("## Notes\n\n| **Independent pass** | [record 19]({r19}) |"),
+        ),
+        (
+            "an Independent pass row under a heading indented two spaces",
+            copied.clone(),
+            format!("  ## Notes\n\n| Step | Evidence |\n|---|---|\n| **Independent pass** | [record 19]({r19}) |"),
+        ),
+        (
+            "a `|` in the link text, which splits the cell",
+            format!("{copied} · [Record 19 | the pass]({r19})"),
+            String::new(),
+        ),
+        (
+            "a `|` in the title, which splits the cell",
+            format!("{copied} · [Record 19]({r19} \"a|b\")"),
+            String::new(),
+        ),
+        (
+            "an HTML comment in the row",
+            format!("{copied} <!-- [Record 19]({r19}) -->"),
+            String::new(),
+        ),
+        (
+            "an HTML attribute in the row",
+            format!("{copied} <span title=\"[Record 19]({r19})\">read</span>"),
+            String::new(),
+        ),
+        (
+            "a fake row in an HTML comment block",
+            copied.clone(),
+            format!("<!--\n| **Independent pass** | … | [Record 19]({r19}) |\n-->"),
+        ),
+        (
+            "a fake row after a fence line with text after it, which closes nothing",
+            copied.clone(),
+            format!("```text\n``` not a close\n| **Independent pass** | … | [Record 19]({r19}) |\n```"),
+        ),
+        (
+            "a fake row after a fence indented four spaces, which closes nothing",
+            copied.clone(),
+            format!("```\n    ```\n| **Independent pass** | … | [Record 19]({r19}) |\n```"),
+        ),
+    ] {
+        let (rule_2, rule_7, rule_12) = judge(&v0_7_0, &record_with_pass_row(&row, &after));
+        assert!(
+            rule_2 == 1 && rule_7 == 1 && !rule_12.is_empty(),
+            "{probe}: the row copies record 15, and rule 2 refused {rule_2}, rule 7 {rule_7}, \
+             rule 12 {rule_12:?}"
+        );
+    }
+
+    for (how, row, after) in [
+        ("a new link", format!("[Record 19]({r19})"), String::new()),
+        (
+            "the copied link beside a new one",
+            format!("{copied} · [Record 19]({r19})"),
+            String::new(),
+        ),
+        (
+            "a new link by reference",
+            "[Record 19][r19]".to_owned(),
+            format!("[r19]: {r19}"),
+        ),
+    ] {
+        assert_eq!(
+            judge(&v0_7_0, &record_with_pass_row(&row, &after)),
+            (0, 0, Vec::new()),
+            "the control: {how}"
+        );
+    }
+
+    // An earlier release cited its row too: v0.7.0's prose link to record 16
+    // was not its citation, so v0.8.0's row citing 16 is new to rules 2, 7
+    // and 12.
+    let prose_16 = record_with_pass_row(&copied, &format!("Record 16 is [here]({r16})."));
+    assert_eq!(
+        judge(
+            &prose_16,
+            &record_with_pass_row(&format!("[Record 16]({r16})"), "")
+        ),
+        (0, 0, Vec::new()),
+        "an earlier release's prose link counted as its citation"
+    );
+}
+
+/// **Below `v0.5.0` a record is read whole; from it on, by its row**
+/// ([#568](https://github.com/sujanto-gaws/kelir/issues/568)) — and a record
+/// with no row is told so.
+#[test]
+fn a_record_is_read_by_its_row_from_v0_5_0_on() {
+    let r15 = RECORD_15_CITED;
+    let pre_flight = "# Release v0.4.0 — 2099-01-01\n\n\
+                      **Status:** Final · **Last updated:** 2099-01-01\n\n\
+                      ## Pre-flight\n\n\
+                      | Step | Check | Evidence |\n|---|---|---|\n";
+    // Record 03's shape: no row, and the pass in a prose link under Ship.
+    let prose_only = format!(
+        "{pre_flight}| Tests green | CI | a run |\n\n## Ship\n\n\
+         The question it answers: the closing pass ([record 15]({r15})) found nothing open.\n"
+    );
+    // Record 04's: the pass in its Docs current row.
+    let docs_current =
+        format!("{pre_flight}| Docs current | the report, [record 15]({r15}) | `abc1234` |\n");
+
+    for body in [&prose_only, &docs_current] {
+        for version in [(0, 3, 0), (0, 4, 0)] {
+            assert_eq!(uncited(version, body), None, "{version:?}: {body}");
+            assert_eq!(
+                cited_records(&pass_citations(version, body)),
+                BTreeSet::from([RECORD_15.to_owned()]),
+                "{version:?} is read whole"
+            );
+        }
+        assert_eq!(
+            uncited((0, 5, 0), body),
+            Some("has no `Independent pass` row in its `## Pre-flight` table".to_owned()),
+            "from v0.5.0 on, a record with no row is refused naming the row"
+        );
+        assert!(pass_citations((0, 5, 0), body).is_empty());
+        assert!(
+            refused_at_tag("05 at v0.5.0", (0, 5, 0), body, &[], &verification_files())
+                .iter()
+                .any(|why| why
+                    .ends_with("has no `Independent pass` row in its `## Pre-flight` table")),
+            "rule 12 reads the row as rule 1 does"
+        );
+    }
+
+    assert!(
+        refused_at_tag(
+            "05 at v0.5.0",
+            (0, 5, 0),
+            &record_with_pass_row(
+                &format!("[Record 15]({r15})"),
+                &format!("A [typo]({r15}x.md).")
+            ),
+            &[],
+            &verification_files()
+        )
+        .iter()
+        .any(|why| why.contains("x.md")),
+        "rule 12's rule 6 reads every citation in the body, not only the row's"
+    );
+    assert_eq!(
+        uncited(
+            (0, 5, 0),
+            &record_with_pass_row("[Record 07](../releases/07.%20Release%20v0.7.0.md)", "")
+        ),
+        Some("its `Independent pass` row links to no verification record".to_owned()),
+        "a row linking a record outside projects/verifications/"
+    );
+    assert_eq!(
+        uncited(
+            (0, 5, 0),
+            &record_with_pass_row("—", &format!("Read by [record 15]({r15})."))
+        ),
+        Some("its `Independent pass` row links to no verification record".to_owned()),
+        "a row citing nothing, with the pass linked below it"
+    );
+    assert_eq!(
+        uncited(
+            (0, 5, 0),
+            &record_with_pass_row(&format!("[Record 15]({r15})"), "")
+        ),
+        None,
+        "the control"
+    );
+}
+
+/// **Rule 14 still reads every citation in the body**
+/// ([#568](https://github.com/sujanto-gaws/kelir/issues/568)): the row reader
+/// is rules 1, 2 and 7's, and a narrower reader there could hide a reader who
+/// built the release. Here the row cites record 19, whose reader built
+/// nothing, and the body links record 20 below it, whose reader built the
+/// range.
+#[test]
+fn rule_14_reads_a_citation_outside_the_independent_pass_row() {
+    let draft = vec![(
+        (0, 9, 0),
+        "09. Release v0.9.0.md".to_owned(),
+        format!(
+            "{}\nRead beside it: [record 20]({PROBE_20_CITED}).\n",
+            record_at_its_tag("Draft", &[RECORD_19_CITED])
+        ),
+    )];
+    let refused = judge_readers(
+        &draft,
+        (0, 9, 0),
+        |_: &str, _: &str| None,
+        &format!("**Reader session:** {RANGE_AUTHOR}"),
+    );
+
+    assert!(
+        refused
+            .iter()
+            .any(|why| why.contains(PROBE_20) && why.contains("wrote 970ee0c")),
+        "rule 14 read only the row, and the walk found:\n  {}",
+        refused.join("\n  ")
     );
 }
