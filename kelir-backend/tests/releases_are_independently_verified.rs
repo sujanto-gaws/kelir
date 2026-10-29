@@ -197,9 +197,12 @@
 //!   no space around it and one ending `/` are not citations, as they were not before
 //!   [#483](https://github.com/sujanto-gaws/kelir/issues/483). Nor are an HTML
 //!   `href="…"`, an angle-bracket destination `(<…>)`, or any citation on a
-//!   line ending CRLF, where the `\r` stays on the path. **That can only
-//!   cost a release**: a citation not read cannot be rule 2's new record or
-//!   rule 7's high one, and a release left citing nothing is refused by rule 1.
+//!   line ending CRLF, where the `\r` stays on the path. **For rules 1, 2 and
+//!   7 below [`FIRST_PASS_ROW_RELEASE`] that can only cost a release**: a
+//!   citation not read cannot be rule 2's new record or rule 7's high one, and
+//!   a release left citing nothing is refused by rule 1. **Rule 14 reads it
+//!   too, and there a citation not read is a reader not checked**:
+//!   [#623](https://github.com/sujanto-gaws/kelir/issues/623) holds that.
 //! - **Link a record in its *Independent pass* row in a form the row reader
 //!   does not read** ([#568](https://github.com/sujanto-gaws/kelir/issues/568)).
 //!   From [`FIRST_PASS_ROW_RELEASE`] on, rules 1, 2 and 7 read
@@ -213,10 +216,20 @@
 //!   one. **For a later release it can be a pass**: a record an earlier row
 //!   links in such a form is not in the *seen* set, so citing it again is new
 //!   to rule 2, and rule 7 accepts it when it is above the earlier rows'
-//!   readable citations. And two shapes are read that a renderer would not
-//!   link: a reference definition is read wherever it stands outside a fence,
-//!   inside a paragraph or at any indentation, and a row indented four spaces,
-//!   a code block, is read as a row. No record `main` holds has any of these.
+//!   readable citations. **And some shapes are read that a renderer would
+//!   not link, which can be a pass**: a reference definition is read wherever
+//!   it stands outside a fence or a comment, inside a paragraph or at any
+//!   indentation; a row indented four spaces, a code block, is read as a row;
+//!   a row or a definition inside an HTML block other than a comment, such as
+//!   `<details>` or `<div>`, is read, where a renderer shows it as raw text;
+//!   and a heading in setext form, `Notes` over `-----`, ends no section, so
+//!   an *Independent pass* row under it is read as Pre-flight's. Each needs
+//!   CommonMark's block structure — paragraph continuation, the HTML block
+//!   start conditions — which this file does not parse. In the other
+//!   direction, costing the release: a link whose text holds an image,
+//!   `[![badge](…)](…)`, a definition inside a block quote or a list item, and
+//!   a Pre-flight heading at level 3, in setext form or with closing `#`s, are
+//!   not read. No record `main` holds has any of these.
 //! - **Point a symbolic link at an old record.** Rule 6 refuses a record that
 //!   is itself a link, by the directory entry's own type, and [`normalised_citation`]
 //!   resolves `..` lexically, so a linked folder on the path is not followed.
@@ -917,7 +930,8 @@
 //! cell is *Independent pass* ([`pass_rows`]), outside fences, and reads in
 //! them only the destinations a renderer links ([`link_destinations`]): an
 //! inline link's, its title skipped, and a reference link's, from its
-//! definition, with code spans blanked first. Rules 1, 2 and 7 read it from
+//! definition, with code spans blanked first. (The `test-engineer` gate
+//! tightened it: see the next section.) Rules 1, 2 and 7 read it from
 //! [`FIRST_PASS_ROW_RELEASE`], `v0.5.0`, the first record with the row; rule
 //! 12's forms of them read it through [`refused_at_tag`] and
 //! [`earlier_releases`]; and so the *seen* set and the high-water mark are
@@ -1004,6 +1018,43 @@
 //! | No *Independent pass* row, and prose links record 25 | 54 of 54 | red: `a_governed_release_cites_a_verification_record`, naming the row |
 //!
 //! Nothing else was red, and the scratch copy was removed.
+//!
+//! # The `test-engineer` gate on #563 and #568, 2026-10-29
+//!
+//! Each shape below was rendered by GitHub's own Markdown endpoint and set
+//! beside what the readers took in.
+//!
+//! **Eight rows the row reader read a link from where GitHub draws none**,
+//! each a copied row that passed rules 2, 7 and 12 with record 19 beside it:
+//! a `|` in a link's text or in its title, which splits the cell before any
+//! link is read; an HTML comment, or a tag's attribute, in the row; a fake
+//! row in an HTML comment block; a fake row after a fence line with text
+//! after it, or after one indented four spaces, neither of which closes the
+//! block; and a row under a heading indented two spaces, which ended no
+//! section. **Fixed**: [`cells`] splits the row as GitHub does,
+//! [`without_code_or_html`] blanks raw HTML as well as code spans,
+//! [`rendered_lines`] skips comment blocks and closes a fence only as
+//! CommonMark does, and [`section_title`] reads a heading indented up to
+//! three spaces. **And one for rule 10**: a column-0 ```` ```a`b ```` is text,
+//! since a backtick fence's info string holds no backtick, yet it ended the
+//! follow-up block and hid the row after it; [`opening_fence`] decides now.
+//! Each is a probe in `rules_2_7_and_12_…` or `a_lazy_line_…`, red before the
+//! fix. The shapes left unparsed are in the stated limits.
+//!
+//! **Mutations.** Forty-six, each applied alone and the suite run: the
+//! criteria's eleven, all red, and thirty-five more drawn from where
+//! CommonMark and the code could part. Twenty-four survived the tests as
+//! built. Twenty-two are red now, on probes added to the five tests, and
+//! `governed_from` was split from [`governed`] so that a fixture reaches rules
+//! 2 and 7 at `HEAD`: reading the whole body there had survived every test.
+//! Two are equivalent. Reading an angle-bracket destination differs only for
+//! `(<…verifications/NN….md#f>)`, which GitHub does link, so it would read a
+//! link the stated limit leaves to
+//! [#623](https://github.com/sujanto-gaws/kelir/issues/623). Leaving a
+//! destination's parentheses unbalanced differs only for a name holding `(`
+//! before `.md`, which no verification record has, and rule 6, reading every
+//! citation, refuses such a citation either way. Seven more undo the fixes one
+//! at a time, and each is red.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -1731,8 +1782,7 @@ fn starts_a_block(line: &str) -> bool {
         || after_list_marker(&format!("{bare} ")) == Some("")
         || bare.starts_with('>')
         || heading
-        || bare.starts_with("```")
-        || bare.starts_with("~~~")
+        || opening_fence(line).is_some()
         || thematic_break
 }
 
@@ -1870,40 +1920,73 @@ fn read_aftermath(body: &str) -> Aftermath {
     )
 }
 
-/// The fence a line opens or closes a fenced code block with, as its
-/// character and length: three or more backticks or tildes.
-fn fence(line: &str) -> Option<(char, usize)> {
-    let line = line.trim_start_matches(' ');
-    let mark = line.chars().next().filter(|c| matches!(c, '`' | '~'))?;
-    let length = line.chars().take_while(|c| *c == mark).count();
+/// The run of fence characters a line opens with, as its character, its
+/// length and the text after it: three or more backticks or tildes, indented
+/// at most three spaces. Four spaces make an indented code line, not a fence.
+fn fence(line: &str) -> Option<(char, usize, &str)> {
+    let rest = line.trim_start_matches(' ');
+    let mark = rest.chars().next().filter(|c| matches!(c, '`' | '~'))?;
+    let length = rest.chars().take_while(|c| *c == mark).count();
 
-    (length >= 3).then_some((mark, length))
+    (line.len() - rest.len() <= 3 && length >= 3).then(|| (mark, length, &rest[length..]))
 }
 
-/// The lines of `body` outside fenced code blocks. A block closes at a fence
-/// of its own character at least as long as the one that opened it.
-fn unfenced_lines(body: &str) -> Vec<&str> {
+/// The fence a line opens a fenced code block with, as its character and
+/// length. **A backtick fence's info string holds no backtick**: ```` ```a`b ````
+/// is text, and so a lazy line to [`follow_up_block`].
+fn opening_fence(line: &str) -> Option<(char, usize)> {
+    let (mark, length, info) = fence(line)?;
+
+    (mark == '~' || !info.contains('`')).then_some((mark, length))
+}
+
+/// The lines of `body` a renderer reads as Markdown: outside fenced code
+/// blocks and outside HTML comment blocks.
+///
+/// A fenced block closes at a fence of its own character, at least as long
+/// as the one that opened it, **with nothing after it**: ```` ``` text ```` and
+/// a fence indented four spaces are lines inside the block, not its end. A
+/// comment block opens at a line starting `<!--` and runs to the line holding
+/// `-->`, and every line of it is raw HTML, which a renderer hides.
+fn rendered_lines(body: &str) -> Vec<&str> {
     let mut open: Option<(char, usize)> = None;
+    let mut in_comment = false;
     let mut lines = Vec::new();
 
     for line in body.lines() {
-        match (open, fence(line)) {
-            (None, Some(opened)) => open = Some(opened),
-            (None, None) => lines.push(line),
-            (Some((mark, length)), Some((closing, at_least)))
-                if closing == mark && at_least >= length =>
-            {
+        if in_comment {
+            in_comment = !line.contains("-->");
+            continue;
+        }
+
+        if let Some((mark, length)) = open {
+            let closes = fence(line).is_some_and(|(closing, at_least, after)| {
+                closing == mark && at_least >= length && after.trim().is_empty()
+            });
+            if closes {
                 open = None;
             }
-            (Some(_), _) => {}
+            continue;
+        }
+
+        let rest = line.trim_start_matches(' ');
+        if let Some(opened) = opening_fence(line) {
+            open = Some(opened);
+        } else if line.len() - rest.len() <= 3 && rest.starts_with("<!--") {
+            in_comment = !rest[4..].contains("-->");
+        } else {
+            lines.push(line);
         }
     }
 
     lines
 }
 
-/// The title of a level-1 or level-2 ATX heading: a section boundary.
+/// The title of a level-1 or level-2 ATX heading, indented up to three
+/// spaces as CommonMark allows: a section boundary.
 fn section_title(line: &str) -> Option<&str> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    let line = if indent <= 3 { &line[indent..] } else { line };
     let hashes = line.bytes().take_while(|&byte| byte == b'#').count();
     let rest = line.get(hashes..)?;
 
@@ -1913,7 +1996,8 @@ fn section_title(line: &str) -> Option<&str> {
 
 /// The rows of the `## Pre-flight` table whose first cell reads *Independent
 /// pass* ([#568](https://github.com/sujanto-gaws/kelir/issues/568)), outside
-/// fenced code: the row the template gives the citation.
+/// fenced code and HTML comments ([`rendered_lines`]): the row the template
+/// gives the citation.
 ///
 /// The first cell is compared with every `*` and every space taken out, in
 /// any case, so `**Independent pass**` (records 07 to 09) and `Independent
@@ -1924,7 +2008,7 @@ fn pass_rows(body: &str) -> Vec<&str> {
     let mut in_pre_flight = false;
     let mut rows = Vec::new();
 
-    for line in unfenced_lines(body) {
+    for line in rendered_lines(body) {
         if let Some(title) = section_title(line) {
             in_pre_flight = title.eq_ignore_ascii_case("Pre-flight");
             continue;
@@ -1949,16 +2033,28 @@ fn pass_rows(body: &str) -> Vec<&str> {
     rows
 }
 
-/// `text` as characters, with every code span blanked to spaces, so nothing
-/// inside one reads as a link. A run of backticks opens a span that the next
-/// run of the same length closes; a run nothing closes is literal.
-fn without_code_spans(text: &str) -> Vec<char> {
+/// `text` as characters, with every code span and every piece of raw HTML
+/// blanked to spaces, so nothing inside one reads as a link. A run of
+/// backticks opens a span that the next run of the same length closes; a run
+/// nothing closes is literal. Raw HTML is [`raw_html_end`]'s: a comment, or a
+/// tag with whatever its attributes hold, which a renderer does not draw.
+fn without_code_or_html(text: &str) -> Vec<char> {
     let mut chars: Vec<char> = text.chars().collect();
     let mut at = 0;
 
     while at < chars.len() {
         if chars[at] == '\\' {
             at += 2;
+            continue;
+        }
+        if chars[at] == '<' {
+            match raw_html_end(&chars, at) {
+                Some(end) => {
+                    chars[at..end].fill(' ');
+                    at = end;
+                }
+                None => at += 1,
+            }
             continue;
         }
         if chars[at] != '`' {
@@ -1983,6 +2079,39 @@ fn without_code_spans(text: &str) -> Vec<char> {
     }
 
     chars
+}
+
+/// The index after the raw HTML that opens at `open`, a `<`: an HTML
+/// comment `<!-- … -->`, or an opening or closing tag, `<span title="…">` or
+/// `</span>`, its quoted attribute values read through. `None` when what
+/// follows the `<` is neither, and the `<` is text. **An `<a href="…">` is
+/// a tag like any other**, so its destination is not read
+/// ([#623](https://github.com/sujanto-gaws/kelir/issues/623) names it).
+fn raw_html_end(chars: &[char], open: usize) -> Option<usize> {
+    let rest = &chars[open..];
+    if rest.starts_with(&['<', '!', '-', '-']) {
+        return (open + 4..chars.len())
+            .find(|&at| chars[at..].starts_with(&['-', '-', '>']))
+            .map(|at| at + 3);
+    }
+
+    let name = open + 1 + usize::from(chars.get(open + 1) == Some(&'/'));
+    if !chars.get(name).is_some_and(char::is_ascii_alphabetic) {
+        return None;
+    }
+
+    let mut at = name;
+    while let Some(&c) = chars.get(at) {
+        match c {
+            '>' => return Some(at + 1),
+            '"' | '\'' => at = chars[at + 1..].iter().position(|q| *q == c)? + at + 1,
+            '<' => return None,
+            _ => {}
+        }
+        at += 1;
+    }
+
+    None
 }
 
 /// The destination of an inline link whose `(` is at `open`, and the index
@@ -2054,7 +2183,7 @@ fn label_key(label: &str) -> String {
 fn reference_definitions(body: &str) -> BTreeMap<String, String> {
     let mut definitions = BTreeMap::new();
 
-    for line in unfenced_lines(body) {
+    for line in rendered_lines(body) {
         let Some((label, rest)) = line
             .trim_start()
             .strip_prefix('[')
@@ -2081,13 +2210,13 @@ fn reference_definitions(body: &str) -> BTreeMap<String, String> {
 /// link's `](destination)`, and a reference link's — full `[text][label]`,
 /// collapsed `[label][]` or shortcut `[label]` — from its definition.
 ///
-/// **Rendered, and nothing else.** Code spans are blanked first, a title is
-/// skipped, a second `(…)` after a link is text, and an image is not a link.
-/// It reads one line: [`pass_row_citations`] hands it a table row, and the
-/// definitions come from the whole body, because a reference link's
-/// destination is written wherever its definition is.
+/// **Rendered, and nothing else.** Code spans and raw HTML are blanked
+/// first, a title is skipped, a second `(…)` after a link is text, and an
+/// image is not a link. It reads one table cell: [`pass_row_citations`] hands
+/// it the row's cells, and the definitions come from the whole body, because
+/// a reference link's destination is written wherever its definition is.
 fn link_destinations(text: &str, definitions: &BTreeMap<String, String>) -> Vec<String> {
-    let chars = without_code_spans(text);
+    let chars = without_code_or_html(text);
     let mut destinations = Vec::new();
     let mut opens: Vec<usize> = Vec::new();
     let mut at = 0;
@@ -2144,8 +2273,8 @@ fn link_destinations(text: &str, definitions: &BTreeMap<String, String>) -> Vec<
 /// or `None` when the record has no such row
 /// ([#568](https://github.com/sujanto-gaws/kelir/issues/568)).
 ///
-/// [`pass_rows`] finds the row and [`link_destinations`] reads what it links
-/// to; a destination is a citation on [`citations`]' terms, a path through
+/// [`pass_rows`] finds the row, [`cells`] splits it, and
+/// [`link_destinations`] reads what each cell links to; a destination is a citation on [`citations`]' terms, a path through
 /// `verifications/` whose path part ends `.md`, so the row's link to the
 /// folder itself is not one.
 fn pass_row_citations(body: &str) -> Option<BTreeSet<String>> {
@@ -2157,10 +2286,31 @@ fn pass_row_citations(body: &str) -> Option<BTreeSet<String>> {
     let definitions = reference_definitions(body);
     Some(
         rows.iter()
-            .flat_map(|row| link_destinations(row, &definitions))
+            .flat_map(|row| cells(row))
+            .flat_map(|cell| link_destinations(cell, &definitions))
             .filter(|cited| cited.contains("verifications/") && path_part(cited).ends_with(".md"))
             .collect(),
     )
+}
+
+/// A table row's cells, split as GitHub splits them before it reads any
+/// link: at every `|` no backslash escapes, inside a link or a code span
+/// too. So `[Record 19 | the pass](…)` is two cells of text, and no link.
+fn cells(row: &str) -> Vec<&str> {
+    let mut cells = Vec::new();
+    let mut from = 0;
+    let mut escaped = false;
+
+    for (at, c) in row.char_indices() {
+        if c == '|' && !escaped {
+            cells.push(&row[from..at]);
+            from = at + 1;
+        }
+        escaped = c == '\\' && !escaped;
+    }
+    cells.push(&row[from..]);
+
+    cells
 }
 
 /// The citations rules 1, 2 and 7 read from a release record: from
@@ -2198,7 +2348,13 @@ fn as_release(version: (u32, u32, u32), name: &str, body: &str) -> Release {
 }
 
 fn governed() -> Vec<Release> {
-    release_records()
+    governed_from(release_records())
+}
+
+/// The governed releases among `records`, each read by [`as_release`]: the
+/// releases rules 2 and 7 judge at `HEAD`.
+fn governed_from(records: Vec<((u32, u32, u32), String, String)>) -> Vec<Release> {
+    records
         .into_iter()
         .filter(|(version, _, body)| *version >= FIRST_GOVERNED_RELEASE && says_final(body))
         .map(|(version, name, body)| as_release(version, &name, &body))
@@ -3717,6 +3873,9 @@ fn a_lazy_line_at_column_0_does_not_hide_the_rows_after_it() {
         ("P29, `* ` after the space", nbsp_marker.as_str(), "* "),
         ("an issue number, not a heading", "#404 carries it", "* "),
         ("an HTML tag, a stated limit", "<details>", "* "),
+        ("seven hashes, not a heading", "####### seven", "* "),
+        ("two dashes, not a thematic break", "--", "* "),
+        ("a backtick after three, not a fence", "```a`b", "* "),
     ] {
         let unfiled = row_after(between, RECORD_07_UNFILED_ROW, marker);
         assert!(
@@ -3745,6 +3904,16 @@ fn a_lazy_line_at_column_0_does_not_hide_the_rows_after_it() {
         "a lazy line under the answer joins the answer, and two lazy lines in a row are one \
          paragraph: {:?}",
         read_aftermath(&under_the_answer)
+    );
+
+    let after_a_loose_row = record_with_follow_ups(&format!(
+        "- **Follow-ups filed:** two:\n{RECORD_07_FILED_ROW}\n\n{RECORD_07_FILED_ROW}\n{WRAPPED}\n{}",
+        under_marker(RECORD_07_UNFILED_ROW, "* ")
+    ));
+    assert!(
+        refuses_the_unfiled_row(&after_a_loose_row),
+        "a blank line earlier in the list does not end it at a later lazy line: {:?}",
+        read_aftermath(&after_a_loose_row)
     );
 }
 
@@ -3776,11 +3945,14 @@ fn a_column_0_line_that_ends_the_list_still_ends_the_block() {
         "> a note",
         "# A heading",
         "###### A heading",
+        "#",
+        "##\tA heading after a tab",
         "```",
         "~~~",
         "---",
         "***",
         "___",
+        "_ _ _",
     ] {
         let body = row_after(opener, RECORD_07_UNFILED_ROW, "* ");
         assert!(
@@ -5964,6 +6136,90 @@ fn the_independent_pass_row_is_read_from_the_pre_flight_section() {
             vec![],
             "brackets with no definition are text",
         ),
+        (
+            format!("[a]({r16} 'single') · [b]({r19} (parenthesised))"),
+            String::new(),
+            vec![16, 19],
+            "a title in single quotes and in parentheses",
+        ),
+        (
+            format!("[record 19]({r19} trailing)"),
+            String::new(),
+            vec![],
+            "text after a destination that is no title: not a link",
+        ),
+        (
+            "[r16][]".to_owned(),
+            format!("[r16]: {r16}\n\n[r16]: {r19}"),
+            vec![16],
+            "the first definition of a label is the one used",
+        ),
+        (
+            "[Record   16][]".to_owned(),
+            format!("[record 16]: {r16}"),
+            vec![16],
+            "a label's whitespace runs are one space",
+        ),
+        (
+            format!("[see [the note](https://example.com) here]({r19})"),
+            String::new(),
+            vec![],
+            "a link inside link text: the outer brackets are text",
+        ),
+        (
+            format!("\\` [record 16]({r16}) `"),
+            String::new(),
+            vec![16],
+            "an escaped backtick opens no code span",
+        ),
+        (
+            format!("[record 16]({r16}) <b>bold</b> and 1 < 2"),
+            String::new(),
+            vec![16],
+            "a tag beside the link, and a `<` that opens none",
+        ),
+        (
+            "[r16][]".to_owned(),
+            format!("```\n[r16]: {r19}\n````\n\n[r16]: {r16}"),
+            vec![16],
+            "a longer fence closes the block",
+        ),
+        (
+            "[r16][]".to_owned(),
+            format!("```\n~~~\n[r16]: {r19}\n```\n\n[r16]: {r16}"),
+            vec![16],
+            "a fence of the other character does not",
+        ),
+        (
+            "[r16][]".to_owned(),
+            format!("~~struck~~ opens a line\n\n[r16]: {r16}"),
+            vec![16],
+            "two tildes are a strikethrough, not a fence",
+        ),
+        (
+            "[r16][]".to_owned(),
+            format!("<!--\n[r16]: {r19}\n-->\n\n[r16]: {r16}"),
+            vec![16],
+            "a definition in an HTML comment defines nothing",
+        ),
+        (
+            format!("` a `` b ` [Record 16]({r16}) `"),
+            String::new(),
+            vec![16],
+            "a code span is closed by a run of its own length, not by part of a longer one",
+        ),
+        (
+            "[Record 19][r[19]".to_owned(),
+            format!("[r[19]: {r19}"),
+            vec![],
+            "a label holding `[` is no label",
+        ),
+        (
+            "[r16][ ]".to_owned(),
+            format!("[r16]: {r16}"),
+            vec![16],
+            "brackets holding only a space are no label, so the text is a shortcut",
+        ),
     ] {
         assert_eq!(
             pass_row_numbers(&record_with_pass_row(&row, &after)),
@@ -6028,6 +6284,18 @@ fn the_independent_pass_row_is_read_from_the_pre_flight_section() {
             Some(vec![16]),
             "a stated limit: a row indented four spaces, a code block, is read",
         ),
+        (
+            "| **Independent pass** |",
+            "   | **Independent pass** |",
+            Some(vec![16]),
+            "a row indented three spaces",
+        ),
+        (
+            "## Pre-flight",
+            "## Pre-flight\n\n### Before the tag",
+            Some(vec![16]),
+            "a level-3 heading inside Pre-flight does not leave it",
+        ),
     ] {
         assert_eq!(
             pass_row_numbers(&house.replacen(from, to, 1)),
@@ -6081,15 +6349,23 @@ fn rules_2_7_and_12_read_only_the_independent_pass_row() {
     let copied = format!("[Record 15]({r15})");
     let on_disk = verification_files();
 
+    // Rules 2 and 7 judge both as `HEAD` holds them; rule 12 judges v0.8.0 at
+    // its tag, against the release before it.
     let judge = |v0_7_0: &str, body: &str| {
-        let records = [(
-            (0, 7, 0),
-            "07. Release v0.7.0.md".to_owned(),
-            v0_7_0.to_owned(),
-        )];
+        let records = vec![
+            (
+                (0, 7, 0),
+                "07. Release v0.7.0.md".to_owned(),
+                v0_7_0.to_owned(),
+            ),
+            (
+                (0, 8, 0),
+                "08. Release v0.8.0.md".to_owned(),
+                body.to_owned(),
+            ),
+        ];
+        let releases = governed_from(records.clone());
         let earlier = earlier_releases(&records, (0, 8, 0));
-        let mut releases = earlier.clone();
-        releases.push(as_release((0, 8, 0), "08. Release v0.8.0.md", body));
         (
             recycled(&releases).len(),
             backward(&releases).len(),
@@ -6148,6 +6424,46 @@ fn rules_2_7_and_12_read_only_the_independent_pass_row() {
             "an Independent pass row in another section",
             copied.clone(),
             format!("## Notes\n\n| **Independent pass** | [record 19]({r19}) |"),
+        ),
+        (
+            "an Independent pass row under a heading indented two spaces",
+            copied.clone(),
+            format!("  ## Notes\n\n| Step | Evidence |\n|---|---|\n| **Independent pass** | [record 19]({r19}) |"),
+        ),
+        (
+            "a `|` in the link text, which splits the cell",
+            format!("{copied} · [Record 19 | the pass]({r19})"),
+            String::new(),
+        ),
+        (
+            "a `|` in the title, which splits the cell",
+            format!("{copied} · [Record 19]({r19} \"a|b\")"),
+            String::new(),
+        ),
+        (
+            "an HTML comment in the row",
+            format!("{copied} <!-- [Record 19]({r19}) -->"),
+            String::new(),
+        ),
+        (
+            "an HTML attribute in the row",
+            format!("{copied} <span title=\"[Record 19]({r19})\">read</span>"),
+            String::new(),
+        ),
+        (
+            "a fake row in an HTML comment block",
+            copied.clone(),
+            format!("<!--\n| **Independent pass** | … | [Record 19]({r19}) |\n-->"),
+        ),
+        (
+            "a fake row after a fence line with text after it, which closes nothing",
+            copied.clone(),
+            format!("```text\n``` not a close\n| **Independent pass** | … | [Record 19]({r19}) |\n```"),
+        ),
+        (
+            "a fake row after a fence indented four spaces, which closes nothing",
+            copied.clone(),
+            format!("```\n    ```\n| **Independent pass** | … | [Record 19]({r19}) |\n```"),
         ),
     ] {
         let (rule_2, rule_7, rule_12) = judge(&v0_7_0, &record_with_pass_row(&row, &after));
@@ -6235,6 +6551,29 @@ fn a_record_is_read_by_its_row_from_v0_5_0_on() {
         );
     }
 
+    assert!(
+        refused_at_tag(
+            "05 at v0.5.0",
+            (0, 5, 0),
+            &record_with_pass_row(
+                &format!("[Record 15]({r15})"),
+                &format!("A [typo]({r15}x.md).")
+            ),
+            &[],
+            &verification_files()
+        )
+        .iter()
+        .any(|why| why.contains("x.md")),
+        "rule 12's rule 6 reads every citation in the body, not only the row's"
+    );
+    assert_eq!(
+        uncited(
+            (0, 5, 0),
+            &record_with_pass_row("[Record 07](../releases/07.%20Release%20v0.7.0.md)", "")
+        ),
+        Some("its `Independent pass` row links to no verification record".to_owned()),
+        "a row linking a record outside projects/verifications/"
+    );
     assert_eq!(
         uncited(
             (0, 5, 0),

@@ -584,8 +584,10 @@ While the major version is `0`, the public API may change in any release.
   record whose row copied an earlier release's citation passed whenever a
   newer record's path appeared anywhere else in it. From `v0.5.0`, the first
   record with the row, they now read only the links the Pre-flight table's
-  *Independent pass* row renders, at `HEAD` and at the tag. A record with no
-  such row is refused, naming it. Records 03 and 04, which cite their pass
+  *Independent pass* row renders, at `HEAD` and at the tag: not a link that
+  a `|` splits across two cells, one inside an HTML comment or tag, or one
+  in a fenced block that a fence line with text after it did not close. A
+  record with no such row is refused, naming it. Records 03 and 04, which cite their pass
   elsewhere, are read as before. The checks that a citation resolves and that
   its reader built none of the release still read every citation. No release
   record on `main`, now or at any earlier commit, changes verdict.
