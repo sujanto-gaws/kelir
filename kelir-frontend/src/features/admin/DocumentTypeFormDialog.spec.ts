@@ -1810,4 +1810,75 @@ describe('DocumentTypeFormDialog choosers', () => {
     expect(guardedKeys(handed())).toEqual([])
     expect(server.stored()).toMatchObject({ description: 'Buying things', status: 'DEPRECATED' })
   })
+
+  /*
+   * #742's verification campaign (test-engineer, 2026-10-30): an unbound form
+   * or list read as `null` and shown as `''`, and the list page reopening the
+   * same dialog on another type.
+   */
+
+  // The chooser holds `''` for no form, the read holds `null`: compared as
+  // they are, every edit of an unbound type sent `formId: null`, and a stale
+  // one unbound a form another administrator had bound since.
+  it('leaves a form and list bound since alone on a type that had neither', async () => {
+    const handed = handedPut()
+    const server = serveTypeWithStatus()
+
+    server.theirEdit({ formId: null, listId: null })
+    const wrapper = await open(server.stored())
+
+    server.theirEdit({ formId: forms[0].id, listId: lists[0].id })
+    await wrapper.get('[data-testid="type-description"]').setValue('Buying things')
+    await submit(wrapper)
+
+    expect(guardedKeys(handed())).toEqual([])
+    expect(server.stored()).toMatchObject({
+      description: 'Buying things',
+      formId: forms[0].id,
+      listId: lists[0].id,
+    })
+  })
+
+  // The list page keeps one dialog mounted and reopens it on whichever type is
+  // edited, so the baseline is the read of this opening, not of the first.
+  it('compares against the type it was reopened on, not the one it first opened on', async () => {
+    const handed = handedPut()
+    replaceBackend(acceptingPut)
+    const wrapper = await open(boundType(wantedFlow.id))
+
+    await wrapper.setProps({ open: false })
+    await wrapper.setProps({
+      editing: {
+        ...boundType(wantedFlow.id),
+        id: 't-2',
+        typeCode: 'PO',
+        status: 'DEPRECATED',
+        formId: forms[1].id,
+        listId: lists[1].id,
+      },
+    })
+    await wrapper.setProps({ open: true })
+    await flushPromises()
+    await wrapper.get('[data-testid="type-description"]').setValue('Buying things')
+    await submit(wrapper)
+
+    expect(putBody()?.description).toBe('Buying things')
+    expect(guardedKeys(handed())).toEqual([])
+  })
+
+  // A refused save wrote nothing, so what the administrator chose is still a
+  // change from the read: the retry sends it, whatever else was fixed between.
+  it('sends a status chosen before a refused save again when it is retried', async () => {
+    refusingPut({ status: 403, body: errorBody('FORBIDDEN', 'You may not configure this type') })
+    const wrapper = await open(boundType(wantedFlow.id))
+
+    await wrapper.get('[data-testid="type-status"]').setValue('DEPRECATED')
+    await wrapper.get('[data-testid="type-form"]').setValue(forms[0].id)
+    await submit(wrapper)
+    await wrapper.get('[data-testid="type-form"]').setValue(forms[1].id)
+    await submit(wrapper)
+
+    expect(putBodies()).toHaveLength(2)
+    expect(putBodies()[1]).toMatchObject({ status: 'DEPRECATED', formId: forms[1].id })
+  })
 })
