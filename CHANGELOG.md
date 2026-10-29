@@ -576,6 +576,20 @@ While the major version is `0`, the public API may change in any release.
   thematic break. No release record on `main`, now or at any earlier commit,
   changes verdict.
 
+- **A release record's pass is read from its *Independent pass* row**
+  ([#568](https://github.com/sujanto-gaws/kelir/issues/568)). Rules 1, 2 and
+  7 of `releases_are_independently_verified.rs` read every path to a
+  verification record anywhere in a record: in a link's title, in a second
+  `(…)` after a link, in a code span, in a fenced block or in prose. So a
+  record whose row copied an earlier release's citation passed whenever a
+  newer record's path appeared anywhere else in it. From `v0.5.0`, the first
+  record with the row, they now read only the links the Pre-flight table's
+  *Independent pass* row renders, at `HEAD` and at the tag. A record with no
+  such row is refused, naming it. Records 03 and 04, which cite their pass
+  elsewhere, are read as before. The checks that a citation resolves and that
+  its reader built none of the release still read every citation. No release
+  record on `main`, now or at any earlier commit, changes verdict.
+
 ### Fixed
 
 - **A username, email or display name longer than its column is a 422 and
