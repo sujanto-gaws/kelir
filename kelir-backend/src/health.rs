@@ -207,4 +207,21 @@ mod tests {
             assert_eq!(body.multi_tenant, multi_tenant);
         }
     }
+
+    #[tokio::test]
+    async fn readiness_is_unavailable_when_the_database_refuses_tls() {
+        // The log line is the ping error's Debug, which names the setting;
+        // `db`'s tests pin that text (#803).
+        let url = crate::db::server_refusing_tls().await;
+        let pool = crate::db::create_pool(&url).expect("lazy pool builds without a server");
+
+        let (status, Json(body)) = readiness(State(AppState::new(
+            pool,
+            crate::config::AppConfig::test_default(),
+        )))
+        .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.database, "down");
+    }
 }

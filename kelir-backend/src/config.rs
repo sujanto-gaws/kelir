@@ -29,6 +29,12 @@ pub struct AppConfig {
     pub app_env: AppEnv,
     pub bind_address: String,
     pub database_url: String,
+    /// `KELIR_DATABASE_SSL_MODE` and `KELIR_DATABASE_SSL_ROOT_CERT` (#803),
+    /// as given, or `None` when unset or blank. Checked where the pool is
+    /// built (`db::connect_options`), which is the one place that knows the
+    /// host they apply to.
+    pub database_ssl_mode: Option<String>,
+    pub database_ssl_root_cert: Option<String>,
     pub jwt_secret: String,
     pub storage_driver: String,
     /// Where object storage is, and what it is called there (FR-ATT-001, #244).
@@ -433,6 +439,12 @@ impl AppConfig {
                 .unwrap_or_else(|| fallback.to_owned())
         };
 
+        // For a setting whose absence means something of its own, which no
+        // fallback string could stand for.
+        let unset_if_blank = |key: &'static str| -> Option<String> {
+            get(key).ok().filter(|value| !value.trim().is_empty())
+        };
+
         let required = |key: &'static str| -> Result<String, ConfigError> {
             get(key)
                 .ok()
@@ -487,6 +499,8 @@ impl AppConfig {
                 "KELIR_DATABASE_URL",
                 "postgres://postgres:postgres@localhost:5432/kelir",
             ),
+            database_ssl_mode: unset_if_blank("KELIR_DATABASE_SSL_MODE"),
+            database_ssl_root_cert: unset_if_blank("KELIR_DATABASE_SSL_ROOT_CERT"),
             jwt_secret,
             storage_driver: optional("KELIR_STORAGE_DRIVER", "local"),
             storage_endpoint: optional("KELIR_STORAGE_ENDPOINT", "http://localhost:9000"),
@@ -575,6 +589,8 @@ impl AppConfig {
             app_env: AppEnv::Test,
             bind_address: "127.0.0.1:0".to_owned(),
             database_url: "postgres://postgres:postgres@localhost:5432/kelir".to_owned(),
+            database_ssl_mode: None,
+            database_ssl_root_cert: None,
             jwt_secret: "test-secret".to_owned(),
             storage_driver: "local".to_owned(),
             storage_endpoint: "http://localhost:9000".to_owned(),
@@ -675,6 +691,36 @@ mod tests {
 
         assert!(!config.integration_allow_loopback);
         assert!(config.integration_dns_overrides.is_empty());
+    }
+
+    #[test]
+    fn reads_the_database_tls_settings_and_discards_blank_ones() {
+        let unset =
+            AppConfig::from_source(source(&[("KELIR_JWT_SECRET", "s3cret")])).expect("loads");
+        assert_eq!(unset.database_ssl_mode, None);
+        assert_eq!(unset.database_ssl_root_cert, None);
+
+        let set = AppConfig::from_source(source(&[
+            ("KELIR_JWT_SECRET", "s3cret"),
+            ("KELIR_DATABASE_SSL_MODE", "verify-full"),
+            ("KELIR_DATABASE_SSL_ROOT_CERT", "/etc/kelir/db-tls/ca.pem"),
+        ]))
+        .expect("loads");
+        assert_eq!(set.database_ssl_mode.as_deref(), Some("verify-full"));
+        assert_eq!(
+            set.database_ssl_root_cert.as_deref(),
+            Some("/etc/kelir/db-tls/ca.pem")
+        );
+
+        // What the staging compose file passes when `.env` says nothing.
+        let blank = AppConfig::from_source(source(&[
+            ("KELIR_JWT_SECRET", "s3cret"),
+            ("KELIR_DATABASE_SSL_MODE", ""),
+            ("KELIR_DATABASE_SSL_ROOT_CERT", "  "),
+        ]))
+        .expect("loads");
+        assert_eq!(blank.database_ssl_mode, None);
+        assert_eq!(blank.database_ssl_root_cert, None);
     }
 
     #[test]

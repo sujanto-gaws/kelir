@@ -884,6 +884,9 @@ fn test_config(database_url: &str) -> AppConfig {
         app_env: AppEnv::Test,
         bind_address: "127.0.0.1:0".to_owned(),
         database_url: database_url.to_owned(),
+        // The pool above is built from the URL alone, as these leave it.
+        database_ssl_mode: None,
+        database_ssl_root_cert: None,
         jwt_secret: JWT_SECRET.to_owned(),
         storage_driver: "local".to_owned(),
         // **Real object storage, not a double.** This harness's own header says

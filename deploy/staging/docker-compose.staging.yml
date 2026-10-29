@@ -57,6 +57,14 @@ services:
       # stack: the defaults address the host's native install over the Docker
       # bridge, but a test rig may run it elsewhere or on another port.
       KELIR_DATABASE_URL: postgres://kelir:${KELIR_DB_PASSWORD:?set KELIR_DB_PASSWORD}@${KELIR_DB_HOST:-host.docker.internal}:${KELIR_DB_PORT:-5432}/kelir
+      # **A KELIR_DB_HOST other than host.docker.internal is reached over TLS
+      # or not at all** (#803, NFR-SEC-010). Empty keeps the default: `prefer`
+      # for the host's own PostgreSQL, `require` for any other host. A bridge IP
+      # such as 172.17.0.1 is another host. `verify-full` also needs the CA:
+      # put it in ./db-tls beside this file and name it as the container sees
+      # it, /etc/kelir/db-tls/<file>.
+      KELIR_DATABASE_SSL_MODE: ${KELIR_DATABASE_SSL_MODE:-}
+      KELIR_DATABASE_SSL_ROOT_CERT: ${KELIR_DATABASE_SSL_ROOT_CERT:-}
       KELIR_JWT_SECRET: ${KELIR_JWT_SECRET:?set KELIR_JWT_SECRET to a generated value}
       KELIR_STORAGE_DRIVER: s3
       # **Object storage, addressed inside the stack** (#244). Without these the
@@ -99,6 +107,11 @@ services:
     # maps it to the bridge gateway so the same URL works on every platform.
     extra_hosts:
       - 'host.docker.internal:host-gateway'
+    # The database's CA, for KELIR_DATABASE_SSL_MODE=verify-full (#803).
+    # Read-only, and empty unless the operator puts a certificate there:
+    # Compose creates the directory when it is missing.
+    volumes:
+      - ./db-tls:/etc/kelir/db-tls:ro
     # There is no depends_on for PostgreSQL because it is not a compose service.
     # The backend runs migrations at startup and exits if the database is not
     # reachable; the restart policy retries until it is.
