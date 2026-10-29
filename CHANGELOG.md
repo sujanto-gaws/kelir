@@ -594,6 +594,15 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A document type deleted while a document of it is being created is
+  refused** ([#769](https://github.com/sujanto-gaws/kelir/issues/769)). The
+  delete asked whether documents existed before it took any lock, so it did
+  not see one not yet committed, then waited for the creation and retired the
+  type under it: `DELETE /api/v1/document-types/{id}` answered 204 and left a
+  live document whose type no read returns. It now takes the type row
+  `FOR UPDATE` first, which a creation holds until its document commits, and
+  asks after, so it answers 409 `CONFLICT` and the type stays live. No
+  migration, and no schema change.
 - **A username, email or display name longer than its column is a 422 and
   not a 500** ([#610](https://github.com/sujanto-gaws/kelir/issues/610)).
   Nothing bounded them, so a username over 64 characters, an email over 320

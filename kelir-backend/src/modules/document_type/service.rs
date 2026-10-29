@@ -341,7 +341,18 @@ pub async fn delete_type(
     let tenant_id = caller.tenant_id();
     let actor = Some(caller.user_id());
 
-    let before = repo::find_type(&state.pool, tenant_id, id)
+    let mut transaction = state.pool.begin().await?;
+
+    // The type row is held before the documents are asked about (#769). A
+    // creation holds it from `lock_pinned_form` until its document commits, so
+    // a check made before the lock answers "none" for a document about to
+    // exist, and the delete then retires the type under it. Held here, the
+    // delete waits for the creation and counts what it committed.
+    //
+    // No lock order changes (record 23 §5.2): the delete holds nothing before
+    // the type row, and `has_documents` is a plain `EXISTS`, so it locks no
+    // document, as `has_live_instances` locks no instance.
+    let before = repo::lock_retiring_type(&mut transaction, tenant_id, id)
         .await?
         .ok_or_else(|| AppError::not_found("Document type"))?;
 
@@ -350,7 +361,7 @@ pub async fn delete_type(
     // live documents leaves those documents pointing at something no read
     // returns. Deprecating the type is the way to stop new documents being
     // created from it, and that is an update.
-    if repo::has_documents(&state.pool, tenant_id, id).await? {
+    if repo::has_documents(&mut *transaction, tenant_id, id).await? {
         return Err(AppError::conflict(format!(
             "`{}` has documents created from it and cannot be retired; set its \
              status to DEPRECATED instead, which stops new ones",
@@ -358,9 +369,11 @@ pub async fn delete_type(
         )));
     }
 
-    if repo::soft_delete(&state.pool, tenant_id, id, actor).await? == 0 {
+    if repo::soft_delete(&mut *transaction, tenant_id, id, actor).await? == 0 {
         return Err(AppError::not_found("Document type"));
     }
+
+    transaction.commit().await?;
 
     audit::record_or_warn(
         &state.pool,

@@ -540,6 +540,49 @@ pub async fn replace_workflows(
     Ok(())
 }
 
+/// What a delete reads of the type it retires, under the row's `FOR UPDATE`
+/// (#769): the refusal names the code, and the audit entry records all three.
+pub struct RetiringType {
+    pub type_code: String,
+    pub name: String,
+    pub status: DocumentTypeStatus,
+}
+
+/// Reads the type a delete retires **and holds its row** for the rest of the
+/// transaction, so [`has_documents`] is asked after every creation of the type
+/// has committed or rolled back ([#769]).
+///
+/// `FOR UPDATE` for the reason [`lock_type_binding`] gives: a document creation
+/// takes the same lock (`lock_pinned_form`), and its insert's foreign key takes
+/// `FOR KEY SHARE` on this row, which `FOR UPDATE` conflicts with and `FOR NO
+/// KEY UPDATE` does not. `None` is "no such type", or one a delete ahead of
+/// this one retired while it waited.
+///
+/// [#769]: https://github.com/sujanto-gaws/kelir/issues/769
+pub async fn lock_retiring_type(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<Option<RetiringType>, sqlx::Error> {
+    let row = sqlx::query!(
+        r#"
+        SELECT type_code, name, status FROM document_types
+        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+        FOR UPDATE
+        "#,
+        tenant_id,
+        id
+    )
+    .fetch_optional(&mut **transaction)
+    .await?;
+
+    Ok(row.map(|row| RetiringType {
+        type_code: row.type_code,
+        name: row.name,
+        status: DocumentTypeStatus::from_db(&row.status),
+    }))
+}
+
 /// Retires a document type by soft delete.
 pub async fn soft_delete<'e, E: PgExecutor<'e>>(
     executor: E,
@@ -565,10 +608,11 @@ pub async fn soft_delete<'e, E: PgExecutor<'e>>(
 /// Whether any document was created from this type.
 ///
 /// Read before a delete: retiring a type that documents were created from would
-/// leave those documents pointing at something no read returns. Phase 4 has no
-/// document-creation endpoint, so this answers `false` today — it is here
-/// because the delete is written now and the documents arrive in Sprint 9,
-/// and a refusal added later is a refusal somebody has to remember.
+/// leave those documents pointing at something no read returns. A plain read,
+/// and safe to decide on only after [`lock_retiring_type`] (#769): a creation
+/// holds the type row until its document commits, so a delete that asked first
+/// would answer `false` for a document about to exist. An `EXISTS` takes no row
+/// lock, so the delete still locks no document.
 pub async fn has_documents<'e, E: PgExecutor<'e>>(
     executor: E,
     tenant_id: Uuid,
