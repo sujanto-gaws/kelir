@@ -2428,6 +2428,11 @@ async fn a_type_with_documents_is_refused_rather_than_retired() {
          no read returns. Body: {}",
         deleted.body
     );
+    assert_eq!(
+        audited_deletes(&app, id).await,
+        0,
+        "a refused delete is not audited"
+    );
 }
 
 #[tokio::test]
@@ -2455,6 +2460,7 @@ async fn a_type_with_no_documents_is_retired() {
         .await;
 
     assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
+    assert_eq!(audited_deletes(&app, id).await, 1);
 
     let read = app
         .send(
@@ -2466,6 +2472,476 @@ async fn a_type_with_no_documents_is_retired() {
         .await;
 
     assert_eq!(read.status, StatusCode::NOT_FOUND);
+}
+
+/// The `DELETE` audit entries of a type.
+async fn audited_deletes(app: &TestApp, type_id: Uuid) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM audit_events WHERE object_id = $1 AND action = 'DELETE'",
+    )
+    .bind(type_id)
+    .fetch_one(&app.pool)
+    .await
+    .expect("audit rows are countable")
+}
+
+/// The transaction a delete is queued behind in the #769 tests.
+enum Writer {
+    /// `create_document` as it runs: the type row held `FOR UPDATE`, as
+    /// `lock_pinned_form` holds it, then a document of the type inserted.
+    Creation,
+    /// The type row held `FOR UPDATE`, and nothing inserted.
+    LockOnly,
+    /// A document inserted with no lock taken first, so the type row is held
+    /// only by the foreign key's `FOR KEY SHARE`.
+    InsertOnly,
+    /// Another delete of the type, its soft delete written and uncommitted.
+    Retire,
+}
+
+/// Stages a delete of a fresh type behind `writer`, uncommitted ([#769]), and
+/// answers the delete's response, whether the delete was seen queued on a
+/// lock, and whether the type is still live afterwards. The delete is let go
+/// once it is seen queued in `pg_locks`, and the writer then commits.
+///
+/// [#769]: https://github.com/sujanto-gaws/kelir/issues/769
+async fn delete_queued_behind(code: &str, writer: Writer) -> (common::TestResponse, bool, bool) {
+    use std::time::Duration;
+
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let created = app
+        .send(
+            Method::POST,
+            "/api/v1/document-types",
+            Some(&token),
+            Some(json!({ "typeCode": code, "name": "Raced" })),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let id = id_of(&created.body["data"]);
+
+    let mut holder = app.pool.begin().await.expect("a transaction opens");
+    if matches!(writer, Writer::Creation | Writer::LockOnly) {
+        sqlx::query("SELECT id FROM document_types WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .execute(&mut *holder)
+            .await
+            .expect("holds the type row");
+    }
+    if matches!(writer, Writer::Creation | Writer::InsertOnly) {
+        sqlx::query(
+            "INSERT INTO documents (id, tenant_id, document_ref, document_type_id, title)
+             VALUES ($1, $2, 'DOC-2026-000769', $3, 'Created mid-delete')",
+        )
+        .bind(Uuid::now_v7())
+        .bind(fixtures::SYSTEM_TENANT_ID)
+        .bind(id)
+        .execute(&mut *holder)
+        .await
+        .expect("a live document of the type, uncommitted");
+    }
+    if matches!(writer, Writer::Retire) {
+        sqlx::query("UPDATE document_types SET deleted_at = now() WHERE id = $1")
+            .bind(id)
+            .execute(&mut *holder)
+            .await
+            .expect("retires the type, uncommitted");
+    }
+
+    let route = format!("/api/v1/document-types/{id}");
+    let delete = app.send(Method::DELETE, &route, Some(&token), None);
+
+    let release = async {
+        // Commit once the delete is queued on a lock. If it never queues, commit
+        // after ten seconds anyway, and the caller asserts that it did.
+        let mut queued = false;
+        for _ in 0..200 {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_locks WHERE NOT granted \
+                 AND pid IN (SELECT pid FROM pg_stat_activity WHERE datname = current_database())",
+            )
+            .fetch_one(&app.pool)
+            .await
+            .expect("reads pg_locks");
+            if waiting > 0 {
+                queued = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        holder.commit().await.expect("the writer commits");
+        queued
+    };
+
+    let (deleted, queued) =
+        tokio::time::timeout(Duration::from_secs(20), futures_lite_join(delete, release))
+            .await
+            .expect("the delete must not block forever");
+
+    let live: bool =
+        sqlx::query_scalar("SELECT deleted_at IS NULL FROM document_types WHERE id = $1")
+            .bind(id)
+            .fetch_one(&app.pool)
+            .await
+            .expect("the type is readable");
+
+    (deleted, queued, live)
+}
+
+/// **A delete queued behind a document being created counts that document**
+/// ([#769] AC2). The delete waits on the type row the creation holds, and
+/// asks whether documents exist only once it has the row, so it sees the
+/// committed document and is refused, and the type stays live.
+///
+/// # Seen to fail (coding standard 2.9)
+///
+/// 2026-10-29: red against `delete_type` as it was at `6a83893`, which asked
+/// `has_documents` on the pool before any lock: the delete answered 204 and
+/// retired the type under its live document.
+///
+/// [#769]: https://github.com/sujanto-gaws/kelir/issues/769
+#[tokio::test]
+async fn a_delete_queued_behind_a_creation_counts_its_document() {
+    let (deleted, queued, live) = delete_queued_behind("DELETE_RACED", Writer::Creation).await;
+
+    assert!(queued, "the delete was never seen waiting on the creation");
+    assert_eq!(
+        deleted.status,
+        StatusCode::CONFLICT,
+        "a document of the type committed while the delete waited for it. Body: {}",
+        deleted.body
+    );
+    assert!(live, "a refused delete leaves the type live");
+}
+
+/// **The control: a creation that commits no document does not block the
+/// delete** ([#769] AC3). The same staging, so a delete that refused whenever
+/// it waited is red here.
+///
+/// [#769]: https://github.com/sujanto-gaws/kelir/issues/769
+#[tokio::test]
+async fn a_delete_queued_behind_a_writer_that_adds_no_document_retires_the_type() {
+    let (deleted, queued, live) = delete_queued_behind("DELETE_UNRACED", Writer::LockOnly).await;
+
+    assert!(queued, "the delete was never seen waiting on the writer");
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
+    assert!(!live, "the type is retired");
+}
+
+/// **The lock is `FOR UPDATE` because an insert holds only `FOR KEY SHARE`**
+/// ([#769], mutant 1 of its gate). Under [`Writer::Creation`] any row lock the
+/// delete takes waits, since the creation's `FOR UPDATE` conflicts with all of
+/// them. A document inserted with no lock of its own holds the type row only
+/// through its foreign key, which `FOR NO KEY UPDATE` and `FOR SHARE` do not
+/// conflict with: a delete taking either reads no documents and retires the
+/// type at once.
+///
+/// # Seen to fail (coding standard 2.9)
+///
+/// 2026-10-29: red against `lock_retiring_type` weakened to `FOR NO KEY
+/// UPDATE`, and to `FOR SHARE`, and against `delete_type` as it was at
+/// `6a83893`: each time the delete was never seen queued. Both tests above
+/// stayed green under either weakened lock.
+///
+/// [#769]: https://github.com/sujanto-gaws/kelir/issues/769
+#[tokio::test]
+async fn a_delete_waits_for_a_document_inserted_without_a_lock_of_its_own() {
+    let (deleted, queued, live) = delete_queued_behind("DELETE_INSERTED", Writer::InsertOnly).await;
+
+    assert!(queued, "the delete was never seen waiting on the insert");
+    assert_eq!(
+        deleted.status,
+        StatusCode::CONFLICT,
+        "a document of the type committed while the delete waited for it. Body: {}",
+        deleted.body
+    );
+    assert!(live, "a refused delete leaves the type live");
+}
+
+/// **A delete queued behind another delete of the type is a 404** ([#769]
+/// AC1). The lock's `deleted_at IS NULL` is evaluated again once the delete
+/// ahead commits, so the row is no longer found.
+///
+/// [#769]: https://github.com/sujanto-gaws/kelir/issues/769
+#[tokio::test]
+async fn a_delete_queued_behind_another_delete_of_the_type_is_not_found() {
+    let (deleted, queued, live) = delete_queued_behind("DELETE_TWICE", Writer::Retire).await;
+
+    assert!(
+        queued,
+        "the delete was never seen waiting on the other delete"
+    );
+    assert_eq!(deleted.status, StatusCode::NOT_FOUND, "{}", deleted.body);
+    assert!(!live, "the delete ahead retired the type");
+}
+
+/// **A delete of another tenant's type waits on nothing of theirs** ([#769]
+/// AC1). The lock names the tenant, so a type id from another tenant finds no
+/// row and is a 404 at once, even while that tenant's creation holds the row.
+///
+/// # Seen to fail (coding standard 2.9)
+///
+/// 2026-10-29: red against `lock_retiring_type` with its `tenant_id = $1`
+/// dropped. The delete still answered 404, through the tenant-scoped count and
+/// soft delete, so every other #769 test stayed green, but it took the other
+/// tenant's row and waited on that tenant's creation.
+///
+/// [#769]: https://github.com/sujanto-gaws/kelir/issues/769
+#[tokio::test]
+async fn a_delete_of_another_tenants_type_waits_on_nothing_of_theirs() {
+    use std::time::Duration;
+
+    let app = TestApp::spawn().await;
+    let other = fixtures::create_tenant(&app.pool, "TNT-DT-RACED", "Raced tenant").await;
+    let theirs = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO document_types (id, tenant_id, type_code, name)
+         VALUES ($1, $2, 'THEIRS_RACED', 'Theirs')",
+    )
+    .bind(theirs)
+    .bind(other)
+    .execute(&app.pool)
+    .await
+    .expect("insert the other tenant's type");
+    let token = app.administrator_token().await;
+
+    let mut holder = app.pool.begin().await.expect("a transaction opens");
+    sqlx::query("SELECT id FROM document_types WHERE id = $1 FOR UPDATE")
+        .bind(theirs)
+        .execute(&mut *holder)
+        .await
+        .expect("their creation holds their type row");
+
+    let deleted = tokio::time::timeout(
+        Duration::from_secs(5),
+        app.send(
+            Method::DELETE,
+            &format!("/api/v1/document-types/{theirs}"),
+            Some(&token),
+            None,
+        ),
+    )
+    .await
+    .expect("the delete waited on another tenant's row");
+    holder.rollback().await.expect("their creation ends");
+
+    assert_eq!(deleted.status, StatusCode::NOT_FOUND, "{}", deleted.body);
+    let live: bool =
+        sqlx::query_scalar("SELECT deleted_at IS NULL FROM document_types WHERE id = $1")
+            .bind(theirs)
+            .fetch_one(&app.pool)
+            .await
+            .expect("their type is readable");
+    assert!(live, "their type is untouched");
+}
+
+/// **A retired type is a 404 to a delete even with a live document under it**
+/// ([#769] AC1). That is the state #769 left behind. The lock reads only a
+/// live row, as `find_type` did before it, so the delete does not go on to
+/// ask about documents and answer a 409 naming a type no read returns.
+///
+/// # Seen to fail (coding standard 2.9)
+///
+/// 2026-10-29: red against `lock_retiring_type` with its `deleted_at IS NULL`
+/// dropped, which answered 409. Every other test in this file stayed green.
+///
+/// [#769]: https://github.com/sujanto-gaws/kelir/issues/769
+#[tokio::test]
+async fn a_retired_type_with_a_live_document_is_not_found_by_a_delete() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let created = app
+        .send(
+            Method::POST,
+            "/api/v1/document-types",
+            Some(&token),
+            Some(json!({ "typeCode": "RETIRED_UNDER_ONE", "name": "Retired under one" })),
+        )
+        .await;
+    let id = id_of(&created.body["data"]);
+    sqlx::query(
+        "INSERT INTO documents (id, tenant_id, document_ref, document_type_id, title)
+         VALUES ($1, $2, 'DOC-2026-000770', $3, 'Left behind')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .bind(id)
+    .execute(&app.pool)
+    .await
+    .expect("a live document of the type");
+    sqlx::query("UPDATE document_types SET deleted_at = now() WHERE id = $1")
+        .bind(id)
+        .execute(&app.pool)
+        .await
+        .expect("retires the type under it");
+
+    let deleted = app
+        .send(
+            Method::DELETE,
+            &format!("/api/v1/document-types/{id}"),
+            Some(&token),
+            None,
+        )
+        .await;
+
+    assert_eq!(deleted.status, StatusCode::NOT_FOUND, "{}", deleted.body);
+}
+
+/// **A type whose only document was deleted is retired** ([#769]'s criteria,
+/// *Not in scope*): the lock changes when the documents are counted, not which.
+///
+/// [#769]: https://github.com/sujanto-gaws/kelir/issues/769
+#[tokio::test]
+async fn a_type_whose_only_document_was_deleted_is_retired() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let created = app
+        .send(
+            Method::POST,
+            "/api/v1/document-types",
+            Some(&token),
+            Some(json!({ "typeCode": "EMPTIED", "name": "Emptied" })),
+        )
+        .await;
+    let id = id_of(&created.body["data"]);
+    sqlx::query(
+        "INSERT INTO documents (id, tenant_id, document_ref, document_type_id, title, deleted_at)
+         VALUES ($1, $2, 'DOC-2026-000771', $3, 'Deleted', now())",
+    )
+    .bind(Uuid::now_v7())
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .bind(id)
+    .execute(&app.pool)
+    .await
+    .expect("a deleted document of the type");
+
+    let deleted = app
+        .send(
+            Method::DELETE,
+            &format!("/api/v1/document-types/{id}"),
+            Some(&token),
+            None,
+        )
+        .await;
+
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
+}
+
+/// **The type row is held from the lock to the commit** ([#769]). A creation
+/// that arrives while the delete counts documents waits for the delete, and
+/// then finds no type to create a document of.
+///
+/// The count is held still by a transaction holding `documents` in `ACCESS
+/// EXCLUSIVE`, so the delete is caught between its lock and its count. The
+/// creation is `lock_pinned_form`'s statement, then the insert. The table is
+/// let go once the creation too is queued: on the type row if the delete
+/// still holds it, or on `documents` if the delete had let the row go.
+///
+/// # Seen to fail (coding standard 2.9)
+///
+/// 2026-10-29: red against `delete_type` committing its transaction straight
+/// after the lock, then counting and soft-deleting on the pool. The creation
+/// took the row, its document committed, and the delete answered 204 over it.
+/// Every other #769 test stayed green.
+///
+/// [#769]: https://github.com/sujanto-gaws/kelir/issues/769
+#[tokio::test]
+async fn a_creation_arriving_while_the_delete_counts_waits_for_the_delete() {
+    use std::time::Duration;
+
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let created = app
+        .send(
+            Method::POST,
+            "/api/v1/document-types",
+            Some(&token),
+            Some(json!({ "typeCode": "DELETE_COUNTING", "name": "Counting" })),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let id = id_of(&created.body["data"]);
+
+    let mut gate = app.pool.begin().await.expect("a transaction opens");
+    sqlx::query("LOCK TABLE documents IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *gate)
+        .await
+        .expect("holds the documents table");
+
+    // Whether at least `at_least` locks are waited for, within ten seconds.
+    let waiting = |at_least: i64| {
+        let pool = app.pool.clone();
+        async move {
+            for _ in 0..200 {
+                let waiting: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM pg_locks WHERE NOT granted \
+                     AND pid IN (SELECT pid FROM pg_stat_activity WHERE datname = current_database())",
+                )
+                .fetch_one(&pool)
+                .await
+                .expect("reads pg_locks");
+                if waiting >= at_least {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            false
+        }
+    };
+
+    let route = format!("/api/v1/document-types/{id}");
+    let delete = app.send(Method::DELETE, &route, Some(&token), None);
+
+    let creation = async {
+        assert!(waiting(1).await, "the delete was never seen counting");
+        let create = async {
+            let mut transaction = app.pool.begin().await.expect("a transaction opens");
+            let found: Option<Uuid> = sqlx::query_scalar(
+                "SELECT id FROM document_types WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+            )
+            .bind(id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .expect("the creation's lock");
+            if found.is_some() {
+                sqlx::query(
+                    "INSERT INTO documents (id, tenant_id, document_ref, document_type_id, title)
+                     VALUES ($1, $2, 'DOC-2026-000772', $3, 'Created mid-count')",
+                )
+                .bind(Uuid::now_v7())
+                .bind(fixtures::SYSTEM_TENANT_ID)
+                .bind(id)
+                .execute(&mut *transaction)
+                .await
+                .expect("the creation's document");
+            }
+            transaction.commit().await.expect("the creation commits");
+            found.is_some()
+        };
+        let release = async {
+            assert!(waiting(2).await, "the creation was never seen queued");
+            gate.rollback()
+                .await
+                .expect("the documents table is let go");
+        };
+        futures_lite_join(create, release).await.0
+    };
+
+    let (deleted, created_document) =
+        tokio::time::timeout(Duration::from_secs(20), futures_lite_join(delete, creation))
+            .await
+            .expect("the delete must not block forever");
+
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
+    assert!(
+        !created_document,
+        "a document was created of a type the delete had already counted"
+    );
 }
 
 /// A form retired **while** the binding is being written is refused.
