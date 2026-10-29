@@ -1,7 +1,7 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import type { AxiosResponse, InternalAxiosRequestConfig } from 'axios'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, onTestFinished } from 'vitest'
 
 import DocumentTypeFormDialog from './DocumentTypeFormDialog.vue'
 import { apiClient } from '@/api/client'
@@ -1077,11 +1077,11 @@ describe('DocumentTypeFormDialog choosers', () => {
     expect(wrapper.find('[data-testid="document-type-unplaced-errors"]').exists()).toBe(false)
   })
 
-  // #739 AC8: the request the server's fix is written for. A form or list
-  // retired since the type was bound reads as a 404, so its chooser cannot name
-  // it, and the dialog still sends it back as read: the server keeps a binding
-  // sent at its stored value without checking it again.
-  it('renames a type whose form and list were retired, sending both back as read', async () => {
+  // #739 AC8: a form or list retired since the type was bound reads as a 404,
+  // so its chooser cannot name it, and a rename still saves. Until #742 the
+  // dialog sent both back as read, which the server keeps without checking
+  // them again; since #742 it leaves both off, which leaves them alone.
+  it('renames a type whose form and list were retired, leaving both alone', async () => {
     const retiredForm = 'f-retired'
     const retiredList = 'l-retired'
     replaceBackend(acceptingPut)
@@ -1106,11 +1106,9 @@ describe('DocumentTypeFormDialog choosers', () => {
     await wrapper.get('form').trigger('submit')
     await flushPromises()
 
-    expect(putBody()).toMatchObject({
-      name: 'Requisition (renamed)',
-      formId: retiredForm,
-      listId: retiredList,
-    })
+    expect(putBody()?.name).toBe('Requisition (renamed)')
+    expect(putBody()).not.toHaveProperty('formId')
+    expect(putBody()).not.toHaveProperty('listId')
     expect(sentWorkflows()).toBe(false)
     expect(wrapper.emitted('saved')).toHaveLength(1)
     expect(messageUnder(wrapper, 'type-form')).toBe('')
@@ -1615,5 +1613,201 @@ describe('DocumentTypeFormDialog choosers', () => {
     expect(
       wrapper.get('[data-testid="reload-document-type"]').attributes('disabled'),
     ).toBeUndefined()
+  })
+
+  /*
+   * #742. An edit sends `status`, `formId` and `listId` only when they differ
+   * from what the dialog read, so a save from a stale read does not undo a
+   * deprecation or a rebinding another administrator made since.
+   */
+
+  /**
+   * The object the dialog handed the client for its `PUT`, before serialising.
+   * `putBody` cannot tell a key left off from one set to `undefined`, which
+   * `JSON.stringify` drops; this can, and only the first is "left off".
+   */
+  function handedPut(): () => Record<string, unknown> | undefined {
+    let handed: Record<string, unknown> | undefined
+    const id = apiClient.interceptors.request.use((config) => {
+      if (config.method === 'put') {
+        handed = config.data as Record<string, unknown>
+      }
+
+      return config
+    })
+
+    onTestFinished(() => apiClient.interceptors.request.eject(id))
+
+    return () => handed
+  }
+
+  /** The keys of the three an edit leaves off unless they changed, as handed over. */
+  function guardedKeys(handed: Record<string, unknown> | undefined): string[] {
+    expect(handed).toBeDefined()
+
+    return Object.keys(handed ?? {}).filter((key) => ['status', 'formId', 'listId'].includes(key))
+  }
+
+  /**
+   * A server holding one `ACTIVE` type, which another administrator edits
+   * through `theirEdit` while the dialog is open. Its `PUT` writes each key it
+   * is sent and leaves the rest alone, as `update_type` does, and refuses a
+   * stale `expectedWorkflows`.
+   */
+  function serveTypeWithStatus(): {
+    stored(): DocumentType
+    theirEdit(change: Partial<DocumentType>): void
+  } {
+    let stored: DocumentType = { ...boundType(wantedFlow.id), workflows: [routed] }
+
+    replaceBackend((request) => {
+      if (request.url !== '/document-types/t-1') {
+        return undefined
+      }
+
+      if (request.method === 'get') {
+        return { status: 200, body: itemBody(stored) }
+      }
+
+      const sent = {
+        ...(request.body as Partial<DocumentType> & { expectedWorkflows?: WorkflowBinding[] }),
+      }
+
+      if (sent.expectedWorkflows && !sameSet(sent.expectedWorkflows, stored.workflows)) {
+        return workflowsChanged
+      }
+
+      delete sent.expectedWorkflows
+      stored = { ...stored, ...sent }
+
+      return { status: 200, body: itemBody(stored) }
+    })
+
+    return {
+      stored: () => stored,
+      theirEdit(change) {
+        stored = { ...stored, ...change }
+      },
+    }
+  }
+
+  // AC1 and AC6: the issue's sequence. Red before #742: the body carried
+  // `status: 'ACTIVE'`, and the deprecation was undone.
+  it('leaves a deprecation made since it opened alone when only the description is edited', async () => {
+    const handed = handedPut()
+    const server = serveTypeWithStatus()
+    const wrapper = await open(server.stored())
+
+    server.theirEdit({ status: 'DEPRECATED', formId: forms[0].id, listId: lists[0].id })
+    await wrapper.get('[data-testid="type-description"]').setValue('Buying things')
+    await submit(wrapper)
+
+    expect(wrapper.emitted('saved')).toHaveLength(1)
+    expect(server.stored()).toMatchObject({
+      description: 'Buying things',
+      status: 'DEPRECATED',
+      formId: forms[0].id,
+      listId: lists[0].id,
+    })
+    // Absent: not `undefined`, which serialising would hide, and not `null`.
+    expect(guardedKeys(handed())).toEqual([])
+  })
+
+  // AC2: a deliberate change is this administrator's, last-writer-wins as before.
+  it.each([
+    ['', {}],
+    [' after another administrator deprecated the type', { status: 'DEPRECATED' as const }],
+  ])('sends a status the administrator chose%s', async (_, theirs) => {
+    const server = serveTypeWithStatus()
+    const wrapper = await open(server.stored())
+
+    server.theirEdit(theirs)
+    await wrapper.get('[data-testid="type-status"]').setValue('DRAFT')
+    await submit(wrapper)
+
+    expect(putBody()?.status).toBe('DRAFT')
+    expect(server.stored().status).toBe('DRAFT')
+  })
+
+  // AC3, and AC5's last case: a change undone before saving is no change.
+  it.each([
+    ['status', 'type-status', 'DEPRECATED', 'ACTIVE'],
+    ['form', 'type-form', forms[0].id, forms[1].id],
+    ['list', 'type-list', lists[0].id, lists[1].id],
+  ] as const)('sends no %s when it is changed and changed back', async (_, testId, other, read) => {
+    const handed = handedPut()
+    replaceBackend(acceptingPut)
+    // Bound on the first page, so the bound row stays a choice after another is made.
+    const wrapper = await open({
+      ...boundType(wantedFlow.id),
+      formId: forms[1].id,
+      listId: lists[1].id,
+    })
+
+    await wrapper.get(`[data-testid="${testId}"]`).setValue(other)
+    await wrapper.get(`[data-testid="${testId}"]`).setValue(read)
+    await wrapper.get('[data-testid="type-name"]').setValue('Requisition (renamed)')
+    await submit(wrapper)
+
+    expect(putBody()?.name).toBe('Requisition (renamed)')
+    expect(guardedKeys(handed())).toEqual([])
+  })
+
+  // AC5: each binding on its own, so dropping either comparison shows.
+  it.each([
+    ['form when it moves to another', 'type-form', 'formId', forms[0].id, forms[0].id],
+    ['form as null when it is cleared', 'type-form', 'formId', '', null],
+    ['list when it moves to another', 'type-list', 'listId', lists[0].id, lists[0].id],
+    ['list as null when it is cleared', 'type-list', 'listId', '', null],
+  ] as const)('sends the %s, and no other of the three', async (_, testId, field, chosen, sent) => {
+    const handed = handedPut()
+    replaceBackend(acceptingPut)
+    const wrapper = await open(boundType(wantedFlow.id))
+
+    await wrapper.get(`[data-testid="${testId}"]`).setValue(chosen)
+    await submit(wrapper)
+
+    // A clear is `null`, which unbinds; it is a change, so it is sent.
+    expect(putBody()).toHaveProperty(field, sent)
+    expect(guardedKeys(handed())).toEqual([field])
+  })
+
+  // AC4: a create states all three, as before.
+  it('still sends the status, form and list when creating a type', async () => {
+    const wrapper = await open()
+
+    await wrapper.get('[data-testid="type-code"]').setValue('REQ')
+    await wrapper.get('[data-testid="type-name"]').setValue('Requisition')
+    await submit(wrapper)
+
+    const posted = backend.requests.find((request) => request.method === 'post')?.body
+
+    expect(posted).toMatchObject({ status: 'DRAFT', formId: null, listId: null })
+  })
+
+  // The baseline is the last read the fields were filled from: after a Reload,
+  // the reloaded status, not the one the dialog first opened on.
+  it('compares against what a reload read, not what the dialog opened on', async () => {
+    const handed = handedPut()
+    const server = serveTypeWithStatus()
+    const wrapper = await open(server.stored())
+
+    server.theirEdit({
+      status: 'DEPRECATED',
+      workflows: [binding(flows[1].id, { priority: 4 })],
+    })
+    await wrapper.get('[data-testid="type-workflow"]').setValue(flows[0].id)
+    await submit(wrapper)
+    await wrapper.get('[data-testid="reload-document-type"]').trigger('click')
+    await flushPromises()
+
+    expect(selectedValue(wrapper, 'type-status')).toBe('DEPRECATED')
+
+    await wrapper.get('[data-testid="type-description"]').setValue('Buying things')
+    await submit(wrapper)
+
+    expect(putBodies()).toHaveLength(2)
+    expect(guardedKeys(handed())).toEqual([])
+    expect(server.stored()).toMatchObject({ description: 'Buying things', status: 'DEPRECATED' })
   })
 })

@@ -71,6 +71,12 @@ const securityLevel = ref<SecurityLevel>('INTERNAL')
 const workflowId = ref('')
 /** The bindings the type had when the dialog opened, in the server's order. */
 const storedBindings = ref<WorkflowBinding[]>([])
+/** The status, form and list of the read the fields hold, from opening or Reload (#742). */
+const storedFields = ref<Pick<DocumentType, 'status' | 'formId' | 'listId'>>({
+  status: 'DRAFT',
+  formId: null,
+  listId: null,
+})
 
 const isSaving = ref(false)
 const { fieldErrors, formError, report, reset } = useFormErrors()
@@ -238,6 +244,11 @@ function fill(editing: DocumentType | null): void {
   // at all — including the error that would have said why.
   storedBindings.value = editing?.workflows ?? []
   workflowId.value = storedBindings.value[0]?.workflowDefinitionId ?? ''
+  storedFields.value = {
+    status: status.value,
+    formId: editing?.formId ?? null,
+    listId: editing?.listId ?? null,
+  }
 }
 
 watch(
@@ -308,6 +319,47 @@ function workflowsToSend(): WorkflowBindingRequest[] | undefined {
   return [{ ...onTheWire(first), workflowDefinitionId: chosen }]
 }
 
+/**
+ * The `status`, `formId` and `listId` a save sends: on an edit, only those that
+ * differ from what the dialog read; the rest are absent rather than `undefined`.
+ *
+ * **Each is written as sent** (`update_type`), and leaving one off leaves it
+ * alone — so an edit sends one only when the administrator changed it (#742),
+ * as `workflows` is sent only when the chooser moved (#718). Until then every
+ * save sent all three back as read, and one from a stale read undid a
+ * deprecation, or a rebinding, another administrator had made since. A change
+ * the administrator did make is sent and is last-writer-wins, as before;
+ * clearing a bound form or list sends `null`, which unbinds it.
+ */
+function fieldsToSend(): Pick<CreateDocumentTypeRequest, 'status' | 'formId' | 'listId'> {
+  const chosen = {
+    status: status.value,
+    formId: orNull(formId.value),
+    listId: orNull(listId.value),
+  }
+
+  if (!isEditing.value) {
+    return chosen
+  }
+
+  const read = storedFields.value
+  const changed: Pick<CreateDocumentTypeRequest, 'status' | 'formId' | 'listId'> = {}
+
+  if (chosen.status !== read.status) {
+    changed.status = chosen.status
+  }
+
+  if (chosen.formId !== read.formId) {
+    changed.formId = chosen.formId
+  }
+
+  if (chosen.listId !== read.listId) {
+    changed.listId = chosen.listId
+  }
+
+  return changed
+}
+
 async function save(): Promise<void> {
   isSaving.value = true
   reset()
@@ -317,11 +369,9 @@ async function save(): Promise<void> {
     name: name.value.trim(),
     description: orNull(description.value),
     category: orNull(category.value),
-    formId: orNull(formId.value),
-    listId: orNull(listId.value),
+    ...fieldsToSend(),
     targetEntityType: targetEntity.value === '' ? null : targetEntity.value,
     defaultSecurityLevel: securityLevel.value,
-    status: status.value,
   }
 
   const workflows = workflowsToSend()
@@ -335,7 +385,8 @@ async function save(): Promise<void> {
   try {
     if (props.editing) {
       // `typeCode` may not change — a delegation scopes itself to it and an
-      // integration names a type by it — so an edit sends everything else.
+      // integration names a type by it — so an edit sends everything else,
+      // the status, form and list only as far as they changed.
       const editable = { ...body, typeCode: undefined }
 
       delete editable.typeCode
