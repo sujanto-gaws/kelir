@@ -76,7 +76,8 @@
 //!    every sprint, and eight of them were old enough to have read nothing in
 //!    the release naming them. Since [#483](https://github.com/sujanto-gaws/kelir/issues/483),
 //!    a release that cites something and points at no numbered record is
-//!    refused rather than skipped.
+//!    refused rather than skipped. From `v0.5.0`, it reads the *Independent
+//!    pass* row's links ([#568](https://github.com/sujanto-gaws/kelir/issues/568)).
 //! 8. **A release record's header status is a word the process defines.** Door
 //!    C: a status the detector could not parse left the record ungoverned
 //!    rather than red.
@@ -118,7 +119,9 @@
 //! 12. **That record, as it stood at the tag, already cites its pass**: a
 //!     status the process defines (`Draft` is expected, `Final` is never
 //!     required), and a citation that resolves, is new and is above the
-//!     high-water mark. See *Rules 11 and 12, 2026-09-26* below.
+//!     high-water mark. See *Rules 11 and 12, 2026-09-26* below. Rules 1, 2
+//!     and 7 are read here from the *Independent pass* row, from `v0.5.0` on,
+//!     and rule 6 reads every citation.
 //!
 //! Rules 13 and 14 are [#549](https://github.com/sujanto-gaws/kelir/issues/549),
 //! Sprint 21 row 19: [#448](https://github.com/sujanto-gaws/kelir/issues/448)'s
@@ -1458,9 +1461,12 @@ fn release_records() -> Vec<((u32, u32, u32), String, String)> {
 /// every rule that compares citations compares that.
 ///
 /// So the prefix is kept now, because a path cannot be resolved without it.
-/// **A token this does not keep can only cost a release**: it is not a
-/// citation, so it cannot be the new one rule 2 wants or the high one rule 7
-/// wants, and a release left citing nothing is refused by rule 1.
+/// **For rules 1, 2 and 7 below [`FIRST_PASS_ROW_RELEASE`], a token this does
+/// not keep can only cost a release**: it is not a citation, so it cannot be
+/// the new one rule 2 wants or the high one rule 7 wants, and a release left
+/// citing nothing is refused by rule 1. **Rules 6, 13 and 14 read this too**,
+/// and there a token not kept is a link not resolved and a reader not checked
+/// ([#623](https://github.com/sujanto-gaws/kelir/issues/623)).
 ///
 /// # Why this still does not check that the file exists
 ///
@@ -2909,13 +2915,15 @@ fn a_cited_verification_record_exists() {
 /// The rule: *a governed release cites a record numbered above every record any
 /// earlier release cited.* Records are numbered in the order they are written,
 /// so a number above the high-water mark is a record written after the last
-/// release read anything. It held against all five governed releases —
+/// release read anything. It held against the five governed releases when it
+/// landed —
 /// `v0.3.0` → 03; `v0.4.0` → 06 > 03; `v0.5.0` → 09, 10 > 06; `v0.6.0` → 13, 14
 /// > 10; `v0.7.0` → 15 > 14 — and it refuses the probe, which cites 01.
 ///
 /// **Since [#568](https://github.com/sujanto-gaws/kelir/issues/568) it reads
 /// the *Independent pass* row** from [`FIRST_PASS_ROW_RELEASE`] on, and holds
-/// against all seven: `v0.5.0` → 09 > 06; `v0.6.0` → 13 > 09; `v0.7.0` → 15 >
+/// against all seven: `v0.3.0` and `v0.4.0` are read whole, as before, then
+/// `v0.5.0` → 09 > 06; `v0.6.0` → 13 > 09; `v0.7.0` → 15 >
 /// 13; `v0.8.0` → 16, 17 > 15; `v0.9.0` → 19, 20, 21 > 17.
 ///
 /// A release citing nothing at all is rule 1's, not this one's, so this stays
@@ -3248,8 +3256,10 @@ fn the_pre_rule_releases_are_named_rather_than_silently_skipped() {
 ///   there, because a column-0 list marker is where the next top-level item
 ///   begins. Markdown renders it outside the follow-up list too, so a reader
 ///   sees the same edge the walk does. **Since [#563](https://github.com/sujanto-gaws/kelir/issues/563)
-///   that is the only column-0 text the block ends at directly under a row**:
-///   a lazy continuation line is read, and so are the rows after it.
+///   that is the first of the column-0 lines the block ends at directly under
+///   a row**: a quote, a heading, a fence or a thematic break ends it too
+///   ([`starts_a_block`]), and a lazy continuation line is read, and so are
+///   the rows after it.
 /// - **A follow-up under another label** — `- **Issues found post-release:**`,
 ///   or record 02's `- **Carried into the sprint plan:**`. Rule 10 reads the
 ///   one label the template gives follow-ups.
