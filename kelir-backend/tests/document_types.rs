@@ -5148,7 +5148,7 @@ async fn a_stale_dialog_save_leaves_a_status_form_and_list_changed_since_alone()
     for field in ["status", "formId", "listId"] {
         assert!(
             old_value.get(field).is_none() && new_value.get(field).is_none(),
-            "A's save did not change {field}, so its audit entry does not record it:              {old_value} -> {new_value}"
+            "A's save did not change {field}, so its audit entry does not record it: {old_value} -> {new_value}"
         );
     }
 }
