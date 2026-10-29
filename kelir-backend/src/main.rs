@@ -51,7 +51,9 @@ async fn run() -> anyhow::Result<()> {
         "starting kelir backend"
     );
 
-    let pool = db::create_pool(&config.database_url)?;
+    // A non-local database without TLS is refused here when the configuration
+    // alone says so, and at the first connection below when the server does.
+    let pool = db::create_pool_with_tls(&config.database_url, (&config).into())?;
 
     // Migrations run at startup so a fresh compose stack is usable immediately.
     // This is safe while deployments are single-instance; once several replicas
