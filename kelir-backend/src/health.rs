@@ -208,20 +208,60 @@ mod tests {
         }
     }
 
+    /// Everything a subscriber writes, for a test to read back.
+    #[derive(Clone, Default)]
+    struct LogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("lock").extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
     #[tokio::test]
     async fn readiness_is_unavailable_when_the_database_refuses_tls() {
-        // The log line is the ping error's Debug, which names the setting;
-        // `db`'s tests pin that text (#803).
+        use tracing::instrument::WithSubscriber;
+
         let url = crate::db::server_refusing_tls().await;
         let pool = crate::db::create_pool(&url).expect("lazy pool builds without a server");
+        let capture = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_ansi(false)
+            .finish();
 
-        let (status, Json(body)) = readiness(State(AppState::new(
+        let probe = readiness(State(AppState::new(
             pool,
             crate::config::AppConfig::test_default(),
         )))
-        .await;
+        .with_subscriber(subscriber);
+        // A callsite caches whether anyone listens. One another test reached
+        // first, with no subscriber, would stay silent here without this.
+        tracing::callsite::rebuild_interest_cache();
+        let (status, Json(body)) = probe.await;
 
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body.database, "down");
+
+        // The log line names the setting (#803 AC9), and not the password the
+        // URL carries (coding standard §2.7). The control first: an empty
+        // capture would pass the rest.
+        let logged = String::from_utf8_lossy(&capture.0.lock().expect("lock")).into_owned();
+        assert!(logged.contains("readiness probe failed"), "{logged:?}");
+        assert!(logged.contains("KELIR_DATABASE_SSL_MODE"), "{logged}");
+        assert!(!logged.contains("s3cret-pw"), "{logged}");
     }
 }

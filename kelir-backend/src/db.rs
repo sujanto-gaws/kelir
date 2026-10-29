@@ -357,20 +357,38 @@ impl std::error::Error for ConnectOptionsError {
 
 /// Names the Kelir settings in a TLS failure.
 ///
-/// sqlx's own text — *server does not support TLS*, or a certificate the
-/// verifier refused — names no setting, so an operator reading the log would
-/// not know which knob decided it. Kept as [`sqlx::Error::Tls`] so callers
-/// that match on the variant still do.
+/// sqlx's own text names no setting, so an operator reading the log would not
+/// know which knob decided it. sqlx 0.8.6 reports TLS failures in two
+/// variants, and each keeps its variant here so callers that match on it
+/// still do:
+///
+/// - [`sqlx::Error::Tls`]: the server said it offers no TLS (*server does not
+///   support TLS*), or the CA file could not be loaded.
+/// - [`sqlx::Error::Io`]: rustls refused the handshake itself — a certificate
+///   from an unknown issuer, one not valid for the host's name, or bytes that
+///   are not TLS. sqlx returns the handshake's `io::Error` as it is, and
+///   rustls builds that error as `InvalidData` around its own.
 fn name_the_tls_settings(error: sqlx::Error) -> sqlx::Error {
+    const SETTINGS: &str = "The database is reached over TLS as the host and \
+         KELIR_DATABASE_SSL_MODE decide: turn TLS on at the server, check \
+         KELIR_DATABASE_SSL_ROOT_CERT, or reach it through a local host";
+
     match error {
-        sqlx::Error::Tls(source) => sqlx::Error::Tls(
-            format!(
-                "{source}. The database is reached over TLS as the host and \
-                 KELIR_DATABASE_SSL_MODE decide: turn TLS on at the server, check \
-                 KELIR_DATABASE_SSL_ROOT_CERT, or reach it through a local host"
-            )
-            .into(),
-        ),
+        sqlx::Error::Tls(source) => sqlx::Error::Tls(format!("{source}. {SETTINGS}").into()),
+        // **Matched by shape, not by type.** Downcasting to `rustls::Error`
+        // would take rustls as a direct dependency, which changes Cargo.lock.
+        // The shape is narrow enough here: the socket is a TCP or Unix stream
+        // whose own failures carry an OS error, not an inner one, and sqlx's
+        // protocol faults are `Error::Protocol`. `InvalidData` with an error
+        // inside is what rustls builds (`ConnectionCommon::complete_io`).
+        sqlx::Error::Io(source)
+            if source.kind() == std::io::ErrorKind::InvalidData && source.get_ref().is_some() =>
+        {
+            sqlx::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{source}. {SETTINGS}"),
+            ))
+        }
         other => other,
     }
 }
@@ -456,6 +474,42 @@ pub(crate) async fn server_refusing_tls() -> String {
     format!("postgres://kelir:s3cret-pw@127.0.0.2:{port}/kelir")
 }
 
+/// [`server_refusing_tls`]'s opposite: it says *yes* to TLS, then answers the
+/// ClientHello with bytes that are not TLS, so rustls itself refuses the
+/// handshake — the path a certificate refusal takes through sqlx, without a
+/// certificate.
+#[cfg(test)]
+async fn server_breaking_the_handshake() -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.2:0")
+        .await
+        .expect("127.0.0.2 is loopback");
+    let port = listener.local_addr().expect("bound").port();
+
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut request = [0u8; 8];
+                if socket.read_exact(&mut request).await.is_err()
+                    || socket.write_all(b"S").await.is_err()
+                {
+                    return;
+                }
+                let mut client_hello = [0u8; 1024];
+                if socket.read(&mut client_hello).await.unwrap_or(0) > 0 {
+                    let _ = socket.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n").await;
+                }
+                // Held open until the client gives up, so the refusal is
+                // rustls's and not a closed socket's.
+                let _ = socket.read(&mut client_hello).await;
+            });
+        }
+    });
+
+    format!("postgres://kelir:s3cret-pw@127.0.0.2:{port}/kelir")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -521,6 +575,8 @@ mod tests {
             // `::1` cannot stand bare in a URL's authority, so it arrives as
             // the `host` parameter, which wins over the authority.
             format!("{}?host=::1", url_at("db.example.com")),
+            // And `hostaddr` at a loopback address is local, whatever the name.
+            format!("{}?hostaddr=127.0.0.1", url_at("db.example.com")),
             // Both spellings of a socket directory sqlx accepts.
             format!("postgres://kelir:{PASSWORD}@%2Fvar%2Frun%2Fpostgresql/kelir"),
             format!("{}?host=/var/run/postgresql", url_at("db.example.com")),
@@ -698,6 +754,70 @@ mod tests {
     }
 
     #[test]
+    fn the_last_sslmode_wins_in_either_spelling_as_in_sqlx() {
+        let at = |query: &str| format!("{}?{query}", url_at("db.example.com"));
+
+        // What sqlx would dial is what the rule judges: a weak mode after a
+        // strong one is the one that counts, under either key sqlx reads.
+        for query in [
+            "sslmode=require&sslmode=disable",
+            "ssl-mode=prefer",
+            "sslmode=verify-full&ssl-mode=allow",
+            "sslmode=DISABLE",
+        ] {
+            let message = refusal(&at(query), NO_SETTINGS);
+            assert!(
+                message.contains("KELIR_DATABASE_SSL_MODE"),
+                "{query}: {message}"
+            );
+        }
+
+        for (query, expected) in [
+            ("sslmode=disable&sslmode=require", "require"),
+            ("ssl-mode=verify-ca", "verify-ca"),
+            ("ssl-mode=prefer&sslmode=verify-full", "verify-full"),
+        ] {
+            let url = at(query);
+            let sqlx_reads: PgConnectOptions = url.parse().expect("sqlx parses it");
+
+            assert_eq!(mode(&url, NO_SETTINGS), expected, "{query}");
+            assert_eq!(mode_name(sqlx_reads.get_ssl_mode()), expected, "{query}");
+        }
+    }
+
+    #[test]
+    fn the_binary_passes_both_settings_from_its_configuration() {
+        let config = AppConfig {
+            database_ssl_mode: Some("verify-full".to_owned()),
+            database_ssl_root_cert: Some("/etc/kelir/db-tls/ca.pem".to_owned()),
+            ..AppConfig::test_default()
+        };
+
+        let settings = DatabaseTlsSettings::from(&config);
+
+        assert_eq!(settings.ssl_mode, Some("verify-full"));
+        assert_eq!(settings.ssl_root_cert, Some("/etc/kelir/db-tls/ca.pem"));
+    }
+
+    #[test]
+    fn a_ca_the_url_asks_for_is_checked_at_startup_too() {
+        let missing = std::env::temp_dir().join("kelir-db-ca-that-does-not-exist.pem");
+        let missing = missing.to_str().expect("utf-8 temp path");
+
+        // No setting: the URL's own certificate check is what reads the file.
+        for url_mode in ["verify-ca", "verify-full"] {
+            let url = format!("{}?sslmode={url_mode}", url_at("db.example.com"));
+            let message = refusal(&url, tls(None, Some(missing)));
+
+            assert!(
+                message.contains("KELIR_DATABASE_SSL_ROOT_CERT"),
+                "{message}"
+            );
+            assert!(message.contains(missing), "{message}");
+        }
+    }
+
+    #[test]
     fn a_ca_that_nothing_would_check_is_refused() {
         let ca = pem_file(PEM);
 
@@ -746,6 +866,66 @@ mod tests {
 
         let untouched = name_the_tls_settings(sqlx::Error::PoolTimedOut);
         assert!(matches!(untouched, sqlx::Error::PoolTimedOut));
+    }
+
+    #[tokio::test]
+    async fn a_handshake_rustls_refuses_names_both_settings() {
+        // A certificate refusal travels this way too: sqlx 0.8.6 returns the
+        // handshake's io::Error as `Error::Io`, not `Error::Tls`.
+        let url = server_breaking_the_handshake().await;
+        let pool = create_pool(&url).expect("the configuration alone is acceptable");
+
+        let error = ping(&pool).await.expect_err("no handshake, no connection");
+        assert!(matches!(error, sqlx::Error::Io(_)), "{error:?}");
+        for text in [error.to_string(), format!("{error:?}")] {
+            assert!(text.contains("KELIR_DATABASE_SSL_MODE"), "{text}");
+            assert!(text.contains("KELIR_DATABASE_SSL_ROOT_CERT"), "{text}");
+        }
+
+        let error = run_migrations(&pool)
+            .await
+            .expect_err("migrations need a connection");
+        assert!(
+            error.to_string().contains("KELIR_DATABASE_SSL_ROOT_CERT"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_io_error_carrying_a_tls_refusal_is_named_and_a_plain_one_is_not() {
+        // The shape rustls gives a refused certificate: InvalidData, with
+        // rustls's error inside.
+        let refused = std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid peer certificate: UnknownIssuer",
+        );
+        let wrapped = name_the_tls_settings(sqlx::Error::Io(refused));
+
+        let sqlx::Error::Io(inner) = &wrapped else {
+            panic!("Io stays Io: {wrapped:?}");
+        };
+        assert_eq!(inner.kind(), std::io::ErrorKind::InvalidData);
+        for text in [wrapped.to_string(), format!("{wrapped:?}")] {
+            assert!(text.contains("UnknownIssuer"), "{text}");
+            assert!(text.contains("KELIR_DATABASE_SSL_MODE"), "{text}");
+            assert!(text.contains("KELIR_DATABASE_SSL_ROOT_CERT"), "{text}");
+        }
+
+        for plain in [
+            std::io::Error::from(std::io::ErrorKind::ConnectionRefused),
+            std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused"),
+            // InvalidData with nothing inside is not rustls's shape.
+            std::io::Error::from(std::io::ErrorKind::InvalidData),
+        ] {
+            let before = plain.to_string();
+            let untouched = name_the_tls_settings(sqlx::Error::Io(plain));
+
+            assert!(
+                !untouched.to_string().contains("KELIR_DATABASE_SSL_MODE"),
+                "{untouched}"
+            );
+            assert!(untouched.to_string().contains(&before), "{untouched}");
+        }
     }
 
     #[tokio::test]
