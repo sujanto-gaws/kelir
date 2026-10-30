@@ -62,6 +62,52 @@ ${body}" "${side}"
   judge "${expected}" "${name}"
 }
 
+# probe_octopus <name> <title>: a commit of three parents on BASE, then the
+# check, which should not read it.
+probe_octopus() {
+  local name="$1" title="$2"
+  local tree first second third merge
+
+  tree="$(git -C "${REPO}" rev-parse "${BASE}^{tree}")"
+  first="$(commit_tree "${tree}" -p "${BASE}" -m "chore: first")"
+  second="$(commit_tree "${tree}" -p "${BASE}" -m "chore: second")"
+  third="$(commit_tree "${tree}" -p "${BASE}" -m "chore: third")"
+  merge="$(commit_tree "${tree}" -p "${first}" -p "${second}" -p "${third}" -m "${title}")"
+  git -C "${REPO}" checkout -q --detach "${merge}"
+
+  judge accepted "${name}"
+}
+
+commit_tree() {
+  git -C "${REPO}" -c user.name=probe -c user.email=probe@example.com commit-tree "$@"
+}
+
+# probe_says <name> <body> <text>: refused, and the log holds the text.
+probe_says() {
+  local name="$1" body="$2" text="$3"
+  local output actual=accepted
+
+  git -C "${REPO}" checkout -q --detach "${BASE}"
+  git -C "${REPO}" -c user.name=probe -c user.email=probe@example.com \
+    commit -q --allow-empty -F - <<< "test: probe
+
+${body}"
+
+  if ! output="$(cd "${REPO}" && "${CHECK}" "${BASE}" HEAD)"; then
+    actual=refused
+  fi
+  if [[ "${actual}" == refused ]] && ! grep -qF -- "${text}" <<< "${output}"; then
+    actual="refused without '${text}'"
+  fi
+
+  if [[ "${actual}" == refused ]]; then
+    echo "  ok    refused  ${name}"
+  else
+    echo "  FAIL  ${name}: expected refused, was ${actual}"
+    failures=$((failures + 1))
+  fi
+}
+
 # judge <refused|accepted> <name>: the check over what HEAD holds.
 judge() {
   local expected="$1" name="$2"
@@ -173,6 +219,25 @@ Closes #1, #2
 ${FENCE}"
 probe_merge accepted "two parents and a list in the body" "Merge branch 'main' into work" \
   "Closes #1, #2"
+
+# **The closing gate's mutation campaign on row 16.** Each shape held nothing,
+# so the mutation named stayed green: seen red under it, in a copy of the check.
+#
+# Each fence starts with nothing held, so a line a closed fence hid is not
+# revealed by one left open after it. Seen red with `held` kept at a fence line.
+probe refused "a session line in a closed fence, then a fence never closed" "${CLAUDE}
+
+${FENCE}text
+Claude-Session: ${UUID}
+${FENCE}
+
+${FENCE}text
+quoted"
+# More than one parent, not exactly two. Seen red with the skip narrowed to two.
+probe_octopus "three parents and another title" "Bring three lines in"
+# The commit's refusal says what to write. Seen red with the report's lines not
+# printed, which left a failure naming nothing.
+probe_says "the log names what will not close" "Closes #1, #2" "write   Closes #2"
 
 # Controls, last: each shape above has a correct neighbour that still passes.
 probe accepted "a UUID in the trailer block" "Claude-Session: ${UUID}

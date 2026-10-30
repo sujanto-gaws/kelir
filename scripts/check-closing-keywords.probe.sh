@@ -437,6 +437,118 @@ Prose.
   ${FENCE}
 ${LINE}"
 
+# **The closing gate's mutation campaign on row 16.** Each shape below held
+# nothing, so the mutation named in its comment stayed green: seen red under
+# that mutation, made to a copy of the check, and green against the check as
+# written. Each shape about a fence in a list renders in cmark-gfm as the probe
+# says, but for the ninth marker, where the check stops reading on purpose.
+
+# Every marker. Seen red with '+' and with ')' taken out of ITEM_MARKER; the
+# nine digits with them narrowed to one digit, and to eight.
+probe refused "a list after a '+' item's fence" "+ ${FENCE}
+  code
+  ${FENCE}
++ Closes #1, #2"
+probe refused "a list after a ')' item's fence" "1) ${FENCE}
+   code
+   ${FENCE}
+2) Closes #1, #2"
+probe refused "a list after a nine-digit item's fence" "123456789. ${FENCE}
+           code
+           ${FENCE}
+${LINE}"
+# Ten digits are no marker, and a marker wants a blank after it. Seen red with
+# any run of digits allowed, and with the blank made optional.
+probe refused "a list after ten digits and a fence" "1234567890. ${FENCE}
+            ${LINE}"
+probe refused "a list after a marker with no blank" "-${FENCE}
+  ${LINE}"
+# A tab may follow a marker, and a marker may be indented. Seen red with the
+# blank narrowed to spaces, and with the marker anchored to column 0.
+probe refused "a list after a marker and a tab" "-${TAB}${FENCE}
+    code
+    ${FENCE}
+- Closes #1, #2"
+probe refused "a list after an indented item's fence" "  - ${FENCE}
+    code
+    ${FENCE}
+  - Closes #1, #2"
+
+# Markers on one line nest, and each moves the content on. Seen red with the
+# offset taken from the last marker alone; the second with one marker read.
+probe refused "a line below the inner item of two on one line" "- - ${FENCE}
+  ${LINE}"
+probe accepted "a list in the fence of two items on one line" "- - ${FENCE}
+    ${LINE}"
+# At most eight are read. Seen red with seven; the ninth with nine, and with
+# no limit, which is also the case MAX_MARKERS exists for.
+probe accepted "a list in the fence of eight items on one line" "- - - - - - - - ${FENCE}
+                ${LINE}"
+probe refused "a ninth marker is not read" "- - - - - - - - - ${FENCE}
+                  ${LINE}"
+
+# A blank line leaves an item open, and a line ends only the items it is
+# indented less than. Seen red with a blank line popping the stack, and with a
+# pop emptying it.
+probe refused "a fence after a blank line in an item, never closed" "- item
+
+  ${FENCE}
+  code
+- Closes #1, #2"
+probe refused "a fence in an outer item, the inner item ended" "- outer
+  - inner
+  ${FENCE}
+  code
+- Closes #1, #2"
+
+# An item's end ends the fence for good. Seen red with the fence left set when
+# the line that ended it fell through.
+probe refused "a list indented as an ended item's fence" "- ${FENCE}
+  code
+Prose.
+  ${LINE}"
+
+# Indent is read from tabs too. Seen red with it counted in spaces alone.
+probe accepted "a list indented by tabs in an item's fence" "- ${FENCE}
+${TAB}${TAB}${LINE}"
+
+# Every separator at a line's end. Seen red with '&', '/' and '+' each taken
+# out of ends_in_separator.
+probe refused "'&' ending a line" "Closes #1 &
+#2"
+probe refused "'/' ending a line" "Resolves #1 /
+#2"
+probe refused "'+' ending a line" "Fixes #1 +
+#2"
+# Spaces after it, which a hard wrap leaves. Seen red with none allowed, after
+# a separator and after 'and'.
+probe refused "a comma and a trailing space" $'Closes #1, \n#2'
+probe refused "'and' and a trailing space" $'Fixes #1 and \n#2'
+# 'and' on a line of its own. Seen red with a blank required before it.
+probe refused "'and' alone on a line, inside a wrap" "Closes #1,
+and
+#2"
+
+# Case, on either side of the join. Seen red with the line before left in its
+# own case, and with the line itself.
+probe refused "an upper-case 'AND' ending the first line" "Fixes #1 AND
+#2"
+probe refused "an upper-case 'AND' opening a line" "Closes #1
+AND #2"
+
+# An opening separator may be indented, as a list item's continuation is, and
+# wants a blank after it. Seen red with it anchored to column 0, and with the
+# blank not required.
+probe refused "'and' opening an item's continuation line" "- Closes #1
+  and #2"
+probe accepted "'&' with no blank opening a line" "Closes #1
+&#2"
+# A blank line ends a wrap that a separator began. Seen red with an opening
+# separator joined whatever the line before it held.
+probe accepted "a comma, a blank line, then 'and'" "Closes #1,
+
+and #2"
+
 # Nothing to read. Seen red with the check made to refuse every body.
 probe accepted "an empty body" ""
 probe accepted "a whitespace-only body" "  ${CR}
