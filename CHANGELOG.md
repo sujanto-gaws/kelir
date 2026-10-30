@@ -594,6 +594,18 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A stale document type dialog no longer undoes a status, form or list
+  change made since it opened**
+  ([#742](https://github.com/sujanto-gaws/kelir/issues/742)). The dialog sent
+  `status`, `formId` and `listId` back as it read them on every save, and
+  `PUT /api/v1/document-types/{id}` writes each field it is sent, so editing
+  the description of a type another administrator had deprecated since made
+  it `ACTIVE` again, and a form or list rebound since went back to the one
+  read, with nothing said. An edit now sends each of the three only when the
+  administrator changed it from the value read; clearing a bound form or list
+  still sends `null`, and a creation still sends all three. The API is
+  unchanged: **a client that sends `status` still overwrites it**, last
+  writer wins. No migration, and no schema change.
 - **A document type deleted while a document of it is being created is
   refused** ([#769](https://github.com/sujanto-gaws/kelir/issues/769)). The
   delete asked whether documents existed before it took any lock, so it did
@@ -772,8 +784,9 @@ While the major version is `0`, the public API may change in any release.
   brings in the current values, discarding the dialog's unsaved edits. **A
   client that omits `expectedWorkflows` is not protected**, and behaves
   exactly as before. Only the bindings are checked: the type's other fields
-  are still last writer wins, and a stale save can still undo a status change
-  ([#742](https://github.com/sujanto-gaws/kelir/issues/742)). No migration,
+  are still last writer wins, and a stale save from the dialog could still
+  undo a status change until
+  [#742](https://github.com/sujanto-gaws/kelir/issues/742) (above). No migration,
   and no schema change.
 - **The password-reset texts say what a reset does**
   ([#697](https://github.com/sujanto-gaws/kelir/issues/697), decision

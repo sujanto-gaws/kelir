@@ -1394,11 +1394,12 @@ async fn type_bound_to_form_and_list(
     id_of(&created.body["data"])
 }
 
-/// The dialog's edit body, field for field, built from a read of the type:
-/// `typeCode` dropped, `formId` and `listId` as read, and no `workflows` key.
-/// It is what `DocumentTypeFormDialog` sends when only the name changed, and
-/// `DocumentTypeFormDialog.spec.ts` pins that shape for a retired form and
-/// list (#739 AC8).
+/// The dialog's edit body before #742, field for field, built from a read of
+/// the type: `typeCode` dropped, `formId`, `listId` and `status` as read, and
+/// no `workflows` key. It is what `DocumentTypeFormDialog` sent when only the
+/// name changed, and is still what a client that sends the whole type back
+/// sends. Since #742 the dialog leaves the three off unless they changed
+/// (`dialog_edit_since_742`).
 fn dialog_edit(read: &Value, name: &str) -> Value {
     json!({
         "name": name,
@@ -5051,4 +5052,103 @@ async fn a_save_queued_on_the_lock_compares_against_the_set_committed_ahead_of_i
         [first.to_string(), added.to_string()],
         "the binding committed ahead of the save survives: {stored}"
     );
+}
+
+/*
+ * #742. The dialog sends `status`, `formId` and `listId` only when the
+ * administrator changed them, so a save from a stale read does not undo a
+ * change another administrator made since. The server is unchanged; these pin
+ * the contract the dialog relies on.
+ */
+
+/// The dialog's edit body since #742, built from a read of the type, when only
+/// the description changed: no `status`, `formId`, `listId` or `workflows`.
+fn dialog_edit_since_742(read: &Value, description: &str) -> Value {
+    json!({
+        "name": read["name"],
+        "description": description,
+        "category": read["category"],
+        "targetEntityType": read["targetEntityType"],
+        "defaultSecurityLevel": read["defaultSecurityLevel"],
+    })
+}
+
+/// **#742 AC6: a stale dialog save leaves a status, form and list changed
+/// since alone.** A reads an `ACTIVE` type bound to a form and a list. B then
+/// deprecates it and rebinds both. A's dialog, which touched only the
+/// description, sends the body it now builds. The type stays `DEPRECATED` on
+/// B's form and list, the description is A's, and A's audit entry records no
+/// change to the status, the form or the list.
+///
+/// # Not seen to fail
+///
+/// It passes against `main` before #742 too, and is meant to: it pins that a
+/// key left off is a field left alone. What was red there is the dialog's
+/// body, which sent all three back as read (`DocumentTypeFormDialog.spec.ts`
+/// and `e2e/tests/a-stale-dialog-keeps-a-deprecation.spec.ts`).
+#[tokio::test]
+async fn a_stale_dialog_save_leaves_a_status_form_and_list_changed_since_alone() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let form = published_form(&app, &token, "pr-stale-status").await;
+    let list = created_list(&app, &token, "stale_status_list").await;
+    let newer_form = published_form(&app, &token, "pr-stale-status-newer").await;
+    let newer_list = created_list(&app, &token, "stale_status_newer_list").await;
+    let id =
+        type_bound_to_form_and_list(&app, &token, "STALE_STATUS", Some(form), Some(list)).await;
+
+    let read_by_a = read_type(&app, &token, id).await;
+    assert_eq!(read_by_a["status"], "ACTIVE", "{read_by_a}");
+
+    let by_b = put_type(
+        &app,
+        &token,
+        id,
+        json!({ "status": "DEPRECATED", "formId": newer_form, "listId": newer_list }),
+    )
+    .await;
+    assert_eq!(by_b.status, StatusCode::OK, "{}", by_b.body);
+    let audited = audited_updates(&app, id).await;
+
+    let description = "Edited from a stale read";
+    let by_a = put_type(
+        &app,
+        &token,
+        id,
+        dialog_edit_since_742(&read_by_a, description),
+    )
+    .await;
+    assert_eq!(by_a.status, StatusCode::OK, "{}", by_a.body);
+
+    for read in [by_a.body["data"].clone(), read_type(&app, &token, id).await] {
+        assert_eq!(read["description"], description, "{read}");
+        assert_eq!(
+            read["status"], "DEPRECATED",
+            "B's deprecation stands: {read}"
+        );
+        assert_eq!(read["formId"], newer_form.to_string(), "{read}");
+        assert_eq!(read["listId"], newer_list.to_string(), "{read}");
+    }
+
+    assert_eq!(audited_updates(&app, id).await, audited + 1);
+
+    let (old_value, new_value): (Value, Value) = sqlx::query_as(
+        "SELECT old_value_json, new_value_json FROM audit_events
+         WHERE object_id = $1 AND action = 'UPDATE'
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(id)
+    .fetch_one(&app.pool)
+    .await
+    .expect("A's save was audited");
+
+    assert_eq!(new_value["description"], description, "{new_value}");
+
+    for field in ["status", "formId", "listId"] {
+        assert!(
+            old_value.get(field).is_none() && new_value.get(field).is_none(),
+            "A's save did not change {field}, so its audit entry does not record it: {old_value} -> {new_value}"
+        );
+    }
 }
