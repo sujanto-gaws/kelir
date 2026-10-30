@@ -161,7 +161,9 @@ While the major version is `0`, the public API may change in any release.
   reaches new documents only. **Before upgrading, look for a `calculate` or
   `conditional` that reads a field through one of these and is itself read
   back by that field.** A form's computed `var` is not refused and gets no
-  edge, and **D-135** is open on it.
+  edge yet: **D-135** A refuses it at a form's publish, in
+  [#822](https://github.com/sujanto-gaws/kelir/issues/822), which has not
+  landed.
 
 ### Added
 
