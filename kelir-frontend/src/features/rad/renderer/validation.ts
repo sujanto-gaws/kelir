@@ -117,19 +117,37 @@ interface RegistryRule {
   undecidable?: string
 }
 
-/** A rule this side decides, left to the server for one value, and why. */
+/** A rule this side decides, not decided here for one value, and why. */
 export interface Undecided {
+  /**
+   * What happened here, without who decides it instead: that is the rule's
+   * scope, which [`applyRule`] reads and the rule's `decide` is not given.
+   */
   undecided: string
 }
 
 /**
- * Why a pattern was left to the server, in the words the form shows.
+ * Why a pattern was not decided here, in the words the form shows.
  *
- * `JfssForm` prints it after *"… is checked when this form is submitted, not
- * as you type."*, so it is the reason and not the whole sentence.
+ * `JfssForm` prints it after the rule's name and a headline, so it is the
+ * reason and not the whole sentence. [`decidedBy`] completes it.
  */
-const PATTERN_GAVE_UP =
-  'this browser gave up matching the value against the pattern, so the server decides it'
+const PATTERN_GAVE_UP = 'this browser gave up matching the value against the pattern'
+
+/**
+ * Who decides a value this side left undecided, by the rule's scope (#624).
+ *
+ * **A `client` rule is decided by nobody.** The server skips a rule the
+ * definition scopes to `client` (`validation.rs`,
+ * `a_rule_the_definition_scopes_to_the_client_does_not_run_here`), so *the
+ * server decides it* was false there. Refusing the value instead would strand
+ * the person: no later verdict could accept it.
+ */
+function decidedBy(scope: JfssScope): string {
+  return scope === 'client'
+    ? 'and this rule runs in the browser only, so nothing decides it'
+    : 'so the server decides it'
+}
 
 /**
  * Runs a pattern against a value, telling a pattern that does not compile from
@@ -142,8 +160,8 @@ const PATTERN_GAVE_UP =
  *   `false`, a violation: a check that could not be applied has not been met.
  * - `.test()` throwing is an engine that gave up on this value, which Firefox
  *   does with *too much recursion* on a long backtrack. That is `'gave-up'`:
- *   the pattern compiled, the value was not decided here, and the server
- *   decides it on submit.
+ *   the pattern compiled and the value was not decided here. The server
+ *   decides it on submit, unless the rule is scoped to `client` (#624).
  *
  * Only a throw is caught here. An engine that gives up without throwing, by
  * running on or by answering *no match*, is not seen by this function, and
@@ -234,6 +252,8 @@ export const VALIDATION_RULES: Readonly<Record<string, RegistryRule>> = {
    * what the server would accept. The rule is left to the server on submit
    * instead, and `testPattern` is where the two throws are told apart. Chrome
    * does not throw, it keeps the tab busy, and that is not changed here.
+   * **A rule scoped to `client` is left to nobody** (#624), because the server
+   * skips it, and [`applyRule`] says so.
    */
   regex: {
     scope: 'both',
@@ -316,7 +336,12 @@ export const VALIDATION_RULES: Readonly<Record<string, RegistryRule>> = {
 export interface UndecidedRule {
   /** The rule's name, or `pattern` for the keyword. */
   rule: string
-  /** The scope the registry gives it, which is why the reason reads as it does. */
+  /**
+   * The scope the registry gives it, which is why the reason reads as it does.
+   *
+   * **Except a give-up on a rule the definition scopes to `client`** (#624),
+   * which carries `client`: nothing decides that one, and the form says so.
+   */
   scope: JfssScope
   reason: string
 }
@@ -358,7 +383,12 @@ export function applyRule(
   }
 
   if (decision !== false) {
-    return { rule: rule.rule, scope: entry.scope, reason: decision.undecided }
+    // The definition's scope again, and for the same reason: a `regex` scoped
+    // to `client` is one the server skips, so the catalogue's `both` would
+    // promise a verdict nobody gives (#624).
+    const scope = rule.scope === 'client' ? 'client' : entry.scope
+
+    return { rule: rule.rule, scope, reason: `${decision.undecided}, ${decidedBy(scope)}` }
   }
 
   // §6.2 makes `message` required, so a definition that reaches here has one.
@@ -583,7 +613,11 @@ function checkValidation(
       const verdict = matchesPattern(validation.pattern, value)
 
       if (verdict === 'gave-up') {
-        undecided.push({ rule: 'pattern', scope: 'both', reason: PATTERN_GAVE_UP })
+        undecided.push({
+          rule: 'pattern',
+          scope: 'both',
+          reason: `${PATTERN_GAVE_UP}, ${decidedBy('both')}`,
+        })
       } else if (!verdict) {
         return fail('pattern')
       }

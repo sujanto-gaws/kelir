@@ -1732,3 +1732,531 @@ async fn all_five_rules_filled_in_create_update_and_publish() {
         .await;
     assert_eq!(published.status, StatusCode::OK, "body {}", published.body);
 }
+
+// -- A shape a browser can take exponential time on (#604) ------------------
+
+/// The phrase each shape's refusal names it by, and the limit every refusal
+/// carries ([#604], **D-93**).
+///
+/// [#604]: https://github.com/sujanto-gaws/kelir/issues/604
+const REPEATED_QUANTIFIER: &str = "is itself repeated without one";
+const REPEATED_ALTERNATION: &str = "alternatives are separated by `|`";
+const SHAPE_LIMIT: &str = "says nothing about any other pattern";
+
+/// One text field, `code`, holding `pattern` as a `regex` rule of `scope`
+/// (`rule` is `regex`) or as §5's keyword (`rule` is `pattern`).
+fn text_field(pattern: &str, rule: &str, scope: &str) -> Value {
+    let mut field = json!({
+        "id": "code", "role": "data", "type": "textfield", "key": "code",
+        "label": "Code", "validation": {"type": "string"},
+    });
+
+    if rule == "regex" {
+        field["rules"] = json!([{
+            "rule": "regex", "scope": scope,
+            "params": {"pattern": pattern}, "message": "No.",
+        }]);
+    } else {
+        field["validation"]["pattern"] = json!(pattern);
+    }
+    field
+}
+
+fn definition_holding(form_id: &str, component: Value) -> Value {
+    json!({
+        "formId": form_id,
+        "version": "2.0.1",
+        "title": "Code",
+        "components": [component],
+    })
+}
+
+/// `component` as the one field of a datagrid's row template.
+fn in_a_row(component: Value) -> Value {
+    json!({
+        "id": "lines", "role": "data", "type": "datagrid", "key": "lines",
+        "label": "Lines", "validation": {"type": "array"},
+        "components": [component],
+    })
+}
+
+async fn post_form(
+    app: &TestApp,
+    token: &str,
+    key: &str,
+    definition: Value,
+) -> common::TestResponse {
+    app.send(
+        Method::POST,
+        "/api/v1/rad/forms",
+        Some(token),
+        Some(json!({"formKey": key, "title": "Code", "definition": definition})),
+    )
+    .await
+}
+
+/// The refusal at `path` is the shape's, naming `shape` and carrying the limit.
+fn backtracking_refusal_at(body: &Value, path: &str, rule: &str, shape: &str) {
+    let detail = refusal_at(body, path, "PATTERN_BACKTRACKING_SHAPE", rule);
+    let message = detail["message"].as_str().unwrap_or_default();
+
+    assert!(
+        message.contains(shape),
+        "the refusal names the shape: {message}"
+    );
+    assert!(
+        message.contains("exponential time"),
+        "the refusal says what a browser may do: {message}"
+    );
+    assert!(message.contains(SHAPE_LIMIT), "{message}");
+}
+
+/// **[#604] AC1: a group repeated without an upper bound, around one repeated
+/// item or an alternation, is refused where the definition is written.**
+///
+/// The server's engine never backtracks, and ADR-0038 §1's argument rested on
+/// that; the browser evaluates the same rule with an engine that does. Record
+/// 17 finding 9 measured `(?:[a-z]|[a-z0-9])*$` splitting in Firefox and
+/// WebKit, and every refused case below stored with a `201`.
+///
+/// **Each refused pattern sits beside one that stores** ([coding standard]
+/// §2.9), and the stored ones are the edges the narrow rule leaves open on
+/// purpose: a group of more than one item, a bounded repeat, an alternation
+/// that is not repeated.
+///
+/// **`(\w*)*`, which the row's criteria list among the refused, is refused as
+/// the divergence it also is**: a pattern both divergent and backtracking
+/// reports the divergence alone, so the shape's case is spelled `([a-z]*)*`
+/// here and `(\w*)*` is asserted for that precedence below.
+///
+/// [#604]: https://github.com/sujanto-gaws/kelir/issues/604
+/// [coding standard]: ../../docs/standards/01.%20Coding%20Standard.md
+#[tokio::test]
+async fn a_shape_a_browser_backtracks_on_is_refused_at_save() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    // (refused, the shape its message names, a pattern beside it that stores)
+    let cases = [
+        (
+            "^(a+)+$",
+            REPEATED_QUANTIFIER,
+            r"^([a-z0-9-]+\.)+[a-z]{2,}$",
+        ),
+        ("([a-z]*)*", REPEATED_QUANTIFIER, r"[a-z]+(\.[a-z]+)*"),
+        ("((a+))+", REPEATED_QUANTIFIER, "^(?:[a-z][0-9])*$"),
+        ("(?:[a-z]|[a-z0-9])*$", REPEATED_ALTERNATION, "^(png|jpg)$"),
+        ("^(cat|dog)+$", REPEATED_ALTERNATION, "^(a+){2}$"),
+        // The cost the narrow rule states, beside the list rewrite ADR-0038
+        // and the Validation Rule Registry cite for it.
+        (
+            "^(png|jpg)+$",
+            REPEATED_ALTERNATION,
+            "^(png|jpg)(,(png|jpg))*$",
+        ),
+        // A class opening with `]` ends there in the browser, so `(a+)+` is
+        // outside it; with a member first, the group is not repeated.
+        ("[^](a+)+]", REPEATED_QUANTIFIER, "[^a](a+)"),
+    ];
+    let places = [
+        ("regex", "definition.components.0.rules.0.params.pattern"),
+        ("pattern", "definition.components.0.validation.pattern"),
+    ];
+
+    for (index, (pattern, shape, accepted)) in cases.iter().enumerate() {
+        for (rule, path) in places {
+            let key = format!("backtracking-{rule}-{index}");
+            let response = post_form(
+                &app,
+                &token,
+                &key,
+                definition_holding(&key, text_field(pattern, rule, "both")),
+            )
+            .await;
+
+            assert_eq!(
+                response.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "`{pattern}` as `{rule}` must not be stored; body {}",
+                response.body
+            );
+            backtracking_refusal_at(&response.body, path, rule, shape);
+
+            let accepted_key = format!("not-named-{rule}-{index}");
+            let stored = post_form(
+                &app,
+                &token,
+                &accepted_key,
+                definition_holding(&accepted_key, text_field(accepted, rule, "both")),
+            )
+            .await;
+
+            assert_eq!(
+                stored.status,
+                StatusCode::CREATED,
+                "`{accepted}` as `{rule}` is not a shape the check names, so it stores; body {}",
+                stored.body
+            );
+        }
+    }
+
+    // A row template is checked at its own path.
+    let response = post_form(
+        &app,
+        &token,
+        "backtracking-row",
+        definition_holding(
+            "backtracking-row",
+            in_a_row(text_field("^(cat|dog)+$", "regex", "both")),
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "body {}",
+        response.body
+    );
+    backtracking_refusal_at(
+        &response.body,
+        "definition.components.0.components.0.rules.0.params.pattern",
+        "regex",
+        REPEATED_ALTERNATION,
+    );
+
+    let stored = post_form(
+        &app,
+        &token,
+        "not-named-row",
+        definition_holding(
+            "not-named-row",
+            in_a_row(text_field(r"^([a-z0-9-]+\.)+[a-z]{2,}$", "regex", "both")),
+        ),
+    )
+    .await;
+    assert_eq!(stored.status, StatusCode::CREATED, "body {}", stored.body);
+
+    // Divergent and backtracking: the divergence alone.
+    let response = post_form(
+        &app,
+        &token,
+        "backtracking-divergent",
+        definition_holding(
+            "backtracking-divergent",
+            text_field(r"(\w*)*", "regex", "both"),
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "body {}",
+        response.body
+    );
+    refusal_at(
+        &response.body,
+        "definition.components.0.rules.0.params.pattern",
+        "PATTERN_CLASS_NOT_PINNED",
+        "regex",
+    );
+}
+
+/// **[#604] AC6: a `client`-scoped rule is refused too.** The server skips
+/// it at submit, and the browser, which runs it, is the engine at risk.
+///
+/// [#604]: https://github.com/sujanto-gaws/kelir/issues/604
+#[tokio::test]
+async fn a_client_scoped_regex_with_the_shape_is_refused_at_save() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let response = post_form(
+        &app,
+        &token,
+        "backtracking-client",
+        definition_holding(
+            "backtracking-client",
+            text_field("^(a+)+$", "regex", "client"),
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a client-scoped rule runs in the browser, so it must not be stored; body {}",
+        response.body
+    );
+    backtracking_refusal_at(
+        &response.body,
+        "definition.components.0.rules.0.params.pattern",
+        "regex",
+        REPEATED_QUANTIFIER,
+    );
+
+    // The second subject: the same scope, a pattern the check does not name.
+    let stored = post_form(
+        &app,
+        &token,
+        "not-named-client",
+        definition_holding("not-named-client", text_field("^a+$", "regex", "client")),
+    )
+    .await;
+    assert_eq!(stored.status, StatusCode::CREATED, "body {}", stored.body);
+}
+
+/// **[#604] AC4: a draft stored with the shape reads back, and is refused at
+/// the next write and at publish.**
+///
+/// It is written behind the API, as
+/// `publishing_a_definition_the_engine_refuses_is_refused` writes its own,
+/// because the API now refuses it: this is a draft saved before the check.
+///
+/// **Green on `main` by design**: the `GET`. The `PUT` and the publish are
+/// the halves seen red.
+///
+/// [#604]: https://github.com/sujanto-gaws/kelir/issues/604
+#[tokio::test]
+async fn a_draft_stored_with_the_shape_reads_back_and_is_refused_at_publish() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let path = "definition.components.0.rules.0.params.pattern";
+
+    let id = id_of(
+        &create_form(
+            &app,
+            &token,
+            "backtracking-draft",
+            definition_holding("backtracking-draft", text_field("^a+$", "regex", "both")),
+        )
+        .await,
+    );
+    let stored = definition_holding("backtracking-draft", text_field("^(a+)+$", "regex", "both"));
+
+    assert_eq!(
+        form_repo::update_draft(
+            &app.pool,
+            fixtures::SYSTEM_TENANT_ID,
+            id,
+            &form_repo::FormFields {
+                title: None,
+                definition_json: Some(&stored),
+                entity_id: None,
+            },
+            None,
+        )
+        .await
+        .expect("the draft is rewritten behind the API"),
+        1
+    );
+
+    let read = app
+        .send(
+            Method::GET,
+            &format!("/api/v1/rad/forms/{id}"),
+            Some(&token),
+            None,
+        )
+        .await;
+    assert_eq!(read.status, StatusCode::OK, "body {}", read.body);
+    assert_eq!(
+        read.body["data"]["definition"]["components"][0]["rules"][0]["params"]["pattern"],
+        "^(a+)+$",
+        "the stored pattern reads back unchanged"
+    );
+
+    let rewritten = app
+        .send(
+            Method::PUT,
+            &format!("/api/v1/rad/forms/{id}"),
+            Some(&token),
+            Some(json!({ "definition": stored })),
+        )
+        .await;
+    assert_eq!(
+        rewritten.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "body {}",
+        rewritten.body
+    );
+    backtracking_refusal_at(&rewritten.body, path, "regex", REPEATED_QUANTIFIER);
+
+    let published = app
+        .send(
+            Method::POST,
+            &format!("/api/v1/rad/forms/{id}/publish"),
+            Some(&token),
+            None,
+        )
+        .await;
+    assert_eq!(
+        published.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "the stored shape must not go live; body {}",
+        published.body
+    );
+    backtracking_refusal_at(&published.body, path, "regex", REPEATED_QUANTIFIER);
+
+    let status: String = sqlx::query_scalar("SELECT status FROM rad_forms WHERE id = $1")
+        .bind(id)
+        .fetch_one(&app.pool)
+        .await
+        .expect("the form is queryable");
+    assert_eq!(status, "DRAFT", "a refused publish leaves a draft");
+}
+
+/// **[#604] AC5: a revision already published with the shape keeps working,
+/// and the revision after it is refused.**
+///
+/// The server's evaluator is unchanged, so a document is created and
+/// submitted against the published revision as before, and a value that does
+/// not match is answered rather than left running. A new revision carrying
+/// the shape is refused; one with no definition copies it unchecked
+/// (`create_revision` in `service/form.rs`), and meets the refusal at publish.
+///
+/// **Green on `main` by design**: the reads, the document and the two `201`s.
+/// The revision carrying the shape and the copy's publish are the halves seen
+/// red.
+///
+/// [#604]: https://github.com/sujanto-gaws/kelir/issues/604
+#[tokio::test]
+async fn a_published_revision_with_the_shape_works_and_its_next_revision_is_refused() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let path = "definition.components.0.rules.0.params.pattern";
+    let corrected = definition_holding("backtracking-live", text_field("^a+$", "regex", "both"));
+    let shape = definition_holding("backtracking-live", text_field("^(a+)+$", "regex", "both"));
+
+    let form = id_of(&create_form(&app, &token, "backtracking-live", corrected.clone()).await);
+    let published = app
+        .send(
+            Method::POST,
+            &format!("/api/v1/rad/forms/{form}/publish"),
+            Some(&token),
+            None,
+        )
+        .await;
+    assert_eq!(published.status, StatusCode::OK, "body {}", published.body);
+    store_behind_the_api(&app, form, &shape).await;
+
+    let read = app
+        .send(
+            Method::GET,
+            &format!("/api/v1/rad/forms/{form}"),
+            Some(&token),
+            None,
+        )
+        .await;
+    assert_eq!(read.status, StatusCode::OK, "body {}", read.body);
+    assert_eq!(read.body["data"]["definition"], shape);
+
+    // A document against it: created, submitted, and a value that does not
+    // match answered.
+    let created = app
+        .send(
+            Method::POST,
+            "/api/v1/document-types",
+            Some(&token),
+            Some(json!({"typeCode": "BACKTRACKING", "name": "Backtracking", "formId": form})),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "body {}", created.body);
+    let type_id = id_of(&created.body["data"]);
+
+    let rule = app
+        .send(
+            Method::PUT,
+            &format!("/api/v1/document-types/{type_id}/numbering-rule"),
+            Some(&token),
+            Some(json!({
+                "ruleTemplate": "BT-{year}-{sequence}",
+                "sequenceScope": "YEAR",
+                "gapPolicy": "GAPLESS",
+            })),
+        )
+        .await;
+    assert_eq!(rule.status, StatusCode::OK, "body {}", rule.body);
+
+    let draft = app
+        .send(
+            Method::POST,
+            "/api/v1/documents",
+            Some(&token),
+            Some(json!({"documentTypeId": type_id, "title": "Matches", "formData": {"code": "aaaa"}})),
+        )
+        .await;
+    assert_eq!(draft.status, StatusCode::CREATED, "body {}", draft.body);
+    let document = id_of(&draft.body["data"]);
+
+    let submitted = app
+        .send(
+            Method::POST,
+            &format!("/api/v1/documents/{document}/submission"),
+            Some(&token),
+            None,
+        )
+        .await;
+    assert_eq!(submitted.status, StatusCode::OK, "body {}", submitted.body);
+    assert_eq!(submitted.body["data"]["status"], "SUBMITTED");
+
+    let not_matching = format!("{}!", "a".repeat(29));
+    let refused = tokio::time::timeout(
+        Duration::from_secs(10),
+        app.send(
+            Method::POST,
+            "/api/v1/documents",
+            Some(&token),
+            Some(json!({
+                "documentTypeId": type_id,
+                "title": "Does not match",
+                "formData": {"code": not_matching},
+            })),
+        ),
+    )
+    .await
+    .expect("a 30-character value that does not match is answered");
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "the rule still refuses what it does not match; body {}",
+        refused.body
+    );
+
+    // The next revision: carrying the shape, corrected, and copied.
+    let revisions = format!("/api/v1/rad/forms/{form}/revisions");
+    let revise = |body: Value| app.send(Method::POST, &revisions, Some(&token), Some(body));
+
+    let carrying = revise(json!({ "definition": shape })).await;
+    assert_eq!(
+        carrying.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "body {}",
+        carrying.body
+    );
+    backtracking_refusal_at(&carrying.body, path, "regex", REPEATED_QUANTIFIER);
+
+    let fixed = revise(json!({ "definition": corrected })).await;
+    assert_eq!(fixed.status, StatusCode::CREATED, "body {}", fixed.body);
+
+    let copied = revise(json!({ "title": "Copied" })).await;
+    assert_eq!(copied.status, StatusCode::CREATED, "body {}", copied.body);
+    let copy = id_of(&copied.body["data"]);
+
+    let published = app
+        .send(
+            Method::POST,
+            &format!("/api/v1/rad/forms/{copy}/publish"),
+            Some(&token),
+            None,
+        )
+        .await;
+    assert_eq!(
+        published.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "the copy is checked where it would go live; body {}",
+        published.body
+    );
+    backtracking_refusal_at(&published.body, path, "regex", REPEATED_QUANTIFIER);
+}

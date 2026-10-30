@@ -111,6 +111,19 @@ While the major version is `0`, the public API may change in any release.
   case-insensitively and exactly). There is no switch that turns the rule off.
   Existing `.env` files need no new line: the two settings are empty by
   default.
+- **A form with a pattern in either backtracking shape cannot be revised or
+  published until the pattern is rewritten**
+  ([#604](https://github.com/sujanto-gaws/kelir/issues/604), decision
+  **D-93**). The two shapes are under *Changed*. **A form already published
+  keeps working**: it reads back, and documents are created and submitted
+  against it as before, because the server's evaluator is unchanged. Its next
+  revision is refused if it carries the shape, a revision copied from it with
+  no definition is refused when it is published, and so is a draft saved
+  before the upgrade. **Before upgrading, find the patterns**
+  (`validation.pattern` and `regex` rules, `client`-scoped ones included) that
+  repeat a group without an upper bound around one repeated item or an
+  alternation, and rewrite them: `(a+)+` as `a+`, and
+  `(?:[a-z]|[a-z0-9])*` as `[a-z0-9]*`.
 
 ### Added
 
@@ -399,6 +412,29 @@ While the major version is `0`, the public API may change in any release.
 
 ### Changed
 
+- **A pattern in a shape a browser may take exponential time on is refused
+  where a definition is written**
+  ([#604](https://github.com/sujanto-gaws/kelir/issues/604), decision
+  **D-93** A). A group repeated without an upper bound (`*`, `+` or `{n,}`,
+  lazy or not) is refused when its body is one item that is itself repeated
+  without one, such as `(a+)+`, `([a-z]*)*` or `((a+))+`, or when its body is
+  an alternation, such as `(cat|dog)+` or `(?:[a-z]|[a-z0-9])*`. `POST` and
+  `PUT` on `/api/v1/rad/forms`, a new revision carrying a definition, and a
+  publish answer 422 `VALIDATION_ERROR` with a detail coded
+  `PATTERN_BACKTRACKING_SHAPE` at the pattern's path. That covers
+  `validation.pattern` and every `regex` rule, whatever its `scope`, in row
+  templates too. The server's `regex` crate does not backtrack, and the
+  browser's engine, which runs the same rule, does: record 17 measured
+  `(?:[a-z]|[a-z0-9])*$` splitting in Firefox and WebKit. **The check names
+  these two shapes and no others.** A group of more than one item, such as
+  `([a-z]+\.)+`, is stored, and so is `(a+b?)+`, which is exponential: a
+  pattern the check accepts is one it does not name, and a browser may still
+  take exponential time on it. **`(png|jpg)+` is refused too**: drop the
+  repeat, or repeat a group of more than one item, such as
+  `^(png|jpg)(,(png|jpg))*$` for a list. A pattern that is also divergent,
+  such as `(\w*)*`, is reported as the divergence alone. ADR-0038 and the
+  Validation Rule Registry are amended; see *Upgrade notes* for forms already
+  stored.
 - **The database connection requires TLS to any host that is not local**
   ([#803](https://github.com/sujanto-gaws/kelir/issues/803), NFR-SEC-010,
   **D-119** C). The backend forced `sslmode=prefer` on every connection, which
@@ -594,6 +630,18 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A `client`-scoped `regex` rule the browser gives up on no longer says the
+  server decides it** ([#624](https://github.com/sujanto-gaws/kelir/issues/624)).
+  Since [#496](https://github.com/sujanto-gaws/kelir/issues/496) a match that
+  throws is left undecided, and the form said the rule was checked when the
+  form was submitted, by the server. The server skips a `client`-scoped rule,
+  so nothing decided it. For such a rule the form now says that this browser
+  gave up, that the rule runs in the browser only and that nothing decides
+  it; the value is still not refused, so the form can be submitted. A
+  `both`-scoped rule is unchanged. A `client` rule and a `both` rule that both
+  give up now show one alert each, worded for its scope, where one alert
+  stood for both. `passwordStrength`'s alert, which runs in the browser only
+  too, no longer says it is checked on submit.
 - **A stale document type dialog no longer undoes a status, form or list
   change made since it opened**
   ([#742](https://github.com/sujanto-gaws/kelir/issues/742)). The dialog sent

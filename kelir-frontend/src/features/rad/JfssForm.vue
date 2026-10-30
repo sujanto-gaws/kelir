@@ -213,9 +213,21 @@ const undecided = computed(() =>
     <!-- A rule the registry defines and this side does not decide. Named, for
          the reason `UnsupportedComponent` is: a check that quietly did not run
          is indistinguishable from a check that passed. `server`-scoped rules
-         are filtered out above — those are not a gap, they are §3.3 working. -->
-    <Alert v-for="rule in undecided" :key="rule.rule" data-testid="form-undecided">
-      <p class="font-medium">
+         are filtered out above — those are not a gap, they are §3.3 working.
+
+         **The headline follows the scope** (#624). The server skips a
+         `client` rule, so saying it is checked on submit claimed a check
+         nobody runs; such a rule is named as not checked, and the reason says
+         why. -->
+    <Alert
+      v-for="rule in undecided"
+      :key="`${rule.rule}:${rule.scope}`"
+      data-testid="form-undecided"
+    >
+      <p v-if="rule.scope === 'client'" class="font-medium">
+        <code>{{ rule.rule }}</code> could not be checked.
+      </p>
+      <p v-else class="font-medium">
         <code>{{ rule.rule }}</code> is checked when this form is submitted, not as you type.
       </p>
       <p class="mt-1">{{ rule.reason }}.</p>

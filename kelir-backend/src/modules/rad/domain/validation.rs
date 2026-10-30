@@ -403,10 +403,11 @@ fn compile_pattern(pattern: &str, flags: &str) -> Result<regex::Regex, regex::Er
 
 /// Why this backend will not honour a pattern as written.
 ///
-/// **Both arms are refusals at save rather than verdicts at submit**
-/// ([#391](https://github.com/sujanto-gaws/kelir/issues/391), **D-15**), and
-/// they fail for opposite reasons: the first is loud on this side and the
-/// second is silent on both.
+/// **Every arm is a refusal at save rather than a verdict at submit**
+/// ([#391](https://github.com/sujanto-gaws/kelir/issues/391), **D-15**). The
+/// first two fail for opposite reasons: the first is loud on this side and the
+/// second is silent on both. The third is about the browser alone
+/// ([#604](https://github.com/sujanto-gaws/kelir/issues/604), **D-93**).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PatternRefusal {
     /// The `regex` crate cannot build it — lookahead, backreferences, or a
@@ -423,6 +424,30 @@ pub(crate) enum PatternRefusal {
     ///
     /// [ADR-0038]: ../../../../../docs/architectures/adr/0038.%20Kelir%20Patterns%20Are%20the%20Linear-Time%20Subset.md
     Divergent(DivergentConstruct),
+    /// A shape the browser's engine backtracks on, where it may take
+    /// exponential time on some values, matching or not. This crate does not
+    /// backtrack, so the server decides the value either way; the rule is
+    /// refused for the browser that runs it too.
+    Backtracking(BacktrackingShape),
+}
+
+/// A shape [`backtracking_shape`] names. Both are a group repeated without an
+/// upper bound (`*`, `+` or `{n,}`, lazy or not).
+///
+/// **Two shapes, chosen by the product owner on 2026-10-30 within D-93 A**,
+/// rather than every repeated group that holds a repeat or a `|`. That broader
+/// rule would also refuse `([a-z]+\.)+`, and leave no way to write
+/// dot-separated labels. **So a shape outside these two is stored, whatever it
+/// costs a browser**: `(a+b?)+` is exponential and is not named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BacktrackingShape {
+    /// The group's body is one item that is itself repeated without an upper
+    /// bound: `(a+)+`, `([a-z]*)*`, `((?:ab)+)*`.
+    RepeatedQuantifier,
+    /// The group's body is an alternation: `(cat|dog)+`,
+    /// `(?:[a-z]|[a-z0-9])*`. **Refused whether or not the alternatives can
+    /// match the same text**, so `(png|jpg)+` is refused too.
+    RepeatedAlternation,
 }
 
 /// A construct the `regex` crate and ECMA-262 both accept and read differently.
@@ -459,6 +484,10 @@ pub(crate) enum DivergentConstruct {
 /// **The compile check runs first and returns alone.** A pattern that does not
 /// build cannot be scanned for anything else, and reporting a class problem
 /// beside a syntax error would be guessing at text the parser rejected.
+///
+/// **The divergence scan answers before the shape scan.** A pattern that is
+/// both is reported as the divergence alone: that is the one that decides a
+/// value differently on the two sides, and its rewrite comes first.
 pub(crate) fn refuse_pattern(pattern: &str, flags: &str) -> Option<PatternRefusal> {
     if let Err(error) = compile_pattern(pattern, flags) {
         return Some(PatternRefusal::Uncompilable {
@@ -466,7 +495,9 @@ pub(crate) fn refuse_pattern(pattern: &str, flags: &str) -> Option<PatternRefusa
         });
     }
 
-    divergent_construct(pattern).map(PatternRefusal::Divergent)
+    divergent_construct(pattern)
+        .map(PatternRefusal::Divergent)
+        .or_else(|| backtracking_shape(pattern).map(PatternRefusal::Backtracking))
 }
 
 /// The crate's own explanation, reduced to the sentence a form author needs.
@@ -618,6 +649,283 @@ fn posix_class_name(characters: &[char], start: usize) -> Option<String> {
     }
 
     None
+}
+
+/// The first group in a pattern that is repeated without an upper bound
+/// around one of the two [`BacktrackingShape`]s.
+///
+/// **The browser's engine backtracks and this crate's does not** ([#604],
+/// **D-93**). ADR-0038 §1's argument about time held for the server, and the
+/// browser that evaluates the same rule never had it: record 17 finding 9
+/// measured `(?:[a-z]|[a-z0-9])*$` splitting in Firefox and WebKit.
+///
+/// **The group's body is read through groups that are the whole of it**, so
+/// `((a+))+` is the shape of `(a+)+`. **And it is read as
+/// [`divergent_construct`] reads a pattern**: the character after a
+/// backslash is consumed, so `\(`, `\*` and `\|` are literals; a bracket
+/// expression is one item, so `[(a+)+]` holds no group; and a capturing
+/// group, `(?:…)`, `(?P<n>…)` and a flag group such as `(?i:…)` are all
+/// groups.
+///
+/// **The boundary this scan draws** ([coding standard] §2.9):
+///
+/// - **Covered:** the two shapes, at any depth, in either spelling of a
+///   group; a repeat written `*`, `+` or `{n,}`, lazy or not, on the group and
+///   on the one item inside it.
+/// - **Not covered, by the product owner's choice:** a body of more than one
+///   item, so `([a-z]+\.)+` and `(a+b?)+` are stored, and the second is
+///   exponential; a bounded outer repeat such as `(a+){2}`; and a shape that
+///   is polynomial rather than exponential, such as `[a-z]*[a-z]*$`.
+/// - **Not covered, and it is a limit rather than a decision:** whether a
+///   browser actually backtracks on a pattern. The scan reads shape and not
+///   cost, so **a pattern it accepts is one it does not name, and no more.**
+///
+/// **Two readings are ECMA-262's rather than this crate's**, because the
+/// browser is the engine this scan is for: a brace is a repeat only when it
+/// holds digits and no spaces, and a `]` right after `[` or `[^` closes the
+/// class ([`class_end`]).
+///
+/// [#604]: https://github.com/sujanto-gaws/kelir/issues/604
+/// [coding standard]: ../../../../../docs/standards/01.%20Coding%20Standard.md
+fn backtracking_shape(pattern: &str) -> Option<BacktrackingShape> {
+    let characters: Vec<char> = pattern.chars().collect();
+    let mut index = 0;
+
+    first_shape(&alternation(&characters, &mut index))
+}
+
+/// One item of a pattern as [`backtracking_shape`] reads it: a character, an
+/// escape, a bracket expression or a group, with the repeats written after it.
+struct Item {
+    /// The group's alternatives, each a sequence of items; `None` for anything
+    /// that is not a group.
+    group: Option<Vec<Vec<Item>>>,
+    /// Whether the outermost repeat on the item has no upper bound; `None`
+    /// when nothing repeats it.
+    unbounded: Option<bool>,
+}
+
+/// The first shape among `alternatives`, outer groups before the groups they
+/// hold.
+fn first_shape(alternatives: &[Vec<Item>]) -> Option<BacktrackingShape> {
+    alternatives.iter().flatten().find_map(|item| {
+        let body = item.group.as_deref()?;
+        let own = if item.unbounded == Some(true) {
+            repeated_body(body)
+        } else {
+            None
+        };
+
+        own.or_else(|| first_shape(body))
+    })
+}
+
+/// The shape a body repeated without an upper bound has, if it is one of the
+/// two.
+fn repeated_body(body: &[Vec<Item>]) -> Option<BacktrackingShape> {
+    if body.len() > 1 {
+        return Some(BacktrackingShape::RepeatedAlternation);
+    }
+
+    let [only] = body.first()?.as_slice() else {
+        // More than one item, or none: not a shape this scan names.
+        return None;
+    };
+
+    match (only.unbounded, &only.group) {
+        (Some(true), _) => Some(BacktrackingShape::RepeatedQuantifier),
+        // A group that is the whole body, with nothing repeating it, is read
+        // through.
+        (None, Some(inner)) => repeated_body(inner),
+        _ => None,
+    }
+}
+
+/// The alternatives from `index` up to the `)` that closes them, which is left
+/// for the caller, or the end.
+fn alternation(characters: &[char], index: &mut usize) -> Vec<Vec<Item>> {
+    let mut alternatives = vec![Vec::new()];
+
+    while let Some(&character) = characters.get(*index) {
+        match character {
+            ')' => break,
+            '|' => {
+                *index += 1;
+                alternatives.push(Vec::new());
+            }
+            _ => {
+                let next = item(characters, index);
+                if let Some(sequence) = alternatives.last_mut() {
+                    sequence.push(next);
+                }
+            }
+        }
+    }
+
+    alternatives
+}
+
+/// The item at `index`, and every repeat written after it.
+fn item(characters: &[char], index: &mut usize) -> Item {
+    let start = *index;
+    *index += 1;
+
+    let group = match characters[start] {
+        '(' => group(characters, index),
+        '[' => {
+            *index = class_end(characters, start);
+            None
+        }
+        '\\' => {
+            *index = escape_end(characters, start);
+            None
+        }
+        _ => None,
+    };
+
+    // A repeat after a repeat wraps it, as `regex` reads `a+*`; the outermost
+    // is the one that says whether the item has an upper bound.
+    let mut unbounded = None;
+    while let Some((end, open)) = repeat_at(characters, *index) {
+        unbounded = Some(open);
+        *index = end;
+
+        // A lazy `?` changes the order counts are tried in, not which counts
+        // are allowed, so it belongs to the repeat before it.
+        if characters.get(*index) == Some(&'?') {
+            *index += 1;
+        }
+    }
+
+    Item { group, unbounded }
+}
+
+/// A group's alternatives, from just past its `(` to just past its `)`.
+///
+/// `None` for a flag directive such as `(?i)`, which sets flags and holds
+/// nothing.
+fn group(characters: &[char], index: &mut usize) -> Option<Vec<Vec<Item>>> {
+    if characters.get(*index) == Some(&'?') {
+        *index += 1;
+
+        match characters.get(*index) {
+            // `(?P<name>…)` and `(?<name>…)`: the name is not the body.
+            Some('P' | '<') => {
+                while let Some(&character) = characters.get(*index) {
+                    *index += 1;
+                    if character == '>' {
+                        break;
+                    }
+                }
+            }
+            // `(?:…)`, `(?i:…)` and `(?i)`.
+            _ => {
+                while characters
+                    .get(*index)
+                    .is_some_and(|character| character.is_ascii_alphabetic() || *character == '-')
+                {
+                    *index += 1;
+                }
+
+                let opens_a_body = characters.get(*index) == Some(&':');
+                *index += 1;
+
+                if !opens_a_body {
+                    return None;
+                }
+            }
+        }
+    }
+
+    let body = alternation(characters, index);
+    *index += 1;
+
+    Some(body)
+}
+
+/// The index just past the bracket expression that opens at `start`.
+///
+/// A leading `^` negates, and an escape is consumed whole. **A `]` right after
+/// `[` or `[^` closes the class, as ECMA-262 reads it**: `[]` is an empty
+/// class and `[^]` is any character. This crate, and [`divergent_construct`],
+/// read that `]` as the class's first member instead. The shape scan reads it
+/// the browser's way, as it reads a brace, because the browser is the engine
+/// that backtracks: it reads `[^](a+)+]` as any character, then `(a+)+`, then
+/// a literal `]`, which this crate's reading would hide inside a class. The
+/// divergence itself is not refused; the Validation Rule Registry's 1.5.2
+/// table lists it.
+fn class_end(characters: &[char], start: usize) -> usize {
+    let mut index = start + 1;
+
+    if characters.get(index) == Some(&'^') {
+        index += 1;
+    }
+
+    while let Some(&character) = characters.get(index) {
+        match character {
+            '\\' => index = escape_end(characters, index),
+            ']' => return index + 1,
+            _ => index += 1,
+        }
+    }
+
+    index
+}
+
+/// The index just past the escape that opens at `start`, its argument
+/// included, so `\x41`, `\u{2C}` and `\p{L}` are each one item and their
+/// digits and braces are not read as items or repeats.
+fn escape_end(characters: &[char], start: usize) -> usize {
+    let index = start + 2;
+    let digits = match characters.get(start + 1) {
+        Some('x') => 2,
+        Some('u') => 4,
+        Some('U') => 8,
+        Some('p' | 'P') => 1,
+        _ => return index,
+    };
+
+    if characters.get(index) == Some(&'{') {
+        return characters[index..]
+            .iter()
+            .position(|&character| character == '}')
+            .map_or(characters.len(), |end| index + end + 1);
+    }
+
+    (index + digits).min(characters.len())
+}
+
+/// The repeat at `index`: the index just past it, and whether it has no upper
+/// bound. `*`, `+` and `{n,}` have none; `?`, `{n}` and `{n,m}` have one.
+fn repeat_at(characters: &[char], index: usize) -> Option<(usize, bool)> {
+    let digits_from = |start: usize| {
+        let mut end = start;
+        while characters.get(end).is_some_and(char::is_ascii_digit) {
+            end += 1;
+        }
+        end
+    };
+
+    match characters.get(index)? {
+        '*' | '+' => Some((index + 1, true)),
+        '?' => Some((index + 1, false)),
+        '{' => {
+            let lower = digits_from(index + 1);
+            if lower == index + 1 {
+                return None;
+            }
+
+            match characters.get(lower)? {
+                '}' => Some((lower + 1, false)),
+                ',' => {
+                    let upper = digits_from(lower + 1);
+                    (characters.get(upper) == Some(&'}')).then_some((upper + 1, upper == lower + 1))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 /// §5's `format` keyword.
@@ -1258,6 +1566,207 @@ mod tests {
             divergent_construct(r"[[:^alpha:]]"),
             Some(DivergentConstruct::PosixClass("^alpha".to_owned()))
         );
+    }
+
+    /// **[#604] AC2: the two shapes, and the edges of each, as a table.**
+    ///
+    /// The refused half is every spelling the shape scan claims: a lazy repeat,
+    /// a `{n,}` repeat, each kind of group, a group read through, a shape
+    /// nested inside a group that is not one, and an escape whose argument is
+    /// more than one character. **The accepted half is what stops the scan from
+    /// being the broad rule the product owner declined** on 2026-10-30, and the
+    /// literals it must not read as structure.
+    ///
+    /// Both halves go through [`refuse_pattern`], so every row also compiles,
+    /// and an accepted row is accepted by the whole check, not only the scan.
+    ///
+    /// [#604]: https://github.com/sujanto-gaws/kelir/issues/604
+    #[test]
+    fn the_shape_scan_refuses_the_two_shapes_and_no_more() {
+        use BacktrackingShape::{RepeatedAlternation, RepeatedQuantifier};
+
+        let refused = [
+            ("(a+)+", RepeatedQuantifier),
+            ("([a-z]+)+", RepeatedQuantifier),
+            ("([a-z]*)*", RepeatedQuantifier),
+            ("((?:ab)+)*", RepeatedQuantifier),
+            // A lazy repeat counts, inside and outside.
+            ("(a+?)+", RepeatedQuantifier),
+            ("(a+)+?", RepeatedQuantifier),
+            // `{n,}` has no upper bound, inside and outside.
+            ("(a{1,})*", RepeatedQuantifier),
+            ("(a+){2,}", RepeatedQuantifier),
+            // A wrapping group is read through.
+            ("((a+))+", RepeatedQuantifier),
+            ("((cat|dog))+", RepeatedAlternation),
+            // An escape is one item, its argument included.
+            (r"(\x41+)+", RepeatedQuantifier),
+            // Inside a group that is not a shape itself.
+            ("^x(y(a+)+)z$", RepeatedQuantifier),
+            ("(?:[a-z]|[a-z0-9])*$", RepeatedAlternation),
+            ("^(cat|dog)+$", RepeatedAlternation),
+            ("(png|jpg)+", RepeatedAlternation),
+            ("(?P<pet>cat|dog)+", RepeatedAlternation),
+            ("(?i:cat|dog)+", RepeatedAlternation),
+        ];
+
+        for (pattern, shape) in refused {
+            assert_eq!(
+                refuse_pattern(pattern, ""),
+                Some(PatternRefusal::Backtracking(shape)),
+                "`{pattern}` should be refused as {shape:?}"
+            );
+        }
+
+        let accepted = [
+            // A literal is not a group and not a repeat.
+            r"\(a+\)+",
+            "[(a+)+]",
+            r"a\|b+",
+            r"[|]+",
+            // More than one item in the body, including the exponential one
+            // the narrow rule leaves open.
+            "((a)b+)*",
+            "(a+b?)+",
+            r"([a-z]+\.)+",
+            r"^([a-z0-9-]+\.)+[a-z]{2,}$",
+            r"[a-z]+(\.[a-z]+)*",
+            "^(?:[a-z][0-9])*$",
+            // A bounded repeat, outside or inside.
+            "(a+){2}",
+            "(a|b){0,3}",
+            "(a?)+",
+            "(a{1,3})*",
+            // No repeat on the group.
+            "(a+)",
+            "(a|b)",
+            "^(png|jpg)$",
+            // The list rewrite of `(png|jpg)+`: the repeated group holds a
+            // separator and the alternation, two items.
+            "^(png|jpg)(,(png|jpg))*$",
+            // Polynomial rather than exponential.
+            "[a-z]*[a-z]*$",
+            // A flag directive holds nothing.
+            "(?i)a+",
+        ];
+
+        for pattern in accepted {
+            assert_eq!(
+                refuse_pattern(pattern, ""),
+                None,
+                "`{pattern}` should be accepted"
+            );
+        }
+    }
+
+    /// **[#604]: the compile check answers first, the divergence scan second,
+    /// and the shape scan last.** A pattern that does not build cannot be read
+    /// for a shape, and one both divergent and backtracking reports the
+    /// divergence alone.
+    ///
+    /// [#604]: https://github.com/sujanto-gaws/kelir/issues/604
+    #[test]
+    fn the_shape_scan_answers_after_the_compile_check_and_the_dialect_scan() {
+        assert!(
+            matches!(
+                refuse_pattern("(a+)+(?=x)", ""),
+                Some(PatternRefusal::Uncompilable { .. })
+            ),
+            "a pattern that cannot be built is reported as that, not as a shape"
+        );
+
+        assert_eq!(
+            refuse_pattern(r"(\w*)*", ""),
+            Some(PatternRefusal::Divergent(DivergentConstruct::Class('w')))
+        );
+        assert_eq!(
+            backtracking_shape(r"(\w*)*"),
+            Some(BacktrackingShape::RepeatedQuantifier),
+            "the shape is there; the divergence is what is reported"
+        );
+    }
+
+    /// **[#604]: the spellings the table above leaves out**, each a mutant of
+    /// the scan that table let live (the row's `test-engineer` gate,
+    /// 2026-10-30).
+    ///
+    /// The refused half is a group or an escape both engines spell the same
+    /// way, and which shape is named when there are two: the outer group's
+    /// before the one it holds, and the first of two siblings. The accepted
+    /// half is a literal the scan must not read as structure: an escaped `]`
+    /// inside a class, and a brace ECMA-262 reads as text because it holds a
+    /// space.
+    ///
+    /// [#604]: https://github.com/sujanto-gaws/kelir/issues/604
+    #[test]
+    fn the_shape_scan_reads_every_spelling_of_a_group_an_escape_and_a_brace() {
+        use BacktrackingShape::{RepeatedAlternation, RepeatedQuantifier};
+
+        let refused = [
+            // ECMA-262's spelling of a named group.
+            ("(?<pet>cat|dog)+", RepeatedAlternation),
+            // A flag group that clears a flag.
+            ("(?i-s:cat|dog)+", RepeatedAlternation),
+            // `\u` with four digits, and braced with more than four.
+            (r"(\u0041+)+", RepeatedQuantifier),
+            (r"(\u{1F600}+)+", RepeatedQuantifier),
+            // The outer group's shape, not the one inside it.
+            ("((a+)+|b)+", RepeatedAlternation),
+            // The first of two siblings.
+            ("(a|b)+(c+)+", RepeatedAlternation),
+        ];
+
+        for (pattern, shape) in refused {
+            assert_eq!(
+                refuse_pattern(pattern, ""),
+                Some(PatternRefusal::Backtracking(shape)),
+                "`{pattern}` should be refused as {shape:?}"
+            );
+        }
+
+        for pattern in [r"[\](a+)+]", "(a+){ 2,}", "(a+){2 ,}"] {
+            assert_eq!(
+                refuse_pattern(pattern, ""),
+                None,
+                "`{pattern}` should be accepted"
+            );
+        }
+    }
+
+    /// **[#604]: a class opening with `]` is read as the browser reads it.**
+    ///
+    /// ECMA-262 reads `[]` as an empty class and `[^]` as any character, each
+    /// ending at that `]`; this crate reads the `]` as the class's first
+    /// member. So the browser reads `[^](a+)+]` as any character, then
+    /// `(a+)+`, then a literal `]`, which is the refused shape: the row's gate
+    /// measured 27.3 s in V8 on 30 characters. Read this crate's way, the
+    /// shape sat inside a class, and the pattern was stored.
+    ///
+    /// **Seen red, 2026-10-30, on `a286cb5`**, where [`class_end`] skipped a
+    /// leading `]`: `[^](a+)+]` was accepted.
+    ///
+    /// [#604]: https://github.com/sujanto-gaws/kelir/issues/604
+    #[test]
+    fn a_class_opening_with_a_bracket_ends_where_the_browser_ends_it() {
+        for pattern in ["[^](a+)+]", "[](a+)+]", "[^a](a+)+"] {
+            assert_eq!(
+                refuse_pattern(pattern, ""),
+                Some(PatternRefusal::Backtracking(
+                    BacktrackingShape::RepeatedQuantifier
+                )),
+                "`{pattern}` should be refused as RepeatedQuantifier"
+            );
+        }
+
+        // The second subjects: a class with a member before the group, and
+        // the group not repeated.
+        for pattern in ["[^a](a+)", "[a](a+)"] {
+            assert_eq!(
+                refuse_pattern(pattern, ""),
+                None,
+                "`{pattern}` should be accepted"
+            );
+        }
     }
 
     fn field(validation: Value) -> Value {

@@ -15,19 +15,29 @@ import { publishForm, type SeededForm } from '../support/forms'
  * throw here: it keeps matching, and the tab is busy for as long as it does,
  * which this row does not change.
  *
- * **The pattern and value are the issue's first row**, measured with
- * `scripts/pattern-parity/backtrack.mjs`. The first assertion re-checks, in
- * the page, that this Firefox still throws on them. If a later Firefox stops
+ * **The pattern and value are a row of the Validation Rule Registry's
+ * backtracking table**, two adjacent stars on `a` × 10,000 then `!`, measured
+ * with `scripts/pattern-parity/backtrack.mjs`: Firefox 153 throws after about
+ * seven seconds, and the server's crate matches. The first assertion re-checks,
+ * in the page, that this Firefox still throws on them. If a later Firefox stops
  * throwing, that assertion fails and says so, rather than this spec passing
  * without having tested anything.
+ *
+ * **It was the issue's first row, `(?:[a-z]|[a-z0-9])*$`, until #604**, which
+ * refuses a repeated alternation at save, so that definition can no longer be
+ * written through the API this spec uses. This pattern has no group, so the
+ * refusal does not name it; that says nothing about how fast it is, and its
+ * slowness is the point. Re-measured 2026-10-30 in Playwright's Firefox 153:
+ * three matches in one page, each throwing *too much recursion* after about
+ * seven seconds.
  *
  * **Both paths carry the pattern**: `validation.pattern` on one field and a
  * `regex` rule on the other, because the renderer runs each separately.
  */
 const suffix = runSuffix()
 
-const pattern = '(?:[a-z]|[a-z0-9])*$'
-const value = `${'a'.repeat(28)}!`
+const pattern = '[a-z]*[a-z]*$'
+const value = `${'a'.repeat(10_000)}!`
 
 const definition = {
   formId: `e2e-give-up-${suffix}`,
@@ -123,7 +133,7 @@ test('a value Firefox gives up matching is submitted, and the server decides it'
     [pattern, value],
   )
 
-  expect(thrown, 'this Firefox still throws on the issue-496 pattern').toContain(
+  expect(thrown, 'this Firefox still throws on the two-star pattern').toContain(
     'too much recursion',
   )
 
@@ -154,8 +164,9 @@ test('a value Firefox gives up matching is submitted, and the server decides it'
   //
   // **Which of the two is undecided is Firefox's choice, not the form's.** The
   // precondition above threw, but a later match of the same pattern on the
-  // same value does not always throw: on a CI run of 2026-09-27 the keyword's
-  // match finished and only the rule's threw. A match that finishes is a
+  // same value does not always throw: on a CI run of 2026-09-27, with the
+  // pattern this spec carried before #604, the keyword's match finished and
+  // only the rule's threw. A match that finishes is a
   // verdict, and the server's agrees with it, so the form may list one name or
   // both. What it may not do is refuse (checked above) or list something else.
   const undecided = page.getByTestId('form-undecided').locator('code')

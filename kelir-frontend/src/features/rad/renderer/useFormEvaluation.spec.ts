@@ -615,6 +615,39 @@ describe('a rule the registry defines and this side does not decide', () => {
     expect(wrapper.find('[data-testid="form-undecided"]').text()).toContain('passwordStrength')
   })
 
+  it('does not say a client-scoped rule is checked on submit, which nothing does (#624)', async () => {
+    // Registry §3.2: the backend ignores `passwordStrength`, so a submit
+    // checks nothing about it.
+    const wrapper = await render({
+      formId: 'strength',
+      version: '2.0.1',
+      components: [
+        {
+          id: 'pw',
+          role: 'data',
+          type: 'textfield',
+          key: 'pw',
+          label: 'Password',
+          validation: { type: 'string' },
+          rules: [
+            {
+              rule: 'passwordStrength',
+              scope: 'client',
+              params: { minScore: 3 },
+              message: 'Too weak.',
+            },
+          ],
+        },
+      ],
+    })
+
+    const alert = wrapper.find('[data-testid="form-undecided"]').text()
+
+    expect(alert).toContain('passwordStrength')
+    expect(alert).toContain('could not be checked')
+    expect(alert).not.toContain('checked when this form is submitted')
+  })
+
   it('says nothing about a server-scoped rule, which is §3.3 working', async () => {
     const definition: JfssDefinition = {
       formId: 'unique',
@@ -646,10 +679,11 @@ describe('a rule the registry defines and this side does not decide', () => {
 })
 
 describe('a pattern the browser gives up on (#496)', () => {
-  // Firefox throws *too much recursion* here and V8 does not, so the throw is
-  // simulated for this one pattern. The e2e spec
-  // `a-pattern-the-browser-gives-up-on.spec.ts` is the real Firefox.
-  const slow = '(?:[a-z]|[a-z0-9])*$'
+  // Firefox throws *too much recursion* on this pattern, given a long enough
+  // value, and V8 does not, so the throw is simulated for this one pattern
+  // whatever the value. The e2e spec `a-pattern-the-browser-gives-up-on.spec.ts`
+  // is the real Firefox, and the pattern is its pattern.
+  const slow = '[a-z]*[a-z]*$'
 
   const definition: JfssDefinition = {
     formId: 'give-up',
@@ -697,6 +731,67 @@ describe('a pattern the browser gives up on (#496)', () => {
     expect(wrapper.find('[data-testid="field-error"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="form-undecided"]').text()).toContain('regex')
     expect(wrapper.emitted('action')![0][0]).toBe('submit')
+  })
+
+  /** One `regex` field per scope given, each carrying the slow pattern. */
+  const scoped = (...scopes: ('client' | 'both')[]): JfssDefinition => ({
+    formId: 'give-up-scoped',
+    version: '2.0.1',
+    components: [
+      ...scopes.map((scope) => ({
+        id: scope,
+        role: 'data' as const,
+        type: 'textfield',
+        key: scope,
+        label: scope,
+        validation: { type: 'string' as const },
+        rules: [{ rule: 'regex', scope, params: { pattern: slow }, message: 'No.' }],
+      })),
+      { id: 's', role: 'action', type: 'button', label: 'Submit', action: 'submit' },
+    ],
+  })
+
+  it('submits a client-scoped rule it gave up on, and says nothing decides it (#624)', async () => {
+    // The server skips a `client` rule, so "checked when this form is
+    // submitted" would be false, and a violation could never be answered.
+    const wrapper = await render(scoped('client'))
+
+    await type(wrapper, '#jfss-client', `${'a'.repeat(28)}!`)
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === 'Submit')!
+      .trigger('click')
+    await flushPromises()
+
+    const alert = wrapper.find('[data-testid="form-undecided"]').text()
+
+    expect(wrapper.find('[data-testid="field-error"]').exists()).toBe(false)
+    expect(alert).toContain('regex')
+    expect(alert).toContain('nothing decides it')
+    expect(alert).not.toContain('checked when this form is submitted')
+    expect(wrapper.emitted('action')![0][0]).toBe('submit')
+  })
+
+  it('names a client and a both give-up separately, each worded for its scope (#624)', async () => {
+    // Keyed by name alone, the two collapsed into one alert, and whichever
+    // came second said what was true of the other.
+    const wrapper = await render(scoped('client', 'both'))
+
+    await type(wrapper, '#jfss-client', `${'a'.repeat(28)}!`)
+    await type(wrapper, '#jfss-both', `${'a'.repeat(28)}!`)
+
+    const alerts = wrapper.findAll('[data-testid="form-undecided"]').map((alert) => alert.text())
+
+    expect(alerts).toHaveLength(2)
+
+    const client = alerts.find((text) => text.includes('nothing decides it'))
+    const both = alerts.find((text) => text.includes('the server decides it'))
+
+    expect(client).toBeDefined()
+    expect(client).not.toContain('checked when this form is submitted')
+    expect(both).toBeDefined()
+    expect(both).toContain('checked when this form is submitted')
+    expect(both).not.toContain('nothing decides it')
   })
 })
 
