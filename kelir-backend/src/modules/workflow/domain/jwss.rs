@@ -89,7 +89,9 @@ use serde_json::Value;
 use super::graph::RoleReference;
 use super::task_type;
 use crate::error::ValidationDetail;
-use crate::modules::rad::domain::engine::{reads_computed_path, visit_paths};
+use crate::modules::rad::domain::engine::{
+    iterator_operands, reads_computed_path, var_default, var_path, visit_paths, ITERATORS,
+};
 use crate::modules::rad::domain::jfss::{check_operators, CONDITIONAL_OPERATORS};
 
 /// The meta-schema, vendored into the crate.
@@ -155,8 +157,9 @@ pub const ROLE_TAKES_NO_SCOPE: &str = "ROLE_TAKES_NO_SCOPE";
 /// ([#706](https://github.com/sujanto-gaws/kelir/issues/706), **D-115** B).
 pub const CONDITION_PATH_NOT_BUILT: &str = "CONDITION_PATH_NOT_BUILT";
 
-/// The refusal for a condition working out the path it reads as it runs
-/// ([#789](https://github.com/sujanto-gaws/kelir/issues/789), JWSS R-18).
+/// The refusal for a condition reading a path no reader of the definition can
+/// name: one it works out as it runs, or one its iterator's body reads off the
+/// context ([#789](https://github.com/sujanto-gaws/kelir/issues/789), JWSS R-18).
 ///
 /// A code of its own because [`CONDITION_PATH_NOT_BUILT`]'s message names the
 /// path read, and here there is none to name.
@@ -548,6 +551,10 @@ pub fn role_scope_errors(definition: &Value) -> Vec<ValidationDetail> {
 /// them, in iterator bodies too, and the expression is told once, after its
 /// unbuilt paths. At publish and not at save, as every path refusal is.
 ///
+/// **A body reads its element, so the element must not be the context**
+/// ([`hands_an_iterator_the_context`]): the same refusal, told once with the
+/// computed path's.
+///
 /// **Pure**: it reads the definition and nothing else, and takes no lock.
 ///
 /// [#706]: https://github.com/sujanto-gaws/kelir/issues/706
@@ -599,7 +606,7 @@ pub fn condition_path_errors(definition: &Value) -> Vec<ValidationDetail> {
             )
         }));
 
-        if reads_computed_path(expression) {
+        if reads_computed_path(expression) || hands_an_iterator_the_context(expression) {
             details.push(detail(
                 path,
                 "conditionPath",
@@ -612,10 +619,92 @@ pub fn condition_path_errors(definition: &Value) -> Vec<ValidationDetail> {
     details
 }
 
+/// The roots a body could read an unbuilt key of, if it were handed one whole.
+///
+/// `formData` is not among them: anything under it is built, so there is
+/// nothing to reach. `variables` is, for the keys no one declared.
+const GUARDED_ROOTS: &[&str] = &["document", "actor", "variables"];
+
+/// Whether `expression` puts the context, or a [`GUARDED_ROOTS`] root, where an
+/// iterator's body can read it: inside a source or a `reduce`'s initial value,
+/// in the scope the expression is written in (#789, JWSS R-18).
+///
+/// **[`visit_paths`] is right not to walk a body, and that is what leaves this
+/// hole.** A plain path in a body reads the element. But the engine iterates an
+/// object's values, and a list can hold anything, so
+/// `{"some": [{"var": ""}, {"==": [{"var": "amount"}, 7]}]}` and
+/// `{"some": [[{"var": "document"}], {"==": [{"var": "amount"}, 7]}]}` read
+/// `document.amount` with no path saying so. A `reduce`'s initial value does
+/// the same through `accumulator`.
+///
+/// **Only those two positions.** Anywhere else the whole scope is a value, which
+/// no path can be read from, so `{"!!": [{"var": ""}]}` is accepted. And only in
+/// this scope: a source inside a body reads the element, and if the outer
+/// element is not the context, nor is this one. So the walk stops at a body,
+/// as [`visit_paths`] does, and takes the same operands from
+/// [`iterator_operands`].
+///
+/// Workflows only. A form's expressions read one record, and every key of it
+/// is a field.
+fn hands_an_iterator_the_context(expression: &Value) -> bool {
+    match expression {
+        Value::Object(map) => map.iter().any(|(operator, argument)| {
+            if ITERATORS.contains(&operator.as_str()) {
+                iterator_operands(operator, argument)
+                    .into_iter()
+                    .flatten()
+                    .any(reads_the_context)
+            } else {
+                hands_an_iterator_the_context(argument)
+            }
+        }),
+        Value::Array(items) => items.iter().any(hands_an_iterator_the_context),
+        _ => false,
+    }
+}
+
+/// Whether `expression` reads the context whole, or a [`GUARDED_ROOTS`] root,
+/// anywhere in the scope it is written in: in a list, in another operator, in a
+/// `var`'s default or a nested iterator's source. Not in a body.
+fn reads_the_context(expression: &Value) -> bool {
+    match expression {
+        Value::Object(map) => map
+            .iter()
+            .any(|(operator, argument)| match operator.as_str() {
+                "var" => {
+                    names_the_context(argument)
+                        || var_default(argument).is_some_and(reads_the_context)
+                }
+                iterator if ITERATORS.contains(&iterator) => iterator_operands(iterator, argument)
+                    .into_iter()
+                    .flatten()
+                    .any(reads_the_context),
+                _ => reads_the_context(argument),
+            }),
+        Value::Array(items) => items.iter().any(reads_the_context),
+        _ => false,
+    }
+}
+
+/// Whether a `var` operand reads the context whole or a [`GUARDED_ROOTS`] root.
+///
+/// [`visit_paths`] gives no path for `null`, `[]` or `[null]`, and each reads
+/// the whole scope, so they are named here. `[null, x]` is not one of them: it
+/// reads a chain that fails at once and answers `null`.
+fn names_the_context(operand: &Value) -> bool {
+    operand.is_null()
+        || matches!(
+            operand.as_array().map(Vec::as_slice),
+            Some([] | [Value::Null])
+        )
+        || var_path(operand).is_some_and(|path| path.is_empty() || GUARDED_ROOTS.contains(&path))
+}
+
 /// Whether the engine builds `path` in JWSS §6.1's context.
 ///
 /// An empty path is no path: `{"var": ""}` reads the whole context, which is
-/// built.
+/// built. Handed to an iterator it is another matter:
+/// [`hands_an_iterator_the_context`].
 fn is_built(path: &str, declared: &BTreeSet<&str>) -> bool {
     if path.is_empty() {
         return true;
@@ -643,10 +732,11 @@ fn is_built(path: &str, declared: &BTreeSet<&str>) -> bool {
 /// What a refusal of a computed path says. It names no path: not knowing the
 /// path is the fault.
 const COMPUTED_PATH_MESSAGE: &str = "A `var`, `missing` or `missing_some` in this expression \
-     works out the path it reads as it runs, or climbs out of its scope to read it, so a \
-     publish cannot check the path: one the engine does not build would read as null and the \
-     condition would take another branch without saying so. Write the path as a string, with \
-     any default beside it (JWSS §6.4).";
+     works out the path it reads as it runs, climbs out of its scope to read it, or hands an \
+     iterator the whole context, so a publish cannot check the path: one the engine does not \
+     build would read as null and the condition would take another branch without saying so. \
+     Write each path as a string, with any default beside it; an iterator's body reads only \
+     its element (JWSS §6.4).";
 
 /// What a refusal of `read` says: the path, why it is refused, and what the
 /// engine builds.
@@ -1555,10 +1645,11 @@ mod tests {
         assert_eq!(
             details[0].message,
             "A `var`, `missing` or `missing_some` in this expression works out the path it \
-             reads as it runs, or climbs out of its scope to read it, so a publish cannot \
-             check the path: one the engine does not build would read as null and the \
-             condition would take another branch without saying so. Write the path as a \
-             string, with any default beside it (JWSS §6.4)."
+             reads as it runs, climbs out of its scope to read it, or hands an iterator the \
+             whole context, so a publish cannot check the path: one the engine does not \
+             build would read as null and the condition would take another branch without \
+             saying so. Write each path as a string, with any default beside it; an \
+             iterator's body reads only its element (JWSS §6.4)."
         );
     }
 
@@ -1776,7 +1867,7 @@ mod tests {
             document["level"] = serde_json::json!([1]);
         }
 
-        serde_json::json!({
+        let mut facts = serde_json::json!({
             "document": document,
             "actor": { "userId": "u", "roles": [], "departmentId": null },
             "formData": {
@@ -1784,8 +1875,15 @@ mod tests {
                 "nums": [1, 2],
                 "rows": [{ "qty": 1, "tags": [1] }, { "qty": 2, "tags": [2] }]
             },
-            "variables": {}
-        })
+            "variables": { "declared": 1 }
+        });
+
+        if sentinel {
+            facts["actor"]["email"] = serde_json::json!(7);
+            facts["variables"]["undeclared"] = serde_json::json!(7);
+        }
+
+        facts
     }
 
     /// Whether `condition`'s answer changes with the sentinel in the context.
@@ -1948,6 +2046,251 @@ mod tests {
         ]
     }
 
+    /// Each row was run: its answer depends on a sentinel at an unbuilt path, a
+    /// body being what reads it. `variables` is here because a run showed it:
+    /// handed over whole, it gives a body the keys no one declared.
+    fn shapes_handing_an_iterator_the_context() -> Vec<(&'static str, Value)> {
+        let is_seven = |path: &str| serde_json::json!({ "==": [var(path), 7] });
+        let carried = |path: &str, initial: Value| serde_json::json!({ "==": [{ "reduce": [[1], var(path), initial] }, 7] });
+        let on = var("formData.on");
+        let whole_operands = [
+            ("\"\"", serde_json::json!("")),
+            ("null", serde_json::json!(null)),
+            ("[]", serde_json::json!([])),
+            ("[null]", serde_json::json!([null])),
+            ("[\"\"]", serde_json::json!([""])),
+            ("[\"\", 0]", serde_json::json!(["", 0])),
+        ];
+
+        let mut shapes = Vec::new();
+
+        for (label, operand) in whole_operands {
+            let whole = serde_json::json!({ "var": operand });
+
+            shapes.push((
+                label,
+                serde_json::json!({ "some": [whole, is_seven("amount")] }),
+            ));
+            shapes.push((
+                label,
+                serde_json::json!({ "some": [[whole], is_seven("document.amount")] }),
+            ));
+            shapes.push((label, carried("accumulator.document.amount", whole)));
+        }
+
+        shapes.extend([
+            (
+                "document",
+                serde_json::json!({ "some": [var("document"), is_seven("")] }),
+            ),
+            (
+                "document, with a default",
+                serde_json::json!({ "some": [{ "var": ["document", 0] }, is_seven("")] }),
+            ),
+            (
+                "document in a list",
+                serde_json::json!({ "some": [[var("document")], is_seven("amount")] }),
+            ),
+            (
+                "document as an initial value",
+                carried("accumulator.amount", var("document")),
+            ),
+            (
+                "actor",
+                serde_json::json!({ "some": [var("actor"), is_seven("")] }),
+            ),
+            (
+                "actor in a list",
+                serde_json::json!({ "some": [[var("actor")], is_seven("email")] }),
+            ),
+            (
+                "actor as an initial value",
+                carried("accumulator.email", var("actor")),
+            ),
+            (
+                "variables",
+                serde_json::json!({ "some": [var("variables"), is_seven("")] }),
+            ),
+            (
+                "variables in a list",
+                serde_json::json!({ "some": [[var("variables")], is_seven("undeclared")] }),
+            ),
+            (
+                "variables as an initial value",
+                carried("accumulator.undeclared", var("variables")),
+            ),
+            (
+                "the whole scope through a list, in current",
+                serde_json::json!({ "==": [
+                    { "reduce": [[{ "var": null }], var("current.document.amount"), 0] }, 7
+                ] }),
+            ),
+            (
+                "an if holding a list",
+                serde_json::json!({ "some": [
+                    { "if": [on, [var("")], []] }, is_seven("document.amount")
+                ] }),
+            ),
+            (
+                "an if holding a root",
+                serde_json::json!({ "some": [{ "if": [on, var("document"), []] }, is_seven("")] }),
+            ),
+            (
+                "an if as an initial value",
+                carried(
+                    "accumulator.amount",
+                    serde_json::json!({ "if": [on, var("document"), 0] }),
+                ),
+            ),
+            (
+                "a default",
+                serde_json::json!({ "some": [
+                    { "var": ["formData.absent", var("document")] }, is_seven("")
+                ] }),
+            ),
+            (
+                "a default that is null's",
+                serde_json::json!({ "some": [
+                    { "var": ["formData.absent", { "var": null }] }, is_seven("amount")
+                ] }),
+            ),
+            (
+                "a filter's source",
+                serde_json::json!({ "some": [
+                    { "filter": [var("document"), true] }, is_seven("")
+                ] }),
+            ),
+            (
+                "a map's source",
+                serde_json::json!({ "some": [{ "map": [var("document"), var("")] }, is_seven("")] }),
+            ),
+            (
+                "a map over a list",
+                serde_json::json!({ "some": [
+                    { "map": [[var("")], var("document")] }, is_seven("amount")
+                ] }),
+            ),
+            (
+                "a reduce's initial value in a source",
+                serde_json::json!({ "some": [
+                    { "reduce": [[1], var("accumulator"), var("document")] }, is_seven("")
+                ] }),
+            ),
+        ]);
+
+        shapes
+    }
+
+    /// **#789, the decision taken after the campaign.** A source or an initial
+    /// value holding the whole scope, `document`, `actor` or `variables` is
+    /// refused as `CONDITION_PATH_COMPUTED`: one detail, in a condition and in
+    /// a variable's `source`.
+    #[test]
+    fn a_source_or_initial_value_holding_the_context_is_refused() {
+        for (shape, condition) in shapes_handing_an_iterator_the_context() {
+            let details = condition_path_errors(&reading(condition.clone(), serde_json::json!([])));
+            assert_eq!(
+                refused_codes(&details),
+                [(CONDITION.to_owned(), CONDITION_PATH_COMPUTED.to_owned())],
+                "{shape}: {condition}"
+            );
+
+            let details = condition_path_errors(&serde_json::json!({
+                "variables": [{ "key": "v", "source": condition }]
+            }));
+            assert_eq!(
+                refused_codes(&details),
+                [(
+                    "definition.variables.0.source".to_owned(),
+                    CONDITION_PATH_COMPUTED.to_owned()
+                )],
+                "{shape}"
+            );
+        }
+    }
+
+    /// One detail for the expression, whichever of the two it holds and however
+    /// often.
+    #[test]
+    fn the_context_and_a_computed_var_in_one_expression_are_told_once() {
+        let condition = serde_json::json!({ "and": [
+            { "some": [var(""), var("amount")] },
+            { "var": { "var": "formData.which" } },
+            { "==": [{ "reduce": [[1], var("accumulator"), var("document")] }, 7] }
+        ] });
+        let details = condition_path_errors(&reading(condition, serde_json::json!([])));
+
+        assert_eq!(
+            refused_codes(&details),
+            [(CONDITION.to_owned(), CONDITION_PATH_COMPUTED.to_owned())]
+        );
+    }
+
+    /// What stays accepted, each run. `formData` handed over whole gives a body
+    /// nothing unbuilt, since anything under it is built. A root in a body is
+    /// the element's key, and a `[null, …]` opening reads nothing. Outside the
+    /// two positions the whole scope is only a value (AC9).
+    #[test]
+    fn a_source_that_cannot_hold_the_context_is_accepted() {
+        let is_seven = |path: &str| serde_json::json!({ "==": [var(path), 7] });
+
+        for condition in [
+            serde_json::json!({ "some": [var("formData"), is_seven("")] }),
+            serde_json::json!({ "some": [[var("formData")], is_seven("on")] }),
+            serde_json::json!({ "==": [
+                { "reduce": [[1], var("accumulator.on"), var("formData")] }, 7
+            ] }),
+            serde_json::json!({ "some": [var("document.status"), is_seven("")] }),
+            serde_json::json!({ "some": [var("actor.roles"), is_seven("")] }),
+            serde_json::json!({ "some": [{ "var": [null, 0] }, is_seven("amount")] }),
+            serde_json::json!({ "some": [{ "var": [true] }, is_seven("amount")] }),
+            serde_json::json!({ "some": [var("formData.rows"),
+                { "some": [var(""), is_seven("x")] }] }),
+            serde_json::json!({ "some": [var("formData.rows"),
+                { "some": [var("document"), is_seven("x")] }] }),
+            serde_json::json!({ "some": [
+                { "map": [var("formData.rows"), var("")] }, is_seven("qty")
+            ] }),
+            serde_json::json!({ "!!": [var("")] }),
+            serde_json::json!({ "!!": [{ "var": null }] }),
+            serde_json::json!({ "!!": [{ "var": [] }] }),
+            serde_json::json!({ "!!": [{ "var": [null] }] }),
+            serde_json::json!({ "!!": [var("document")] }),
+            serde_json::json!({ "!!": [var("actor")] }),
+            serde_json::json!({ "!!": [var("variables")] }),
+            serde_json::json!({ "in": ["amount", var("document")] }),
+        ] {
+            assert!(!depends_on_the_sentinel(&condition), "{condition}");
+            assert!(
+                condition_path_errors(&reading(condition.clone(), serde_json::json!([])))
+                    .is_empty(),
+                "{condition}"
+            );
+        }
+    }
+
+    /// `missing_some` with no second operand has no names: the engine reads
+    /// the one operand as its count and answers `[]`, so nothing there is a
+    /// computed name. Run, and left as it is.
+    #[test]
+    fn a_missing_some_with_one_operand_asks_about_no_name() {
+        let name = serde_json::json!({ "if": [var("formData.on"), "document.amount", "x"] });
+
+        for condition in [
+            serde_json::json!({ "!": [{ "missing_some": var("formData.names") }] }),
+            serde_json::json!({ "!": [{ "missing_some": [var("formData.names")] }] }),
+            serde_json::json!({ "!": [{ "missing_some": name }] }),
+            serde_json::json!({ "!": [{ "missing_some": [name] }] }),
+        ] {
+            assert!(!depends_on_the_sentinel(&condition), "{condition}");
+            assert!(
+                condition_path_errors(&reading(condition.clone(), serde_json::json!([])))
+                    .is_empty(),
+                "{condition}"
+            );
+        }
+    }
+
     /// **#789 AC7, the closure test**: where the answer depends on an unbuilt
     /// path, a publish refuses the condition. The sentinel is what makes the
     /// premise a run and not a claim, and the failures are gathered so that a
@@ -1956,7 +2299,10 @@ mod tests {
     fn a_condition_whose_answer_depends_on_an_unbuilt_path_is_refused() {
         let mut accepted = Vec::new();
 
-        for (shape, condition) in shapes_reaching_an_unbuilt_path() {
+        for (shape, condition) in shapes_reaching_an_unbuilt_path()
+            .into_iter()
+            .chain(shapes_handing_an_iterator_the_context())
+        {
             assert!(
                 depends_on_the_sentinel(&condition),
                 "{shape} does not read the sentinel: {condition}"
@@ -1995,9 +2341,11 @@ mod tests {
         }
     }
 
-    /// **H6, H8 and H10, run**: nothing else reaches the context. A plain path
-    /// in a body reads the element, a quantifier's third operand is an
-    /// evaluation error, and neither `$` nor `..` climbs out of a scope.
+    /// **H6, H8 and H10, run**: a plain path in a body reads the element, a
+    /// quantifier's third operand is an evaluation error, and neither `$` nor
+    /// `..` climbs out of a scope. So a body reaches the context only if the
+    /// element is the context, which
+    /// [`a_source_or_initial_value_holding_the_context_is_refused`] closes.
     #[test]
     fn a_body_reads_its_element_and_nothing_climbs_out_of_it_by_a_plain_path() {
         let is_seven = serde_json::json!({ "==": [var("document.amount"), 7] });
@@ -2023,6 +2371,36 @@ mod tests {
                 "{condition}"
             );
         }
+    }
+
+    /// The closing campaign's reproduction: a body's plain path reads the
+    /// element, and the element can be the context, or a root of it.
+    #[test]
+    fn a_body_reaches_an_unbuilt_path_through_an_element_that_is_the_context() {
+        let is_seven = |path: &str| serde_json::json!({ "==": [var(path), 7] });
+        let mut accepted = Vec::new();
+
+        for condition in [
+            serde_json::json!({ "some": [var(""), is_seven("amount")] }),
+            serde_json::json!({ "some": [[var("")], is_seven("document.amount")] }),
+            serde_json::json!({ "some": [[var("document")], is_seven("amount")] }),
+            serde_json::json!({ "some": [var("document"), is_seven("")] }),
+            serde_json::json!({ "==": [
+                { "reduce": [[1], var("accumulator.amount"), var("document")] }, 7
+            ] }),
+            serde_json::json!({ "==": [
+                { "reduce": [[{ "var": null }], var("current.document.amount"), 0] }, 7
+            ] }),
+        ] {
+            assert!(depends_on_the_sentinel(&condition), "{condition}");
+
+            if condition_path_errors(&reading(condition.clone(), serde_json::json!([]))).is_empty()
+            {
+                accepted.push(condition);
+            }
+        }
+
+        assert!(accepted.is_empty(), "accepted: {accepted:#?}");
     }
 
     #[test]

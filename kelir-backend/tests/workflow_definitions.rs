@@ -3921,6 +3921,91 @@ async fn a_computed_path_is_refused_at_publish_wherever_it_sits() {
     }
 }
 
+/// **#789, the decision taken after the campaign: a body reads its element, and
+/// the element cannot be the context.** Each draft saves, and each publish is
+/// refused once at the condition. `formData` whole is accepted, since anything
+/// under it is built, and the whole scope outside the two positions is a value.
+#[tokio::test]
+async fn an_iterator_handed_the_context_is_refused_at_publish() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    role(&app, "WF-APPROVER").await;
+
+    let is_seven = |path: &str| json!({ "==": [{ "var": path }, 7] });
+
+    for (key, condition) in [
+        (
+            "wf_r35_ctx_whole",
+            json!({ "some": [{ "var": "" }, is_seven("amount")] }),
+        ),
+        (
+            "wf_r35_ctx_null",
+            json!({ "some": [{ "var": null }, is_seven("amount")] }),
+        ),
+        (
+            "wf_r35_ctx_empty",
+            json!({ "some": [{ "var": [] }, is_seven("amount")] }),
+        ),
+        (
+            "wf_r35_ctx_list",
+            json!({ "some": [[{ "var": "" }], is_seven("document.amount")] }),
+        ),
+        (
+            "wf_r35_ctx_root",
+            json!({ "some": [[{ "var": "document" }], is_seven("amount")] }),
+        ),
+        (
+            "wf_r35_ctx_values",
+            json!({ "some": [{ "var": "document" }, is_seven("")] }),
+        ),
+        (
+            "wf_r35_ctx_actor",
+            json!({ "some": [{ "var": "actor" }, is_seven("")] }),
+        ),
+        (
+            "wf_r35_ctx_initial",
+            json!({ "==": [
+                { "reduce": [[1], { "var": "accumulator.amount" }, { "var": "document" }] }, 7
+            ] }),
+        ),
+        (
+            "wf_r35_ctx_current",
+            json!({ "==": [
+                { "reduce": [[{ "var": null }], { "var": "current.document.amount" }, 0] }, 7
+            ] }),
+        ),
+        (
+            "wf_r35_ctx_variables",
+            json!({ "==": [
+                { "reduce": [[1], { "var": "accumulator.nope" }, { "var": "variables" }] }, 7
+            ] }),
+        ),
+    ] {
+        let refused = refused_publish(&app, &token, key, condition).await;
+
+        assert_eq!(refusals(&refused), computed(&[CONDITION]), "{key}");
+        assert!(
+            messages(&refused)[0].contains("hands an iterator the whole context"),
+            "{key}: {}",
+            refused.body
+        );
+    }
+
+    let definition = conditioned(
+        "wf_r35_ctx_accepted",
+        json!({ "and": [
+            { "some": [{ "var": "formData" }, is_seven("")] },
+            { "!!": [{ "var": "" }] },
+            { "!!": [{ "var": "document" }] }
+        ] }),
+    );
+    let id = saved(&app, &token, "wf_r35_ctx_accepted", definition).await;
+    let answer = publish(&app, &token, id).await;
+
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+}
+
 /// **#789 AC10, AC11: what a `var`'s default, `missing` and `missing_some` read
 /// is read.** Each draft saves. A nested `var` is refused for its own path; a
 /// nested list in `missing` holds names; a name worked out as the condition

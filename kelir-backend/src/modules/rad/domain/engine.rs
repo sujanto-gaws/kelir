@@ -219,7 +219,7 @@ fn collect_references(expression: &Value, found: &mut References) {
 
 /// The path a `var` operand names: the string itself, or the first element of
 /// `[path, default]` when it is a string. Anything else names no path.
-fn var_path(operand: &Value) -> Option<&str> {
+pub(crate) fn var_path(operand: &Value) -> Option<&str> {
     match operand {
         Value::String(text) => Some(text),
         // `{"var": ["total", 0]}` — the path with a default beside it.
@@ -234,10 +234,27 @@ fn var_path(operand: &Value) -> Option<&str> {
 /// Evaluated in this scope when the path misses, so a default that is an
 /// expression reads what it says. Anything after it is never evaluated, and an
 /// array opening with `null` or a boolean takes no default.
-fn var_default(operand: &Value) -> Option<&Value> {
+pub(crate) fn var_default(operand: &Value) -> Option<&Value> {
     match operand.as_array()?.as_slice() {
         [Value::String(_) | Value::Number(_), default, ..] => Some(default),
         _ => None,
+    }
+}
+
+/// The operators that evaluate a body against each item of a source.
+pub(crate) const ITERATORS: &[&str] = &["map", "filter", "reduce", "all", "some", "none"];
+
+/// The operands of an iterator evaluated in the scope it is written in: its
+/// source and, for `reduce`, its initial value. Everything else is its body,
+/// or is never evaluated.
+///
+/// The argument itself is the source in the shorthand, given directly rather
+/// than wrapped in a list.
+pub(crate) fn iterator_operands<'a>(operator: &str, argument: &'a Value) -> [Option<&'a Value>; 2] {
+    match argument.as_array().map(Vec::as_slice) {
+        Some([source, _, initial, ..]) if operator == "reduce" => [Some(source), Some(initial)],
+        Some([source, ..]) => [Some(source), None],
+        _ => [Some(argument), None],
     }
 }
 
@@ -307,6 +324,11 @@ fn visit_names<'a, F: FnMut(&'a str)>(argument: &'a Value, visit: &mut F) {
 /// whole scope either, which would invent edges and cycles for every form
 /// holding one. Workflows refuse the shape through [`reads_computed_path`].
 ///
+/// **Nor does this see what a body reads through its element.** A workflow
+/// refuses to hand a body the context
+/// (`workflow::domain::jwss::hands_an_iterator_the_context`); a form's
+/// record has no path it does not build.
+///
 /// [#706]: https://github.com/sujanto-gaws/kelir/issues/706
 /// [#789]: https://github.com/sujanto-gaws/kelir/issues/789
 pub(crate) fn visit_paths<'a, F: FnMut(&'a str)>(expression: &'a Value, visit: &mut F) {
@@ -332,19 +354,9 @@ pub(crate) fn visit_paths<'a, F: FnMut(&'a str)>(expression: &'a Value, visit: &
                         }
                         _ => visit_names(argument, visit),
                     },
-                    "map" | "filter" | "reduce" | "all" | "some" | "none" => {
-                        match argument.as_array().map(Vec::as_slice) {
-                            Some([source, rest @ ..]) => {
-                                visit_paths(source, visit);
-
-                                // `{"reduce": [source, body, initial]}`.
-                                if let ("reduce", [_, initial, ..]) = (operator.as_str(), rest) {
-                                    visit_paths(initial, visit);
-                                }
-                            }
-                            // The shorthand: the argument given directly rather
-                            // than wrapped in a list.
-                            _ => visit_paths(argument, visit),
+                    iterator if ITERATORS.contains(&iterator) => {
+                        for operand in iterator_operands(iterator, argument).into_iter().flatten() {
+                            visit_paths(operand, visit);
                         }
                     }
                     _ => visit_paths(argument, visit),
@@ -1821,6 +1833,25 @@ mod tests {
         ]));
 
         assert_eq!(codes(&details), [CALCULATION_CYCLE]);
+    }
+
+    /// **#789.** What a workflow refuses at a source, the whole scope or a
+    /// list holding it, binds workflows only: a form is what it was.
+    #[test]
+    fn a_form_iterating_its_whole_record_is_not_refused() {
+        for source in [
+            json!({"var": ""}),
+            json!({"var": null}),
+            json!([{"var": ""}]),
+        ] {
+            let mut notes = plain("notes");
+            notes["conditional"] = json!({
+                "action": "show",
+                "logic": {"some": [source, {">": [{"var": "qty"}, 1]}]}
+            });
+
+            assert!(definition_errors(&definition(vec![notes])).is_empty());
+        }
     }
 
     /// **#789 AC16.** A computed `var` that names a field in a loop is not a
