@@ -3986,7 +3986,7 @@ async fn an_iterator_handed_the_context_is_refused_at_publish() {
 
         assert_eq!(refusals(&refused), computed(&[CONDITION]), "{key}");
         assert!(
-            messages(&refused)[0].contains("hands an iterator the whole context"),
+            messages(&refused)[0].contains("hands an iterator or a stored variable the whole context"),
             "{key}: {}",
             refused.body
         );

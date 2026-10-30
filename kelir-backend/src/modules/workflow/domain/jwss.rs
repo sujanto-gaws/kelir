@@ -748,7 +748,8 @@ fn is_built(path: &str, declared: &BTreeSet<&str>) -> bool {
 /// path is the fault.
 const COMPUTED_PATH_MESSAGE: &str = "A `var`, `missing` or `missing_some` in this expression \
      works out the path it reads as it runs, climbs out of its scope to read it, or hands an \
-     iterator the whole context, so a publish cannot check the path: one the engine does not \
+     iterator or a stored variable the whole context, so a publish cannot check the path: \
+     one the engine does not \
      build would read as null and the condition would take another branch without saying so. \
      Write each path as a string, with any default beside it; an iterator's body reads only \
      its element (JWSS §6.4).";
@@ -1661,8 +1662,9 @@ mod tests {
         assert_eq!(
             details[0].message,
             "A `var`, `missing` or `missing_some` in this expression works out the path it \
-             reads as it runs, climbs out of its scope to read it, or hands an iterator the \
-             whole context, so a publish cannot check the path: one the engine does not \
+             reads as it runs, climbs out of its scope to read it, or hands an iterator or a \
+             stored variable the whole context, so a publish cannot check the path: \
+             one the engine does not \
              build would read as null and the condition would take another branch without \
              saying so. Write each path as a string, with any default beside it; an \
              iterator's body reads only its element (JWSS §6.4)."
