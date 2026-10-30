@@ -1619,6 +1619,12 @@ mod tests {
                 serde_json::json!({ "missing": [["formData.a", "document.amount"]] }),
                 vec![not_built.clone()],
             ),
+            // Three lists deep the engine stops looking, and §6.4 still reads a
+            // name "at any depth". A known over-read, kept deliberate here.
+            (
+                serde_json::json!({ "missing": [[["document.amount"]]] }),
+                vec![not_built.clone()],
+            ),
             (
                 serde_json::json!({ "missing": { "if": [true, "formData.a", "formData.b"] } }),
                 vec![computed.clone()],
@@ -1898,6 +1904,10 @@ mod tests {
                 serde_json::json!({ "==": [{ "var": [0, amount] }, 7] }),
             ),
             (
+                "H4 a default with a literal after it",
+                serde_json::json!({ "==": [{ "var": ["formData.absent", amount, 0] }, 7] }),
+            ),
+            (
                 "H5 missing with a var",
                 serde_json::json!({ "!": [{ "missing": var("document.names") }] }),
             ),
@@ -1931,6 +1941,10 @@ mod tests {
                 "H5 a var in missing_some's names",
                 serde_json::json!({ "!": [{ "missing_some": [1, [var("document.name")]] }] }),
             ),
+            (
+                "H5 missing_some's names with an operand after them",
+                serde_json::json!({ "!": [{ "missing_some": [1, var("document.names"), 0] }] }),
+            ),
         ]
     }
 
@@ -1954,6 +1968,31 @@ mod tests {
         }
 
         assert!(accepted.is_empty(), "accepted: {accepted:#?}");
+    }
+
+    /// What the engine takes no answer from is neither read nor refused: an
+    /// operand after `missing_some`'s two is dropped when the rule compiles, and
+    /// an array opening with a boolean or `null` takes no default, so its `var`
+    /// answers `null` whatever follows.
+    #[test]
+    fn an_operand_the_engine_takes_no_answer_from_is_not_read() {
+        let amount = var("document.amount");
+        let computed = serde_json::json!({ "var": { "var": "document.where" } });
+
+        for condition in [
+            serde_json::json!({ "missing_some": [1, ["formData.on"], amount] }),
+            serde_json::json!({ "missing_some": [1, ["formData.on"], computed] }),
+            serde_json::json!({ "var": [true, amount] }),
+            serde_json::json!({ "var": [false, amount] }),
+            serde_json::json!({ "var": [null, amount] }),
+        ] {
+            assert!(!depends_on_the_sentinel(&condition), "{condition}");
+            assert!(
+                condition_path_errors(&reading(condition.clone(), serde_json::json!([])))
+                    .is_empty(),
+                "{condition}"
+            );
+        }
     }
 
     /// **H6, H8 and H10, run**: nothing else reaches the context. A plain path

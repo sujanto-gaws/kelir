@@ -4046,6 +4046,72 @@ async fn path_refusals_keep_their_order_with_a_computed_path_among_them() {
     assert!(messages[2].contains("`document.amount`"), "{}", messages[2]);
 }
 
+/// **#789 AC12, at its most mixed.** Two conditions and two sources, a path
+/// repeated within an expression and across expressions, an expression holding
+/// two computed paths, a scope and a dead role: each expression is told once per
+/// path and once for its computed paths, and no expression is excused for what
+/// an earlier one was told.
+#[tokio::test]
+async fn a_refusal_tells_each_expression_its_own_paths_whatever_the_others_said() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    // No `WF-APPROVER`.
+    let mut definition = conditioned(
+        "wf_r35_mixed",
+        json!({ "and": [
+            { "var": "actor.email" },
+            { "var": { "var": "formData.field" } },
+            { "var": "document.amount" },
+            { "var": "actor.email" },
+            { "var": [[1], "formData.amount"] }
+        ] }),
+    );
+    definition["transitions"][1]["condition"] = json!({ "or": [
+        { "var": [[1], "formData.amount"] },
+        { "var": "actor.email" }
+    ] });
+    definition["transitions"][1]["allowedBy"] = scoped_role("DEPT-FIN");
+    definition["variables"] = json!([
+        { "key": "worked_out", "dataType": "NUMBER",
+          "source": { "some": [{ "var": "formData.lines" }, { "var": { "var": "name" } }] } },
+        { "key": "amount", "dataType": "NUMBER", "source": { "var": "document.amount" } }
+    ]);
+
+    let id = saved(&app, &token, "wf_r35_mixed", definition).await;
+    let refused = publish(&app, &token, id).await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+
+    let second = "definition.transitions.1.condition";
+    let mut expected = takes_no_scope(&["definition.transitions.1.allowedBy.departmentScope"]);
+    expected.extend(not_built(&[CONDITION, CONDITION]));
+    expected.extend(computed(&[CONDITION]));
+    expected.extend(not_built(&[second]));
+    expected.extend(computed(&[second]));
+    expected.extend(computed(&["definition.variables.0.source"]));
+    expected.extend(not_built(&["definition.variables.1.source"]));
+    expected.extend(not_live(&[
+        "definition.states.0.task.assignment.roleCode",
+        "definition.transitions.0.allowedBy",
+        "definition.transitions.1.allowedBy.roleCode",
+    ]));
+    assert_eq!(refusals(&refused), expected);
+
+    let messages = messages(&refused);
+    assert!(messages[1].contains("`actor.email`"), "{}", messages[1]);
+    assert!(messages[2].contains("`document.amount`"), "{}", messages[2]);
+    assert!(messages[4].contains("`actor.email`"), "{}", messages[4]);
+    assert!(messages[7].contains("`document.amount`"), "{}", messages[7]);
+    assert_eq!(status_of(&app, id).await, "DRAFT");
+    assert_eq!(projected_rows(&app, id).await, 0);
+}
+
 /// **#789 AC13: an S-rule fault hides a computed path and an initial value**, as
 /// it hides the other path refusals.
 #[tokio::test]
