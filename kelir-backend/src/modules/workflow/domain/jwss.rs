@@ -2355,9 +2355,9 @@ mod tests {
         }
     }
 
-    /// `missing_some` with no second operand has no names: the engine reads
-    /// the one operand as its count and answers `[]`, so nothing there is a
-    /// computed name. Run, and left as it is.
+    /// `missing_some` with no second operand has no names: the engine answers
+    /// `[]` before it evaluates anything, so nothing there is a computed name.
+    /// Run, and left as it is.
     #[test]
     fn a_missing_some_with_one_operand_asks_about_no_name() {
         let name = serde_json::json!({ "if": [var("formData.on"), "document.amount", "x"] });

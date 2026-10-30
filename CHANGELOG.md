@@ -126,22 +126,38 @@ While the major version is `0`, the public API may change in any release.
   `(?:[a-z]|[a-z0-9])*` as `[a-z0-9]*`.
 - **A workflow definition that published before can be refused at its next
   publish** ([#789](https://github.com/sujanto-gaws/kelir/issues/789)). A
-  publish now reads every path a `condition` or a variable `source` can reach:
-  `reduce`'s initial value, a `var`'s default beside a string or a number, and
-  the expressions among the operands of `missing` and `missing_some`,
-  `missing_some`'s count included. A path the engine does not build there is
-  `CONDITION_PATH_NOT_BUILT`, where it used to read `null` and take the
-  fallback edge without a warning. **A path a publish cannot see is refused
+  publish now reads every path a `condition` or a variable `source` can reach
+  in the context: `reduce`'s initial value, a `var`'s default beside a string
+  or a number, and the expressions among the operands of `missing` and
+  `missing_some`, `missing_some`'s count included. A path the engine does not
+  build there is `CONDITION_PATH_NOT_BUILT`, where it used to read `null` and
+  take the fallback edge without a warning. A path past a declared variable's
+  key is not checked
+  ([#823](https://github.com/sujanto-gaws/kelir/issues/823)):
+  `variables.doc.misspelt`, and a declared key with no value, still read
+  `null` unrefused. **A path a publish cannot see is refused
   too**, as 422 `VALIDATION_ERROR` with a `CONDITION_PATH_COMPUTED` detail,
   `rule: "conditionPath"`, at `definition.transitions.N.condition` or
   `definition.variables.N.source`, at most once per expression: a `var` whose
   operand is an object, or an array opening with an object or an array, the
   scope jump `[[1], "document.amount"]` among them, and a `missing` or
   `missing_some` name that is an expression, in any scope, iterator bodies
-  included. This is refused even where the path reached was built, so a
-  definition that ran correctly can be refused. Write the path as a string,
-  with any default beside it. `{"var": 0}`, `null`, `[]`, `""` and
-  `[1, "document.amount"]` are still accepted. Within one 422 the details
+  included. **Handing the context on as data is refused the same way**: the
+  whole context, or a bare `document`, `actor` or `variables`, anywhere inside
+  an iterator's source or a `reduce`'s initial value, because a body's plain
+  path reads the element and the engine iterates an object's values, and in
+  the whole `source` of a `JSON` variable, because `variables.doc.amount` then
+  reads it past the check. `{"var": "formData"}` is accepted there, and
+  `{"!!": [{"var": "document"}]}` is accepted as a condition and refused as a
+  `JSON` variable's source. All of this is refused even where the path reached
+  was built, so a definition that ran correctly can be refused. Write each
+  path as a string, with any default beside it. **Two things can no longer be
+  written at all**, because the scope jump was the only way out of a body:
+  comparing a row with a field outside it, `{"var": [[1], "formData.limit"]}`,
+  and iteration metadata, `{"var": [[1], "index"]}`. A checked form is
+  [#826](https://github.com/sujanto-gaws/kelir/issues/826). `{"var": 0}` and
+  `[1, "document.amount"]` are still accepted, and so are `null`, `[]` and
+  `""` outside those positions. Within one 422 the details
   run `ROLE_TAKES_NO_SCOPE`, then each `condition` and each `source` in index
   order, each expression's unbuilt paths before its computed detail, then
   `ROLE_NOT_LIVE`, and an S-rule fault hides them all. Saving a draft does not
@@ -149,19 +165,31 @@ While the major version is `0`, the public API may change in any release.
   silent fallback; a revision cloned from one is refused at its publish. No
   migration and no schema change: JWSS takes revision R-18, and its
   meta-schema is untouched.
-- **A form already published with a loop through a `reduce`'s initial value
-  now meets that loop at each write**
+- **A form already published can meet a cycle at each write, or compute in
+  a new order**
   ([#789](https://github.com/sujanto-gaws/kelir/issues/789)). Forms share the
-  publish's walk, so an initial value, a `var`'s default and the expressions
-  among the operands of `missing` and `missing_some` are now dependency edges,
-  and a loop through one is `CALCULATION_CYCLE` at save and at publish. A form
-  published before the upgrade is not re-checked and its loop went unseen, so
-  every write against it, a draft save included, is now refused with a 422
-  naming the fields. Documents pin their revision, so a corrected revision
-  reaches new documents only. **Before upgrading, look for a `calculate` or
-  `conditional` that reads a field through one of these and is itself read
-  back by that field.** A form's computed `var` is not refused and gets no
-  edge yet: **D-135** A refuses it at a form's publish, in
+  publish's walk, so a `reduce`'s initial value, a `var`'s default and the
+  expressions among the operands of `missing` and `missing_some` are now
+  dependency edges. A loop through one is `CALCULATION_CYCLE` at save and at
+  publish, and that reaches further than a loop through an initial value: a
+  self-read through a default (`{"var": ["raw", {"var": "a"}]}` as `a`'s
+  `calculate`), two defaults reading each other, a `conditional`'s initial
+  value, default, nested `missing` name or count read back by a `calculate`,
+  and `{"var": ""}` as a default or initial value in a `calculate`, which is
+  a self-loop. A form published before the upgrade is not re-checked, so each
+  write against it, a draft save included, is now refused with a 422 naming
+  the fields; that is read from the evaluator, where the refusals at save were
+  run. Documents pin their revision, so a corrected revision reaches new
+  documents only. **A form with no loop can change order too**: a field
+  reading a later one through a default now runs after it, so a stored value
+  can change at the next write. **Before upgrading, go through each published
+  form's `calculate` and `conditional` expressions, take each initial value,
+  each default and each expression among the operands of `missing` and
+  `missing_some`, and look for what it reads: the field's own key, the whole
+  record in a `calculate`, a field that reads this one back, or a field
+  declared later.** No parity or fixture form hits any of this, and stored
+  data cannot be audited from the repository. A form's computed `var` is not
+  refused and gets no edge yet: **D-135** A refuses it at a form's publish, in
   [#822](https://github.com/sujanto-gaws/kelir/issues/822), which has not
   landed.
 
