@@ -1854,6 +1854,42 @@ mod tests {
         }
     }
 
+    /// **#789.** The other half of what a form kept. A `calculate` holding the
+    /// whole record reads the field it fills, so `{"var": ""}` as a source is the
+    /// self-loop it was before the walk learned anything: `t` → `t`, and not a
+    /// refusal of the iterator. `{"var": null}` names no path to the walk, so it
+    /// is no edge and no refusal, a difference this leaves where it was.
+    #[test]
+    fn a_calculate_iterating_its_whole_record_is_the_self_loop_it_was() {
+        let summing = |source: Value| {
+            field(
+                "t",
+                json!({"reduce": [
+                    source,
+                    {"+": [{"var": "current"}, {"var": "accumulator"}]},
+                    0
+                ]}),
+            )
+        };
+
+        for source in [json!({"var": ""}), json!([{"var": ""}])] {
+            let details = definition_errors(&definition(vec![plain("qty"), summing(source)]));
+
+            assert_eq!(codes(&details), [CALCULATION_CYCLE]);
+            assert!(
+                details[0].message.contains("`t` → `t`"),
+                "{}",
+                details[0].message
+            );
+        }
+
+        assert!(definition_errors(&definition(vec![
+            plain("qty"),
+            summing(json!({"var": null}))
+        ]))
+        .is_empty());
+    }
+
     /// **#789 AC16.** A computed `var` that names a field in a loop is not a
     /// loop this engine can see, and a definition holding one is what it was.
     #[test]

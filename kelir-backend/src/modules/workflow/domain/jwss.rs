@@ -2244,6 +2244,30 @@ mod tests {
         );
     }
 
+    /// The context's refusal keeps a computed path's place: after its
+    /// expression's unbuilt paths, whichever of the two comes first in it.
+    #[test]
+    fn the_contexts_refusal_follows_its_expressions_unbuilt_paths() {
+        let is_seven = serde_json::json!({ "==": [var("amount"), 7] });
+        let handing = serde_json::json!({ "some": [var(""), is_seven] });
+
+        for condition in [
+            serde_json::json!({ "and": [handing, var("document.amount")] }),
+            serde_json::json!({ "and": [var("document.amount"), handing] }),
+        ] {
+            let details = condition_path_errors(&reading(condition.clone(), serde_json::json!([])));
+
+            assert_eq!(
+                refused_codes(&details),
+                [
+                    (CONDITION.to_owned(), CONDITION_PATH_NOT_BUILT.to_owned()),
+                    (CONDITION.to_owned(), CONDITION_PATH_COMPUTED.to_owned())
+                ],
+                "{condition}"
+            );
+        }
+    }
+
     /// What stays accepted, each run. `formData` handed over whole gives a body
     /// nothing unbuilt, since anything under it is built. A root in a body is
     /// the element's key, and a `[null, …]` opening reads nothing. Outside the
@@ -2277,6 +2301,7 @@ mod tests {
             serde_json::json!({ "!!": [var("actor")] }),
             serde_json::json!({ "!!": [var("variables")] }),
             serde_json::json!({ "in": ["amount", var("document")] }),
+            serde_json::json!({ "!!": [{}] }),
         ] {
             assert!(!depends_on_the_sentinel(&condition), "{condition}");
             assert!(
@@ -2344,6 +2369,8 @@ mod tests {
             ("JSON", var("document.status")),
             ("STRING", var("document")),
             ("NUMBER", serde_json::json!({ "!!": [var("")] })),
+            ("BOOLEAN", serde_json::json!({ "!!": [var("")] })),
+            ("DATE", var("document")),
         ] {
             assert!(
                 condition_path_errors(&serde_json::json!({
@@ -2353,6 +2380,34 @@ mod tests {
                 "{data_type} {source}"
             );
         }
+    }
+
+    /// A `reduce`'s initial value is its third operand, whatever follows it. A
+    /// fourth fails at evaluation, and the walk reads the same three operands
+    /// the engine would have.
+    #[test]
+    fn a_reduces_initial_value_is_its_third_operand_and_not_its_last() {
+        let amount = var("document.amount");
+        let carried = |initial: Value, last: Value| {
+            serde_json::json!({ "==": [
+                { "reduce": [[1], var("accumulator"), initial, last] }, 7
+            ] })
+        };
+
+        let details = condition_path_errors(&reading(
+            carried(amount.clone(), serde_json::json!(0)),
+            serde_json::json!([]),
+        ));
+        assert_eq!(
+            refused_codes(&details),
+            [(CONDITION.to_owned(), CONDITION_PATH_NOT_BUILT.to_owned())]
+        );
+
+        assert!(condition_path_errors(&reading(
+            carried(serde_json::json!(0), amount),
+            serde_json::json!([])
+        ))
+        .is_empty());
     }
 
     /// `missing_some` with no second operand has no names: the engine answers
