@@ -1680,6 +1680,53 @@ mod tests {
         );
     }
 
+    /// **[#604]: the spellings the table above leaves out**, each a mutant of
+    /// the scan that table let live (the row's `test-engineer` gate,
+    /// 2026-10-30).
+    ///
+    /// The refused half is a group or an escape both engines spell the same
+    /// way, and which shape is named when there are two: the outer group's
+    /// before the one it holds, and the first of two siblings. The accepted
+    /// half is a literal the scan must not read as structure: an escaped `]`
+    /// inside a class, and a brace ECMA-262 reads as text because it holds a
+    /// space.
+    ///
+    /// [#604]: https://github.com/sujanto-gaws/kelir/issues/604
+    #[test]
+    fn the_shape_scan_reads_every_spelling_of_a_group_an_escape_and_a_brace() {
+        use BacktrackingShape::{RepeatedAlternation, RepeatedQuantifier};
+
+        let refused = [
+            // ECMA-262's spelling of a named group.
+            ("(?<pet>cat|dog)+", RepeatedAlternation),
+            // A flag group that clears a flag.
+            ("(?i-s:cat|dog)+", RepeatedAlternation),
+            // `\u` with four digits, and braced with more than four.
+            (r"(\u0041+)+", RepeatedQuantifier),
+            (r"(\u{1F600}+)+", RepeatedQuantifier),
+            // The outer group's shape, not the one inside it.
+            ("((a+)+|b)+", RepeatedAlternation),
+            // The first of two siblings.
+            ("(a|b)+(c+)+", RepeatedAlternation),
+        ];
+
+        for (pattern, shape) in refused {
+            assert_eq!(
+                refuse_pattern(pattern, ""),
+                Some(PatternRefusal::Backtracking(shape)),
+                "`{pattern}` should be refused as {shape:?}"
+            );
+        }
+
+        for pattern in [r"[\](a+)+]", "(a+){ 2,}", "(a+){2 ,}"] {
+            assert_eq!(
+                refuse_pattern(pattern, ""),
+                None,
+                "`{pattern}` should be accepted"
+            );
+        }
+    }
+
     fn field(validation: Value) -> Value {
         json!({
             "id": "f", "role": "data", "type": "textfield", "key": "f", "label": "F",

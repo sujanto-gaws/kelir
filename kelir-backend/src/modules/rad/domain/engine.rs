@@ -2166,6 +2166,28 @@ mod tests {
         }
     }
 
+    /// **[#604]: the refusal says what the shape it found may cost, apart from
+    /// the limit.** The limit also says *exponential time*, about the patterns
+    /// the check accepts, so a message that lost its own sentence about the
+    /// refused shape still passed the test above (the row's `test-engineer`
+    /// gate, 2026-10-30).
+    #[test]
+    fn a_backtracking_refusal_says_a_value_that_does_not_match_may_take_exponential_time() {
+        for shape in [
+            BacktrackingShape::RepeatedQuantifier,
+            BacktrackingShape::RepeatedAlternation,
+        ] {
+            let reason = backtracking_reason(shape);
+
+            assert!(
+                reason.contains(
+                    "on a value that does not match, a browser may take exponential time"
+                ),
+                "{shape:?}: {reason}"
+            );
+        }
+    }
+
     /// **AC1**: the Validation Rule Registry half of the catalogue.
     #[test]
     fn refuses_a_rule_name_no_registry_declares() {

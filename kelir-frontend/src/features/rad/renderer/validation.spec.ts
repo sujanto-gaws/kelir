@@ -357,6 +357,17 @@ describe('a pattern the browser gives up on (#496)', () => {
     expect(slowMatches).toBe(0)
   })
 
+  it('still says the server decides a pattern keyword whose match throws (#624)', () => {
+    // §5's keyword has no `scope`, and the server always runs it, so only a
+    // `regex` rule's own scope can leave a give-up to nobody.
+    const outcome = validateField(field({ type: 'string', pattern: slow }), gaveUp.value, {})
+
+    expect(outcome.undecided).toEqual([
+      { rule: 'pattern', scope: 'both', reason: expect.stringContaining('the server decides it') },
+    ])
+    expect(outcome.undecided[0].reason).not.toContain('nothing decides it')
+  })
+
   it('leaves a pattern keyword whose match throws undecided, and checks the keywords after it', () => {
     const outcome = validateField(field({ type: 'string', pattern: slow }), 'aaaa!', {})
 
