@@ -320,6 +320,123 @@ probe refused "a link listed after a reference" "Fixes #1, [#2](${ISSUES}/2)"
 probe refused "a reference listed after a link" "Fixes [#1](${ISSUES}/1) and #2"
 probe accepted "a keyword for each link" "Fixes [#1](${ISSUES}/1), fixes [#2](${ISSUES}/2)"
 
+# **A list wrapped across lines is a list** (#730). Commit bodies wrap at 72
+# characters, so a separator can end a line and its reference open the next.
+# Seen red against the check before lines were joined.
+probe refused "a comma ending a line" "Closes #1,
+#2"
+probe refused "'and' ending a line" "Fixes #1 and
+#2"
+probe refused "a comma and 'and' ending a line" "Fixes #1, and
+#2"
+probe refused "a semicolon ending a line" "Closes #1;
+#2"
+probe refused "a wrapped list in a list item" "- Closes #1,
+  #2"
+probe refused "emphasis around the separator" "**Closes #1,**
+#2"
+# A wrap may fall before the word, not only after it. Seen red with only a
+# line's end read; the '&' with it taken out of the opening separators.
+probe refused "'and' opening a line" "Closes #1
+and #2"
+probe refused "'&' opening a line" "Closes #1
+& #2"
+# Each line of a wrapped list is named, and the report keeps its line numbers.
+# Seen red with a chain joined two lines at a time, and with the joined lines
+# not made up in blanks, which named the wrong line.
+probe_names "a list wrapped over three lines" "Closes #1,
+#2,
+#3" "  FAIL    will not close: #2, #3"
+probe_names "the line after a wrapped list keeps its number" "Closes #1,
+#2
+
+Fixes #3, #4" "  line    Fixes #3, #4"
+
+# What ends a wrap. Seen red with a blank line joined over, with any next line
+# taken as a reference, and with a fence's lines joined across.
+probe accepted "a blank line ends a list" "Closes #1,
+
+#2"
+probe accepted "a next line of prose" "Closes #1,
+which also touches #2"
+probe accepted "a keyword for each across lines" "Closes #1,
+closes #2"
+probe accepted "'and' opening a line after a blank line" "Closes #1
+
+and #2"
+probe accepted "a next line in a fence" "Closes #1,
+${FENCE}
+#2
+${FENCE}"
+
+# **A fence in a list item** (#731). The opener follows the list marker, and
+# the item's indented closing fence closes it. Seen red against the check
+# before the opener read a marker: the closing fence opened a second fence and
+# hid the rest of the body.
+probe refused "a list after a list item's fence" "- ${FENCE}
+  code
+  ${FENCE}
+- Closes #1, #2"
+probe refused "a list after an ordered item's fence" "1. ${FENCE}
+   code
+   ${FENCE}
+2. Closes #1, #2"
+probe refused "a list after a '*' item's tilde fence" "* ~~~
+  code
+  ~~~
+* Closes #1, #2"
+probe accepted "a list in a list item's fence" "- ${FENCE}
+  ${LINE}
+  ${FENCE}"
+probe accepted "a blank line in a list item's fence" "- ${FENCE}
+  code
+
+  ${LINE}
+  ${FENCE}"
+
+# **An unclosed fence stays in its item.** A line indented less than the item's
+# content ends the item, and the fence with it. Seen red with a fence ended only
+# by its closing line; the nested one with the item's own indent ignored; the
+# indented opener with a fence's container read only from its own line.
+probe refused "a fence never closed, then the next item" "- ${FENCE}
+  code
+- Closes #1, #2"
+probe refused "a fence never closed, then a line out of the list" "- ${FENCE}
+  code
+Closes #1, #2"
+probe refused "a nested fence never closed, then the next item" "- a
+  - ${FENCE}
+    code
+  - Closes #1, #2"
+probe refused "an indented fence never closed, then the next item" "- item
+  ${FENCE}
+  code
+- Closes #1, #2"
+# A line still in the item stays in the fence. Seen red with any next line
+# ending it.
+probe accepted "a list indented as the item's fence, never closed" "- ${FENCE}
+  ${LINE}"
+# Past the item, the same line is a fence of its own. Seen red with a fence's
+# end not read again as an opener.
+probe accepted "a fence opening where an item's fence ended" "- ${FENCE}
+  code
+${FENCE}
+${LINE}"
+
+# **Out of any list a fence never closed still hides the rest**, as GitHub
+# renders it. Seen red with every opener's fence ended by a line indented less.
+probe accepted "a list after a fence never closed" "${FENCE}
+${LINE}"
+probe accepted "a list after an indented fence never closed" "  ${FENCE}
+code
+${LINE}"
+probe accepted "a list after a list ended and a fence never closed" "- item
+
+Prose.
+
+  ${FENCE}
+${LINE}"
+
 # Nothing to read. Seen red with the check made to refuse every body.
 probe accepted "an empty body" ""
 probe accepted "a whitespace-only body" "  ${CR}

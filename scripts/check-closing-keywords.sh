@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # Refuses a pull request whose body follows a closing keyword with a list of
-# issues (#725, retrospective 21).
+# issues (#725, retrospective 21). `check-commit-messages.sh` runs it over each
+# commit's message too (#730), through the same variable.
 #
 # GitHub closes the issue a closing keyword names when the pull request merges.
 # **Of a list after one keyword it closes only the first issue**, and says
@@ -36,6 +37,16 @@
 #   `Closes #1 - #3` and `Closes #1 through #3`: a spaced dash is punctuation,
 #   and a word is prose.
 #
+# **A list wrapped across lines is a list** (#730). Commit bodies wrap at 72
+# characters, so a line ending in a separator is read with the next, and so is a
+# line opening with *and* or `&`, where a wrap falls before the word. A comma
+# or a semicolon stays with the reference before it, and `+` opens a list item,
+# so neither is read at a line's start. A blank line ends a list.
+#
+# - `Closes #1,` then `#2`, and `Closes #1` then `and #2`, are refused;
+# - `Closes #1,` then a blank line then `#2` is accepted, and so is `Closes #1,`
+#   then `which touches #2`: the list needs a reference straight after it.
+#
 # Every line is read, not only the first: a keyword closes wherever it is.
 # Before matching:
 #
@@ -62,6 +73,15 @@
 #   the body, as GitHub renders it. A backtick fence's info string holds no
 #   backtick (CommonMark §4.5), so a line opening with ```x``` is a code span,
 #   read below, and opens no fence.
+# - **A fence may open after a list marker, and it stays inside its item**
+#   (#731, CommonMark §5.2). A marker is `-`, `+`, `*`, or up to nine digits and
+#   `.` or `)`, followed by space, and up to eight may nest on a line. A line
+#   that holds text and is indented less than the innermost open item's content
+#   ends that item, and a fence inside it, closed or not, so a fence never
+#   closed hides what is left of its item and no more. A fence in no item still
+#   hides the rest of the body. A paragraph's lazy continuation line is read
+#   as ending the item, so a fence after one is a fence in no item, and a tab
+#   counts as one column.
 # - An inline code span is removed: a run of backticks to the next run of the
 #   same length on the same line. A run with no partner is text.
 #
@@ -78,13 +98,14 @@
 # per line. Now each step reads the body once:
 #
 # - the shell's own string work runs under the `C` locale, byte by byte (see
-#   the locale below);
+#   the locale below), and at most eight list markers are read from a line;
 # - comments are cut out after one split of the body at every `<!--`, and
 #   lines are split once, by `mapfile`;
 # - a line's backtick runs are split out once, and each run is paired with the
 #   next run of its length through a table built in one pass from the right;
-# - emphasis is removed by one `sed` over the whole body, the lists are found
-#   by one `grep`, and one more `sed` splits each list into its references.
+# - emphasis is removed by one `sed` over the whole body, wrapped lines are
+#   joined by one `awk` that holds nothing but the line before, the lists are
+#   found by one `grep`, and one more `sed` splits each list into its references.
 #
 # A 64 KB body of any shape the test-engineer campaign on #729 tried runs in
 # well under five seconds on the runner, and the job's `timeout-minutes` bounds
@@ -135,6 +156,34 @@ LIST="(^|[^[:alnum:]])${KEYWORD}(:[[:blank:]]*|[[:blank:]]+)${REFERENCE}(${SEPAR
 
 FENCE_OPEN='^[[:blank:]]*(`{3,}|~{3,})'
 FENCE_CLOSE='^[[:blank:]]*(`+|~+)[[:blank:]]*$'
+ITEM_MARKER='^[[:blank:]]*([-+*]|[0-9]{1,9}[.)])[[:blank:]]+'
+MAX_MARKERS=8
+
+# Lines read as one where a list wraps. Each line is printed without its line
+# break until the next shows whether it joins, and a joined line is made up by
+# a blank after the chain, so `grep -n` numbers the lines as `lines` does.
+JOIN_WRAPPED='
+  function ends_in_separator(l) {
+    return l ~ /[,;&\/+][[:blank:]]*$/ || l ~ /(^|[[:blank:]])and[[:blank:]]*$/
+  }
+  function opens_with_separator(l) { return l ~ /^[[:blank:]]*(and|&)[[:blank:]]/ }
+  function blanks() { for (; owed > 0; owed--) printf "\n" }
+  NR == 1 { printf "%s", $0; before = tolower($0); next }
+  {
+    line = tolower($0)
+    if (ends_in_separator(before) \
+      || (opens_with_separator(line) && before !~ /^[[:blank:]]*$/)) {
+      printf " %s", $0
+      owed++
+    } else {
+      printf "\n"
+      blanks()
+      printf "%s", $0
+    }
+    before = line
+  }
+  END { printf "\n"; blanks() }
+'
 
 # What GitHub shows: the body with every `<!-- ... -->` taken out. A comment
 # spanning lines takes its line breaks with it, so the text after its `-->`
@@ -219,22 +268,54 @@ without_code_spans() {
 
 # Each line as matching reads it: empty inside a fence, its code spans removed
 # outside one. The line numbers stay those of `lines`.
+#
+# `items` holds the content indent of each open list item, innermost last, and
+# `fence_item` the one a fence opened in, 0 for none.
 texts=()
 fence=''
+fence_item=0
+items=()
 for line in "${lines[@]}"; do
+  [[ "${line}" =~ ^[[:blank:]]*(.?) ]]
+  has_text="${BASH_REMATCH[1]}"
+  indent=$(( ${#BASH_REMATCH[0]} - ${#has_text} ))
+
   if [[ -n "${fence}" ]]; then
-    if [[ "${line}" =~ ${FENCE_CLOSE} ]] \
-      && [[ "${BASH_REMATCH[1]:0:1}" == "${fence:0:1}" ]] \
-      && (( ${#BASH_REMATCH[1]} >= ${#fence} )); then
-      fence=''
+    if [[ -z "${has_text}" ]] || (( indent >= fence_item )); then
+      if [[ "${line}" =~ ${FENCE_CLOSE} ]] \
+        && [[ "${BASH_REMATCH[1]:0:1}" == "${fence:0:1}" ]] \
+        && (( ${#BASH_REMATCH[1]} >= ${#fence} )); then
+        fence=''
+      fi
+      texts+=('')
+      continue
     fi
-    texts+=('')
-    continue
+    fence=''
   fi
+
+  if [[ -n "${has_text}" ]]; then
+    while (( ${#items[@]} > 0 )) && (( indent < items[-1] )); do
+      unset 'items[-1]'
+    done
+  fi
+
+  rest="${line}"
+  offset=0
+  for (( markers = 0; markers < MAX_MARKERS; markers++ )); do
+    [[ "${rest}" =~ ${ITEM_MARKER} ]] || break
+    offset=$(( offset + ${#BASH_REMATCH[0]} ))
+    items+=("${offset}")
+    rest="${rest:${#BASH_REMATCH[0]}}"
+  done
+
   # A backtick fence whose line holds another backtick is a code span instead.
-  if [[ "${line}" =~ ${FENCE_OPEN} ]] \
-    && [[ "${BASH_REMATCH[1]}" == '~'* || "${line#*"${BASH_REMATCH[1]}"}" != *'`'* ]]; then
+  if [[ "${rest}" =~ ${FENCE_OPEN} ]] \
+    && [[ "${BASH_REMATCH[1]}" == '~'* || "${rest#*"${BASH_REMATCH[1]}"}" != *'`'* ]]; then
     fence="${BASH_REMATCH[1]}"
+    fence_item=0
+    if (( ${#items[@]} > 0 )); then
+      fence_item="${items[-1]}"
+    fi
     texts+=('')
     continue
   fi
@@ -247,8 +328,9 @@ for line in "${lines[@]}"; do
   texts+=("${text}")
 done
 
-# Emphasis out; each list found, as `<line number>:<match>`; then each match
-# split at its separators, so a tab follows every reference but the last.
+# Emphasis out; wrapped lines joined; each list found, as `<line
+# number>:<match>`; then each match split at its separators, so a tab follows
+# every reference but the last.
 # The split's `s` is delimited by `@`, which no pattern here holds: a
 # reference holds `/`. `grep` finding nothing is not an error, and anything
 # else from it is: a command substitution carries the pipeline's status to
@@ -256,6 +338,7 @@ done
 matches="$(
   printf '%s\n' "${texts[@]}" \
     | LC_ALL="${MATCHING}" sed -E 's/\*//g; s/(^|[^[:alnum:]])_+/\1/g; s/_+([^[:alnum:]]|$)/\1/g' \
+    | LC_ALL="${MATCHING}" awk "${JOIN_WRAPPED}" \
     | { LC_ALL="${MATCHING}" grep -a -n -o -i -E -e "${LIST}" || (( $? == 1 )); } \
     | LC_ALL="${MATCHING}" sed -E "s@${REFERENCE}${SEPARATOR}@\1\t@gI"
 )"

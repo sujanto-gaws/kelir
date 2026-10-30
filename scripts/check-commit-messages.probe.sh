@@ -27,15 +27,44 @@ FENCE='```'
 
 failures=0
 
-# probe <refused|accepted> <name> <body>: one commit on BASE, then the check.
+# probe <refused|accepted> <name> <body> [title]: one commit on BASE, then the
+# check.
 probe() {
-  local expected="$1" name="$2" body="$3"
+  local expected="$1" name="$2" body="$3" title="${4:-test: probe}"
 
   git -C "${REPO}" checkout -q --detach "${BASE}"
   git -C "${REPO}" -c user.name=probe -c user.email=probe@example.com \
-    commit -q --allow-empty -F - <<< "test: probe
+    commit -q --allow-empty -F - <<< "${title}
 
 ${body}"
+
+  judge "${expected}" "${name}"
+}
+
+# probe_merge <refused|accepted> <name> <title> <body>: a commit of two parents
+# on BASE, then the check.
+probe_merge() {
+  local expected="$1" name="$2" title="$3" body="$4"
+  local side
+
+  git -C "${REPO}" checkout -q --detach "${BASE}"
+  git -C "${REPO}" -c user.name=probe -c user.email=probe@example.com \
+    commit -q --allow-empty -m "chore: side"
+  side="$(git -C "${REPO}" rev-parse HEAD)"
+  git -C "${REPO}" checkout -q --detach "${BASE}"
+  git -C "${REPO}" -c user.name=probe -c user.email=probe@example.com \
+    commit -q --allow-empty -m "chore: main"
+  git -C "${REPO}" -c user.name=probe -c user.email=probe@example.com \
+    merge -q --no-ff -m "${title}
+
+${body}" "${side}"
+
+  judge "${expected}" "${name}"
+}
+
+# judge <refused|accepted> <name>: the check over what HEAD holds.
+judge() {
+  local expected="$1" name="$2"
 
   local actual=accepted
   if ! (cd "${REPO}" && "${CHECK}" "${BASE}" HEAD > /dev/null); then
@@ -93,6 +122,58 @@ Claude-Session: ${UUID}
 
 ${CLAUDE}"
 
+# **A fence never closed hides only what is not the trailer block** (#557,
+# record 19's P15). Each was accepted before this change. Seen red with the
+# held lines never printed, and the next with them held past a blank line.
+probe refused "the co-author inside a fence never closed" "${FENCE}text
+${CLAUDE}"
+probe refused "a fence opened in a list, never closed, the co-author after" "- the range:
+  ${FENCE}text
+  quoted
+
+${CLAUDE}"
+probe refused "a blank line closing the message after a fence never closed" "${FENCE}text
+${CLAUDE}
+"
+# What the fence still hides, though nothing closes it: a line quoted in an
+# earlier paragraph. Seen red with a fence never closed taken for no fence.
+probe refused "a session line quoted before the trailers, fence never closed" "${FENCE}text
+Claude-Session: ${UUID}
+
+${CLAUDE}"
+probe accepted "a human commit quoting a trailer, fence never closed" "${FENCE}text
+${CLAUDE}
+
+Written by hand."
+
+# **A merge is a commit of two parents, not a title** (#557). Each `Merge …`
+# below was accepted before this change. Seen red with the skip keyed on the
+# title again.
+probe refused "one parent, a Merge title, the co-author, no session line" \
+  "${CLAUDE}" "Merge the outbox work"
+probe refused "one parent, a Merge title, and no co-author" \
+  "Written by hand." "Merge the outbox work"
+probe_merge accepted "two parents, a Merge title, the co-author, no session line" \
+  "Merge branch 'main' into work" "${CLAUDE}"
+probe_merge accepted "two parents and another title" "Bring main in" "Written by hand."
+
+# **A commit's body closes issues too** (#730): `Closes #1, #2` closes #1 alone,
+# as it does in a pull-request body. Seen red with the closing-keyword check
+# not called; the wrap against the check before it joined lines.
+probe refused "a list in a commit body" "Closes #1, #2"
+probe refused "a list wrapped across a commit body" "Closes #1,
+#2"
+probe refused "a list on the commit's first line" "" "fix: closes #1, #2"
+probe accepted "one keyword per line in a commit body" "Closes #1
+Closes #2"
+probe accepted "a list quoted in a commit body's fence" "Refused:
+
+${FENCE}
+Closes #1, #2
+${FENCE}"
+probe_merge accepted "two parents and a list in the body" "Merge branch 'main' into work" \
+  "Closes #1, #2"
+
 # Controls, last: each shape above has a correct neighbour that still passes.
 probe accepted "a UUID in the trailer block" "Claude-Session: ${UUID}
 ${CLAUDE}"
@@ -108,6 +189,14 @@ ${FENCE}
 Claude-Session: ${UUID}
 ${CLAUDE}"
 probe accepted "a human commit with no co-author" "Written by hand."
+probe accepted "the commit's own trailers after a fence never closed" "${FENCE}text
+quoted
+
+Claude-Session: ${UUID}
+${CLAUDE}"
+probe accepted "its own trailers inside a fence never closed" "${FENCE}text
+Claude-Session: ${UUID}
+${CLAUDE}"
 probe accepted "a human commit quoting a Claude trailer in a fence" "The trailer looks like this:
 
 ~~~

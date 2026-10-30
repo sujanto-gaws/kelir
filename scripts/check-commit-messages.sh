@@ -12,6 +12,14 @@
 # found 64 of 268 such commits without one, #459 among them, and a criterion
 # cannot find an author who left nothing to match.
 #
+# **It also runs `check-closing-keywords.sh` over each commit's message** (#730).
+# A commit's body closes issues on its own, as #707's squash commit closed #673,
+# and of a list after one keyword it closes only the first.
+#
+# **A merge is a commit of two parents, and nothing here reads one** (#557). The
+# title is not what makes it one: a commit of one parent titled `Merge the
+# outbox work` used to skip every check.
+#
 # Usage: scripts/check-commit-messages.sh <base-ref> [head-ref]
 
 set -euo pipefail
@@ -27,6 +35,8 @@ set -euo pipefail
 # count reverts to bytes, which is no worse than not setting it.
 export LC_ALL=C.UTF-8
 
+SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 BASE_REF="${1:?usage: check-commit-messages.sh <base-ref> [head-ref]}"
 HEAD_REF="${2:-HEAD}"
 
@@ -40,11 +50,6 @@ failures=0
 check_header() {
   local sha="$1" header="$2"
   local short="${sha:0:8}"
-
-  if [[ "${header}" =~ ^Merge\  ]]; then
-    echo "  skip  ${short}  merge commit"
-    return 0
-  fi
 
   if [[ ! "${header}" =~ ${HEADER_PATTERN} ]]; then
     echo "  FAIL  ${short}  ${header}"
@@ -131,8 +136,21 @@ CO_AUTHOR='^co-authored-by[[:space:]]*:.*(claude|@anthropic\.com)'
 # (#485). The co-author is looked for the same way, so a human commit that
 # quotes a Claude trailer in a fence stays a human commit. A fence opens and
 # closes on a line starting with ``` or ~~~, and the two are not told apart.
+#
+# **A fence never closed keeps the message's last paragraph out of it** (#557).
+# That paragraph is the block git reads trailers from, and git knows nothing of
+# fences: `git interpret-trailers --parse` printed the co-author this function
+# had dropped, so a Claude commit passed for a human one. The paragraphs before
+# it stay hidden, so a session line quoted there is still not the commit's own.
+# `held` is the paragraph being read, and a trailing blank line does not end it.
 unfenced() {
-  awk '/^[[:space:]]*(```|~~~)/ { fenced = !fenced; next } !fenced { print }'
+  awk '
+    /^[[:space:]]*(```|~~~)/ { fenced = !fenced; held = ""; gap = 0; next }
+    !fenced { print; next }
+    /^[[:space:]]*$/ { gap = 1; next }
+    { if (gap) { held = ""; gap = 0 } held = held $0 "\n" }
+    END { if (fenced) printf "%s", held }
+  '
 }
 
 check_session() {
@@ -166,21 +184,45 @@ check_session() {
   failures=$((failures + 1))
 }
 
+# The whole message, title too, since a keyword closes wherever it is. Only the
+# report's own lines are printed: the rest of that script's output speaks of a
+# pull-request body, and each of these is indented, so no line of the author's
+# text starts a line of the log.
+check_closing_keywords() {
+  local sha="$1"
+  local short="${sha:0:8}"
+  local report
+
+  if report="$(PR_BODY="$(git log -1 --format=%B "${sha}")" \
+    "${SCRIPTS}/check-closing-keywords.sh" 2>&1)"; then
+    return 0
+  fi
+
+  echo "  FAIL  ${short}  a closing keyword followed by a list closes only the first"
+  grep -E '^  (line|FAIL|write) ' <<< "${report}" | sed 's/^/      /' || true
+  echo "        give each issue its own keyword, one per line;"
+  echo "        see docs/standards/05. Git Workflow.md §4"
+  failures=$((failures + 1))
+}
+
 echo "Checking commit headers in ${BASE_REF}..${HEAD_REF}"
 
-commits=$(git rev-list "${BASE_REF}..${HEAD_REF}")
+commits=$(git rev-list --parents "${BASE_REF}..${HEAD_REF}")
 
 if [[ -z "${commits}" ]]; then
   echo "No commits in range; nothing to check."
   exit 0
 fi
 
-while read -r sha; do
+while read -r sha parents; do
+  if [[ "${parents}" == *' '* ]]; then
+    echo "  skip  ${sha:0:8}  merge commit"
+    continue
+  fi
   header="$(git log -1 --format=%s "${sha}")"
   check_header "${sha}" "${header}"
-  if [[ ! "${header}" =~ ^Merge\  ]]; then
-    check_session "${sha}"
-  fi
+  check_session "${sha}"
+  check_closing_keywords "${sha}"
 done <<< "${commits}"
 
 if (( failures > 0 )); then
