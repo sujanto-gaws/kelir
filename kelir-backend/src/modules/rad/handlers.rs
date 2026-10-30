@@ -366,7 +366,7 @@ async fn delete_list(
         (status = 200, description = "One page of the options this lookup offers", body = [LookupOption]),
         (status = 403, description = "Missing the permission that opens the underlying master data"),
         (status = 404, description = "No such lookup source"),
-        (status = 422, description = "The search is longer than anything it could match")
+        (status = 422, description = "The search is longer than anything it could match, or `source` holds a NUL")
     ),
     security(("bearer" = []))
 )]
@@ -449,7 +449,7 @@ async fn list_actions(
         (status = 403, description = "Missing document:read"),
         (status = 404, description = "No such list"),
         (status = 409, description = "The list is a draft or is deprecated"),
-        (status = 422, description = "The definition declares something this renderer cannot serve")
+        (status = 422, description = "The definition declares something this renderer cannot serve, or `list_key` holds a NUL")
     ),
     security(("bearer" = []))
 )]

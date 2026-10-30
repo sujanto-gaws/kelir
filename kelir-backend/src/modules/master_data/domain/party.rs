@@ -460,6 +460,7 @@ pub struct PersonInput {
     pub personal_title: Option<String>,
     pub suffix: Option<String>,
     pub gender: Option<Gender>,
+    #[serde(default, deserialize_with = "crate::utils::storable::option_date")]
     pub birth_date: Option<NaiveDate>,
     pub marital_status: Option<String>,
     pub comments: Option<String>,
@@ -485,7 +486,9 @@ pub struct PartyIdentificationInput {
     pub party_identification_type_id: String,
     pub id_value: String,
     pub issued_by: Option<String>,
+    #[serde(default, deserialize_with = "crate::utils::storable::option_date")]
     pub issue_date: Option<NaiveDate>,
+    #[serde(default, deserialize_with = "crate::utils::storable::option_date")]
     pub expire_date: Option<NaiveDate>,
     pub additional_attributes: Option<Value>,
 }
@@ -501,7 +504,9 @@ pub struct PartyRelationshipInput {
     pub party_id_to: String,
     pub role_type_id_to: Option<String>,
     pub party_relationship_type_id: String,
+    #[serde(deserialize_with = "crate::utils::storable::instant")]
     pub from_date: DateTime<Utc>,
+    #[serde(default, deserialize_with = "crate::utils::storable::option_instant")]
     pub thru_date: Option<DateTime<Utc>>,
     pub status_id: Option<String>,
     pub priority: Option<i32>,
@@ -514,7 +519,9 @@ pub struct PartyRelationshipInput {
 pub struct PartyClassificationInput {
     pub party_class_type_id: String,
     pub party_classification_id: Option<String>,
+    #[serde(deserialize_with = "crate::utils::storable::instant")]
     pub from_date: DateTime<Utc>,
+    #[serde(default, deserialize_with = "crate::utils::storable::option_instant")]
     pub thru_date: Option<DateTime<Utc>>,
     pub comments: Option<String>,
 }
@@ -531,7 +538,9 @@ pub struct PartyContactMechInput {
     pub contact_mech_id: Option<Uuid>,
     pub contact_mech_type_id: Option<ContactMechType>,
     pub purpose_type_id: Option<String>,
+    #[serde(deserialize_with = "crate::utils::storable::instant")]
     pub from_date: DateTime<Utc>,
+    #[serde(default, deserialize_with = "crate::utils::storable::option_instant")]
     pub thru_date: Option<DateTime<Utc>>,
     #[serde(default)]
     pub is_primary: bool,

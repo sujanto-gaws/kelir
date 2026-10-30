@@ -319,7 +319,9 @@ pub struct ContactProfile {
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AssignRoleRequest {
+    #[serde(deserialize_with = "crate::utils::storable::instant")]
     pub from_date: DateTime<Utc>,
+    #[serde(default, deserialize_with = "crate::utils::storable::option_instant")]
     pub thru_date: Option<DateTime<Utc>>,
     pub status_id: Option<PartyRoleStatus>,
     pub comments: Option<String>,
@@ -393,6 +395,7 @@ pub struct CustomerProfileInput {
     pub party_id: Option<String>,
     pub customer_number: Option<String>,
     pub customer_category: Option<String>,
+    #[serde(default, deserialize_with = "crate::utils::storable::option_date")]
     pub customer_since: Option<NaiveDate>,
     /// Decimal as a string, matching the response.
     pub credit_limit: Option<String>,
@@ -414,7 +417,9 @@ pub struct EmployeeProfileInput {
     pub position: Option<String>,
     pub job_grade: Option<String>,
     pub employment_type: Option<EmploymentType>,
+    #[serde(default, deserialize_with = "crate::utils::storable::option_date")]
     pub join_date: Option<NaiveDate>,
+    #[serde(default, deserialize_with = "crate::utils::storable::option_date")]
     pub resign_date: Option<NaiveDate>,
     pub status_id: Option<String>,
     pub additional_attributes: Option<Value>,

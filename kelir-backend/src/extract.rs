@@ -18,6 +18,12 @@
 //! client written against the envelope cannot read: it finds `null` where it
 //! expects `error.code`.
 //!
+//! **Three of them also refuse what PostgreSQL cannot store** (ADR-0044,
+//! ADR-0050): a NUL in a query value, a path capture or a body string, named
+//! where it was sent, before anything is deserialized. A date in a body is
+//! refused differently, because only the type knows which strings are dates:
+//! its field's `utils::storable` helper refuses it, and [`JsonBody`] names it.
+//!
 //! [`MultipartBody`] is the fourth, and it arrived the way the first three did —
 //! by the claim above being false. This module's header used to say *the three
 //! extractors together mean no refusal leaves this API outside the envelope*,
@@ -49,6 +55,15 @@ use crate::utils::storable;
 ///
 /// Drop-in for `axum::Json` in a handler argument position. The `utoipa`
 /// annotation is unaffected: `request_body` names the type, not the extractor.
+///
+/// **A NUL in any string of the body is refused before the body is fitted to
+/// its type** ([#668](https://github.com/sujanto-gaws/kelir/issues/668),
+/// ADR-0050), as [`QueryParams`] refuses one in a query value: a role code
+/// holding `\u0000` reached its bind and answered 500, and so did a username
+/// at `/auth/login`, which takes no token. Every value and every key holding
+/// one is named at its path as sent ([`refuse_nul_in_body`]). A date PostgreSQL
+/// cannot store is refused while the body is read, by the `utils::storable`
+/// helper its field names, and answered here as `OUT_OF_RANGE` ([`detail`]).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct JsonBody<T>(pub T);
 
@@ -67,6 +82,7 @@ where
         let bytes = Bytes::from_request(request, state)
             .await
             .map_err(|error| AppError::bad_request(error.body_text()))?;
+        refuse_nul_in_body(&bytes)?;
 
         let deserializer = &mut serde_json::Deserializer::from_slice(&bytes);
 
@@ -150,6 +166,15 @@ where
 /// still a 400 — the resource named by `/parties/not-a-uuid` does not fail to
 /// exist, the reference to it never became one — and the two programmer-error
 /// kinds are still 500. All that changes is that the reply is now the envelope.
+///
+/// **One exception: a NUL in any capture is a 422 `INVALID_CHARACTER` naming
+/// it** ([#657](https://github.com/sujanto-gaws/kelir/issues/657), ADR-0050).
+/// `GET /rad/lists/by-key/%00` bound the key and answered 500, and so did a
+/// role type on `/parties/{id}/roles/{roleTypeId}`. The decoded captures are
+/// read and refused before `T` is deserialized, as [`QueryParams`] refuses
+/// before it parses, so a NUL in a uuid capture is the NUL's refusal rather
+/// than whichever parse failed first. A capture that is not UTF-8 once decoded
+/// cannot be read here, and is left to `Path`'s 400.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PathParam<T>(pub T);
 
@@ -161,6 +186,17 @@ where
     type Rejection = AppError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        if let Ok(captures) = axum::extract::RawPathParams::from_request_parts(parts, state).await {
+            let details: Vec<ValidationDetail> = captures
+                .iter()
+                .filter(|(_, value)| value.contains('\0'))
+                .map(|(key, _)| storable::nul_refusal(key))
+                .collect();
+            if !details.is_empty() {
+                return Err(AppError::validation(details));
+            }
+        }
+
         axum::extract::Path::<T>::from_request_parts(parts, state)
             .await
             .map(|axum::extract::Path(value)| Self(value))
@@ -228,6 +264,83 @@ fn refuse_nul(query: &str) -> Result<(), AppError> {
     } else {
         Err(AppError::validation(details))
     }
+}
+
+/// The only spelling a NUL has in a JSON body: a raw 0x00 is not valid JSON,
+/// and no other escape decodes to U+0000.
+const ESCAPED_NUL: &[u8] = br"\u0000";
+
+/// Whether `bytes` can hold a NUL at all. A fast path, never the decision:
+/// `\\u0000` is a backslash and the text `u0000`, so a body that passes here
+/// is still walked, and [`nul_paths`] decides.
+fn may_hold_nul(bytes: &[u8]) -> bool {
+    bytes
+        .windows(ESCAPED_NUL.len())
+        .any(|window| window == ESCAPED_NUL)
+}
+
+/// Every string and every object key in a JSON body that holds a NUL, each
+/// named once at its path as sent — `items[0].name` — as a refusal of a field
+/// in that body is named.
+///
+/// **A key is refused as a value is**, where [`refuse_nul`] passes a query
+/// key: a free-form object, a form definition or `additionalAttributes`, is
+/// stored with its keys, and `jsonb` cannot hold a NUL in either.
+///
+/// The body is read as a `Value` only here, and only when [`may_hold_nul`]
+/// found the escape; `T` is still read from the bytes. A `Value` keeps the
+/// last of two equal keys, so a NUL in a value a later duplicate replaces is
+/// not named, and is not what `T` reads either.
+fn refuse_nul_in_body(bytes: &[u8]) -> Result<(), AppError> {
+    if !may_hold_nul(bytes) {
+        return Ok(());
+    }
+    // Not JSON: the deserializer says so in a moment, as it would have
+    // without the escape, and there is no field to name.
+    let Ok(body) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return Ok(());
+    };
+
+    let details: Vec<ValidationDetail> = nul_paths(&body)
+        .into_iter()
+        .map(storable::nul_refusal)
+        .collect();
+    if details.is_empty() {
+        Ok(())
+    } else {
+        Err(AppError::validation(details))
+    }
+}
+
+fn nul_paths(body: &serde_json::Value) -> Vec<String> {
+    fn visit(value: &serde_json::Value, path: &str, found: &mut Vec<String>) {
+        match value {
+            serde_json::Value::String(text) if text.contains('\0') => {
+                found.push(if path.is_empty() { "body" } else { path }.to_owned());
+            }
+            serde_json::Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    visit(item, &format!("{path}[{index}]"), found);
+                }
+            }
+            serde_json::Value::Object(members) => {
+                for (key, member) in members {
+                    let at = join(path, key);
+                    if key.contains('\0') {
+                        found.push(at.clone());
+                    }
+                    visit(member, &at, found);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut found = Vec::new();
+    visit(body, "", &mut found);
+    // A key and its own value are one path: name it once.
+    found.dedup();
+    found
 }
 
 fn query_rejection(error: serde_path_to_error::Error<serde_urlencoded::de::Error>) -> AppError {
@@ -346,15 +459,20 @@ fn detail(path: &str, message: &str) -> ValidationDetail {
         );
     }
 
+    let field = if path.is_empty() { "body" } else { path };
+
+    // A date PostgreSQL cannot store, refused by its field's `storable`
+    // helper while the body was read (#668). Serde carries only a message, so
+    // the helper marks it, and the mark is what makes it `range` rather than
+    // a type the caller got wrong.
+    if let Some(reason) = storable::out_of_range_reason(message) {
+        return ValidationDetail::new(field, "range", storable::OUT_OF_RANGE, capitalize(reason));
+    }
+
     // Everything else is a value that parsed but did not fit: wrong type, a
     // string where a UUID belongs, an enum variant that does not exist. Here
     // the path is exact, which is why it is worth carrying.
-    ValidationDetail::new(
-        if path.is_empty() { "body" } else { path },
-        "type",
-        "INVALID_TYPE",
-        capitalize(message),
-    )
+    ValidationDetail::new(field, "type", "INVALID_TYPE", capitalize(message))
 }
 
 /// Extracts `x` from a message reading ``<prefix>`x`, …``.
@@ -614,6 +732,190 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_nul_in_a_body_string_is_refused_at_its_path_before_the_type_is_read() {
+        // #668. `count` is missing and `extra` is unknown: the NUL is what the
+        // caller is told, as it is in a query value.
+        for (body, path) in [
+            (r#"{"name":"a\u0000b","count":1}"#, "name"),
+            (
+                r#"{"name":"a","count":1,"tags":[{"label":"x"},{"label":"\u0000"}]}"#,
+                "tags[1].label",
+            ),
+            (r#"{"name":"\u0000","extra":true}"#, "name"),
+            (r#""\u0000""#, "body"),
+        ] {
+            let (status, refused) = post_json(body).await;
+
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert_eq!(detail(&refused)["path"], path, "{body}");
+            assert_eq!(detail(&refused)["code"], "INVALID_CHARACTER");
+            assert_eq!(detail(&refused)["rule"], "pattern");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_nul_in_a_key_is_refused_and_a_key_holding_one_is_named_once() {
+        for body in [
+            r#"{"name":"a","count":1,"x\u0000":1}"#,
+            r#"{"name":"a","count":1,"x\u0000":"\u0000"}"#,
+        ] {
+            let (status, refused) = post_json(body).await;
+
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            let details = refused["error"]["details"].as_array().expect("details");
+            assert_eq!(details.len(), 1, "{refused}");
+            assert_eq!(details[0]["path"], "x\u{0}");
+            assert_eq!(details[0]["code"], "INVALID_CHARACTER");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_nul_a_later_duplicate_replaces_is_not_named_and_never_reaches_the_type() {
+        // ADR-0050's stated risk. A `Value` keeps the last of two equal keys,
+        // so the walk does not see the first copy's NUL...
+        let body = r#"{"name":"\u0000","name":"a","count":1}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).expect("JSON");
+        assert_eq!(parsed["name"], "a");
+        assert!(nul_paths(&parsed).is_empty());
+
+        // ...and `T` is read from the bytes, where a struct refuses the
+        // duplicate itself, so the NUL reaches no bind.
+        let (status, refused) = post_json(body).await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(detail(&refused)["code"], "INVALID_TYPE");
+        assert!(
+            detail(&refused)["message"]
+                .as_str()
+                .is_some_and(|message| message.starts_with("Duplicate field `name`")),
+            "{refused}"
+        );
+
+        // In the other order the last copy holds the NUL, and it is named.
+        let (_, refused) = post_json(r#"{"name":"a","name":"\u0000","count":1}"#).await;
+        assert_eq!(detail(&refused)["code"], "INVALID_CHARACTER");
+    }
+
+    #[tokio::test]
+    async fn another_control_character_and_an_escaped_backslash_pass() {
+        // `\\u0000` is a backslash and the text `u0000`: the fast path sees
+        // the escape, and the walk finds no NUL.
+        let (status, echoed) = post_text(r#"{"name":"a\u0001b\\u0000","count":1}"#).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(echoed, "a\u{1}b\\u0000:1:");
+    }
+
+    #[tokio::test]
+    async fn json_that_is_not_json_stays_a_400_when_it_holds_the_escape() {
+        for body in [
+            "{\"name\":\"a\0b\",\"count\":1}",
+            r#"{"name":"\ud800","count":1,"tags":"\u0000"}"#,
+            r#"{"name":"\u0000","count":1"#,
+        ] {
+            let (status, refused) = post_json(body).await;
+
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(refused["error"]["code"], "BAD_REQUEST");
+        }
+    }
+
+    #[test]
+    fn the_fast_path_never_passes_a_body_the_walk_refuses() {
+        // The two agree: wherever the walk finds a NUL, the bytes held the
+        // escape. Removing the fast path changes no answer, only the cost.
+        for body in [
+            r#"{"a":"\u0000"}"#,
+            r#"{"\u0000":1}"#,
+            r#"["x",{"a":["\u0000"]}]"#,
+            r#"{"a":"\\\u0000"}"#,
+            r#"{"a":"\\u0000"}"#,
+            r#"{"a":"\u0001","b":"😀"}"#,
+            r#"{"a":"plain"}"#,
+        ] {
+            let parsed: serde_json::Value = serde_json::from_str(body).expect("JSON");
+            let refused = !nul_paths(&parsed).is_empty();
+
+            assert!(!refused || may_hold_nul(body.as_bytes()), "{body}");
+            assert_eq!(
+                refuse_nul_in_body(body.as_bytes()).is_err(),
+                refused,
+                "{body}"
+            );
+        }
+        assert!(!may_hold_nul(br#"{"a":"plain"}"#));
+        assert!(may_hold_nul(br#"{"a":"\u0000"}"#));
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Dated {
+        #[serde(deserialize_with = "crate::utils::storable::date")]
+        valid_from: chrono::NaiveDate,
+        #[serde(default, deserialize_with = "crate::utils::storable::option_instant")]
+        ends_at: Option<chrono::DateTime<chrono::Utc>>,
+    }
+
+    async fn dated(JsonBody(body): JsonBody<Dated>) -> String {
+        format!("{}:{}", body.valid_from, body.ends_at.is_some())
+    }
+
+    async fn post_dated(body: &str) -> (StatusCode, serde_json::Value) {
+        let response = Router::new()
+            .route("/", post(dated))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_owned()))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("router responds");
+
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_body_date_postgresql_cannot_store_is_out_of_range_at_its_field() {
+        for (body, path) in [
+            (r#"{"validFrom":"-5000-01-01"}"#, "validFrom"),
+            (
+                r#"{"validFrom":"2026-01-01","endsAt":"-4713-11-23T23:59:59.999999999Z"}"#,
+                "endsAt",
+            ),
+        ] {
+            let (status, refused) = post_dated(body).await;
+
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert_eq!(detail(&refused)["path"], path);
+            assert_eq!(detail(&refused)["code"], "OUT_OF_RANGE");
+            assert_eq!(detail(&refused)["rule"], "range");
+            let message = detail(&refused)["message"].as_str().expect("a message");
+            assert!(
+                message.starts_with("Must be"),
+                "the mark is not shown: {message}"
+            );
+        }
+
+        let (status, _) = post_dated(r#"{"validFrom":"-4713-11-24"}"#).await;
+        assert_eq!(status, StatusCode::OK, "PostgreSQL's first date is read");
+
+        // A date that does not parse is still the type the caller got wrong.
+        let (_, refused) = post_dated(r#"{"validFrom":"soon"}"#).await;
+        assert_eq!(detail(&refused)["code"], "INVALID_TYPE");
+    }
+
     // -----------------------------------------------------------------------
     // QueryParams (#122)
     // -----------------------------------------------------------------------
@@ -811,6 +1113,82 @@ mod tests {
         let (status, _) = get_path("0198f0e2-0000-7000-8000-000000000000").await;
 
         assert_eq!(status, StatusCode::OK);
+    }
+
+    async fn assign(PathParam((id, role)): PathParam<(uuid::Uuid, String)>) -> String {
+        format!("{id}:{role}")
+    }
+
+    async fn get_pair(path: &str) -> (StatusCode, serde_json::Value) {
+        let response = Router::new()
+            .route("/{id}/roles/{roleTypeId}", axum::routing::get(assign))
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/{path}"))
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("router responds");
+
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    const ID: &str = "0198f0e2-0000-7000-8000-000000000000";
+
+    #[tokio::test]
+    async fn a_nul_in_a_capture_is_a_422_naming_the_capture() {
+        // #657: `/rad/lists/by-key/%00` bound the key and answered 500.
+        for role in ["%00", "a%00b"] {
+            let (status, body) = get_pair(&format!("{ID}/roles/{role}")).await;
+
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{role}");
+            assert_eq!(body["error"]["code"], "VALIDATION_ERROR");
+            assert_eq!(detail(&body)["path"], "roleTypeId");
+            assert_eq!(detail(&body)["code"], "INVALID_CHARACTER");
+            assert_eq!(detail(&body)["rule"], "pattern");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_nul_in_a_capture_is_refused_before_the_capture_is_parsed() {
+        // A NUL in a uuid is the NUL's refusal, not the 400 a parse gives.
+        let (status, body) = get_path("%00").await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(detail(&body)["path"], "id");
+        assert_eq!(detail(&body)["code"], "INVALID_CHARACTER");
+    }
+
+    #[tokio::test]
+    async fn only_the_member_of_a_tuple_holding_the_nul_is_named() {
+        let (_, body) = get_pair(&format!("{ID}/roles/%00")).await;
+        let details = body["error"]["details"].as_array().expect("details");
+        assert_eq!(details.len(), 1, "{body}");
+        assert_eq!(details[0]["path"], "roleTypeId");
+
+        let (_, body) = get_pair("a%00b/roles/SUPPLIER").await;
+        let details = body["error"]["details"].as_array().expect("details");
+        assert_eq!(details.len(), 1, "{body}");
+        assert_eq!(details[0]["path"], "id");
+    }
+
+    #[tokio::test]
+    async fn another_control_character_or_a_capture_that_is_not_utf8_is_answered_as_before() {
+        let (status, echoed) = get_pair(&format!("{ID}/roles/a%01b")).await;
+        assert_eq!(status, StatusCode::OK, "{echoed}");
+
+        let (status, body) = get_pair(&format!("{ID}/roles/%FF")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"]["code"], "BAD_REQUEST");
     }
 
     #[tokio::test]

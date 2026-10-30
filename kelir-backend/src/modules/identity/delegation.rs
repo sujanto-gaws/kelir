@@ -145,7 +145,9 @@ pub struct Delegation {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateDelegationRequest {
     pub delegate_user_id: Uuid,
+    #[serde(deserialize_with = "crate::utils::storable::instant")]
     pub starts_at: DateTime<Utc>,
+    #[serde(deserialize_with = "crate::utils::storable::instant")]
     pub ends_at: DateTime<Utc>,
     /// `ALL` when absent.
     #[serde(default)]

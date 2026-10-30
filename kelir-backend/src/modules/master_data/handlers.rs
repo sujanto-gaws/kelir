@@ -227,7 +227,7 @@ So a restatement carrying only `fromDate` clears the end date and keeps the comm
         (status = 403, description = "Missing master-data:party-role:assign"),
         (status = 404, description = "No such party"),
         (status = 409, description = "That profile number is already in use"),
-        (status = 422, description = "Validation failed, or no such role type")
+        (status = 422, description = "Validation failed, no such role type, or `roleTypeId` holds a NUL")
     ),
     security(("bearer" = []))
 )]
@@ -254,7 +254,8 @@ async fn assign_role(
     responses(
         (status = 204, description = "Role removed; the party and its other roles are untouched"),
         (status = 403, description = "Missing master-data:party-role:remove"),
-        (status = 404, description = "No such party, or it does not hold that role")
+        (status = 404, description = "No such party, or it does not hold that role"),
+        (status = 422, description = "`roleTypeId` holds a NUL")
     ),
     security(("bearer" = []))
 )]
