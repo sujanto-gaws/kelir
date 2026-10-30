@@ -124,6 +124,44 @@ While the major version is `0`, the public API may change in any release.
   repeat a group without an upper bound around one repeated item or an
   alternation, and rewrite them: `(a+)+` as `a+`, and
   `(?:[a-z]|[a-z0-9])*` as `[a-z0-9]*`.
+- **A workflow definition that published before can be refused at its next
+  publish** ([#789](https://github.com/sujanto-gaws/kelir/issues/789)). A
+  publish now reads every path a `condition` or a variable `source` can reach:
+  `reduce`'s initial value, a `var`'s default beside a string or a number, and
+  the expressions among the operands of `missing` and `missing_some`,
+  `missing_some`'s count included. A path the engine does not build there is
+  `CONDITION_PATH_NOT_BUILT`, where it used to read `null` and take the
+  fallback edge without a warning. **A path a publish cannot see is refused
+  too**, as 422 `VALIDATION_ERROR` with a `CONDITION_PATH_COMPUTED` detail,
+  `rule: "conditionPath"`, at `definition.transitions.N.condition` or
+  `definition.variables.N.source`, at most once per expression: a `var` whose
+  operand is an object, or an array opening with an object or an array, the
+  scope jump `[[1], "document.amount"]` among them, and a `missing` or
+  `missing_some` name that is an expression, in any scope, iterator bodies
+  included. This is refused even where the path reached was built, so a
+  definition that ran correctly can be refused. Write the path as a string,
+  with any default beside it. `{"var": 0}`, `null`, `[]`, `""` and
+  `[1, "document.amount"]` are still accepted. Within one 422 the details
+  run `ROLE_TAKES_NO_SCOPE`, then each `condition` and each `source` in index
+  order, each expression's unbuilt paths before its computed detail, then
+  `ROLE_NOT_LIVE`, and an S-rule fault hides them all. Saving a draft does not
+  check it. **Revisions already published are not re-checked**, and keep any
+  silent fallback; a revision cloned from one is refused at its publish. No
+  migration and no schema change: JWSS takes revision R-18, and its
+  meta-schema is untouched.
+- **A form already published with a loop through a `reduce`'s initial value
+  now meets that loop at each write**
+  ([#789](https://github.com/sujanto-gaws/kelir/issues/789)). Forms share the
+  publish's walk, so an initial value, a `var`'s default and the expressions
+  among the operands of `missing` and `missing_some` are now dependency edges,
+  and a loop through one is `CALCULATION_CYCLE` at save and at publish. A form
+  published before the upgrade is not re-checked and its loop went unseen, so
+  every write against it, a draft save included, is now refused with a 422
+  naming the fields. Documents pin their revision, so a corrected revision
+  reaches new documents only. **Before upgrading, look for a `calculate` or
+  `conditional` that reads a field through one of these and is itself read
+  back by that field.** A form's computed `var` is not refused and gets no
+  edge, and **D-135** is open on it.
 
 ### Added
 
