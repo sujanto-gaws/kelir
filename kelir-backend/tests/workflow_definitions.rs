@@ -4006,6 +4006,46 @@ async fn an_iterator_handed_the_context_is_refused_at_publish() {
     assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
 }
 
+/// **#789: a `JSON` variable cannot store the context**, or
+/// `variables.doc.amount` would pass on its declared key. `formData` can, and
+/// another `dataType` is unchanged.
+#[tokio::test]
+async fn a_json_variable_holding_the_context_is_refused_at_publish() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    role(&app, "WF-APPROVER").await;
+
+    let reads = json!({ "==": [{ "var": "variables.doc.amount" }, 7] });
+
+    let mut definition = conditioned("wf_r35_json_document", reads.clone());
+    definition["variables"] =
+        json!([{ "key": "doc", "dataType": "JSON", "source": { "var": "document" } }]);
+    let id = saved(&app, &token, "wf_r35_json_document", definition).await;
+    let refused = publish(&app, &token, id).await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+    assert_eq!(
+        refusals(&refused),
+        computed(&["definition.variables.0.source"])
+    );
+
+    let mut definition = conditioned("wf_r35_json_form", reads);
+    definition["variables"] = json!([
+        { "key": "doc", "dataType": "JSON", "source": { "var": "formData" } },
+        { "key": "text", "dataType": "STRING", "source": { "var": "document.status" } }
+    ]);
+    let id = saved(&app, &token, "wf_r35_json_form", definition).await;
+    let answer = publish(&app, &token, id).await;
+
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+}
+
 /// **#789 AC10, AC11: what a `var`'s default, `missing` and `missing_some` read
 /// is read.** Each draft saves. A nested `var` is refused for its own path; a
 /// nested list in `missing` holds names; a name worked out as the condition

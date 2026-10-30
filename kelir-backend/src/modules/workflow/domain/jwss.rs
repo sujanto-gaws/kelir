@@ -553,7 +553,10 @@ pub fn role_scope_errors(definition: &Value) -> Vec<ValidationDetail> {
 ///
 /// **A body reads its element, so the element must not be the context**
 /// ([`hands_an_iterator_the_context`]): the same refusal, told once with the
-/// computed path's.
+/// computed path's. **Nor may a `JSON` variable store it**: [`is_built`] checks
+/// only a variable's declared key, so its whole `source` is held to
+/// [`reads_the_context`], and `{"var": "variables.doc.amount"}` over a stored
+/// `document` cannot pass. Another `dataType` cannot store an object.
 ///
 /// **Pure**: it reads the definition and nothing else, and takes no lock.
 ///
@@ -575,6 +578,7 @@ pub fn condition_path_errors(definition: &Value) -> Vec<ValidationDetail> {
                 Some((
                     format!("definition.transitions.{index}.condition"),
                     condition,
+                    false,
                 ))
             });
     let sources = variables
@@ -582,12 +586,17 @@ pub fn condition_path_errors(definition: &Value) -> Vec<ValidationDetail> {
         .enumerate()
         .filter_map(|(index, variable)| {
             let source = variable.get("source")?;
-            Some((format!("definition.variables.{index}.source"), source))
+            let stored_whole = variable.get("dataType").and_then(Value::as_str) == Some("JSON");
+            Some((
+                format!("definition.variables.{index}.source"),
+                source,
+                stored_whole,
+            ))
         });
 
     let mut details = Vec::new();
 
-    for (path, expression) in conditions.chain(sources) {
+    for (path, expression, stored_whole) in conditions.chain(sources) {
         let mut seen: BTreeSet<&str> = BTreeSet::new();
         let mut unbuilt: Vec<&str> = Vec::new();
 
@@ -606,7 +615,13 @@ pub fn condition_path_errors(definition: &Value) -> Vec<ValidationDetail> {
             )
         }));
 
-        if reads_computed_path(expression) || hands_an_iterator_the_context(expression) {
+        let holds_the_context = if stored_whole {
+            reads_the_context(expression)
+        } else {
+            hands_an_iterator_the_context(expression)
+        };
+
+        if reads_computed_path(expression) || holds_the_context {
             details.push(detail(
                 path,
                 "conditionPath",
@@ -1097,6 +1112,7 @@ fn array<'a>(definition: &'a Value, key: &str) -> &'a [Value] {
 mod tests {
     use super::*;
     use crate::modules::rad::evaluator::RuleEvaluator;
+    use crate::modules::workflow::domain::instance::{read_variable, write_variable};
 
     fn reference(path: &str, role_code: &str) -> RoleReference {
         RoleReference {
@@ -2265,6 +2281,74 @@ mod tests {
                 condition_path_errors(&reading(condition.clone(), serde_json::json!([])))
                     .is_empty(),
                 "{condition}"
+            );
+        }
+    }
+
+    /// What a condition reads of variable `doc`, declared `JSON` with `source`,
+    /// through the variable's own route: evaluated, stored by `write_variable`,
+    /// parsed back by `read_variable`, and put under `variables`.
+    fn read_through_a_json_variable(source: &Value, path: &str, sentinel: bool) -> Value {
+        let evaluator = RuleEvaluator::new();
+        let value = evaluator
+            .evaluate(source, &context(sentinel))
+            .expect("the source evaluates");
+        let stored = write_variable("doc", &value, "JSON").expect("a JSON variable takes it");
+
+        let mut facts = context(sentinel);
+        facts["variables"]["doc"] = read_variable(&stored, "JSON");
+
+        evaluator
+            .evaluate(&serde_json::json!({ "==": [var(path), 7] }), &facts)
+            .expect("the condition evaluates")
+    }
+
+    /// #789: a `JSON` variable stores what its `source` answers, and `is_built`
+    /// checks only the declared key, so one holding the context would give every
+    /// condition a path no one could see. Run through the variable's own route.
+    #[test]
+    fn a_json_variable_holding_the_context_is_refused() {
+        for (source, path) in [
+            (var("document"), "variables.doc.amount"),
+            (var(""), "variables.doc.document.amount"),
+        ] {
+            assert_ne!(
+                read_through_a_json_variable(&source, path, true),
+                read_through_a_json_variable(&source, path, false),
+                "{source} does not carry the sentinel to {path}"
+            );
+
+            let details = condition_path_errors(&serde_json::json!({
+                "transitions": [{ "condition": { "==": [var(path), 7] } }],
+                "variables": [{ "key": "doc", "dataType": "JSON", "source": source }]
+            }));
+            assert_eq!(
+                refused_codes(&details),
+                [(
+                    "definition.variables.0.source".to_owned(),
+                    CONDITION_PATH_COMPUTED.to_owned()
+                )],
+                "{source}"
+            );
+        }
+    }
+
+    /// Only the whole `source` of a `JSON` variable is held to it. `formData`
+    /// stays accepted, and another `dataType` cannot store an object.
+    #[test]
+    fn a_variable_that_cannot_hold_the_context_is_accepted() {
+        for (data_type, source) in [
+            ("JSON", var("formData")),
+            ("JSON", var("document.status")),
+            ("STRING", var("document")),
+            ("NUMBER", serde_json::json!({ "!!": [var("")] })),
+        ] {
+            assert!(
+                condition_path_errors(&serde_json::json!({
+                    "variables": [{ "key": "doc", "dataType": data_type, "source": source }]
+                }))
+                .is_empty(),
+                "{data_type} {source}"
             );
         }
     }
