@@ -403,9 +403,10 @@ pub async fn publish_definition(
     // null and the condition takes another branch without a word, so it is
     // refused here, where the author is. At publish and not at save, as the
     // scope check above is, and a revision already published is not
-    // re-checked: it keeps the fallback it was published with. Pure, so it
-    // runs before the roles are taken, and its details sit between the scope
-    // details and D-111's.
+    // re-checked: it keeps the fallback it was published with. A path worked
+    // out as the condition runs cannot be checked, so it is refused here too
+    // (#789, JWSS R-18). Pure, so it runs before the roles are taken, and its
+    // details sit between the scope details and D-111's.
     refused.extend(jwss::condition_path_errors(&before.definition));
 
     // **Every role it names is live, and stays live until this commits**

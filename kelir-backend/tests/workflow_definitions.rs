@@ -3391,7 +3391,9 @@ async fn each_path_the_engine_does_not_build_is_refused_at_publish_once_per_expr
 /// an index after `actor.roles`, anything under `formData`, a declared
 /// variable, `missing` and `missing_some`, a `var` with no path or a
 /// non-string one, and an iterator whose element-scoped operand reads `qty`,
-/// which addresses the element and not the context.
+/// which addresses the element and not the context. **#789 AC9**: none of the
+/// non-string operands computes a path. `[1, "document.amount"]` looks like one
+/// and is a literal default beside the key `1`.
 #[tokio::test]
 async fn every_path_the_engine_builds_is_accepted_at_publish() {
     let app = TestApp::spawn().await;
@@ -3421,6 +3423,10 @@ async fn every_path_the_engine_builds_is_accepted_at_publish() {
             { "!": [{ "missing_some": [1, ["formData.a", "actor.userId"]] }] },
             { "!!": [{ "var": "" }] },
             { "!!": [{ "var": 0 }] },
+            { "!!": [{ "var": null }] },
+            { "!!": [{ "var": [] }] },
+            { "!!": [{ "var": [1, "document.amount"] }] },
+            { "!!": [{ "var": ["formData.x", 0] }] },
             { "some": [{ "var": "formData.lines" }, { ">": [{ "var": "qty" }, 1] }] },
             { "all": [{ "var": "formData.lines" }, { ">": [{ "var": "price" }, 0] }] }
         ] }),
@@ -3599,20 +3605,10 @@ async fn a_draft_reading_an_unbuilt_path_is_saved_and_publishes_once_fixed() {
     assert_eq!(status_of(&app, id).await, "ACTIVE");
 }
 
-/// **#706 AC9: an S-rule fault hides the path refusal**, as it hides the
-/// scope's (R-16): the conformance check runs first and its refusal is the
-/// whole answer.
-#[tokio::test]
-async fn an_s_rule_fault_hides_an_unbuilt_path() {
-    let app = TestApp::spawn().await;
-    let token = app.administrator_token().await;
-
-    role(&app, "WF-APPROVER").await;
-
-    let mut stuck = conditioned(
-        "wf_paths_stuck",
-        json!({ ">": [{ "var": "document.amount" }, 1] }),
-    );
+/// A draft with `condition` on its `APPROVE` edge and an S-rule fault beside it,
+/// written behind the API, which would have refused the fault at save.
+async fn smuggled_with_a_dead_end(app: &TestApp, key: &str, condition: Value) -> Uuid {
+    let mut stuck = conditioned(key, condition);
     stuck["states"]
         .as_array_mut()
         .expect("states")
@@ -3631,15 +3627,36 @@ async fn an_s_rule_fault_hides_an_unbuilt_path() {
         INSERT INTO workflow_definitions
             (id, tenant_id, workflow_key, name, version, jwss_version, definition_json,
              initial_state, status)
-        VALUES ($1, $2, 'wf_paths_stuck', 'Stuck', 1, '1.0.0', $3, 'MANAGER_APPROVAL', 'DRAFT')
+        VALUES ($1, $2, $3, 'Stuck', 1, '1.0.0', $4, 'MANAGER_APPROVAL', 'DRAFT')
         "#,
     )
     .bind(smuggled)
     .bind(common::fixtures::SYSTEM_TENANT_ID)
+    .bind(key)
     .bind(&stuck)
     .execute(&app.pool)
     .await
     .expect("write a definition the API would have refused");
+
+    smuggled
+}
+
+/// **#706 AC9: an S-rule fault hides the path refusal**, as it hides the
+/// scope's (R-16): the conformance check runs first and its refusal is the
+/// whole answer.
+#[tokio::test]
+async fn an_s_rule_fault_hides_an_unbuilt_path() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    role(&app, "WF-APPROVER").await;
+
+    let smuggled = smuggled_with_a_dead_end(
+        &app,
+        "wf_paths_stuck",
+        json!({ ">": [{ "var": "document.amount" }, 1] }),
+    )
+    .await;
 
     let s_rule = publish(&app, &token, smuggled).await;
     assert_eq!(
@@ -3704,4 +3721,415 @@ async fn a_published_revision_reading_an_unbuilt_path_stays_and_its_clone_is_ref
     );
     assert_eq!(status_of(&app, second).await, "DRAFT");
     assert_eq!(status_of(&app, first).await, "ACTIVE");
+}
+
+// ---------------------------------------------------------------------------
+// #789 (R-18) — a publish reads every path a condition can reach
+// ---------------------------------------------------------------------------
+
+const CONDITION: &str = "definition.transitions.0.condition";
+
+fn computed(paths: &[&str]) -> Vec<(String, String)> {
+    paths
+        .iter()
+        .map(|path| ((*path).to_owned(), "CONDITION_PATH_COMPUTED".to_owned()))
+        .collect()
+}
+
+/// `reduce` over `formData.lines`, summing, with `initial` as its third operand
+/// when one is given.
+fn folding(initial: Option<Value>) -> Value {
+    let mut operands = vec![
+        json!({ "var": "formData.lines" }),
+        json!({ "+": [{ "var": "current" }, { "var": "accumulator" }] }),
+    ];
+    operands.extend(initial);
+
+    json!({ "reduce": operands })
+}
+
+/// The publish of a saved definition holding `condition`, which is refused.
+async fn refused_publish(
+    app: &TestApp,
+    token: &str,
+    key: &str,
+    condition: Value,
+) -> common::TestResponse {
+    let id = saved(app, token, key, conditioned(key, condition)).await;
+    let refused = publish(app, token, id).await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{key} was published: {}",
+        refused.body
+    );
+    assert_eq!(refused.body["error"]["code"], "VALIDATION_ERROR");
+    assert_eq!(status_of(app, id).await, "DRAFT", "{key}");
+    assert_eq!(projected_rows(app, id).await, 0, "{key} projected");
+
+    refused
+}
+
+/// **#789 AC1, AC3: `reduce`'s initial value is read in the outer scope.** The
+/// draft saves; its publish is refused at the condition, for `document.amount`,
+/// and the message points at `formData.amount`. A bare `qty` there is the
+/// context's and not an element's, so it is refused as `qty`.
+#[tokio::test]
+async fn a_reduces_initial_value_is_read_in_the_outer_scope_at_publish() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    role(&app, "WF-APPROVER").await;
+
+    let amount = refused_publish(
+        &app,
+        &token,
+        "wf_r35_initial",
+        json!({ "==": [folding(Some(json!({ "var": "document.amount" }))), 7] }),
+    )
+    .await;
+    assert_eq!(refusals(&amount), not_built(&[CONDITION]));
+
+    let messages_of_amount = messages(&amount);
+    assert!(
+        messages_of_amount[0].contains("`document.amount`")
+            && messages_of_amount[0].contains("`formData.amount`"),
+        "{}",
+        messages_of_amount[0]
+    );
+    assert_eq!(amount.body["error"]["details"][0]["rule"], "conditionPath");
+
+    let element = refused_publish(
+        &app,
+        &token,
+        "wf_r35_initial_qty",
+        json!({ "==": [folding(Some(json!({ "var": "qty" }))), 7] }),
+    )
+    .await;
+    assert_eq!(refusals(&element), not_built(&[CONDITION]));
+    assert!(messages(&element)[0].contains("`qty`"));
+}
+
+/// **#789 AC2: a `reduce` reading nothing unbuilt still publishes**: with a
+/// literal initial value, with `formData.start`, with a declared variable, and
+/// with two arguments.
+#[tokio::test]
+async fn a_reduce_with_a_built_or_literal_initial_value_publishes() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    role(&app, "WF-APPROVER").await;
+
+    for (key, initial) in [
+        ("wf_r35_literal", Some(json!(0))),
+        ("wf_r35_form", Some(json!({ "var": "formData.start" }))),
+        ("wf_r35_declared", Some(json!({ "var": "variables.start" }))),
+        ("wf_r35_two", None),
+    ] {
+        let mut definition = conditioned(key, json!({ ">": [folding(initial), 1] }));
+        definition["variables"] = json!([
+            { "key": "start", "dataType": "NUMBER", "source": { "var": "formData.start" } }
+        ]);
+
+        let id = saved(&app, &token, key, definition).await;
+        let answer = publish(&app, &token, id).await;
+
+        assert_eq!(answer.status, StatusCode::OK, "{key}: {}", answer.body);
+        assert_eq!(status_of(&app, id).await, "ACTIVE", "{key}");
+    }
+}
+
+/// **#789 AC6, record 24's P2.** Both conditions read `document.amount`, both
+/// save, and neither publishes: the `reduce` as the unbuilt path it names, the
+/// computed `var` as a path that cannot be named.
+#[tokio::test]
+async fn an_unbuilt_path_read_another_way_is_refused_at_publish() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    role(&app, "WF-APPROVER").await;
+
+    let reduce = refused_publish(
+        &app,
+        &token,
+        "wf_r24_reduce",
+        json!({ "==": [{ "reduce": [
+            { "var": "formData.lines" },
+            { "+": [{ "var": "current" }, { "var": "accumulator" }] },
+            { "var": "document.amount" }
+        ] }, 7] }),
+    )
+    .await;
+    assert_eq!(refusals(&reduce), not_built(&[CONDITION]));
+
+    let computed_var = refused_publish(
+        &app,
+        &token,
+        "wf_r24_computed",
+        json!({ "==": [{ "var": { "if": [true, "document.amount", "x"] } }, 7] }),
+    )
+    .await;
+    assert_eq!(refusals(&computed_var), computed(&[CONDITION]));
+}
+
+/// **#789 AC8: a path that cannot be checked is refused at publish**, in each
+/// shape and wherever it sits, a body included, because the scope jump works at
+/// any depth. Each draft saves. The message says why, and what to write, and
+/// names no path: the one thing it does not know is the path.
+#[tokio::test]
+async fn a_computed_path_is_refused_at_publish_wherever_it_sits() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    role(&app, "WF-APPROVER").await;
+
+    let chosen = json!({ "if": [true, "formData.amount", "x"] });
+
+    for (key, condition) in [
+        ("wf_r35_object", json!({ "var": chosen })),
+        ("wf_r35_opening_object", json!({ "var": [chosen, 0] })),
+        (
+            "wf_r35_opening_array",
+            json!({ "var": [[1], "formData.amount"] }),
+        ),
+        (
+            "wf_r35_in_a_body",
+            json!({ "some": [{ "var": "formData.lines" }, {
+                "==": [{ "var": [[1], "document.amount"] }, 7]
+            }] }),
+        ),
+        (
+            "wf_r35_in_a_reduce_body",
+            json!({ "reduce": [{ "var": "formData.lines" }, { "var": { "var": "kind" } }, 0] }),
+        ),
+    ] {
+        let refused = refused_publish(&app, &token, key, condition).await;
+
+        assert_eq!(refusals(&refused), computed(&[CONDITION]), "{key}");
+        assert_eq!(refused.body["error"]["details"][0]["rule"], "conditionPath");
+
+        let message = &messages(&refused)[0];
+        assert!(
+            message.contains("cannot check") && message.contains("as a string"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("document.") && !message.contains("formData."),
+            "a computed path has no name to give: {message}"
+        );
+    }
+}
+
+/// **#789 AC10, AC11: what a `var`'s default, `missing` and `missing_some` read
+/// is read.** Each draft saves. A nested `var` is refused for its own path; a
+/// nested list in `missing` holds names; a name worked out as the condition
+/// runs is refused as computed, after the path it was worked out from.
+#[tokio::test]
+async fn a_default_and_the_operands_of_missing_are_read_at_publish() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    role(&app, "WF-APPROVER").await;
+
+    let amount = json!({ "var": "document.amount" });
+
+    for (key, condition, expected) in [
+        (
+            "wf_r35_default",
+            json!({ "var": ["formData.x", amount] }),
+            not_built(&[CONDITION]),
+        ),
+        (
+            "wf_r35_default_by_number",
+            json!({ "var": [0, amount] }),
+            not_built(&[CONDITION]),
+        ),
+        (
+            "wf_r35_nested_names",
+            json!({ "missing": [["formData.a", "document.amount"]] }),
+            not_built(&[CONDITION]),
+        ),
+        (
+            "wf_r35_count",
+            json!({ "missing_some": [amount, ["formData.a", "formData.b"]] }),
+            not_built(&[CONDITION]),
+        ),
+        (
+            "wf_r35_var_names",
+            json!({ "missing": amount }),
+            [not_built(&[CONDITION]), computed(&[CONDITION])].concat(),
+        ),
+        (
+            "wf_r35_some_names",
+            json!({ "missing_some": [1, amount] }),
+            [not_built(&[CONDITION]), computed(&[CONDITION])].concat(),
+        ),
+        (
+            "wf_r35_built_names",
+            json!({ "missing": { "var": "formData.names" } }),
+            computed(&[CONDITION]),
+        ),
+    ] {
+        let refused = refused_publish(&app, &token, key, condition).await;
+
+        assert_eq!(refusals(&refused), expected, "{key}");
+    }
+
+    let definition = conditioned(
+        "wf_r35_built",
+        json!({ "and": [
+            { "var": ["formData.x", { "var": "actor.userId" }] },
+            { "!": [{ "missing": [["formData.a", "document.status"], "actor.userId"] }] },
+            { "!": [{ "missing_some": [{ "var": "formData.count" }, ["formData.a", "formData.b"]] }] }
+        ] }),
+    );
+    let id = saved(&app, &token, "wf_r35_built", definition).await;
+    let answer = publish(&app, &token, id).await;
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+}
+
+/// **#789 AC8, AC12: the order, and one computed refusal per expression.** In
+/// one refusal, the scope details, then each expression's unbuilt paths, a
+/// `reduce`'s initial value after its source and the expression's computed path
+/// after them, however many it holds, transitions before variables, then the
+/// dead roles.
+#[tokio::test]
+async fn path_refusals_keep_their_order_with_a_computed_path_among_them() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    // No `WF-APPROVER`.
+    let mut definition = conditioned(
+        "wf_r35_ordered",
+        json!({ "and": [
+            { "var": { "var": "formData.field" } },
+            { "reduce": [
+                { "var": "document.lines" },
+                { "+": [{ "var": "current" }, { "var": "accumulator" }] },
+                { "var": "document.amount" }
+            ] },
+            { "var": [[1], "formData.amount"] }
+        ] }),
+    );
+    definition["transitions"][1]["allowedBy"] = scoped_role("DEPT-FIN");
+    definition["variables"] = json!([
+        { "key": "worked_out", "dataType": "NUMBER",
+          "source": { "+": [{ "var": [[1], "x"] }, { "var": "actor.email" }] } }
+    ]);
+
+    let id = saved(&app, &token, "wf_r35_ordered", definition).await;
+    let refused = publish(&app, &token, id).await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+
+    let source = "definition.variables.0.source";
+    let mut expected = takes_no_scope(&["definition.transitions.1.allowedBy.departmentScope"]);
+    expected.extend(not_built(&[CONDITION, CONDITION]));
+    expected.extend(computed(&[CONDITION]));
+    expected.extend(not_built(&[source]));
+    expected.extend(computed(&[source]));
+    expected.extend(not_live(&[
+        "definition.states.0.task.assignment.roleCode",
+        "definition.transitions.0.allowedBy",
+        "definition.transitions.1.allowedBy.roleCode",
+    ]));
+    assert_eq!(refusals(&refused), expected);
+
+    let messages = messages(&refused);
+    assert!(messages[1].contains("`document.lines`"), "{}", messages[1]);
+    assert!(messages[2].contains("`document.amount`"), "{}", messages[2]);
+}
+
+/// **#789 AC13: an S-rule fault hides a computed path and an initial value**, as
+/// it hides the other path refusals.
+#[tokio::test]
+async fn an_s_rule_fault_hides_a_computed_path() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    role(&app, "WF-APPROVER").await;
+
+    let smuggled = smuggled_with_a_dead_end(
+        &app,
+        "wf_r35_stuck",
+        json!({ "and": [
+            { "var": { "var": "formData.field" } },
+            folding(Some(json!({ "var": "document.amount" })))
+        ] }),
+    )
+    .await;
+
+    let s_rule = publish(&app, &token, smuggled).await;
+
+    assert_eq!(
+        s_rule.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        s_rule.body
+    );
+    let details = refusals(&s_rule);
+    assert!(
+        details.iter().any(|(_, code)| code == "DEAD_END_STATE"),
+        "{}",
+        s_rule.body
+    );
+    assert!(
+        details
+            .iter()
+            .all(|(_, code)| !code.starts_with("CONDITION_PATH")),
+        "an S-rule fault did not hide the path refusals: {}",
+        s_rule.body
+    );
+}
+
+/// **#789 AC14: a published revision is not re-checked, and its clone is.** Each
+/// shape is written behind the API, as a revision published before #789 holds
+/// it. The revision stays `ACTIVE`; its clone is a draft, refused at publish.
+#[tokio::test]
+async fn a_published_revision_holding_either_shape_stays_and_its_clone_is_refused() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for (key, condition, expected) in [
+        (
+            "wf_r35_revised_reduce",
+            json!({ "==": [folding(Some(json!({ "var": "document.amount" }))), 7] }),
+            not_built(&[CONDITION]),
+        ),
+        (
+            "wf_r35_revised_var",
+            json!({ "var": [[1], "document.amount"] }),
+            computed(&[CONDITION]),
+        ),
+    ] {
+        let first = published(&app, &token, key).await;
+        stored_with(&app, first, "{transitions,0,condition}", condition).await;
+
+        let revision = app
+            .post(
+                &format!("{DEFINITIONS}/{first}/revisions"),
+                Some(&token),
+                json!({}),
+            )
+            .await;
+        assert_eq!(revision.status, StatusCode::CREATED, "{}", revision.body);
+        let second = id_of(&revision.body["data"]);
+
+        let refused = publish(&app, &token, second).await;
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{key}'s clone was published: {}",
+            refused.body
+        );
+        assert_eq!(refusals(&refused), expected, "{key}");
+        assert_eq!(status_of(&app, second).await, "DRAFT", "{key}");
+        assert_eq!(status_of(&app, first).await, "ACTIVE", "{key}");
+    }
 }

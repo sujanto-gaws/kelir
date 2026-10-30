@@ -721,6 +721,89 @@ async fn a_cyclic_definition_is_refused_at_save_and_names_both_fields() {
     assert!(message.contains("`b`"), "{message}");
 }
 
+/// **#789 AC15, at the endpoint.** `reduce`'s initial value is read in the outer
+/// scope, so a loop through one is a loop, and it is refused where it is written.
+#[tokio::test]
+async fn a_loop_through_a_reduces_initial_value_is_refused_at_save() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let mut document = definition("cyclic-initial");
+    document["components"] = json!([
+        {"id": "a", "role": "data", "type": "number", "key": "a", "label": "A",
+         "validation": {"type": "number"},
+         "calculate": {"reduce": [
+             {"var": "rows"},
+             {"+": [{"var": "current"}, {"var": "accumulator"}]},
+             {"var": "b"}
+         ]}},
+        {"id": "b", "role": "data", "type": "number", "key": "b", "label": "B",
+         "validation": {"type": "number"}, "calculate": {"+": [{"var": "a"}, 1]}}
+    ]);
+
+    let response = app
+        .send(
+            Method::POST,
+            "/api/v1/rad/forms",
+            Some(&token),
+            Some(json!({
+                "formKey": "cyclic-initial",
+                "title": "Cyclic",
+                "definition": document,
+            })),
+        )
+        .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "body {}",
+        response.body
+    );
+    assert!(
+        response.body["error"]["details"]
+            .as_array()
+            .expect("details")
+            .iter()
+            .any(|detail| detail["code"] == "CALCULATION_CYCLE"),
+        "body {}",
+        response.body
+    );
+}
+
+/// **#789 AC16.** A form's computed `var` is what it was: a workflow's is
+/// refused at publish, and a form's still saves and publishes, because refusing
+/// it would narrow JFSS.
+#[tokio::test]
+async fn a_form_with_a_computed_var_still_saves_and_publishes() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let mut document = definition("computed-var");
+    document["components"] = json!([
+        {"id": "a", "role": "data", "type": "number", "key": "a", "label": "A",
+         "validation": {"type": "number"},
+         "calculate": {"+": [{"var": {"var": "which"}}, 1]}},
+        {"id": "b", "role": "data", "type": "number", "key": "b", "label": "B",
+         "validation": {"type": "number"}, "calculate": {"+": [{"var": [[1], "a"]}, 1]}}
+    ]);
+
+    let created = create_form(&app, &token, "computed-var", document).await;
+    let id = id_of(&created);
+
+    let published = app
+        .send(
+            Method::POST,
+            &format!("/api/v1/rad/forms/{id}/publish"),
+            Some(&token),
+            None,
+        )
+        .await;
+
+    assert_eq!(published.status, StatusCode::OK, "body {}", published.body);
+    assert_eq!(published.body["data"]["status"], "PUBLISHED");
+}
+
 /// **AC3's other half: the publish itself refuses**, not only the write that
 /// preceded it.
 ///

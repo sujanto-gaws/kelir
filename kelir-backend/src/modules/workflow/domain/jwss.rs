@@ -89,7 +89,7 @@ use serde_json::Value;
 use super::graph::RoleReference;
 use super::task_type;
 use crate::error::ValidationDetail;
-use crate::modules::rad::domain::engine::visit_paths;
+use crate::modules::rad::domain::engine::{reads_computed_path, visit_paths};
 use crate::modules::rad::domain::jfss::{check_operators, CONDITIONAL_OPERATORS};
 
 /// The meta-schema, vendored into the crate.
@@ -154,6 +154,13 @@ pub const ROLE_TAKES_NO_SCOPE: &str = "ROLE_TAKES_NO_SCOPE";
 /// The refusal for a condition reading a path the engine does not build
 /// ([#706](https://github.com/sujanto-gaws/kelir/issues/706), **D-115** B).
 pub const CONDITION_PATH_NOT_BUILT: &str = "CONDITION_PATH_NOT_BUILT";
+
+/// The refusal for a condition working out the path it reads as it runs
+/// ([#789](https://github.com/sujanto-gaws/kelir/issues/789), JWSS R-18).
+///
+/// A code of its own because [`CONDITION_PATH_NOT_BUILT`]'s message names the
+/// path read, and here there is none to name.
+pub const CONDITION_PATH_COMPUTED: &str = "CONDITION_PATH_COMPUTED";
 
 /// The keys of the `document` half of JWSS §6.1's condition context.
 ///
@@ -526,15 +533,25 @@ pub fn role_scope_errors(definition: &Value) -> Vec<ValidationDetail> {
 /// object, and a declared key is still accepted there.
 ///
 /// **What is read is [`visit_paths`]'s**, the walk the form engine's
-/// dependency graph uses: each `var`, `missing` and `missing_some` path, and
-/// an iterator's source but not its element-scoped operands. One detail per
+/// dependency graph uses: each `var`, `missing` and `missing_some` path, a
+/// `var`'s default, an iterator's source and a `reduce`'s initial value, but
+/// not an iterator's body, which addresses the element. One detail per
 /// distinct path per expression, in the order it is read, transitions before
 /// variables. `allowedBy.expression` and `assignment.expression` are not read:
 /// `EXPRESSION` is refused at save (JWSS §5.3).
 ///
+/// **A path worked out as the condition runs cannot be checked, so it is
+/// refused** ([#789], JWSS R-18, [`CONDITION_PATH_COMPUTED`]): a `var` whose
+/// operand is an object or an array opening with an object or an array, the
+/// scope jump `[[1], "document.amount"]` among them, and a `missing` or
+/// `missing_some` name that is an expression. [`reads_computed_path`] finds
+/// them, in iterator bodies too, and the expression is told once, after its
+/// unbuilt paths. At publish and not at save, as every path refusal is.
+///
 /// **Pure**: it reads the definition and nothing else, and takes no lock.
 ///
 /// [#706]: https://github.com/sujanto-gaws/kelir/issues/706
+/// [#789]: https://github.com/sujanto-gaws/kelir/issues/789
 pub fn condition_path_errors(definition: &Value) -> Vec<ValidationDetail> {
     let variables = array(definition, "variables");
     let declared: BTreeSet<&str> = variables
@@ -581,6 +598,15 @@ pub fn condition_path_errors(definition: &Value) -> Vec<ValidationDetail> {
                 not_built_message(read),
             )
         }));
+
+        if reads_computed_path(expression) {
+            details.push(detail(
+                path,
+                "conditionPath",
+                CONDITION_PATH_COMPUTED,
+                COMPUTED_PATH_MESSAGE.to_owned(),
+            ));
+        }
     }
 
     details
@@ -613,6 +639,14 @@ fn is_built(path: &str, declared: &BTreeSet<&str>) -> bool {
         _ => false,
     }
 }
+
+/// What a refusal of a computed path says. It names no path: not knowing the
+/// path is the fault.
+const COMPUTED_PATH_MESSAGE: &str = "A `var`, `missing` or `missing_some` in this expression \
+     works out the path it reads as it runs, or climbs out of its scope to read it, so a \
+     publish cannot check the path: one the engine does not build would read as null and the \
+     condition would take another branch without saying so. Write the path as a string, with \
+     any default beside it (JWSS §6.4).";
 
 /// What a refusal of `read` says: the path, why it is refused, and what the
 /// engine builds.
@@ -972,6 +1006,7 @@ fn array<'a>(definition: &'a Value, key: &str) -> &'a [Value] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::modules::rad::evaluator::RuleEvaluator;
 
     fn reference(path: &str, role_code: &str) -> RoleReference {
         RoleReference {
@@ -1189,6 +1224,28 @@ mod tests {
         serde_json::json!({ "var": path })
     }
 
+    const CONDITION: &str = "definition.transitions.0.condition";
+
+    /// The `(path, code)` of every detail, for a refusal that may hold either
+    /// code, each detail being `conditionPath`'s.
+    fn refused_codes(details: &[ValidationDetail]) -> Vec<(String, String)> {
+        details
+            .iter()
+            .map(|detail| {
+                assert_eq!(detail.rule, "conditionPath");
+                (detail.path.clone(), detail.code.clone())
+            })
+            .collect()
+    }
+
+    /// The unbuilt paths a condition is refused for, in the order read.
+    fn read_paths(condition: &Value) -> Vec<String> {
+        refused_reads(&reading(condition.clone(), serde_json::json!([])))
+            .into_iter()
+            .map(|(_, read)| read)
+            .collect()
+    }
+
     #[test]
     fn condition_path_errors_refuses_each_unbuilt_path_at_its_expression() {
         for path in [
@@ -1306,14 +1363,18 @@ mod tests {
         );
     }
 
-    /// A `var` with a non-string path names no path.
+    /// A `var` with a non-string path names no path, and none of these computes
+    /// one (#789 AC9): `[1, "document.amount"]` is the key `1` with a literal
+    /// default beside it.
     #[test]
     fn condition_path_errors_ignores_a_var_that_names_no_path() {
         for operand in [
             serde_json::json!(0),
             serde_json::json!(null),
             serde_json::json!([]),
+            serde_json::json!(""),
             serde_json::json!([1, "document.amount"]),
+            serde_json::json!(["formData.x", 0]),
         ] {
             let condition = serde_json::json!({ "var": operand });
 
@@ -1324,9 +1385,23 @@ mod tests {
         }
     }
 
+    /// #789 AC9: a path with a default beside it computes nothing, so an
+    /// unbuilt one is refused for what it names and not for its shape.
+    #[test]
+    fn a_path_with_a_default_is_refused_only_for_the_path_it_names() {
+        assert_eq!(
+            refused_reads(&reading(
+                serde_json::json!({ "var": ["total", 0] }),
+                serde_json::json!([])
+            )),
+            [(CONDITION.to_owned(), "total".to_owned())]
+        );
+    }
+
     /// AC8: the element-scoped operand addresses the element, and is not read;
-    /// the iterator's source is. `reduce`'s initial value is not read either,
-    /// which is the form engine's rule, shared.
+    /// the iterator's source is, and so is `reduce`'s initial value (#789),
+    /// which is the form engine's rule, shared. The evaluator reads it in the
+    /// outer scope, before there is an element.
     #[test]
     fn condition_path_errors_reads_an_iterators_source_and_not_its_element() {
         for operator in ["map", "filter", "all", "some", "none", "reduce"] {
@@ -1354,7 +1429,274 @@ mod tests {
             { "+": [var("current.qty"), var("accumulator")] },
             var("document.amount")
         ] });
-        assert!(condition_path_errors(&reading(reduce, serde_json::json!([]))).is_empty());
+        assert_eq!(
+            refused_reads(&reading(reduce, serde_json::json!([]))),
+            [(CONDITION.to_owned(), "document.amount".to_owned())]
+        );
+    }
+
+    /// #789 AC3: `qty` as an initial value is the context's and not an
+    /// element's, the body beside it is still the element's, and a `reduce`
+    /// nested in an initial value has both its source and its initial value
+    /// read, source first.
+    #[test]
+    fn a_reduces_initial_value_is_read_in_the_outer_scope() {
+        let fold = serde_json::json!({ "+": [var("current.qty"), var("accumulator")] });
+        let nested = serde_json::json!({ "reduce": [
+            var("formData.lines"),
+            fold,
+            { "reduce": [var("document.lines"), fold, var("actor.email")] }
+        ] });
+
+        assert_eq!(
+            read_paths(&serde_json::json!({ "reduce": [var("formData.lines"), fold, var("qty")] })),
+            ["qty"]
+        );
+        assert_eq!(read_paths(&nested), ["document.lines", "actor.email"]);
+    }
+
+    /// #789 AC5, record 24's P1. All three read the amount, the evaluator
+    /// answers true for all three, and all three are refused.
+    #[test]
+    fn three_ways_of_reading_the_amount_are_all_refused() {
+        let reduce = serde_json::json!({ "==": [{ "reduce": [
+            var("formData.lines"),
+            { "+": [var("current"), var("accumulator")] },
+            var("document.amount")
+        ] }, 7] });
+        let computed =
+            serde_json::json!({ "==": [{ "var": { "if": [true, "document.amount", "x"] } }, 7] });
+        let plain = serde_json::json!({ "==": [var("document.amount"), 7] });
+
+        let data = serde_json::json!({ "document": { "amount": 7 }, "formData": {} });
+        let evaluator = RuleEvaluator::new();
+        for condition in [&reduce, &computed, &plain] {
+            assert_eq!(evaluator.evaluate(condition, &data), Ok(Value::Bool(true)));
+        }
+
+        for (condition, code) in [
+            (reduce, CONDITION_PATH_NOT_BUILT),
+            (computed, CONDITION_PATH_COMPUTED),
+            (plain, CONDITION_PATH_NOT_BUILT),
+        ] {
+            let details = condition_path_errors(&reading(condition, serde_json::json!([])));
+
+            assert_eq!(
+                refused_codes(&details),
+                [(CONDITION.to_owned(), code.to_owned())]
+            );
+        }
+    }
+
+    /// #789 AC8: each shape of a computed `var`, in every place a body can hold
+    /// it, in a condition and in a variable's `source`.
+    #[test]
+    fn a_computed_var_is_refused_in_each_shape_and_wherever_it_sits() {
+        let operands = [
+            serde_json::json!({ "if": [true, "formData.a", "x"] }),
+            serde_json::json!({ "var": "formData.which" }),
+            serde_json::json!([{ "if": [true, "formData.a", "x"] }]),
+            serde_json::json!([{ "if": [true, "formData", "x"] }, "a"]),
+            serde_json::json!([[1], "formData.a"]),
+            serde_json::json!([[0], "formData.a"]),
+            serde_json::json!([["formData", "a"]]),
+        ];
+
+        for operand in operands {
+            let computed = serde_json::json!({ "var": operand });
+            let lines = var("formData.lines");
+
+            for expression in [
+                computed.clone(),
+                serde_json::json!({ "==": [computed, 1] }),
+                serde_json::json!({ "map": [lines, computed] }),
+                serde_json::json!({ "filter": [lines, computed] }),
+                serde_json::json!({ "all": [lines, computed] }),
+                serde_json::json!({ "some": [lines, computed] }),
+                serde_json::json!({ "none": [lines, computed] }),
+                serde_json::json!({ "reduce": [lines, computed, 0] }),
+                serde_json::json!({ "reduce": [lines, var("current"), computed] }),
+                serde_json::json!({ "some": [lines, { "some": [var("tags"), computed] }] }),
+                serde_json::json!({ "some": [computed, var("qty")] }),
+                serde_json::json!({ "var": ["formData.x", computed] }),
+                serde_json::json!({ "missing_some": [computed, ["formData.a"]] }),
+            ] {
+                let details =
+                    condition_path_errors(&reading(expression.clone(), serde_json::json!([])));
+                assert_eq!(
+                    refused_codes(&details),
+                    [(CONDITION.to_owned(), CONDITION_PATH_COMPUTED.to_owned())],
+                    "{expression}"
+                );
+
+                let details = condition_path_errors(&serde_json::json!({
+                    "variables": [{ "key": "v", "source": expression }]
+                }));
+                assert_eq!(
+                    refused_codes(&details),
+                    [(
+                        "definition.variables.0.source".to_owned(),
+                        CONDITION_PATH_COMPUTED.to_owned()
+                    )]
+                );
+            }
+        }
+    }
+
+    /// #789 AC8: the message says why and what to write, and names no path.
+    #[test]
+    fn a_computed_paths_message_names_no_path() {
+        let details = condition_path_errors(&reading(
+            serde_json::json!({ "var": [[1], "document.amount"] }),
+            serde_json::json!([]),
+        ));
+
+        assert_eq!(details[0].rule, "conditionPath");
+        assert_eq!(
+            details[0].message,
+            "A `var`, `missing` or `missing_some` in this expression works out the path it \
+             reads as it runs, or climbs out of its scope to read it, so a publish cannot \
+             check the path: one the engine does not build would read as null and the \
+             condition would take another branch without saying so. Write the path as a \
+             string, with any default beside it (JWSS §6.4)."
+        );
+    }
+
+    /// #789 AC10: a default that is an expression reads what it says, beside a
+    /// string or a number, and a built path there is accepted.
+    #[test]
+    fn a_vars_default_is_read() {
+        for first in [serde_json::json!("formData.x"), serde_json::json!(0)] {
+            let default = |path: &str| serde_json::json!({ "var": [first, var(path)] });
+
+            assert_eq!(read_paths(&default("document.amount")), ["document.amount"]);
+            assert!(read_paths(&default("actor.userId")).is_empty());
+        }
+
+        // The engine evaluates nothing after the default, and `[null, …]` and
+        // `[true, …]` take none: run in the closure test's premise.
+        assert!(read_paths(
+            &serde_json::json!({ "var": ["formData.x", 0, var("document.amount")] })
+        )
+        .is_empty());
+        assert!(
+            read_paths(&serde_json::json!({ "var": [null, var("document.amount")] })).is_empty()
+        );
+    }
+
+    /// #789 AC11: what the operands of `missing` and `missing_some` read is
+    /// read, the count included; a name worked out as the condition runs is
+    /// refused, after the path it was worked out from; literal names keep
+    /// working, in a list inside a list too.
+    #[test]
+    fn the_operands_of_missing_are_read_and_a_computed_name_is_refused() {
+        let amount = var("document.amount");
+        let not_built = (CONDITION.to_owned(), CONDITION_PATH_NOT_BUILT.to_owned());
+        let computed = (CONDITION.to_owned(), CONDITION_PATH_COMPUTED.to_owned());
+
+        for (expression, expected) in [
+            (
+                serde_json::json!({ "missing": amount }),
+                vec![not_built.clone(), computed.clone()],
+            ),
+            (
+                serde_json::json!({ "missing": ["formData.a", amount] }),
+                vec![not_built.clone(), computed.clone()],
+            ),
+            (
+                serde_json::json!({ "missing_some": [1, amount] }),
+                vec![not_built.clone(), computed.clone()],
+            ),
+            (
+                serde_json::json!({ "missing_some": [1, ["formData.a", amount]] }),
+                vec![not_built.clone(), computed.clone()],
+            ),
+            (
+                serde_json::json!({ "missing_some": [amount, ["formData.a"]] }),
+                vec![not_built.clone()],
+            ),
+            (
+                serde_json::json!({ "missing": [["formData.a", "document.amount"]] }),
+                vec![not_built.clone()],
+            ),
+            (
+                serde_json::json!({ "missing": { "if": [true, "formData.a", "formData.b"] } }),
+                vec![computed.clone()],
+            ),
+            (
+                serde_json::json!({ "missing": var("formData.names") }),
+                vec![computed.clone()],
+            ),
+            (
+                serde_json::json!({ "missing_some": [1, [[var("formData.names")]]] }),
+                vec![computed.clone()],
+            ),
+            (
+                serde_json::json!({ "some": [var("formData.lines"), { "missing": var("name") }] }),
+                vec![computed],
+            ),
+            (
+                serde_json::json!({ "missing": ["formData.a", 3, ["formData.b"], "actor.userId"] }),
+                vec![],
+            ),
+            (
+                serde_json::json!({ "missing_some": [var("formData.n"), ["formData.a"]] }),
+                vec![],
+            ),
+        ] {
+            let details =
+                condition_path_errors(&reading(expression.clone(), serde_json::json!([])));
+
+            assert_eq!(refused_codes(&details), expected, "{expression}");
+        }
+    }
+
+    /// #789 AC12: an expression's unbuilt paths in the order read, an initial
+    /// value after its source and whichever comes first in the expression, then
+    /// its computed path, once; transitions before variables.
+    #[test]
+    fn a_computed_path_follows_its_expressions_unbuilt_paths_once() {
+        let computed = serde_json::json!({ "var": { "var": "formData.which" } });
+        let definition = serde_json::json!({
+            "transitions": [
+                { "condition": { "and": [
+                    computed,
+                    { "reduce": [var("document.lines"), var("current"), var("document.foo")] },
+                    computed,
+                    var("document.foo"),
+                    var("actor.email")
+                ] } },
+                { "condition": computed }
+            ],
+            "variables": [
+                { "key": "v", "source": { "+": [computed, var("amount")] } }
+            ]
+        });
+
+        let details = condition_path_errors(&definition);
+
+        assert_eq!(
+            refused_codes(&details)
+                .iter()
+                .map(|(path, code)| (path.as_str(), code.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (CONDITION, CONDITION_PATH_NOT_BUILT),
+                (CONDITION, CONDITION_PATH_NOT_BUILT),
+                (CONDITION, CONDITION_PATH_NOT_BUILT),
+                (CONDITION, CONDITION_PATH_COMPUTED),
+                (
+                    "definition.transitions.1.condition",
+                    CONDITION_PATH_COMPUTED
+                ),
+                ("definition.variables.0.source", CONDITION_PATH_NOT_BUILT),
+                ("definition.variables.0.source", CONDITION_PATH_COMPUTED),
+            ]
+        );
+        assert!(details[0].message.contains("`document.lines`"));
+        assert!(details[1].message.contains("`document.foo`"));
+        assert!(details[2].message.contains("`actor.email`"));
+        assert!(details[5].message.contains("`amount`"));
     }
 
     /// One detail per distinct path per expression, in the order read; a path
@@ -1410,6 +1752,238 @@ mod tests {
         });
 
         assert!(condition_path_errors(&definition).is_empty());
+    }
+
+    // -- #789: every way a condition can reach an unbuilt path ----------------
+
+    /// A context shaped as JWSS §6.1's, with `document` carrying unbuilt keys
+    /// when `sentinel` is set, so a condition's answer can be compared with
+    /// them and without them.
+    fn context(sentinel: bool) -> Value {
+        let mut document = serde_json::json!({ "status": "SUBMITTED" });
+
+        if sentinel {
+            document["amount"] = serde_json::json!(7);
+            document["where"] = serde_json::json!("document.amount");
+            document["names"] = serde_json::json!(["formData.absent"]);
+            document["name"] = serde_json::json!("formData.absent");
+            document["level"] = serde_json::json!([1]);
+        }
+
+        serde_json::json!({
+            "document": document,
+            "actor": { "userId": "u", "roles": [], "departmentId": null },
+            "formData": {
+                "on": true,
+                "nums": [1, 2],
+                "rows": [{ "qty": 1, "tags": [1] }, { "qty": 2, "tags": [2] }]
+            },
+            "variables": {}
+        })
+    }
+
+    /// Whether `condition`'s answer changes with the sentinel in the context.
+    fn depends_on_the_sentinel(condition: &Value) -> bool {
+        let evaluator = RuleEvaluator::new();
+
+        evaluator.evaluate(condition, &context(true))
+            != evaluator.evaluate(condition, &context(false))
+    }
+
+    /// Each row was run against `datalogic-rs` 5.2.0, not traced: the premise
+    /// in the closure test fails if a shape stops reading the path.
+    fn shapes_reaching_an_unbuilt_path() -> Vec<(&'static str, Value)> {
+        let amount = var("document.amount");
+        let fold = serde_json::json!({ "+": [var("current"), var("accumulator")] });
+        let jump = serde_json::json!({ "var": [[1], "document.amount"] });
+        let is_seven = serde_json::json!({ "==": [jump, 7] });
+        let chosen = serde_json::json!({ "if": [var("formData.on"), "document.amount", "x"] });
+
+        vec![
+            ("plain", serde_json::json!({ "==": [amount, 7] })),
+            (
+                "H1 over numbers",
+                serde_json::json!({ "==": [
+                    { "reduce": [var("formData.nums"), fold, amount] }, 10
+                ] }),
+            ),
+            (
+                "H1 over a map",
+                serde_json::json!({ "==": [
+                    { "reduce": [
+                        { "map": [var("formData.rows"), var("qty")] }, fold, amount
+                    ] }, 10
+                ] }),
+            ),
+            (
+                "H1 over nothing",
+                serde_json::json!({ "==": [
+                    { "reduce": [var("formData.lines"), fold, amount] }, 7
+                ] }),
+            ),
+            (
+                "H2 a constant if",
+                serde_json::json!({ "==": [
+                    { "var": { "if": [true, "document.amount", "x"] } }, 7
+                ] }),
+            ),
+            (
+                "H2 an if",
+                serde_json::json!({ "==": [{ "var": chosen }, 7] }),
+            ),
+            (
+                "H2 a var",
+                serde_json::json!({ "==": [{ "var": var("document.where") }, 7] }),
+            ),
+            (
+                "H3 opening with an expression",
+                serde_json::json!({ "==": [{ "var": [chosen] }, 7] }),
+            ),
+            (
+                "H3 a chain opening with an expression",
+                serde_json::json!({ "==": [
+                    { "var": [{ "if": [var("formData.on"), "document", "x"] }, "amount"] }, 7
+                ] }),
+            ),
+            (
+                "H3 a computed level",
+                serde_json::json!({ "==": [
+                    { "var": [var("document.level"), "document.amount"] }, 7
+                ] }),
+            ),
+            (
+                "H3 opening with an array",
+                serde_json::json!({ "==": [{ "var": [["document", "amount"]] }, 7] }),
+            ),
+            (
+                "H3 the jump outside a body",
+                serde_json::json!({ "==": [jump, 7] }),
+            ),
+            (
+                "H3 the jump in some",
+                serde_json::json!({ "some": [var("formData.nums"), is_seven] }),
+            ),
+            (
+                "H3 the jump in all",
+                serde_json::json!({ "all": [var("formData.rows"), is_seven] }),
+            ),
+            (
+                "H3 the jump in none",
+                serde_json::json!({ "none": [var("formData.rows"), is_seven] }),
+            ),
+            (
+                "H3 the jump in filter",
+                serde_json::json!({ "!!": [{ "filter": [var("formData.rows"), is_seven] }] }),
+            ),
+            (
+                "H3 the jump in map",
+                serde_json::json!({ "in": [7, { "map": [var("formData.rows"), jump] }] }),
+            ),
+            (
+                "H3 the jump in reduce",
+                serde_json::json!({ "==": [{ "reduce": [var("formData.nums"), jump, 0] }, 7] }),
+            ),
+            (
+                "H3 the jump up two bodies",
+                serde_json::json!({ "some": [var("formData.rows"), { "some": [var("tags"), {
+                    "==": [{ "var": [[2], "document.amount"] }, 7]
+                }] }] }),
+            ),
+            (
+                "H4 a default",
+                serde_json::json!({ "==": [{ "var": ["formData.absent", amount] }, 7] }),
+            ),
+            (
+                "H4 a default beside a number",
+                serde_json::json!({ "==": [{ "var": [0, amount] }, 7] }),
+            ),
+            (
+                "H5 missing with a var",
+                serde_json::json!({ "!": [{ "missing": var("document.names") }] }),
+            ),
+            (
+                "H5 missing with a var in its list",
+                serde_json::json!({ "!": [{ "missing": [var("document.names")] }] }),
+            ),
+            (
+                "H5 missing with a list in its list",
+                serde_json::json!({ "!": [{ "missing": [["document.amount"]] }] }),
+            ),
+            (
+                "H5 missing with a var in a list in its list",
+                serde_json::json!({ "!": [{ "missing": [[var("document.name")]] }] }),
+            ),
+            (
+                "H5 missing with a computed name",
+                serde_json::json!({ "!": [{ "missing": chosen }] }),
+            ),
+            (
+                "H5 missing_some's count",
+                serde_json::json!({ "!": [{ "missing_some": [
+                    amount, ["formData.on", "formData.absent"]
+                ] }] }),
+            ),
+            (
+                "H5 missing_some's names",
+                serde_json::json!({ "!": [{ "missing_some": [1, var("document.names")] }] }),
+            ),
+            (
+                "H5 a var in missing_some's names",
+                serde_json::json!({ "!": [{ "missing_some": [1, [var("document.name")]] }] }),
+            ),
+        ]
+    }
+
+    /// **#789 AC7, the closure test**: where the answer depends on an unbuilt
+    /// path, a publish refuses the condition. The sentinel is what makes the
+    /// premise a run and not a claim, and the failures are gathered so that a
+    /// red run names every shape.
+    #[test]
+    fn a_condition_whose_answer_depends_on_an_unbuilt_path_is_refused() {
+        let mut accepted = Vec::new();
+
+        for (shape, condition) in shapes_reaching_an_unbuilt_path() {
+            assert!(
+                depends_on_the_sentinel(&condition),
+                "{shape} does not read the sentinel: {condition}"
+            );
+
+            if condition_path_errors(&reading(condition, serde_json::json!([]))).is_empty() {
+                accepted.push(shape);
+            }
+        }
+
+        assert!(accepted.is_empty(), "accepted: {accepted:#?}");
+    }
+
+    /// **H6, H8 and H10, run**: nothing else reaches the context. A plain path
+    /// in a body reads the element, a quantifier's third operand is an
+    /// evaluation error, and neither `$` nor `..` climbs out of a scope.
+    #[test]
+    fn a_body_reads_its_element_and_nothing_climbs_out_of_it_by_a_plain_path() {
+        let is_seven = serde_json::json!({ "==": [var("document.amount"), 7] });
+
+        for condition in [
+            serde_json::json!({ "some": [var("formData.nums"), is_seven] }),
+            serde_json::json!({ "some": [var("formData.rows"), is_seven] }),
+            serde_json::json!({ "==": [
+                { "reduce": [var("formData.rows"), var("document.amount"), 0] }, 7
+            ] }),
+            serde_json::json!({ "some": [var("formData.rows"),
+                { "!": [{ "missing": ["document.amount"] }] }] }),
+            serde_json::json!({ "some": [var("formData.nums"), { ">": [var(""), 0] }, is_seven] }),
+            serde_json::json!({ "some": [var("formData.nums"),
+                { "==": [var("../document.amount"), 7] }] }),
+            serde_json::json!({ "some": [var("formData.nums"),
+                { "==": [var("..document.amount"), 7] }] }),
+        ] {
+            assert!(!depends_on_the_sentinel(&condition), "{condition}");
+            assert!(
+                condition_path_errors(&reading(condition.clone(), serde_json::json!([])))
+                    .is_empty(),
+                "{condition}"
+            );
+        }
     }
 
     #[test]
