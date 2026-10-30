@@ -295,11 +295,13 @@ fn refuse_nul_in_body(bytes: &[u8]) -> Result<(), AppError> {
     if !may_hold_nul(bytes) {
         return Ok(());
     }
-    // Not JSON: the deserializer says so in a moment, as it would have
-    // without the escape, and there is no field to name.
-    let Ok(body) = serde_json::from_slice::<serde_json::Value>(bytes) else {
-        return Ok(());
-    };
+    // A body a `Value` cannot read is refused here, not left to `T`: a type
+    // that ignores unknown fields skips the value that failed (a lone
+    // surrogate, a number past `f64`, nesting past 128) and would read a NUL
+    // elsewhere in the same body.
+    let deserializer = &mut serde_json::Deserializer::from_slice(bytes);
+    let body: serde_json::Value =
+        serde_path_to_error::deserialize(deserializer).map_err(rejection)?;
 
     let details: Vec<ValidationDetail> = nul_paths(&body)
         .into_iter()
@@ -338,8 +340,10 @@ fn nul_paths(body: &serde_json::Value) -> Vec<String> {
 
     let mut found = Vec::new();
     visit(body, "", &mut found);
-    // A key and its own value are one path: name it once.
-    found.dedup();
+    // A key and its own value are one path, and `a.b` can be both a nested
+    // member and a key holding a dot: name each path once, where first found.
+    let mut named = std::collections::BTreeSet::new();
+    found.retain(|path| named.insert(path.clone()));
     found
 }
 
@@ -819,6 +823,51 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
             assert_eq!(refused["error"]["code"], "BAD_REQUEST");
         }
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct Loose {
+        name: String,
+    }
+
+    async fn loose(JsonBody(body): JsonBody<Loose>) -> String {
+        body.name
+    }
+
+    #[tokio::test]
+    async fn a_body_a_value_cannot_read_is_a_400_even_for_a_type_that_ignores_fields() {
+        // `Loose` skips `x` without validating it, so these reached the type
+        // with a NUL in `name` while the walk gave up (the gate's finding).
+        let deep = format!("{}{}", "[".repeat(200), "]".repeat(200));
+        for body in [
+            r#"{"name":"a\u0000","x":"\ud800"}"#.to_owned(),
+            r#"{"name":"a\u0000","x":1e400}"#.to_owned(),
+            format!(r#"{{"name":"a\u0000","x":{deep}}}"#),
+        ] {
+            let response = Router::new()
+                .route("/", post(loose))
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body.clone()))
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+        }
+    }
+
+    #[test]
+    fn a_path_found_twice_is_named_once_where_first_found() {
+        let parsed: serde_json::Value =
+            serde_json::from_str(r#"{"a":{"b":"\u0000"},"a!":"\u0000","a.b":"\u0000"}"#)
+                .expect("JSON");
+
+        assert_eq!(nul_paths(&parsed), ["a.b", "a!"]);
     }
 
     #[test]
