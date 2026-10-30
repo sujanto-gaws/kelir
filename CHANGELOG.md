@@ -630,6 +630,20 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **The commit checks read what they skipped**
+  ([#557](https://github.com/sujanto-gaws/kelir/issues/557),
+  [#730](https://github.com/sujanto-gaws/kelir/issues/730),
+  [#731](https://github.com/sujanto-gaws/kelir/issues/731)). The
+  `Commit messages` job now fails a commit whose message follows a closing
+  keyword with a list of issues, because a commit closes issues on its own,
+  and of a list only the first. **That job is required, so such a commit stops
+  the merge.** A list wrapped across lines now counts, in commit messages and
+  pull-request bodies alike. A merge is now a commit of more than one parent,
+  not a title: a commit of one parent titled `Merge …` used to skip every
+  check, and a merge is exempt from the header rule alone. A fence never closed
+  no longer hides a `Co-Authored-By:` line in a message's last paragraph, which
+  is where git reads it. In the closing-keyword check, a fence in a list item
+  no longer hides what follows the item.
 - **A NUL in a path capture or a JSON body string, and a body date before
   4714 BC, are a 422 and not a 500**
   ([#657](https://github.com/sujanto-gaws/kelir/issues/657),

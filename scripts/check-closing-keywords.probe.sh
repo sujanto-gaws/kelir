@@ -320,6 +320,300 @@ probe refused "a link listed after a reference" "Fixes #1, [#2](${ISSUES}/2)"
 probe refused "a reference listed after a link" "Fixes [#1](${ISSUES}/1) and #2"
 probe accepted "a keyword for each link" "Fixes [#1](${ISSUES}/1), fixes [#2](${ISSUES}/2)"
 
+# **A list wrapped across lines is a list** (#730). Commit bodies wrap at 72
+# characters, so a separator can end a line and its reference open the next.
+# Seen red against the check before lines were joined.
+probe refused "a comma ending a line" "Closes #1,
+#2"
+probe refused "'and' ending a line" "Fixes #1 and
+#2"
+probe refused "a comma and 'and' ending a line" "Fixes #1, and
+#2"
+probe refused "a semicolon ending a line" "Closes #1;
+#2"
+probe refused "a wrapped list in a list item" "- Closes #1,
+  #2"
+probe refused "emphasis around the separator" "**Closes #1,**
+#2"
+probe refused "a comma and 'and' with no space, ending a line" "Closes #1,and
+#2"
+# A wrap may fall before the word, not only after it. Seen red with only a
+# line's end read; the '&' with it taken out of the opening separators.
+probe refused "'and' opening a line" "Closes #1
+and #2"
+probe refused "'&' opening a line" "Closes #1
+& #2"
+# Each line of a wrapped list is named, and the report keeps its line numbers.
+# Seen red with a chain joined two lines at a time, and with the joined lines
+# not made up in blanks, which named the wrong line.
+probe_names "a list wrapped over three lines" "Closes #1,
+#2,
+#3" "  FAIL    will not close: #2, #3"
+probe_names "the line after a wrapped list keeps its number" "Closes #1,
+#2
+
+Fixes #3, #4" "  line    Fixes #3, #4"
+
+# A word ending in 'and' is no separator, so the report names the list's own
+# line. Seen red with 'and' read with no boundary before it.
+probe_names "a list after a line ending in a word like 'command'" "Run the command
+Closes #1, #2" "  line    Closes #1, #2"
+
+# What ends a wrap. Seen red with a blank line joined over, with any next line
+# taken as a reference, and with a fence's lines joined across.
+probe accepted "a blank line ends a list" "Closes #1,
+
+#2"
+probe accepted "a next line of prose" "Closes #1,
+which also touches #2"
+probe accepted "a keyword for each across lines" "Closes #1,
+closes #2"
+probe accepted "'and' opening a line after a blank line" "Closes #1
+
+and #2"
+probe accepted "a next line in a fence" "Closes #1,
+${FENCE}
+#2
+${FENCE}"
+
+# **A fence in a list item** (#731). The opener follows the list marker, and
+# the item's indented closing fence closes it. Seen red against the check
+# before the opener read a marker: the closing fence opened a second fence and
+# hid the rest of the body.
+probe refused "a list after a list item's fence" "- ${FENCE}
+  code
+  ${FENCE}
+- Closes #1, #2"
+probe refused "a list after an ordered item's fence" "1. ${FENCE}
+   code
+   ${FENCE}
+2. Closes #1, #2"
+probe refused "a list after a '*' item's tilde fence" "* ~~~
+  code
+  ~~~
+* Closes #1, #2"
+probe accepted "a list in a list item's fence" "- ${FENCE}
+  ${LINE}
+  ${FENCE}"
+probe accepted "a blank line in a list item's fence" "- ${FENCE}
+  code
+
+  ${LINE}
+  ${FENCE}"
+
+# **An unclosed fence stays in its item.** A line indented less than the item's
+# content ends the item, and the fence with it. Seen red with a fence ended only
+# by its closing line; the nested one with the item's own indent ignored; the
+# indented opener with a fence's container read only from its own line.
+probe refused "a fence never closed, then the next item" "- ${FENCE}
+  code
+- Closes #1, #2"
+probe refused "a fence never closed, then a line out of the list" "- ${FENCE}
+  code
+Closes #1, #2"
+probe refused "a nested fence never closed, then the next item" "- a
+  - ${FENCE}
+    code
+  - Closes #1, #2"
+probe refused "an indented fence never closed, then the next item" "- item
+  ${FENCE}
+  code
+- Closes #1, #2"
+# A line still in the item stays in the fence. Seen red with any next line
+# ending it.
+probe accepted "a list indented as the item's fence, never closed" "- ${FENCE}
+  ${LINE}"
+# Past the item, the same line is a fence of its own. Seen red with a fence's
+# end not read again as an opener.
+probe accepted "a fence opening where an item's fence ended" "- ${FENCE}
+  code
+${FENCE}
+${LINE}"
+
+# **A tab moves to a stop of four columns.** Each disagreed with cmark-gfm with a
+# tab counted as one column, and the third was refused on `main`.
+probe refused "a list after an item's fence closed on a tab" "- ${FENCE}
+${TAB}code
+${TAB}${FENCE}
+- Closes #1, #2"
+probe refused "a list after a fence whose marker a tab follows" "-${TAB}${FENCE}
+${TAB}code
+${TAB}${FENCE}
+-${TAB}Closes #1, #2"
+probe refused "a line indented less than a tab's item" "-${TAB}${FENCE}
+  * Closes #1, #2"
+probe accepted "a list a tab keeps in an item's fence" "- ${FENCE}
+${TAB}${LINE}"
+# The stop is counted from the line's start, not from the tab. Each held nothing
+# in the re-gate's mutation of 'columns'; each renders in cmark-gfm as it says.
+# An outer item keeps a short line out of an indented code block.
+# Seen red with the text before a tab ignored, which puts this content at 4.
+probe refused "a line short of a tab's stop past the marker" "- 12.${TAB}${FENCE}
+    ${LINE}"
+# Seen red with a second tab counted from column 0.
+probe accepted "a list two tabs keep in a deep item's fence" "- - - ${FENCE}
+${TAB}${TAB}${LINE}"
+# Seen red with what follows the last tab dropped.
+probe refused "a line short of a space after a tab" "- -${TAB} ${FENCE}
+    ${LINE}"
+# Seen red with a later marker's tab counted from column 0.
+probe accepted "a list a second marker's tab keeps in its fence" "- -${TAB}${FENCE}
+    ${LINE}"
+# Seen red with a line's indent counted from column 1.
+probe refused "a line one column in, below an item's content" "- ${FENCE}
+ ${LINE}"
+
+# **A marker four columns past the open item is no marker** (row 16's gate). It
+# is a paragraph's text, so no fence opens, and cmark-gfm shows the list. `main`
+# refused the first. Seen red with a marker read at any indent.
+probe refused "a marker four columns in, under a paragraph" "text
+    - ${FENCE}
+      Closes #1, #2"
+probe refused "a marker four columns past an item's content" "- item
+      - ${FENCE}
+        Closes #1, #2"
+probe accepted "a marker three columns in, under a paragraph" "text
+   - ${FENCE}
+     Closes #1, #2"
+
+# **Out of any list a fence never closed still hides the rest**, as GitHub
+# renders it. Seen red with every opener's fence ended by a line indented less.
+probe accepted "a list after a fence never closed" "${FENCE}
+${LINE}"
+probe accepted "a list after an indented fence never closed" "  ${FENCE}
+code
+${LINE}"
+probe accepted "a list after a list ended and a fence never closed" "- item
+
+Prose.
+
+  ${FENCE}
+${LINE}"
+
+# **The closing gate's mutation campaign on row 16.** Each shape below held
+# nothing, so the mutation named in its comment stayed green: seen red under
+# that mutation, made to a copy of the check, and green against the check as
+# written. Each shape about a fence in a list renders in cmark-gfm as the probe
+# says, but for the ninth marker, where the check stops reading on purpose.
+
+# Every marker. Seen red with '+' and with ')' taken out of ITEM_MARKER; the
+# nine digits with them narrowed to one digit, and to eight.
+probe refused "a list after a '+' item's fence" "+ ${FENCE}
+  code
+  ${FENCE}
++ Closes #1, #2"
+probe refused "a list after a ')' item's fence" "1) ${FENCE}
+   code
+   ${FENCE}
+2) Closes #1, #2"
+probe refused "a list after a nine-digit item's fence" "123456789. ${FENCE}
+           code
+           ${FENCE}
+${LINE}"
+# Ten digits are no marker, and a marker wants a blank after it. Seen red with
+# any run of digits allowed, and with the blank made optional.
+probe refused "a list after ten digits and a fence" "1234567890. ${FENCE}
+            ${LINE}"
+probe refused "a list after a marker with no blank" "-${FENCE}
+  ${LINE}"
+# A tab may follow a marker, and a marker may be indented. Seen red with the
+# blank narrowed to spaces, and with the marker anchored to column 0.
+probe refused "a list after a marker and a tab" "-${TAB}${FENCE}
+    code
+    ${FENCE}
+- Closes #1, #2"
+probe refused "a list after an indented item's fence" "  - ${FENCE}
+    code
+    ${FENCE}
+  - Closes #1, #2"
+
+# Markers on one line nest, and each moves the content on. Seen red with the
+# offset taken from the last marker alone; the second with one marker read.
+probe refused "a line below the inner item of two on one line" "- - ${FENCE}
+  ${LINE}"
+probe accepted "a list in the fence of two items on one line" "- - ${FENCE}
+    ${LINE}"
+# At most eight are read. Seen red with seven; the ninth with nine, and with
+# no limit, which is also the case MAX_MARKERS exists for.
+probe accepted "a list in the fence of eight items on one line" "- - - - - - - - ${FENCE}
+                ${LINE}"
+probe refused "a ninth marker is not read" "- - - - - - - - - ${FENCE}
+                  ${LINE}"
+
+# A blank line leaves an item open, and a line ends only the items it is
+# indented less than. Seen red with a blank line popping the stack, and with a
+# pop emptying it.
+probe refused "a fence after a blank line in an item, never closed" "- item
+
+  ${FENCE}
+  code
+- Closes #1, #2"
+probe refused "a fence in an outer item, the inner item ended" "- outer
+  - inner
+  ${FENCE}
+  code
+- Closes #1, #2"
+
+# An item's end ends the fence for good. Seen red with the fence left set when
+# the line that ended it fell through.
+probe refused "a list indented as an ended item's fence" "- ${FENCE}
+  code
+Prose.
+  ${LINE}"
+
+# Indent is read from tabs too. Seen red with it counted in spaces alone.
+probe accepted "a list indented by tabs in an item's fence" "- ${FENCE}
+${TAB}${TAB}${LINE}"
+
+# Every separator at a line's end. Seen red with '&', '/' and '+' each taken
+# out of ends_in_separator.
+probe refused "'&' ending a line" "Closes #1 &
+#2"
+probe refused "'/' ending a line" "Resolves #1 /
+#2"
+probe refused "'+' ending a line" "Fixes #1 +
+#2"
+# Spaces after it, which a hard wrap leaves. Seen red with none allowed, after
+# a separator and after 'and'.
+probe refused "a comma and a trailing space" $'Closes #1, \n#2'
+probe refused "'and' and a trailing space" $'Fixes #1 and \n#2'
+# 'and' on a line of its own. Seen red with a blank required before it.
+probe refused "'and' alone on a line, inside a wrap" "Closes #1,
+and
+#2"
+
+# Case, on either side of the join. Seen red with the line before left in its
+# own case, and with the line itself.
+probe refused "an upper-case 'AND' ending the first line" "Fixes #1 AND
+#2"
+probe refused "an upper-case 'AND' opening a line" "Closes #1
+AND #2"
+
+# An opening separator may be indented, as a list item's continuation is, and
+# wants a blank after it. Seen red with it anchored to column 0, and with the
+# blank not required.
+probe refused "'and' opening an item's continuation line" "- Closes #1
+  and #2"
+probe accepted "'&' with no blank opening a line" "Closes #1
+&#2"
+# A blank line ends a wrap that a separator began. Seen red with an opening
+# separator joined whatever the line before it held.
+probe accepted "a comma, a blank line, then 'and'" "Closes #1,
+
+and #2"
+
+# **Time, not an answer** (row 16's gate). A fence's opening run was searched for
+# with a pattern as long as itself, which is cubic: 8 KB of backticks passed 40
+# seconds, and a list marker in front made that a shape `main` read in 0.15
+# seconds. 30 KB is far past where that overruns this budget. Seen red against
+# the check before the run was stepped over.
+RUN="$(printf '`%.0s' {1..30000})"
+for shape in "${RUN}" "- ${RUN}" "- ${RUN}x"; do
+  actual=accepted
+  PR_BODY="${shape}" timeout 20 "${CHECK}" > /dev/null || actual="stopped with $?"
+  report accepted "${actual}" "30 KB of backticks, as '${shape:0:3}'"
+done
+
 # Nothing to read. Seen red with the check made to refuse every body.
 probe accepted "an empty body" ""
 probe accepted "a whitespace-only body" "  ${CR}

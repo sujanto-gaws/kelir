@@ -27,15 +27,90 @@ FENCE='```'
 
 failures=0
 
-# probe <refused|accepted> <name> <body>: one commit on BASE, then the check.
+# probe <refused|accepted> <name> <body> [title]: one commit on BASE, then the
+# check.
 probe() {
-  local expected="$1" name="$2" body="$3"
+  local expected="$1" name="$2" body="$3" title="${4:-test: probe}"
+
+  git -C "${REPO}" checkout -q --detach "${BASE}"
+  git -C "${REPO}" -c user.name=probe -c user.email=probe@example.com \
+    commit -q --allow-empty -F - <<< "${title}
+
+${body}"
+
+  judge "${expected}" "${name}"
+}
+
+# probe_merge <refused|accepted> <name> <title> <body>: a commit of two parents
+# on BASE, then the check.
+probe_merge() {
+  local expected="$1" name="$2" title="$3" body="$4"
+  local side
+
+  git -C "${REPO}" checkout -q --detach "${BASE}"
+  git -C "${REPO}" -c user.name=probe -c user.email=probe@example.com \
+    commit -q --allow-empty -m "chore: side"
+  side="$(git -C "${REPO}" rev-parse HEAD)"
+  git -C "${REPO}" checkout -q --detach "${BASE}"
+  git -C "${REPO}" -c user.name=probe -c user.email=probe@example.com \
+    commit -q --allow-empty -m "chore: main"
+  git -C "${REPO}" -c user.name=probe -c user.email=probe@example.com \
+    merge -q --no-ff -m "${title}
+
+${body}" "${side}"
+
+  judge "${expected}" "${name}"
+}
+
+# probe_octopus <name> <title>: a commit of three parents on BASE, then the
+# check, which should not read it.
+probe_octopus() {
+  local name="$1" title="$2"
+  local tree first second third merge
+
+  tree="$(git -C "${REPO}" rev-parse "${BASE}^{tree}")"
+  first="$(commit_tree "${tree}" -p "${BASE}" -m "chore: first")"
+  second="$(commit_tree "${tree}" -p "${BASE}" -m "chore: second")"
+  third="$(commit_tree "${tree}" -p "${BASE}" -m "chore: third")"
+  merge="$(commit_tree "${tree}" -p "${first}" -p "${second}" -p "${third}" -m "${title}")"
+  git -C "${REPO}" checkout -q --detach "${merge}"
+
+  judge accepted "${name}"
+}
+
+commit_tree() {
+  git -C "${REPO}" -c user.name=probe -c user.email=probe@example.com commit-tree "$@"
+}
+
+# probe_says <name> <body> <text>: refused, and the log holds the text.
+probe_says() {
+  local name="$1" body="$2" text="$3"
+  local output actual=accepted
 
   git -C "${REPO}" checkout -q --detach "${BASE}"
   git -C "${REPO}" -c user.name=probe -c user.email=probe@example.com \
     commit -q --allow-empty -F - <<< "test: probe
 
 ${body}"
+
+  if ! output="$(cd "${REPO}" && "${CHECK}" "${BASE}" HEAD)"; then
+    actual=refused
+  fi
+  if [[ "${actual}" == refused ]] && ! grep -qF -- "${text}" <<< "${output}"; then
+    actual="refused without '${text}'"
+  fi
+
+  if [[ "${actual}" == refused ]]; then
+    echo "  ok    refused  ${name}"
+  else
+    echo "  FAIL  ${name}: expected refused, was ${actual}"
+    failures=$((failures + 1))
+  fi
+}
+
+# judge <refused|accepted> <name>: the check over what HEAD holds.
+judge() {
+  local expected="$1" name="$2"
 
   local actual=accepted
   if ! (cd "${REPO}" && "${CHECK}" "${BASE}" HEAD > /dev/null); then
@@ -93,6 +168,82 @@ Claude-Session: ${UUID}
 
 ${CLAUDE}"
 
+# **A fence never closed hides only what is not the trailer block** (#557,
+# record 19's P15). Each was accepted before this change. Seen red with the
+# held lines never printed, and the next with them held past a blank line.
+probe refused "the co-author inside a fence never closed" "${FENCE}text
+${CLAUDE}"
+probe refused "a fence opened in a list, never closed, the co-author after" "- the range:
+  ${FENCE}text
+  quoted
+
+${CLAUDE}"
+probe refused "a blank line closing the message after a fence never closed" "${FENCE}text
+${CLAUDE}
+"
+# What the fence still hides, though nothing closes it: a line quoted in an
+# earlier paragraph. Seen red with a fence never closed taken for no fence.
+probe refused "a session line quoted before the trailers, fence never closed" "${FENCE}text
+Claude-Session: ${UUID}
+
+${CLAUDE}"
+probe accepted "a human commit quoting a trailer, fence never closed" "${FENCE}text
+${CLAUDE}
+
+Written by hand."
+
+# **A merge is a commit of more than one parent, not a title** (#557). Each
+# `Merge …` refused below was accepted before this change. Seen red with the
+# skip keyed on the title again; the two-parent refusals with a merge's message
+# left unread, which let one land with no session line.
+probe refused "one parent, a Merge title, the co-author, no session line" \
+  "${CLAUDE}" "Merge the outbox work"
+probe refused "one parent, a Merge title, and no co-author" \
+  "Written by hand." "Merge the outbox work"
+probe_merge refused "two parents, a Merge title, the co-author, no session line" \
+  "Merge branch 'main' into work" "${CLAUDE}"
+probe_merge accepted "two parents, a Merge title, the co-author and its session line" \
+  "Merge branch 'main' into work" "Claude-Session: ${UUID}
+${CLAUDE}"
+probe_merge accepted "two parents and git's own message" "Merge branch 'main' into work" ""
+probe_merge accepted "two parents and another title" "Bring main in" "Written by hand."
+
+# **A commit's body closes issues too** (#730): `Closes #1, #2` closes #1 alone,
+# as it does in a pull-request body. Seen red with the closing-keyword check
+# not called; the wrap against the check before it joined lines.
+probe refused "a list in a commit body" "Closes #1, #2"
+probe refused "a list wrapped across a commit body" "Closes #1,
+#2"
+probe refused "a list on the commit's first line" "" "fix: closes #1, #2"
+probe accepted "one keyword per line in a commit body" "Closes #1
+Closes #2"
+probe accepted "a list quoted in a commit body's fence" "Refused:
+
+${FENCE}
+Closes #1, #2
+${FENCE}"
+probe_merge refused "two parents and a list in the body" "Merge branch 'main' into work" \
+  "Closes #1, #2"
+
+# **The closing gate's mutation campaign on row 16.** Each shape held nothing,
+# so the mutation named stayed green: seen red under it, in a copy of the check.
+#
+# Each fence starts with nothing held, so a line a closed fence hid is not
+# revealed by one left open after it. Seen red with `held` kept at a fence line.
+probe refused "a session line in a closed fence, then a fence never closed" "${CLAUDE}
+
+${FENCE}text
+Claude-Session: ${UUID}
+${FENCE}
+
+${FENCE}text
+quoted"
+# More than one parent, not exactly two. Seen red with the skip narrowed to two.
+probe_octopus "three parents and another title" "Bring three lines in"
+# The commit's refusal says what to write. Seen red with the report's lines not
+# printed, which left a failure naming nothing.
+probe_says "the log names what will not close" "Closes #1, #2" "write   Closes #2"
+
 # Controls, last: each shape above has a correct neighbour that still passes.
 probe accepted "a UUID in the trailer block" "Claude-Session: ${UUID}
 ${CLAUDE}"
@@ -108,6 +259,14 @@ ${FENCE}
 Claude-Session: ${UUID}
 ${CLAUDE}"
 probe accepted "a human commit with no co-author" "Written by hand."
+probe accepted "the commit's own trailers after a fence never closed" "${FENCE}text
+quoted
+
+Claude-Session: ${UUID}
+${CLAUDE}"
+probe accepted "its own trailers inside a fence never closed" "${FENCE}text
+Claude-Session: ${UUID}
+${CLAUDE}"
 probe accepted "a human commit quoting a Claude trailer in a fence" "The trailer looks like this:
 
 ~~~
@@ -117,6 +276,40 @@ probe accepted "a human commit naming the trailer mid-sentence" \
   "Whether Co-authored-by: Claude belongs on a human commit was asked and answered."
 probe accepted "a human co-author whose address only contains anthropic" \
   "Co-authored-by: Jane Doe <jane@anthropicfans.org>"
+
+# **A closing-keyword check that does not finish is not a list.** It stays a
+# refusal, and it says what happened. Seen red with every failure of that script
+# reported as a list, which sent the author looking for one that was not there.
+# The log names the cause and no list, and a `FAIL` in a path is not a report's
+# own line: seen red with the report not printed, with the branch falling through
+# to the list's message, and with that match not anchored.
+STUB="$(mktemp -d)"
+cp "${CHECK}" "${STUB}/"
+printf '#!/usr/bin/env bash\necho "/tmp/FAIL/check: Argument list too long" >&2\nexit 126\n' \
+  > "${STUB}/check-closing-keywords.sh"
+chmod +x "${STUB}/check-closing-keywords.sh"
+git -C "${REPO}" checkout -q --detach "${BASE}"
+git -C "${REPO}" -c user.name=probe -c user.email=probe@example.com \
+  commit -q --allow-empty -m "test: probe"
+actual=accepted
+if ! output="$(cd "${REPO}" && "${STUB}/check-commit-messages.sh" "${BASE}" HEAD)"; then
+  actual=refused
+fi
+rm -rf "${STUB}"
+if [[ "${actual}" == refused ]]; then
+  if ! grep -q 'could not read this message' <<< "${output}" \
+    || grep -q 'a closing keyword followed by a list' <<< "${output}"; then
+    actual="refused for a list it does not hold"
+  elif ! grep -q 'Argument list too long' <<< "${output}"; then
+    actual="refused without the cause"
+  fi
+fi
+if [[ "${actual}" == refused ]]; then
+  echo "  ok    refused  a closing-keyword check that did not finish"
+else
+  echo "  FAIL  a closing-keyword check that did not finish: was ${actual}"
+  failures=$((failures + 1))
+fi
 
 if (( failures > 0 )); then
   echo
