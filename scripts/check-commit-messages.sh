@@ -16,9 +16,10 @@
 # A commit's body closes issues on its own, as #707's squash commit closed #673,
 # and of a list after one keyword it closes only the first.
 #
-# **A merge is a commit of two parents, and nothing here reads one** (#557). The
-# title is not what makes it one: a commit of one parent titled `Merge the
-# outbox work` used to skip every check.
+# **A merge is a commit of more than one parent, and only its header is exempt**
+# (#557). The title is not what makes it one: a commit of one parent titled
+# `Merge the outbox work` used to skip every check. Its message is still read,
+# because a merge can land as it is on this repository, keywords and all.
 #
 # Usage: scripts/check-commit-messages.sh <base-ref> [head-ref]
 
@@ -198,8 +199,17 @@ check_closing_keywords() {
     return 0
   fi
 
+  # Refused either way: a message past the kernel's 128 KB for one variable never
+  # reaches the script, and that is no reason to name a list it does not hold.
+  if ! grep -q '^  FAIL ' <<< "${report}"; then
+    echo "  FAIL  ${short}  the closing-keyword check could not read this message"
+    head -3 <<< "${report}" | sed 's/^/        /'
+    failures=$((failures + 1))
+    return 0
+  fi
+
   echo "  FAIL  ${short}  a closing keyword followed by a list closes only the first"
-  grep -E '^  (line|FAIL|write) ' <<< "${report}" | sed 's/^/      /' || true
+  grep -E '^  (line|FAIL|write) ' <<< "${report}" | sed 's/^/      /'
   echo "        give each issue its own keyword, one per line;"
   echo "        see docs/standards/05. Git Workflow.md §4"
   failures=$((failures + 1))
@@ -216,11 +226,10 @@ fi
 
 while read -r sha parents; do
   if [[ "${parents}" == *' '* ]]; then
-    echo "  skip  ${sha:0:8}  merge commit"
-    continue
+    echo "  skip  ${sha:0:8}  a merge commit's header"
+  else
+    check_header "${sha}" "$(git log -1 --format=%s "${sha}")"
   fi
-  header="$(git log -1 --format=%s "${sha}")"
-  check_header "${sha}" "${header}"
   check_session "${sha}"
   check_closing_keywords "${sha}"
 done <<< "${commits}"

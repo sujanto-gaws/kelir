@@ -499,12 +499,15 @@ jobs:
     # Only meaningful on pull requests: the branch's commits are checked against
     # the commit message convention before they can be squashed onto main.
     if: github.event_name == 'pull_request'
+    # A message is anyone's text, and this job is required: without this a
+    # message the check is slow on holds the run for GitHub's six hours.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - name: Validate headers against the commit convention
+      - name: Validate messages against the commit convention
         run: |
           ./scripts/check-commit-messages.sh \
             "origin/${{ github.base_ref }}" \

@@ -335,6 +335,8 @@ probe refused "a wrapped list in a list item" "- Closes #1,
   #2"
 probe refused "emphasis around the separator" "**Closes #1,**
 #2"
+probe refused "a comma and 'and' with no space, ending a line" "Closes #1,and
+#2"
 # A wrap may fall before the word, not only after it. Seen red with only a
 # line's end read; the '&' with it taken out of the opening separators.
 probe refused "'and' opening a line" "Closes #1
@@ -422,6 +424,21 @@ probe accepted "a fence opening where an item's fence ended" "- ${FENCE}
   code
 ${FENCE}
 ${LINE}"
+
+# **A tab moves to a stop of four columns.** Each disagreed with cmark-gfm with a
+# tab counted as one column, and the third was refused on `main`.
+probe refused "a list after an item's fence closed on a tab" "- ${FENCE}
+${TAB}code
+${TAB}${FENCE}
+- Closes #1, #2"
+probe refused "a list after a fence whose marker a tab follows" "-${TAB}${FENCE}
+${TAB}code
+${TAB}${FENCE}
+-${TAB}Closes #1, #2"
+probe refused "a line indented less than a tab's item" "-${TAB}${FENCE}
+  * Closes #1, #2"
+probe accepted "a list a tab keeps in an item's fence" "- ${FENCE}
+${TAB}${LINE}"
 
 # **Out of any list a fence never closed still hides the rest**, as GitHub
 # renders it. Seen red with every opener's fence ended by a line indented less.
@@ -548,6 +565,18 @@ probe accepted "'&' with no blank opening a line" "Closes #1
 probe accepted "a comma, a blank line, then 'and'" "Closes #1,
 
 and #2"
+
+# **Time, not an answer** (row 16's gate). A fence's opening run was searched for
+# with a pattern as long as itself, which is cubic: 8 KB of backticks passed 40
+# seconds, and a list marker in front made that a shape `main` read in 0.15
+# seconds. 30 KB, because a longer body is past what the Windows environment
+# hands a child. Seen red against the check before the run was stepped over.
+RUN="$(printf '`%.0s' {1..30000})"
+for shape in "${RUN}" "- ${RUN}" "- ${RUN}x"; do
+  actual=accepted
+  PR_BODY="${shape}" timeout 20 "${CHECK}" > /dev/null || actual="stopped with $?"
+  report accepted "${actual}" "30 KB of backticks, as '${shape:0:3}'"
+done
 
 # Nothing to read. Seen red with the check made to refuse every body.
 probe accepted "an empty body" ""

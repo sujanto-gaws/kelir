@@ -75,13 +75,13 @@
 #   read below, and opens no fence.
 # - **A fence may open after a list marker, and it stays inside its item**
 #   (#731, CommonMark §5.2). A marker is `-`, `+`, `*`, or up to nine digits and
-#   `.` or `)`, followed by space, and up to eight may nest on a line. A line
+#   `.` or `)`, followed by a space or a tab, and up to eight may nest on a
+#   line. A tab moves to the next stop of four columns (CommonMark §2.2). A line
 #   that holds text and is indented less than the innermost open item's content
 #   ends that item, and a fence inside it, closed or not, so a fence never
 #   closed hides what is left of its item and no more. A fence in no item still
 #   hides the rest of the body. A paragraph's lazy continuation line is read
-#   as ending the item, so a fence after one is a fence in no item, and a tab
-#   counts as one column.
+#   as ending the item, so a fence after one is a fence in no item.
 # - An inline code span is removed: a run of backticks to the next run of the
 #   same length on the same line. A run with no partner is text.
 #
@@ -101,6 +101,9 @@
 #   the locale below), and at most eight list markers are read from a line;
 # - comments are cut out after one split of the body at every `<!--`, and
 #   lines are split once, by `mapfile`;
+# - a fence's opening run is measured and stepped over, never searched for: a
+#   pattern as long as the run, tried at each place on the line, took cubic time
+#   and was seen to pass 40 seconds on 8 KB of backticks (row 16's gate);
 # - a line's backtick runs are split out once, and each run is paired with the
 #   next run of its length through a table built in one pass from the right;
 # - emphasis is removed by one `sed` over the whole body, wrapped lines are
@@ -162,9 +165,11 @@ MAX_MARKERS=8
 # Lines read as one where a list wraps. Each line is printed without its line
 # break until the next shows whether it joins, and a joined line is made up by
 # a blank after the chain, so `grep -n` numbers the lines as `lines` does.
+# Joining too much costs nothing, since LIST still wants a separator straight
+# after a reference, so `and` needs no boundary: `Closes #1,and` wraps too.
 JOIN_WRAPPED='
   function ends_in_separator(l) {
-    return l ~ /[,;&\/+][[:blank:]]*$/ || l ~ /(^|[[:blank:]])and[[:blank:]]*$/
+    return l ~ /[,;&\/+][[:blank:]]*$/ || l ~ /and[[:blank:]]*$/
   }
   function opens_with_separator(l) { return l ~ /^[[:blank:]]*(and|&)[[:blank:]]/ }
   function blanks() { for (; owed > 0; owed--) printf "\n" }
@@ -266,6 +271,28 @@ without_code_spans() {
   text="${text%x}"
 }
 
+# columns <column> <text>: sets `column` to where text starting there ends.
+# Text and tabs alternate, split once at STX, which no body holds by now, with
+# an `x` on the end because a split drops a last empty field.
+columns() {
+  column="$1"
+  local text="$2"
+  if [[ "${text}" != *$'\t'* ]]; then
+    column=$(( column + ${#text} ))
+    return 0
+  fi
+
+  local IFS=$'\x02' i last
+  local -a fields
+  # shellcheck disable=SC2206 # Split at the marks, by design; `set -f` holds.
+  fields=( ${text//$'\t'/$'\x02'}x )
+  last=$(( ${#fields[@]} - 1 ))
+  for (( i = 0; i < last; i++ )); do
+    column=$(( ( (column + ${#fields[i]}) / 4 + 1 ) * 4 ))
+  done
+  column=$(( column + ${#fields[last]} - 1 ))
+}
+
 # Each line as matching reads it: empty inside a fence, its code spans removed
 # outside one. The line numbers stay those of `lines`.
 #
@@ -276,9 +303,10 @@ fence=''
 fence_item=0
 items=()
 for line in "${lines[@]}"; do
-  [[ "${line}" =~ ^[[:blank:]]*(.?) ]]
-  has_text="${BASH_REMATCH[1]}"
-  indent=$(( ${#BASH_REMATCH[0]} - ${#has_text} ))
+  [[ "${line}" =~ ^([[:blank:]]*)(.?) ]]
+  has_text="${BASH_REMATCH[2]}"
+  columns 0 "${BASH_REMATCH[1]}"
+  indent="${column}"
 
   if [[ -n "${fence}" ]]; then
     if [[ -z "${has_text}" ]] || (( indent >= fence_item )); then
@@ -303,14 +331,16 @@ for line in "${lines[@]}"; do
   offset=0
   for (( markers = 0; markers < MAX_MARKERS; markers++ )); do
     [[ "${rest}" =~ ${ITEM_MARKER} ]] || break
-    offset=$(( offset + ${#BASH_REMATCH[0]} ))
+    marker="${BASH_REMATCH[0]}"
+    columns "${offset}" "${marker}"
+    offset="${column}"
     items+=("${offset}")
-    rest="${rest:${#BASH_REMATCH[0]}}"
+    rest="${rest:${#marker}}"
   done
 
   # A backtick fence whose line holds another backtick is a code span instead.
   if [[ "${rest}" =~ ${FENCE_OPEN} ]] \
-    && [[ "${BASH_REMATCH[1]}" == '~'* || "${rest#*"${BASH_REMATCH[1]}"}" != *'`'* ]]; then
+    && [[ "${BASH_REMATCH[1]}" == '~'* || "${rest:${#BASH_REMATCH[0]}}" != *'`'* ]]; then
     fence="${BASH_REMATCH[1]}"
     fence_item=0
     if (( ${#items[@]} > 0 )); then

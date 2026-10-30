@@ -192,15 +192,20 @@ ${CLAUDE}
 
 Written by hand."
 
-# **A merge is a commit of two parents, not a title** (#557). Each `Merge …`
-# below was accepted before this change. Seen red with the skip keyed on the
-# title again.
+# **A merge is a commit of more than one parent, not a title** (#557). Each
+# `Merge …` refused below was accepted before this change. Seen red with the
+# skip keyed on the title again; the two-parent refusals with a merge's message
+# left unread, which let one land with no session line.
 probe refused "one parent, a Merge title, the co-author, no session line" \
   "${CLAUDE}" "Merge the outbox work"
 probe refused "one parent, a Merge title, and no co-author" \
   "Written by hand." "Merge the outbox work"
-probe_merge accepted "two parents, a Merge title, the co-author, no session line" \
+probe_merge refused "two parents, a Merge title, the co-author, no session line" \
   "Merge branch 'main' into work" "${CLAUDE}"
+probe_merge accepted "two parents, a Merge title, the co-author and its session line" \
+  "Merge branch 'main' into work" "Claude-Session: ${UUID}
+${CLAUDE}"
+probe_merge accepted "two parents and git's own message" "Merge branch 'main' into work" ""
 probe_merge accepted "two parents and another title" "Bring main in" "Written by hand."
 
 # **A commit's body closes issues too** (#730): `Closes #1, #2` closes #1 alone,
@@ -217,7 +222,7 @@ probe accepted "a list quoted in a commit body's fence" "Refused:
 ${FENCE}
 Closes #1, #2
 ${FENCE}"
-probe_merge accepted "two parents and a list in the body" "Merge branch 'main' into work" \
+probe_merge refused "two parents and a list in the body" "Merge branch 'main' into work" \
   "Closes #1, #2"
 
 # **The closing gate's mutation campaign on row 16.** Each shape held nothing,
@@ -271,6 +276,32 @@ probe accepted "a human commit naming the trailer mid-sentence" \
   "Whether Co-authored-by: Claude belongs on a human commit was asked and answered."
 probe accepted "a human co-author whose address only contains anthropic" \
   "Co-authored-by: Jane Doe <jane@anthropicfans.org>"
+
+# **A closing-keyword check that does not finish is not a list.** It stays a
+# refusal, and it says what happened. Seen red with every failure of that script
+# reported as a list, which sent the author looking for one that was not there.
+STUB="$(mktemp -d)"
+cp "${CHECK}" "${STUB}/"
+printf '#!/usr/bin/env bash\necho "Argument list too long" >&2\nexit 126\n' \
+  > "${STUB}/check-closing-keywords.sh"
+chmod +x "${STUB}/check-closing-keywords.sh"
+git -C "${REPO}" checkout -q --detach "${BASE}"
+git -C "${REPO}" -c user.name=probe -c user.email=probe@example.com \
+  commit -q --allow-empty -m "test: probe"
+actual=accepted
+if ! output="$(cd "${REPO}" && "${STUB}/check-commit-messages.sh" "${BASE}" HEAD)"; then
+  actual=refused
+fi
+rm -rf "${STUB}"
+if [[ "${actual}" == refused ]] && ! grep -q 'could not read this message' <<< "${output}"; then
+  actual="refused for a list it does not hold"
+fi
+if [[ "${actual}" == refused ]]; then
+  echo "  ok    refused  a closing-keyword check that did not finish"
+else
+  echo "  FAIL  a closing-keyword check that did not finish: was ${actual}"
+  failures=$((failures + 1))
+fi
 
 if (( failures > 0 )); then
   echo
