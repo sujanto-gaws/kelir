@@ -53,6 +53,7 @@ Early exploratory documents. Still valid for intent and examples, but **supersed
 | [04. Kelir Plugin and Extension Management Concept.md](architectures/04.%20Kelir%20Plugin%20and%20Extension%20Management%20Concept.md) | Plugin platform: registry, lifecycle, permissions, hooks, settings, sandboxing |
 | [05. Core - Master Data - Party.md](architectures/05.%20Core%20-%20Master%20Data%20-%20Party.md) | Party master-data model as a JSON Schema aggregate (OFBiz-style) |
 | [06. Building an ERP on Kelir.md](architectures/06.%20Building%20an%20ERP%20on%20Kelir.md) | **Draft, nothing scheduled** — the layering an ERP over Kelir would take: what the platform provides, the ledger concepts it has none of, the posting seam, and the platform gaps an ERP forces. Scope is issue [#371](https://github.com/sujanto-gaws/kelir/issues/371) |
+| [07. Entity and Business Metadata.md](architectures/07.%20Entity%20and%20Business%20Metadata.md) | **Draft, nothing scheduled** — the post-`v1.0.0` theme **D-124** approved: tenant-defined entities (EDS), line records with identity, typed relations, revisions with migration, computed fields, invariants, lifecycle and events; input to the storage ADR D-124 owes first. Its ten decisions are Product Backlog §6.2's D-125 to D-134 |
 
 ### architectures/adr/
 
