@@ -280,9 +280,12 @@ probe accepted "a human co-author whose address only contains anthropic" \
 # **A closing-keyword check that does not finish is not a list.** It stays a
 # refusal, and it says what happened. Seen red with every failure of that script
 # reported as a list, which sent the author looking for one that was not there.
+# The log names the cause and no list, and a `FAIL` in a path is not a report's
+# own line: seen red with the report not printed, with the branch falling through
+# to the list's message, and with that match not anchored.
 STUB="$(mktemp -d)"
 cp "${CHECK}" "${STUB}/"
-printf '#!/usr/bin/env bash\necho "Argument list too long" >&2\nexit 126\n' \
+printf '#!/usr/bin/env bash\necho "/tmp/FAIL/check: Argument list too long" >&2\nexit 126\n' \
   > "${STUB}/check-closing-keywords.sh"
 chmod +x "${STUB}/check-closing-keywords.sh"
 git -C "${REPO}" checkout -q --detach "${BASE}"
@@ -293,8 +296,13 @@ if ! output="$(cd "${REPO}" && "${STUB}/check-commit-messages.sh" "${BASE}" HEAD
   actual=refused
 fi
 rm -rf "${STUB}"
-if [[ "${actual}" == refused ]] && ! grep -q 'could not read this message' <<< "${output}"; then
-  actual="refused for a list it does not hold"
+if [[ "${actual}" == refused ]]; then
+  if ! grep -q 'could not read this message' <<< "${output}" \
+    || grep -q 'a closing keyword followed by a list' <<< "${output}"; then
+    actual="refused for a list it does not hold"
+  elif ! grep -q 'Argument list too long' <<< "${output}"; then
+    actual="refused without the cause"
+  fi
 fi
 if [[ "${actual}" == refused ]]; then
   echo "  ok    refused  a closing-keyword check that did not finish"

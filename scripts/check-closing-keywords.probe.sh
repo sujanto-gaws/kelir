@@ -439,6 +439,24 @@ probe refused "a line indented less than a tab's item" "-${TAB}${FENCE}
   * Closes #1, #2"
 probe accepted "a list a tab keeps in an item's fence" "- ${FENCE}
 ${TAB}${LINE}"
+# The stop is counted from the line's start, not from the tab. Each held nothing
+# in the re-gate's mutation of 'columns'; each renders in cmark-gfm as it says.
+# An outer item keeps a short line out of an indented code block.
+# Seen red with the text before a tab ignored, which puts this content at 4.
+probe refused "a line short of a tab's stop past the marker" "- 12.${TAB}${FENCE}
+    ${LINE}"
+# Seen red with a second tab counted from column 0.
+probe accepted "a list two tabs keep in a deep item's fence" "- - - ${FENCE}
+${TAB}${TAB}${LINE}"
+# Seen red with what follows the last tab dropped.
+probe refused "a line short of a space after a tab" "- -${TAB} ${FENCE}
+    ${LINE}"
+# Seen red with a later marker's tab counted from column 0.
+probe accepted "a list a second marker's tab keeps in its fence" "- -${TAB}${FENCE}
+    ${LINE}"
+# Seen red with a line's indent counted from column 1.
+probe refused "a line one column in, below an item's content" "- ${FENCE}
+ ${LINE}"
 
 # **Out of any list a fence never closed still hides the rest**, as GitHub
 # renders it. Seen red with every opener's fence ended by a line indented less.
