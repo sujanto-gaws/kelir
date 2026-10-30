@@ -654,8 +654,11 @@ export function createFormEvaluation(
       )) {
         const outcome = validateField(component, scope[component.key], scope)
 
+        // Keyed by scope as well as name: a `client` and a `both` give-up say
+        // different things about who decides them, and one entry would make
+        // whichever came last speak for both (#624).
         for (const rule of outcome.undecided) {
-          undecided.set(rule.rule, rule)
+          undecided.set(`${rule.rule}:${rule.scope}`, rule)
         }
 
         if (outcome.violation) {

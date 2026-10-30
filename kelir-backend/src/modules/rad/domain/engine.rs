@@ -67,7 +67,9 @@ use super::jfss::{
     check_operators, container_children_at, data_key, role_of, row_template, CALCULATE_OPERATORS,
     CONDITIONAL_OPERATORS,
 };
-use super::validation::{is_registered, refuse_pattern, DivergentConstruct, PatternRefusal};
+use super::validation::{
+    is_registered, refuse_pattern, BacktrackingShape, DivergentConstruct, PatternRefusal,
+};
 use crate::error::ValidationDetail;
 
 /// The S10.3 `code` a cyclic definition carries, at either moment.
@@ -111,6 +113,17 @@ pub(crate) const PATTERN_CLASS_NOT_PINNED: &str = "PATTERN_CLASS_NOT_PINNED";
 /// author reading this one has to re-express the intent rather than transcribe
 /// it ([#413](https://github.com/sujanto-gaws/kelir/issues/413)).
 pub(crate) const PATTERN_CONSTRUCT_NOT_PORTABLE: &str = "PATTERN_CONSTRUCT_NOT_PORTABLE";
+
+/// A pattern in a shape the browser's engine may take exponential time on: a
+/// group repeated without an upper bound around one repeated item or an
+/// alternation, such as `(a+)+` or `(cat|dog)+`.
+///
+/// **It is a separate code because the remedy differs in kind again.** The
+/// refusal is not about a construct the two sides spell differently; the
+/// browser backtracks and this crate does not, so the rewrite changes the
+/// shape rather than a construct
+/// ([#604](https://github.com/sujanto-gaws/kelir/issues/604), **D-93**).
+pub(crate) const PATTERN_BACKTRACKING_SHAPE: &str = "PATTERN_BACKTRACKING_SHAPE";
 
 /// The S10.3 `code` a rule carries when the parameter it cannot work without is
 /// absent, `""` or `[]`.
@@ -922,6 +935,10 @@ fn json_kind(value: &Value) -> &'static str {
 /// **The `regex` rule's `flags` are read, because they change what compiles.**
 /// A pattern is built here exactly as it will be built at submit, which is what
 /// makes this check a promise rather than an approximation.
+///
+/// **A rule's `scope` is not read.** The server skips a `client`-scoped rule at
+/// submit, and the browser still runs it, so a shape the browser backtracks on
+/// is refused there too ([#604](https://github.com/sujanto-gaws/kelir/issues/604)).
 fn check_patterns(entry: &Entry<'_>, details: &mut Vec<ValidationDetail>) {
     if let Some(pattern) = entry
         .component
@@ -1014,9 +1031,53 @@ fn refuse(
                 ),
             )
         }
+        PatternRefusal::Backtracking(shape) => (
+            PATTERN_BACKTRACKING_SHAPE,
+            format!(
+                "`{key}`'s pattern `{pattern}` {}",
+                backtracking_reason(shape)
+            ),
+        ),
     };
 
     details.push(ValidationDetail::new(path, rule, code, message));
+}
+
+/// The sentence a backtracking shape earns, after the pattern it names.
+///
+/// **It names the shape found and claims nothing about what the check
+/// accepts** (retrospective 17's second action, D-88's stopping rule). The
+/// rewrite each arm offers matches the values of the example it is given
+/// for, and the limit says what that is not: a claim about how long any
+/// pattern takes a browser.
+fn backtracking_reason(shape: BacktrackingShape) -> String {
+    /// What the refusal does not promise, said once.
+    const SHAPE_LIMIT: &str = "This check refuses this shape and says nothing about any \
+         other pattern: one it accepts is one it does not name, and a browser may still take \
+         exponential time on it";
+
+    let (found, remedy) = match shape {
+        BacktrackingShape::RepeatedQuantifier => (
+            "repeats a group without an upper bound, and the group holds one item that is \
+             itself repeated without one, as in `(a+)+`",
+            "Repeat once: `(a+)+` matches the values `a+` does",
+        ),
+        BacktrackingShape::RepeatedAlternation => (
+            "repeats a group without an upper bound, and the group's alternatives are \
+             separated by `|`, as in `(cat|dog)+`",
+            "Drop the repeat, or repeat a group of more than one item. Where every \
+             alternative is one character, one class matches the same values: \
+             `(?:[a-z]|[a-z0-9])*` matches the values `[a-z0-9]*` does. The shape is \
+             refused whether or not the alternatives can match the same text, so \
+             `(png|jpg)+` is refused too",
+        ),
+    };
+
+    format!(
+        "{found}. A browser backtracks on this shape, and this backend does not: on a value \
+         that does not match, a browser may take exponential time, and the page stops \
+         responding while it does. {remedy}. {SHAPE_LIMIT}"
+    )
 }
 
 /// The code and the sentence a divergent construct earns.
@@ -2005,6 +2066,104 @@ mod tests {
         let details = definition_errors(&definition(vec![component]));
 
         assert_eq!(codes(&details), [PATTERN_NOT_COMPILABLE]);
+    }
+
+    /// **[#604] AC1 at the unit: both shapes, in both places a pattern sits.**
+    ///
+    /// **The second subject is the group of more than one item**
+    /// ([coding standard] §2.9), the edge the product owner kept open on
+    /// 2026-10-30: `([a-z]+\.)+` stores beside each refused pattern, so the
+    /// test cannot pass by refusing every repeated group that holds a repeat.
+    ///
+    /// [#604]: https://github.com/sujanto-gaws/kelir/issues/604
+    /// [coding standard]: ../../../../../docs/standards/01.%20Coding%20Standard.md
+    #[test]
+    fn refuses_a_backtracking_shape_and_not_a_group_of_more_than_one_item() {
+        for (pattern, found) in [
+            ("^(a+)+$", "is itself repeated without one"),
+            ("(?:[a-z]|[a-z0-9])*$", "alternatives are separated by `|`"),
+        ] {
+            let mut rule = plain("handle");
+            rule["rules"] = json!([{
+                "rule": "regex", "scope": "client",
+                "params": {"pattern": pattern},
+                "message": "m",
+            }]);
+            let mut keyword = plain("alias");
+            keyword["validation"] = json!({ "pattern": pattern });
+            let mut labels = plain("domain");
+            labels["validation"] = json!({"pattern": r"^([a-z0-9-]+\.)+[a-z]{2,}$"});
+
+            let details = definition_errors(&definition(vec![rule, keyword, labels]));
+
+            assert_eq!(
+                codes(&details),
+                [PATTERN_BACKTRACKING_SHAPE, PATTERN_BACKTRACKING_SHAPE],
+                "`{pattern}`: {details:?}"
+            );
+            assert_eq!(
+                details[0].path,
+                "definition.components.0.rules.0.params.pattern"
+            );
+            assert_eq!(details[0].rule, "regex");
+            assert_eq!(
+                details[1].path,
+                "definition.components.1.validation.pattern"
+            );
+            assert_eq!(details[1].rule, "pattern");
+            for detail in &details {
+                assert!(detail.message.contains(found), "{}", detail.message);
+                assert!(detail.message.contains(pattern), "{}", detail.message);
+            }
+        }
+    }
+
+    /// **[#604]: a pattern both divergent and backtracking reports the
+    /// divergence alone**, as one both uncompilable and unpinned reports only
+    /// the first. `(\w*)*` is in #604's own list of shapes; its `\w` is the
+    /// rewrite an author has to make first.
+    ///
+    /// [#604]: https://github.com/sujanto-gaws/kelir/issues/604
+    #[test]
+    fn a_pattern_that_is_both_divergent_and_backtracking_reports_only_the_divergence() {
+        let mut component = plain("handle");
+        component["validation"] = json!({"pattern": r"(\w*)*"});
+
+        let details = definition_errors(&definition(vec![component]));
+
+        assert_eq!(codes(&details), [PATTERN_CLASS_NOT_PINNED]);
+    }
+
+    /// **[#604] AC3: the refusal claims nothing about what the check accepts.**
+    ///
+    /// Retrospective 17's second action and D-88's stopping rule: a claim that
+    /// a pattern is fine is the kind a probe splits. So every shape's message
+    /// carries the limit, and none uses a word that would make the accepted
+    /// pattern, or the rewrite offered, a promise about time.
+    #[test]
+    fn no_backtracking_refusal_claims_what_it_accepts_is_quick() {
+        for shape in [
+            BacktrackingShape::RepeatedQuantifier,
+            BacktrackingShape::RepeatedAlternation,
+        ] {
+            let reason = backtracking_reason(shape);
+
+            assert!(
+                reason.contains(
+                    "This check refuses this shape and says nothing about any other pattern"
+                ),
+                "{shape:?} carries the limit: {reason}"
+            );
+            assert!(reason.contains("exponential time"), "{reason}");
+
+            let lowered = reason.to_lowercase();
+            for claim in ["safe", "linear", "fast", "guarantee", "quick", "efficient"] {
+                assert!(
+                    !lowered.contains(claim),
+                    "{shape:?} claims `{claim}`: {reason}"
+                );
+            }
+        }
     }
 
     /// **AC1**: the Validation Rule Registry half of the catalogue.

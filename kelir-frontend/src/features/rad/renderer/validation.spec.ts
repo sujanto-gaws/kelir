@@ -3,10 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   UnknownValidationRuleError,
   VALIDATION_RULES,
+  applyRule,
   validateField,
   type FieldViolation,
+  type UndecidedRule,
 } from './validation'
-import type { JfssDataComponent, JfssValidation } from '@/types/jfss'
+import type { JfssAdvancedRule, JfssDataComponent, JfssScope, JfssValidation } from '@/types/jfss'
 
 /**
  * The rule catalogue, case for case against the two documents that define it
@@ -260,16 +262,17 @@ describe('the Validation Rule Registry §3, the advanced rules', () => {
 
 /**
  * #496: a pattern the browser gives up on is left to the server, and a rule is
- * not matched once a keyword has already failed.
+ * not matched once a keyword has already failed. #624: unless the rule is
+ * scoped to `client`, when nothing decides it.
  *
  * **The give-up is simulated rather than provoked.** Only a throw is caught,
  * and jsdom runs on V8, which does not throw on the pattern Firefox throws on.
  * So `RegExp.prototype.test` throws for one pattern and runs for every other;
  * `e2e/tests/a-pattern-the-browser-gives-up-on.spec.ts` is where Firefox
- * throws for real.
+ * throws for real, on the same pattern and a value 10,001 characters long.
  */
 describe('a pattern the browser gives up on (#496)', () => {
-  const slow = '(?:[a-z]|[a-z0-9])*$'
+  const slow = '[a-z]*[a-z]*$'
   const original = RegExp.prototype.test
 
   /** Calls to `.test()` for the slow pattern, whatever they then did. */
@@ -305,6 +308,53 @@ describe('a pattern the browser gives up on (#496)', () => {
     expect(outcome.undecided).toEqual([
       { rule: 'regex', scope: 'both', reason: expect.stringContaining('gave up') },
     ])
+  })
+
+  /**
+   * #624: who decides the rule after a give-up is the definition's `scope`.
+   *
+   * The server skips a rule scoped to `client` (`validation.rs`,
+   * `a_rule_the_definition_scopes_to_the_client_does_not_run_here`), so a
+   * give-up there is decided by nobody, and saying *the server decides it*
+   * would be false.
+   */
+  const regexRule = (scope: JfssScope): JfssAdvancedRule => ({
+    rule: 'regex',
+    scope,
+    params: { pattern: slow },
+    message: 'No.',
+  })
+
+  const gaveUp = { value: `${'a'.repeat(28)}!`, scope: {} }
+
+  it('says nothing decides a client-scoped regex rule whose match throws (#624)', () => {
+    const outcome = applyRule(regexRule('client'), gaveUp) as UndecidedRule
+
+    expect(slowMatches).toBe(1)
+    expect(outcome.scope).toBe('client')
+    expect(outcome.reason).toContain('gave up')
+    expect(outcome.reason).toContain('nothing decides it')
+    expect(outcome.reason).not.toContain('the server decides')
+
+    // Not a violation either: no later verdict could accept a refused value.
+    const component = field({ type: 'string' }, { rules: [regexRule('client')] })
+    const fieldOutcome = validateField(component, gaveUp.value, {})
+
+    expect(fieldOutcome.violation).toBeUndefined()
+    expect(fieldOutcome.undecided.map((entry) => entry.scope)).toEqual(['client'])
+  })
+
+  it('still says the server decides a both-scoped regex rule whose match throws (#624)', () => {
+    const outcome = applyRule(regexRule('both'), gaveUp) as UndecidedRule
+
+    expect(outcome.scope).toBe('both')
+    expect(outcome.reason).toContain('the server decides it')
+    expect(outcome.reason).not.toContain('nothing decides it')
+  })
+
+  it('never matches a server-scoped regex rule at all (#624)', () => {
+    expect(applyRule(regexRule('server'), gaveUp)).toBeUndefined()
+    expect(slowMatches).toBe(0)
   })
 
   it('leaves a pattern keyword whose match throws undecided, and checks the keywords after it', () => {
