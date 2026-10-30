@@ -311,7 +311,7 @@ a root               "document"    "actor"    "variables"    ["document", d] and
 
 A bare `formData` is not one: anything under it is built. Kelir's publish refuses them:
 
-- **In an iterator's source or a `reduce`'s initial value**, anywhere inside it, in the expression's own scope: directly, in a literal list, in another operator such as `if`, in a `var`'s default, or in a nested iterator's source or initial value.
+- **In an iterator's source or a `reduce`'s initial value**, anywhere inside it, in the expression's own scope: directly, in a literal list, in another operator such as `if`, in a `var`'s default, or in a nested iterator's source or initial value. A value merely derived from one is refused too: `{"if": [{"var": "actor"}, {"var": "formData.rows"}, []]}` as a source reads only what it may and is refused all the same, a cost accepted for a check that reads the whole operand.
 - **In the whole `source` of a variable whose `dataType` is `JSON`.** Other `dataType`s are unchanged. `{"!!": [{"var": "document"}]}` as a `JSON` variable's source is refused though it stores a boolean, a cost accepted for a check that reads the whole `source`.
 - **The refusal.** `CONDITION_PATH_COMPUTED`, with the same rule and path as the shapes above and one detail for both: an expression holding either, or both, gets at most one. Saving, published revisions and their clones are as they are for those shapes.
 - **What stays accepted.** `{"var": "formData"}` in those positions; `document.status` and `actor.roles` as sources; `{"var": ""}` or `{"var": "document"}` as a source inside a body, where they read the element; and the same shapes outside those positions, such as `{"!!": [{"var": "document"}]}`, where the context is a value no path is read from.
