@@ -425,7 +425,7 @@ pub(crate) enum PatternRefusal {
     /// [ADR-0038]: ../../../../../docs/architectures/adr/0038.%20Kelir%20Patterns%20Are%20the%20Linear-Time%20Subset.md
     Divergent(DivergentConstruct),
     /// A shape the browser's engine backtracks on, where it may take
-    /// exponential time on a value that does not match. This crate does not
+    /// exponential time on some values, matching or not. This crate does not
     /// backtrack, so the server decides the value either way; the rule is
     /// refused for the browser that runs it too.
     Backtracking(BacktrackingShape),
@@ -680,8 +680,10 @@ fn posix_class_name(characters: &[char], start: usize) -> Option<String> {
 ///   browser actually backtracks on a pattern. The scan reads shape and not
 ///   cost, so **a pattern it accepts is one it does not name, and no more.**
 ///
-/// A brace is a repeat only as ECMA-262 reads one, digits with no spaces,
-/// because the browser is the engine this scan is for.
+/// **Two readings are ECMA-262's rather than this crate's**, because the
+/// browser is the engine this scan is for: a brace is a repeat only when it
+/// holds digits and no spaces, and a `]` right after `[` or `[^` closes the
+/// class ([`class_end`]).
 ///
 /// [#604]: https://github.com/sujanto-gaws/kelir/issues/604
 /// [coding standard]: ../../../../../docs/standards/01.%20Coding%20Standard.md
@@ -843,15 +845,19 @@ fn group(characters: &[char], index: &mut usize) -> Option<Vec<Vec<Item>>> {
 
 /// The index just past the bracket expression that opens at `start`.
 ///
-/// Read as [`divergent_construct`] reads one: a leading `^` negates and a
-/// leading `]` is a member, and an escape is consumed whole.
+/// A leading `^` negates, and an escape is consumed whole. **A `]` right after
+/// `[` or `[^` closes the class, as ECMA-262 reads it**: `[]` is an empty
+/// class and `[^]` is any character. This crate, and [`divergent_construct`],
+/// read that `]` as the class's first member instead. The shape scan reads it
+/// the browser's way, as it reads a brace, because the browser is the engine
+/// that backtracks: it reads `[^](a+)+]` as any character, then `(a+)+`, then
+/// a literal `]`, which this crate's reading would hide inside a class. The
+/// divergence itself is not refused; the Validation Rule Registry's 1.5.2
+/// table lists it.
 fn class_end(characters: &[char], start: usize) -> usize {
     let mut index = start + 1;
 
     if characters.get(index) == Some(&'^') {
-        index += 1;
-    }
-    if characters.get(index) == Some(&']') {
         index += 1;
     }
 
@@ -1719,6 +1725,42 @@ mod tests {
         }
 
         for pattern in [r"[\](a+)+]", "(a+){ 2,}", "(a+){2 ,}"] {
+            assert_eq!(
+                refuse_pattern(pattern, ""),
+                None,
+                "`{pattern}` should be accepted"
+            );
+        }
+    }
+
+    /// **[#604]: a class opening with `]` is read as the browser reads it.**
+    ///
+    /// ECMA-262 reads `[]` as an empty class and `[^]` as any character, each
+    /// ending at that `]`; this crate reads the `]` as the class's first
+    /// member. So the browser reads `[^](a+)+]` as any character, then
+    /// `(a+)+`, then a literal `]`, which is the refused shape: the row's gate
+    /// measured 27.3 s in V8 on 30 characters. Read this crate's way, the
+    /// shape sat inside a class, and the pattern was stored.
+    ///
+    /// **Seen red, 2026-10-30, on `a286cb5`**, where [`class_end`] skipped a
+    /// leading `]`: `[^](a+)+]` was accepted.
+    ///
+    /// [#604]: https://github.com/sujanto-gaws/kelir/issues/604
+    #[test]
+    fn a_class_opening_with_a_bracket_ends_where_the_browser_ends_it() {
+        for pattern in ["[^](a+)+]", "[](a+)+]", "[^a](a+)+"] {
+            assert_eq!(
+                refuse_pattern(pattern, ""),
+                Some(PatternRefusal::Backtracking(
+                    BacktrackingShape::RepeatedQuantifier
+                )),
+                "`{pattern}` should be refused as RepeatedQuantifier"
+            );
+        }
+
+        // The second subjects: a class with a member before the group, and
+        // the group not repeated.
+        for pattern in ["[^a](a+)", "[a](a+)"] {
             assert_eq!(
                 refuse_pattern(pattern, ""),
                 None,

@@ -1074,9 +1074,9 @@ fn backtracking_reason(shape: BacktrackingShape) -> String {
     };
 
     format!(
-        "{found}. A browser backtracks on this shape, and this backend does not: on a value \
-         that does not match, a browser may take exponential time, and the page stops \
-         responding while it does. {remedy}. {SHAPE_LIMIT}"
+        "{found}. A browser backtracks on this shape, and this backend does not: on some \
+         values, whether they match or not, a browser may take exponential time, and the \
+         page stops responding while it does. {remedy}. {SHAPE_LIMIT}"
     )
 }
 
@@ -2171,8 +2171,13 @@ mod tests {
     /// the check accepts, so a message that lost its own sentence about the
     /// refused shape still passed the test above (the row's `test-engineer`
     /// gate, 2026-10-30).
+    ///
+    /// **Not only on a value that does not match**, which the sentence used to
+    /// say: an unanchored pattern can take as long on one that does. The gate
+    /// measured `(?:[a-z]|[a-z0-9])*$` answering `true` after 21.8 s on 28
+    /// characters.
     #[test]
-    fn a_backtracking_refusal_says_a_value_that_does_not_match_may_take_exponential_time() {
+    fn a_backtracking_refusal_says_some_values_may_take_a_browser_exponential_time() {
         for shape in [
             BacktrackingShape::RepeatedQuantifier,
             BacktrackingShape::RepeatedAlternation,
@@ -2181,10 +2186,12 @@ mod tests {
 
             assert!(
                 reason.contains(
-                    "on a value that does not match, a browser may take exponential time"
+                    "on some values, whether they match or not, a browser may take exponential \
+                     time"
                 ),
                 "{shape:?}: {reason}"
             );
+            assert!(!reason.contains("does not match"), "{shape:?}: {reason}");
         }
     }
 

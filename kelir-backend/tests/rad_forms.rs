@@ -1854,6 +1854,9 @@ async fn a_shape_a_browser_backtracks_on_is_refused_at_save() {
             REPEATED_ALTERNATION,
             "^(png|jpg)(,(png|jpg))*$",
         ),
+        // A class opening with `]` ends there in the browser, so `(a+)+` is
+        // outside it; with a member first, the group is not repeated.
+        ("[^](a+)+]", REPEATED_QUANTIFIER, "[^a](a+)"),
     ];
     let places = [
         ("regex", "definition.components.0.rules.0.params.pattern"),
