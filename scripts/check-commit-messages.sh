@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Validates commit message headers against docs/standards/03. Commit Message
+# Validates commit messages against docs/standards/03. Commit Message
 # Convention.md. Checks what a regex can check: type, optional scope, the
 # breaking-change marker, and the header rules (length, no trailing period,
 # lowercase subject). Imperative mood is a review concern, not a CI one.
@@ -215,7 +215,7 @@ check_closing_keywords() {
   failures=$((failures + 1))
 }
 
-echo "Checking commit headers in ${BASE_REF}..${HEAD_REF}"
+echo "Checking commit messages in ${BASE_REF}..${HEAD_REF}"
 
 commits=$(git rev-list --parents "${BASE_REF}..${HEAD_REF}")
 

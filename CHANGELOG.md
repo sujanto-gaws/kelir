@@ -640,9 +640,10 @@ While the major version is `0`, the public API may change in any release.
   the merge.** A list wrapped across lines now counts, in commit messages and
   pull-request bodies alike. A merge is now a commit of more than one parent,
   not a title: a commit of one parent titled `Merge …` used to skip every
-  check, and a merge is exempt from the header rule alone. A fence never closed no longer hides a `Co-Authored-By:` line
-  in a message's last paragraph, which is where git reads it. A fence in a list
-  item no longer hides what follows the item.
+  check, and a merge is exempt from the header rule alone. A fence never closed
+  no longer hides a `Co-Authored-By:` line in a message's last paragraph, which
+  is where git reads it. In the closing-keyword check, a fence in a list item
+  no longer hides what follows the item.
 - **A NUL in a path capture or a JSON body string, and a body date before
   4714 BC, are a 422 and not a 500**
   ([#657](https://github.com/sujanto-gaws/kelir/issues/657),
