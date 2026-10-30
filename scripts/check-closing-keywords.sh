@@ -81,7 +81,9 @@
 #   ends that item, and a fence inside it, closed or not, so a fence never
 #   closed hides what is left of its item and no more. A fence in no item still
 #   hides the rest of the body. A paragraph's lazy continuation line is read
-#   as ending the item, so a fence after one is a fence in no item.
+#   as ending the item, so a fence after one is a fence in no item. A marker
+#   four or more columns past the open item is a paragraph's text or indented
+#   code, and is not read as one.
 # - An inline code span is removed: a run of backticks to the next run of the
 #   same length on the same line. A run with no partner is text.
 #
@@ -110,9 +112,9 @@
 #   joined by one `awk` that holds nothing but the line before, the lists are
 #   found by one `grep`, and one more `sed` splits each list into its references.
 #
-# A 64 KB body of any shape the test-engineer campaign on #729 tried runs in
-# well under five seconds on the runner, and the job's `timeout-minutes` bounds
-# whatever this misses.
+# A 64 KB body of any shape the test-engineer campaigns on #729 and row 16 tried
+# ran in under five seconds on the laptop; none was timed on the runner. Each
+# job's `timeout-minutes` bounds whatever this misses.
 #
 # Usage: PR_BODY="<pull-request body>" scripts/check-closing-keywords.sh
 #
@@ -165,11 +167,11 @@ MAX_MARKERS=8
 # Lines read as one where a list wraps. Each line is printed without its line
 # break until the next shows whether it joins, and a joined line is made up by
 # a blank after the chain, so `grep -n` numbers the lines as `lines` does.
-# Joining too much costs nothing, since LIST still wants a separator straight
-# after a reference, so `and` needs no boundary: `Closes #1,and` wraps too.
+# `and` needs a boundary only so that the report names the right line: a word
+# such as `command` joined to the next would name itself. `Closes #1,and` wraps.
 JOIN_WRAPPED='
   function ends_in_separator(l) {
-    return l ~ /[,;&\/+][[:blank:]]*$/ || l ~ /and[[:blank:]]*$/
+    return l ~ /[,;&\/+][[:blank:]]*$/ || l ~ /(^|[^[:alnum:]])and[[:blank:]]*$/
   }
   function opens_with_separator(l) { return l ~ /^[[:blank:]]*(and|&)[[:blank:]]/ }
   function blanks() { for (; owed > 0; owed--) printf "\n" }
@@ -329,7 +331,11 @@ for line in "${lines[@]}"; do
 
   rest="${line}"
   offset=0
-  for (( markers = 0; markers < MAX_MARKERS; markers++ )); do
+  open_item=0
+  if (( ${#items[@]} > 0 )); then
+    open_item="${items[-1]}"
+  fi
+  for (( markers = 0; markers < MAX_MARKERS && indent < open_item + 4; markers++ )); do
     [[ "${rest}" =~ ${ITEM_MARKER} ]] || break
     marker="${BASH_REMATCH[0]}"
     columns "${offset}" "${marker}"

@@ -354,6 +354,11 @@ probe_names "the line after a wrapped list keeps its number" "Closes #1,
 
 Fixes #3, #4" "  line    Fixes #3, #4"
 
+# A word ending in 'and' is no separator, so the report names the list's own
+# line. Seen red with 'and' read with no boundary before it.
+probe_names "a list after a line ending in a word like 'command'" "Run the command
+Closes #1, #2" "  line    Closes #1, #2"
+
 # What ends a wrap. Seen red with a blank line joined over, with any next line
 # taken as a reference, and with a fence's lines joined across.
 probe accepted "a blank line ends a list" "Closes #1,
@@ -457,6 +462,19 @@ probe accepted "a list a second marker's tab keeps in its fence" "- -${TAB}${FEN
 # Seen red with a line's indent counted from column 1.
 probe refused "a line one column in, below an item's content" "- ${FENCE}
  ${LINE}"
+
+# **A marker four columns past the open item is no marker** (row 16's gate). It
+# is a paragraph's text, so no fence opens, and cmark-gfm shows the list. `main`
+# refused the first. Seen red with a marker read at any indent.
+probe refused "a marker four columns in, under a paragraph" "text
+    - ${FENCE}
+      Closes #1, #2"
+probe refused "a marker four columns past an item's content" "- item
+      - ${FENCE}
+        Closes #1, #2"
+probe accepted "a marker three columns in, under a paragraph" "text
+   - ${FENCE}
+     Closes #1, #2"
 
 # **Out of any list a fence never closed still hides the rest**, as GitHub
 # renders it. Seen red with every opener's fence ended by a line indented less.
@@ -587,8 +605,8 @@ and #2"
 # **Time, not an answer** (row 16's gate). A fence's opening run was searched for
 # with a pattern as long as itself, which is cubic: 8 KB of backticks passed 40
 # seconds, and a list marker in front made that a shape `main` read in 0.15
-# seconds. 30 KB, because a longer body is past what the Windows environment
-# hands a child. Seen red against the check before the run was stepped over.
+# seconds. 30 KB is far past where that overruns this budget. Seen red against
+# the check before the run was stepped over.
 RUN="$(printf '`%.0s' {1..30000})"
 for shape in "${RUN}" "- ${RUN}" "- ${RUN}x"; do
   actual=accepted
