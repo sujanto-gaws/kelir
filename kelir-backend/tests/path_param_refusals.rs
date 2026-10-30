@@ -83,6 +83,30 @@
 //! - the fast path made always true — one unit test only, as intended: the
 //!   walk's answers do not change;
 //! - `date` for `option_date` on one field — does not compile.
+//!
+//! **The `test-engineer` gate (PR #817) added five tests and widened the
+//! source guard**, each seen red under a mutation that left everything above
+//! green, and reverted:
+//!
+//! - the fast path skipping a `\u0000` after a backslash — `\\\u0000` (an
+//!   escaped backslash, then a NUL) answered 500;
+//! - a string directly in an array, or an array in an array, left unwalked —
+//!   `a[0]` and `a[0][1]` were not named;
+//! - an instant's bound read on its own clock rather than in UTC —
+//!   `-4713-11-24T00:00:00+01:00` answered 500;
+//! - the sentinel matched anywhere in serde's message rather than at its
+//!   front — an unknown `credentialType` spelled as the sentinel answered
+//!   `OUT_OF_RANGE`;
+//! - a date in an enum's variant, a tuple struct, a `pub(super)` struct, a
+//!   field whose type is on its own line, a `DateTime<FixedOffset>` or behind
+//!   `type R13Day = NaiveDate` — the guard was green on all six; it now names
+//!   each. A helper on an `Option` without `#[serde(default)]` is named too.
+//!
+//! Run against `main` at `d767b48`, the instant and JSON tests are red; the
+//! sentinel, not-UTF-8 and query-key tests pass there, and pin what the fix
+//! must not change. A NUL in a query key stays out of scope (ADR-0050): no
+//! route answers it with a 500, and `/rad/lists/{id}/rows` refuses it as a
+//! filter the list does not declare.
 
 mod common;
 
@@ -1521,10 +1545,23 @@ struct Field {
     field_type: String,
 }
 
-/// The `Deserialize` structs in `text` that are not query parameters, and
-/// their fields. A hand parse, line by line, of the shapes the crate writes:
-/// attributes above the struct, `{` on its line, one field per line, and a
-/// `#[cfg(test)] mod tests` at the bottom of a file, which is not scanned.
+/// Whether a declaration names a date or an instant, in any spelling the
+/// crate could write: `NaiveDateTime` and a `DateTime` in another zone too,
+/// which no helper reads and so must not pass unseen.
+fn mentions_a_date(text: &str) -> bool {
+    text.contains("NaiveDate") || text.contains("DateTime<")
+}
+
+/// The `Deserialize` structs and enums in `text` that are not query
+/// parameters, and their fields. A hand parse, line by line, of the shapes the
+/// crate writes: attributes above the item, `{` on its line, one field per
+/// line, and a `#[cfg(test)] mod tests` at the bottom of a file, which is not
+/// scanned.
+///
+/// **What it cannot parse it does not skip.** A line of an item's body that
+/// mentions a date and is not a `name: Type` field — a tuple member, an enum's
+/// tuple variant, a type broken onto its own line — is kept as a field whose
+/// type is the whole line, which no helper reads, so the guard names it.
 fn request_structs(text: &str) -> Vec<(String, Vec<Field>)> {
     /// An attribute can span lines; it ends where its brackets close.
     fn open_brackets(line: &str) -> i32 {
@@ -1546,6 +1583,26 @@ fn request_structs(text: &str) -> Vec<(String, Vec<Field>)> {
         line.starts_with("//") || line.is_empty()
     }
 
+    /// What follows `struct ` or `enum ` on an item's first line, at any
+    /// visibility.
+    fn item(line: &str) -> Option<&str> {
+        let line = match line.strip_prefix("pub") {
+            Some(rest) if rest.starts_with('(') => rest.split_once(") ")?.1,
+            Some(rest) => rest.strip_prefix(' ')?,
+            None => line,
+        };
+        line.strip_prefix("struct ")
+            .or_else(|| line.strip_prefix("enum "))
+    }
+
+    fn unparsed(line: &str) -> Field {
+        Field {
+            attributes: String::new(),
+            name: "(not a `name: Type` line)".to_owned(),
+            field_type: line.to_owned(),
+        }
+    }
+
     let text = text.split("#[cfg(test)]\nmod tests").next().unwrap_or(text);
     let mut lines = text.lines().map(str::trim);
     let mut structs = Vec::new();
@@ -1557,37 +1614,45 @@ fn request_structs(text: &str) -> Vec<(String, Vec<Field>)> {
             continue;
         }
         let derives = std::mem::take(&mut attributes);
-        let Some(rest) = line
-            .strip_prefix("pub struct ")
-            .or_else(|| line.strip_prefix("pub(crate) struct "))
-            .or_else(|| line.strip_prefix("struct "))
-            .filter(|rest| rest.ends_with('{'))
-        else {
+        let Some(rest) = item(line) else {
             continue;
         };
-        let name = rest.split(['<', ' ', '{']).next().unwrap_or_default();
+        let name = rest
+            .split(['<', ' ', '{', '(', ';'])
+            .next()
+            .unwrap_or_default();
 
         let mut fields = Vec::new();
-        let mut field_attributes = String::new();
-        let mut field_depth = 0;
-        for line in lines.by_ref() {
-            if gather(line, &mut field_attributes, &mut field_depth) {
-                continue;
+        if rest.ends_with('{') || rest.ends_with('(') {
+            let close = if rest.ends_with('{') { "}" } else { ")" };
+            let mut field_attributes = String::new();
+            let mut field_depth = 0;
+            for line in lines.by_ref() {
+                if gather(line, &mut field_attributes, &mut field_depth) {
+                    continue;
+                }
+                if line == close || line == format!("{close};") {
+                    break;
+                }
+                let declaration = line
+                    .trim_start_matches("pub(crate) ")
+                    .trim_start_matches("pub ")
+                    .trim_end_matches(',');
+                match declaration.split_once(':') {
+                    Some((field, field_type)) if !field_type.trim().is_empty() => {
+                        fields.push(Field {
+                            attributes: std::mem::take(&mut field_attributes),
+                            name: field.trim().to_owned(),
+                            field_type: field_type.replace("chrono::", "").replace(' ', ""),
+                        });
+                    }
+                    _ if mentions_a_date(line) => fields.push(unparsed(line)),
+                    _ => {}
+                }
             }
-            if line == "}" {
-                break;
-            }
-            let declaration = line
-                .trim_start_matches("pub(crate) ")
-                .trim_start_matches("pub ")
-                .trim_end_matches(',');
-            if let Some((field, field_type)) = declaration.split_once(':') {
-                fields.push(Field {
-                    attributes: std::mem::take(&mut field_attributes),
-                    name: field.trim().to_owned(),
-                    field_type: field_type.replace("chrono::", "").replace(' ', ""),
-                });
-            }
+        } else if mentions_a_date(rest) {
+            // A tuple struct on one line, `struct Day(NaiveDate);`.
+            fields.push(unparsed(rest));
         }
 
         if derives.contains("Deserialize") && !derives.contains("IntoParams") {
@@ -1596,6 +1661,26 @@ fn request_structs(text: &str) -> Vec<(String, Vec<Field>)> {
     }
 
     structs
+}
+
+/// Every alias that would hide a date from [`request_structs`]: a field typed
+/// `Day` after `type Day = NaiveDate;` or `use chrono::NaiveDate as Day;` is
+/// a date the scan reads as something else.
+fn date_aliases(text: &str) -> Vec<String> {
+    let text = text.split("#[cfg(test)]\nmod tests").next().unwrap_or(text);
+    text.lines()
+        .map(str::trim)
+        .filter(|line| {
+            let item = line
+                .trim_start_matches("pub(crate) ")
+                .trim_start_matches("pub(super) ")
+                .trim_start_matches("pub ");
+            let declares = item.starts_with("type ");
+            let renames = item.starts_with("use ") && item.contains(" as ");
+            (declares || renames) && mentions_a_date(item)
+        })
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 /// **The source guard** (AC13). Every date field of a `Deserialize` struct in
@@ -1627,11 +1712,14 @@ fn every_request_date_field_reads_through_a_storable_helper() {
     let mut checked = BTreeMap::new();
     let mut failures = Vec::new();
     for (file, text) in &files {
+        for alias in date_aliases(text) {
+            failures.push(format!(
+                "{file}: `{alias}` gives a date another name, which this scan cannot follow"
+            ));
+        }
         for (name, fields) in request_structs(text) {
             for field in fields {
-                if !field.field_type.contains("NaiveDate")
-                    && !field.field_type.contains("DateTime<Utc>")
-                {
+                if !mentions_a_date(&field.field_type) {
                     continue;
                 }
                 let at = format!("{name}.{} in {file}", field.name);
@@ -1643,7 +1731,17 @@ fn every_request_date_field_reads_through_a_storable_helper() {
                     continue;
                 };
                 let wanted = format!("storable::{helper}\"");
-                if field.attributes.contains("deserialize_with")
+                // A field read through a helper is no longer optional by its
+                // type alone: without `default`, leaving out an `Option` is a
+                // `REQUIRED` refusal.
+                if field.field_type.starts_with("Option<") && !field.attributes.contains("default")
+                {
+                    failures.push(format!(
+                        "{at}: `{}` reads through a helper without `#[serde(default)]`, so \
+                         leaving it out is refused",
+                        field.field_type
+                    ));
+                } else if field.attributes.contains("deserialize_with")
                     && field.attributes.contains(&wanted)
                 {
                     checked.insert(at, helper);
@@ -1670,4 +1768,288 @@ fn every_request_date_field_reads_through_a_storable_helper() {
          the request structs: {checked:#?}",
         checked.len()
     );
+}
+
+// ---------------------------------------------------------------------------
+// The `test-engineer` gate (PR #817)
+// ---------------------------------------------------------------------------
+
+/// **Where JSON can put a NUL, and where it only looks as if it had.** The
+/// fast path looks for the six bytes `\u0000`, and the walk names what it
+/// finds. A NUL straight after an escaped backslash is one; a NUL straight
+/// inside an array, or in an array inside one, is named at the index; and
+/// neither `\U0000`, which is no escape at all, nor two escaped backslashes
+/// before the text `u0000`, is a NUL.
+#[tokio::test]
+async fn a_nul_is_found_wherever_json_can_spell_one_and_only_there() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let roles = "/api/v1/identity/roles";
+    let raw = |bytes: &'static [u8]| Some(Bytes::from_static(bytes));
+
+    for (label, body, path) in [
+        (
+            "an escaped backslash, then a NUL",
+            raw(br#"{"roleCode":"R13-G1","name":"\\\u0000"}"#),
+            "name",
+        ),
+        (
+            "a NUL after a surrogate pair",
+            raw(br#"{"roleCode":"R13-G2","name":"\ud83d\ude00\u0000"}"#),
+            "name",
+        ),
+        (
+            "a NUL directly in an array",
+            raw(br#"{"roleCode":"R13-G3","name":"x","a":["\u0000"]}"#),
+            "a[0]",
+        ),
+        (
+            "a NUL in an array in an array",
+            raw(br#"{"roleCode":"R13-G4","name":"x","a":[["x","\u0000"]]}"#),
+            "a[0][1]",
+        ),
+        (
+            "a NUL in a body that is an array",
+            raw(br#"["x","\u0000"]"#),
+            "[1]",
+        ),
+    ] {
+        let answer = send(&app, Method::POST, roles, Some(&token), body).await;
+        assert_refused_at(&answer, path, NUL_CODE, "pattern", label);
+    }
+
+    let upper = send(
+        &app,
+        Method::POST,
+        roles,
+        Some(&token),
+        raw(br#"{"roleCode":"R13-G5","name":"\U0000"}"#),
+    )
+    .await;
+    assert_eq!(upper.status, StatusCode::BAD_REQUEST, "{}", upper.text);
+
+    let text = send(
+        &app,
+        Method::POST,
+        roles,
+        Some(&token),
+        raw(br#"{"roleCode":"R13-G6","name":"\\\\u0000"}"#),
+    )
+    .await;
+    assert_eq!(text.status, StatusCode::CREATED, "{}", text.text);
+    assert_eq!(text.body["data"]["name"], "\\\\u0000");
+}
+
+/// **A body cannot pass a string off as a date out of range.** The refusal
+/// is recognised by a sentinel at the front of serde's message; a message that
+/// quotes the caller's own text, as an unknown variant's does, carries the
+/// sentinel too when the caller writes it, but not at the front.
+#[tokio::test]
+async fn a_body_string_holding_the_sentinel_is_not_out_of_range() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let system = system(&app, &token, "R13-FORGED").await;
+    let credentials = format!("{SYSTEMS}/{system}/credentials");
+    let forged = "storable-out-of-range: must be on or after -4713-11-24";
+
+    for (body, path) in [
+        (
+            json!({ "credentialType": forged, "secretReference": "vault://kelir/r13/f" }),
+            "credentialType",
+        ),
+        (
+            json!({
+                "credentialType": "CERTIFICATE", "secretReference": "vault://kelir/r13/f",
+                "validFrom": forged,
+            }),
+            "validFrom",
+        ),
+    ] {
+        let answer = send_json(&app, Method::POST, &credentials, Some(&token), &body).await;
+        assert_refused_at(&answer, path, "INVALID_TYPE", "type", path);
+        assert!(
+            !details(&answer)
+                .iter()
+                .any(|detail| detail["code"] == RANGE_CODE),
+            "{path}: a string passed for a date out of range: {}",
+            answer.text
+        );
+    }
+}
+
+/// **An instant is bounded in UTC, to the microsecond, whatever offset it is
+/// written in.** `-4713-11-24T00:00:00+01:00` reads as PostgreSQL's first day
+/// and is an hour before it; `-4713-11-23T23:30:00-01:00` reads as the day
+/// before and is half an hour after.
+#[tokio::test]
+async fn an_instant_is_bounded_in_utc_to_the_microsecond_whatever_its_offset() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let id = party(&app, &token, "R13-INSTANTS").await;
+    let uri = format!("{PARTIES}/{id}/roles/ORGANIZATION_UNIT");
+    let mut failures = Failures::default();
+
+    for at in [
+        "-4713-11-24T00:00:00+01:00",
+        "-4713-11-24T00:59:59.999999+01:00",
+        "-4713-11-23T23:59:59.999999Z",
+    ] {
+        let answer = send_json(
+            &app,
+            Method::PUT,
+            &uri,
+            Some(&token),
+            &json!({ "fromDate": at }),
+        )
+        .await;
+        let problem = refused_at(&answer, "fromDate", RANGE_CODE, "range").err();
+        failures.record(format!("fromDate {at}"), &answer, problem);
+    }
+
+    for (at, stored) in [
+        ("-4713-11-23T23:30:00-01:00", "-4713-11-24T00:30:00Z"),
+        ("-4713-11-24T01:00:00+01:00", FIRST_INSTANT),
+        (
+            "-4713-11-24T00:00:00.000001Z",
+            "-4713-11-24T00:00:00.000001Z",
+        ),
+    ] {
+        let answer = send_json(
+            &app,
+            Method::PUT,
+            &uri,
+            Some(&token),
+            &json!({ "fromDate": at }),
+        )
+        .await;
+        let problem = if !answer.status.is_success() {
+            Some(format!("{at} was not accepted"))
+        } else if !answer.text.contains(stored) {
+            Some(format!("{at} was not stored as {stored}"))
+        } else {
+            None
+        };
+        failures.record(format!("fromDate {at}"), &answer, problem);
+    }
+
+    failures.assert_none(1);
+}
+
+/// **A capture that is not UTF-8 is the 400 it was, NUL or not.** The raw
+/// captures cannot be read, so the NUL check is skipped; `Path` refuses the
+/// same capture, so nothing reaches a bind.
+#[tokio::test]
+async fn a_capture_that_is_not_utf8_is_a_400_even_holding_a_nul() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let id = party(&app, &token, "R13-NOT-UTF8").await;
+
+    let mut failures = Failures::default();
+    for (method, uri) in [
+        (Method::GET, "/api/v1/rad/lists/by-key/%FF%00".to_owned()),
+        (Method::GET, "/api/v1/rad/lists/by-key/%00%FF".to_owned()),
+        (Method::PUT, format!("{PARTIES}/{id}/roles/%FF%00")),
+        (Method::PUT, format!("{PARTIES}/%FF/roles/%00")),
+        (Method::DELETE, format!("{PARTIES}/{id}/roles/%00%FF")),
+    ] {
+        let body = (method == Method::PUT).then(|| Bytes::from(assignment().to_string()));
+        let answer = send(&app, method.clone(), &uri, Some(&token), body).await;
+        let problem = (answer.status != StatusCode::BAD_REQUEST).then(|| "expected 400".to_owned());
+        failures.record(format!("{method} {uri}"), &answer, problem);
+    }
+    failures.assert_none(3);
+}
+
+/// The query parameters each `get` in the document declares, by name.
+fn query_parameters() -> Vec<(String, Vec<String>)> {
+    let document = serde_json::to_value(ApiDoc::openapi()).expect("the document serialises");
+    let mut operations = Vec::new();
+    for (template, item) in document["paths"].as_object().expect("paths") {
+        let Some(parameters) = item["get"]["parameters"].as_array() else {
+            continue;
+        };
+        let names: Vec<String> = parameters
+            .iter()
+            .filter(|parameter| parameter["in"] == "query")
+            .filter_map(|parameter| parameter["name"].as_str().map(ToOwned::to_owned))
+            .collect();
+        if !names.is_empty() {
+            operations.push((template.clone(), names));
+        }
+    }
+    operations
+}
+
+/// **A NUL in a query key is not refused (ADR-0044 §4, ADR-0050), and is
+/// never a 500.** A key is matched against names, never bound — except where
+/// a flattened map collects it: `RowQuery`'s filters, which refuse a key the
+/// list does not declare by naming it. Every `get` with a query parameter is
+/// sent a NUL in a key of its own, beside each declared name, and spelled as
+/// a declared name followed by one; the rows of a real list are sent the same.
+#[tokio::test]
+async fn a_nul_in_a_query_key_is_never_a_500() {
+    let operations = query_parameters();
+    assert!(
+        operations.len() >= 30,
+        "{} operations with a query parameter; the list walk counts 33",
+        operations.len()
+    );
+
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let list = send_json(
+        &app,
+        Method::POST,
+        "/api/v1/rad/lists",
+        Some(&token),
+        &json!({
+            "listKey": "r13-query-keys",
+            "title": "Query keys",
+            "status": "ACTIVE",
+            "columns": [{ "columnKey": "title", "label": "Subject" }],
+        }),
+    )
+    .await;
+    assert_eq!(list.status, StatusCode::CREATED, "{}", list.text);
+    let list = id_of(&list);
+    let bound = send_json(
+        &app,
+        Method::POST,
+        "/api/v1/document-types",
+        Some(&token),
+        &json!({ "typeCode": "R13_QUERY_KEYS", "name": "Query keys", "listId": list }),
+    )
+    .await;
+    assert_eq!(bound.status, StatusCode::CREATED, "{}", bound.text);
+
+    let mut failures = Failures::default();
+    let mut rows_reached = false;
+    for (template, names) in &operations {
+        let mut paths = vec![template.clone()];
+        if template.ends_with("/rad/lists/{id}/rows") {
+            paths.push(template.replace("{id}", &list.to_string()));
+        }
+        for path in paths {
+            let path = captures_of(&path).iter().fold(path.clone(), |path, name| {
+                path.replace(&format!("{{{name}}}"), &Uuid::now_v7().to_string())
+            });
+            let mut queries = vec!["%00=1".to_owned(), "a%00b=1".to_owned()];
+            for name in names {
+                queries.push(format!("{name}%00=1"));
+                queries.push(format!("%00{name}=1&{name}%00="));
+            }
+            for query in queries {
+                let uri = format!("{path}?{query}");
+                let answer = send(&app, Method::GET, &uri, Some(&token), None).await;
+                if path.contains(&list.to_string()) && answer.status != StatusCode::NOT_FOUND {
+                    rows_reached = true;
+                }
+                failures.record(format!("GET {uri}"), &answer, None);
+            }
+        }
+    }
+
+    assert!(rows_reached, "no query reached a real list's rows");
+    failures.assert_none(operations.len());
 }
