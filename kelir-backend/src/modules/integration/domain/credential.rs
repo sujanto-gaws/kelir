@@ -43,7 +43,6 @@ use uuid::Uuid;
 use super::external_system::AuthType;
 use super::Problems;
 use crate::error::AppError;
-use crate::utils::serde::present_or_absent;
 
 /// The schemes a reference may use: the two secret stores architectures/03
 /// names (environment and vault).
@@ -84,7 +83,9 @@ pub struct CreateIntegrationCredentialRequest {
     /// `vault://path[#field]` or `env://NAME` — see the module documentation
     /// for exactly what is checked.
     pub secret_reference: String,
+    #[serde(default, deserialize_with = "crate::utils::storable::option_date")]
     pub valid_from: Option<NaiveDate>,
+    #[serde(default, deserialize_with = "crate::utils::storable::option_date")]
     pub valid_to: Option<NaiveDate>,
     /// Defaults to `true`.
     pub is_active: Option<bool>,
@@ -96,10 +97,16 @@ pub struct CreateIntegrationCredentialRequest {
 pub struct UpdateIntegrationCredentialRequest {
     pub credential_type: Option<AuthType>,
     pub secret_reference: Option<String>,
-    #[serde(default, deserialize_with = "present_or_absent")]
+    #[serde(
+        default,
+        deserialize_with = "crate::utils::storable::present_or_absent_date"
+    )]
     #[schema(value_type = Option<NaiveDate>)]
     pub valid_from: Option<Option<NaiveDate>>,
-    #[serde(default, deserialize_with = "present_or_absent")]
+    #[serde(
+        default,
+        deserialize_with = "crate::utils::storable::present_or_absent_date"
+    )]
     #[schema(value_type = Option<NaiveDate>)]
     pub valid_to: Option<Option<NaiveDate>>,
     pub is_active: Option<bool>,

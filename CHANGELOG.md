@@ -630,6 +630,28 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A NUL in a path capture or a JSON body string, and a body date before
+  4714 BC, are a 422 and not a 500**
+  ([#657](https://github.com/sujanto-gaws/kelir/issues/657),
+  [#668](https://github.com/sujanto-gaws/kelir/issues/668); ADR-0050, which
+  extends ADR-0044). `GET /api/v1/rad/lists/by-key/%00`, a `%00` role type on
+  `PUT` and `DELETE /api/v1/master-data/parties/{id}/roles/{roleTypeId}` (for
+  a party that does not exist too), a role code holding `\u0000`, and a
+  credential's `validFrom` of `-5000-01-01` each reached a bind and answered
+  500. So did a `\u0000` in the `username` of `POST /api/v1/auth/login` and
+  `POST /api/v1/auth/forgot-password`, which take no token. A NUL in any
+  capture is now refused by `PathParam` and a NUL in any body string or key by
+  `JsonBody`, each as `INVALID_CHARACTER` at the path as sent, such as
+  `roleTypeId` or `items[0].name`, before the request is read further. The 22
+  date fields of 12 request structs, on 8 routes, now read through
+  `utils::storable` helpers, which refuse a date or an instant PostgreSQL
+  cannot store as `OUT_OF_RANGE` with `rule` `range` at the field's path, such
+  as `person.birthDate`; a body names its first such date only, where a query
+  names every bound. **Three answers change for a client:** a NUL in a uuid
+  capture was a 400 and is now a 422 `INVALID_CHARACTER`, on every route with
+  one; `/api/v1/rad/lookups/%00/options` was a 404 and is now that 422; and a
+  NUL in a body key is refused, where a NUL in a query key still is not. No
+  migration, and no schema change.
 - **A `client`-scoped `regex` rule the browser gives up on no longer says the
   server decides it** ([#624](https://github.com/sujanto-gaws/kelir/issues/624)).
   Since [#496](https://github.com/sujanto-gaws/kelir/issues/496) a match that

@@ -122,7 +122,9 @@ pub struct WorkflowBinding {
     pub condition_expression: Option<String>,
     #[serde(default = "default_priority")]
     pub priority: i32,
+    #[serde(default, deserialize_with = "crate::utils::storable::option_date")]
     pub valid_from: Option<chrono::NaiveDate>,
+    #[serde(default, deserialize_with = "crate::utils::storable::option_date")]
     pub valid_to: Option<chrono::NaiveDate>,
 }
 

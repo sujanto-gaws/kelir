@@ -22,8 +22,20 @@
 //!
 //! Both halves answer the same envelope: a 422 `VALIDATION_ERROR` whose detail
 //! names the parameter as the caller sent it.
+//!
+//! **A path capture and a JSON body joined them**
+//! ([#657](https://github.com/sujanto-gaws/kelir/issues/657),
+//! [#668](https://github.com/sujanto-gaws/kelir/issues/668); ADR-0050). The
+//! NUL in either is refused by its extractor, `PathParam` and `JsonBody`,
+//! through [`nul_refusal`]. A date in a body is refused while the body is
+//! read, by the `deserialize_with` helpers below — [`date`], [`option_date`],
+//! [`present_or_absent_date`], [`instant`] and [`option_instant`] — which
+//! every date field of a request struct names. A test in
+//! `tests/path_param_refusals.rs` reads the source and fails on a field that
+//! does not.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
+use serde::{Deserialize, Deserializer};
 
 use crate::error::{AppError, ValidationDetail};
 
@@ -101,6 +113,105 @@ pub fn refuse_out_of_range(bounds: &[(&str, Option<DateTime<Utc>>)]) -> Result<(
     } else {
         Err(AppError::validation(details))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Dates in a body (#668)
+// ---------------------------------------------------------------------------
+
+/// What a body date's refusal carries through serde, which carries only a
+/// message. `crate::extract` reads it off the front of the message and answers
+/// `range` and [`OUT_OF_RANGE`], where any other failure to read a field is
+/// `INVALID_TYPE`. No serde or chrono message begins with it.
+const OUT_OF_RANGE_SENTINEL: &str = "storable-out-of-range: ";
+
+/// The refusal's message without its sentinel, when `message` is a body
+/// date's refusal.
+pub fn out_of_range_reason(message: &str) -> Option<&str> {
+    message.strip_prefix(OUT_OF_RANGE_SENTINEL)
+}
+
+/// PostgreSQL's first `date`, 4714-11-24 BC, the day its first `timestamptz`
+/// begins. Its last, in year 5874897, is beyond chrono's 262142, so no parsed
+/// `NaiveDate` can pass it.
+fn first_postgres_date() -> NaiveDate {
+    NaiveDate::from_ymd_opt(-4713, 11, 24).expect("4714-11-24 BC is a date chrono holds")
+}
+
+/// Whether PostgreSQL can hold `day` as a `date`: [`within_postgres_range`]'s
+/// sibling for a day.
+pub fn date_within_postgres_range(day: NaiveDate) -> bool {
+    day >= first_postgres_date()
+}
+
+fn storable_date<E: serde::de::Error>(day: NaiveDate) -> Result<NaiveDate, E> {
+    if date_within_postgres_range(day) {
+        Ok(day)
+    } else {
+        Err(E::custom(format!(
+            "{OUT_OF_RANGE_SENTINEL}must be on or after -4713-11-24 (4714 BC), the first \
+             date PostgreSQL stores"
+        )))
+    }
+}
+
+fn storable_instant<E: serde::de::Error>(at: DateTime<Utc>) -> Result<DateTime<Utc>, E> {
+    if within_postgres_range(at) {
+        Ok(at)
+    } else {
+        Err(E::custom(format!(
+            "{OUT_OF_RANGE_SENTINEL}must be between -4713-11-24T00:00:00Z (4714 BC) and \
+             294276-12-31T23:59:59.999999Z, the range PostgreSQL stores"
+        )))
+    }
+}
+
+/// `#[serde(deserialize_with = "crate::utils::storable::date")]` on a
+/// `NaiveDate` field of a request: the date, refused while the body is read if
+/// PostgreSQL cannot store it.
+///
+/// **A helper per field, not a newtype.** A `StorableDate` would carry the
+/// bound in the type, and would also ripple into every bind, every comparison
+/// and every OpenAPI `value_type` the field touches. The attribute changes
+/// nothing past the read, and the source scan in
+/// `tests/path_param_refusals.rs` keeps a field from going without it.
+pub fn date<'de, D: Deserializer<'de>>(deserializer: D) -> Result<NaiveDate, D::Error> {
+    storable_date(NaiveDate::deserialize(deserializer)?)
+}
+
+/// [`date`] for an `Option<NaiveDate>`. Name it with `#[serde(default)]`: a
+/// field read through a helper is no longer optional by its type alone.
+pub fn option_date<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<NaiveDate>, D::Error> {
+    Option::<NaiveDate>::deserialize(deserializer)?
+        .map(storable_date)
+        .transpose()
+}
+
+/// [`option_date`] with `crate::utils::serde::present_or_absent`'s meaning,
+/// for an `Option<Option<NaiveDate>>` whose `null` clears the column. Named
+/// with `#[serde(default)]`, so an absent field stays `None`.
+pub fn present_or_absent_date<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<NaiveDate>>, D::Error> {
+    option_date(deserializer).map(Some)
+}
+
+/// [`date`] for a `DateTime<Utc>`, against `timestamptz`'s range at
+/// nanosecond precision, as [`refuse_out_of_range`] compares.
+pub fn instant<'de, D: Deserializer<'de>>(deserializer: D) -> Result<DateTime<Utc>, D::Error> {
+    storable_instant(DateTime::<Utc>::deserialize(deserializer)?)
+}
+
+/// [`instant`] for an `Option<DateTime<Utc>>`, named with
+/// `#[serde(default)]`.
+pub fn option_instant<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<DateTime<Utc>>, D::Error> {
+    Option::<DateTime<Utc>>::deserialize(deserializer)?
+        .map(storable_instant)
+        .transpose()
 }
 
 #[cfg(test)]
@@ -189,6 +300,83 @@ mod tests {
     #[test]
     fn an_absent_bound_is_not_a_refusal() {
         assert!(refused(&[("from", None), ("to", None)]).is_empty());
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Body {
+        #[serde(default, deserialize_with = "option_date")]
+        day: Option<NaiveDate>,
+        #[serde(default, deserialize_with = "present_or_absent_date")]
+        cleared: Option<Option<NaiveDate>>,
+        #[serde(default, deserialize_with = "option_instant")]
+        at: Option<DateTime<Utc>>,
+    }
+
+    fn read(body: serde_json::Value) -> Result<Body, String> {
+        serde_json::from_value(body).map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn the_first_date_is_postgresqls_and_the_day_before_is_not() {
+        let first = NaiveDate::from_ymd_opt(-4713, 11, 24).expect("a date");
+        assert!(date_within_postgres_range(first));
+        assert!(!date_within_postgres_range(
+            first.pred_opt().expect("a day")
+        ));
+        assert!(date_within_postgres_range(NaiveDate::MAX));
+        // The same day the first `timestamptz` begins.
+        assert_eq!(
+            first
+                .and_hms_opt(0, 0, 0)
+                .expect("midnight")
+                .and_utc()
+                .timestamp_micros(),
+            POSTGRES_MIN_MICROS
+        );
+    }
+
+    #[test]
+    fn a_body_date_is_read_at_the_bound_and_refused_before_it() {
+        let first = read(
+            serde_json::json!({ "day": "-4713-11-24", "cleared": "-4713-11-24",
+                                             "at": "-4713-11-24T00:00:00Z" }),
+        )
+        .expect("the first values are read");
+        assert_eq!(
+            first.day.map(|day| day.to_string()).as_deref(),
+            Some("-4713-11-24")
+        );
+        assert!(first.cleared.flatten().is_some());
+        assert!(first.at.is_some());
+
+        for body in [
+            serde_json::json!({ "day": "-4713-11-23" }),
+            serde_json::json!({ "cleared": "-4713-11-23" }),
+            serde_json::json!({ "at": "-4713-11-23T23:59:59.999999999Z" }),
+        ] {
+            let message = read(body.clone()).expect_err("below the range");
+            assert!(
+                out_of_range_reason(&message).is_some(),
+                "{body}: the refusal does not carry the sentinel: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn absent_null_and_a_wrong_type_are_what_they_were() {
+        let absent = read(serde_json::json!({})).expect("nothing is required");
+        assert_eq!((absent.day, absent.cleared, absent.at), (None, None, None));
+
+        let null = read(serde_json::json!({ "day": null, "cleared": null })).expect("nulls");
+        assert_eq!(
+            (null.day, null.cleared),
+            (None, Some(None)),
+            "null still clears"
+        );
+
+        let message = read(serde_json::json!({ "day": "not a date" })).expect_err("a parse");
+        assert!(out_of_range_reason(&message).is_none(), "{message}");
     }
 
     #[test]
