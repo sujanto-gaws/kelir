@@ -177,13 +177,19 @@ While the major version is `0`, the public API may change in any release.
   value, default, nested `missing` name or count read back by a `calculate`,
   and `{"var": ""}` as a default or initial value in a `calculate`, which is
   a self-loop. A form published before the upgrade is not re-checked, so each
-  write against it, a draft save included, is now refused with a 422 naming
-  the fields; that is read from the evaluator, where the refusals at save were
-  run. Documents pin their revision, so a corrected revision reaches new
-  documents only. **A form with no loop can change order too**: a field
-  reading a later one through a default now runs after it, so a stored value
-  can change at the next write. **Before upgrading, go through each published
-  form's `calculate` and `conditional` expressions, take each initial value,
+  write against it, a form submission, a new document, a draft save and a
+  document's submission, is now refused with a 422 `CALCULATION_CYCLE` naming
+  the fields, and nothing is stored. The form still reads back. Documents pin
+  their revision, so a corrected revision reaches new documents only. A
+  default beside a declared field's key counts too, though the server never
+  takes it, because the payload is normalised to `null` first:
+  `{"var": ["o", {"var": "b"}]}` could not fire, and with `b` reading this
+  field back it is refused all the same. **A form with no loop can change
+  order too**: a field reading a later one through a default or an initial
+  value now runs after it, so a stored value can change at the next write. The
+  old order also let a value the client sent for a calculated field reach a
+  stored field, and that is closed. **Before upgrading, go through each
+  published form's `calculate` and `conditional` expressions, take each initial value,
   each default and each expression among the operands of `missing` and
   `missing_some`, and look for what it reads: the field's own key, the whole
   record in a `calculate`, a field that reads this one back, or a field
