@@ -1079,6 +1079,88 @@ async fn a_fault_the_validator_finds_is_the_only_one_a_publish_returns() {
     }
 }
 
+/// **#822 AC4, past the shapes it names.** The server never runs an `enable` or
+/// `disable`, and a browser does; a `generated` field is computed once; an
+/// action has a `conditional`; and `type` is an open vocabulary, so a row
+/// template is whatever a `data` component's `components` holds. Each is read
+/// at its own path, and each was unread by every test before this one.
+#[tokio::test]
+async fn a_publish_reads_an_action_a_disabled_field_a_generated_one_and_an_odd_type() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let computed = json!({"var": {"var": "which"}});
+    let mut generated = calculated_field("generated", computed.clone());
+    generated["calculateMode"] = json!("generated");
+
+    let mut disabled = number_field("disabled");
+    disabled["conditional"] = json!({"action": "disable", "logic": computed});
+
+    let components = json!([
+        {"id": "go", "role": "action", "type": "button", "label": "Go", "action": "submit",
+         "conditional": {"action": "enable", "logic": computed}},
+        generated,
+        disabled,
+        {"id": "odd", "role": "data", "type": "repeater", "key": "odd", "label": "Odd",
+         "validation": {"type": "array"},
+         "components": [calculated_field("in_a_row", computed)]}
+    ]);
+
+    let created = create_form(
+        &app,
+        &token,
+        "computed-unnamed",
+        definition_of("computed-unnamed", components),
+    )
+    .await;
+    let id = id_of(&created);
+    let refused = publish(&app, &token, id).await;
+
+    assert_refused(
+        &app,
+        &token,
+        id,
+        &refused,
+        &[
+            ("definition.components.0.conditional.logic", COMPUTED),
+            ("definition.components.1.calculate", COMPUTED),
+            ("definition.components.2.conditional.logic", COMPUTED),
+            ("definition.components.3.components.0.calculate", COMPUTED),
+        ],
+    )
+    .await;
+}
+
+/// **#822 AC7, at the publish itself.** A form that went live holding the shape
+/// is told it is not a draft, and is not told about the shape: the status comes
+/// first, and the check is for what is about to go live.
+#[tokio::test]
+async fn a_form_already_live_with_a_computed_var_is_a_conflict_at_publish() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let components = json!([calculated_field("a", json!({"var": {"var": "which"}}))]);
+    let created = create_form(
+        &app,
+        &token,
+        "computed-live",
+        definition_of("computed-live", components),
+    )
+    .await;
+    let id = id_of(&created);
+
+    assert_eq!(
+        form_repo::publish(&app.pool, fixtures::SYSTEM_TENANT_ID, id, None)
+            .await
+            .expect("the draft is published behind the API"),
+        1
+    );
+
+    let again = publish(&app, &token, id).await;
+
+    assert_eq!(again.status, StatusCode::CONFLICT, "body {}", again.body);
+}
+
 /// **AC3's other half: the publish itself refuses**, not only the write that
 /// preceded it.
 ///
