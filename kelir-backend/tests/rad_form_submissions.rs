@@ -658,3 +658,221 @@ async fn a_key_the_definition_does_not_declare_is_not_stored() {
 
     assert!(stored.get("is_approved").is_none(), "stored: {stored}");
 }
+
+// ---------------------------------------------------------------------------
+// A form already live, under the walk #789 widened
+// ---------------------------------------------------------------------------
+
+fn number_field(key: &str) -> Value {
+    json!({
+        "id": key, "role": "data", "type": "number", "key": key, "label": key,
+        "validation": {"type": "number"}
+    })
+}
+
+fn calculated_field(key: &str, calculate: Value) -> Value {
+    let mut field = number_field(key);
+    field["calculate"] = calculate;
+    field
+}
+
+/// **#789, run rather than read from the evaluator.** The walk now follows an
+/// initial value, so a loop through one is refused at save and at publish. A
+/// form published before that never met the check, and what it meets instead is
+/// every write: the definition is rewritten here behind the API, because the API
+/// no longer lets such a form be published.
+///
+/// The document pins the same row, so it stands for a draft saved before the
+/// upgrade. Nothing is written by any of the four, and the read still answers.
+#[tokio::test]
+async fn a_published_form_with_a_loop_the_walk_now_sees_is_refused_at_each_write() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let form_id = published_form(&app, &token, "loop_after_publish").await;
+
+    let type_id = id_of_created(
+        app.send(
+            Method::POST,
+            "/api/v1/document-types",
+            Some(&token),
+            Some(json!({"typeCode": "LOOP", "name": "Loop", "formId": form_id})),
+        )
+        .await,
+    );
+    let document_id = id_of_created(
+        app.send(
+            Method::POST,
+            "/api/v1/documents",
+            Some(&token),
+            Some(json!({
+                "documentTypeId": type_id,
+                "title": "Saved before the upgrade",
+                "formData": {"title": "Desks"}
+            })),
+        )
+        .await,
+    );
+
+    let looped = json!({
+        "formId": "loop_after_publish",
+        "version": "2.0.1",
+        "title": "Purchase requisition",
+        "components": [
+            calculated_field("a", json!({"reduce": [[1], {"var": "accumulator"}, {"var": "b"}]})),
+            calculated_field("b", json!({"+": [{"var": "a"}, 1]}))
+        ]
+    });
+    sqlx::query("UPDATE rad_forms SET definition_json = $1 WHERE id = $2")
+        .bind(&looped)
+        .bind(form_id)
+        .execute(&app.pool)
+        .await
+        .expect("the published definition is rewritten behind the API");
+
+    let form_data = json!({"a": 1, "b": 2});
+    let writes = [
+        submit(&app, &token, form_id, form_data.clone()).await,
+        app.send(
+            Method::POST,
+            "/api/v1/documents",
+            Some(&token),
+            Some(json!({
+                "documentTypeId": type_id,
+                "title": "Saved after the upgrade",
+                "formData": form_data
+            })),
+        )
+        .await,
+        app.send(
+            Method::PUT,
+            &format!("/api/v1/documents/{document_id}"),
+            Some(&token),
+            Some(json!({"formData": form_data})),
+        )
+        .await,
+        app.send(
+            Method::POST,
+            &format!("/api/v1/documents/{document_id}/submission"),
+            Some(&token),
+            None,
+        )
+        .await,
+    ];
+
+    for refused in &writes {
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            refused.body
+        );
+
+        let detail = refused.body["error"]["details"]
+            .as_array()
+            .and_then(|details| details.iter().find(|d| d["code"] == "CALCULATION_CYCLE"))
+            .unwrap_or_else(|| panic!("no cycle named: {}", refused.body));
+
+        assert_eq!(detail["path"], json!("definition"));
+        assert!(
+            detail["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("`a`") && message.contains("`b`")),
+            "{detail}"
+        );
+    }
+
+    let submissions: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM rad_form_submissions WHERE form_id = $1")
+            .bind(form_id)
+            .fetch_one(&app.pool)
+            .await
+            .expect("the submissions are countable");
+    let documents: Vec<(String, Value)> =
+        sqlx::query_as("SELECT status, form_data_json FROM documents WHERE document_type_id = $1")
+            .bind(type_id)
+            .fetch_all(&app.pool)
+            .await
+            .expect("the documents are readable");
+
+    assert_eq!(submissions, 0);
+    assert_eq!(documents.len(), 1, "{documents:?}");
+    assert_eq!(documents[0].0, "DRAFT");
+    assert_eq!(documents[0].1["title"], json!("Desks"));
+    assert!(documents[0].1.get("a").is_none(), "{documents:?}");
+
+    let read = app
+        .send(
+            Method::GET,
+            &format!("/api/v1/rad/forms/{form_id}"),
+            Some(&token),
+            None,
+        )
+        .await;
+
+    assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+}
+
+/// **#789, a form with no loop.** A field reading a later one through a default
+/// or an initial value now runs after it, so what is stored at the next write
+/// changes. Before, `a` ran first and read the client's `b`, which made the
+/// tampered 100 a stored `a`; a client that sent no `b` stored 0. The rule is
+/// S8.1's: a calculated value is never the client's.
+#[tokio::test]
+async fn a_field_reading_a_later_one_through_a_default_or_an_initial_value_runs_after_it() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for (key, calculate) in [
+        ("through_default", json!({"var": ["nope", {"var": "b"}]})),
+        (
+            "through_initial",
+            json!({"reduce": [[1], {"var": "accumulator"}, {"var": "b"}]}),
+        ),
+    ] {
+        let form_id = id_of_created(
+            app.send(
+                Method::POST,
+                "/api/v1/rad/forms",
+                Some(&token),
+                Some(json!({
+                    "formKey": key,
+                    "title": "Order",
+                    "definition": {
+                        "formId": key,
+                        "version": "2.0.1",
+                        "title": "Order",
+                        "components": [
+                            number_field("c"),
+                            calculated_field("a", calculate),
+                            calculated_field("b", json!({"+": [{"var": "c"}, 1]}))
+                        ]
+                    }
+                })),
+            )
+            .await,
+        );
+        let published = app
+            .send(
+                Method::POST,
+                &format!("/api/v1/rad/forms/{form_id}/publish"),
+                Some(&token),
+                None,
+            )
+            .await;
+
+        assert_eq!(published.status, StatusCode::OK, "{}", published.body);
+
+        for payload in [json!({"c": 1}), json!({"c": 1, "b": 100})] {
+            let response = submit(&app, &token, form_id, payload).await;
+            let stored = stored_payload(&app, submission_id(&response.body)).await;
+
+            assert_eq!(stored, json!({"a": 2.0, "b": 2.0, "c": 1}), "{key}");
+        }
+    }
+}
+
+fn id_of_created(response: common::TestResponse) -> Uuid {
+    assert_eq!(response.status, StatusCode::CREATED, "{}", response.body);
+
+    submission_id(&response.body)
+}

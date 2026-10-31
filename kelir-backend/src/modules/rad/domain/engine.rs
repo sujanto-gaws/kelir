@@ -219,7 +219,7 @@ fn collect_references(expression: &Value, found: &mut References) {
 
 /// The path a `var` operand names: the string itself, or the first element of
 /// `[path, default]` when it is a string. Anything else names no path.
-fn var_path(operand: &Value) -> Option<&str> {
+pub(crate) fn var_path(operand: &Value) -> Option<&str> {
     match operand {
         Value::String(text) => Some(text),
         // `{"var": ["total", 0]}` — the path with a default beside it.
@@ -228,34 +228,88 @@ fn var_path(operand: &Value) -> Option<&str> {
     }
 }
 
-/// `missing` and `missing_some` take *names*, not expressions.
+/// The default of a `var`: the second element of an operand opening with a
+/// string or a number, the two the engine reads a default beside.
+///
+/// Evaluated in this scope when the path misses, so a default that is an
+/// expression reads what it says. Anything after it is never evaluated, and an
+/// array opening with `null` or a boolean takes no default.
+pub(crate) fn var_default(operand: &Value) -> Option<&Value> {
+    match operand.as_array()?.as_slice() {
+        [Value::String(_) | Value::Number(_), default, ..] => Some(default),
+        _ => None,
+    }
+}
+
+/// The operators that evaluate a body against each item of a source.
+pub(crate) const ITERATORS: &[&str] = &["map", "filter", "reduce", "all", "some", "none"];
+
+/// The operands of an iterator evaluated in the scope it is written in: its
+/// source and, for `reduce`, its initial value. Everything else is its body,
+/// or is never evaluated.
+///
+/// The argument itself is the source in the shorthand, given directly rather
+/// than wrapped in a list.
+pub(crate) fn iterator_operands<'a>(operator: &str, argument: &'a Value) -> [Option<&'a Value>; 2] {
+    match argument.as_array().map(Vec::as_slice) {
+        Some([source, _, initial, ..]) if operator == "reduce" => [Some(source), Some(initial)],
+        Some([source, ..]) => [Some(source), None],
+        _ => [Some(argument), None],
+    }
+}
+
+/// Whether a `var` operand works its path out as it runs, so that no reader of
+/// the definition can say what it reads: an object, or an array opening with an
+/// object or an array.
+///
+/// **The array is not only a computed path.** `[[1], "document.amount"]` is the
+/// engine's scope jump: `[1]` is the level to climb, and from a body it is the
+/// one way back out to the context. `{"var": 0}`, `null`, `[]` and
+/// `[1, "total"]` are none of these, and neither is a path with a default.
+fn is_computed_var(operand: &Value) -> bool {
+    match operand {
+        Value::Object(_) => true,
+        Value::Array(items) => matches!(items.first(), Some(Value::Object(_) | Value::Array(_))),
+        _ => false,
+    }
+}
+
+/// `missing` and `missing_some` take *names*, as strings or lists of strings,
+/// and the engine evaluates each operand first. So an expression among them is
+/// walked: what it reads is read, and what it answers is a name, which only
+/// [`reads_computed_path`] can speak to.
+///
+/// A list inside a list holds names too (`{"missing": [["a", "b"]]}`). The
+/// engine stops looking at that depth and this does not, which reads a name
+/// nothing would ever ask about, in a shape nobody writes.
 fn visit_names<'a, F: FnMut(&'a str)>(argument: &'a Value, visit: &mut F) {
     match argument {
+        Value::String(name) => visit(name),
         Value::Array(items) => {
-            for name in items.iter().filter_map(Value::as_str) {
-                visit(name);
+            for item in items {
+                visit_names(item, visit);
             }
         }
-        other => {
-            if let Some(path) = var_path(other) {
-                visit(path);
-            }
-        }
+        other => visit_paths(other, visit),
     }
 }
 
 /// Every path `expression` reads **in the scope it is written in**, whole and
-/// in the order it reads them: each `var` path, and each name `missing` and
-/// `missing_some` ask about. An empty path is given as `""`, the whole scope;
-/// a `var` whose operand is not a string names no path and is not given.
+/// in the order it reads them: each `var` path with its default, each name
+/// `missing` and `missing_some` ask about, and whatever the expressions among
+/// their operands read, `missing_some`'s count included. An empty path is given
+/// as `""`, the whole scope; a `var` whose operand is not a string names no
+/// path and is not given, and neither is anything inside it.
 ///
 /// **The iterator operators are the reason this is a walk and not a search for
 /// `var`.** `map`, `filter`, `reduce`, `all`, `some` and `none` evaluate their
-/// first argument in the current scope and every later one against each *item*
-/// of what that produced — so in the registry §6.1 invoice,
+/// first argument in the current scope and their body against each *item* of
+/// what that produced — so in the registry §6.1 invoice,
 /// `{"map": [{"var": "line_items"}, {"*": [{"var": "unit_price"}, …]}]}` reads
-/// `line_items` here and `unit_price` in a row. Only the first argument is
-/// walked; `reduce`'s initial value is not either.
+/// `line_items` here and `unit_price` in a row. So the first argument is walked
+/// and the body is not. **`reduce`'s third argument is walked too**: its
+/// initial value is evaluated here, once, before there is an item to address
+/// ([#789]), and it is given after the source, the order it is written in.
 ///
 /// **One walk, two readers** ([#706]). The form engine keeps each path's head
 /// as a dependency between fields, where a path read into the wrong scope
@@ -266,7 +320,17 @@ fn visit_names<'a, F: FnMut(&'a str)>(argument: &'a Value, visit: &mut F) {
 /// from here, so they cannot disagree about which operand addresses an
 /// element and which addresses the context.
 ///
+/// **A computed `var` stays unseen here on purpose**, and it is not read as the
+/// whole scope either, which would invent edges and cycles for every form
+/// holding one. Workflows refuse the shape through [`reads_computed_path`].
+///
+/// **Nor does this see what a body reads through its element.** A workflow
+/// refuses to hand a body the context
+/// (`workflow::domain::jwss::hands_an_iterator_the_context`); a form's
+/// record has no path it does not build.
+///
 /// [#706]: https://github.com/sujanto-gaws/kelir/issues/706
+/// [#789]: https://github.com/sujanto-gaws/kelir/issues/789
 pub(crate) fn visit_paths<'a, F: FnMut(&'a str)>(expression: &'a Value, visit: &mut F) {
     match expression {
         Value::Object(map) => {
@@ -276,20 +340,23 @@ pub(crate) fn visit_paths<'a, F: FnMut(&'a str)>(expression: &'a Value, visit: &
                         if let Some(path) = var_path(argument) {
                             visit(path);
                         }
+                        if let Some(default) = var_default(argument) {
+                            visit_paths(default, visit);
+                        }
                     }
                     "missing" => visit_names(argument, visit),
                     // `{"missing_some": [n, ["a", "b"]]}` — the count, then the
                     // names.
-                    "missing_some" => match argument.as_array().and_then(|items| items.get(1)) {
-                        Some(names) => visit_names(names, visit),
-                        None => visit_names(argument, visit),
+                    "missing_some" => match argument.as_array().map(Vec::as_slice) {
+                        Some([count, names, ..]) => {
+                            visit_paths(count, visit);
+                            visit_names(names, visit);
+                        }
+                        _ => visit_names(argument, visit),
                     },
-                    "map" | "filter" | "reduce" | "all" | "some" | "none" => {
-                        match argument.as_array().and_then(|items| items.first()) {
-                            Some(source) => visit_paths(source, visit),
-                            // The shorthand: the argument given directly rather
-                            // than wrapped in a list.
-                            None => visit_paths(argument, visit),
+                    iterator if ITERATORS.contains(&iterator) => {
+                        for operand in iterator_operands(iterator, argument).into_iter().flatten() {
+                            visit_paths(operand, visit);
                         }
                     }
                     _ => visit_paths(argument, visit),
@@ -302,6 +369,47 @@ pub(crate) fn visit_paths<'a, F: FnMut(&'a str)>(expression: &'a Value, visit: &
             }
         }
         _ => {}
+    }
+}
+
+/// Whether `expression` holds a read no one can name before it runs: a computed
+/// `var` ([`is_computed_var`]), or a `missing` or `missing_some` name that is
+/// an expression.
+///
+/// **It enters every body, which [`visit_paths`] does not.** A plain path in a
+/// body reads the element, and is the element's business. A computed path is
+/// not: the scope jump works at any depth, and nothing in the shape tells a
+/// harmless computed path from a jump.
+///
+/// The workflow publish is the one reader ([#789], JWSS R-18). A form's
+/// computed `var` is not refused: that would narrow JFSS, which is its own
+/// revision.
+///
+/// [#789]: https://github.com/sujanto-gaws/kelir/issues/789
+pub(crate) fn reads_computed_path(expression: &Value) -> bool {
+    match expression {
+        Value::Object(map) => map.iter().any(|(operator, argument)| {
+            match (operator.as_str(), argument.as_array().map(Vec::as_slice)) {
+                ("var", _) => is_computed_var(argument) || reads_computed_path(argument),
+                ("missing", _) => is_computed_name(argument),
+                ("missing_some", Some([count, names, ..])) => {
+                    reads_computed_path(count) || is_computed_name(names)
+                }
+                _ => reads_computed_path(argument),
+            }
+        }),
+        Value::Array(items) => items.iter().any(reads_computed_path),
+        _ => false,
+    }
+}
+
+/// Whether a `missing` or `missing_some` operand holds an expression where a
+/// name goes, however deep in lists. [`visit_names`]'s shape.
+fn is_computed_name(argument: &Value) -> bool {
+    match argument {
+        Value::Object(_) => true,
+        Value::Array(items) => items.iter().any(is_computed_name),
+        _ => false,
     }
 }
 
@@ -1572,10 +1680,11 @@ mod tests {
         );
     }
 
-    /// Each iterator's first operand is read in this scope, and nothing after
-    /// it is: not the element-scoped operand, and not `reduce`'s initial value.
+    /// Each iterator's first operand is read in this scope and its body is not,
+    /// and `reduce`'s initial value is read here too, after the source (#789):
+    /// the engine evaluates it once, in this scope.
     #[test]
-    fn visits_only_an_iterators_source() {
+    fn visits_an_iterators_source_and_a_reduces_initial_value_and_no_body() {
         for operator in ["map", "filter", "all", "some", "none"] {
             let expression = json!({operator: [{"var": "lines"}, {">": [{"var": "qty"}, 1]}]});
 
@@ -1587,10 +1696,209 @@ mod tests {
             {"+": [{"var": "current.qty"}, {"var": "accumulator"}]},
             {"var": "start"}
         ]});
-        assert_eq!(paths(&reduce), ["lines"]);
+        assert_eq!(paths(&reduce), ["lines", "start"]);
+
+        let nested = json!({"reduce": [
+            {"var": "lines"},
+            {"var": "current"},
+            {"reduce": [{"var": "others"}, {"var": "current"}, {"var": "start"}]}
+        ]});
+        assert_eq!(paths(&nested), ["lines", "others", "start"]);
+
+        let two = json!({"reduce": [{"var": "lines"}, {"var": "current"}]});
+        assert_eq!(paths(&two), ["lines"]);
+
+        // Only `reduce` has one: a third operand elsewhere is an evaluation
+        // error, not a read.
+        let third = json!({"some": [{"var": "lines"}, {"var": "qty"}, {"var": "start"}]});
+        assert_eq!(paths(&third), ["lines"]);
 
         // The shorthand, with the argument given directly.
         assert_eq!(paths(&json!({"some": {"var": "lines"}})), ["lines"]);
+    }
+
+    /// A default that is an expression reads what it says, after the path.
+    #[test]
+    fn visits_a_vars_default() {
+        assert_eq!(
+            paths(&json!({"var": ["total", {"var": "fallback"}]})),
+            ["total", "fallback"]
+        );
+        assert_eq!(
+            paths(&json!({"var": [0, {"var": "fallback"}]})),
+            ["fallback"]
+        );
+        assert_eq!(paths(&json!({"var": ["total", 0]})), ["total"]);
+        assert_eq!(paths(&json!({"var": [1, "total"]})), Vec::<&str>::new());
+    }
+
+    /// What `missing` and `missing_some` are handed is read, not only literal
+    /// names: an expression among them, a list inside a list, the count.
+    #[test]
+    fn visits_what_the_operands_of_missing_read() {
+        assert_eq!(paths(&json!({"missing": {"var": "names"}})), ["names"]);
+        assert_eq!(
+            paths(&json!({"missing": ["a", {"var": "names"}, ["b", {"var": "more"}]]})),
+            ["a", "names", "b", "more"]
+        );
+        assert_eq!(
+            paths(&json!({"missing_some": [{"var": "count"}, ["a", {"var": "names"}]]})),
+            ["count", "a", "names"]
+        );
+        assert_eq!(
+            paths(&json!({"missing_some": [1, {"var": "names"}]})),
+            ["names"]
+        );
+    }
+
+    /// **A computed `var` stays unseen by the walk** (#789): forms are not
+    /// refused for one, and reading it as the whole scope would invent edges.
+    #[test]
+    fn visits_nothing_of_a_computed_var() {
+        for operand in [
+            json!({"if": [true, "a", "b"]}),
+            json!({"var": "which"}),
+            json!([{"var": "which"}, {"var": "default"}]),
+            json!([[1], "a"]),
+        ] {
+            let expression = json!({"var": operand});
+
+            assert_eq!(paths(&expression), Vec::<&str>::new(), "{operand}");
+            assert!(reads_computed_path(&expression), "{operand}");
+        }
+    }
+
+    /// The scan enters what the walk does not: a body.
+    #[test]
+    fn the_scan_for_a_computed_path_enters_a_body_and_finds_a_computed_name() {
+        for expression in [
+            json!({"some": [{"var": "lines"}, {"var": [[1], "a"]}]}),
+            json!({"reduce": [{"var": "lines"}, {"var": {"var": "a"}}, 0]}),
+            json!({"missing": {"var": "names"}}),
+            json!({"missing": ["a", [{"var": "name"}]]}),
+            json!({"missing_some": [1, {"var": "names"}]}),
+            json!({"missing_some": [{"var": {"var": "a"}}, ["a"]]}),
+            json!({"var": ["a", {"var": {"var": "b"}}]}),
+        ] {
+            assert!(reads_computed_path(&expression), "{expression}");
+        }
+
+        for expression in [
+            json!({"var": 0}),
+            json!({"var": null}),
+            json!({"var": []}),
+            json!({"var": ""}),
+            json!({"var": [1, "a"]}),
+            json!({"var": ["a", 0]}),
+            json!({"var": ["a", {"var": "b"}]}),
+            json!({"missing": ["a", 3, ["b"]]}),
+            json!({"missing_some": [{"var": "count"}, ["a"]]}),
+            json!({"some": [{"var": "lines"}, {"var": "qty"}]}),
+        ] {
+            assert!(!reads_computed_path(&expression), "{expression}");
+        }
+    }
+
+    /// **#789 AC15.** `total` reads `b` only through `reduce`'s initial value,
+    /// and `b` is declared after it, so the edge is what puts `b` first.
+    #[test]
+    fn an_initial_value_is_a_dependency_and_a_literal_one_is_not() {
+        let total = |initial: Value| {
+            field(
+                "total",
+                json!({"reduce": [
+                    {"var": "lines"},
+                    {"+": [{"var": "current"}, {"var": "accumulator"}]},
+                    initial
+                ]}),
+            )
+        };
+
+        assert_eq!(
+            ordered(&[total(json!({"var": "b"})), plain("b")]),
+            ["b", "total"]
+        );
+        assert_eq!(ordered(&[total(json!(0)), plain("b")]), ["total", "b"]);
+    }
+
+    /// **#789 AC15.** A loop through an initial value is a loop.
+    #[test]
+    fn a_loop_through_an_initial_value_is_a_cycle() {
+        let details = definition_errors(&definition(vec![
+            field(
+                "a",
+                json!({"reduce": [{"var": "lines"}, {"var": "current"}, {"var": "b"}]}),
+            ),
+            field("b", json!({"+": [{"var": "a"}, 1]})),
+        ]));
+
+        assert_eq!(codes(&details), [CALCULATION_CYCLE]);
+    }
+
+    /// **#789.** What a workflow refuses at a source, the whole scope or a
+    /// list holding it, binds workflows only: a form is what it was.
+    #[test]
+    fn a_form_iterating_its_whole_record_is_not_refused() {
+        for source in [
+            json!({"var": ""}),
+            json!({"var": null}),
+            json!([{"var": ""}]),
+        ] {
+            let mut notes = plain("notes");
+            notes["conditional"] = json!({
+                "action": "show",
+                "logic": {"some": [source, {">": [{"var": "qty"}, 1]}]}
+            });
+
+            assert!(definition_errors(&definition(vec![notes])).is_empty());
+        }
+    }
+
+    /// **#789.** The other half of what a form kept. A `calculate` holding the
+    /// whole record reads the field it fills, so `{"var": ""}` as a source is the
+    /// self-loop it was before the walk learned anything: `t` → `t`, and not a
+    /// refusal of the iterator. `{"var": null}` names no path to the walk, so it
+    /// is no edge and no refusal, a difference this leaves where it was.
+    #[test]
+    fn a_calculate_iterating_its_whole_record_is_the_self_loop_it_was() {
+        let summing = |source: Value| {
+            field(
+                "t",
+                json!({"reduce": [
+                    source,
+                    {"+": [{"var": "current"}, {"var": "accumulator"}]},
+                    0
+                ]}),
+            )
+        };
+
+        for source in [json!({"var": ""}), json!([{"var": ""}])] {
+            let details = definition_errors(&definition(vec![plain("qty"), summing(source)]));
+
+            assert_eq!(codes(&details), [CALCULATION_CYCLE]);
+            assert!(
+                details[0].message.contains("`t` → `t`"),
+                "{}",
+                details[0].message
+            );
+        }
+
+        assert!(definition_errors(&definition(vec![
+            plain("qty"),
+            summing(json!({"var": null}))
+        ]))
+        .is_empty());
+    }
+
+    /// **#789 AC16.** A computed `var` that names a field in a loop is not a
+    /// loop this engine can see, and a definition holding one is what it was.
+    #[test]
+    fn a_form_with_a_computed_var_is_not_refused_and_gets_no_edge() {
+        let a = field("a", json!({"+": [{"var": {"var": "which"}}, 1]}));
+        let b = field("b", json!({"+": [{"var": [[1], "a"]}, 1]}));
+
+        assert_eq!(ordered(&[a.clone(), b.clone()]), ["a", "b"]);
+        assert!(definition_errors(&definition(vec![a, b])).is_empty());
     }
 
     // -- The definition gate -----------------------------------------------
