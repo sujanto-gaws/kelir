@@ -549,12 +549,18 @@ async fn another_tenants_history_is_out_of_reach() {
     // And their records do not appear under an id of ours either: a party of
     // ours whose id somehow collided would still not inherit their chain.
     let ours = given_party(&app, &token, "PARTY-OURS").await;
-    sqlx::query("UPDATE audit_events SET object_id = $1 WHERE tenant_id = $2")
-        .bind(ours)
-        .bind(other_tenant)
-        .execute(&app.pool)
-        .await
-        .expect("point their record at our party");
+    sqlx::query(
+        "INSERT INTO audit_events
+             (id, tenant_id, event_type, action, object_type, object_id,
+              previous_hash, current_hash)
+         VALUES ($1, $2, 'Party.Created', 'CREATE', 'PARTY', $3, 'sha256:theirs', 'sha256:collides')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(other_tenant)
+    .bind(ours)
+    .execute(&app.pool)
+    .await
+    .expect("insert a record of theirs under our party's id");
 
     let history = app
         .get(&format!("{PARTIES}/{ours}/audit"), Some(&token))

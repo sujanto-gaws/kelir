@@ -25,12 +25,22 @@
 //! normalises numbers. A hash that is only correct before the row is written is
 //! not a hash anything can verify, and no unit test would ever say so. That is
 //! what these tests are for, and why they go through a real database.
+//!
+//! # The two tampering tests go past the trigger
+//!
+//! `audit_events` has refused an `UPDATE` since [#833], so the writes below no
+//! longer say what an attacker on the application's connection can do. They say
+//! what the chain does if a write lands anyway, which the table's owner can
+//! still arrange, and that is why they stay. `tests/audit_append_only.rs` holds
+//! the refusal.
+//!
+//! [#833]: https://github.com/sujanto-gaws/kelir/issues/833
 
 mod common;
 
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
-use common::TestApp;
+use common::{fixtures, TestApp};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -279,12 +289,14 @@ async fn rewriting_what_a_stored_record_says_it_changed_no_longer_verifies() {
         "the row should verify before it is tampered with"
     );
 
-    sqlx::query("UPDATE audit_events SET new_value_json = $2 WHERE id = $1")
-        .bind(target.id)
-        .bind(json!({ "externalId": "SAP-000000" }))
-        .execute(&app.pool)
-        .await
-        .expect("the tampering write lands");
+    fixtures::write_past_the_audit_trigger(
+        &app.pool,
+        sqlx::query("UPDATE audit_events SET new_value_json = $2 WHERE id = $1")
+            .bind(target.id)
+            .bind(json!({ "externalId": "SAP-000000" })),
+    )
+    .await
+    .expect("the tampering write lands");
 
     let tampered = stored_rows(&app)
         .await
@@ -314,11 +326,15 @@ async fn moving_a_stored_record_in_time_no_longer_verifies() {
         .next()
         .expect("at least one audit row");
 
-    sqlx::query("UPDATE audit_events SET created_at = created_at - interval '1 day' WHERE id = $1")
-        .bind(target.id)
-        .execute(&app.pool)
-        .await
-        .expect("the tampering write lands");
+    fixtures::write_past_the_audit_trigger(
+        &app.pool,
+        sqlx::query(
+            "UPDATE audit_events SET created_at = created_at - interval '1 day' WHERE id = $1",
+        )
+        .bind(target.id),
+    )
+    .await
+    .expect("the tampering write lands");
 
     let tampered = stored_rows(&app)
         .await

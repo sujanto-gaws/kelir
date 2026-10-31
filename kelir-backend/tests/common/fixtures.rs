@@ -8,13 +8,73 @@
 //!
 //! Business identifiers follow naming convention §8: `TNT-001`, `DEPT-PROC`.
 
-use sqlx::PgPool;
+use sqlx::postgres::{PgArguments, PgQueryResult};
+use sqlx::query::Query;
+use sqlx::{PgPool, Postgres};
 use uuid::Uuid;
 
 use kelir_backend::modules::auth::password::hash_password;
 use kelir_backend::modules::identity::repository as identity_repo;
 
 use super::harness_failure;
+
+/// The trigger that makes `audit_events` append-only, from
+/// `0052_audit_events_append_only.sql`.
+pub const AUDIT_APPEND_ONLY_TRIGGER: &str = "trg_audit_events_append_only";
+
+/// Runs one write against `audit_events` past its append-only trigger.
+///
+/// **For a test that needs a tampered row, and for nothing else.** Every such
+/// test goes through here, so the one place a test suite rewrites the audit
+/// trail is one function ([#833]).
+///
+/// The disable, the write and the enable are one transaction. DDL is
+/// transactional, so the trigger is back whether the write commits or rolls
+/// back, and no other connection ever sees it off: `ALTER TABLE` holds a lock
+/// that keeps a concurrent writer waiting until the transaction ends.
+///
+/// **This works only because the harness's pool owns the table**, which is the
+/// limit [#842] addresses. `session_replication_role` is no alternative: it
+/// needs a superuser, and a setting the application could flip would be no
+/// control at all.
+///
+/// A failing write comes back as the `Err`, after an explicit rollback.
+/// Dropping the transaction would queue that rollback for when the connection
+/// next reaches the pool, and a caller's next statement could arrive first and
+/// find the trigger still off.
+///
+/// [#833]: https://github.com/sujanto-gaws/kelir/issues/833
+/// [#842]: https://github.com/sujanto-gaws/kelir/issues/842
+pub async fn write_past_the_audit_trigger(
+    pool: &PgPool,
+    write: Query<'_, Postgres, PgArguments>,
+) -> Result<PgQueryResult, sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+
+    sqlx::query(&format!(
+        "ALTER TABLE audit_events DISABLE TRIGGER {AUDIT_APPEND_ONLY_TRIGGER}"
+    ))
+    .execute(&mut *transaction)
+    .await?;
+
+    let written = match write.execute(&mut *transaction).await {
+        Ok(written) => written,
+        Err(error) => {
+            transaction.rollback().await?;
+            return Err(error);
+        }
+    };
+
+    sqlx::query(&format!(
+        "ALTER TABLE audit_events ENABLE TRIGGER {AUDIT_APPEND_ONLY_TRIGGER}"
+    ))
+    .execute(&mut *transaction)
+    .await?;
+
+    transaction.commit().await?;
+
+    Ok(written)
+}
 
 /// The **system tenant's** `ROLE-ADMIN`, seeded by `0002_identity.sql` with
 /// every permission.
