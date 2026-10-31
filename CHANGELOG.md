@@ -1122,10 +1122,18 @@ While the major version is `0`, the public API may change in any release.
   to fill in (*Fixed*, above), so check each before publishing.~~ (Struck
   2026-10-15: such a rule is refused at save and publish since #722, under
   *Changed*. A revision published before it is not re-checked.)
-- **A layout's or display's `conditional` escapes the operator check**
+- **A non-data component's expression escapes the operator check**
   ([#828](https://github.com/sujanto-gaws/kelir/issues/828)). A save and a
-  publish check the operators of data components only. It is unprioritised
-  and unplaced.
+  publish check the operators of data components only, so a layout's, a
+  display's or an action's `conditional`, or a display's `calculate`, can hold
+  an operator the set refuses. A form can publish that nobody can submit,
+  `merge` there has discarded what the person typed, and `val` or `exists`
+  reads a computed path past **D-135**'s check. It is unprioritised and
+  unplaced.
+- **A refused layout `conditional` cannot be edited in the form builder**
+  ([#830](https://github.com/sujanto-gaws/kelir/issues/830)). The refusal shows
+  on the component, and the builder offers no way to change the expression;
+  the way out is the API. It is unprioritised and unplaced.
 
 ## [0.9.0] — 2026-10-09
 
