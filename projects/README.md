@@ -15,6 +15,7 @@ projects/
 ├── retrospectives/     per-sprint and per-phase retrospectives with committed actions
 ├── releases/           one evidence checklist per tagged release
 ├── verifications/      one record per independent verification pass
+├── security/           one record per pass over the NFR-SEC requirements
 └── spikes/             one finding per time-boxed investigation
 ```
 
@@ -150,6 +151,14 @@ An independent verification pass is a **person or agent other than the author** 
 | [07. Sprint 10 Surface Verification.md](verifications/07.%20Sprint%2010%20Surface%20Verification.md) | 2026-08-28, over the whole Sprint 10 construction. **The second record that is not independent**, and §1 says so first. 34 SQL and constraint mutations. **Nine findings, eight closed in the pass** — a document number collision that answered 500 on a configuration two types can fall into, a concurrent edit that took the sprint's migration number, a doc comment claiming a check the code did not make, two facts made one argument so a legal definition could strand a process forever, a detail read capped by a page size, and six predicates nothing held. **Three of the six came from reading rather than mutating**, which is the honest statement of what a campaign is for |
 | [06. Sprint 9 Surface Verification.md](verifications/06.%20Sprint%209%20Surface%20Verification.md) | 2026-08-28, over the whole Sprint 9 construction. **The first record of its kind that is not independent**, and §1 says so before anything else: one author built it, verified it and wrote this. 27 SQL mutations, **13 red — 48%**. Three findings, one release-blocking, all closed in the pass — a submit holding two pooled connections on the path no test reaches, a flaky test that contaminated the campaign measuring it, and five predicates that were #218's category one sprint later |
 | [04. Sprint 7 Surface Verification.md](verifications/04.%20Sprint%207%20Surface%20Verification.md) | 2026-08-26, over the whole Sprint 7 construction (#153–#158), both carry-overs (#28, #17), the unplanned tenant item (#27, #65) and the defect sweep (PR #199). Thirty-two mutations, four probes: **seven defects, one release-blocking** — a `DEPARTMENT_YEAR` numbering rule that issues `000001` to every document forever, a multi-argument `sum` that is a silent zero on *both* engines, and twenty of the thirty-two predicates the sprint added exercised by nothing |
+
+### security/
+
+A security pass traces the NFR-SEC requirements to the tests that hold them, and records what was audited, scanned and checked by hand. **It is a row's own record, not an independent reading**, so it does not go in `verifications/`: `sprint_reports_are_verified.rs` reads a file there named for a sprint as a pass over that sprint.
+
+| Document | Content |
+|---|---|
+| [01. NFR-SEC Security Pass.md](security/01.%20NFR-SEC%20Security%20Pass.md) | Issue #779, construction plan 21 row 3, 2026-10-31, at `3c2bb8a`. Traces NFR-SEC-001 to 010 to tests each opened: **seven met, NFR-SEC-003 met for authentication and partly shown for authorization, NFR-SEC-010 met under D-119 C with its scope stated, and NFR-SEC-006 not met**, which is a `must`, with FR-AUD-003. Three pins, seen red by 22 mutations and 2 controls. One dependency audit of the two shipped lock files, one TLS check on a hostname against the shipped Caddyfile, seen red against a server that accepts TLS 1.1, and one secret scan, with no real secret found. Its seven findings are [#833](https://github.com/sujanto-gaws/kelir/issues/833)–[#839](https://github.com/sujanto-gaws/kelir/issues/839) |
 
 ### spikes/
 
