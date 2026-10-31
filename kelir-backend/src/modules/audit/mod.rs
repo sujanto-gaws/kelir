@@ -168,7 +168,8 @@ impl ChangeSet {
 /// Each row's `current_hash` covers **every column this function writes** — the
 /// metadata, the two payload halves, and the row's own `created_at` — *and* the
 /// previous row's hash, so altering or removing any row breaks every hash after
-/// it. That makes tampering detectable (FR-AUD-003) without preventing writes.
+/// it. That makes tampering detectable. Refusing a change is `0052`'s trigger
+/// (FR-AUD-003), which does not stop the table's owner.
 ///
 /// The columns outside the hash are the ones nothing writes: `document_id`,
 /// `workflow_instance_id`, `entity_type`, `entity_id`, `actor_role_id` and

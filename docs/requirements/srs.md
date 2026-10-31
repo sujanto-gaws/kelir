@@ -1,6 +1,6 @@
 # Kelir Software Requirements Specification
 
-**Status:** Draft · **Last updated:** 2026-10-29
+**Status:** Draft · **Last updated:** 2026-11-01
 
 The companion Solution Blueprint formerly bundled in this file now lives in the System Design Document: `docs/design/01. System Design Document.md`.
 
@@ -630,6 +630,8 @@ File upload: depends on network and file size
 | NFR-SEC-010 | Data in transit must use TLS 1.2 or higher |
 
 Note: NFR-SEC-010 is read by decision **D-119** (2026-10-28; the requirement is unchanged). It is met by TLS at the edge Caddy serves, which holds today, and on the backend's connection to PostgreSQL, the one internal hop the design takes off the host, which ~~holds once #803 has merged~~ holds since #803. The object store and the virus scanner are reached only inside the deployment's private network, and SMTP uses STARTTLS for any host that is not local. ~~The database half is built by [#803](https://github.com/sujanto-gaws/kelir/issues/803).~~ The database half was built by [#803](https://github.com/sujanto-gaws/kelir/issues/803): a database host that is not local is reached over TLS 1.2 or higher or not at all, and a local one is exempt by design ([SDD](../design/01.%20System%20Design%20Document.md) §13.2). *(Restated 2026-10-29.)*
+
+Note: NFR-SEC-006 and FR-AUD-003 are held by a database trigger, `trg_audit_events_append_only`, which refuses `UPDATE`, `DELETE` and `TRUNCATE` on `audit_events` ([#833](https://github.com/sujanto-gaws/kelir/issues/833), decision **D-139**, 2026-10-31; the requirements are unchanged). **FR-AUD-003 is met. NFR-SEC-006 is met against the application's connection, not against the table's owner**: anything the owner or a superuser can do still changes a row, and the application connects as the owner today, so a stolen application credential defeats the trigger ([#842](https://github.com/sujanto-gaws/kelir/issues/842) is the separate roles). `INSERT` stays allowed, so a forged appended row is not stopped either. [Database Schema](../design/02.%20Database%20Schema.md) §10.2 has the whole limit.
 
 ---
 

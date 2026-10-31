@@ -1110,6 +1110,19 @@ While the major version is `0`, the public API may change in any release.
   excluded it; no document names the window. No migration and no schema
   change: JWSS takes revision R-17, its meta-schema is untouched, and the
   Document Type Definition Schema's examples read `formData.amount`.
+- **A stored audit row refuses a change**
+  ([#833](https://github.com/sujanto-gaws/kelir/issues/833), decision
+  **D-139**, FR-AUD-003, NFR-SEC-006). Until now only the absence of a route
+  kept a row as written. `0052_audit_events_append_only.sql` adds a trigger
+  that refuses `UPDATE`, `DELETE` and `TRUNCATE` on `audit_events`, a write
+  matching no row included. **It holds against the application's connection,
+  not against the table's owner or a superuser**, and the application connects
+  as the owner, so a stolen application credential defeats it
+  ([#842](https://github.com/sujanto-gaws/kelir/issues/842) is the separate
+  roles). `INSERT` stays allowed, so a forged appended row is not stopped.
+  `0052` changes no table and no column, and the audit module only inserts and
+  selects, so the previous image runs against the schema it leaves (release
+  process §6).
 
 ### Known limitations
 
