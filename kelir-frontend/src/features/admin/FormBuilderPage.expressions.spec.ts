@@ -76,6 +76,19 @@ import FormBuilderPage from './FormBuilderPage.vue'
  * | (before the fix, at `ab71f00`) no §4.4 check, Publish unguarded | *refuses to save a heading cleared of its text …*, *opens a loaded heading with no text flagged …*, *never publishes a draft loaded with a repeated key* |
  * | `save` without its duplicate guard, the button still disabled | *flags a key another component uses …* (the PUT count) |
  *
+ * #822 AC9 needed no production change, so its cases were green when written.
+ * Run 2026-10-31 against this file, `FormPropertiesPanel.spec.ts` and
+ * `propertyEdits.spec.ts`, each mutation reverted after:
+ *
+ * | Mutation | Reddened |
+ * |---|---|
+ * | `FormCanvasNode` draws no message list (**the #822 case alone**: nothing else in the three files reads a card's list) | *shows a publish's refusal on a layout's and a display's card …* |
+ * | `FormPropertiesPanel` draws no `allMessages` list | that case, the five *shows a refusal of … in the panel's list …*, and the older AC9 cases |
+ * | `offersConditional` drops `display` | those at the heading's conditional, *offers the purchase requisition's expressions …*, *has a body for all 18 SUPPORTED types …* |
+ * | `offersConditional` takes `layout` too | those at the panel and the columns, the page case, *has a body for all 18 SUPPORTED types …*, and the meta-schema round trips of columns and tabs |
+ * | `restOfPath` drops the `definition.` prefix | *places …components.0.calculate on node 0 …*, every *places … on that node …*, and the AC9 cases |
+ * | `placeDetails` sends a `conditional.logic` to the top list | *places … on that node …* at a conditional, and both page cases |
+ *
  * **Not a mutant:** the panel deriving `variables` as a new array on every
  * write. No case reddens, and none should: `JsonLogicBuilder` reads
  * `variables` for its choices and badges only, and has no watcher on it.
@@ -192,6 +205,7 @@ describe('FormBuilderPage, the properties panel’s expressions', () => {
   let backend: FakeBackendHandle
   let current: Node
   let saveResponse: { status: number; body: unknown } | null
+  let publishResponse: { status: number; body: unknown } | null
   let router: Router
   let mounted: VueWrapper[]
 
@@ -201,10 +215,15 @@ describe('FormBuilderPage, the properties panel’s expressions', () => {
     mounted = []
     current = form(orderForm())
     saveResponse = null
+    publishResponse = null
 
     backend = installFakeBackend((request: RecordedRequest) => {
       if (request.method === 'put' && saveResponse) {
         return saveResponse
+      }
+
+      if (request.method === 'post' && publishResponse) {
+        return publishResponse
       }
 
       if (request.method === 'put') {
@@ -630,6 +649,99 @@ describe('FormBuilderPage, the properties panel’s expressions', () => {
 
     await select(wrapper, 'notes')
     expect(wrapper.find('[data-testid="conditional-error-notes"]').text()).toContain('`map`')
+  })
+
+  /**
+   * **#822 AC9: a publish refuses an expression the panel may not offer.** The
+   * backend reads a `calculate` and a `conditional.logic` on every role, so its
+   * detail can name a layout, which offers no `conditional`, or a display's
+   * `calculate`, which is not offered either. Neither has a field to stand at.
+   *
+   * **The card is what shows it**: every node's card lists what the server said
+   * about it, selected or not, so the refusal is on screen without the author
+   * knowing where to look. A node with no panel at all, a layout in a row
+   * template, has the card alone. Nothing here reaches the top list, whose job is
+   * the details no node claims.
+   */
+  it('shows a publish’s refusal on a layout’s and a display’s card, selected or not (#822 AC9)', async () => {
+    const LOGIC = { '==': [{ var: 'a' }, 1] }
+    const conditional = { action: 'show', logic: LOGIC }
+    const refusal = (path: string, message: string) => ({
+      path,
+      rule: 'expressionPath',
+      code: 'EXPRESSION_PATH_COMPUTED',
+      message,
+    })
+
+    current = form(
+      definition([
+        numberField('quantity'),
+        { id: 'section', role: 'layout', type: 'panel', title: 'S', conditional, components: [] },
+        { id: 'intro', role: 'display', type: 'heading', content: 'I', conditional },
+        {
+          id: 'banner',
+          role: 'display',
+          type: 'alert',
+          content: 'B',
+          calculate: { var: 'quantity' },
+        },
+        {
+          id: 'lines',
+          role: 'data',
+          type: 'datagrid',
+          key: 'lines',
+          label: 'Lines',
+          validation: { type: 'array' },
+          components: [
+            { id: 'row_panel', role: 'layout', type: 'panel', conditional, components: [] },
+          ],
+        },
+      ]),
+    )
+    publishResponse = {
+      status: 422,
+      body: errorBody('VALIDATION_ERROR', 'Validation failed', [
+        refusal('definition.components.1.conditional.logic', 'the layout’s conditional'),
+        refusal('definition.components.2.conditional.logic', 'the display’s conditional'),
+        refusal('definition.components.3.calculate', 'the display’s calculate'),
+        refusal('definition.components.4.components.0.conditional.logic', 'the row’s layout'),
+      ]),
+    }
+
+    const wrapper = await render()
+
+    await wrapper.find('[data-testid="publish-form"]').trigger('click')
+    await settle()
+
+    const card = (id: string) => wrapper.find(`[data-testid="component-errors-${id}"]`)
+
+    expect(wrapper.find('[data-testid="save-error"]').text()).toBe('Validation failed')
+    // Selected or not: `quantity` is the one selected, and it was not refused.
+    expect(card('quantity').exists()).toBe(false)
+    expect(card('section').text()).toBe('the layout’s conditional')
+    expect(card('intro').text()).toBe('the display’s conditional')
+    expect(card('banner').text()).toBe('the display’s calculate')
+    // A layout in a row template is an unsupported card, with no panel to open.
+    expect(card('row_panel').text()).toBe('the row’s layout')
+    expect(wrapper.find('[data-testid="select-row_panel"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="form-errors"]').exists()).toBe(false)
+
+    await select(wrapper, 'section')
+    expect(wrapper.find('[data-testid="editor-errors-section"]').text()).toBe(
+      'the layout’s conditional',
+    )
+    expect(wrapper.find('[data-testid="conditional-section"]').exists()).toBe(false)
+
+    await select(wrapper, 'intro')
+    expect(wrapper.find('[data-testid="conditional-error-intro"]').text()).toBe(
+      'the display’s conditional',
+    )
+
+    await select(wrapper, 'banner')
+    expect(wrapper.find('[data-testid="editor-errors-banner"]').text()).toBe(
+      'the display’s calculate',
+    )
+    expect(wrapper.find('[data-testid="calculate-banner"]').exists()).toBe(false)
   })
 
   // --- The purchase requisition, through the page (test-engineer campaign, 2026-10-15) ---

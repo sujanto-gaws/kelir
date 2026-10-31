@@ -12,7 +12,7 @@ use sqlx::PgExecutor;
 use uuid::Uuid;
 
 use super::super::domain::{
-    jfss, validate_create_form, validate_update_form, CreateFormRequest, Form, FormQuery,
+    engine, jfss, validate_create_form, validate_update_form, CreateFormRequest, Form, FormQuery,
     FormStatus, FormSummary, UpdateFormRequest,
 };
 use super::super::repository::form::{self as repo, FormFields, NewForm};
@@ -256,7 +256,25 @@ pub async fn publish_form(
     let tenant_id = caller.tenant_id();
     let actor = Some(caller.user_id());
 
-    let before = repo::find_form(&state.pool, tenant_id, id)
+    let mut transaction = state.pool.begin().await?;
+
+    // **The revision checked is the revision published** (#822). The row is
+    // locked `FOR UPDATE` and read inside this transaction, so everything below
+    // checks and publishes one copy of it. Read before the transaction, a save
+    // committed in between went live unread, and a save is wider than a publish,
+    // so that was a way past the check below. Now a save already written is
+    // waited for and its definition is what is read here; or `repo::update_draft`
+    // waits for this commit and matches no draft, which `update_form` refuses as
+    // `NOT_A_DRAFT`. A second publish waits too, and then finds no draft.
+    //
+    // Both checks are pure and the audit record is written after the commit, so
+    // nothing wants a second connection while the row is held. A refusal drops
+    // the transaction unwritten.
+    if !repo::lock_for_publish(&mut transaction, tenant_id, id).await? {
+        return Err(AppError::not_found("Form definition"));
+    }
+
+    let before = repo::find_form(&mut *transaction, tenant_id, id)
         .await?
         .ok_or_else(|| AppError::not_found("Form definition"))?;
 
@@ -276,21 +294,27 @@ pub async fn publish_form(
     // live and is discovered by the first person to fill it in. **The stored
     // definition is what goes live, so the stored definition is what is
     // checked.**
-    let details = jfss::validate_definition(&before.definition);
+    let mut details = jfss::validate_definition(&before.definition);
+
+    // **A publish's own check, after the shared one and only when it is clean**
+    // (#822, D-135). A draft may hold a path no one can name until it goes live,
+    // so this cannot be in the validator a save runs, and a definition that is
+    // not valid has a worse fault to fix first.
+    if details.is_empty() {
+        details = engine::computed_path_errors(&before.definition);
+    }
 
     if !details.is_empty() {
         return Err(AppError::validation(details));
     }
 
     // The publish and the read of what it wrote, in one transaction: a delete
-    // sent meanwhile waits on the row the write holds rather than landing
-    // between the two, which answered 500 for a change that committed, with no
-    // audit row (#787).
-    let mut transaction = state.pool.begin().await?;
-
+    // sent meanwhile waits on the row held rather than landing between the two,
+    // which answered 500 for a change that committed, with no audit row (#787).
     if repo::publish(&mut *transaction, tenant_id, id, actor).await? == 0 {
-        // Somebody else published it first. Their name is on it, which is
-        // correct — the second call did not publish anything.
+        // The row is held and was read as a draft, so a second publish was
+        // refused above. The statement keeps its predicate, and a zero here is
+        // still no publish.
         return Err(AppError::conflict(format!(
             "revision {} of `{}` was published by another request",
             before.revision, before.form_key

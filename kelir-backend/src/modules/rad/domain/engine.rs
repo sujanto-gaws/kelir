@@ -75,6 +75,16 @@ use crate::error::ValidationDetail;
 /// The S10.3 `code` a cyclic definition carries, at either moment.
 pub(crate) const CALCULATION_CYCLE: &str = "CALCULATION_CYCLE";
 
+/// The S10.3 `code` a form's expression carries at publish when it reads a path
+/// no reader of the definition can name ([#822], **D-135**).
+///
+/// **`rad`'s own, not `workflow`'s `CONDITION_PATH_COMPUTED`**, whose message
+/// cites JWSS: `workflow` imports this module, and not the other way round. One
+/// shape, one scan, and a code per standard.
+///
+/// [#822]: https://github.com/sujanto-gaws/kelir/issues/822
+pub(crate) const EXPRESSION_PATH_COMPUTED: &str = "EXPRESSION_PATH_COMPUTED";
+
 /// The S10.3 `code` a rule name outside the Validation Rule Registry carries.
 ///
 /// The same string [`super::super::service::evaluation`] raises at submit, and
@@ -322,7 +332,9 @@ fn visit_names<'a, F: FnMut(&'a str)>(argument: &'a Value, visit: &mut F) {
 ///
 /// **A computed `var` stays unseen here on purpose**, and it is not read as the
 /// whole scope either, which would invent edges and cycles for every form
-/// holding one. Workflows refuse the shape through [`reads_computed_path`].
+/// holding one. A publish refuses the shape through [`reads_computed_path`], a
+/// workflow's and a form's alike, and a form already live goes on being walked
+/// here at each write, so this walk must not refuse it.
 ///
 /// **Nor does this see what a body reads through its element.** A workflow
 /// refuses to hand a body the context
@@ -381,9 +393,8 @@ pub(crate) fn visit_paths<'a, F: FnMut(&'a str)>(expression: &'a Value, visit: &
 /// not: the scope jump works at any depth, and nothing in the shape tells a
 /// harmless computed path from a jump.
 ///
-/// The workflow publish is the one reader ([#789], JWSS R-18). A form's
-/// computed `var` is not refused: that would narrow JFSS, which is its own
-/// revision.
+/// Two publishes read it, and no save does: a workflow's ([#789], JWSS R-18)
+/// and a form's ([`computed_path_errors`]).
 ///
 /// [#789]: https://github.com/sujanto-gaws/kelir/issues/789
 pub(crate) fn reads_computed_path(expression: &Value) -> bool {
@@ -772,6 +783,79 @@ fn check_scope(components: &[&Value], path: &str, details: &mut Vec<ValidationDe
 
             check_scope(&rows, &format!("{}.components", entry.path), details);
         }
+    }
+}
+
+/// What a refusal of a computed path says. It names no path: not knowing the
+/// path is the fault. The workflow's sentence, less what only a workflow has.
+const COMPUTED_PATH_MESSAGE: &str = "A `var`, `missing` or `missing_some` in this expression \
+     works out the path it reads as it runs, or climbs out of its scope to read it, so a publish \
+     cannot see what it reads: the order this form's fields are evaluated in takes no account of \
+     it, and a loop through it goes unseen. Write each path as a string, with any default beside \
+     it; an iterator's body reads only its element (JFSS S12.2).";
+
+/// Every `calculate` and `conditional.logic` that reads a path no reader of the
+/// definition can name ([#822], **D-135**): [`reads_computed_path`] over every
+/// component of every role, one detail per expression, in document order: a
+/// component's `calculate`, its `conditional.logic`, then what it holds.
+///
+/// **A publish's check and no one else's**, which is why it is not in
+/// [`definition_errors`]: that one runs at each save too, and a draft may hold
+/// this shape until it goes live. Nor is it in [`visit_paths`], which
+/// [`evaluation_order`] walks at each write of a form already published. A form
+/// that went live with the shape keeps working, and its next revision meets
+/// this. It reads the definition the publish locked, so a save cannot land
+/// between this check and the write that makes it live.
+///
+/// **Not over [`ScopeCatalogue`], which holds data components.** A layout's or a
+/// display's `conditional` has no edge in any graph, but it is evaluated at each
+/// write, and a hidden layout discards what is under it. So this walks the
+/// components themselves, with the one definition of *child* the catalogue
+/// uses, [`container_children_at`] and [`row_template`].
+///
+/// **Pure**: it reads the definition and nothing else.
+///
+/// [#822]: https://github.com/sujanto-gaws/kelir/issues/822
+pub(crate) fn computed_path_errors(definition: &Value) -> Vec<ValidationDetail> {
+    let Some(components) = definition.get("components").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+
+    let mut details = Vec::new();
+
+    for (index, component) in components.iter().enumerate() {
+        let here = format!("definition.components.{index}");
+
+        check_computed_paths(component, &here, &mut details);
+    }
+
+    details
+}
+
+/// One component's own expressions, then its children and its rows.
+fn check_computed_paths(component: &Value, here: &str, details: &mut Vec<ValidationDetail>) {
+    let calculate = component.get("calculate");
+    let logic = component
+        .get("conditional")
+        .and_then(|conditional| conditional.get("logic"));
+
+    for (property, expression) in [("calculate", calculate), ("conditional.logic", logic)] {
+        if expression.is_some_and(reads_computed_path) {
+            details.push(ValidationDetail::new(
+                format!("{here}.{property}"),
+                "expressionPath",
+                EXPRESSION_PATH_COMPUTED,
+                COMPUTED_PATH_MESSAGE,
+            ));
+        }
+    }
+
+    for (child, child_path) in container_children_at(component, here) {
+        check_computed_paths(child, &child_path, details);
+    }
+
+    for (index, row) in row_template(component).into_iter().flatten().enumerate() {
+        check_computed_paths(row, &format!("{here}.components.{index}"), details);
     }
 }
 
@@ -1751,8 +1835,9 @@ mod tests {
         );
     }
 
-    /// **A computed `var` stays unseen by the walk** (#789): forms are not
-    /// refused for one, and reading it as the whole scope would invent edges.
+    /// **A computed `var` stays unseen by the walk** (#789): a form is refused
+    /// for one at publish, by the scan, and reading it as the whole scope here
+    /// would invent edges.
     #[test]
     fn visits_nothing_of_a_computed_var() {
         for operand in [
@@ -1890,15 +1975,213 @@ mod tests {
         .is_empty());
     }
 
-    /// **#789 AC16.** A computed `var` that names a field in a loop is not a
-    /// loop this engine can see, and a definition holding one is what it was.
+    /// **#822 AC8**, #789 AC16 turned round. A computed `var` that names a field
+    /// in a loop is still no loop this engine can see: the walk and the save are
+    /// what they were, and the publish's own check refuses each expression.
     #[test]
-    fn a_form_with_a_computed_var_is_not_refused_and_gets_no_edge() {
+    fn a_form_with_a_computed_var_is_refused_at_publish_and_gets_no_edge() {
         let a = field("a", json!({"+": [{"var": {"var": "which"}}, 1]}));
         let b = field("b", json!({"+": [{"var": [[1], "a"]}, 1]}));
 
         assert_eq!(ordered(&[a.clone(), b.clone()]), ["a", "b"]);
-        assert!(definition_errors(&definition(vec![a, b])).is_empty());
+
+        let document = definition(vec![a, b]);
+
+        assert!(definition_errors(&document).is_empty());
+        assert_eq!(
+            refused_at(&document),
+            [
+                "definition.components.0.calculate",
+                "definition.components.1.calculate"
+            ]
+        );
+    }
+
+    /// The paths a publish refuses, each detail held to the one shape it has.
+    fn refused_at(document: &Value) -> Vec<String> {
+        computed_path_errors(document)
+            .into_iter()
+            .map(|detail| {
+                assert_eq!(detail.rule, "expressionPath");
+                assert_eq!(detail.code, EXPRESSION_PATH_COMPUTED);
+                assert_eq!(detail.message, COMPUTED_PATH_MESSAGE);
+                detail.path
+            })
+            .collect()
+    }
+
+    /// **#822 AC2 and AC3.** Every position the scan reads, in either property,
+    /// and two shapes in one expression are one detail.
+    #[test]
+    fn a_publish_refuses_each_computed_shape_once_in_either_property() {
+        let computed = json!({"var": {"var": "which"}});
+        let bodies = ["map", "filter", "all", "some", "none"]
+            .map(|iterator| json!({iterator: [{"var": "rows"}, computed]}));
+        let others = [
+            computed.clone(),
+            json!({"var": [[1], "a"]}),
+            json!({"var": [{"var": "which"}, 0]}),
+            json!({"reduce": [{"var": "rows"}, computed, 0]}),
+            json!({"reduce": [{"var": "rows"}, {"var": "current"}, computed]}),
+            json!({"var": ["a", computed]}),
+            json!({"missing": {"var": "names"}}),
+            json!({"missing": ["a", [{"var": "name"}]]}),
+            json!({"missing_some": [1, {"var": "names"}]}),
+            json!({"missing_some": [computed, ["a"]]}),
+            json!({"+": [computed, {"var": [[1], "a"]}]}),
+        ];
+
+        for expression in bodies.into_iter().chain(others) {
+            let mut shown = plain("t");
+            shown["conditional"] = json!({"action": "show", "logic": expression});
+
+            assert_eq!(
+                refused_at(&definition(vec![field("t", expression.clone())])),
+                ["definition.components.0.calculate"],
+                "{expression}"
+            );
+            assert_eq!(
+                refused_at(&definition(vec![shown])),
+                ["definition.components.0.conditional.logic"],
+                "{expression}"
+            );
+        }
+    }
+
+    /// **#822 AC4.** Each of §4.3.1's three shapes and a row template, nested
+    /// either way round, at the path of the field itself.
+    #[test]
+    fn a_publish_reaches_a_container_and_a_row_each_at_its_own_path() {
+        let computed = || field("t", json!({"var": {"var": "which"}}));
+        let inside = |kind: &str, children: Vec<Value>| match kind {
+            "datagrid" => json!({
+                "id": "g", "role": "data", "type": "datagrid", "key": "g", "label": "G",
+                "validation": {"type": "array"}, "components": children
+            }),
+            "fieldset" => json!({
+                "id": "f", "role": "layout", "type": "fieldset", "components": children
+            }),
+            slot => json!({
+                "id": "s", "role": "layout", "type": slot,
+                slot: [{"components": []}, {"components": children}]
+            }),
+        };
+
+        for (component, path) in [
+            (
+                inside("fieldset", vec![plain("p"), computed()]),
+                "components.1",
+            ),
+            (
+                inside("columns", vec![computed()]),
+                "columns.1.components.0",
+            ),
+            (inside("tabs", vec![computed()]), "tabs.1.components.0"),
+            (
+                inside("datagrid", vec![plain("p"), computed()]),
+                "components.1",
+            ),
+            (
+                inside("fieldset", vec![inside("datagrid", vec![computed()])]),
+                "components.0.components.0",
+            ),
+            (
+                inside("datagrid", vec![inside("tabs", vec![computed()])]),
+                "components.0.tabs.1.components.0",
+            ),
+        ] {
+            assert_eq!(
+                refused_at(&definition(vec![component])),
+                [format!("definition.components.0.{path}.calculate")]
+            );
+        }
+    }
+
+    /// **#822 AC6.** The document's order: a row where its grid is declared,
+    /// which is not the order [`check_scope`] reports in, and `calculate` before
+    /// `conditional.logic`.
+    #[test]
+    fn a_publish_reports_in_declaration_order_calculate_first() {
+        let computed = json!({"var": {"var": "which"}});
+        let mut after = field("after", computed.clone());
+        after["conditional"] = json!({"action": "show", "logic": computed});
+
+        assert_eq!(
+            refused_at(&definition(vec![
+                json!({
+                    "id": "g", "role": "data", "type": "datagrid", "key": "g", "label": "G",
+                    "validation": {"type": "array"},
+                    "components": [field("t", computed.clone())]
+                }),
+                after,
+            ])),
+            [
+                "definition.components.0.components.0.calculate",
+                "definition.components.1.calculate",
+                "definition.components.1.conditional.logic",
+            ]
+        );
+    }
+
+    /// **#822 AC4, on every role.** A component the catalogue does not hold is
+    /// read all the same, each at its own path, a container before its children.
+    #[test]
+    fn a_publish_reads_a_layout_and_a_display_at_their_own_paths() {
+        let computed = json!({"var": {"var": "which"}});
+        let hidden = |mut component: Value| {
+            component["conditional"] = json!({"action": "show", "logic": computed});
+            component
+        };
+        let panel = |children: Vec<Value>| json!({"id": "f", "role": "layout", "type": "fieldset", "components": children});
+        let note = json!({"id": "n", "role": "display", "type": "paragraph"});
+        let mut echo = note.clone();
+        echo["calculate"] = computed.clone();
+
+        for (component, paths) in [
+            (hidden(panel(vec![plain("p")])), vec!["conditional.logic"]),
+            (hidden(note.clone()), vec!["conditional.logic"]),
+            (echo, vec!["calculate"]),
+            (
+                panel(vec![hidden(panel(vec![plain("p")]))]),
+                vec!["components.0.conditional.logic"],
+            ),
+            (
+                panel(vec![hidden(note)]),
+                vec!["components.0.conditional.logic"],
+            ),
+            (
+                hidden(panel(vec![field("t", computed.clone())])),
+                vec!["conditional.logic", "components.0.calculate"],
+            ),
+        ] {
+            let expected: Vec<String> = paths
+                .iter()
+                .map(|path| format!("definition.components.0.{path}"))
+                .collect();
+
+            assert_eq!(refused_at(&definition(vec![component])), expected);
+        }
+    }
+
+    /// **#822 AC10.** It says what to write and names no path: the one read is
+    /// the thing nobody knows.
+    #[test]
+    fn the_refusal_says_what_to_write_and_names_no_path() {
+        let document = definition(vec![field("secret", json!({"var": {"var": "hidden"}}))]);
+        let details = computed_path_errors(&document);
+        let message = &details[0].message;
+
+        for wanted in [
+            "Write each path as a string, with any default beside it",
+            "an iterator's body reads only its element",
+            "JFSS",
+        ] {
+            assert!(message.contains(wanted), "{message}");
+        }
+
+        for unwanted in ["secret", "hidden", "JWSS", "context"] {
+            assert!(!message.contains(unwanted), "{message}");
+        }
     }
 
     // -- The definition gate -----------------------------------------------

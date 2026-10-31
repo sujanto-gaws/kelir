@@ -1244,6 +1244,64 @@ describe('FormPropertiesPanel', () => {
     }
   })
 
+  // #822 AC9: a publish reads a `calculate` and a `conditional.logic` on every
+  // role, and the panel offers neither on every role. What it does not offer has
+  // no field to stand at, so the message is in the panel's list, and only there.
+  it.each([
+    [
+      'a panel’s conditional',
+      { id: 'n', role: 'layout', type: 'panel', title: 'P', components: [] },
+      'conditional.logic',
+      'conditional-error-n',
+      false,
+    ],
+    [
+      'a columns’ conditional',
+      { id: 'n', role: 'layout', type: 'columns', columns: [{ components: [] }] },
+      'conditional.logic',
+      'conditional-error-n',
+      false,
+    ],
+    [
+      'a heading’s conditional',
+      { id: 'n', role: 'display', type: 'heading', content: 'H' },
+      'conditional.logic',
+      'conditional-error-n',
+      true,
+    ],
+    [
+      'a heading’s calculate',
+      { id: 'n', role: 'display', type: 'heading', content: 'H' },
+      'calculate',
+      'calculate-error-n',
+      false,
+    ],
+    [
+      'a button’s conditional',
+      { id: 'n', role: 'action', type: 'button', label: 'Go', action: 'submit' },
+      'conditional.logic',
+      'conditional-error-n',
+      false,
+    ],
+  ])(
+    'shows a refusal of %s in the panel’s list, and at a field only where one is offered (#822)',
+    (_case, node, property, fieldError, atField) => {
+      const message = 'this expression works out the path it reads'
+      const details: ValidationDetail[] = [
+        {
+          path: `definition.components.0.${property}`,
+          rule: 'expressionPath',
+          code: 'EXPRESSION_PATH_COMPUTED',
+          message,
+        },
+      ]
+      const { wrapper } = harness(node as JfssComponent, { details })
+
+      expect(wrapper.find('[data-testid="editor-errors-n"]').text()).toBe(message)
+      expect(wrapper.find(`[data-testid="${fieldError}"]`).exists()).toBe(atField)
+    },
+  )
+
   // The data grid's own properties place their details too (test-engineer
   // campaign, 2026-10-15: each of these three passed every case when it was
   // left to the list alone).

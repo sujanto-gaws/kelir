@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
 
 import type { ValidationDetail } from '@/types/api'
-import type { JfssComponent, JfssValidation } from '@/types/jfss'
+import type { JfssComponent, JfssDefinition, JfssValidation } from '@/types/jfss'
 
+import { pathOf, placeDetails } from './formTree'
 import {
   limitConflicts,
   limitsFor,
@@ -200,6 +201,78 @@ describe('messageAt (AC9)', () => {
     expect(messageAt(details, 'components.1', 'validation.pattern')).toBeUndefined()
     expect(messageAt(details, 'components.1', 'rules.2.param')).toBeUndefined()
     expect(messageAt(details, 'components.1', 'components')).toBe('about a row field')
+  })
+})
+
+/**
+ * **Where a publish's `EXPRESSION_PATH_COMPUTED` lands** (#822 AC9). The backend
+ * reads a `calculate` and a `conditional.logic` on every role, so its detail is
+ * addressed to any node at any depth. The address the panel reads with is the
+ * one the page hands it, `pathOf`, not a string this spec invents.
+ */
+describe('a publish’s refusal of an expression (#822 AC9)', () => {
+  const refusal = (path: string): ValidationDetail => ({
+    path,
+    rule: 'expressionPath',
+    code: 'EXPRESSION_PATH_COMPUTED',
+    message: `refused at ${path}`,
+  })
+  const field = (id: string): JfssComponent =>
+    ({
+      id,
+      role: 'data',
+      type: 'number',
+      key: id,
+      label: id,
+      validation: { type: 'number' },
+    }) as JfssComponent
+  const definition = {
+    formId: 'order',
+    version: '2.0.1',
+    title: 'Order',
+    components: [
+      field('total'),
+      field('quantity'),
+      field('notes'),
+      {
+        id: 'columns_1',
+        role: 'layout',
+        type: 'columns',
+        columns: [{ components: [field('inner')] }, { components: [] }],
+      },
+    ],
+  } as unknown as JfssDefinition
+
+  it('places …components.0.calculate on node 0, and messageAt finds it there', () => {
+    const details = [refusal('definition.components.0.calculate')]
+    const { byNode, unplaced } = placeDetails(definition, details)
+
+    expect(unplaced).toEqual([])
+    expect([...byNode.keys()]).toEqual(['total'])
+    expect(messageAt(details, 'components.0', 'calculate')).toBe(
+      'refused at definition.components.0.calculate',
+    )
+  })
+
+  it.each([
+    ['a layout’s own', 'columns_1', 'conditional.logic'],
+    ['a nested field’s', 'inner', 'conditional.logic'],
+    ['a nested field’s', 'inner', 'calculate'],
+  ])('places %s (%s) %s on that node, at the path the page reads with', (_case, id, property) => {
+    const nodePath = pathOf(definition, id) as string
+    const details = [refusal(`definition.${nodePath}.${property}`)]
+    const { byNode, unplaced } = placeDetails(definition, details)
+
+    expect(unplaced).toEqual([])
+    expect(byNode.get(id)).toEqual(details)
+    expect(messageAt(byNode.get(id) ?? [], nodePath, property)).toBe(details[0].message)
+  })
+
+  it('reads a nested node by the whole of its path, not by its parent’s', () => {
+    const path = 'definition.components.3.columns.0.components.0.conditional.logic'
+
+    expect(pathOf(definition, 'inner')).toBe('components.3.columns.0.components.0')
+    expect(messageAt([refusal(path)], 'components.3', 'conditional.logic')).toBeUndefined()
   })
 })
 

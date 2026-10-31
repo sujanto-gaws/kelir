@@ -24,6 +24,7 @@ mod common;
 
 use axum::http::{Method, StatusCode};
 use common::{fixtures, TestApp};
+use kelir_backend::modules::rad::repository::form as form_repo;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -810,6 +811,149 @@ async fn a_published_form_with_a_loop_the_walk_now_sees_is_refused_at_each_write
         .await;
 
     assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+}
+
+/// **#822 AC7.** A form that went live before the check is not re-checked, and
+/// the order it runs in is the one it had. `a` reads `b` through a path no edge
+/// follows, so it runs first, on the `b` the client sent, and the stored 101 is
+/// that fault left as it was: the check ends new forms holding it and changes
+/// nothing for this one. Its next revision meets the check.
+///
+/// Published behind the API, because the API no longer publishes it.
+#[tokio::test]
+async fn a_form_published_with_a_computed_var_keeps_working_and_its_clone_is_refused() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let form_id = id_of_created(
+        app.send(
+            Method::POST,
+            "/api/v1/rad/forms",
+            Some(&token),
+            Some(json!({
+                "formKey": "computed_before_the_check",
+                "title": "Order",
+                "definition": {
+                    "formId": "computed_before_the_check",
+                    "version": "2.0.1",
+                    "title": "Order",
+                    "components": [
+                        calculated_field("a", json!({"+": [{"var": {"var": "which"}}, 1]})),
+                        {"id": "which", "role": "data", "type": "textfield", "key": "which",
+                         "label": "Which", "validation": {"type": "string"}},
+                        calculated_field("b", json!({"+": [{"var": "c"}, 1]})),
+                        number_field("c")
+                    ]
+                }
+            })),
+        )
+        .await,
+    );
+
+    assert_eq!(
+        form_repo::publish(&app.pool, fixtures::SYSTEM_TENANT_ID, form_id, None)
+            .await
+            .expect("the draft is published behind the API"),
+        1
+    );
+
+    let read = app
+        .send(
+            Method::GET,
+            &format!("/api/v1/rad/forms/{form_id}"),
+            Some(&token),
+            None,
+        )
+        .await;
+
+    assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+    assert_eq!(read.body["data"]["status"], "PUBLISHED");
+
+    let form_data = json!({"a": 0, "which": "b", "b": 100, "c": 1});
+    let response = submit(&app, &token, form_id, form_data.clone()).await;
+
+    assert_eq!(response.status, StatusCode::CREATED, "{}", response.body);
+
+    let stored = stored_payload(&app, submission_id(&response.body)).await;
+
+    assert_eq!(stored["a"], json!(101.0), "{stored}");
+    assert_eq!(stored["b"], json!(2.0), "{stored}");
+
+    let type_id = id_of_created(
+        app.send(
+            Method::POST,
+            "/api/v1/document-types",
+            Some(&token),
+            Some(json!({"typeCode": "COMPUTED", "name": "Computed", "formId": form_id})),
+        )
+        .await,
+    );
+    let document_id = id_of_created(
+        app.send(
+            Method::POST,
+            "/api/v1/documents",
+            Some(&token),
+            Some(json!({
+                "documentTypeId": type_id,
+                "title": "Written after the upgrade",
+                "formData": form_data
+            })),
+        )
+        .await,
+    );
+
+    let rewritten = app
+        .send(
+            Method::PUT,
+            &format!("/api/v1/documents/{document_id}"),
+            Some(&token),
+            Some(json!({"formData": {"a": 0, "which": "b", "b": 200, "c": 2}})),
+        )
+        .await;
+
+    assert_eq!(rewritten.status, StatusCode::OK, "{}", rewritten.body);
+
+    let stored: Value = sqlx::query_scalar("SELECT form_data_json FROM documents WHERE id = $1")
+        .bind(document_id)
+        .fetch_one(&app.pool)
+        .await
+        .expect("the document is readable");
+
+    assert_eq!(stored["a"], json!(201.0), "{stored}");
+    assert_eq!(stored["b"], json!(3.0), "{stored}");
+
+    let clone_id = id_of_created(
+        app.send(
+            Method::POST,
+            &format!("/api/v1/rad/forms/{form_id}/revisions"),
+            Some(&token),
+            Some(json!({})),
+        )
+        .await,
+    );
+    let refused = app
+        .send(
+            Method::POST,
+            &format!("/api/v1/rad/forms/{clone_id}/publish"),
+            Some(&token),
+            None,
+        )
+        .await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+    assert_eq!(
+        refused.body["error"]["details"][0]["code"],
+        "EXPRESSION_PATH_COMPUTED"
+    );
+    assert_eq!(
+        refused.body["error"]["details"][0]["path"],
+        "definition.components.0.calculate"
+    );
 }
 
 /// **#789, a form with no loop.** A field reading a later one through a default
