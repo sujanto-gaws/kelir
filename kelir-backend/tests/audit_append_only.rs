@@ -165,6 +165,107 @@ async fn a_truncate_that_cascades_into_the_table_is_refused() {
     assert_refused(&app, "TRUNCATE tenants CASCADE").await;
 }
 
+/// AC1, what `tgtype` does not hold. A `WHEN` clause leaves the bit field at 58
+/// and every refusal in this file intact, and it is a way past the trigger for
+/// whatever it tests: a session setting, a role, an `application_name`.
+#[tokio::test]
+async fn the_trigger_fires_on_no_condition() {
+    let app = TestApp::spawn().await;
+
+    let unconditional: bool = sqlx::query_scalar(
+        "SELECT tgqual IS NULL
+         FROM pg_trigger
+         WHERE tgrelid = 'audit_events'::regclass AND tgname = $1",
+    )
+    .bind(AUDIT_APPEND_ONLY_TRIGGER)
+    .fetch_one(&app.pool)
+    .await
+    .expect("the catalogue reads back");
+
+    assert!(unconditional, "the trigger carries a WHEN clause");
+}
+
+/// AC2's refusal, whole. The function is the one `RAISE`: any branch in it is a
+/// way past it, and a setting it honours is no control, so no refusal below can
+/// show its absence, because none of them knows which setting to try. The text
+/// also holds the verb, which a fixed message would get wrong for two of the
+/// three, and leaves `RAISE`'s own `SQLSTATE`.
+#[tokio::test]
+async fn the_refusal_is_one_statement_with_no_way_around_it() {
+    let app = TestApp::spawn().await;
+
+    let source: String = sqlx::query_scalar(
+        "SELECT prosrc FROM pg_proc WHERE oid = 'audit_events_refuse_change'::regproc",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .expect("the function reads back");
+
+    assert_eq!(
+        source.split_whitespace().collect::<Vec<_>>().join(" "),
+        "BEGIN RAISE EXCEPTION 'audit_events is append-only: % is refused', TG_OP; END"
+    );
+}
+
+/// AC2, every column: `UPDATE OF reason` would refuse the write above and let
+/// a rewritten `current_hash` through. The columns come from the catalogue, so
+/// one added later is held as well.
+#[tokio::test]
+async fn an_update_of_any_column_is_refused() {
+    let app = an_app_with_audit_rows().await;
+
+    let columns: Vec<String> = sqlx::query_scalar(
+        "SELECT attname::text
+         FROM pg_attribute
+         WHERE attrelid = 'audit_events'::regclass AND attnum > 0 AND NOT attisdropped",
+    )
+    .fetch_all(&app.pool)
+    .await
+    .expect("the columns read back");
+    assert!(columns.len() > 1, "no columns, so this proves nothing");
+
+    for column in columns {
+        assert_refused(
+            &app,
+            &format!("UPDATE audit_events SET {column} = {column}"),
+        )
+        .await;
+    }
+}
+
+/// AC2 and AC3 by the roads that do not open with the verb. Each fires the
+/// statement-level trigger, on the versions CI and a laptop run, and nothing
+/// but PostgreSQL's own rules says so: an upgrade that changed one is what
+/// this would catch. `COPY` is not here because it only appends, which is the
+/// forged row the migration's header says it does not stop.
+#[tokio::test]
+async fn a_write_by_another_road_is_refused() {
+    let app = an_app_with_audit_rows().await;
+
+    for sql in [
+        "INSERT INTO audit_events
+             (id, tenant_id, event_type, action, object_type, object_id,
+              previous_hash, current_hash)
+         SELECT id, tenant_id, event_type, action, object_type, object_id,
+                previous_hash, current_hash
+         FROM audit_events
+         LIMIT 1
+         ON CONFLICT (id) DO UPDATE SET reason = 'x'",
+        "WITH changed AS (UPDATE audit_events SET reason = 'x' RETURNING id)
+         SELECT count(*) FROM changed",
+        "WITH removed AS (DELETE FROM audit_events RETURNING id)
+         SELECT count(*) FROM removed",
+        "MERGE INTO audit_events audit
+         USING (SELECT id FROM audit_events) stored ON audit.id = stored.id
+         WHEN MATCHED THEN UPDATE SET reason = 'x'",
+        "MERGE INTO audit_events audit
+         USING (SELECT id FROM audit_events) stored ON audit.id = stored.id
+         WHEN MATCHED THEN DELETE",
+    ] {
+        assert_refused(&app, sql).await;
+    }
+}
+
 /// AC5. The application's own write is the `INSERT`, and the trigger names no
 /// `INSERT`. The row lands and links to the row before it.
 #[tokio::test]
