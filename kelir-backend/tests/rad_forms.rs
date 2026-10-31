@@ -771,37 +771,304 @@ async fn a_loop_through_a_reduces_initial_value_is_refused_at_save() {
     );
 }
 
-/// **#789 AC16.** A form's computed `var` is what it was: a workflow's is
-/// refused at publish, and a form's still saves and publishes, because refusing
-/// it would narrow JFSS.
-#[tokio::test]
-async fn a_form_with_a_computed_var_still_saves_and_publishes() {
-    let app = TestApp::spawn().await;
-    let token = app.administrator_token().await;
+fn number_field(key: &str) -> Value {
+    json!({
+        "id": key, "role": "data", "type": "number", "key": key, "label": key,
+        "validation": {"type": "number"}
+    })
+}
 
-    let mut document = definition("computed-var");
-    document["components"] = json!([
-        {"id": "a", "role": "data", "type": "number", "key": "a", "label": "A",
-         "validation": {"type": "number"},
-         "calculate": {"+": [{"var": {"var": "which"}}, 1]}},
-        {"id": "b", "role": "data", "type": "number", "key": "b", "label": "B",
-         "validation": {"type": "number"}, "calculate": {"+": [{"var": [[1], "a"]}, 1]}}
-    ]);
+fn calculated_field(key: &str, calculate: Value) -> Value {
+    let mut field = number_field(key);
+    field["calculate"] = calculate;
+    field
+}
 
-    let created = create_form(&app, &token, "computed-var", document).await;
-    let id = id_of(&created);
+fn shown_field(key: &str, logic: Value) -> Value {
+    let mut field = number_field(key);
+    field["conditional"] = json!({"action": "show", "logic": logic});
+    field
+}
 
-    let published = app
+fn definition_of(form_id: &str, components: Value) -> Value {
+    let mut document = definition(form_id);
+    document["components"] = components;
+    document
+}
+
+async fn publish(app: &TestApp, token: &str, id: Uuid) -> common::TestResponse {
+    app.send(
+        Method::POST,
+        &format!("/api/v1/rad/forms/{id}/publish"),
+        Some(token),
+        None,
+    )
+    .await
+}
+
+/// **#822's *refused*:** a 422 carrying these `(path, code)`s in this order and
+/// nothing else, the form still a draft, and no published audit row.
+async fn assert_refused(
+    app: &TestApp,
+    token: &str,
+    id: Uuid,
+    response: &common::TestResponse,
+    expected: &[(&str, &str)],
+) {
+    assert_eq!(
+        response.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "body {}",
+        response.body
+    );
+    assert_eq!(response.body["error"]["code"], "VALIDATION_ERROR");
+
+    let details: Vec<(&str, &str)> = response.body["error"]["details"]
+        .as_array()
+        .expect("details")
+        .iter()
+        .map(|detail| {
+            (
+                detail["path"].as_str().unwrap_or_default(),
+                detail["code"].as_str().unwrap_or_default(),
+            )
+        })
+        .collect();
+
+    assert_eq!(details, expected, "body {}", response.body);
+
+    let read = app
         .send(
-            Method::POST,
-            &format!("/api/v1/rad/forms/{id}/publish"),
-            Some(&token),
+            Method::GET,
+            &format!("/api/v1/rad/forms/{id}"),
+            Some(token),
             None,
         )
         .await;
 
-    assert_eq!(published.status, StatusCode::OK, "body {}", published.body);
-    assert_eq!(published.body["data"]["status"], "PUBLISHED");
+    assert_eq!(read.body["data"]["status"], "DRAFT", "body {}", read.body);
+    assert!(read.body["data"]["publishedAt"].is_null(), "{}", read.body);
+
+    let audited: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_events WHERE object_id = $1 AND event_type = 'RadForm.Published'",
+    )
+    .bind(id)
+    .fetch_one(&app.pool)
+    .await
+    .expect("the audit trail is countable");
+
+    assert_eq!(audited, 0, "a refused publish leaves no published record");
+}
+
+const COMPUTED: &str = "EXPRESSION_PATH_COMPUTED";
+
+/// **#822 AC1**, #789 AC16 turned round. The draft saves, created and updated,
+/// because a draft may hold this until it goes live, and the publish refuses.
+#[tokio::test]
+async fn a_form_with_a_computed_var_saves_and_is_refused_at_publish() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let components = json!([calculated_field(
+        "a",
+        json!({"+": [{"var": {"var": "which"}}, 1]})
+    )]);
+    let created = create_form(
+        &app,
+        &token,
+        "computed-var",
+        definition_of("computed-var", components.clone()),
+    )
+    .await;
+    let id = id_of(&created);
+
+    let updated = app
+        .send(
+            Method::PUT,
+            &format!("/api/v1/rad/forms/{id}"),
+            Some(&token),
+            Some(json!({
+                "title": "Still a draft",
+                "definition": definition_of("computed-var", components),
+            })),
+        )
+        .await;
+
+    assert_eq!(updated.status, StatusCode::OK, "body {}", updated.body);
+
+    let refused = publish(&app, &token, id).await;
+
+    assert_refused(
+        &app,
+        &token,
+        id,
+        &refused,
+        &[("definition.components.0.calculate", COMPUTED)],
+    )
+    .await;
+
+    let detail = &refused.body["error"]["details"][0];
+
+    assert_eq!(detail["rule"], "expressionPath");
+    assert!(
+        detail["message"]
+            .as_str()
+            .is_some_and(|message| !message.contains("which")),
+        "the path is what nobody knows: {detail}"
+    );
+}
+
+/// **#822 AC2, AC3, AC4 and AC6, at the endpoint.** One detail per expression at
+/// its own path, in the document's order, whatever is around it: a sound field
+/// is not told, two shapes in one expression are told once, and a row is told
+/// where its grid is declared.
+#[tokio::test]
+async fn a_publish_refuses_each_expression_once_at_its_own_path_in_declaration_order() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let jump = json!({"var": [[1], "a"]});
+    let computed = json!({"var": {"var": "which"}});
+    let mut both = calculated_field("b", json!({"+": [jump, computed]}));
+    both["conditional"] = json!({"action": "hide", "logic": {"missing": {"var": "names"}}});
+
+    let components = json!([
+        number_field("a"),
+        both,
+        {"id": "panel", "role": "layout", "type": "fieldset", "components": [
+            number_field("in_panel"),
+            calculated_field("c", json!({"var": ["a", {"var": {"var": "b"}}]}))
+        ]},
+        {"id": "cols", "role": "layout", "type": "columns", "columns": [
+            {"components": [
+                shown_field("d", json!({"some": [{"var": "rows"}, {"var": [[1], "a"]}]}))
+            ]}
+        ]},
+        {"id": "rows", "role": "data", "type": "datagrid", "key": "rows", "label": "Rows",
+         "validation": {"type": "array"}, "components": [
+             number_field("qty"),
+             calculated_field("e", json!({"reduce": [{"var": "qty"}, {"var": "current"}, computed]}))
+         ]},
+        shown_field("f", json!({"missing_some": [1, {"var": "names"}]}))
+    ]);
+
+    let created = create_form(
+        &app,
+        &token,
+        "computed-everywhere",
+        definition_of("computed-everywhere", components),
+    )
+    .await;
+    let id = id_of(&created);
+    let refused = publish(&app, &token, id).await;
+
+    assert_refused(
+        &app,
+        &token,
+        id,
+        &refused,
+        &[
+            ("definition.components.1.calculate", COMPUTED),
+            ("definition.components.1.conditional.logic", COMPUTED),
+            ("definition.components.2.components.1.calculate", COMPUTED),
+            (
+                "definition.components.3.columns.0.components.0.conditional.logic",
+                COMPUTED,
+            ),
+            ("definition.components.4.components.1.calculate", COMPUTED),
+            ("definition.components.5.conditional.logic", COMPUTED),
+        ],
+    )
+    .await;
+}
+
+/// **#822 AC5.** R-18's accepted shapes stay accepted. `""` is left out of
+/// `calculate`, where it reads the field it fills and is `CALCULATION_CYCLE`.
+#[tokio::test]
+async fn a_publish_accepts_every_var_whose_path_can_be_named() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let operands = [
+        json!(0),
+        json!(null),
+        json!([]),
+        json!(""),
+        json!([1, "a"]),
+        json!(["a", 0]),
+        json!([null, "a"]),
+        json!([true, "a"]),
+        json!([false, "a"]),
+        json!(["a", {"var": "b"}]),
+    ];
+
+    for (index, operand) in operands.into_iter().enumerate() {
+        let key = format!("named-path-{index}");
+        let read = json!({"var": operand});
+        let mut components = vec![
+            number_field("a"),
+            number_field("b"),
+            shown_field("shown", json!({"!!": [read]})),
+        ];
+
+        if operand != json!("") {
+            components.push(calculated_field("t", read));
+        }
+
+        let created = create_form(&app, &token, &key, definition_of(&key, json!(components))).await;
+        let published = publish(&app, &token, id_of(&created)).await;
+
+        assert_eq!(
+            published.status,
+            StatusCode::OK,
+            "{operand}: {}",
+            published.body
+        );
+        assert_eq!(published.body["data"]["status"], "PUBLISHED");
+    }
+}
+
+/// **#822 AC6.** A definition that is not valid is told that and only that: the
+/// computed shape waits until there is nothing worse to fix.
+#[tokio::test]
+async fn a_fault_the_validator_finds_is_the_only_one_a_publish_returns() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let computed = calculated_field("computed", json!({"var": {"var": "which"}}));
+    let mut unregistered = number_field("a");
+    unregistered["rules"] = json!([{
+        "rule": "noSuchRule", "scope": "both", "params": {}, "message": "m"
+    }]);
+
+    for (key, fault, path, code) in [
+        (
+            "with-a-cycle",
+            json!([
+                calculated_field("a", json!({"var": "b"})),
+                calculated_field("b", json!({"var": "a"})),
+            ]),
+            "definition.components.0",
+            "CALCULATION_CYCLE",
+        ),
+        (
+            "with-a-bad-rule",
+            json!([unregistered]),
+            "definition.components.0.rules.0",
+            "RULE_NOT_REGISTERED",
+        ),
+    ] {
+        let created = create_form(&app, &token, key, definition(key)).await;
+        let id = id_of(&created);
+        let mut components = fault.as_array().expect("a list").clone();
+
+        components.push(computed.clone());
+        store_behind_the_api(&app, id, &definition_of(key, json!(components))).await;
+
+        let refused = publish(&app, &token, id).await;
+
+        assert_refused(&app, &token, id, &refused, &[(path, code)]).await;
+    }
 }
 
 /// **AC3's other half: the publish itself refuses**, not only the write that

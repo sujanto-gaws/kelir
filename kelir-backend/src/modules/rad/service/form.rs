@@ -12,7 +12,7 @@ use sqlx::PgExecutor;
 use uuid::Uuid;
 
 use super::super::domain::{
-    jfss, validate_create_form, validate_update_form, CreateFormRequest, Form, FormQuery,
+    engine, jfss, validate_create_form, validate_update_form, CreateFormRequest, Form, FormQuery,
     FormStatus, FormSummary, UpdateFormRequest,
 };
 use super::super::repository::form::{self as repo, FormFields, NewForm};
@@ -276,7 +276,15 @@ pub async fn publish_form(
     // live and is discovered by the first person to fill it in. **The stored
     // definition is what goes live, so the stored definition is what is
     // checked.**
-    let details = jfss::validate_definition(&before.definition);
+    let mut details = jfss::validate_definition(&before.definition);
+
+    // **A publish's own check, after the shared one and only when it is clean**
+    // (#822, D-135). A draft may hold a path no one can name until it goes live,
+    // so this cannot be in the validator a save runs, and a definition that is
+    // not valid has a worse fault to fix first.
+    if details.is_empty() {
+        details = engine::computed_path_errors(&before.definition);
+    }
 
     if !details.is_empty() {
         return Err(AppError::validation(details));
