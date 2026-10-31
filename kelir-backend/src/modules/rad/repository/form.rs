@@ -250,11 +250,40 @@ pub async fn update_draft<'e, E: PgExecutor<'e>>(
     .map(|result| result.rows_affected())
 }
 
+/// Locks a live form row `FOR UPDATE` for a publish, answering whether there was
+/// one (#822).
+///
+/// The publish then reads, checks and flips the row it holds, so a save
+/// ([`update_draft`]) or a second publish waits for it to commit, and a save
+/// already written is waited for here. `workflow`'s `lock_for_publish` is this
+/// shape.
+pub async fn lock_for_publish(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let found = sqlx::query_scalar!(
+        r#"
+        SELECT 1 AS "found!" FROM rad_forms
+        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+        FOR UPDATE
+        "#,
+        tenant_id,
+        id
+    )
+    .fetch_optional(&mut **transaction)
+    .await?;
+
+    Ok(found.is_some())
+}
+
 /// Publishes a draft revision.
 ///
 /// The same reasoning as `update_draft`: `status = 'DRAFT'` is a predicate
 /// rather than a prior read, so publishing twice writes once. The second call
 /// affects no rows, and the second publisher is not recorded as the publisher.
+/// `publish_form` also holds the row ([`lock_for_publish`]), so its second caller
+/// is refused before it gets here.
 pub async fn publish<'e, E: PgExecutor<'e>>(
     executor: E,
     tenant_id: Uuid,

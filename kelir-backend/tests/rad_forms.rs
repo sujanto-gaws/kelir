@@ -1557,6 +1557,75 @@ async fn an_edit_blocked_by_a_publish_applies_to_nothing() {
     );
 }
 
+/// **#822: the definition checked is the definition published.** A save is wider
+/// than a publish, so a save committing between a publish's read and its write
+/// would put a shape no check read live, with a 200. This save has written and
+/// not committed: the publish waits on the row, and reads what it committed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_save_landing_inside_a_publish_is_what_the_publish_checks() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let created = create_form(&app, &token, "save-race", definition("save-race")).await;
+    let id = id_of(&created);
+    let computed = definition_of(
+        "save-race",
+        json!([calculated_field("a", json!({"var": {"var": "which"}}))]),
+    );
+
+    let mut save = app.pool.begin().await.expect("a transaction");
+    let written = form_repo::update_draft(
+        &mut *save,
+        fixtures::SYSTEM_TENANT_ID,
+        id,
+        &form_repo::FormFields {
+            title: None,
+            definition_json: Some(&computed),
+            entity_id: None,
+        },
+        None,
+    )
+    .await
+    .expect("the save writes");
+
+    assert_eq!(written, 1);
+
+    let commit_once_the_publish_waits = async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity
+                 WHERE datname = current_database() AND wait_event_type = 'Lock'",
+            )
+            .fetch_one(&app.pool)
+            .await
+            .expect("the activity view is readable");
+
+            if waiting > 0 {
+                break;
+            }
+
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        save.commit().await.expect("the save commits");
+    };
+
+    let (refused, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(publish(&app, &token, id), commit_once_the_publish_waits)
+    })
+    .await
+    .expect("the publish waits on the save and no longer");
+
+    assert_refused(
+        &app,
+        &token,
+        id,
+        &refused,
+        &[("definition.components.0.calculate", COMPUTED)],
+    )
+    .await;
+}
+
 /// The same interleaving for the other statement: two publishes, one row.
 ///
 /// Without `AND status = 'DRAFT'` the second publish rewrites `published_at`

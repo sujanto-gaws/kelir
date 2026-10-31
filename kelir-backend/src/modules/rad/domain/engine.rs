@@ -804,7 +804,8 @@ const COMPUTED_PATH_MESSAGE: &str = "A `var`, `missing` or `missing_some` in thi
 /// this shape until it goes live. Nor is it in [`visit_paths`], which
 /// [`evaluation_order`] walks at each write of a form already published. A form
 /// that went live with the shape keeps working, and its next revision meets
-/// this.
+/// this. It reads the definition the publish locked, so a save cannot land
+/// between this check and the write that makes it live.
 ///
 /// **Not over [`ScopeCatalogue`], which holds data components.** A layout's or a
 /// display's `conditional` has no edge in any graph, but it is evaluated at each

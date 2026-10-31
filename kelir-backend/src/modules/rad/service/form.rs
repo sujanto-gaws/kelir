@@ -256,7 +256,25 @@ pub async fn publish_form(
     let tenant_id = caller.tenant_id();
     let actor = Some(caller.user_id());
 
-    let before = repo::find_form(&state.pool, tenant_id, id)
+    let mut transaction = state.pool.begin().await?;
+
+    // **The revision checked is the revision published** (#822). The row is
+    // locked `FOR UPDATE` and read inside this transaction, so everything below
+    // checks and publishes one copy of it. Read before the transaction, a save
+    // committed in between went live unread, and a save is wider than a publish,
+    // so that was a way past the check below. Now a save already written is
+    // waited for and its definition is what is read here; or `repo::update_draft`
+    // waits for this commit and matches no draft, which `update_form` refuses as
+    // `NOT_A_DRAFT`. A second publish waits too, and then finds no draft.
+    //
+    // Both checks are pure and the audit record is written after the commit, so
+    // nothing wants a second connection while the row is held. A refusal drops
+    // the transaction unwritten.
+    if !repo::lock_for_publish(&mut transaction, tenant_id, id).await? {
+        return Err(AppError::not_found("Form definition"));
+    }
+
+    let before = repo::find_form(&mut *transaction, tenant_id, id)
         .await?
         .ok_or_else(|| AppError::not_found("Form definition"))?;
 
@@ -291,14 +309,12 @@ pub async fn publish_form(
     }
 
     // The publish and the read of what it wrote, in one transaction: a delete
-    // sent meanwhile waits on the row the write holds rather than landing
-    // between the two, which answered 500 for a change that committed, with no
-    // audit row (#787).
-    let mut transaction = state.pool.begin().await?;
-
+    // sent meanwhile waits on the row held rather than landing between the two,
+    // which answered 500 for a change that committed, with no audit row (#787).
     if repo::publish(&mut *transaction, tenant_id, id, actor).await? == 0 {
-        // Somebody else published it first. Their name is on it, which is
-        // correct — the second call did not publish anything.
+        // The row is held and was read as a draft, so a second publish was
+        // refused above. The statement keeps its predicate, and a zero here is
+        // still no publish.
         return Err(AppError::conflict(format!(
             "revision {} of `{}` was published by another request",
             before.revision, before.form_key
