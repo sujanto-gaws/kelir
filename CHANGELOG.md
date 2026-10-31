@@ -194,10 +194,34 @@ While the major version is `0`, the public API may change in any release.
   `missing_some`, and look for what it reads: the field's own key, the whole
   record in a `calculate`, a field that reads this one back, or a field
   declared later.** No parity or fixture form hits any of this, and stored
-  data cannot be audited from the repository. A form's computed `var` is not
+  data cannot be audited from the repository. ~~A form's computed `var` is not
   refused and gets no edge yet: **D-135** A refuses it at a form's publish, in
   [#822](https://github.com/sujanto-gaws/kelir/issues/822), which has not
-  landed.
+  landed.~~ (Struck 2026-10-31: a form's computed `var` still gets no edge, and
+  since #822 its publish refuses it, in the next note.)
+- **A form that published before can be refused at its next publish**
+  ([#822](https://github.com/sujanto-gaws/kelir/issues/822), decision
+  **D-135** A). Once a definition is otherwise valid, a form's publish refuses
+  a `calculate` or `conditional.logic` that reads a path it cannot see, as 422
+  `VALIDATION_ERROR` with one `EXPRESSION_PATH_COMPUTED` detail per expression,
+  `rule: "expressionPath"`, at that expression's path. **Stored forms cannot be
+  audited from the repository**, though no registry or parity example holds the
+  shape. **Before upgrading, go through each form's `calculate` and
+  `conditional` expressions, on every component of every role, a layout's and a
+  display's included, and look for** a `var` whose operand is an object, or an
+  array opening with an object or an array, the scope jump `[[1], "a"]` among
+  them, and a `missing` or `missing_some` name that is an expression, anywhere,
+  iterator bodies included. Only a raw JSON box or the API writes these. Write
+  each path as a string, with any default beside it. `{"var": 0}`, `null`, `[]`,
+  `""`, `[1, "a"]`, `["a", 0]`, `[null, X]`, `[true, X]` and `[false, X]` with X
+  plain, and `["a", {"var": "b"}]` are still accepted. **One thing can no longer
+  be written, in a form either**: a body comparing an element with a field
+  outside the row. A checked form is
+  [#826](https://github.com/sujanto-gaws/kelir/issues/826). Saving a draft does
+  not check it. **A form already published is not re-checked**, and keeps its
+  old order until a revision is written; a clone of it is refused at its
+  publish, and a rewritten path is a dependency edge, so that revision can
+  compute in a new order. No migration, and JFSS's meta-schema is untouched.
 
 ### Added
 
@@ -1098,6 +1122,10 @@ While the major version is `0`, the public API may change in any release.
   to fill in (*Fixed*, above), so check each before publishing.~~ (Struck
   2026-10-15: such a rule is refused at save and publish since #722, under
   *Changed*. A revision published before it is not re-checked.)
+- **A layout's or display's `conditional` escapes the operator check**
+  ([#828](https://github.com/sujanto-gaws/kelir/issues/828)). A save and a
+  publish check the operators of data components only. It is unprioritised
+  and unplaced.
 
 ## [0.9.0] — 2026-10-09
 
