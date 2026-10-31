@@ -1591,22 +1591,7 @@ async fn a_save_landing_inside_a_publish_is_what_the_publish_checks() {
     assert_eq!(written, 1);
 
     let commit_once_the_publish_waits = async {
-        loop {
-            let waiting: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM pg_stat_activity
-                 WHERE datname = current_database() AND wait_event_type = 'Lock'",
-            )
-            .fetch_one(&app.pool)
-            .await
-            .expect("the activity view is readable");
-
-            if waiting > 0 {
-                break;
-            }
-
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-
+        until_a_request_waits_on_a_lock(&app).await;
         save.commit().await.expect("the save commits");
     };
 
@@ -1624,6 +1609,143 @@ async fn a_save_landing_inside_a_publish_is_what_the_publish_checks() {
         &[("definition.components.0.calculate", COMPUTED)],
     )
     .await;
+}
+
+async fn until_a_request_waits_on_a_lock(app: &TestApp) {
+    loop {
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity
+             WHERE datname = current_database() AND wait_event_type = 'Lock'",
+        )
+        .fetch_one(&app.pool)
+        .await
+        .expect("the activity view is readable");
+
+        if waiting > 0 {
+            return;
+        }
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// **#822, the other order.** The publish holds the row, and this save read a
+/// draft before it committed, so only `update_draft`'s predicate stands between
+/// the save and a published revision. The save waits, matches nothing and is
+/// told so; a `PUT` arriving later never reaches the statement.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_save_waiting_on_a_publish_is_told_the_revision_is_not_a_draft() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let created = create_form(&app, &token, "publish-race", definition("publish-race")).await;
+    let id = id_of(&created);
+
+    let mut publishing = app.pool.begin().await.expect("a transaction");
+    let published = form_repo::publish(&mut *publishing, fixtures::SYSTEM_TENANT_ID, id, None)
+        .await
+        .expect("the publish writes");
+
+    assert_eq!(published, 1);
+
+    let uri = format!("/api/v1/rad/forms/{id}");
+    let body = json!({"title": "Edited after the publish"});
+    let commit_once_the_save_waits = async {
+        until_a_request_waits_on_a_lock(&app).await;
+        publishing.commit().await.expect("the publish commits");
+    };
+
+    let (refused, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(
+            app.send(Method::PUT, &uri, Some(&token), Some(body)),
+            commit_once_the_save_waits
+        )
+    })
+    .await
+    .expect("the save waits on the publish and no longer");
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+    assert_eq!(refused.body["error"]["details"][0]["code"], "NOT_A_DRAFT");
+
+    let read = app.send(Method::GET, &uri, Some(&token), None).await;
+
+    assert_eq!(read.body["data"]["title"], "Purchase requisition");
+}
+
+/// **#822: the transaction now opens first, and the answers keep their order.**
+/// The permission comes before the row, so a caller without it learns nothing of
+/// a form in another tenant, and a caller holding it is told that form is not
+/// found. Neither reaches the check, and neither publishes it.
+#[tokio::test]
+async fn a_publish_answers_for_its_permission_and_its_tenant_before_the_check() {
+    let app = TestApp::spawn().await;
+    let admin = app.administrator_token().await;
+
+    let computed = json!([calculated_field("a", json!({"var": {"var": "which"}}))]);
+    let created = create_form(&app, &admin, "gated", definition_of("gated", computed)).await;
+    let id = id_of(&created);
+
+    let role = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "ROLE-FORM-AUTHOR",
+        &["rad:form:read", "rad:form:update", "rad:form:create"],
+    )
+    .await;
+
+    fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "author.only",
+        "author.only@kelir.test",
+        "a-long-enough-author-password",
+        &[role],
+    )
+    .await;
+
+    let author = app
+        .sign_in("author.only", "a-long-enough-author-password")
+        .await;
+
+    let own = publish(&app, &author, id).await;
+
+    assert_eq!(own.status, StatusCode::FORBIDDEN, "{}", own.body);
+
+    let other = fixtures::create_tenant(&app.pool, "TNT-GATED", "Another tenant").await;
+
+    sqlx::query("UPDATE rad_forms SET tenant_id = $1 WHERE id = $2")
+        .bind(other)
+        .bind(id)
+        .execute(&app.pool)
+        .await
+        .expect("the form moves to the other tenant");
+
+    for (token, status) in [
+        (&author, StatusCode::FORBIDDEN),
+        (&admin, StatusCode::NOT_FOUND),
+    ] {
+        let response = publish(&app, token, id).await;
+
+        assert_eq!(response.status, status, "{}", response.body);
+        assert!(
+            !response.body.to_string().contains(COMPUTED),
+            "{}",
+            response.body
+        );
+    }
+
+    let status: String = sqlx::query_scalar("SELECT status FROM rad_forms WHERE id = $1")
+        .bind(id)
+        .fetch_one(&app.pool)
+        .await
+        .expect("the form is readable");
+
+    assert_eq!(status, "DRAFT");
 }
 
 /// The same interleaving for the other statement: two publishes, one row.
