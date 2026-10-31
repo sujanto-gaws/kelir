@@ -23,14 +23,21 @@
 -- connection, a write matching no row included.
 --
 -- **What this does not stop**:
---   - the table's owner or a superuser running `DISABLE TRIGGER` or
---     `DROP TRIGGER`. The application connects as the owner today, so a stolen
---     application credential defeats this (#842 is the separate roles);
---   - `DROP TABLE` and re-creating it;
---   - a column-type rewrite, which fires no trigger, as `0004` did;
+--   - **anything the table's owner or a superuser can do.** The application
+--     connects as the owner today, so a stolen application credential defeats
+--     this (#842 is the separate roles). `DISABLE TRIGGER`, `DROP TRIGGER`,
+--     `DROP TABLE` and a column-type rewrite, as `0004` did, are the plain
+--     cases. **A check that the trigger is enabled proves nothing**: replacing
+--     this function, or `ALTER TABLE audit_events INHERIT` and then writing
+--     through the parent, changes rows with `tgenabled` still `O`. A superuser
+--     also has `session_replication_role = replica` and
+--     `pg_restore --disable-triggers`;
 --   - access to the disk, a backup or the host;
 --   - a restore from an altered dump;
 --   - a forged **appended** row, because `INSERT` stays allowed.
+--
+-- **A restore still works.** A full `pg_restore` emits triggers after the data,
+-- and `COPY` is an insert.
 --
 -- **A future migration that rewrites rows must disable this trigger itself**: an
 -- `UPDATE` or `DELETE` on this table is refused for a migration as it is for
@@ -53,4 +60,4 @@ CREATE TRIGGER trg_audit_events_append_only
     EXECUTE FUNCTION audit_events_refuse_change();
 
 COMMENT ON TRIGGER trg_audit_events_append_only ON audit_events IS
-    'Refuses UPDATE, DELETE and TRUNCATE from any connection that has not disabled it. The table owner and a superuser can disable it; INSERT stays allowed. FR-AUD-003, #833.';
+    'Refuses UPDATE, DELETE and TRUNCATE unless it is disabled. It does not stop the table owner or a superuser; INSERT stays allowed. FR-AUD-003, #833.';

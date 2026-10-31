@@ -38,10 +38,8 @@ pub const AUDIT_APPEND_ONLY_TRIGGER: &str = "trg_audit_events_append_only";
 /// needs a superuser, and a setting the application could flip would be no
 /// control at all.
 ///
-/// A failing write comes back as the `Err`, after an explicit rollback.
-/// Dropping the transaction would queue that rollback for when the connection
-/// next reaches the pool, and a caller's next statement could arrive first and
-/// find the trigger still off.
+/// A failing write comes back as the `Err`, after an explicit rollback, so the
+/// transaction has ended before this returns.
 ///
 /// [#833]: https://github.com/sujanto-gaws/kelir/issues/833
 /// [#842]: https://github.com/sujanto-gaws/kelir/issues/842
