@@ -935,7 +935,8 @@ async fn a_publish_refuses_each_expression_once_at_its_own_path_in_declaration_o
     let components = json!([
         number_field("a"),
         both,
-        {"id": "panel", "role": "layout", "type": "fieldset", "components": [
+        {"id": "panel", "role": "layout", "type": "fieldset",
+         "conditional": {"action": "show", "logic": computed}, "components": [
             number_field("in_panel"),
             calculated_field("c", json!({"var": ["a", {"var": {"var": "b"}}]}))
         ]},
@@ -947,7 +948,9 @@ async fn a_publish_refuses_each_expression_once_at_its_own_path_in_declaration_o
         {"id": "rows", "role": "data", "type": "datagrid", "key": "rows", "label": "Rows",
          "validation": {"type": "array"}, "components": [
              number_field("qty"),
-             calculated_field("e", json!({"reduce": [{"var": "qty"}, {"var": "current"}, computed]}))
+             calculated_field("e", json!({"reduce": [{"var": "qty"}, {"var": "current"}, computed]})),
+             {"id": "row-note", "role": "display", "type": "paragraph", "content": "Note",
+              "conditional": {"action": "hide", "logic": computed}}
          ]},
         shown_field("f", json!({"missing_some": [1, {"var": "names"}]}))
     ]);
@@ -970,12 +973,17 @@ async fn a_publish_refuses_each_expression_once_at_its_own_path_in_declaration_o
         &[
             ("definition.components.1.calculate", COMPUTED),
             ("definition.components.1.conditional.logic", COMPUTED),
+            ("definition.components.2.conditional.logic", COMPUTED),
             ("definition.components.2.components.1.calculate", COMPUTED),
             (
                 "definition.components.3.columns.0.components.0.conditional.logic",
                 COMPUTED,
             ),
             ("definition.components.4.components.1.calculate", COMPUTED),
+            (
+                "definition.components.4.components.2.conditional.logic",
+                COMPUTED,
+            ),
             ("definition.components.5.conditional.logic", COMPUTED),
         ],
     )

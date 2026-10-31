@@ -795,9 +795,9 @@ const COMPUTED_PATH_MESSAGE: &str = "A `var`, `missing` or `missing_some` in thi
      it; an iterator's body reads only its element (JFSS S12.2).";
 
 /// Every `calculate` and `conditional.logic` that reads a path no reader of the
-/// definition can name ([#822], **D-135**): [`reads_computed_path`] over each
-/// data component the catalogue holds, one detail per expression, in
-/// declaration order and `calculate` first.
+/// definition can name ([#822], **D-135**): [`reads_computed_path`] over every
+/// component of every role, one detail per expression, in document order: a
+/// component's `calculate`, its `conditional.logic`, then what it holds.
 ///
 /// **A publish's check and no one else's**, which is why it is not in
 /// [`definition_errors`]: that one runs at each save too, and a draft may hold
@@ -806,12 +806,11 @@ const COMPUTED_PATH_MESSAGE: &str = "A `var`, `missing` or `missing_some` in thi
 /// that went live with the shape keeps working, and its next revision meets
 /// this.
 ///
-/// **A row is entered where its datagrid is declared**, not after the scope as
-/// in [`check_scope`], so the details read in the order the document does.
-///
-/// **What the catalogue does not hold is not read**: the `conditional` of a
-/// layout or a display component, which has no edge in any graph, plain paths
-/// included.
+/// **Not over [`ScopeCatalogue`], which holds data components.** A layout's or a
+/// display's `conditional` has no edge in any graph, but it is evaluated at each
+/// write, and a hidden layout discards what is under it. So this walks the
+/// components themselves, with the one definition of *child* the catalogue
+/// uses, [`container_children_at`] and [`row_template`].
 ///
 /// **Pure**: it reads the definition and nothing else.
 ///
@@ -822,37 +821,40 @@ pub(crate) fn computed_path_errors(definition: &Value) -> Vec<ValidationDetail> 
     };
 
     let mut details = Vec::new();
-    let components: Vec<&Value> = components.iter().collect();
 
-    check_computed_paths(&components, "definition.components", &mut details);
+    for (index, component) in components.iter().enumerate() {
+        let here = format!("definition.components.{index}");
+
+        check_computed_paths(component, &here, &mut details);
+    }
+
     details
 }
 
-/// One scope's expressions, each row template in its place.
-fn check_computed_paths(components: &[&Value], path: &str, details: &mut Vec<ValidationDetail>) {
-    for entry in ScopeCatalogue::of(components, path).entries {
-        let calculate = entry.component.get("calculate");
-        let logic = entry
-            .component
-            .get("conditional")
-            .and_then(|conditional| conditional.get("logic"));
+/// One component's own expressions, then its children and its rows.
+fn check_computed_paths(component: &Value, here: &str, details: &mut Vec<ValidationDetail>) {
+    let calculate = component.get("calculate");
+    let logic = component
+        .get("conditional")
+        .and_then(|conditional| conditional.get("logic"));
 
-        for (property, expression) in [("calculate", calculate), ("conditional.logic", logic)] {
-            if expression.is_some_and(reads_computed_path) {
-                details.push(ValidationDetail::new(
-                    format!("{}.{property}", entry.path),
-                    "expressionPath",
-                    EXPRESSION_PATH_COMPUTED,
-                    COMPUTED_PATH_MESSAGE,
-                ));
-            }
+    for (property, expression) in [("calculate", calculate), ("conditional.logic", logic)] {
+        if expression.is_some_and(reads_computed_path) {
+            details.push(ValidationDetail::new(
+                format!("{here}.{property}"),
+                "expressionPath",
+                EXPRESSION_PATH_COMPUTED,
+                COMPUTED_PATH_MESSAGE,
+            ));
         }
+    }
 
-        if let Some(template) = row_template(entry.component) {
-            let rows: Vec<&Value> = template.iter().collect();
+    for (child, child_path) in container_children_at(component, here) {
+        check_computed_paths(child, &child_path, details);
+    }
 
-            check_computed_paths(&rows, &format!("{}.components", entry.path), details);
-        }
+    for (index, row) in row_template(component).into_iter().flatten().enumerate() {
+        check_computed_paths(row, &format!("{here}.components.{index}"), details);
     }
 }
 
@@ -2120,18 +2122,43 @@ mod tests {
         );
     }
 
-    /// **The edge of the catalogue, pinned.** A layout's or a display's
-    /// `conditional` is evaluated at each write and is no entry here, and the
-    /// operator check does not read it either.
+    /// **#822 AC4, on every role.** A component the catalogue does not hold is
+    /// read all the same, each at its own path, a container before its children.
     #[test]
-    fn a_publish_does_not_read_a_conditional_the_catalogue_does_not_hold() {
-        for role in ["layout", "display"] {
-            let document = definition(vec![json!({
-                "id": "c", "role": role, "type": "fieldset", "components": [plain("p")],
-                "conditional": {"action": "show", "logic": {"var": {"var": "which"}}}
-            })]);
+    fn a_publish_reads_a_layout_and_a_display_at_their_own_paths() {
+        let computed = json!({"var": {"var": "which"}});
+        let hidden = |mut component: Value| {
+            component["conditional"] = json!({"action": "show", "logic": computed});
+            component
+        };
+        let panel = |children: Vec<Value>| json!({"id": "f", "role": "layout", "type": "fieldset", "components": children});
+        let note = json!({"id": "n", "role": "display", "type": "paragraph"});
+        let mut echo = note.clone();
+        echo["calculate"] = computed.clone();
 
-            assert!(computed_path_errors(&document).is_empty(), "{role}");
+        for (component, paths) in [
+            (hidden(panel(vec![plain("p")])), vec!["conditional.logic"]),
+            (hidden(note.clone()), vec!["conditional.logic"]),
+            (echo, vec!["calculate"]),
+            (
+                panel(vec![hidden(panel(vec![plain("p")]))]),
+                vec!["components.0.conditional.logic"],
+            ),
+            (
+                panel(vec![hidden(note)]),
+                vec!["components.0.conditional.logic"],
+            ),
+            (
+                hidden(panel(vec![field("t", computed.clone())])),
+                vec!["conditional.logic", "components.0.calculate"],
+            ),
+        ] {
+            let expected: Vec<String> = paths
+                .iter()
+                .map(|path| format!("definition.components.0.{path}"))
+                .collect();
+
+            assert_eq!(refused_at(&definition(vec![component])), expected);
         }
     }
 
