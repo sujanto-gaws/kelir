@@ -35,6 +35,7 @@
 //!
 //! [#246]: https://github.com/sujanto-gaws/kelir/issues/246
 
+use std::future::Future;
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -76,19 +77,29 @@ const CHUNK: usize = 64 * 1024;
 /// The measured cost is ~170 ms; this is 30 seconds. It is not a performance
 /// bound but a liveness one: a scanner that has stopped answering must not hold
 /// a worker for ever, because the worker is what would otherwise pick the file
-/// up again. **It covers the store as well as the scanner**, since the file is
-/// read from one as it is written to the other ([#834]).
+/// up again.
+///
+/// **It holds each wait on `clamd` and not the conversation** ([#834]): the
+/// connect, each write and the reply. The file is read from the store as it is
+/// written to the scanner, and over the whole conversation this would count the
+/// store's time as the scanner's. A file that takes the store longer than this
+/// to send would then time out on every pass, from its first byte each time, and
+/// sit `PENDING` for ever. The store's reads have a bound of their own, in
+/// [`ObjectStorage::get`](super::storage::ObjectStorage::get).
 ///
 /// [#834]: https://github.com/sujanto-gaws/kelir/issues/834
 const TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Streams one file to `clamd` and reads its answer.
 pub async fn scan(host: &str, port: u16, file: ObjectStream) -> Result<ScanOutcome, ScanError> {
-    let reply = tokio::time::timeout(TIMEOUT, converse(host, port, file))
-        .await
-        .map_err(|_| ScanError(format!("clamd at {host}:{port} did not answer within 30s")))??;
+    Ok(interpret(&converse(host, port, file, TIMEOUT).await?))
+}
 
-    Ok(interpret(&reply))
+/// One wait on `clamd`, held to `limit`.
+async fn within<T>(limit: Duration, wait: impl Future<Output = T>) -> Result<T, ScanError> {
+    tokio::time::timeout(limit, wait)
+        .await
+        .map_err(|_| ScanError(format!("clamd did not answer within {limit:?}")))
 }
 
 /// The protocol itself.
@@ -97,14 +108,18 @@ pub async fn scan(host: &str, port: u16, file: ObjectStream) -> Result<ScanOutco
 /// frame.** That frame says *this was the whole file*, and `clamd` would answer
 /// `OK` for the part it had, so sending it after a failed read is the one way
 /// this function could turn a truncated read into a false `CLEAN`.
-async fn converse(host: &str, port: u16, mut file: ObjectStream) -> Result<String, ScanError> {
-    let mut stream = TcpStream::connect((host, port))
-        .await
+async fn converse(
+    host: &str,
+    port: u16,
+    mut file: ObjectStream,
+    limit: Duration,
+) -> Result<String, ScanError> {
+    let mut stream = within(limit, TcpStream::connect((host, port)))
+        .await?
         .map_err(|error| ScanError(format!("cannot reach clamd at {host}:{port}: {error}")))?;
 
-    stream
-        .write_all(b"zINSTREAM\0")
-        .await
+    within(limit, stream.write_all(b"zINSTREAM\0"))
+        .await?
         .map_err(|error| ScanError(format!("clamd closed before the stream began: {error}")))?;
 
     while let Some(bytes) = file.next().await {
@@ -119,13 +134,11 @@ async fn converse(host: &str, port: u16, mut file: ObjectStream) -> Result<Strin
             // rather than fail it — which is why `write_all` is used throughout.
             let length = u32::try_from(chunk.len()).unwrap_or(u32::MAX);
 
-            stream
-                .write_all(&length.to_be_bytes())
-                .await
+            within(limit, stream.write_all(&length.to_be_bytes()))
+                .await?
                 .map_err(|error| ScanError(format!("clamd stopped mid-stream: {error}")))?;
-            stream
-                .write_all(chunk)
-                .await
+            within(limit, stream.write_all(chunk))
+                .await?
                 .map_err(|error| ScanError(format!("clamd stopped mid-stream: {error}")))?;
         }
     }
@@ -134,13 +147,12 @@ async fn converse(host: &str, port: u16, mut file: ObjectStream) -> Result<Strin
     // clamd that has already decided — a stream over its limit is the usual
     // case — closes the write side before this arrives, and the answer it wants
     // to give is still waiting to be read.
-    let _ = stream.write_all(&0_u32.to_be_bytes()).await;
+    let _ = within(limit, stream.write_all(&0_u32.to_be_bytes())).await;
 
     let mut reply = Vec::new();
 
-    stream
-        .read_to_end(&mut reply)
-        .await
+    within(limit, stream.read_to_end(&mut reply))
+        .await?
         .map_err(|error| ScanError(format!("clamd gave no answer: {error}")))?;
 
     if reply.is_empty() {
@@ -229,6 +241,98 @@ mod tests {
             !told.ends_with(&0_u32.to_be_bytes()),
             "the final frame told clamd the file had ended: {told:?}"
         );
+    }
+
+    /// A `clamd` that reads the stream to its final frame and answers `OK`.
+    async fn answering_clamd() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("a port");
+        let port = listener.local_addr().expect("an address").port();
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("the worker");
+            let mut command = [0_u8; 10];
+
+            socket.read_exact(&mut command).await.expect("the command");
+
+            loop {
+                let length = socket.read_u32().await.expect("a length") as usize;
+
+                if length == 0 {
+                    break;
+                }
+
+                let mut chunk = vec![0_u8; length];
+
+                socket.read_exact(&mut chunk).await.expect("a chunk");
+            }
+
+            socket.write_all(b"stream: OK\0").await.expect("the answer");
+            socket.shutdown().await.ok();
+        });
+
+        port
+    }
+
+    /// **A store slower than the limit is not a scanner that stopped answering.**
+    /// Four reads of 60 ms against a limit of 100 ms: over the whole conversation
+    /// this times out, on every pass, and the row stays `PENDING` for ever.
+    #[tokio::test]
+    async fn a_slow_store_is_not_counted_against_the_scanner() {
+        let port = answering_clamd().await;
+        let file = stream::iter(0..4)
+            .then(|_| async {
+                tokio::time::sleep(Duration::from_millis(60)).await;
+
+                Ok(Bytes::from_static(b"part"))
+            })
+            .boxed();
+
+        let reply = converse("127.0.0.1", port, file, Duration::from_millis(100))
+            .await
+            .expect("the scanner answered");
+
+        assert_eq!(interpret(&reply), ScanOutcome::Clean);
+    }
+
+    #[tokio::test]
+    async fn a_scanner_that_takes_the_file_and_never_answers_is_still_timed() {
+        let (port, _told) = listener().await;
+        let file = stream::iter([Ok(Bytes::from_static(b"the file"))]).boxed();
+
+        let answer = converse("127.0.0.1", port, file, Duration::from_millis(100)).await;
+
+        assert!(
+            answer.is_err_and(|error| error.0.contains("did not answer")),
+            "a silent scanner was not given up on"
+        );
+    }
+
+    /// Accepts and never reads, so the writes stop once the socket's buffers are
+    /// full. The outer timeout is what a write with no limit of its own would
+    /// run into.
+    #[tokio::test]
+    async fn a_scanner_that_stops_reading_is_still_timed() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("a port");
+        let port = listener.local_addr().expect("an address").port();
+        let held = tokio::spawn(async move { listener.accept().await });
+        let megabyte = Bytes::from(vec![7_u8; 1024 * 1024]);
+        let file = stream::repeat_with(move || Ok(megabyte.clone()))
+            .take(256)
+            .boxed();
+
+        let answer = tokio::time::timeout(
+            Duration::from_secs(10),
+            converse("127.0.0.1", port, file, Duration::from_millis(100)),
+        )
+        .await
+        .expect("a write with no limit waited for ever");
+
+        assert!(
+            answer.is_err_and(|error| error.0.contains("did not answer")),
+            "a stalled scanner was not given up on"
+        );
+
+        held.abort();
     }
 
     /// A zero-length frame is the end of the stream, so an empty read in the
