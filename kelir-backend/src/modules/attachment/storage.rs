@@ -304,8 +304,26 @@ impl ObjectStorage {
     pub async fn begin_upload(&self, reference: &str) -> Result<PartUpload, AppError> {
         match self {
             Self::S3 { store, bucket } => {
-                let upload = answered(store.put_multipart(&ObjectPath::from(reference)))
+                let (store, path) = (Arc::clone(store), ObjectPath::from(reference));
+                let owned = reference.to_owned();
+
+                // **On a task of its own, so a dropped request cannot lose the
+                // answer**: it is the only thing that names the upload, and the
+                // guard built from it is what aborts one nobody is left to use.
+                let opening = tokio::spawn(async move {
+                    let upload = answered(store.put_multipart(&path)).await?;
+
+                    object_store::Result::Ok(PartUpload {
+                        upload: Some(upload),
+                        reference: owned,
+                    })
+                });
+
+                opening
                     .await
+                    .map_err(|error| AppError::Internal {
+                        source: anyhow::anyhow!("opening an upload did not finish: {error}"),
+                    })?
                     .map_err(|error| {
                         tracing::error!(
                             %error,
@@ -315,12 +333,7 @@ impl ObjectStorage {
                         );
 
                         write_refused(&error)
-                    })?;
-
-                Ok(PartUpload {
-                    upload: Some(upload),
-                    reference: reference.to_owned(),
-                })
+                    })
             }
             Self::Unavailable { reason } => Err(no_store(reason)),
         }
