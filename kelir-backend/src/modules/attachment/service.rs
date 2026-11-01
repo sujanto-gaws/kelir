@@ -15,7 +15,7 @@ use super::domain::{
     MAX_FILE_NAME,
 };
 use super::repository as repo;
-use super::storage::ObjectStream;
+use super::storage::{ObjectStream, PartUpload, PART_SIZE};
 use super::{ATTACHMENT_CREATE, ATTACHMENT_DELETE, ATTACHMENT_READ, ATTACHMENT_REFERENCE};
 use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
@@ -26,21 +26,191 @@ use crate::modules::document::service::document as document_service;
 use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
 
-/// One file, as it arrived out of the multipart body.
+/// One file, as it arrives out of the multipart body ([#834]).
+///
+/// **It holds one part.** The first [`PART_SIZE`] bytes stay in `buffer`, which
+/// is where the checks that need the file's head read them, and a file that ends
+/// there goes to the store as one `put`. Only a byte past that opens a multipart
+/// upload, so most files cost one request, as they always did. The checksum and
+/// the count run over everything.
+///
+/// **Whether it can be stored is decided here and answered by [`upload`]**,
+/// after the body has been read. A later `file` part replaces this one, so a
+/// refusal raised while reading would be a refusal of a file the request went on
+/// to withdraw.
+///
+/// [#834]: https://github.com/sujanto-gaws/kelir/issues/834
 pub struct UploadedFile {
     pub original_file_name: String,
     /// What the caller *said* it is. Recorded, not trusted — validating by
     /// content is [#245](https://github.com/sujanto-gaws/kelir/issues/245) AC4,
     /// and the two disagree exactly when it matters.
     pub declared_mime_type: String,
-    pub bytes: Bytes,
     pub description: Option<String>,
     /// What kind of thing it is (FR-ATT-006), if the person said. Validated
     /// against this tenant's categories before anything is stored.
     pub category_id: Option<Uuid>,
+    id: Uuid,
+    file_name: String,
+    reference: String,
+    buffer: Vec<u8>,
+    /// Open once the file has outgrown the buffer. Dropping it aborts.
+    parts: Option<PartUpload>,
+    /// Decided when the file outgrew the buffer. The rest of it is then read
+    /// and discarded, with nothing held and nothing sent.
+    refusal: Option<AppError>,
+    digest: Sha256,
+    size: u64,
 }
 
-/// Stores a file against a document, then records it.
+impl UploadedFile {
+    /// Begins a file for a document [`may_upload`] has answered for.
+    pub fn begin(
+        caller: &Authenticated,
+        document_id: Uuid,
+        original_file_name: String,
+        declared_mime_type: String,
+    ) -> Self {
+        let id = Uuid::now_v7();
+        let file_name = domain::safe_file_name(&original_file_name);
+        let reference = domain::storage_reference(caller.tenant_id(), document_id, id, &file_name);
+
+        Self {
+            original_file_name,
+            declared_mime_type,
+            description: None,
+            category_id: None,
+            id,
+            file_name,
+            reference,
+            buffer: Vec::new(),
+            parts: None,
+            refusal: None,
+            digest: Sha256::new(),
+            size: 0,
+        }
+    }
+
+    /// Takes the next chunk of the file, whatever size it came in.
+    ///
+    /// **The first chunk can be a few bytes**, and it is not what is sniffed: the
+    /// head is judged when the buffer is full and more is arriving, or in
+    /// [`upload`] if the file ended first.
+    pub async fn write(&mut self, state: &AppState, mut chunk: Bytes) -> Result<(), AppError> {
+        if self.refusal.is_some() {
+            return Ok(());
+        }
+
+        self.digest.update(&chunk);
+        self.size += chunk.len() as u64;
+
+        while !chunk.is_empty() {
+            if self.buffer.len() == PART_SIZE {
+                self.send_part(state).await?;
+
+                if self.refusal.is_some() {
+                    return Ok(());
+                }
+            }
+
+            let room = PART_SIZE - self.buffer.len();
+            let taken = chunk.split_to(room.min(chunk.len()));
+
+            self.buffer.extend_from_slice(&taken);
+        }
+
+        Ok(())
+    }
+
+    /// Moves a full buffer to the store, opening the upload on the first.
+    async fn send_part(&mut self, state: &AppState) -> Result<(), AppError> {
+        if self.parts.is_none() {
+            self.refusal = self.head_refusal(state);
+
+            if self.refusal.is_some() {
+                self.buffer = Vec::new();
+
+                return Ok(());
+            }
+
+            self.parts = Some(state.storage.begin_upload(&self.reference).await?);
+        }
+
+        let part = std::mem::replace(&mut self.buffer, Vec::with_capacity(PART_SIZE));
+
+        if let Some(parts) = self.parts.as_mut() {
+            parts.put_part(part.into()).await?;
+        }
+
+        Ok(())
+    }
+
+    /// What is wrong with this file, as far as its first bytes can say.
+    fn head_refusal(&self, state: &AppState) -> Option<AppError> {
+        if self.buffer.is_empty() {
+            return Some(domain::empty_file());
+        }
+
+        let name_length = self.original_file_name.chars().count();
+
+        if name_length > MAX_FILE_NAME {
+            return Some(domain::file_name_too_long(name_length));
+        }
+
+        // **What the bytes are, not what the caller called them** (#245 AC4). The
+        // declared `Content-Type` is still recorded by [`upload`], because what a
+        // client claimed is a fact about the request; it is simply not the fact
+        // this decision is made on. A part is more than `infer` reads: a fixed few
+        // KiB, and for an office file the first ZIP entry and a few KiB past it,
+        // which is a manifest of a few KiB in any such file.
+        //
+        // The size limit is not checked here and that is not an omission: it is
+        // enforced as the request body is read (#245 AC3), by the layer
+        // `handlers::routes` puts on this route.
+        let detected = domain::detect_mime_type(&self.buffer);
+        let allowed = &state.config.storage_allowed_mime_types;
+
+        if !domain::type_is_allowed(detected, allowed) {
+            return Some(domain::type_not_allowed(detected, allowed));
+        }
+
+        None
+    }
+}
+
+/// What must hold before a byte of a file is read, and the document it is for.
+///
+/// **The document is read through its own module's service** (coding standard
+/// §2.2), which requires `document:read` and answers 404 for a document that is
+/// not this tenant's, is deleted, or does not exist — so [#244] AC5's *the
+/// refusal does not confirm the document exists* is satisfied by reusing the
+/// answer the document surface already gives rather than by a second rule beside
+/// it.
+///
+/// Two permissions, not one: `attachment:create` is *may this account attach
+/// files at all*, and `document:read` is *may it see this document*. A caller
+/// holding the first and not the second can attach nothing anywhere, which is
+/// the correct reading of an attachment being as private as what it hangs on.
+///
+/// **Separate from [`upload`] because the body streams** ([#834]): the bytes go
+/// towards the store as they are read, so a caller who may not attach has to be
+/// refused before they are.
+///
+/// [#834]: https://github.com/sujanto-gaws/kelir/issues/834
+pub async fn may_upload(
+    state: &AppState,
+    caller: &Authenticated,
+    document_id: Uuid,
+) -> Result<Uuid, AppError> {
+    caller.require(ATTACHMENT_CREATE)?;
+
+    // 404 for a document this caller may not see, before a byte is read.
+    let document = document_service::get_document(state, caller, document_id).await?;
+
+    Ok(document.id)
+}
+
+/// Finishes storing a file against a document, then records it.
 ///
 /// # The order is the decision, and it is the one that can be recovered from
 ///
@@ -61,54 +231,24 @@ pub struct UploadedFile {
 /// assumed: `storage_reference` is derived from ids this row would have carried,
 /// so an orphan is findable by listing the prefix and asking which have no row.
 ///
-/// # What is checked before anything is written
+/// # What is checked before the object exists
 ///
-/// **The document is read through its own module's service** (coding standard
-/// §2.2), which requires `document:read` and answers 404 for a document that is
-/// not this tenant's, is deleted, or does not exist — so [#244] AC5's *the
-/// refusal does not confirm the document exists* is satisfied by reusing the
-/// answer the document surface already gives rather than by a second rule beside
-/// it.
-///
-/// Two permissions, not one: `attachment:create` is *may this account attach
-/// files at all*, and `document:read` is *may it see this document*. A caller
-/// holding the first and not the second can attach nothing anywhere, which is
-/// the correct reading of an attachment being as private as what it hangs on.
+/// [`may_upload`] has answered for the caller and the document. By the time this
+/// runs, the last part of the body has been read, so a file longer than a part
+/// has most of its bytes in the store, **as parts of an upload that is not an
+/// object yet**. Every refusal below drops that upload, and dropping it aborts
+/// it, so a refused file leaves no object here either.
 pub async fn upload(
     state: &AppState,
     caller: &Authenticated,
     document_id: Uuid,
-    file: UploadedFile,
+    mut file: UploadedFile,
 ) -> Result<Attachment, AppError> {
-    caller.require(ATTACHMENT_CREATE)?;
-
-    // 404 for a document this caller may not see, before a byte is stored.
-    let document = document_service::get_document(state, caller, document_id).await?;
-
-    if file.bytes.is_empty() {
-        return Err(domain::empty_file());
-    }
-
-    let name_length = file.original_file_name.chars().count();
-
-    if name_length > MAX_FILE_NAME {
-        return Err(domain::file_name_too_long(name_length));
-    }
-
-    // **What the bytes are, not what the caller called them** (#245 AC4). The
-    // declared `Content-Type` is still recorded below, because what a client
-    // claimed is a fact about the request; it is simply not the fact this
-    // decision is made on.
-    //
-    // The size limit is not checked here and that is not an omission: it is
-    // enforced on the request body before any of it is read (#245 AC3), by the
-    // layer `handlers::routes` puts on this route. A check at this point would
-    // be a check on bytes already in hand.
-    let detected = domain::detect_mime_type(&file.bytes);
-    let allowed = &state.config.storage_allowed_mime_types;
-
-    if !domain::type_is_allowed(detected, allowed) {
-        return Err(domain::type_not_allowed(detected, allowed));
+    // A file with parts open was judged when it outgrew the buffer, and passed.
+    if file.parts.is_none() {
+        if let Some(refusal) = file.refusal.take().or_else(|| file.head_refusal(state)) {
+            return Err(refusal);
+        }
     }
 
     let tenant_id = caller.tenant_id();
@@ -124,22 +264,31 @@ pub async fn upload(
         }
     }
 
-    let id = Uuid::now_v7();
-    let file_name = domain::safe_file_name(&file.original_file_name);
-    let reference = domain::storage_reference(tenant_id, document.id, id, &file_name);
+    let id = file.id;
+    let reference = std::mem::take(&mut file.reference);
 
     // **A checksum over the bytes as stored**, so a later read can tell a
     // corrupted object from a different one. `sha256:` prefixed because §8.2's
     // own example is, and an unprefixed digest is a digest whose algorithm is a
     // guess.
-    let checksum = format!("sha256:{:x}", Sha256::digest(&file.bytes));
+    let checksum = format!("sha256:{:x}", file.digest.finalize());
 
     // `i64` because the column is `BIGINT` and the cast is the one place a file
     // larger than 8 exabytes would be a problem, which is not a problem.
-    let file_size = i64::try_from(file.bytes.len()).unwrap_or(i64::MAX);
+    let file_size = i64::try_from(file.size).unwrap_or(i64::MAX);
 
-    // The object first. See this function's own documentation.
-    state.storage.put(&reference, file.bytes).await?;
+    // The object first. See this function's own documentation. What is in the
+    // buffer is the whole file, or the last part of it, and a multipart object
+    // comes into being only here, at `complete`.
+    let tail = Bytes::from(std::mem::take(&mut file.buffer));
+
+    match file.parts.take() {
+        Some(mut parts) => {
+            parts.put_part(tail).await?;
+            parts.complete().await?;
+        }
+        None => state.storage.put(&reference, tail).await?,
+    }
 
     // **The row and its event are one transaction; the object is not in it.**
     // #244 AC2 chose the object-first order and that is unchanged — what is new
@@ -154,8 +303,8 @@ pub async fn upload(
         &repo::NewAttachment {
             id,
             tenant_id,
-            document_id: document.id,
-            file_name: &file_name,
+            document_id,
+            file_name: &file.file_name,
             original_file_name: &file.original_file_name,
             mime_type: &file.declared_mime_type,
             file_size,
@@ -172,7 +321,7 @@ pub async fn upload(
         &mut transaction,
         &crate::modules::activity::service::Happening {
             tenant_id,
-            document_id: Some(document.id),
+            document_id: Some(document_id),
             workflow_instance_id: None,
             task_id: None,
             // **The event links to what it describes** (#248 AC2), so a
@@ -221,7 +370,7 @@ pub async fn upload(
             reason: None,
             old_value: None,
             new_value: Some(json!({
-                "documentId": document.id,
+                "documentId": document_id,
                 "originalFileName": stored.original_file_name,
                 "mimeType": stored.mime_type,
                 "fileSize": stored.file_size,

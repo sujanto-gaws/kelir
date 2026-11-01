@@ -16,10 +16,19 @@
 //! holding for that transfer. Each is held under two parts for a 25 MiB file, and
 //! against the buffered code each reads 25 MiB.
 //!
+//! **The upload's is measured on a real socket.** `multer` reads its stream until
+//! the stream says *pending*, so a body that is always ready, as an in-memory one
+//! is, is read whole into `multer`'s buffer whatever this product does. Over
+//! hyper the body is pending between frames, because the connection and the
+//! handler share a task, and that is what has to be shown. So [`served`] counts
+//! what hyper hands up. The other tests here want a body in pieces, and
+//! [`frames_of`] gives them one.
+//!
 //! [#834]: https://github.com/sujanto-gaws/kelir/issues/834
 
 mod common;
 
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -28,19 +37,20 @@ use async_trait::async_trait;
 use axum::body::{to_bytes, Body, Bytes};
 use axum::extract::ConnectInfo;
 use axum::http::{header, Method, Request, Response, StatusCode};
-use futures_util::stream::{self, BoxStream, StreamExt};
+use futures_util::stream::{self, BoxStream, StreamExt, TryStreamExt};
 use object_store::path::Path as ObjectPath;
 use object_store::{
     GetOptions, GetResult, GetResultPayload, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
     PutMultipartOptions, PutOptions, PutPayload, PutResult, UploadPart,
 };
 use serde_json::{json, Value};
+use sha2::Digest;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpSocket;
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-use common::{TestApp, TEST_PEER};
+use common::{fixtures, TestApp, TEST_PEER};
 use kelir_backend::config::AppConfig;
 use kelir_backend::modules::attachment::storage::ObjectStorage;
 use kelir_backend::modules::attachment::worker;
@@ -161,6 +171,8 @@ struct Watched {
     part_takes: Duration,
     /// The read stream fails once this many bytes have left it.
     fail_read_after: Option<u64>,
+    /// The store refuses the part with this index.
+    refuse_part: Option<usize>,
 }
 
 impl std::fmt::Display for Watched {
@@ -200,6 +212,7 @@ impl ObjectStore for Watched {
             ledger: Arc::clone(&self.ledger),
             flow: Arc::clone(&self.flow),
             part_takes: self.part_takes,
+            refuse_part: self.refuse_part,
         }))
     }
 
@@ -283,14 +296,28 @@ struct WatchedUpload {
     ledger: Arc<Ledger>,
     flow: Arc<Flow>,
     part_takes: Duration,
+    refuse_part: Option<usize>,
 }
 
 #[async_trait]
 impl MultipartUpload for WatchedUpload {
     fn put_part(&mut self, data: PutPayload) -> UploadPart {
         let size = data.content_length();
+        let index = {
+            let mut parts = self.ledger.parts.lock().expect("the ledger");
 
-        self.ledger.parts.lock().expect("the ledger").push(size);
+            parts.push(size);
+            parts.len() - 1
+        };
+
+        if self.refuse_part == Some(index) {
+            return Box::pin(async {
+                Err(object_store::Error::Generic {
+                    store: "Watched",
+                    source: "the store refused the part".into(),
+                })
+            });
+        }
 
         let sent = self.inner.put_part(data);
         let flow = Arc::clone(&self.flow);
@@ -354,6 +381,7 @@ async fn watching(max_upload_bytes: usize, tune: impl FnOnce(&mut Watched)) -> W
         flow: Arc::clone(&flow),
         part_takes: Duration::ZERO,
         fail_read_after: None,
+        refuse_part: None,
     };
 
     tune(&mut watched);
@@ -430,15 +458,113 @@ fn multipart(parts: &[Part<'_>]) -> Vec<u8> {
     body
 }
 
-/// A body that arrives the way a socket delivers one, counting as it is read.
-fn counted(body: Vec<u8>, flow: Arc<Flow>) -> Body {
-    let frames: Vec<Bytes> = body.chunks(FRAME).map(Bytes::copy_from_slice).collect();
+/// Frames that arrive the way hyper delivers them: **through a channel from
+/// another task**, so that between frames the body is pending until the runtime
+/// has turned, and a second poll straight after the first finds nothing. A
+/// `yield_now` does not do that. `multer` polls twice on its way to the first
+/// boundary, and a yield resolved on the second poll read the whole of a short
+/// body and its end at once, which `multer` calls an incomplete stream.
+fn frames_of(
+    frames: Vec<Bytes>,
+    flow: Arc<Flow>,
+) -> impl futures_util::Stream<Item = std::io::Result<Bytes>> + Send + 'static {
+    let (sender, receiver) = tokio::sync::mpsc::channel(1);
 
-    Body::from_stream(stream::iter(frames).map(move |frame| {
-        flow.read(frame.len());
+    tokio::spawn(async move {
+        for frame in frames {
+            if sender.send(frame).await.is_err() {
+                return;
+            }
+        }
+    });
 
-        Ok::<_, std::convert::Infallible>(frame)
-    }))
+    stream::unfold(receiver, move |mut receiver| {
+        let flow = Arc::clone(&flow);
+
+        async move {
+            let frame: Bytes = receiver.recv().await?;
+
+            flow.read(frame.len());
+
+            Some((Ok(frame), receiver))
+        }
+    })
+}
+
+fn framed(frames: Vec<Bytes>, flow: Arc<Flow>) -> Body {
+    Body::from_stream(frames_of(frames, flow))
+}
+
+fn stream_of(
+    body: Vec<u8>,
+    flow: Arc<Flow>,
+) -> impl futures_util::Stream<Item = std::io::Result<Bytes>> + Send + 'static {
+    frames_of(
+        body.chunks(FRAME).map(Bytes::copy_from_slice).collect(),
+        flow,
+    )
+}
+
+/// The application on a real socket, counting the request body as hyper hands
+/// it up. See this file's header.
+async fn served(app: &TestApp, flow: Arc<Flow>) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("a port");
+    let address = listener.local_addr().expect("an address");
+
+    let service = app
+        .router()
+        .layer(axum::middleware::map_request(
+            move |request: Request<Body>| {
+                let flow = Arc::clone(&flow);
+
+                async move {
+                    let (parts, body) = request.into_parts();
+                    let counted = body.into_data_stream().inspect_ok(move |frame| {
+                        flow.read(frame.len());
+                    });
+
+                    Request::from_parts(parts, Body::from_stream(counted))
+                }
+            },
+        ))
+        .into_make_service_with_connect_info::<SocketAddr>();
+
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, service).await;
+    });
+
+    address
+}
+
+/// Posts `body` down a socket as fast as the socket takes it, and hands back the
+/// response's first line.
+async fn post_over_a_socket(address: SocketAddr, uri: &str, token: &str, body: Vec<u8>) -> String {
+    let head = format!(
+        "POST {uri} HTTP/1.1\r\nHost: kelir.test\r\nAuthorization: Bearer {token}\r\n\
+         Content-Type: multipart/form-data; boundary={BOUNDARY}\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+
+    // `split`, not `into_split`: an owned write half shuts the socket's write side
+    // when it is dropped, and hyper reads that as a client gone mid-request.
+    let mut socket = TcpStream::connect(address).await.expect("connect");
+    let (mut reading, mut writing) = socket.split();
+    let mut answer = Vec::new();
+
+    let write = async {
+        writing.write_all(head.as_bytes()).await.expect("the head");
+        writing.write_all(&body).await.expect("the body");
+    };
+    let read = async {
+        reading.read_to_end(&mut answer).await.expect("the answer");
+    };
+
+    tokio::join!(write, read);
+
+    let answer = String::from_utf8_lossy(&answer);
+
+    answer.lines().next().unwrap_or_default().to_owned()
 }
 
 fn request(
@@ -511,7 +637,7 @@ impl Watching {
                 &format!("/api/v1/documents/{document}/attachments"),
                 token,
                 multipart_type(),
-                counted(body, Arc::clone(&self.flow)),
+                Body::from_stream(stream_of(body, Arc::clone(&self.flow))),
             ))
             .await
             .expect("the router answers");
@@ -551,6 +677,36 @@ impl Watching {
             .expect("the router answers")
     }
 
+    /// Every object the store holds for this document.
+    async fn objects(&self, document: Uuid) -> Vec<ObjectPath> {
+        let prefix = ObjectPath::from(format!(
+            "tenants/{}/documents/{document}",
+            fixtures::SYSTEM_TENANT_ID
+        ));
+
+        self.store
+            .list(Some(&prefix))
+            .map(|object| object.expect("a listing").location)
+            .collect()
+            .await
+    }
+
+    async fn rows(&self, document: Uuid) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM attachments WHERE document_id = $1")
+            .bind(document)
+            .fetch_one(&self.app.pool)
+            .await
+            .expect("a count")
+    }
+
+    async fn status_of(&self, attachment: Uuid) -> String {
+        sqlx::query_scalar("SELECT virus_scan_status FROM attachments WHERE id = $1")
+            .bind(attachment)
+            .fetch_one(&self.app.pool)
+            .await
+            .expect("the status")
+    }
+
     async fn clear(&self, attachment: Uuid) {
         sqlx::query("UPDATE attachments SET virus_scan_status = 'CLEAN' WHERE id = $1")
             .bind(attachment)
@@ -573,16 +729,28 @@ fn id_of(value: &Value) -> Uuid {
 // ---------------------------------------------------------------------------
 
 /// **A store slower than the client** is the case a part in flight has to hold
-/// against: 100 ms a part, so nothing but waiting for the store keeps the body
-/// from being read ahead of it.
+/// against: 100 ms a part, with the client writing as fast as the socket takes
+/// it, so nothing but waiting for the store keeps the body from being read ahead
+/// of it. On a real socket; this file's header is why.
 #[tokio::test]
 async fn an_upload_never_holds_more_than_two_parts_of_a_25_mib_file() {
-    let watching = watching(ROOMY, |store| store.part_takes = Duration::from_millis(100)).await;
+    let watching = watching(ROOMY, |store| {
+        store.part_takes = Duration::from_millis(100);
+    })
+    .await;
     let document = watching.document("PR_STREAM_MEM_UP").await;
     let file = pdf_of(LARGE);
+    let address = served(&watching.app, Arc::clone(&watching.flow)).await;
 
-    watching.upload(document, "large.pdf", &file).await;
+    let answer = post_over_a_socket(
+        address,
+        &format!("/api/v1/documents/{document}/attachments"),
+        &watching.token,
+        multipart(&[Part::File("large.pdf", &file)]),
+    )
+    .await;
 
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
     assert!(
         watching.flow.total_read() >= LARGE as u64,
         "the instrument saw {} bytes",
@@ -657,14 +825,7 @@ async fn the_worker_never_holds_more_than_two_parts_of_the_file_it_scans() {
         .await
         .expect("the pass");
 
-    let status: String =
-        sqlx::query_scalar("SELECT virus_scan_status FROM attachments WHERE id = $1")
-            .bind(attachment)
-            .fetch_one(&watching.app.pool)
-            .await
-            .expect("the status");
-
-    assert_eq!(status, "CLEAN");
+    assert_eq!(watching.status_of(attachment).await, "CLEAN");
     assert_eq!(flow.total_accepted(), LARGE as u64);
     assert!(
         flow.peak() <= BOUND,
@@ -697,10 +858,13 @@ async fn slow_clamd(flow: Arc<Flow>) -> u16 {
 
         let mut frame = vec![0_u8; 128 * 1024];
 
+        // A stream that stops is the far side closing: nothing to answer.
         loop {
             let mut length = [0_u8; 4];
 
-            socket.read_exact(&mut length).await.expect("a length");
+            if socket.read_exact(&mut length).await.is_err() {
+                return;
+            }
 
             let length = u32::from_be_bytes(length) as usize;
 
@@ -708,10 +872,10 @@ async fn slow_clamd(flow: Arc<Flow>) -> u16 {
                 break;
             }
 
-            socket
-                .read_exact(&mut frame[..length])
-                .await
-                .expect("a chunk");
+            if socket.read_exact(&mut frame[..length]).await.is_err() {
+                return;
+            }
+
             flow.accepted(length);
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
@@ -721,4 +885,662 @@ async fn slow_clamd(flow: Arc<Flow>) -> u16 {
     });
 
     port
+}
+
+// ---------------------------------------------------------------------------
+// AC1, AC3, AC6 — which road a file takes, and that it arrives whole
+// ---------------------------------------------------------------------------
+
+/// **The boundary, from both sides.** A file of exactly one part is a `put`, and
+/// one byte more is an upload; a file of exactly two parts has no empty third.
+/// Each checksum and size is compared with the bytes read back from the store.
+/// **Seen red**: see the file's header.
+#[tokio::test]
+async fn each_size_takes_its_road_and_is_stored_exactly() {
+    for (size, puts, parts) in [
+        (1_000, 1, vec![]),
+        (PART, 1, vec![]),
+        (PART + 1, 0, vec![PART, 1]),
+        (2 * PART, 0, vec![PART, PART]),
+        (2 * PART + 7, 0, vec![PART, PART, 7]),
+    ] {
+        let watching = watching(ROOMY, |_| {}).await;
+        let document = watching.document("PR_STREAM_ROADS").await;
+        let file = pdf_of(size);
+        let (status, body) = watching
+            .post(document, multipart(&[Part::File("q.pdf", &file)]))
+            .await;
+
+        assert_eq!(status, StatusCode::OK, "{size}: {body}");
+
+        let ledger = &watching.ledger;
+
+        assert_eq!(ledger.puts.load(Ordering::SeqCst), puts, "{size}: puts");
+        assert_eq!(ledger.parts(), parts, "{size}: parts");
+        assert_eq!(
+            ledger.completed.load(Ordering::SeqCst),
+            usize::from(puts == 0),
+            "{size}: completed"
+        );
+
+        // A guard that fired on a completed upload would land after the answer.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(ledger.aborted.load(Ordering::SeqCst), 0, "{size}: aborted");
+
+        let stored = watching.objects(document).await;
+
+        assert_eq!(stored.len(), 1, "{size}: {stored:?}");
+
+        let read_back = watching
+            .store
+            .get(&stored[0])
+            .await
+            .expect("the object")
+            .bytes()
+            .await
+            .expect("its bytes");
+
+        assert_eq!(read_back.as_ref(), file.as_slice(), "{size}: the bytes");
+        assert_eq!(body["data"]["fileSize"], read_back.len() as i64, "{size}");
+        assert_eq!(
+            body["data"]["checksum"],
+            format!("sha256:{:x}", sha2::Sha256::digest(&read_back)),
+            "{size}"
+        );
+    }
+}
+
+/// The body arrives a few bytes at a time at the start: the type is read from
+/// the buffer, not from the first chunk, which here holds two bytes of a header
+/// `infer` needs five of.
+#[tokio::test]
+async fn a_first_chunk_of_a_few_bytes_is_not_what_is_sniffed() {
+    let watching = watching(ROOMY, |_| {}).await;
+    let document = watching.document("PR_STREAM_TINY").await;
+    let file = pdf_of(1_000);
+    let body = multipart(&[Part::File("q.pdf", &file)]);
+    let two_bytes_in = body
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("a part head")
+        + 4
+        + 2;
+
+    let response = watching
+        .app
+        .router()
+        .oneshot(request(
+            Method::POST,
+            &format!("/api/v1/documents/{document}/attachments"),
+            &watching.token,
+            multipart_type(),
+            framed(
+                vec![
+                    Bytes::copy_from_slice(&body[..two_bytes_in]),
+                    Bytes::copy_from_slice(&body[two_bytes_in..]),
+                ],
+                Arc::clone(&watching.flow),
+            ),
+        ))
+        .await
+        .expect("the router answers");
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+/// AC1: through the route, for a file the store holds as parts.
+#[tokio::test]
+async fn a_download_serves_the_stored_bytes_and_says_how_many() {
+    let watching = watching(ROOMY, |_| {}).await;
+    let document = watching.document("PR_STREAM_DOWN").await;
+    let file = pdf_of(2 * PART + 3);
+    let attachment = watching.upload(document, "q.pdf", &file).await;
+
+    watching.clear(attachment).await;
+
+    let served = watching
+        .app
+        .get_raw(
+            &format!("/api/v1/documents/{document}/attachments/{attachment}"),
+            Some(&watching.token),
+        )
+        .await;
+
+    assert_eq!(served.status, StatusCode::OK);
+    assert_eq!(
+        served.header(header::CONTENT_LENGTH).as_deref(),
+        Some((2 * PART + 3).to_string().as_str())
+    );
+    assert_eq!(
+        served.header(header::CONTENT_DISPOSITION).as_deref(),
+        Some("attachment; filename=\"q.pdf\"")
+    );
+    assert_eq!(served.bytes, file);
+}
+
+// ---------------------------------------------------------------------------
+// AC4 — a refusal leaves nothing
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_refusal_of_a_file_that_ends_in_the_buffer_asks_nothing_of_the_store() {
+    let watching = watching(ROOMY, |_| {}).await;
+    let document = watching.document("PR_STREAM_REFUSE_SHORT").await;
+    let long_name = format!("{}.pdf", "n".repeat(300));
+    let pdf = pdf_of(100);
+
+    for (body, code) in [
+        (multipart(&[Part::File("empty.pdf", b"")]), "FILE_EMPTY"),
+        (
+            multipart(&[Part::File(
+                "q.pdf",
+                b"only words, which no magic number claims",
+            )]),
+            "FILE_TYPE_NOT_ALLOWED",
+        ),
+        (
+            multipart(&[Part::File(&long_name, &pdf)]),
+            "FILE_NAME_TOO_LONG",
+        ),
+        (
+            multipart(&[
+                Part::File("q.pdf", &pdf),
+                Part::Text("categoryId", &Uuid::now_v7().to_string()),
+            ]),
+            "CATEGORY_NOT_FOUND",
+        ),
+    ] {
+        let (status, refused) = watching.post(document, body).await;
+
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{code}: {refused}"
+        );
+        assert_eq!(refused["error"]["details"][0]["code"], code, "{refused}");
+        assert_eq!(watching.ledger.calls(), 0, "{code}");
+    }
+
+    assert_eq!(watching.objects(document).await, Vec::<ObjectPath>::new());
+    assert_eq!(watching.rows(document).await, 0);
+}
+
+/// The head decides before an upload opens, so a file that outgrows the buffer
+/// and is refused by it costs no request, and the rest of it is read and dropped.
+#[tokio::test]
+async fn a_refusal_read_from_the_head_of_a_long_file_opens_no_upload() {
+    let watching = watching(ROOMY, |_| {}).await;
+    let document = watching.document("PR_STREAM_REFUSE_HEAD").await;
+    let words = vec![b'x'; PART + MIB];
+    let long_name = format!("{}.pdf", "n".repeat(300));
+    let pdf = pdf_of(PART + MIB);
+
+    for (body, code) in [
+        (
+            multipart(&[Part::File("q.pdf", &words)]),
+            "FILE_TYPE_NOT_ALLOWED",
+        ),
+        (
+            multipart(&[Part::File(&long_name, &pdf)]),
+            "FILE_NAME_TOO_LONG",
+        ),
+    ] {
+        let (status, refused) = watching.post(document, body).await;
+
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{code}: {refused}"
+        );
+        assert_eq!(refused["error"]["details"][0]["code"], code, "{refused}");
+        assert_eq!(watching.ledger.calls(), 0, "{code}");
+    }
+}
+
+/// **The category comes after the file, which is what this product's own client
+/// sends**, so most of the file is in the store before it can be checked. That
+/// is the case the shape exists for: parts, no object, and an abort.
+#[tokio::test]
+async fn a_category_refused_after_the_file_leaves_no_object_and_no_upload() {
+    let watching = watching(ROOMY, |_| {}).await;
+    let document = watching.document("PR_STREAM_REFUSE_CAT").await;
+    let file = pdf_of(2 * PART + MIB);
+
+    for (category, status, expected) in [
+        (
+            Uuid::now_v7().to_string(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            1,
+        ),
+        ("not a uuid".to_owned(), StatusCode::BAD_REQUEST, 2),
+    ] {
+        let (answered, body) = watching
+            .post(
+                document,
+                multipart(&[
+                    Part::File("q.pdf", &file),
+                    Part::Text("categoryId", &category),
+                ]),
+            )
+            .await;
+
+        assert_eq!(answered, status, "{body}");
+        watching.ledger.aborts_settled(expected).await;
+    }
+
+    assert_eq!(watching.ledger.opened.load(Ordering::SeqCst), 2);
+    assert_eq!(watching.ledger.completed.load(Ordering::SeqCst), 0);
+    assert_eq!(watching.ledger.parts(), vec![PART; 4]);
+    assert_eq!(watching.objects(document).await, Vec::<ObjectPath>::new());
+    assert_eq!(watching.rows(document).await, 0);
+}
+
+/// **Over the cap at the first part**: the read fails inside the buffer, so
+/// there is nothing to abort. The name the limit goes by is the one
+/// `multipart_failure` gives, whichever read it surfaced from.
+#[tokio::test]
+async fn a_file_over_the_cap_inside_the_first_part_reaches_no_store() {
+    let watching = watching(2 * MIB, |_| {}).await;
+    let document = watching.document("PR_STREAM_CAP_FIRST").await;
+    let file = pdf_of(3 * MIB);
+
+    let (status, refused) = watching
+        .post(document, multipart(&[Part::File("q.pdf", &file)]))
+        .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(refused["error"]["details"][0]["code"], "FILE_TOO_LARGE");
+    assert_eq!(watching.ledger.calls(), 0);
+}
+
+#[tokio::test]
+async fn a_file_over_the_cap_past_the_first_part_is_refused_and_aborted() {
+    let watching = watching(7 * MIB, |_| {}).await;
+    let document = watching.document("PR_STREAM_CAP_PAST").await;
+    let file = pdf_of(8 * MIB);
+
+    let (status, refused) = watching
+        .post(document, multipart(&[Part::File("q.pdf", &file)]))
+        .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(refused["error"]["details"][0]["code"], "FILE_TOO_LARGE");
+
+    watching.ledger.aborts_settled(1).await;
+
+    assert_eq!(watching.ledger.parts(), vec![PART]);
+    assert_eq!(watching.ledger.completed.load(Ordering::SeqCst), 0);
+    assert_eq!(watching.objects(document).await, Vec::<ObjectPath>::new());
+}
+
+/// A store that stops taking parts is the caller's 500 and the upload's abort.
+#[tokio::test]
+async fn a_part_the_store_refuses_aborts_the_upload_and_records_nothing() {
+    let watching = watching(ROOMY, |store| store.refuse_part = Some(1)).await;
+    let document = watching.document("PR_STREAM_PART_FAIL").await;
+    let file = pdf_of(3 * PART);
+
+    let (status, body) = watching
+        .post(document, multipart(&[Part::File("q.pdf", &file)]))
+        .await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+
+    watching.ledger.aborts_settled(1).await;
+
+    assert_eq!(watching.objects(document).await, Vec::<ObjectPath>::new());
+    assert_eq!(watching.rows(document).await, 0);
+}
+
+// ---------------------------------------------------------------------------
+// AC5 — a dropped request aborts too
+// ---------------------------------------------------------------------------
+
+/// **The request's future is dropped mid-upload**, with a part in the store and
+/// the body still open, which is what a disconnect can do: no error path runs,
+/// because nothing returns.
+#[tokio::test]
+async fn a_request_dropped_mid_upload_aborts_it() {
+    let watching = watching(ROOMY, |_| {}).await;
+    let document = watching.document("PR_STREAM_DROPPED").await;
+    let file = pdf_of(3 * PART);
+    let mut body = multipart(&[Part::File("q.pdf", &file)]);
+
+    body.truncate(PART + 2 * MIB);
+
+    let flow = Arc::clone(&watching.flow);
+    let never_ends = stream_of(body, Arc::clone(&flow)).chain(stream::pending());
+
+    let mut answering = Box::pin(watching.app.router().oneshot(request(
+        Method::POST,
+        &format!("/api/v1/documents/{document}/attachments"),
+        &watching.token,
+        multipart_type(),
+        Body::from_stream(never_ends),
+    )));
+
+    let a_part_landed = async {
+        while watching.flow.total_accepted() < PART as u64 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    };
+
+    tokio::select! {
+        answer = &mut answering => panic!("a body with no end was answered: {answer:?}"),
+        () = a_part_landed => {}
+        () = tokio::time::sleep(Duration::from_secs(20)) => panic!("no part reached the store"),
+    }
+
+    drop(answering);
+
+    watching.ledger.aborts_settled(1).await;
+
+    assert_eq!(watching.ledger.completed.load(Ordering::SeqCst), 0);
+    assert_eq!(watching.objects(document).await, Vec::<ObjectPath>::new());
+    assert_eq!(watching.rows(document).await, 0);
+}
+
+/// The other thing a disconnect can be: a read that fails. It answers as any
+/// malformed body does, to nobody, and the upload goes the same way.
+#[tokio::test]
+async fn a_body_that_breaks_mid_upload_aborts_it() {
+    let watching = watching(ROOMY, |_| {}).await;
+    let document = watching.document("PR_STREAM_BROKEN").await;
+    let file = pdf_of(3 * PART);
+    let mut body = multipart(&[Part::File("q.pdf", &file)]);
+
+    body.truncate(PART + 2 * MIB);
+
+    let breaks = stream_of(body, Arc::clone(&watching.flow)).chain(stream::once(async {
+        Err(std::io::Error::other("the connection was reset"))
+    }));
+
+    let response = watching
+        .app
+        .router()
+        .oneshot(request(
+            Method::POST,
+            &format!("/api/v1/documents/{document}/attachments"),
+            &watching.token,
+            multipart_type(),
+            Body::from_stream(breaks),
+        ))
+        .await
+        .expect("the router answers");
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    watching.ledger.aborts_settled(1).await;
+
+    assert_eq!(watching.ledger.completed.load(Ordering::SeqCst), 0);
+    assert_eq!(watching.objects(document).await, Vec::<ObjectPath>::new());
+}
+
+// ---------------------------------------------------------------------------
+// AC7 — what stays
+// ---------------------------------------------------------------------------
+
+/// **The last `file` part wins, as it did**, and an earlier one is not judged:
+/// today a request that sends a bad file and then a good one is a good request,
+/// which is why a refusal waits for the end of the body.
+#[tokio::test]
+async fn the_last_file_part_wins_and_an_earlier_upload_is_aborted() {
+    let watching = watching(ROOMY, |_| {}).await;
+    let document = watching.document("PR_STREAM_TWO_FILES").await;
+    let long = pdf_of(PART + MIB);
+    let last = pdf_of(1_000);
+
+    let (status, body) = watching
+        .post(
+            document,
+            multipart(&[
+                Part::File("first.pdf", &long),
+                Part::File("last.pdf", &last),
+            ]),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["originalFileName"], "last.pdf");
+    assert_eq!(body["data"]["fileSize"], 1_000);
+
+    watching.ledger.aborts_settled(1).await;
+
+    assert_eq!(watching.ledger.completed.load(Ordering::SeqCst), 0);
+    assert_eq!(watching.objects(document).await.len(), 1);
+
+    let words = vec![b'x'; PART + MIB];
+
+    for earlier in [&b""[..], b"only words", &words] {
+        let (status, body) = watching
+            .post(
+                document,
+                multipart(&[
+                    Part::File("first.pdf", earlier),
+                    Part::File("last.pdf", &last),
+                ]),
+            )
+            .await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["originalFileName"], "last.pdf");
+    }
+}
+
+/// **Parts in any order**, and with a stranger among them. `file` first is the
+/// shape this product's client sends, on a file long enough to be in parts.
+#[tokio::test]
+async fn the_description_and_category_may_follow_the_file_and_strangers_are_ignored() {
+    let watching = watching(ROOMY, |_| {}).await;
+    let document = watching.document("PR_STREAM_ORDER").await;
+    let categories = watching
+        .app
+        .get("/api/v1/attachment-categories", Some(&watching.token))
+        .await;
+    let category = categories.body["data"][0]["id"]
+        .as_str()
+        .expect("a seeded category")
+        .to_owned();
+    let file = pdf_of(PART + MIB);
+
+    let (status, body) = watching
+        .post(
+            document,
+            multipart(&[
+                Part::Text("somethingABrowserAdded", "x"),
+                Part::File("q.pdf", &file),
+                Part::Text("description", "  the supplier's quotation  "),
+                Part::Text("categoryId", &category),
+                Part::Text("somethingElse", "y"),
+            ]),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["description"], "the supplier's quotation");
+    assert_eq!(body["data"]["category"]["id"], category.as_str());
+    assert_eq!(watching.ledger.completed.load(Ordering::SeqCst), 1);
+}
+
+// ---------------------------------------------------------------------------
+// AC8 — what moves, and what does not
+// ---------------------------------------------------------------------------
+
+/// **403 and 404 come before any of the body is read.** The body is over the cap
+/// as well, which is the two-fault request whose answer moved: it was a 422.
+#[tokio::test]
+async fn a_caller_who_may_not_attach_is_refused_before_the_body_or_the_store() {
+    let watching = watching(2 * MIB, |_| {}).await;
+    let document = watching.document("PR_STREAM_FIRST").await;
+    let file = pdf_of(3 * MIB);
+
+    fixtures::create_user(
+        &watching.app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "stream-outsider",
+        "stream-outsider@example.test",
+        common::ADMIN_PASSWORD,
+        &[],
+    )
+    .await;
+
+    let outsider = watching
+        .app
+        .sign_in("stream-outsider", common::ADMIN_PASSWORD)
+        .await;
+
+    let (status, refused) = watching
+        .post_as(
+            &outsider,
+            document,
+            multipart(&[Part::File("q.pdf", &file)]),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+
+    let (status, refused) = watching
+        .post(Uuid::now_v7(), multipart(&[Part::File("q.pdf", &file)]))
+        .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND, "{refused}");
+    assert_eq!(watching.flow.total_read(), 0, "the body was read");
+    assert_eq!(watching.ledger.calls(), 0, "the store was asked");
+}
+
+/// **What did not move**, because a refusal is decided as the file is read and
+/// answered after the body is: what the body was going to answer still comes
+/// first.
+#[tokio::test]
+async fn a_body_fault_still_answers_before_what_is_wrong_with_the_file() {
+    let watching = watching(2 * MIB, |_| {}).await;
+    let document = watching.document("PR_STREAM_ORDER_KEPT").await;
+    let words = vec![b'x'; 100];
+
+    let (status, body) = watching
+        .post(
+            document,
+            multipart(&[
+                Part::File("q.txt", &words),
+                Part::Text("categoryId", "not a uuid"),
+            ]),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    let words = vec![b'x'; 3 * MIB];
+
+    let (status, body) = watching
+        .post(document, multipart(&[Part::File("q.txt", &words)]))
+        .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["error"]["details"][0]["code"], "FILE_TOO_LARGE");
+}
+
+// ---------------------------------------------------------------------------
+// AC10 — a failure mid-stream
+// ---------------------------------------------------------------------------
+
+/// A body that fails, and a length it did not reach, is how a client is told.
+/// The read is logged, and the event stands: it was written when the stream
+/// started, so it names a transfer that failed partway.
+#[tokio::test]
+async fn a_download_that_fails_after_its_headers_is_truncated_and_logged() {
+    let watching = watching(ROOMY, |store| {
+        store.fail_read_after = Some(MIB as u64);
+    })
+    .await;
+    let document = watching.document("PR_STREAM_TRUNCATE").await;
+    let file = pdf_of(2 * PART);
+    let attachment = watching.upload(document, "q.pdf", &file).await;
+
+    watching.clear(attachment).await;
+
+    let captured = Captured::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::ERROR)
+        .with_ansi(false)
+        .with_writer(captured.clone())
+        .finish();
+
+    let (headers, body) = {
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let response = watching.download(document, attachment).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let headers = response.headers().clone();
+
+        (headers, to_bytes(response.into_body(), usize::MAX).await)
+    };
+
+    assert_eq!(
+        headers
+            .get(header::CONTENT_LENGTH)
+            .and_then(|length| length.to_str().ok()),
+        Some((2 * PART).to_string().as_str()),
+        "the length is what makes a short body a broken one"
+    );
+    assert!(body.is_err(), "the body ended as though it were whole");
+
+    let log = String::from_utf8_lossy(&captured.0.lock().expect("the capture")).into_owned();
+
+    assert!(
+        log.contains("an attachment's bytes stopped mid-read"),
+        "the failure was not logged: {log}"
+    );
+
+    let recorded: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM activity_events \
+         WHERE event_type = 'Attachment.Downloaded' AND document_id = $1",
+    )
+    .bind(document)
+    .fetch_one(&watching.app.pool)
+    .await
+    .expect("a count");
+
+    assert_eq!(recorded, 1, "the event names the transfer that started");
+}
+
+/// AC2's fourth outcome, through the worker: a store that fails partway says
+/// nothing about the file, so the row stays as it was and the next pass asks.
+#[tokio::test]
+async fn a_file_the_store_stops_serving_mid_scan_stays_pending() {
+    let watching = watching(ROOMY, |store| store.fail_read_after = Some(1)).await;
+    let document = watching.document("PR_STREAM_SCAN_BREAK").await;
+    let file = pdf_of(2 * PART);
+    let attachment = watching.upload(document, "q.pdf", &file).await;
+    let port = slow_clamd(Arc::clone(&watching.flow)).await;
+
+    worker::pass(&watching.app.state, "127.0.0.1", port)
+        .await
+        .expect("the pass");
+
+    assert_eq!(watching.status_of(attachment).await, "PENDING");
+}
+
+/// What a test's own subscriber writes.
+#[derive(Clone, Default)]
+struct Captured(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Captured {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("the capture").extend_from_slice(bytes);
+
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+    type Writer = Captured;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
 }

@@ -27,10 +27,10 @@ use crate::state::AppState;
 /// convenience.
 ///
 /// **`DefaultBodyLimit` is how [#245] AC3 is satisfied**, and it is why the
-/// limit is a router concern rather than a service one: the layer refuses a body
-/// larger than the deployment accepts **before any of it is read**, where a
-/// check inside the handler could only measure what had already arrived. A limit
-/// on bytes you are holding is a limit on your disk.
+/// limit is a router concern rather than a service one: the layer counts the body
+/// **as it is read** and fails the read that passes the limit, so nothing has to
+/// be held to measure it. A limit on bytes you are holding is a limit on your
+/// disk.
 ///
 /// It is applied to the upload route alone. Axum's global default is 2 MB, which
 /// every JSON route in this product wants and this one does not.
@@ -88,7 +88,9 @@ pub async fn upload_attachment(
     PathParam(document_id): PathParam<Uuid>,
     MultipartBody(multipart): MultipartBody,
 ) -> Result<Json<ItemEnvelope<Attachment>>, AppError> {
-    let file = read_file_part(multipart, state.config.storage_max_upload_bytes).await?;
+    // Before the body: the file goes towards the store as it is read.
+    let document_id = service::may_upload(&state, &caller, document_id).await?;
+    let file = read_file_part(&state, &caller, document_id, multipart).await?;
 
     Ok(Json(ItemEnvelope::new(
         service::upload(&state, &caller, document_id, file).await?,
@@ -100,7 +102,7 @@ pub async fn upload_attachment(
 /// **A body over the limit and a body that is malformed arrive the same way**,
 /// as a `MultipartError`, and only its status tells them apart.
 /// `DefaultBodyLimit` refuses while the body is being read, so the error can
-/// surface from **either** `next_field` or `bytes` depending on where the read
+/// surface from **either** `next_field` or `chunk` depending on where the read
 /// stopped — which is why this is one function called from both places rather
 /// than a check at the point that seemed likely. It was written at the likely
 /// point first, and the test for it failed with `FILE_REQUIRED`: somebody who
@@ -120,7 +122,11 @@ fn multipart_failure(error: axum::extract::multipart::MultipartError, limit: usi
     domain::no_file_part()
 }
 
-/// Pulls the one file part and the optional description out of the body.
+/// Reads the body, sending the one file part towards the store as it comes.
+///
+/// **The parts may come in any order**, and in this product's own client `file`
+/// comes first, so the description and the category are read past it. A refusal
+/// here drops the file, and dropping it aborts any upload it opened.
 ///
 /// **A malformed multipart body is a 422 and not a 500.** `Multipart::next_field`
 /// fails on a body that is not what the content type promised, which is a
@@ -134,14 +140,17 @@ fn multipart_failure(error: axum::extract::multipart::MultipartError, limit: usi
 /// this project's JSON bodies is right there and wrong here: a JSON body is a
 /// contract, and a form post is a browser's rendering of one.
 async fn read_file_part(
+    state: &AppState,
+    caller: &Authenticated,
+    document_id: Uuid,
     mut multipart: Multipart,
-    max_upload_bytes: usize,
 ) -> Result<UploadedFile, AppError> {
+    let max_upload_bytes = state.config.storage_max_upload_bytes;
     let mut file: Option<UploadedFile> = None;
     let mut description: Option<String> = None;
     let mut category_id: Option<Uuid> = None;
 
-    while let Some(field) = multipart
+    while let Some(mut field) = multipart
         .next_field()
         .await
         .map_err(|error| multipart_failure(error, max_upload_bytes))?
@@ -154,18 +163,26 @@ async fn read_file_part(
                     .unwrap_or("application/octet-stream")
                     .to_owned();
 
-                let bytes = field
-                    .bytes()
-                    .await
-                    .map_err(|error| multipart_failure(error, max_upload_bytes))?;
+                // **The last `file` part wins**, so the one before it is over:
+                // dropping it here aborts what it had sent.
+                drop(file.take());
 
-                file = Some(UploadedFile {
+                let mut incoming = UploadedFile::begin(
+                    caller,
+                    document_id,
                     original_file_name,
                     declared_mime_type,
-                    bytes,
-                    description: None,
-                    category_id: None,
-                });
+                );
+
+                while let Some(chunk) = field
+                    .chunk()
+                    .await
+                    .map_err(|error| multipart_failure(error, max_upload_bytes))?
+                {
+                    incoming.write(state, chunk).await?;
+                }
+
+                file = Some(incoming);
             }
             Some("description") => {
                 let text = field.text().await.unwrap_or_default();

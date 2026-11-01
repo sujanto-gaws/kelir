@@ -22,9 +22,10 @@
 //! # The bucket is the deployment's, not this process's
 //!
 //! Nothing here creates one. The credentials this process holds should be able
-//! to put and get objects in a bucket somebody else provisioned; a process that
-//! can create buckets can create the one an attacker names. `deploy/docker`
-//! creates it, and CI's backend job creates it before the tests run.
+//! to put and get objects, and abort an upload of its own, in a bucket somebody
+//! else provisioned; a process that can create buckets can create the one an
+//! attacker names. `deploy/docker` creates it, and CI's backend job creates it
+//! before the tests run.
 //!
 //! [#244]: https://github.com/sujanto-gaws/kelir/issues/244
 
@@ -34,7 +35,7 @@ use axum::body::Bytes;
 use futures_util::stream::{BoxStream, StreamExt, TryStreamExt};
 use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
 use object_store::path::Path as ObjectPath;
-use object_store::{ObjectStore, PutPayload};
+use object_store::{MultipartUpload, ObjectStore, PutPayload};
 
 use crate::config::AppConfig;
 use crate::error::AppError;
@@ -42,6 +43,13 @@ use crate::error::AppError;
 /// `x-amz-server-side-encryption`'s value for SSE-S3: the store encrypts under
 /// its own key (`MINIO_KMS_SECRET_KEY`).
 const SSE_S3: &str = "AES256";
+
+/// How much of a file goes to the store at a time, and the most an upload holds.
+///
+/// **The smallest S3 accepts for every part but the last**, and exactly this for
+/// each of them, because some S3-compatible stores also ask that they be equal.
+/// A file no longer than this is one ordinary `put`.
+pub const PART_SIZE: usize = 5 * 1024 * 1024;
 
 /// An object's bytes as the store sends them, for a reader to pull ([#834]).
 ///
@@ -189,7 +197,8 @@ impl ObjectStorage {
         }
     }
 
-    /// Writes one object, and is the only thing in this codebase that does.
+    /// Writes one object whole, which is how a file of one part or less is
+    /// stored. [`Self::begin_upload`] is the other way in.
     ///
     /// **The failure this returns leaves nothing behind that a reader can
     /// see.** Its caller writes the row only after this succeeds, which is
@@ -219,14 +228,154 @@ impl ObjectStorage {
 
                 Ok(())
             }
-            Self::Unavailable { reason } => Err(AppError::Internal {
-                source: anyhow::anyhow!(
-                    "this deployment has no object storage configured, so a file cannot be \
-                     attached: {reason}. Set KELIR_STORAGE_ENDPOINT, KELIR_STORAGE_BUCKET \
-                     and the two credentials"
-                ),
-            }),
+            Self::Unavailable { reason } => Err(no_store(reason)),
         }
+    }
+
+    /// Opens a multipart upload for a file longer than one part.
+    ///
+    /// **Nothing is visible at `reference` until [`PartUpload::complete`].** So a
+    /// refusal that arrives with the last bytes of a body still leaves no object,
+    /// and the row-after-object order [`Self::put`] describes holds here too.
+    pub async fn begin_upload(&self, reference: &str) -> Result<PartUpload, AppError> {
+        match self {
+            Self::S3 { store, bucket } => {
+                let upload = store
+                    .put_multipart(&ObjectPath::from(reference))
+                    .await
+                    .map_err(|error| {
+                        tracing::error!(
+                            %error,
+                            %bucket,
+                            %reference,
+                            "an attachment's upload could not be opened"
+                        );
+
+                        write_refused(&error)
+                    })?;
+
+                Ok(PartUpload {
+                    upload: Some(upload),
+                    reference: reference.to_owned(),
+                })
+            }
+            Self::Unavailable { reason } => Err(no_store(reason)),
+        }
+    }
+}
+
+fn write_refused(error: &object_store::Error) -> AppError {
+    AppError::Internal {
+        source: anyhow::anyhow!("object storage refused the write: {error}"),
+    }
+}
+
+fn no_store(reason: &str) -> AppError {
+    AppError::Internal {
+        source: anyhow::anyhow!(
+            "this deployment has no object storage configured, so a file cannot be \
+             attached: {reason}. Set KELIR_STORAGE_ENDPOINT, KELIR_STORAGE_BUCKET \
+             and the two credentials"
+        ),
+    }
+}
+
+/// A multipart upload under way, which aborts itself unless it is completed.
+///
+/// # Why the abort is in `Drop`
+///
+/// **A client that disconnects can drop the handler's future at any `await`, and
+/// then no error path runs.** S3 keeps the parts of an upload nobody aborted, out
+/// of sight and billed, so every way out of a request has to end the upload.
+/// Each refusal is a way out as well, so there is one path for all of them
+/// rather than a call beside each `?`: dropping this.
+///
+/// `Drop` cannot wait, so the abort is spawned, and a response can leave before
+/// it lands. A process killed outright runs nothing; what that leaves is hidden
+/// parts, never an object, and the store's stale-upload expiry is what clears
+/// them.
+///
+/// **Sent one part at a time**, by the handler's own task. A part is what holds
+/// memory, so the next is not read until the store has taken this one, and since
+/// nothing is spawned, a dropped request leaves no part still being sent.
+pub struct PartUpload {
+    /// `None` once [`Self::complete`] has succeeded, which is the end of this.
+    upload: Option<Box<dyn MultipartUpload>>,
+    reference: String,
+}
+
+impl PartUpload {
+    /// Sends one part and waits for the store to take it.
+    ///
+    /// Every part but the last must be [`PART_SIZE`].
+    pub async fn put_part(&mut self, part: Bytes) -> Result<(), AppError> {
+        if let Some(upload) = self.upload.as_mut() {
+            upload
+                .put_part(PutPayload::from_bytes(part))
+                .await
+                .map_err(|error| {
+                    tracing::error!(
+                        %error,
+                        reference = %self.reference,
+                        "a part of an attachment could not be stored"
+                    );
+
+                    write_refused(&error)
+                })?;
+        }
+
+        Ok(())
+    }
+
+    /// Makes the object exist, and stands the guard down.
+    ///
+    /// A `complete` that fails keeps the upload, so it is aborted like any other.
+    pub async fn complete(mut self) -> Result<(), AppError> {
+        if let Some(upload) = self.upload.as_mut() {
+            upload.complete().await.map_err(|error| {
+                tracing::error!(
+                    %error,
+                    reference = %self.reference,
+                    "an attachment's upload could not be completed"
+                );
+
+                write_refused(&error)
+            })?;
+        }
+
+        self.upload = None;
+
+        Ok(())
+    }
+}
+
+impl Drop for PartUpload {
+    fn drop(&mut self) {
+        let Some(mut upload) = self.upload.take() else {
+            return;
+        };
+
+        let reference = std::mem::take(&mut self.reference);
+
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(
+                %reference,
+                "an upload ended with no runtime to abort it; its parts stay until the store \
+                 expires them"
+            );
+
+            return;
+        };
+
+        runtime.spawn(async move {
+            if let Err(error) = upload.abort().await {
+                tracing::warn!(
+                    %error,
+                    %reference,
+                    "an upload could not be aborted; its parts stay until the store expires them"
+                );
+            }
+        });
     }
 }
 
@@ -285,16 +434,6 @@ mod tests {
         (endpoint, served)
     }
 
-    fn storage_at(endpoint: String) -> Arc<dyn ObjectStore> {
-        let mut config = AppConfig::test_default();
-        config.storage_endpoint = endpoint;
-
-        match ObjectStorage::from_config(&config) {
-            ObjectStorage::S3 { store, .. } => store,
-            ObjectStorage::Unavailable { reason } => panic!("no store was built: {reason}"),
-        }
-    }
-
     fn asks_for_sse_s3(head: &str) -> bool {
         head.lines()
             .any(|line| line.trim_end() == "x-amz-server-side-encryption: aes256")
@@ -328,10 +467,9 @@ mod tests {
     }
 
     /// **A multipart upload asks when it is created**, which is where S3 takes
-    /// SSE-S3 for one; its parts carry the header only for SSE-C. Nothing
-    /// writes multipart today, and a writer that does inherits the setting
-    /// because it is on the store, not on [`ObjectStorage::put`]. Seen red,
-    /// 2026-10-28.
+    /// SSE-S3 for one; its parts carry the header only for SSE-C. It inherits
+    /// the setting because that is on the store, not on [`ObjectStorage::put`].
+    /// Seen red, 2026-10-28.
     #[tokio::test]
     async fn a_multipart_upload_asks_the_store_to_encrypt_it_too() {
         let body = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
@@ -344,10 +482,16 @@ mod tests {
         ))
         .await;
 
-        storage_at(endpoint)
-            .put_multipart(&ObjectPath::from("tenants/t/large.pdf"))
+        let mut config = AppConfig::test_default();
+        config.storage_endpoint = endpoint;
+
+        // Stood down rather than dropped: this store answers one request, and
+        // the guard's abort would be a second.
+        let upload = ObjectStorage::from_config(&config)
+            .begin_upload("tenants/t/large.pdf")
             .await
             .expect("the scripted store starts the upload");
+        std::mem::forget(upload);
 
         let head = served.await.expect("the request was served");
         assert!(
