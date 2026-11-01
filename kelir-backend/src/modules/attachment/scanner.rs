@@ -274,14 +274,15 @@ mod tests {
     }
 
     /// **A store slower than the limit is not a scanner that stopped answering.**
-    /// Four reads of 60 ms against a limit of 100 ms: over the whole conversation
-    /// this times out, on every pass, and the row stays `PENDING` for ever.
+    /// Three reads of 150 ms against a limit of 100 ms, so neither one read nor
+    /// the conversation may be what is timed: either way this times out, on
+    /// every pass, and the row stays `PENDING` for ever.
     #[tokio::test]
     async fn a_slow_store_is_not_counted_against_the_scanner() {
         let port = answering_clamd().await;
-        let file = stream::iter(0..4)
+        let file = stream::iter(0..3)
             .then(|_| async {
-                tokio::time::sleep(Duration::from_millis(60)).await;
+                tokio::time::sleep(Duration::from_millis(150)).await;
 
                 Ok(Bytes::from_static(b"part"))
             })

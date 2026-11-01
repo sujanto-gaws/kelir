@@ -43,6 +43,14 @@
 //! | A refusal answered from inside the body | `the_last_file_part_wins_…` |
 //! | The body read before the caller is judged | `a_caller_who_may_not_attach_…` |
 //! | A failed read ends the scan as a whole file | `scanner::tests::a_file_that_stops_mid_read_…` |
+//! | `upload` does not ask for the document again | `a_document_deleted_while_its_file_is_read_…` |
+//! | The abort not held to the bound | `storage::tests::a_store_that_hangs_…` |
+//! | The bound is a minute | `storage::tests::a_store_that_hangs_…` |
+//! | A body read held to the client's timeout | `storage::tests::a_body_that_stops_…` |
+//! | The scan timed whole, as it was | `scanner::tests::a_slow_store_is_not_counted_…` |
+//! | The store's read inside the scanner's limit | `scanner::tests::a_slow_store_is_not_counted_…` |
+//! | A write with no limit | `scanner::tests::a_scanner_that_stops_reading_…` |
+//! | The reply with no limit | `scanner::tests::a_scanner_that_takes_the_file_…`, which then never ends |
 //!
 //! [#834]: https://github.com/sujanto-gaws/kelir/issues/834
 
