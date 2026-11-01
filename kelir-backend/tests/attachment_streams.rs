@@ -1295,6 +1295,90 @@ async fn a_body_that_breaks_mid_upload_aborts_it() {
     assert_eq!(watching.objects(document).await, Vec::<ObjectPath>::new());
 }
 
+/// **A slow body is time for the document to go.** The check before the body is
+/// as old as the body is slow, so the object is written on a second one, and the
+/// answer is the one a deleted document gets. Both roads: one has parts to abort,
+/// and the other has only not to write.
+#[tokio::test]
+async fn a_document_deleted_while_its_file_is_read_is_refused_and_leaves_nothing() {
+    for (size, cut) in [(1_000, 500), (2 * PART + MIB, PART + 2 * MIB)] {
+        let watching = watching(ROOMY, |_| {}).await;
+        let document = watching.document("PR_STREAM_GONE").await;
+        let file = pdf_of(size);
+        let mut head = multipart(&[Part::File("q.pdf", &file)]);
+        let tail = head.split_off(cut);
+        let flow = Arc::clone(&watching.flow);
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+
+        let rest = {
+            let flow = Arc::clone(&flow);
+
+            stream::once(async move {
+                released.await.ok();
+
+                stream_of(tail, flow)
+            })
+            .flatten()
+        };
+
+        let answering = tokio::spawn(watching.app.router().oneshot(request(
+            Method::POST,
+            &format!("/api/v1/documents/{document}/attachments"),
+            &watching.token,
+            multipart_type(),
+            Body::from_stream(stream_of(head, Arc::clone(&flow)).chain(rest)),
+        )));
+
+        // Mid-read: all of the first half taken, and on the long road a part in
+        // the store.
+        let accepted = if size > PART { PART as u64 } else { 0 };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+
+        while flow.total_read() < cut as u64 || flow.total_accepted() < accepted {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the read did not get there"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        let uri = format!("/api/v1/documents/{document}");
+        let deleted = watching.app.delete(&uri, Some(&watching.token)).await;
+
+        assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
+
+        release.send(()).expect("the body is waiting");
+
+        let response = answering.await.expect("the task").expect("the router");
+        let status = response.status();
+        let refused: Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("the answer"),
+        )
+        .expect("an envelope");
+
+        let gone = watching.app.get(&uri, Some(&watching.token)).await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND, "{size}: {refused}");
+        assert_eq!(gone.status, StatusCode::NOT_FOUND, "{}", gone.body);
+        assert_eq!(refused["error"], gone.body["error"], "{size}");
+
+        if size > PART {
+            watching.ledger.aborts_settled(1).await;
+        }
+
+        assert_eq!(watching.ledger.puts.load(Ordering::SeqCst), 0, "{size}");
+        assert_eq!(
+            watching.ledger.completed.load(Ordering::SeqCst),
+            0,
+            "{size}"
+        );
+        assert_eq!(watching.objects(document).await, Vec::<ObjectPath>::new());
+        assert_eq!(watching.rows(document).await, 0, "{size}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // AC7 — what stays
 // ---------------------------------------------------------------------------

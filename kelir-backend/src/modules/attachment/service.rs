@@ -192,9 +192,10 @@ impl UploadedFile {
 /// holding the first and not the second can attach nothing anywhere, which is
 /// the correct reading of an attachment being as private as what it hangs on.
 ///
-/// **Separate from [`upload`] because the body streams** ([#834]): the bytes go
-/// towards the store as they are read, so a caller who may not attach has to be
-/// refused before they are.
+/// **Asked twice, because the body streams** ([#834]): before it, since the bytes
+/// go towards the store as they are read and a caller who may not attach has to
+/// be refused first, and again by [`upload`], since a body can take longer to
+/// arrive than the first answer stays true.
 ///
 /// [#834]: https://github.com/sujanto-gaws/kelir/issues/834
 pub async fn may_upload(
@@ -233,17 +234,23 @@ pub async fn may_upload(
 ///
 /// # What is checked before the object exists
 ///
-/// [`may_upload`] has answered for the caller and the document. By the time this
-/// runs, the last part of the body has been read, so a file longer than a part
-/// has most of its bytes in the store, **as parts of an upload that is not an
-/// object yet**. Every refusal below drops that upload, and dropping it aborts
-/// it, so a refused file leaves no object here either.
+/// By the time this runs, the last part of the body has been read, so a file
+/// longer than a part has most of its bytes in the store, **as parts of an upload
+/// that is not an object yet**. Every refusal below drops that upload, and
+/// dropping it aborts it, so a refused file leaves no object here either.
+///
+/// **[`may_upload`] is the first of them, again.** It answered before the body,
+/// and a slow body is time for the document to be deleted, so this is the answer
+/// the object is written on. What the caller may do does not change here: a
+/// permission is what the token carried when it was issued, whenever it is read.
 pub async fn upload(
     state: &AppState,
     caller: &Authenticated,
     document_id: Uuid,
     mut file: UploadedFile,
 ) -> Result<Attachment, AppError> {
+    let document_id = may_upload(state, caller, document_id).await?;
+
     // A file with parts open was judged when it outgrew the buffer, and passed.
     if file.parts.is_none() {
         if let Some(refusal) = file.refusal.take().or_else(|| file.head_refusal(state)) {
