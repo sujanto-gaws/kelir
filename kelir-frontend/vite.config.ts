@@ -289,3 +289,5 @@ export default defineConfig({
     include: ['src/**/*.spec.ts'],
   },
 })
+
+# Automated fix for issue #845: attachment: a description part is not checked before the row
