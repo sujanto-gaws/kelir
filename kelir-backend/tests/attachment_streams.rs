@@ -24,6 +24,26 @@
 //! what hyper hands up. The other tests here want a body in pieces, and
 //! [`frames_of`] gives them one.
 //!
+//! # Seen to fail
+//!
+//! The three memory tests were red against the buffered code: 26,214,552 bytes
+//! held for the upload, and 26,214,400 for the download and for the scan, against
+//! a bound of 10,485,760. Streaming, the upload holds 5,624,946.
+//!
+//! Each mutation below was made alone and reverted. **Seen red, 2026-11-01**, in
+//! `kelir-rust-tools:1.89`.
+//!
+//! | Mutation | Reddened at |
+//! |---|---|
+//! | The guard spawns no abort | Six: the cap past a part, a dropped request, a refused part, a refused category, a broken body, the second `file` |
+//! | `complete` leaves the guard armed | `each_size_takes_its_road_…`, at the abort that follows the answer |
+//! | A part sent as soon as the buffer is full | `each_size_takes_its_road_…`, at exactly one part |
+//! | `PART_SIZE` one byte short | `each_size_takes_its_road_…` |
+//! | The head not judged before an upload opens | `a_refusal_read_from_the_head_…` |
+//! | A refusal answered from inside the body | `the_last_file_part_wins_…` |
+//! | The body read before the caller is judged | `a_caller_who_may_not_attach_…` |
+//! | A failed read ends the scan as a whole file | `scanner::tests::a_file_that_stops_mid_read_…` |
+//!
 //! [#834]: https://github.com/sujanto-gaws/kelir/issues/834
 
 mod common;
@@ -894,7 +914,6 @@ async fn slow_clamd(flow: Arc<Flow>) -> u16 {
 /// **The boundary, from both sides.** A file of exactly one part is a `put`, and
 /// one byte more is an upload; a file of exactly two parts has no empty third.
 /// Each checksum and size is compared with the bytes read back from the store.
-/// **Seen red**: see the file's header.
 #[tokio::test]
 async fn each_size_takes_its_road_and_is_stored_exactly() {
     for (size, puts, parts) in [
