@@ -52,12 +52,41 @@
 //! | A write with no limit | `scanner::tests::a_scanner_that_stops_reading_…` |
 //! | The reply with no limit | `scanner::tests::a_scanner_that_takes_the_file_…`, which then never ends |
 //!
+//! The closing gate's own, made the same way and on the same day:
+//!
+//! | Mutation | Reddened at |
+//! |---|---|
+//! | `answered` off any one of `get`, a read, `put`, opening, a part, completing | `storage::tests`, by hanging: each is the only bound on its call |
+//! | No abort after a part or a completion that failed | `a_part_the_store_refuses_…`, `storage::tests::a_store_that_hangs_…` |
+//! | No abort before the first part landed | `a_request_dropped_at_each_await_…`, `storage::tests::a_store_that_hangs_…` |
+//! | No abort on a refused category, the second check or a chunk that failed | The test named for each |
+//! | No abort on a last part that failed | `a_store_that_refuses_any_call_…` |
+//! | No abort on a limit met past the file | `a_body_over_the_cap_after_its_file_…` |
+//! | The earlier `file` forgotten, or held to the end of the body | `the_last_file_part_wins_…`, `an_earlier_file_is_aborted_…` |
+//! | A part sent at `PART_SIZE - 1` | `a_read_ending_a_byte_short_…` |
+//! | A part's room one byte over | `each_size_takes_its_road_…` |
+//! | A short last part dropped, or judged as a head | `each_size_takes_its_road_…` |
+//! | One pass over a chunk | `each_size_takes_its_road_…` |
+//! | The checksum or the count skipping parts | `each_size_takes_its_road_…` |
+//! | The second check after the object | `a_document_deleted_while_its_file_is_read_…` |
+//! | A refusal that does not stop later writes | `a_head_that_was_refused_…` |
+//! | A refusal judged again at the end | `a_refusal_read_from_the_head_…` |
+//! | A failed read ending the body cleanly | `a_download_that_fails_…` |
+//! | The opening not spawned | `a_request_dropped_as_the_store_opens_…` |
+//! | `connect` with no limit | `scanner::tests::a_scanner_that_never_takes_the_connection_…` |
+//!
+//! **Three of the scanner's timers survive**: the `zINSTREAM` write, a length
+//! prefix and the final frame. Each is ten bytes or fewer beside a chunk write that
+//! is timed, and blocks only with the socket's buffer full at that exact byte,
+//! which no test here can arrange.
+//!
 //! [#834]: https://github.com/sujanto-gaws/kelir/issues/834
 
 mod common;
 
+use std::future::Future;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -66,6 +95,8 @@ use axum::body::{to_bytes, Body, Bytes};
 use axum::extract::ConnectInfo;
 use axum::http::{header, Method, Request, Response, StatusCode};
 use futures_util::stream::{self, BoxStream, StreamExt, TryStreamExt};
+use object_store::aws::{AwsAuthorizer, AwsCredential};
+use object_store::client::HttpRequestBody;
 use object_store::path::Path as ObjectPath;
 use object_store::{
     GetOptions, GetResult, GetResultPayload, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
@@ -151,9 +182,21 @@ struct Ledger {
     aborted: AtomicUsize,
     /// Every abort the store itself refused, which a count of aborts would hide.
     abort_failures: AtomicUsize,
+    /// Each upload's key, which is what MinIO's listing of them asks for.
+    locations: Mutex<Vec<ObjectPath>>,
+    /// The call a [`Stop`] named has been reached.
+    stopped: AtomicBool,
+    /// Lets that call go on, if anything is still waiting for it.
+    released: tokio::sync::Notify,
 }
 
 impl Ledger {
+    /// Stops here, so a test can drop the request at this `await`.
+    async fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        self.released.notified().await;
+    }
+
     fn parts(&self) -> Vec<usize> {
         self.parts.lock().expect("the ledger").clone()
     }
@@ -189,6 +232,23 @@ impl Ledger {
     }
 }
 
+/// One `await` on the store, which a request can be dropped at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stop {
+    /// The request that opens the upload has not left.
+    Opening,
+    /// The store has opened the upload, and the answer naming it never arrives.
+    Opened,
+    /// The part with this index has not left.
+    Sending(usize),
+    /// The store has this part, and its answer never arrives.
+    Sent(usize),
+    /// The request that completes the upload has not left.
+    Completing,
+    /// The store has made the object, and its answer never arrives.
+    Completed,
+}
+
 /// The real store, watched. See this file's header.
 #[derive(Debug)]
 struct Watched {
@@ -199,8 +259,22 @@ struct Watched {
     part_takes: Duration,
     /// The read stream fails once this many bytes have left it.
     fail_read_after: Option<u64>,
+    /// The read stream ends, with no error, once this many bytes have left it.
+    end_read_after: Option<u64>,
     /// The store refuses the part with this index.
     refuse_part: Option<usize>,
+    refuse_put: bool,
+    refuse_open: bool,
+    refuse_complete: bool,
+    stop: Option<Stop>,
+}
+
+/// What the store says when a test has it refuse.
+fn refused(what: &'static str) -> object_store::Error {
+    object_store::Error::Generic {
+        store: "Watched",
+        source: format!("the store refused {what}").into(),
+    }
 }
 
 impl std::fmt::Display for Watched {
@@ -221,6 +295,10 @@ impl ObjectStore for Watched {
 
         self.ledger.puts.fetch_add(1, Ordering::SeqCst);
 
+        if self.refuse_put {
+            return Err(refused("the write"));
+        }
+
         let stored = self.inner.put_opts(location, payload, options).await?;
 
         self.flow.accepted(size);
@@ -234,13 +312,34 @@ impl ObjectStore for Watched {
         options: PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
         self.ledger.opened.fetch_add(1, Ordering::SeqCst);
+        self.ledger
+            .locations
+            .lock()
+            .expect("the ledger")
+            .push(location.clone());
+
+        if self.refuse_open {
+            return Err(refused("the upload"));
+        }
+
+        if self.stop == Some(Stop::Opening) {
+            self.ledger.stop().await;
+        }
+
+        let inner = self.inner.put_multipart_opts(location, options).await?;
+
+        if self.stop == Some(Stop::Opened) {
+            self.ledger.stop().await;
+        }
 
         Ok(Box::new(WatchedUpload {
-            inner: self.inner.put_multipart_opts(location, options).await?,
+            inner,
             ledger: Arc::clone(&self.ledger),
             flow: Arc::clone(&self.flow),
             part_takes: self.part_takes,
             refuse_part: self.refuse_part,
+            refuse_complete: self.refuse_complete,
+            stop: self.stop,
         }))
     }
 
@@ -258,7 +357,9 @@ impl ObjectStore for Watched {
         );
         let flow = Arc::clone(&self.flow);
         let fail_after = self.fail_read_after;
+        let end_after = self.end_read_after;
         let mut served = 0_u64;
+        let mut left = 0_u64;
 
         let stream = result
             .into_stream()
@@ -276,6 +377,13 @@ impl ObjectStore for Watched {
                 flow.read(chunk.len());
 
                 Ok(chunk)
+            })
+            .take_while(move |chunk| {
+                let ended = end_after.is_some_and(|limit| left >= limit);
+
+                left += chunk.as_ref().map_or(0, |chunk| chunk.len() as u64);
+
+                std::future::ready(!ended)
             })
             .boxed();
 
@@ -325,6 +433,8 @@ struct WatchedUpload {
     flow: Arc<Flow>,
     part_takes: Duration,
     refuse_part: Option<usize>,
+    refuse_complete: bool,
+    stop: Option<Stop>,
 }
 
 #[async_trait]
@@ -339,31 +449,48 @@ impl MultipartUpload for WatchedUpload {
         };
 
         if self.refuse_part == Some(index) {
-            return Box::pin(async {
-                Err(object_store::Error::Generic {
-                    store: "Watched",
-                    source: "the store refused the part".into(),
-                })
-            });
+            return Box::pin(async { Err(refused("the part")) });
         }
 
         let sent = self.inner.put_part(data);
         let flow = Arc::clone(&self.flow);
         let takes = self.part_takes;
+        let ledger = Arc::clone(&self.ledger);
+        let stop = self.stop;
 
         Box::pin(async move {
+            if stop == Some(Stop::Sending(index)) {
+                ledger.stop().await;
+            }
+
             tokio::time::sleep(takes).await;
             sent.await?;
             flow.accepted(size);
+
+            if stop == Some(Stop::Sent(index)) {
+                ledger.stop().await;
+            }
 
             Ok(())
         })
     }
 
     async fn complete(&mut self) -> object_store::Result<PutResult> {
+        if self.refuse_complete {
+            return Err(refused("the completion"));
+        }
+
+        if self.stop == Some(Stop::Completing) {
+            self.ledger.stop().await;
+        }
+
         let completed = self.inner.complete().await?;
 
         self.ledger.completed.fetch_add(1, Ordering::SeqCst);
+
+        if self.stop == Some(Stop::Completed) {
+            self.ledger.stop().await;
+        }
 
         Ok(completed)
     }
@@ -409,7 +536,12 @@ async fn watching(max_upload_bytes: usize, tune: impl FnOnce(&mut Watched)) -> W
         flow: Arc::clone(&flow),
         part_takes: Duration::ZERO,
         fail_read_after: None,
+        end_read_after: None,
         refuse_part: None,
+        refuse_put: false,
+        refuse_open: false,
+        refuse_complete: false,
+        stop: None,
     };
 
     tune(&mut watched);
@@ -719,6 +851,88 @@ impl Watching {
             .await
     }
 
+    /// A request to the store itself, signed as `object_store` signs its own.
+    async fn signed(&self, method: Method, rest: &str) -> reqwest::Response {
+        let config = &self.app.state.config;
+        let credential = AwsCredential {
+            key_id: config.storage_access_key.clone(),
+            secret_key: config.storage_secret_key.clone(),
+            token: None,
+        };
+        let mut signed = Request::builder()
+            .method(method)
+            .uri(format!(
+                "{}/{}{rest}",
+                config.storage_endpoint, config.storage_bucket
+            ))
+            .body(HttpRequestBody::empty())
+            .expect("a request");
+
+        AwsAuthorizer::new(&credential, "s3", &config.storage_region).authorize(&mut signed, None);
+
+        let mut sending =
+            reqwest::Client::new().request(signed.method().clone(), signed.uri().to_string());
+
+        for (name, value) in signed.headers() {
+            sending = sending.header(name, value);
+        }
+
+        sending.send().await.expect("the store answers")
+    }
+
+    /// **Every upload the store still holds open for this request's files**, by
+    /// asking the store and not the ledger: an abort that was called is not an
+    /// upload that went. MinIO lists the uploads of one exact key, which is why
+    /// the ledger keeps them.
+    async fn incomplete(&self) -> usize {
+        let locations = self.ledger.locations.lock().expect("the ledger").clone();
+        let mut open = 0;
+
+        for location in locations {
+            let key = location.as_ref().replace('/', "%2F");
+            let listing = self
+                .signed(Method::GET, &format!("?prefix={key}&uploads="))
+                .await;
+
+            assert!(listing.status().is_success(), "{listing:?}");
+
+            open += listing
+                .text()
+                .await
+                .expect("a listing")
+                .matches("<UploadId>")
+                .count();
+        }
+
+        open
+    }
+
+    async fn added_events(&self, document: Uuid) -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM activity_events \
+             WHERE event_type = 'Attachment.Added' AND document_id = $1",
+        )
+        .bind(document)
+        .fetch_one(&self.app.pool)
+        .await
+        .expect("a count")
+    }
+
+    fn sending(
+        &self,
+        document: Uuid,
+        body: Body,
+    ) -> impl Future<Output = Result<Response<Body>, std::convert::Infallible>> + Send + 'static
+    {
+        self.app.router().oneshot(request(
+            Method::POST,
+            &format!("/api/v1/documents/{document}/attachments"),
+            &self.token,
+            multipart_type(),
+            body,
+        ))
+    }
+
     async fn rows(&self, document: Uuid) -> i64 {
         sqlx::query_scalar("SELECT count(*) FROM attachments WHERE document_id = $1")
             .bind(document)
@@ -977,6 +1191,40 @@ async fn each_size_takes_its_road_and_is_stored_exactly() {
     }
 }
 
+/// **A read that ends one byte short of a part is not a part.** Every other test
+/// here reads in frames that straddle the boundary, so the buffer is never seen at
+/// exactly this length, and a store may refuse a short part that is not the last.
+#[tokio::test]
+async fn a_read_ending_a_byte_short_of_a_part_sends_no_part() {
+    let watching = watching(ROOMY, |_| {}).await;
+    let document = watching.document("PR_STREAM_SHORT_READ").await;
+    let file = pdf_of(2 * PART + 7);
+    let body = multipart(&[Part::File("q.pdf", &file)]);
+    let file_starts = body
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("a part head")
+        + 4;
+    let cut = file_starts + PART - 1;
+
+    let response = watching
+        .sending(
+            document,
+            framed(
+                vec![
+                    Bytes::copy_from_slice(&body[..cut]),
+                    Bytes::copy_from_slice(&body[cut..]),
+                ],
+                Arc::clone(&watching.flow),
+            ),
+        )
+        .await
+        .expect("the router answers");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(watching.ledger.parts(), vec![PART, PART, 7]);
+}
+
 /// The body arrives a few bytes at a time at the start: the type is read from
 /// the buffer, not from the first chunk, which here holds two bytes of a header
 /// `infer` needs five of.
@@ -1200,6 +1448,36 @@ async fn a_file_over_the_cap_past_the_first_part_is_refused_and_aborted() {
     assert_eq!(watching.objects(document).await, Vec::<ObjectPath>::new());
 }
 
+/// **Over the cap past the end of the file**: the file's part has been read whole
+/// and its upload is open, and the limit trips in the next field, which is the
+/// other of the two reads `multipart_failure` is called from.
+#[tokio::test]
+async fn a_body_over_the_cap_after_its_file_is_refused_and_aborted() {
+    let watching = watching(7 * MIB, |_| {}).await;
+    let document = watching.document("PR_STREAM_CAP_AFTER").await;
+    let file = pdf_of(6 * MIB);
+    let filler = "x".repeat(2 * MIB);
+
+    let (status, refused) = watching
+        .post(
+            document,
+            multipart(&[
+                Part::File("q.pdf", &file),
+                Part::Text("somethingABrowserAdded", &filler),
+            ]),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(refused["error"]["details"][0]["code"], "FILE_TOO_LARGE");
+
+    watching.ledger.aborts_settled(1).await;
+
+    assert_eq!(watching.incomplete().await, 0);
+    assert_eq!(watching.ledger.completed.load(Ordering::SeqCst), 0);
+    assert_eq!(watching.objects(document).await, Vec::<ObjectPath>::new());
+}
+
 /// A store that stops taking parts is the caller's 500 and the upload's abort.
 #[tokio::test]
 async fn a_part_the_store_refuses_aborts_the_upload_and_records_nothing() {
@@ -1301,6 +1579,557 @@ async fn a_body_that_breaks_mid_upload_aborts_it() {
 
     assert_eq!(watching.ledger.completed.load(Ordering::SeqCst), 0);
     assert_eq!(watching.objects(document).await, Vec::<ObjectPath>::new());
+}
+
+/// Polls the request until `reached`, and no further: what the caller does next
+/// is what a disconnect does.
+async fn until<T>(
+    answering: &mut (impl Future<Output = T> + Unpin),
+    reached: impl Future<Output = ()>,
+) {
+    tokio::select! {
+        _ = answering => panic!("answered before it could be dropped"),
+        () = reached => {}
+        () = tokio::time::sleep(Duration::from_secs(20)) => panic!("it never got there"),
+    }
+}
+
+/// One `await` on the upload's road.
+struct Await {
+    at: &'static str,
+    /// The store call it is, or `None` for a read of the body that stopped.
+    stop: Option<Stop>,
+    /// How much of the body arrives, if not all of it.
+    cut: Option<usize>,
+    /// Parts in the store by then.
+    landed: usize,
+    /// Whether the store has an upload open by then.
+    open: bool,
+}
+
+/// **Every `await` on the road, each dropped alone**, with the store asked what
+/// it holds rather than the ledger what it was told. The listing is seen at one
+/// first, wherever an upload is open, so its zero afterwards is not a listing
+/// that sees nothing.
+#[tokio::test]
+async fn a_request_dropped_at_each_await_of_the_upload_leaves_nothing_in_the_store() {
+    let file = pdf_of(2 * PART + MIB);
+    let category = Uuid::now_v7().to_string();
+    let whole = multipart(&[
+        Part::File("q.pdf", &file),
+        Part::Text("categoryId", &category),
+    ]);
+    let past_the_file = whole
+        .windows(10)
+        .rposition(|window| window == b"categoryId")
+        .expect("the second part");
+
+    for case in [
+        Await {
+            at: "the first read",
+            stop: None,
+            cut: Some(MIB),
+            landed: 0,
+            open: false,
+        },
+        Await {
+            at: "opening, before the request left",
+            stop: Some(Stop::Opening),
+            cut: None,
+            landed: 0,
+            open: false,
+        },
+        Await {
+            at: "the first part, unsent",
+            stop: Some(Stop::Sending(0)),
+            cut: None,
+            landed: 0,
+            open: true,
+        },
+        Await {
+            at: "the first part, its answer lost",
+            stop: Some(Stop::Sent(0)),
+            cut: None,
+            landed: 1,
+            open: true,
+        },
+        Await {
+            at: "a read between parts",
+            stop: None,
+            cut: Some(PART + 2 * MIB),
+            landed: 1,
+            open: true,
+        },
+        Await {
+            at: "the second part, unsent",
+            stop: Some(Stop::Sending(1)),
+            cut: None,
+            landed: 1,
+            open: true,
+        },
+        Await {
+            at: "the second part, its answer lost",
+            stop: Some(Stop::Sent(1)),
+            cut: None,
+            landed: 2,
+            open: true,
+        },
+        Await {
+            at: "the next field, past the file",
+            stop: None,
+            cut: Some(past_the_file),
+            landed: 2,
+            open: true,
+        },
+        Await {
+            at: "the last part, unsent",
+            stop: Some(Stop::Sending(2)),
+            cut: None,
+            landed: 2,
+            open: true,
+        },
+        Await {
+            at: "the last part, its answer lost",
+            stop: Some(Stop::Sent(2)),
+            cut: None,
+            landed: 3,
+            open: true,
+        },
+        Await {
+            at: "completing, before the request left",
+            stop: Some(Stop::Completing),
+            cut: None,
+            landed: 3,
+            open: true,
+        },
+    ] {
+        let at = case.at;
+        let stop = case.stop;
+        let watching = watching(ROOMY, |store| store.stop = stop).await;
+        let document = watching.document("PR_STREAM_AWAITS").await;
+
+        // On this road the category has to be a real one, or the request is
+        // refused before the last of the store calls is reached.
+        let categories = watching
+            .app
+            .get("/api/v1/attachment-categories", Some(&watching.token))
+            .await;
+        let real = categories.body["data"][0]["id"]
+            .as_str()
+            .expect("a seeded category");
+        let mut body = multipart(&[Part::File("q.pdf", &file), Part::Text("categoryId", real)]);
+        let flow = Arc::clone(&watching.flow);
+
+        let stream = match case.cut {
+            Some(cut) => {
+                body.truncate(cut);
+
+                stream_of(body, Arc::clone(&flow))
+                    .chain(stream::pending())
+                    .boxed()
+            }
+            None => stream_of(body, Arc::clone(&flow)).boxed(),
+        };
+
+        let mut answering = Box::pin(watching.sending(document, Body::from_stream(stream)));
+
+        until(&mut answering, async {
+            loop {
+                let there = match (case.stop, case.cut) {
+                    (Some(_), _) => watching.ledger.stopped.load(Ordering::SeqCst),
+                    (None, Some(cut)) => {
+                        flow.total_read() >= cut as u64
+                            && flow.total_accepted() >= (case.landed * PART) as u64
+                    }
+                    (None, None) => unreachable!(),
+                };
+
+                if there {
+                    break;
+                }
+
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+
+            // Past the read that was counted, to the wait for the next one.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        })
+        .await;
+
+        assert_eq!(
+            watching.incomplete().await,
+            usize::from(case.open),
+            "{at}: what the store holds before the drop"
+        );
+
+        drop(answering);
+
+        if case.open {
+            watching.ledger.aborts_settled(1).await;
+        } else {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert_eq!(watching.ledger.aborted.load(Ordering::SeqCst), 0, "{at}");
+        }
+
+        assert_eq!(watching.incomplete().await, 0, "{at}: an upload was left");
+        assert_eq!(
+            watching.objects(document).await,
+            Vec::<ObjectPath>::new(),
+            "{at}"
+        );
+        assert_eq!(watching.rows(document).await, 0, "{at}");
+        assert_eq!(watching.added_events(document).await, 0, "{at}");
+    }
+}
+
+/// **The one `await` with no guard yet.** The store has opened the upload and
+/// the answer that names it has not arrived, so the upload exists and nothing
+/// here knows its id. Dropped there, only the store's expiry could ever clear it,
+/// unless the call outlives the request.
+#[tokio::test]
+async fn a_request_dropped_as_the_store_opens_the_upload_leaves_nothing_in_the_store() {
+    let watching = watching(ROOMY, |store| store.stop = Some(Stop::Opened)).await;
+    let document = watching.document("PR_STREAM_OPENED").await;
+    let file = pdf_of(2 * PART);
+    let body = multipart(&[Part::File("q.pdf", &file)]);
+    let stream = stream_of(body, Arc::clone(&watching.flow));
+
+    let mut answering = Box::pin(watching.sending(document, Body::from_stream(stream)));
+
+    until(&mut answering, async {
+        while !watching.ledger.stopped.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+
+    assert_eq!(watching.incomplete().await, 1, "the store opened nothing");
+
+    drop(answering);
+
+    // The answer arrives after the request has gone, to whatever is left to hear.
+    watching.ledger.released.notify_one();
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    assert_eq!(watching.incomplete().await, 0, "the upload was left open");
+}
+
+/// **The last `await` an upload has, and the object wins it.** The store made the
+/// object and the answer did not arrive, which is `put`'s old road by another
+/// name: no upload is left, the object has no row, and that is the state
+/// `service::upload`'s documentation accepts. This pins that it is that state
+/// and no worse.
+#[tokio::test]
+async fn a_request_dropped_as_the_store_completes_leaves_the_object_and_no_upload() {
+    let watching = watching(ROOMY, |store| store.stop = Some(Stop::Completed)).await;
+    let document = watching.document("PR_STREAM_COMPLETED").await;
+    let file = pdf_of(2 * PART);
+    let body = multipart(&[Part::File("q.pdf", &file)]);
+    let stream = stream_of(body, Arc::clone(&watching.flow));
+
+    let mut answering = Box::pin(watching.sending(document, Body::from_stream(stream)));
+
+    until(&mut answering, async {
+        while !watching.ledger.stopped.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+
+    drop(answering);
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    assert_eq!(watching.incomplete().await, 0);
+    assert_eq!(watching.rows(document).await, 0);
+    assert_eq!(watching.added_events(document).await, 0);
+
+    let stored = watching.objects(document).await;
+
+    assert_eq!(stored.len(), 1, "{stored:?}");
+
+    watching.store.delete(&stored[0]).await.expect("cleaned up");
+}
+
+/// **The last read is over and the database is what is being waited for**, at
+/// the second `may_upload`: every connection is held, so the request stops there.
+#[tokio::test]
+async fn a_request_dropped_waiting_for_the_database_leaves_nothing_in_the_store() {
+    let watching = watching(ROOMY, |_| {}).await;
+    let document = watching.document("PR_STREAM_DB_WAIT").await;
+    let file = pdf_of(2 * PART);
+    let mut head = multipart(&[Part::File("q.pdf", &file)]);
+    let tail = head.split_off(PART + 2 * MIB);
+    let flow = Arc::clone(&watching.flow);
+    let (release, released) = tokio::sync::oneshot::channel::<()>();
+    let total = (head.len() + tail.len()) as u64;
+
+    let rest = {
+        let flow = Arc::clone(&flow);
+
+        stream::once(async move {
+            released.await.ok();
+
+            stream_of(tail, flow)
+        })
+        .flatten()
+    };
+    let stream = stream_of(head, Arc::clone(&flow)).chain(rest);
+
+    let mut answering = Box::pin(watching.sending(document, Body::from_stream(stream)));
+
+    until(&mut answering, async {
+        while flow.total_accepted() < PART as u64 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+
+    let mut held = Vec::new();
+
+    for _ in 0..common::TEST_POOL_MAX_CONNECTIONS {
+        held.push(watching.app.pool.acquire().await.expect("a connection"));
+    }
+
+    release.send(()).expect("the body is waiting");
+
+    until(&mut answering, async {
+        while flow.total_read() < total {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    })
+    .await;
+
+    assert_eq!(watching.incomplete().await, 1);
+    assert_eq!(watching.ledger.parts(), vec![PART], "the last part stays");
+
+    drop(answering);
+    drop(held);
+
+    watching.ledger.aborts_settled(1).await;
+
+    assert_eq!(watching.incomplete().await, 0);
+    assert_eq!(watching.objects(document).await, Vec::<ObjectPath>::new());
+    assert_eq!(watching.rows(document).await, 0);
+}
+
+/// **On a real socket, with no timer anywhere above it.** A client that stops
+/// sending costs an open upload for as long as it stays: nothing in this process
+/// ends the request. It costs no store call in flight, since a part goes only
+/// when one is full, and what ends it is the client leaving, which is seen.
+#[tokio::test]
+async fn a_client_that_stalls_keeps_its_upload_open_until_it_leaves() {
+    let watching = watching(ROOMY, |_| {}).await;
+    let document = watching.document("PR_STREAM_STALL").await;
+    let file = pdf_of(3 * PART);
+    let mut body = multipart(&[Part::File("q.pdf", &file)]);
+    let length = body.len();
+    let flow = Arc::clone(&watching.flow);
+
+    body.truncate(PART + 2 * MIB);
+
+    let address = served(&watching.app, Arc::clone(&flow)).await;
+    let mut socket = TcpStream::connect(address).await.expect("connect");
+
+    socket
+        .write_all(
+            format!(
+                "POST /api/v1/documents/{document}/attachments HTTP/1.1\r\nHost: kelir.test\r\n\
+                 Authorization: Bearer {}\r\n\
+                 Content-Type: multipart/form-data; boundary={BOUNDARY}\r\n\
+                 Content-Length: {length}\r\n\r\n",
+                watching.token
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("the head");
+    socket.write_all(&body).await.expect("the body");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+
+    while flow.total_accepted() < PART as u64 {
+        assert!(tokio::time::Instant::now() < deadline, "no part landed");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    assert_eq!(watching.ledger.parts(), vec![PART], "a part is still going");
+    assert_eq!(watching.ledger.aborted.load(Ordering::SeqCst), 0);
+    assert_eq!(watching.incomplete().await, 1, "the stall ended the upload");
+
+    drop(socket);
+
+    watching.ledger.aborts_settled(1).await;
+
+    assert_eq!(watching.incomplete().await, 0);
+    assert_eq!(watching.objects(document).await, Vec::<ObjectPath>::new());
+    assert_eq!(watching.rows(document).await, 0);
+}
+
+/// **Each call the store can refuse**, and what each leaves: a 500, no object, no
+/// upload, no row and no event. An upload that was opened is aborted; the two
+/// roads that never opened one have nothing to abort.
+#[tokio::test]
+async fn a_store_that_refuses_any_call_leaves_nothing_and_records_nothing() {
+    let refuse_open: fn(&mut Watched) = |store| store.refuse_open = true;
+    let refuse_first: fn(&mut Watched) = |store| store.refuse_part = Some(0);
+    let refuse_last: fn(&mut Watched) = |store| store.refuse_part = Some(2);
+    let refuse_complete: fn(&mut Watched) = |store| store.refuse_complete = true;
+    let refuse_put: fn(&mut Watched) = |store| store.refuse_put = true;
+
+    for (call, tune, size, aborts) in [
+        ("opening", refuse_open, 2 * PART + MIB, 0),
+        ("the first part", refuse_first, 2 * PART + MIB, 1),
+        ("the last part", refuse_last, 2 * PART + MIB, 1),
+        ("completing", refuse_complete, 2 * PART + MIB, 1),
+        ("the put", refuse_put, 1_000, 0),
+    ] {
+        let watching = watching(ROOMY, tune).await;
+        let document = watching.document("PR_STREAM_REFUSALS").await;
+        let file = pdf_of(size);
+
+        let (status, body) = watching
+            .post(document, multipart(&[Part::File("q.pdf", &file)]))
+            .await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{call}: {body}");
+
+        watching.ledger.aborts_settled(aborts).await;
+
+        assert_eq!(
+            watching.ledger.aborted.load(Ordering::SeqCst),
+            aborts,
+            "{call}"
+        );
+        assert_eq!(watching.incomplete().await, 0, "{call}: an upload was left");
+        assert_eq!(
+            watching.objects(document).await,
+            Vec::<ObjectPath>::new(),
+            "{call}"
+        );
+        assert_eq!(watching.rows(document).await, 0, "{call}");
+        assert_eq!(watching.added_events(document).await, 0, "{call}");
+    }
+}
+
+/// **A refused head stays refused.** The read after the one that refused this
+/// file begins like a PDF, which is what a file judged once a buffer would pass
+/// on: the allow-list reads the first bytes of the file, and no later ones get a
+/// turn. The frames are cut there because a refusal drops the rest of its read.
+#[tokio::test]
+async fn a_head_that_was_refused_is_not_judged_again_at_a_later_read() {
+    let watching = watching(ROOMY, |_| {}).await;
+    let document = watching.document("PR_STREAM_HEAD_ONCE").await;
+    let mut file = vec![b'x'; PART + 1];
+
+    file.extend_from_slice(&pdf_of(2 * PART));
+
+    let body = multipart(&[Part::File("q.pdf", &file)]);
+    let file_starts = body
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("a part head")
+        + 4;
+    let cut = file_starts + PART + 1;
+
+    let response = watching
+        .sending(
+            document,
+            framed(
+                vec![
+                    Bytes::copy_from_slice(&body[..cut]),
+                    Bytes::copy_from_slice(&body[cut..]),
+                ],
+                Arc::clone(&watching.flow),
+            ),
+        )
+        .await
+        .expect("the router answers");
+
+    let status = response.status();
+    let refused: Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("the answer"),
+    )
+    .expect("an envelope");
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(
+        refused["error"]["details"][0]["code"],
+        "FILE_TYPE_NOT_ALLOWED"
+    );
+    assert_eq!(watching.ledger.calls(), 0);
+}
+
+/// **The earlier `file` is let go when the later one starts, and not when the body
+/// ends**: its upload is aborted with the later file still arriving, so a request
+/// does not hold two parts' worth of buffers and two uploads to read one file.
+#[tokio::test]
+async fn an_earlier_file_is_aborted_as_the_later_one_begins() {
+    let watching = watching(ROOMY, |_| {}).await;
+    let document = watching.document("PR_STREAM_TWO_LONG").await;
+    let long = pdf_of(PART + MIB);
+    let second = pdf_of(2 * MIB);
+    let mut body = multipart(&[
+        Part::File("first.pdf", &long),
+        Part::File("second.pdf", &second),
+    ]);
+
+    body.truncate(PART + MIB + MIB);
+
+    let stream = stream_of(body, Arc::clone(&watching.flow)).chain(stream::pending());
+    let mut answering = Box::pin(watching.sending(document, Body::from_stream(stream)));
+
+    until(&mut answering, async {
+        while watching.ledger.aborted.load(Ordering::SeqCst) < 1 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+
+    assert_eq!(watching.incomplete().await, 0);
+}
+
+/// The multipart road's object is as encrypted as the `put` road's, by the store's
+/// own report of what it holds (NFR-SEC-009, AC3).
+#[tokio::test]
+async fn an_object_from_either_road_is_encrypted_at_rest() {
+    let watching = watching(ROOMY, |_| {}).await;
+    let document = watching.document("PR_STREAM_SSE").await;
+
+    for (size, puts, opened) in [(1_000, 1, 0), (PART + 1, 1, 1)] {
+        let file = pdf_of(size);
+        let attachment = watching.upload(document, "q.pdf", &file).await;
+
+        assert_eq!(watching.ledger.puts.load(Ordering::SeqCst), puts, "{size}");
+        assert_eq!(
+            watching.ledger.opened.load(Ordering::SeqCst),
+            opened,
+            "{size}"
+        );
+
+        let stored = watching.objects(document).await;
+        let object = stored
+            .iter()
+            .find(|path| path.as_ref().contains(&attachment.to_string()))
+            .expect("the object");
+        let head = watching.signed(Method::HEAD, &format!("/{object}")).await;
+
+        assert_eq!(
+            head.headers()
+                .get("x-amz-server-side-encryption")
+                .map(|value| value.to_str().expect("a header")),
+            Some("AES256"),
+            "{size}: {:?}",
+            head.headers()
+        );
+    }
 }
 
 /// **A slow body is time for the document to go.** The check before the body is
@@ -1550,6 +2379,271 @@ async fn a_body_fault_still_answers_before_what_is_wrong_with_the_file() {
     assert_eq!(body["error"]["details"][0]["code"], "FILE_TOO_LARGE");
 }
 
+/// What can be wrong with a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fault {
+    OverCap,
+    MalformedCategory,
+    NoPermission,
+    DeletedDocument,
+    Empty,
+    LongName,
+    Disallowed,
+    UnknownCategory,
+    StoreDown,
+}
+
+/// **The order the faults answered in at `4683c3d`**, read off that commit: what
+/// the body's read fails on, then `service::upload` from its top.
+const ORDER_BEFORE_STREAMING: [Fault; 9] = [
+    Fault::OverCap,
+    Fault::MalformedCategory,
+    Fault::NoPermission,
+    Fault::DeletedDocument,
+    Fault::Empty,
+    Fault::LongName,
+    Fault::Disallowed,
+    Fault::UnknownCategory,
+    Fault::StoreDown,
+];
+
+impl Fault {
+    fn answer(self) -> (StatusCode, Option<&'static str>) {
+        match self {
+            Self::OverCap => (StatusCode::UNPROCESSABLE_ENTITY, Some("FILE_TOO_LARGE")),
+            Self::MalformedCategory => (StatusCode::BAD_REQUEST, None),
+            Self::NoPermission => (StatusCode::FORBIDDEN, None),
+            Self::DeletedDocument => (StatusCode::NOT_FOUND, None),
+            Self::Empty => (StatusCode::UNPROCESSABLE_ENTITY, Some("FILE_EMPTY")),
+            Self::LongName => (StatusCode::UNPROCESSABLE_ENTITY, Some("FILE_NAME_TOO_LONG")),
+            Self::Disallowed => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Some("FILE_TYPE_NOT_ALLOWED"),
+            ),
+            Self::UnknownCategory => (StatusCode::UNPROCESSABLE_ENTITY, Some("CATEGORY_NOT_FOUND")),
+            Self::StoreDown => (StatusCode::INTERNAL_SERVER_ERROR, None),
+        }
+    }
+}
+
+/// **Every pair whose answer moved, and which fault now answers** (AC8). The first
+/// two rows are the caller being judged before the body. The third is new with the
+/// stream: a file past a part meets the store while the body is still arriving, so
+/// a store that is down answers before anything that comes later in the body.
+///
+/// A disallowed type before a malformed `categoryId`, which AC8 expected to move,
+/// did not: a refusal of the file is answered after the body.
+fn moved(pair: &[Fault], past_a_part: bool) -> Option<Fault> {
+    use Fault::{DeletedDocument, MalformedCategory, NoPermission, OverCap, StoreDown};
+
+    let has = |fault| pair.contains(&fault);
+    let body_fault = has(OverCap) || has(MalformedCategory);
+
+    if body_fault && has(NoPermission) {
+        return Some(NoPermission);
+    }
+
+    if body_fault && has(DeletedDocument) {
+        return Some(DeletedDocument);
+    }
+
+    let met_later = body_fault || has(Fault::UnknownCategory);
+
+    (has(StoreDown) && met_later && (past_a_part || has(OverCap))).then_some(StoreDown)
+}
+
+/// The body that has these faults, the shipped client's way: `file` first.
+fn body_with(faults: &[Fault], past_a_part: bool) -> Vec<u8> {
+    let has = |fault| faults.contains(&fault);
+    let size = match (has(Fault::OverCap), past_a_part) {
+        (true, _) => 8 * MIB,
+        (false, true) => 6 * MIB,
+        (false, false) => 1_000,
+    };
+    let file = if has(Fault::Empty) {
+        Vec::new()
+    } else if has(Fault::Disallowed) {
+        vec![b'x'; size]
+    } else {
+        pdf_of(size)
+    };
+    let long_name = format!("{}.pdf", "n".repeat(300));
+    let name = if has(Fault::LongName) {
+        long_name.as_str()
+    } else {
+        "q.pdf"
+    };
+    let unknown = Uuid::now_v7().to_string();
+    let filler = "x".repeat(8 * MIB);
+    let mut parts = vec![Part::File(name, &file)];
+
+    if has(Fault::UnknownCategory) {
+        parts.push(Part::Text("categoryId", &unknown));
+    }
+
+    if has(Fault::MalformedCategory) {
+        parts.push(Part::Text("categoryId", "not a uuid"));
+    }
+
+    // An empty file cannot be over the cap, so a part beside it is.
+    if has(Fault::Empty) && has(Fault::OverCap) {
+        parts.push(Part::Text("somethingABrowserAdded", &filler));
+    }
+
+    multipart(&parts)
+}
+
+/// **Every single fault and every pair of them**, on both roads where the road can
+/// matter, against the order `4683c3d` answered in and [`moved`]. A single fault
+/// answers as it did, which is AC8's other half. All of them are collected, so a
+/// failure is the whole list and not its first line.
+#[tokio::test]
+async fn every_pair_of_faults_answers_as_it_did_or_as_recorded() {
+    use Fault::{DeletedDocument, Empty, NoPermission, OverCap, StoreDown};
+
+    let healthy = watching(7 * MIB, |_| {}).await;
+    let down = watching(7 * MIB, |store| {
+        store.refuse_open = true;
+        store.refuse_put = true;
+    })
+    .await;
+
+    let mut instances = Vec::new();
+
+    for instance in [&healthy, &down] {
+        let document = instance.document("PR_STREAM_FAULTS").await;
+        let deleted = instance.document("PR_STREAM_FAULTS_GONE").await;
+        let gone = instance
+            .app
+            .delete(
+                &format!("/api/v1/documents/{deleted}"),
+                Some(&instance.token),
+            )
+            .await;
+
+        assert_eq!(gone.status, StatusCode::NO_CONTENT, "{}", gone.body);
+
+        fixtures::create_user(
+            &instance.app.pool,
+            fixtures::SYSTEM_TENANT_ID,
+            "stream-faults",
+            "stream-faults@example.test",
+            common::ADMIN_PASSWORD,
+            &[],
+        )
+        .await;
+
+        let outsider = instance
+            .app
+            .sign_in("stream-faults", common::ADMIN_PASSWORD)
+            .await;
+
+        instances.push((document, deleted, outsider));
+    }
+
+    let mut requests: Vec<Vec<Fault>> = ORDER_BEFORE_STREAMING.iter().map(|f| vec![*f]).collect();
+
+    for (at, first) in ORDER_BEFORE_STREAMING.iter().enumerate() {
+        for second in &ORDER_BEFORE_STREAMING[at + 1..] {
+            requests.push(vec![*first, *second]);
+        }
+    }
+
+    let mut wrong = Vec::new();
+
+    for faults in &requests {
+        let has = |fault| faults.contains(&fault);
+
+        for past_a_part in [false, true] {
+            if past_a_part && (has(Empty) || has(OverCap)) {
+                continue;
+            }
+
+            let (instance, (document, deleted, outsider)) = if has(StoreDown) {
+                (&down, &instances[1])
+            } else {
+                (&healthy, &instances[0])
+            };
+            let target = if has(DeletedDocument) {
+                *deleted
+            } else {
+                *document
+            };
+            let token = if has(NoPermission) {
+                outsider.as_str()
+            } else {
+                instance.token.as_str()
+            };
+
+            let (status, body) = instance
+                .post_as(token, target, body_with(faults, past_a_part))
+                .await;
+            let code = body["error"]["details"][0]["code"].as_str();
+
+            let before = ORDER_BEFORE_STREAMING
+                .iter()
+                .find(|fault| faults.contains(fault))
+                .expect("a fault");
+            let expected = match faults.len() {
+                1 => *before,
+                _ => moved(faults, past_a_part).unwrap_or(*before),
+            };
+            let (expected_status, expected_code) = expected.answer();
+
+            if status != expected_status || code != expected_code {
+                wrong.push(format!(
+                    "{faults:?} past_a_part={past_a_part}: {status} {code:?}, \
+                     expected {expected:?} ({expected_status} {expected_code:?})"
+                ));
+            }
+        }
+    }
+
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// **The other fault that stops a body, beside the faults above**: no `file` part
+/// at all, and a body that is not multipart underneath. Both are read after the
+/// caller is judged now, so a caller who may not attach hears that instead.
+#[tokio::test]
+async fn a_body_with_no_file_answers_after_the_caller_is_judged() {
+    let watching = watching(ROOMY, |_| {}).await;
+    let document = watching.document("PR_STREAM_NO_FILE").await;
+
+    fixtures::create_user(
+        &watching.app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "stream-nofile",
+        "stream-nofile@example.test",
+        common::ADMIN_PASSWORD,
+        &[],
+    )
+    .await;
+
+    let outsider = watching
+        .app
+        .sign_in("stream-nofile", common::ADMIN_PASSWORD)
+        .await;
+
+    for body in [
+        multipart(&[Part::Text("description", "no file here")]),
+        b"--kelirstreamsboundary\r\nnot a part at all".to_vec(),
+    ] {
+        let (status, refused) = watching.post(document, body.clone()).await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+        assert_eq!(refused["error"]["details"][0]["code"], "FILE_REQUIRED");
+
+        let (status, refused) = watching.post_as(&outsider, document, body.clone()).await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+
+        let (status, refused) = watching.post(Uuid::now_v7(), body).await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND, "{refused}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // AC10 — a failure mid-stream
 // ---------------------------------------------------------------------------
@@ -1613,6 +2707,55 @@ async fn a_download_that_fails_after_its_headers_is_truncated_and_logged() {
     .expect("a count");
 
     assert_eq!(recorded, 1, "the event names the transfer that started");
+}
+
+/// **Through hyper and a real client**, which is the only place the length is
+/// enforced: `oneshot` reads whatever the body yields. A store's read that fails
+/// and one that simply ends early must both reach the client as a transfer that
+/// broke, never as a shorter file that finished.
+#[tokio::test]
+async fn a_body_that_stops_short_of_its_length_is_a_broken_transfer_to_a_real_client() {
+    let fail: fn(&mut Watched) = |store| store.fail_read_after = Some(MIB as u64);
+    let end: fn(&mut Watched) = |store| store.end_read_after = Some(MIB as u64);
+
+    for (how, tune) in [("failed", fail), ("ended", end)] {
+        let watching = watching(ROOMY, tune).await;
+        let document = watching.document("PR_STREAM_SHORT").await;
+        let file = pdf_of(2 * PART);
+        let attachment = watching.upload(document, "q.pdf", &file).await;
+
+        watching.clear(attachment).await;
+
+        let address = served(&watching.app, Arc::clone(&watching.flow)).await;
+        let mut response = reqwest::Client::new()
+            .get(format!(
+                "http://{address}/api/v1/documents/{document}/attachments/{attachment}"
+            ))
+            .bearer_auth(&watching.token)
+            .send()
+            .await
+            .expect("the headers");
+
+        assert_eq!(response.status(), StatusCode::OK, "{how}");
+        assert_eq!(response.content_length(), Some(2 * PART as u64), "{how}");
+
+        let mut taken = 0;
+
+        let ending = loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) => taken += chunk.len(),
+                Ok(None) => break Ok(()),
+                Err(error) => break Err(error),
+            }
+        };
+
+        assert!(taken < 2 * PART, "{how}: {taken} bytes arrived");
+        assert!(
+            ending.is_err(),
+            "{how}: {taken} of {} bytes ended as a complete body",
+            2 * PART
+        );
+    }
 }
 
 /// AC2's fourth outcome, through the worker: a store that fails partway says

@@ -336,6 +336,49 @@ mod tests {
         held.abort();
     }
 
+    /// **A scanner that never takes the connection.** With its accept queue full
+    /// the kernel leaves a connect unanswered, and the outer timeout is what a
+    /// connect with no limit of its own would run into. Linux's behaviour, which
+    /// is CI's and the container's: elsewhere a full queue can refuse instead.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_scanner_that_never_takes_the_connection_is_still_timed() {
+        let socket = tokio::net::TcpSocket::new_v4().expect("a socket");
+
+        socket
+            .bind("127.0.0.1:0".parse().expect("an address"))
+            .expect("a port");
+
+        let address = socket.local_addr().expect("an address");
+        let _listener = socket.listen(1).expect("a listener");
+        let mut queued = Vec::new();
+
+        while let Ok(Ok(connection)) =
+            tokio::time::timeout(Duration::from_millis(200), TcpStream::connect(address)).await
+        {
+            queued.push(connection);
+
+            assert!(queued.len() < 64, "the queue never filled");
+        }
+
+        let answer = tokio::time::timeout(
+            Duration::from_secs(10),
+            converse(
+                "127.0.0.1",
+                address.port(),
+                stream::empty().boxed(),
+                Duration::from_millis(100),
+            ),
+        )
+        .await
+        .expect("a connect with no limit waited for ever");
+
+        assert!(
+            answer.is_err_and(|error| error.0.contains("did not answer")),
+            "a scanner that never answered the connect was not given up on"
+        );
+    }
+
     /// A zero-length frame is the end of the stream, so an empty read in the
     /// middle of a file must not become one.
     #[tokio::test]
