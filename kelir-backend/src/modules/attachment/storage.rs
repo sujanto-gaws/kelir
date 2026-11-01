@@ -30,12 +30,13 @@
 //! [#244]: https://github.com/sujanto-gaws/kelir/issues/244
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Bytes;
 use futures_util::stream::{BoxStream, StreamExt, TryStreamExt};
 use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
 use object_store::path::Path as ObjectPath;
-use object_store::{MultipartUpload, ObjectStore, PutPayload};
+use object_store::{ClientOptions, MultipartUpload, ObjectStore, PutPayload};
 
 use crate::config::AppConfig;
 use crate::error::AppError;
@@ -43,6 +44,27 @@ use crate::error::AppError;
 /// `x-amz-server-side-encryption`'s value for SSE-S3: the store encrypts under
 /// its own key (`MINIO_KMS_SECRET_KEY`).
 const SSE_S3: &str = "AES256";
+
+/// How long one request to the store may last, from connecting to its last byte.
+///
+/// **`object_store`'s default is 30 seconds, and it counts the response body.**
+/// While a download was read into memory that was the store's own speed. Now the
+/// body is read as the person taking it reads, so the store's response lasts as
+/// long as their connection does: past 30 seconds the read fails and is resumed,
+/// past `RetryConfig`'s three minutes it is not, and the transfer breaks. Measured
+/// [#834] against MinIO: at the default, a reader that paused for 200 seconds
+/// stopped at 7,577 bytes of 25 MiB. At this value, a reader taking 240 seconds
+/// over the file finished it.
+///
+/// **A reader that stops altogether can still lose the transfer**: paused for 200
+/// seconds at this value, it stopped at 8 MiB, past what the sockets held. That
+/// is the truncation [#834] AC10 describes, and the person can ask again.
+///
+/// This is a ceiling on how slowly a file can be taken, and it is what a store
+/// that hangs can cost one request. The connect timeout stays at its 5 seconds.
+///
+/// [#834]: https://github.com/sujanto-gaws/kelir/issues/834
+const STORE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// How much of a file goes to the store at a time, and the most an upload holds.
 ///
@@ -165,14 +187,7 @@ impl ObjectStorage {
         let built = "aws_server_side_encryption"
             .parse::<AmazonS3ConfigKey>()
             .and_then(|server_side_encryption| {
-                AmazonS3Builder::new()
-                    .with_endpoint(&config.storage_endpoint)
-                    .with_bucket_name(&config.storage_bucket)
-                    .with_access_key_id(&config.storage_access_key)
-                    .with_secret_access_key(&config.storage_secret_key)
-                    .with_region(&config.storage_region)
-                    .with_allow_http(true)
-                    .with_virtual_hosted_style_request(false)
+                Self::builder(config)
                     .with_config(server_side_encryption, SSE_S3)
                     .build()
             });
@@ -195,6 +210,19 @@ impl ObjectStorage {
                 }
             }
         }
+    }
+
+    fn builder(config: &AppConfig) -> AmazonS3Builder {
+        // The client options first: they replace what `with_allow_http` sets.
+        AmazonS3Builder::new()
+            .with_client_options(ClientOptions::new().with_timeout(STORE_REQUEST_TIMEOUT))
+            .with_endpoint(&config.storage_endpoint)
+            .with_bucket_name(&config.storage_bucket)
+            .with_access_key_id(&config.storage_access_key)
+            .with_secret_access_key(&config.storage_secret_key)
+            .with_region(&config.storage_region)
+            .with_allow_http(true)
+            .with_virtual_hosted_style_request(false)
     }
 
     /// Writes one object whole, which is how a file of one part or less is
@@ -388,6 +416,7 @@ mod tests {
     //! relies on the default (ADR-0049 §3, *fails closed*).
 
     use super::*;
+    use object_store::ClientConfigKey;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
@@ -432,6 +461,17 @@ mod tests {
         });
 
         (endpoint, served)
+    }
+
+    /// **Read off the builder, because the failure takes minutes to show.** The
+    /// measurement is on [`STORE_REQUEST_TIMEOUT`]; this holds that it is the
+    /// store's setting and that the 30-second default is not.
+    #[test]
+    fn a_request_to_the_store_may_last_as_long_as_a_slow_download() {
+        let timeout = ObjectStorage::builder(&AppConfig::test_default())
+            .get_config_value(&AmazonS3ConfigKey::Client(ClientConfigKey::Timeout));
+
+        assert_eq!(timeout.as_deref(), Some("30m"));
     }
 
     fn asks_for_sse_s3(head: &str) -> bool {
