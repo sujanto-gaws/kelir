@@ -18,7 +18,9 @@
 
 mod common;
 
+use axum::body::Bytes;
 use axum::http::{Method, StatusCode};
+use futures_util::{stream, StreamExt};
 use kelir_backend::modules::attachment::scanner::{self, ScanOutcome};
 use kelir_backend::modules::attachment::{repository, worker};
 use serde_json::{json, Value};
@@ -206,7 +208,8 @@ async fn a_clean_file_is_cleared_and_then_served() {
 async fn a_real_scanner_finds_a_real_signature() {
     let (host, port) = real_clamd();
 
-    let outcome = scanner::scan(&host, port, EICAR)
+    let file = stream::once(async { Ok(Bytes::from_static(EICAR)) }).boxed();
+    let outcome = scanner::scan(&host, port, file)
         .await
         .expect("the scanner to answer");
 

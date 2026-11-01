@@ -39,8 +39,8 @@ services:
       - KELIR_STORAGE_DRIVER=local
       # Attachments (FR-ATT-001, #244). The service name resolves inside the
       # compose network; `minio-init` below creates the bucket, because the
-      # backend holds credentials that can put and get objects and deliberately
-      # not ones that can create a bucket.
+      # backend holds credentials that can put and get objects, and abort an
+      # upload of its own, and deliberately not ones that can create a bucket.
       - KELIR_STORAGE_ENDPOINT=http://minio:9000
       - KELIR_STORAGE_BUCKET=kelir
       - KELIR_STORAGE_ACCESS_KEY=minioadmin

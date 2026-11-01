@@ -726,6 +726,34 @@ While the major version is `0`, the public API may change in any release.
   its reader built none of the release still read every citation. No release
   record on `main`, now or at any earlier commit, changes verdict.
 
+- **An attachment's upload, its download and the scan worker stream**
+  ([#834](https://github.com/sujanto-gaws/kelir/issues/834), decision
+  **D-140**, NFR-PERF-004). Each held the whole file in memory, up to the cap.
+  An upload now holds about one part, 5 MiB. A file that ends inside it is one
+  `put` after the body. A longer one is a multipart upload, sent a part at a
+  time, and it is not an object until it completes, so `categoryId` may still
+  follow `file` and a refusal leaves no object. A guard aborts the upload when
+  it is dropped, so a client that disconnects ends it too. For a 25 MiB file
+  the most held went from 26,214,552 bytes to 5,624,946 for the upload, from
+  26,214,400 to 109,664 for the download, and from 26,214,400 to 3,505,084 for
+  the worker. **What moves for a caller is which of two faults is answered**,
+  because the permission and the document are now checked before the body: a
+  refused caller sending a body that is over the cap, or malformed, gets 403 or
+  404 where it got 422 or 400.
+  A file longer than a part also meets the store as it is read, so a store
+  that fails answers 500 ahead of a fault later in the body. A request with
+  one fault answers as before, and scanning stays asynchronous. **A download
+  that fails after its headers truncates**: the connection closes short of
+  `Content-Length`, and the client sees a transfer that broke. A reader that
+  stops for a long time can lose the transfer the same way, and
+  `Attachment.Downloaded`, recorded when the stream starts, can name a transfer
+  that failed partway. A `description` or `categoryId` part is still read whole,
+  up to the cap ([#845](https://github.com/sujanto-gaws/kelir/issues/845)). A process killed mid-upload leaves hidden parts, never
+  an object, for the store to clear. No migration and no new setting: object
+  keys and rows are unchanged
+  ([Installation and Deployment](docs/operations/01.%20Installation%20and%20Deployment.md)
+  §7.1 says what a restricted store credential needs).
+
 ### Fixed
 
 - **The commit checks read what they skipped**

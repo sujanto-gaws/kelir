@@ -90,8 +90,8 @@ pub async fn pass(state: &AppState, host: &str, port: u16) -> Result<(), sqlx::E
 
 /// One attachment, and every way this can go.
 async fn scan_one(state: &AppState, host: &str, port: u16, attachment: &repo::PendingScan) {
-    let bytes = match state.storage.get(&attachment.storage_reference).await {
-        Ok(bytes) => bytes,
+    let object = match state.storage.get(&attachment.storage_reference).await {
+        Ok(object) => object,
         Err(error) => {
             // The row says there are bytes and storage says there are not. That
             // is a defect somewhere else and this loop cannot fix it — but it
@@ -107,7 +107,7 @@ async fn scan_one(state: &AppState, host: &str, port: u16, attachment: &repo::Pe
         }
     };
 
-    match scanner::scan(host, port, &bytes).await {
+    match scanner::scan(host, port, object.stream).await {
         Ok(outcome) => {
             let status = match &outcome {
                 ScanOutcome::Clean => "CLEAN",
@@ -152,13 +152,14 @@ async fn scan_one(state: &AppState, host: &str, port: u16, attachment: &repo::Pe
                 ),
             }
         }
-        // **The scanner did not answer, so nothing is known.** The row stays
-        // `PENDING`, the file stays undownloadable, and the next pass asks
-        // again. This is the arm that must never write a status.
+        // **The scanner did not answer, or the file stopped being readable, so
+        // nothing is known.** The row stays `PENDING`, the file stays
+        // undownloadable, and the next pass asks again. This is the arm that
+        // must never write a status.
         Err(error) => tracing::warn!(
             %error,
             attachment = %attachment.id,
-            "the scanner could not be reached; the attachment stays pending and will be retried"
+            "the scan did not finish; the attachment stays pending and will be retried"
         ),
     }
 }

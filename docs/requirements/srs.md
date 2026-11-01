@@ -1,6 +1,6 @@
 # Kelir Software Requirements Specification
 
-**Status:** Draft · **Last updated:** 2026-11-01
+**Status:** Draft · **Last updated:** 2026-11-02
 
 The companion Solution Blueprint formerly bundled in this file now lives in the System Design Document: `docs/design/01. System Design Document.md`.
 
@@ -581,6 +581,8 @@ Note: FR-ATT-004 — the maximum file size is configurable, with a default limit
 | NFR-PERF-002 | API endpoints should support pagination to avoid large payloads |
 | NFR-PERF-003 | Workflow transitions should complete without blocking UI unnecessarily |
 | NFR-PERF-004 | File upload should support streaming where possible |
+
+Note: NFR-PERF-004 is held by streaming the upload, and by decision **D-140** the download and the scan worker stream with it ([#834](https://github.com/sujanto-gaws/kelir/issues/834), 2026-11-01; the requirement is unchanged). **An upload's file holds about one part, 5 MiB, and what a file costs in memory no longer follows the cap.** A file that ends inside that part is one `put`, and a longer one is a multipart upload, sent a part at a time, with no object until it completes. For a 25 MiB file the most each held, measured against a test bound of 10,485,760 bytes, went from 26,214,552 to 5,624,946 for the upload, from 26,214,400 to 109,664 for the download, and from 26,214,400 to 3,505,084 for the worker. Scanning stays asynchronous. **What it does not hold**: a download that fails after its headers truncates, and `Attachment.Downloaded`, recorded when the stream starts, can name that transfer. A reader that stops for a long time can lose the transfer. A `description` or `categoryId` part is still read whole, up to the cap ([#845](https://github.com/sujanto-gaws/kelir/issues/845)). A process killed mid-upload leaves hidden parts, never an object, for the store to clear ([Installation and Deployment](../operations/01.%20Installation%20and%20Deployment.md) §7.1). [SDD](../design/01.%20System%20Design%20Document.md) §13.1 has the whole limit.
 
 Initial target:
 

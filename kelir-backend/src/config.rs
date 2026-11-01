@@ -43,8 +43,8 @@ pub struct AppConfig {
     /// `deploy/docker` has working attachments without setting anything. **The
     /// bucket is not created by this process**: the deployment provisions it and
     /// the application holds credentials that can put and get objects in one,
-    /// which is the privilege it should have rather than the one that is
-    /// convenient.
+    /// and abort an upload of its own, which is the privilege it should have
+    /// rather than the one that is convenient.
     ///
     /// **The two credentials have defaults on a developer's machine and none
     /// anywhere else** ([#317]). Staging and production refuse to start with
