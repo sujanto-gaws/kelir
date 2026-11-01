@@ -7,6 +7,7 @@
 //!
 //! [#244]: https://github.com/sujanto-gaws/kelir/issues/244
 
+use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Multipart, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -239,6 +240,13 @@ pub async fn list_attachments(
 /// The file name is the one that was uploaded, quoted, with quotes and control
 /// characters stripped: a header value is a place a caller-controlled string can
 /// inject a second header.
+///
+/// **The body is the store's stream** ([#834]), so `Content-Length` is what says
+/// where it ends. A read that fails after these headers fails the body, and the
+/// server closes the connection short of that length: the client sees a transfer
+/// that broke, never a shorter file that finished.
+///
+/// [#834]: https://github.com/sujanto-gaws/kelir/issues/834
 #[utoipa::path(
     get, path = "/api/v1/documents/{id}/attachments/{attachment_id}", tag = "attachment",
     responses(
@@ -270,8 +278,9 @@ pub async fn download_attachment(
         [
             (header::CONTENT_TYPE, stored.mime_type),
             (header::CONTENT_DISPOSITION, disposition),
+            (header::CONTENT_LENGTH, stored.size.to_string()),
         ],
-        stored.bytes,
+        Body::from_stream(stored.stream),
     )
         .into_response())
 }

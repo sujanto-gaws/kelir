@@ -15,6 +15,7 @@ use super::domain::{
     MAX_FILE_NAME,
 };
 use super::repository as repo;
+use super::storage::ObjectStream;
 use super::{ATTACHMENT_CREATE, ATTACHMENT_DELETE, ATTACHMENT_READ, ATTACHMENT_REFERENCE};
 use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
@@ -298,17 +299,22 @@ pub async fn download(
     //   do, and it is the worse one. A false positive is a wasted question; a
     //   false negative is a copy nobody knows about.
     //
-    // Reading the object before the event costs neither. The bytes are in this
-    // process's memory and have gone nowhere; **the record is still written
-    // before they are served**, which is #293 AC2 and the reason below, kept
-    // verbatim because it is still the reason: if this product cannot record
-    // that somebody took a copy of a file, it should not give them the copy. A
-    // failure to write the event still fails the download.
+    // Opening the object before the event costs neither. The store has answered
+    // that it is there and not a byte has gone anywhere; **the record is still
+    // written before they are served**, which is #293 AC2 and the reason below,
+    // kept verbatim because it is still the reason: if this product cannot
+    // record that somebody took a copy of a file, it should not give them the
+    // copy. A failure to write the event still fails the download.
     //
     // What remains, and is accepted: a response that dies on the wire after the
-    // event is committed. Nothing on this side can know that, and over-recording
-    // is the safe direction for *who has seen this file*.
-    let bytes = state.storage.get(&stored.storage_reference).await?;
+    // event is committed, **and, since the bytes are streamed ([#834] AC10), one
+    // the store stops feeding partway**. So the event says a transfer started,
+    // and a failed one is still recorded. Nothing on this side can know about
+    // the first, the second is in the log, and over-recording is the safe
+    // direction for *who has seen this file*.
+    //
+    // [#834]: https://github.com/sujanto-gaws/kelir/issues/834
+    let object = state.storage.get(&stored.storage_reference).await?;
 
     // Its own transaction, because there is nothing else to join: the action
     // *is* the event.
@@ -342,7 +348,8 @@ pub async fn download(
     Ok(StoredBytes {
         original_file_name: stored.original_file_name,
         mime_type: stored.mime_type,
-        bytes,
+        size: object.size,
+        stream: object.stream,
     })
 }
 
@@ -350,7 +357,8 @@ pub async fn download(
 pub struct StoredBytes {
     pub original_file_name: String,
     pub mime_type: String,
-    pub bytes: axum::body::Bytes,
+    pub size: u64,
+    pub stream: ObjectStream,
 }
 
 /// A document's attachments, newest first.

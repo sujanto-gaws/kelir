@@ -31,6 +31,7 @@
 use std::sync::Arc;
 
 use axum::body::Bytes;
+use futures_util::stream::{BoxStream, StreamExt, TryStreamExt};
 use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, PutPayload};
@@ -41,6 +42,22 @@ use crate::error::AppError;
 /// `x-amz-server-side-encryption`'s value for SSE-S3: the store encrypts under
 /// its own key (`MINIO_KMS_SECRET_KEY`).
 const SSE_S3: &str = "AES256";
+
+/// An object's bytes as the store sends them, for a reader to pull ([#834]).
+///
+/// [#834]: https://github.com/sujanto-gaws/kelir/issues/834
+pub type ObjectStream = BoxStream<'static, Result<Bytes, object_store::Error>>;
+
+/// One object, found and not yet read.
+///
+/// **That the store answered is all this says.** A failure while the bytes are
+/// read comes out of `stream` as an `Err` and has already been logged, so a
+/// reader's job is only to stop: a download truncates, and a scan asks nothing.
+pub struct StoredObject {
+    /// As the store reports it, which is what a download's `Content-Length` says.
+    pub size: u64,
+    pub stream: ObjectStream,
+}
 
 /// The object store this process writes attachments to.
 #[derive(Clone)]
@@ -70,7 +87,7 @@ impl std::fmt::Debug for ObjectStorage {
 }
 
 impl ObjectStorage {
-    /// Reads one object back.
+    /// Opens one object for reading.
     ///
     /// **A missing object is an internal error, not a 404.** The caller reached
     /// here by naming a row that exists and that they may read; if the bytes it
@@ -78,7 +95,7 @@ impl ObjectStorage {
     /// would report that as the caller's mistake. [`super::service::upload`]
     /// writes the object before the row precisely so this cannot happen, so
     /// reaching it means something outside this service removed an object.
-    pub async fn get(&self, reference: &str) -> Result<axum::body::Bytes, AppError> {
+    pub async fn get(&self, reference: &str) -> Result<StoredObject, AppError> {
         match self {
             Self::S3 { store, bucket } => {
                 let path = ObjectPath::from(reference);
@@ -96,13 +113,16 @@ impl ObjectStorage {
                     }
                 })?;
 
-                object.bytes().await.map_err(|error| {
-                    tracing::error!(%error, %bucket, %reference, "an attachment's bytes stopped mid-read");
+                let size = object.meta.size;
+                let (bucket, reference) = (bucket.clone(), reference.to_owned());
+                let stream = object
+                    .into_stream()
+                    .inspect_err(move |error| {
+                        tracing::error!(%error, %bucket, %reference, "an attachment's bytes stopped mid-read");
+                    })
+                    .boxed();
 
-                    AppError::Internal {
-                        source: anyhow::anyhow!("object storage stopped mid-read: {error}"),
-                    }
-                })
+                Ok(StoredObject { size, stream })
             }
             Self::Unavailable { reason } => Err(AppError::Internal {
                 source: anyhow::anyhow!(

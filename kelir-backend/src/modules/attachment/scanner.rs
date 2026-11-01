@@ -37,8 +37,11 @@
 
 use std::time::Duration;
 
+use futures_util::StreamExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+
+use super::storage::ObjectStream;
 
 /// What the scanner said about a file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,12 +76,15 @@ const CHUNK: usize = 64 * 1024;
 /// The measured cost is ~170 ms; this is 30 seconds. It is not a performance
 /// bound but a liveness one: a scanner that has stopped answering must not hold
 /// a worker for ever, because the worker is what would otherwise pick the file
-/// up again.
+/// up again. **It covers the store as well as the scanner**, since the file is
+/// read from one as it is written to the other ([#834]).
+///
+/// [#834]: https://github.com/sujanto-gaws/kelir/issues/834
 const TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Streams one file to `clamd` and reads its answer.
-pub async fn scan(host: &str, port: u16, bytes: &[u8]) -> Result<ScanOutcome, ScanError> {
-    let reply = tokio::time::timeout(TIMEOUT, converse(host, port, bytes))
+pub async fn scan(host: &str, port: u16, file: ObjectStream) -> Result<ScanOutcome, ScanError> {
+    let reply = tokio::time::timeout(TIMEOUT, converse(host, port, file))
         .await
         .map_err(|_| ScanError(format!("clamd at {host}:{port} did not answer within 30s")))??;
 
@@ -86,7 +92,12 @@ pub async fn scan(host: &str, port: u16, bytes: &[u8]) -> Result<ScanOutcome, Sc
 }
 
 /// The protocol itself.
-async fn converse(host: &str, port: u16, bytes: &[u8]) -> Result<String, ScanError> {
+///
+/// **A file that stops being readable ends the conversation with no final
+/// frame.** That frame says *this was the whole file*, and `clamd` would answer
+/// `OK` for the part it had, so sending it after a failed read is the one way
+/// this function could turn a truncated read into a false `CLEAN`.
+async fn converse(host: &str, port: u16, mut file: ObjectStream) -> Result<String, ScanError> {
     let mut stream = TcpStream::connect((host, port))
         .await
         .map_err(|error| ScanError(format!("cannot reach clamd at {host}:{port}: {error}")))?;
@@ -96,20 +107,27 @@ async fn converse(host: &str, port: u16, bytes: &[u8]) -> Result<String, ScanErr
         .await
         .map_err(|error| ScanError(format!("clamd closed before the stream began: {error}")))?;
 
-    for chunk in bytes.chunks(CHUNK) {
-        // The length prefix is big-endian and the protocol has no other framing,
-        // so a short write here would desynchronise the stream rather than fail
-        // it — which is why `write_all` is used throughout.
-        let length = u32::try_from(chunk.len()).unwrap_or(u32::MAX);
+    while let Some(bytes) = file.next().await {
+        let bytes =
+            bytes.map_err(|error| ScanError(format!("the file stopped mid-read: {error}")))?;
 
-        stream
-            .write_all(&length.to_be_bytes())
-            .await
-            .map_err(|error| ScanError(format!("clamd stopped mid-stream: {error}")))?;
-        stream
-            .write_all(chunk)
-            .await
-            .map_err(|error| ScanError(format!("clamd stopped mid-stream: {error}")))?;
+        // What the store sends is any size, and a zero-length frame ends the
+        // stream, so `chunks` matters twice: an empty read sends nothing.
+        for chunk in bytes.chunks(CHUNK) {
+            // The length prefix is big-endian and the protocol has no other
+            // framing, so a short write here would desynchronise the stream
+            // rather than fail it — which is why `write_all` is used throughout.
+            let length = u32::try_from(chunk.len()).unwrap_or(u32::MAX);
+
+            stream
+                .write_all(&length.to_be_bytes())
+                .await
+                .map_err(|error| ScanError(format!("clamd stopped mid-stream: {error}")))?;
+            stream
+                .write_all(chunk)
+                .await
+                .map_err(|error| ScanError(format!("clamd stopped mid-stream: {error}")))?;
+        }
     }
 
     // A zero-length chunk ends the stream. **Its failure is not an error**: a
@@ -162,6 +180,86 @@ fn interpret(reply: &str) -> ScanOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Bytes;
+    use futures_util::stream;
+    use object_store::Error as StoreError;
+    use tokio::net::TcpListener;
+
+    /// Everything `clamd` is told, read until the far side closes.
+    async fn listener() -> (u16, tokio::task::JoinHandle<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("a port");
+        let port = listener.local_addr().expect("an address").port();
+
+        let told = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("the worker");
+            let mut told = Vec::new();
+
+            socket.read_to_end(&mut told).await.expect("the stream");
+
+            told
+        });
+
+        (port, told)
+    }
+
+    #[tokio::test]
+    async fn a_file_that_stops_mid_read_is_not_scanned_as_the_part_that_arrived() {
+        let (port, told) = listener().await;
+        let file = stream::iter([
+            Ok(Bytes::from_static(b"the first half")),
+            Err(StoreError::Generic {
+                store: "test",
+                source: "the store went away".into(),
+            }),
+        ])
+        .boxed();
+
+        let answer = scan("127.0.0.1", port, file).await;
+
+        assert!(
+            answer
+                .as_ref()
+                .is_err_and(|error| error.0.contains("mid-read")),
+            "a read that failed reached a verdict: {answer:?}"
+        );
+
+        let told = told.await.expect("the listener");
+
+        assert!(
+            !told.ends_with(&0_u32.to_be_bytes()),
+            "the final frame told clamd the file had ended: {told:?}"
+        );
+    }
+
+    /// A zero-length frame is the end of the stream, so an empty read in the
+    /// middle of a file must not become one.
+    #[tokio::test]
+    async fn an_empty_read_is_not_the_end_of_the_file() {
+        let (port, told) = listener().await;
+        let file = stream::iter([
+            Ok(Bytes::from_static(b"one")),
+            Ok(Bytes::new()),
+            Ok(Bytes::from_static(b"two")),
+        ])
+        .boxed();
+
+        // The listener says nothing, so the wait for its answer ends here; what
+        // matters is what it was told before that.
+        tokio::time::timeout(Duration::from_millis(200), scan("127.0.0.1", port, file))
+            .await
+            .expect_err("nothing answers this scan");
+
+        let mut framed = b"zINSTREAM\0".to_vec();
+
+        for chunk in [&b"one"[..], b"two"] {
+            framed.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
+            framed.extend_from_slice(chunk);
+        }
+
+        framed.extend_from_slice(&0_u32.to_be_bytes());
+
+        assert_eq!(told.await.expect("the listener"), framed);
+    }
 
     #[test]
     fn the_three_replies_clamd_gives_are_read_as_themselves() {
