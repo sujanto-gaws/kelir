@@ -156,6 +156,8 @@ lettre = { version = "0.11.23", default-features = false, features = [
 ] }
 
 [dev-dependencies]
+# `start_paused`: a store that hangs is three minutes of waiting otherwise (#834).
+tokio = { version = "1", features = ["test-util"] }
 # Drives the router in tests via ServiceExt::oneshot, without binding a port.
 tower = { version = "0.5", features = ["util"] }
 # `ObjectStore` and `MultipartUpload` are written with it, so a test that wraps
