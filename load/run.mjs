@@ -9,6 +9,7 @@
 //   node run.mjs measure tabs            the window, with AC2's tab calls added
 //   node run.mjs report <measurement>    reads a measurement's directory again
 //   node run.mjs down                    removes the stack, its volumes and network
+//   node run.mjs two <step>              two backends behind Caddy: `two-backends.mjs`
 //
 // **Every command passes the refusals first** (`guard.mjs`), before anything
 // else is read or started. Exit code 2 is a refusal; 1 is a failure or a void.
@@ -32,6 +33,7 @@ import { fileURLToPath } from 'node:url'
 import { portOf, refusals } from './guard.mjs'
 import { summarize } from './report.mjs'
 import { checkDataset, seedDataset } from './seed/seed.mjs'
+import { twoBackends } from './two-backends.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(HERE, '..')
@@ -65,10 +67,17 @@ const CONTROL = { holdMs: 7_500, firstWave: 30, secondWave: 6, secondWaveAtMs: 3
 
 let state = existsSync(STATE) ? JSON.parse(readFileSync(STATE, 'utf8')) : null
 
+/** Row 4's stack, which has a project, ports and two more compose files of its own. */
+const TWO = process.argv[2] === 'two' || state?.twoBackends === true
+
 const config = {
-  project: process.env.KELIR_LOAD_PROJECT || state?.project || 'kelir-load',
-  httpPort: Number(process.env.KELIR_LOAD_PORT || state?.httpPort || 18097),
-  httpsPort: Number(process.env.KELIR_LOAD_HTTPS_PORT || state?.httpsPort || 18447),
+  twoBackends: TWO,
+  project:
+    process.env.KELIR_LOAD_PROJECT ||
+    state?.project ||
+    (TWO ? 'kelir-two-backends' : 'kelir-load'),
+  httpPort: Number(process.env.KELIR_LOAD_PORT || state?.httpPort || (TWO ? 18098 : 18097)),
+  httpsPort: Number(process.env.KELIR_LOAD_HTTPS_PORT || state?.httpsPort || (TWO ? 18448 : 18447)),
   database:
     process.env.KELIR_LOAD_DATABASE ||
     state?.database ||
@@ -109,6 +118,14 @@ function composeArgs() {
     join(ROOT, 'deploy/staging/docker-compose.staging.yml'),
     '-f',
     join(HERE, 'compose.overlay.yml'),
+    ...(TWO
+      ? [
+          '-f',
+          join(ROOT, 'deploy/staging/docker-compose.e2e.yml'),
+          '-f',
+          join(HERE, 'compose.two-backends.yml'),
+        ]
+      : []),
   ]
 }
 
@@ -167,7 +184,7 @@ function buildImagesIfMissing() {
 }
 
 /** Real generated secrets, and a staging-shaped environment (AC5). */
-function writeStackEnv(directory) {
+function writeStackEnv(directory, extra = {}) {
   const secret = (bytes) => randomBytes(bytes).toString('base64')
   const hex = (bytes) => randomBytes(bytes).toString('hex')
   const lines = {
@@ -184,6 +201,7 @@ function writeStackEnv(directory) {
     KELIR_MINIO_USER: `load-${hex(6)}`,
     KELIR_MINIO_PASSWORD: hex(24),
     KELIR_MINIO_KMS_SECRET_KEY: `kelir-store:${secret(32)}`,
+    ...extra,
   }
 
   writeFileSync(
@@ -263,29 +281,7 @@ async function verifyStack(url) {
 }
 
 async function up() {
-  if (state) {
-    throw new Error(`a stack is already up, at ${state.runDirectory}: run \`down\` first`)
-  }
-
-  buildImagesIfMissing()
-
-  const directory = join(RUNS, new Date().toISOString().replace(/[:.]/g, '-'))
-
-  mkdirSync(directory, { recursive: true })
-
-  writeStackEnv(directory)
-
-  const password = randomBytes(18).toString('base64url')
-  const url = `http://127.0.0.1:${config.httpPort}`
-  const stack = { ...config, runDirectory: directory, password, url }
-
-  writeFileSync(STATE, JSON.stringify(stack, null, 2))
-  state = stack
-
-  say(`Starting ${config.project} on ${url}, database ${config.database}`)
-  run('docker', [...composeArgs(), 'up', '-d', '--remove-orphans'], {
-    stdio: ['ignore', 'inherit', 'inherit'],
-  })
+  const { runDirectory: directory, password, url } = startStack()
 
   // **The backend migrates, then stops**: it will not serve a default tenant
   // nobody created, and the tenant is the seeder's. So the order is migrations,
@@ -706,6 +702,33 @@ function report(directory) {
   }
 }
 
+/** Starts the stack `up` starts, and leaves what follows it to the caller. */
+function startStack(envExtra) {
+  if (state) {
+    throw new Error(`a stack is already up, at ${state.runDirectory}: run \`down\` first`)
+  }
+
+  buildImagesIfMissing()
+
+  const directory = join(RUNS, new Date().toISOString().replace(/[:.]/g, '-'))
+
+  mkdirSync(directory, { recursive: true })
+  writeStackEnv(directory, envExtra)
+
+  const password = randomBytes(18).toString('base64url')
+  const url = `http://127.0.0.1:${config.httpPort}`
+
+  state = { ...config, runDirectory: directory, password, url, env: envExtra }
+  writeFileSync(STATE, JSON.stringify(state, null, 2))
+
+  say(`Starting ${config.project} on ${url}, database ${config.database}`)
+  run('docker', [...composeArgs(), 'up', '-d', '--remove-orphans'], {
+    stdio: ['ignore', 'inherit', 'inherit'],
+  })
+
+  return state
+}
+
 function smoke() {
   const password = process.env.KELIR_LOAD_PASSWORD || state?.password
   const url = process.env.KELIR_LOAD_BASE_URL || 'http://caddy:80'
@@ -791,8 +814,22 @@ async function main() {
       return report(resolve(argument))
     case 'down':
       return down()
+    case 'two':
+      return twoBackends(argument, process.argv.slice(4), {
+        compose: (...args) => run('docker', [...composeArgs(), ...args]),
+        composeArgs,
+        config,
+        psql,
+        startStack,
+        stack: () => state,
+        verifyStack,
+        waitForHealthy,
+        waitForReady,
+      })
     default:
-      throw new Error('usage: node run.mjs up | check | smoke | measure <mode> | report <dir> | down')
+      throw new Error(
+        'usage: node run.mjs up | check | smoke | measure <mode> | report <dir> | down | two <step>',
+      )
   }
 }
 
