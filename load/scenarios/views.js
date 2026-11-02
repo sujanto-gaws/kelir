@@ -4,10 +4,10 @@
 // **The request lists follow the pages at `8478faa`, and one differs from AC2.**
 // AC2 says the page mounts its tabs, which fetch at once. It does not:
 // `DocumentWorkspace.vue` mounts each tab with a `v-if` on the open tab, so a
-// tab's calls go only when a person opens that tab. That was already so at
-// `be3a9a0`, where AC2 was written. `openDetail` therefore sends what the page
-// sends, and `openTabs` sends the calls AC2 lists, for the run that asks for
-// them (`KELIR_LOAD_TABS=1`).
+// tab's calls go only when a person opens that tab. That was already so when
+// AC2 was written. `openDetail` therefore sends what the page sends, and
+// `openTabs` sends the calls AC2 lists, for the run that asks for them
+// (`KELIR_LOAD_TABS=1`).
 
 import http from 'k6/http'
 
