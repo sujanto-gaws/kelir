@@ -1,0 +1,34 @@
+# Two backends behind the shipped Caddy (#780): NFR-SCA-001 to 003 on a stack.
+# Layered by `run.mjs two`, last, and never by a deployment:
+#
+#   docker-compose.staging.yml   the release stack, read whole
+#   load/compose.overlay.yml     a database of this project's own
+#   docker-compose.e2e.yml       the stand-in upstream the browser suite needs
+#   this file
+#
+# **`scale`, because that is the only way the shipped Caddyfile can reach two.**
+# It proxies to `backend:8080`, one name, and a replica answers to its service's
+# name on the compose network. A second service would need its own name in a
+# Caddyfile this row may not change. Whether that name spreads the traffic is a
+# measurement, not an assumption: `two traffic` reads it from each instance.
+#
+# **`KELIR_DEFAULT_TENANT_CODE` goes back to `SYSTEM`.** Row 1's overlay names a
+# tenant the seeder makes, so its backend stops until seeded and never bootstraps.
+# Here the backends find an empty database and start together, which is the
+# point: each migrates and bootstraps as a first deployment would, and the
+# browser suite signs in as the administrator they made.
+#
+# **`KELIR_LOG` is the one thing a deployment would not set.** The backend writes
+# no line per request. sqlx's statement log is the instance's own record of each
+# authenticated request, because the extractor asks one statement on every one,
+# and the scanner's `debug` line is the only trace of a scan that lost the race
+# to settle. Nothing else moves: not the images, the pool or the Caddyfile.
+# `KELIR_TRUSTED_PROXY_HOPS` stays the release file's 1, read back from both
+# instances by `two up`.
+
+services:
+  backend:
+    scale: 2
+    environment:
+      KELIR_DEFAULT_TENANT_CODE: SYSTEM
+      KELIR_LOG: info,sqlx=warn,sqlx::query=trace,kelir_backend::modules::attachment::worker=debug

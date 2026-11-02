@@ -605,6 +605,8 @@ File upload: depends on network and file size
 | NFR-SCA-003 | Background jobs should be separated from request handling |
 | NFR-SCA-004 | Architecture should allow future service separation |
 
+Note: NFR-SCA-001 to 004 were checked on 2026-11-02 with two backends behind Caddy ([#780](https://github.com/sujanto-gaws/kelir/issues/780); the requirements are unchanged). **NFR-SCA-001 is met for requests**, with [#853](https://github.com/sujanto-gaws/kelir/issues/853) open for notification mail, which goes out twice, and the rate limiter held per instance. **NFR-SCA-002 is measured**: a file stored on one instance is served by the other. **NFR-SCA-003 is measured for the outbox and the scan**, and the workers are in-process tasks, not a separate process. **NFR-SCA-004 is held by text only**: no test enforces a module boundary. The shipped stack runs one backend, the run was on one laptop, and the reading is not independent verification. [SDD](../design/01.%20System%20Design%20Document.md) §13.5 has the whole limit.
+
 ---
 
 ## 5.3 Availability
