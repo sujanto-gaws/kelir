@@ -185,6 +185,11 @@ The MVP focuses on:
 │   ├── playwright.config.ts
 │   ├── support/
 │   └── tests/
+├── load/
+│   ├── run.mjs
+│   ├── scenarios/
+│   ├── seed/
+│   └── view/
 ├── parity/
 │   ├── cases.json
 │   └── expectations.json
@@ -284,6 +289,14 @@ stack, which one flow needs: an integration test call that is answered
 `KELIR_E2E_UPSTREAM_TOKEN` values are the same throwaway token.
 
 Details, including how to add a flow, are in [e2e/README.md](e2e/README.md).
+
+### Load test
+
+`load/` measures NFR-PERF-001 on the release stack. **It is a hand-run
+measurement and not a required check**: no CI step runs it, and its figures
+belong to the machine that ran it. How to run it is in
+[load/README.md](load/README.md), and the result and its limits are in
+[SDD](docs/design/01.%20System%20Design%20Document.md) §13.4.
 
 ## Environment Variables
 

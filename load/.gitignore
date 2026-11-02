@@ -1,0 +1,5 @@
+# One directory per run: secrets, raw samples, logs. Nothing in it is source.
+.run/
+node_modules/
+test-results/
+playwright-report/

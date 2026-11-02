@@ -1,0 +1,16 @@
+{
+  "name": "kelir-load",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "The load test (NFR-PERF-001, #777). Its own workspace: nothing here links into e2e/ or kelir-frontend/.",
+  "engines": {
+    "node": ">=24.7.0"
+  },
+  "scripts": {
+    "load": "node run.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1"
+  }
+}

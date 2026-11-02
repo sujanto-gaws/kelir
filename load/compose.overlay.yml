@@ -1,0 +1,50 @@
+# The load test's stack: the release compose file, plus what a run needs and a
+# release does not have. Layered by `run.mjs`, never by a deployment.
+#
+#   docker compose -p kelir-load --env-file <run>/stack.env \
+#     -f deploy/staging/docker-compose.staging.yml -f load/compose.overlay.yml up -d
+#
+# **Two things differ from `docker-compose.staging.yml`.**
+#
+#   * **The database is a service of this project**, so a run owns it, makes it
+#     and drops it with `down -v`. The release file hard-codes the database's
+#     name and role, and #777 AC5 refuses that name, so `KELIR_DATABASE_URL` is
+#     replaced here. A deployment's PostgreSQL runs natively on the host and the
+#     backend reaches it over the Docker bridge; this one is one bridge hop away
+#     as well, and shares the VM's cores with the stack as that one shares the
+#     host's. **It has no published port**: `run.mjs` reaches it with
+#     `docker compose exec`, so nothing outside the project can touch it.
+#     `postgres` is a local host to `db.rs`, which dials it `prefer`, and this
+#     server offers no TLS, as a loopback-only native one need not.
+#   * **The tenant the backend signs people into** is the throwaway one the
+#     seeder makes, by the setting a deployment uses for its own default.
+#
+# Nothing else moves: not the images, not the Caddyfile, not the pool.
+
+services:
+  postgres:
+    # `postgres:16` as resolved on 2026-11-02, PostgreSQL 16.15, by digest.
+    image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
+    restart: 'no'
+    environment:
+      POSTGRES_USER: kelir_load
+      POSTGRES_PASSWORD: ${KELIR_DB_PASSWORD:?set KELIR_DB_PASSWORD}
+      POSTGRES_DB: ${KELIR_LOAD_DATABASE:?set KELIR_LOAD_DATABASE}
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U kelir_load -d "$$POSTGRES_DB"']
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  backend:
+    environment:
+      KELIR_DATABASE_URL: postgres://kelir_load:${KELIR_DB_PASSWORD:?set KELIR_DB_PASSWORD}@postgres:5432/${KELIR_LOAD_DATABASE:?set KELIR_LOAD_DATABASE}
+      KELIR_DEFAULT_TENANT_CODE: TNT-LOAD
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
