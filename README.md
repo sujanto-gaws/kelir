@@ -296,7 +296,8 @@ Details, including how to add a flow, are in [e2e/README.md](e2e/README.md).
 measurement and not a required check**: no CI step runs it, and its figures
 belong to the machine that ran it. How to run it is in
 [load/README.md](load/README.md), and the result and its limits are in
-[SDD](docs/design/01.%20System%20Design%20Document.md) §13.4.
+[SDD](docs/design/01.%20System%20Design%20Document.md) §13.4. The same harness
+runs two backends behind Caddy for NFR-SCA-001 to 003, and that result is §13.5.
 
 ## Environment Variables
 
