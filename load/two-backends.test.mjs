@@ -2,9 +2,10 @@
 
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 
-import { bootstrapOf, countOf, levelCount, lockWaitMs } from './two-backends.mjs'
+import { bootstrapOf, bothMoved, countOf, levelCount, lockWaitMs, spreadCaddyfile } from './two-backends.mjs'
 
 test('each bootstrap line reads as its own outcome, and "created" is not the deferred one', () => {
   const says = (message) => bootstrapOf(`INFO bootstrap: ${message}`)
@@ -51,4 +52,30 @@ test('every `two` step passes the refusals before it touches anything', () => {
     assert.equal(status, 2, stderr)
     assert.match(stderr, /refused/)
   }
+})
+
+test('the derived Caddyfile changes the one upstream of the shipped file, and nothing else', () => {
+  const shipped = readFileSync(new URL('../deploy/staging/Caddyfile', import.meta.url), 'utf8')
+  const derived = spreadCaddyfile(shipped)
+
+  assert.notEqual(derived, shipped)
+  assert.match(derived, /^\t\treverse_proxy \{\r?\n\t\t\tdynamic a backend 8080\r?\n\t\t\tlb_policy round_robin\r?\n\t\t\}\r?$/m)
+  assert.equal(
+    derived.replace(/reverse_proxy \{[\s\S]*?\n\t\t\}/, 'reverse_proxy backend:8080'),
+    shipped,
+  )
+})
+
+test('a Caddyfile where the upstream is not exactly one line is refused', () => {
+  assert.throws(() => spreadCaddyfile('reverse_proxy elsewhere:8080\n'), /found 0/)
+  assert.throws(
+    () => spreadCaddyfile('reverse_proxy backend:8080\n\treverse_proxy backend:8080\n'),
+    /found 2/,
+  )
+})
+
+test('the spread step holds only when both instances moved', () => {
+  assert.equal(bothMoved([8, 8]), true)
+  assert.equal(bothMoved([0, 16]), false)
+  assert.equal(bothMoved([16, 0]), false)
 })

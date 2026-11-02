@@ -6,6 +6,8 @@
 //   node run.mjs two count       each instance's count so far
 //   node run.mjs two cross       AC3's checks and AC5's two sentences, each with a control
 //   node run.mjs two e2e         the browser suite against this stack
+//   node run.mjs two spread      smoke through a Caddy derived to spread, then Caddy put back
+//   node run.mjs two errors      a real ERROR on each instance, the control on every zero
 //
 // `smoke` and `down` are `run.mjs`'s own, and the refusals in `guard.mjs` have
 // run before anything here does. **A check addresses an instance by running curl
@@ -14,7 +16,7 @@
 
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
-import { createWriteStream, writeFileSync } from 'node:fs'
+import { createWriteStream, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -201,8 +203,9 @@ export function lockWaitMs(log) {
   return found ? Math.round(Number(found[1]) * 1000) : null
 }
 
-export const levelCount = (log, level) =>
-  log.split('\n').filter((line) => new RegExp(`Z\\s+${level}\\s`).test(line)).length
+const linesAt = (log, level) => log.split('\n').filter((line) => new RegExp(`Z\\s+${level}\\s`).test(line))
+
+export const levelCount = (log, level) => linesAt(log, level).length
 
 /** From a stopped pair to both listening, read from their own logs and the tables. */
 async function startPair(ctx, kind) {
@@ -925,8 +928,182 @@ async function e2e(ctx, args) {
   process.exitCode = code === 0 ? 0 : 1
 }
 
+// ---------------------------------------------------------------------------
+// Smoke through a proxy that spreads, and the control on "0 ERROR"
+// ---------------------------------------------------------------------------
+
+/**
+ * The shipped Caddyfile with its one upstream changed. Derived at each run, so
+ * there is no second copy to drift, and it refuses a file where that is not
+ * exactly one place.
+ */
+export function spreadCaddyfile(shipped) {
+  const found = [...shipped.matchAll(/^([\t ]*)reverse_proxy backend:8080(\r?)$/gm)]
+
+  if (found.length !== 1) {
+    throw new Error(`expected one "reverse_proxy backend:8080", found ${found.length}`)
+  }
+
+  const [line, indent, ending] = found[0]
+  const block = ['reverse_proxy {', '\tdynamic a backend 8080', '\tlb_policy round_robin', '}']
+
+  return shipped.replace(line, block.map((text) => `${indent}${text}${ending}`).join('\n'))
+}
+
+export const bothMoved = (moved) => moved.every((count) => count > 0)
+
+const caddy = (ctx) => `${ctx.config.project}-caddy-1`
+const caddyfileInUse = (ctx) => docker(['exec', caddy(ctx), 'cat', '/etc/caddy/Caddyfile']).stdout
+
+/** Recreates Caddy alone, so the backends and their logs are not touched. */
+async function recreateCaddy(ctx, ...overlay) {
+  const { status, stderr } = spawnSync(
+    'docker',
+    [...ctx.composeArgs(), ...overlay, 'up', '-d', '--no-deps', '--force-recreate', 'caddy'],
+    { encoding: 'utf8', timeout: 120_000 },
+  )
+
+  if (status !== 0) {
+    throw new Error(`recreating caddy: ${stderr}`)
+  }
+
+  await until(
+    'caddy',
+    () => docker(['exec', caddy(ctx), 'wget', '-qO-', 'http://127.0.0.1:80/version']).status === 0,
+    30,
+  )
+}
+
+/**
+ * #777's smoke, unchanged and by its own command, through a Caddy recreated from
+ * a derived file, then Caddy put back. Exits non-zero unless both instances moved.
+ *
+ * `two spread control` is the same step on the shipped file, for comparison. It
+ * usually exits 0, because the shipped file spreads smoke by chance: each new
+ * upstream connection lands where the name resolves, and the split then sticks to
+ * the pool. So both moving is necessary here and not sufficient: what round robin
+ * adds is an even split. `KELIR_LOAD_BASE_URL` at one backend forces the red exit.
+ */
+async function spread(ctx, [mode]) {
+  const directory = ctx.stack().runDirectory
+  const shippedFile = join(HERE, '..', 'deploy/staging/Caddyfile')
+  const shipped = readFileSync(shippedFile, 'utf8')
+  const derived = mode === 'control' ? shipped : spreadCaddyfile(shipped)
+  const derivedFile = join(directory, 'Caddyfile.derived')
+  const overlay = join(directory, 'compose.derived-caddy.yml')
+  const stamp = Date.now()
+
+  writeFileSync(derivedFile, derived)
+  writeFileSync(
+    overlay,
+    `services:
+  caddy:
+    volumes:
+      - type: bind
+        source: ${derivedFile.replaceAll('\\', '/')}
+        target: /etc/caddy/Caddyfile
+        read_only: true
+`,
+  )
+
+  const { stdout: diff } = spawnSync('git', ['diff', '--no-index', '--no-color', shippedFile, derivedFile], {
+    encoding: 'utf8',
+    timeout: 30_000,
+  })
+
+  writeFileSync(join(directory, `Caddyfile.derived-${stamp}.diff`), diff)
+
+  const result = { at: new Date().toISOString(), mode: mode ?? 'derived' }
+
+  try {
+    await recreateCaddy(ctx, '-f', overlay)
+    result.derivedInUse = caddyfileInUse(ctx) === derived
+
+    const before = served(ctx)
+    const smoke = spawnSync(process.execPath, [join(HERE, 'run.mjs'), 'smoke'], {
+      encoding: 'utf8',
+      timeout: 180_000,
+    })
+
+    writeFileSync(join(directory, `spread-smoke-${stamp}.log`), `${smoke.stdout}${smoke.stderr}`)
+    result.smokeExit = smoke.status
+    result.smokeFailed = smoke.stdout.match(/http_req_failed\.*: (.*)/)?.[1] ?? null
+    result.before = before
+    result.after = served(ctx)
+    result.moved = change(result.after, before)
+  } finally {
+    await recreateCaddy(ctx)
+  }
+
+  const { accessToken: token } = (await login(ctx, 1, 'load-user-003', ctx.stack().password)).data
+
+  result.shippedBackInUse = caddyfileInUse(ctx) === shipped
+  result.oneAtATime = await throughCaddy(ctx, token, 300, 1)
+
+  const pass =
+    result.derivedInUse &&
+    result.smokeExit === 0 &&
+    bothMoved(result.moved) &&
+    result.shippedBackInUse &&
+    result.oneAtATime.counted.includes(0)
+
+  console.log(JSON.stringify({ ...result, pass }, null, 2))
+  writeFileSync(join(directory, `spread-${stamp}.json`), JSON.stringify({ ...result, pass, diff }, null, 2))
+  process.exitCode = pass ? 0 : 1
+}
+
+/**
+ * A positive control for every "0 ERROR" on this stack. A stored hash that is not
+ * a PHC string logs ERROR at `password.rs:34`, and its caller only sees a 401, so
+ * nothing is held or starved. One sign-in on each instance, on a user of its own.
+ */
+async function errors(ctx) {
+  const user = 'row4-error-control'
+  const read = () => logs(ctx).map((log) => levelCount(log, 'ERROR'))
+
+  sql(ctx, `INSERT INTO users (id, tenant_id, username, email, password_hash, display_name, status,
+              must_change_password)
+            SELECT gen_random_uuid(), tenant_id, '${user}', '${user}@load.kelir.invalid',
+              'not-a-phc-string', 'Row 4 error control', 'ACTIVE', false
+            FROM users WHERE username = 'load-user-009' ON CONFLICT DO NOTHING;
+            UPDATE users SET failed_login_count = 0, locked_until = NULL WHERE username = '${user}';`)
+
+  const before = read()
+  const legs = []
+
+  for (const n of INSTANCES) {
+    const start = read()
+    const { status } = await login(ctx, n, user, 'any-password')
+
+    await pause(1_000)
+    legs.push({ signedInOn: n, status, moved: change(read(), start) })
+  }
+
+  const result = {
+    at: new Date().toISOString(),
+    before,
+    legs,
+    after: read(),
+    lines: logs(ctx).map((log) => linesAt(log, 'ERROR')),
+    pass: legs.every(({ signedInOn, moved }) => moved[signedInOn - 1] > 0 && moved[2 - signedInOn] === 0),
+  }
+
+  console.log(JSON.stringify(result, null, 2))
+  writeFileSync(join(ctx.stack().runDirectory, `errors-${Date.now()}.json`), JSON.stringify(result, null, 2))
+  process.exitCode = result.pass ? 0 : 1
+}
+
 export async function twoBackends(step, args, ctx) {
-  const steps = { up, race, traffic, cross, e2e, count: () => console.log(JSON.stringify(served(ctx))) }
+  const steps = {
+    up,
+    race,
+    traffic,
+    cross,
+    e2e,
+    spread,
+    errors,
+    count: () => console.log(JSON.stringify(served(ctx))),
+  }
 
   if (!steps[step]) {
     throw new Error(`usage: node run.mjs two ${Object.keys(steps).join(' | ')}`)
