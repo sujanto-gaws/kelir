@@ -69,13 +69,33 @@ KELIR_LOAD_USER_PREFIX=load-user- \
 
 `measure` prints `summary.json` and exits 1 when the measurement is void.
 
-- **`void` and `voidReasons`.** A void run is not a number. It is void on any 401, 403, 429 or 5xx in the window from either generator; fewer than 50 users, or a Chromium user, signing in during the ramp; fewer than 1,000 scenario samples or anything but 30 Chromium samples of a view; a run of 12 minutes or more; or either generator exiting non-zero.
+- **`void` and `voidReasons`.** A void run is not a number. It is void on any 401, 403, 429 or 5xx in the window from either generator; fewer than 50 users, or a Chromium user, signing in during the ramp; fewer than 1,000 scenario samples or anything but 30 Chromium samples of a view; a run of 12 minutes or more; either generator exiting non-zero; or **the log's control failing**, below.
 - **`verdicts`.** A view meets its target when its **scenario P95 and its Chromium P95 are both at or under it**. Only `target` gives one. `saturation` and `tabs` say so and give none.
 - **`scenario`.** k6's reading of each view. `n`, `p50`, `p95` and `max` are milliseconds, and `meanBytes` is uncompressed response bytes.
 - **`chromium`.** The Chromium session's reading. `warm` leaves out the two cold samples, `cold` is the first open of each view in a fresh context, and `apiBytesPerOpen` is what crossed the wire, headers included. `warmAssets` is what opening the view again fetched.
 - **`perRequest`.** k6's own figures per call, for finding which call a slow view spent its time on. These percentiles are interpolated. They are for diagnosis and are never the reading.
-- **`logs`.** The counts of `ERROR` and `WARN` lines, `pool timed out` and slow acquires in the backend's log, and of 5xx in Caddy's. The backend logs no line per request, so Caddy's count is the 5xx count. It is taken live, because Docker Desktop's default log driver keeps about 100 MB.
-- **`pool`.** PostgreSQL's view of the 10 connections, five times a second: how many were active, how often all ten were, and what share of the active ones were running the token check. **ADR-0045 §6's trigger is read here.** sqlx exposes no queue, so all ten active is the sign of queueing, and `poolTimedOut` is the proof of it.
+- **`logs`.** The counts of `ERROR` and `WARN` lines, pool timeouts, slow acquires and slow statements in the backend's log, from 5 seconds before the first sign-in until the control starts, and of 5xx in Caddy's. The backend logs no line per request, so Caddy's count is the 5xx count. It is taken live, because Docker Desktop's default log driver keeps about 100 MB.
+- **`logs.backendLog`.** What those counts rest on: `capturedLines`, `streams`, and the lines `before`, `measured` and in the `control`. **Read the control first.** Zero means nothing on its own, so the counts are readings only when `control.passed` is true.
+- **`pool`.** PostgreSQL's view of the 10 connections, five times a second: how many were active, how often all ten were, and what share of the active ones were running the token check. **ADR-0045 §6's trigger is read here.** sqlx exposes no queue, so all ten active is the sign of queueing, and `poolTimedOut` is the proof of it. `overTen` and `localSessions` name any session over the pool's 10, or any that did not arrive over the network, across the whole run.
+
+### The log's control
+
+`run.mjs` follows the backend's container for the whole run, both streams, into `backend.log`, with each line tagged with its stream and stamped by Docker. A run is void unless that file holds:
+
+- **the startup line**, `listening`, which every backend writes
+- **each line the control provokes** after both generators, Caddy's count and the pool sampler have stopped: a slow statement, a slow acquire, a pool timeout, a `WARN` and an `ERROR`
+
+To provoke them it holds `LOCK TABLE documents` on the throwaway database for 7.5 seconds and sends 36 list requests into it, 30 and then 6. Those requests answer 200 or 500 by design, and none of them is in Caddy's count or the pool's. Nothing is written. The backend is left as it was, with its pool refilling once the lock lifts.
+
+| Line | Emitted by | Level | Fires at |
+|---|---|---|---|
+| `slow statement: execution time exceeded alert threshold` | sqlx 0.8.6, target `sqlx::query` | `WARN` | 1 s, sqlx's default, which `db.rs` leaves alone |
+| `acquired connection, but time to acquire exceeded slow threshold` | sqlx 0.8.6, target `sqlx::pool::acquire` | `WARN` | 2 s, sqlx's default |
+| `pool timed out while waiting for an open connection` | `error.rs`, `request failed with an internal error` | `ERROR` | 5 s, `acquire_timeout` in `db.rs` |
+
+`KELIR_LOG=info,sqlx=warn` lets the first two through. **Their zeros are bounded by those thresholds**: no slow statement means none reached 1 second, and says nothing about one that took 900 ms.
+
+The log carries ANSI colour, and `ERROR` is written with no space before it, so `report.mjs` strips the colour and reads a level from its field rather than searching the line for the word.
 
 **P95 is nearest-rank**: the value at position ceil(0.95 n) in the sorted samples, the 29th of 30. `report.mjs` computes it from the raw samples.
 
@@ -108,7 +128,7 @@ The numbers carry these, and any record of them should too.
 | `run.mjs` | The runner: the stack, the machine capture, the measurement, the logs |
 | `guard.mjs` | The refusals |
 | `report.mjs` | Reads the raw samples: nearest-rank P95, voids, verdicts, log and pool counts |
-| `harness.test.mjs` | Tests of the arithmetic and the refusals: `node --test` |
+| `harness.test.mjs` | Tests of the arithmetic, the refusals and the log's control: `node --test` |
 | `compose.overlay.yml` | What a run adds to `docker-compose.staging.yml`, and why |
 | `seed/seed.sql` | The data set (AC3, AC4) |
 | `seed/seed.mjs` | Runs it, and holds the counts it must equal |

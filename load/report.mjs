@@ -18,6 +18,10 @@ const CHROMIUM_SPACING_MS = 5_000
 const RAMP_MS = 30_000
 /** From first sign-in to last request (AC4): the access token lives 15 minutes. */
 const RUN_LIMIT_MS = 12 * 60_000
+/** How long before the first sign-in the measured part of the log begins. */
+const LOG_LEAD_MS = 5_000
+/** The tracing subscriber's colours reach the log, and `ERROR` has no space before it. */
+const ANSI = /\x1b\[[0-9;]*m/g
 
 /** The value at position ceil(percent / 100 * n) of the sorted samples. */
 export function nearestRank(samples, percent) {
@@ -104,27 +108,131 @@ function count(text, pattern) {
   return (text.match(pattern) ?? []).length
 }
 
-function logCounts(directory) {
+/** What one part of the backend's log says. A level is read from its field. */
+function countLines(lines) {
+  const having = (pattern) => lines.filter((line) => pattern.test(line)).length
+
+  return {
+    lines: lines.length,
+    errorLines: having(/^\S+\s+ERROR\s/),
+    warnLines: having(/^\S+\s+WARN\s/),
+    poolTimedOut: having(/pool timed out/i),
+    slowAcquire: having(/time to acquire exceeded/i),
+    slowStatements: having(/slow statement/i),
+    panics: having(/panicked at/),
+  }
+}
+
+/**
+ * Splits `backend.log`, as `run.mjs` writes it, into what came before the run,
+ * during it and during the control, and says whether the capture can be read.
+ *
+ * **Zero is a reading only beside a passing control.** The file must hold the
+ * startup line the backend always writes, and every kind of line the control
+ * provoked. Otherwise every count here is a count over nothing.
+ */
+export function readBackendLog(text, run) {
+  const parts = { before: [], measured: [], control: [] }
+  const streams = { stdout: 0, stderr: 0 }
+  const start = run.startMs - LOG_LEAD_MS
+
+  for (const raw of text.split(/\r?\n/)) {
+    const match = /^(stdout|stderr) (\S+) ?(.*)$/.exec(raw.replace(ANSI, ''))
+
+    if (!match) {
+      continue
+    }
+
+    const [, stream, stamp, line] = match
+    // Docker's stamp is in nanoseconds and on the VM's clock. A line whose time
+    // cannot be read stays among the measured lines, where it will be seen.
+    const at = Date.parse(`${stamp.slice(0, 23)}Z`) - (run.clockOffsetMs ?? 0)
+
+    streams[stream] += 1
+
+    if (at < start) {
+      parts.before.push(line)
+    } else if (run.control && at >= run.control.atMs) {
+      parts.control.push(line)
+    } else {
+      parts.measured.push(line)
+    }
+  }
+
+  const provoked = countLines(parts.control)
+  const startupLines = parts.before.filter((line) => /\bINFO\b.*\blistening\b/.test(line)).length
+  const expected = [
+    ['slow statement', provoked.slowStatements],
+    ['slow acquire', provoked.slowAcquire],
+    ['pool timeout', provoked.poolTimedOut],
+    ['WARN line', provoked.warnLines],
+    ['ERROR line', provoked.errorLines],
+  ]
+  const missing = [
+    ...(startupLines === 0 ? ['no startup line'] : []),
+    ...(run.control
+      ? expected.filter(([, lines]) => lines === 0).map(([name]) => `no provoked ${name}`)
+      : ['this run provoked nothing']),
+  ]
+
+  return {
+    capturedLines: streams.stdout + streams.stderr,
+    streams,
+    before: countLines(parts.before),
+    measured: countLines(parts.measured),
+    control: {
+      passed: missing.length === 0,
+      missing,
+      startupLines,
+      provoked,
+      responses: run.control?.statuses ?? null,
+    },
+  }
+}
+
+function logCounts(directory, run) {
   const read = (name) => {
     const path = join(directory, name)
 
     return existsSync(path) ? readFileSync(path, 'utf8') : ''
   }
-  const backend = read('backend.log')
+  const backend = readBackendLog(read('backend.log'), run)
   const statuses = JSON.parse(read('caddy-status.json') || '{}')
   const entries = Object.entries(statuses)
 
   return {
-    backendErrorLines: count(backend, /\bERROR\b/g),
-    backendWarnLines: count(backend, /\bWARN\b/g),
-    poolTimedOut: count(backend, /pool timed out/gi),
-    slowAcquire: count(backend, /time to acquire exceeded/gi),
-    slowStatements: count(backend, /slow statement/gi),
+    backendLog: backend,
+    backendErrorLines: backend.measured.errorLines,
+    backendWarnLines: backend.measured.warnLines,
+    poolTimedOut: backend.measured.poolTimedOut,
+    slowAcquire: backend.measured.slowAcquire,
+    slowStatements: backend.measured.slowStatements,
     caddy: statuses,
     caddyRequests: entries.reduce((total, [, value]) => total + value, 0),
     caddy5xx: entries
       .filter(([status]) => status.startsWith('5'))
       .reduce((total, [, value]) => total + value, 0),
+  }
+}
+
+/** One line of `pool-samples.csv`. Its last column is JSON, and holds commas. */
+export function parsePoolSample(line) {
+  const match = /^(\d+),(\d+),(\d+),(\d+),(\d+)(?:,(\d+),(.*))?$/.exec(line)
+
+  if (!match) {
+    return null
+  }
+
+  const [, at, open, active, inCheck, waiting, local, sessions] = match
+
+  return {
+    at: Number(at),
+    open: Number(open),
+    active: Number(active),
+    inCheck: Number(inCheck),
+    waiting: Number(waiting),
+    local: Number(local ?? 0),
+    sessions: sessions ? JSON.parse(sessions) : [],
   }
 }
 
@@ -136,23 +244,32 @@ function poolReading(directory, windowStart, windowEnd) {
     return { samples: 0 }
   }
 
-  const rows = readFileSync(path, 'utf8')
-    .split(/\r?\n/)
-    .filter((line) => /^\d+,/.test(line))
-    .map((line) => line.split(',').map(Number))
-    .filter(([at]) => at >= windowStart && at < windowEnd)
-  const active = rows.map((row) => row[2])
-  const inCheck = rows.reduce((total, row) => total + row[3], 0)
+  const all = readFileSync(path, 'utf8').split(/\r?\n/).map(parsePoolSample).filter(Boolean)
+  const rows = all.filter(({ at }) => at >= windowStart && at < windowEnd)
+  const active = rows.map((row) => row.active)
+  const inCheck = rows.reduce((total, row) => total + row.inCheck, 0)
   const activeTotal = active.reduce((total, value) => total + value, 0)
 
   return {
     samples: rows.length,
-    connectionsOpenMax: Math.max(0, ...rows.map((row) => row[1])),
+    connectionsOpenMax: Math.max(0, ...rows.map((row) => row.open)),
     active: describe(active),
     activeMean: rows.length ? activeTotal / rows.length : 0,
     atTenActive: active.filter((value) => value >= 10).length,
     shareOfActiveInTokenCheck: activeTotal ? inCheck / activeTotal : 0,
-    lockWaitSamples: rows.filter((row) => row[4] > 0).length,
+    lockWaitSamples: rows.filter((row) => row.waiting > 0).length,
+    // The whole run and not the window: these name a session, they time nothing.
+    samplesInRun: all.length,
+    overTen: all
+      .filter((row) => row.open > 10)
+      .map(({ at, open, sessions }) => ({ at, open, sessions })),
+    localSessions: all
+      .filter((row) => row.local > 0)
+      .map(({ at, open, sessions }) => ({
+        at,
+        open,
+        sessions: sessions.filter((session) => session.client_addr === null),
+      })),
   }
 }
 
@@ -273,6 +390,16 @@ export function summarize(directory) {
     }
   }
 
+  const logs = logCounts(directory, run)
+
+  if (logs.backendLog.capturedLines === 0) {
+    reasons.push('backend.log holds no line, so its counts are counts over nothing')
+  }
+
+  if (!logs.backendLog.control.passed) {
+    reasons.push(`the log's control failed: ${logs.backendLog.control.missing.join(', ')}`)
+  }
+
   const verdicts = Object.fromEntries(
     ['list', 'detail'].map((view) => {
       const met = scenario[view].p95 <= TARGETS_MS[view] && browser[view].p95 <= TARGETS_MS[view]
@@ -298,7 +425,7 @@ export function summarize(directory) {
     chromiumClosestSamplesMs: closest,
     shellAssets: chromium.shell?.assets,
     perRequest: perRequest(directory),
-    logs: logCounts(directory),
+    logs,
     pool: poolReading(directory, windowStart, windowEnd),
     chromiumVersion: chromium.browserVersion,
   }

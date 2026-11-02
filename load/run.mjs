@@ -51,6 +51,18 @@ const MODES = {
 const LEAD_IN_MS = 10_000
 const WINDOW_MS = Number(process.env.KELIR_LOAD_WINDOW_MS || 300_000)
 
+/**
+ * The provoked half of the log's control, sized against the pool's two limits:
+ * sqlx warns of an acquire over 2 s, and `db.rs` gives up on one at 5 s.
+ *
+ * The lock is seen up to a second after it is taken. The first wave's requests
+ * take all 10 connections, which block on the lock and so run past sqlx's 1 s
+ * slow-statement line, and the rest of that wave wait 5 s and time out. The
+ * second wave arrives 3.5 s after the lock is seen and is served when it lifts,
+ * 3 to 4 s later: slower than 2 s, and short of 5 s.
+ */
+const CONTROL = { holdMs: 7_500, firstWave: 30, secondWave: 6, secondWaveAtMs: 3_500 }
+
 let state = existsSync(STATE) ? JSON.parse(readFileSync(STATE, 'utf8')) : null
 
 const config = {
@@ -363,11 +375,21 @@ function startPoolSampler(directory) {
   // A count rather than a kill: stopping the client outside the container would
   // leave psql running inside it.
   const samples = Math.ceil((LEAD_IN_MS + WINDOW_MS + 70_000) / 200)
+  // The last two columns name a session that is not the pool's: more than 10
+  // client connections, or any that did not arrive over the network. `jsonb`
+  // and not `json`, whose array puts a line break between its elements.
   const query = `SELECT (extract(epoch FROM now()) * 1000)::bigint,
     count(*),
     count(*) FILTER (WHERE state = 'active'),
     count(*) FILTER (WHERE state = 'active' AND query LIKE '%tenant_deleted%'),
-    count(*) FILTER (WHERE wait_event_type = 'Lock')
+    count(*) FILTER (WHERE wait_event_type = 'Lock'),
+    count(*) FILTER (WHERE client_addr IS NULL),
+    CASE WHEN count(*) > 10 OR count(*) FILTER (WHERE client_addr IS NULL) > 0 THEN
+      jsonb_agg(jsonb_build_object(
+        'pid', pid, 'usename', usename, 'application_name', application_name,
+        'client_addr', client_addr::text, 'state', state,
+        'backend_start', backend_start, 'query', left(query, 200)))::text
+    END
   FROM pg_stat_activity
   WHERE datname = current_database() AND backend_type = 'client backend'
     AND pid <> pg_backend_pid() \\watch i=0.2 c=${samples}\n`
@@ -424,6 +446,116 @@ function watchCaddy(directory, startMs) {
   }
 }
 
+/**
+ * Keeps all the backend's container has written, as Caddy's log is read.
+ *
+ * Both streams, each line tagged with the one it came from and stamped by
+ * Docker, and from the container's first line and not from the window's: the
+ * startup line is half of the control, and `report.mjs` splits the file by time.
+ */
+function watchBackend(directory) {
+  const out = createWriteStream(join(directory, 'backend.log'))
+  const follower = spawn(
+    'docker',
+    ['logs', '--follow', '--timestamps', `${config.project}-backend-1`],
+    { stdio: ['ignore', 'pipe', 'pipe'] },
+  )
+  let open = true
+  const keep = (stream, input) =>
+    createInterface({ input }).on('line', (line) => {
+      if (open) {
+        out.write(`${stream} ${line}\n`)
+      }
+    })
+
+  keep('stdout', follower.stdout)
+  keep('stderr', follower.stderr)
+
+  return async () => {
+    await pause(2_000)
+    follower.kill()
+    await Promise.race([finished(follower, 'backend log'), pause(3_000)])
+    follower.stdout.destroy()
+    follower.stderr.destroy()
+    open = false
+    await new Promise((done) => out.end(done))
+  }
+}
+
+async function waitForTheLock() {
+  const lock = `SELECT count(*) FROM pg_locks
+    WHERE relation = 'documents'::regclass AND mode = 'AccessExclusiveLock' AND granted`
+
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (psql(lock).trim() === '1') {
+      return
+    }
+
+    await pause(100)
+  }
+
+  throw new Error('the control never saw its lock')
+}
+
+/**
+ * Makes the product write the lines this run counts, after the window has shut.
+ *
+ * A lock on the throwaway database's `documents`, and requests that wait on it.
+ * Nothing is written. A run that reports "0 slow acquires" has then shown, in
+ * the same file, that a slow acquire reaches that file and is counted.
+ */
+async function provokeControl() {
+  const atMs = Date.now()
+  const login = await fetch(`${state.url}/api/v1/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'load-user-050', password: state.password }),
+  })
+  const token = (await login.json()).data?.accessToken
+
+  if (!token) {
+    throw new Error(`the control could not sign in: ${login.status}`)
+  }
+
+  const holder = spawn('docker', psqlArgs(), { stdio: ['pipe', 'ignore', 'inherit'] })
+  // Attached now: the holder exits as the lock lifts, which is also when the
+  // requests answer, and a listener added after its `close` waits for ever.
+  const held = finished(holder, 'lock holder')
+
+  holder.stdin.end(`BEGIN;
+    LOCK TABLE documents IN ACCESS EXCLUSIVE MODE;
+    SELECT pg_sleep(${CONTROL.holdMs / 1000});
+    COMMIT;\n`)
+  await waitForTheLock()
+
+  const open = () =>
+    fetch(`${state.url}/api/v1/documents?page=1&pageSize=20`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((response) => response.status)
+      .catch(() => 0)
+  const wave = (size) => Array.from({ length: size }, open)
+  const first = wave(CONTROL.firstWave)
+
+  await pause(CONTROL.secondWaveAtMs)
+
+  const statuses = await Promise.all([...first, ...wave(CONTROL.secondWave)])
+  const { code } = await held
+
+  if (code !== 0) {
+    throw new Error(`the control's lock holder exited ${code}`)
+  }
+
+  return {
+    atMs,
+    ...CONTROL,
+    statuses: statuses.reduce(
+      (counts, status) => ({ ...counts, [status]: (counts[status] ?? 0) + 1 }),
+      {},
+    ),
+  }
+}
+
 function finished(child, name) {
   return new Promise((done) => child.on('close', (code) => done({ name, code })))
 }
@@ -460,6 +592,7 @@ async function measure(mode) {
     KELIR_LOAD_START_MS: String(startMs),
     KELIR_LOAD_DETAIL_IDS: join(state.runDirectory, 'detail-ids.json'),
   }
+  const stopWatchingBackend = watchBackend(directory)
   const sampler = startPoolSampler(directory)
   const stopWatchingCaddy = watchCaddy(directory, startMs)
   // Halfway through the window: who holds the cores while the load is on.
@@ -532,18 +665,10 @@ async function measure(mode) {
   sampler.stdin.end()
   await finished(sampler, 'pool sampler')
 
-  writeFileSync(
-    join(directory, 'backend.log'),
-    run('docker', [
-      ...composeArgs(),
-      'logs',
-      '--no-color',
-      '--no-log-prefix',
-      '--since',
-      new Date(startMs - 5_000).toISOString(),
-      'backend',
-    ]),
-  )
+  // Last, once both generators, Caddy's count and the sampler have all stopped.
+  const control = await provokeControl()
+
+  await stopWatchingBackend()
 
   writeFileSync(
     join(directory, 'run.json'),
@@ -555,9 +680,12 @@ async function measure(mode) {
         clockOffsetMs: offset,
         imageTag: config.imageTag,
         commit: state.imageTag.replace(/^load-/, ''),
+        harnessCommit: git('rev-parse', 'HEAD'),
+        harnessDirty: git('status', '--porcelain', '--', 'load') !== '',
         database: config.database,
         project: config.project,
         exitCodes: results,
+        control,
       },
       null,
       2,
