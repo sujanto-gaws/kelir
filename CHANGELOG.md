@@ -756,6 +756,15 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A logic-builder condition can no longer be saved meaning the opposite of
+  what was entered** ([#748](https://github.com/sujanto-gaws/kelir/issues/748)).
+  On a condition loaded as `{"!": {"var": "a"}}`, an array typed into the
+  operand's *Advanced (JSON)* box, say `[0, 1]`, was saved as `{"!": [0, 1]}`.
+  JSON Logic reads that array as `!`'s argument list, so the rule was `!0`,
+  true, where `!` applied to the array is false, and the server saved it as
+  given. An array operand is now emitted wrapped, `{"!": [[0, 1]]}`, whatever
+  its length. A rule already saved in the old form stays as saved, and is
+  corrected by entering it again.
 - **The commit checks read what they skipped**
   ([#557](https://github.com/sujanto-gaws/kelir/issues/557),
   [#730](https://github.com/sujanto-gaws/kelir/issues/730),
