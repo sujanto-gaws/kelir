@@ -1,4 +1,4 @@
-import { mount, type VueWrapper } from '@vue/test-utils'
+import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { afterEach, describe, expect, it } from 'vitest'
 import { defineComponent, h, ref, type PropType } from 'vue'
 
@@ -6,6 +6,7 @@ import { jfssViolations } from '@/lib/testing/jfss-meta-schema'
 import type { JfssComponent, JfssOption } from '@/types/jfss'
 
 import FormPropertiesPanel from './FormPropertiesPanel.vue'
+import OptionRows from './OptionRows.vue'
 
 /**
  * **A select's options, a row each** (#790, AC1–AC9).
@@ -39,6 +40,37 @@ import FormPropertiesPanel from './FormPropertiesPanel.vue'
  * | an edit elsewhere writes options with `String(value)` | AC8 |
  * | no type hint under a value | AC2, *keeps a half-typed value …*, and `propertyEdits.spec.ts` |
  * | the group unlabelled | AC9 |
+ *
+ * The `test-engineer` campaign, 2026-11-03, against this folder's specs and
+ * the `FormBuilderPage` specs, each mutation reverted after. **Every one below
+ * survived all the cases above**; the campaign's cases are the second
+ * `describe`.
+ *
+ * | Mutation | Reddened |
+ * |---|---|
+ * | a blank check that does not trim, so `' '` is stored as `0` | *on a number field, " " …*, *on a integer field, " " …* |
+ * | `parseFloat` for `Number`, so `12abc` is stored as `12` | *on a number field, "12abc" …* |
+ * | `boolean` trims, so `' true '` is stored as `true` | *on a boolean field, " true " …* |
+ * | every row re-read by the value type, edited or not | *never re-reads a row that is not edited …*, *describes a value by a note …*, *keeps the other row's draft …*, *keeps a draft across a reload …* |
+ * | no type hint under a value that has a draft | *keeps the type hint under a value typed …*, all three |
+ * | `aria-describedby` set with no note; or naming `…-hint`; `aria-invalid` always false | *describes a value by a note that exists …* |
+ * | the rows keyed by label, so a label keystroke remounts its input | *keeps a row's label input, and its focus …* |
+ * | the watch reads `options[at].value`, not `?.` | *keeps a draft across a reload …*: a reload with fewer rows throws |
+ * | `DataFieldProperties` passes `component.options` without `?? []` | *adds an option to a select loaded with none …* |
+ *
+ * **Not mutants**, since nothing a host or a stored definition holds can tell
+ * them apart:
+ * - the watch without its `valueType` source: every host clones, so a type switch
+ *   also hands a new `options` array;
+ * - the watch also checking `type === props.valueType`: inside the callback,
+ *   `type` is `props.valueType`;
+ * - a label edit writing `{label, value}` rather than spreading the option:
+ *   `options[]` is `additionalProperties: false`;
+ * - `Number.isSafeInteger(n) || Number.isInteger(n)` for `Number.isInteger(n)`.
+ *
+ * `undefined` shown as `'undefined'` rather than `''` also survived. That needs
+ * an option with no `value`, which JFSS refuses, so it is recorded as a
+ * finding and not pinned.
  */
 
 let mounted: VueWrapper | undefined
@@ -46,9 +78,10 @@ let mounted: VueWrapper | undefined
 afterEach(() => {
   mounted?.unmount()
   mounted = undefined
+  document.body.innerHTML = ''
 })
 
-function harness(initial: Record<string, unknown>) {
+function harness(initial: Record<string, unknown>, attach = false) {
   const history: Record<string, unknown>[] = []
 
   const Host = defineComponent({
@@ -72,7 +105,10 @@ function harness(initial: Record<string, unknown>) {
     },
   })
 
-  const wrapper = mount(Host, { props: { start: initial } })
+  const wrapper = mount(Host, {
+    props: { start: initial },
+    ...(attach ? { attachTo: document.body.appendChild(document.createElement('div')) } : {}),
+  })
 
   mounted = wrapper
 
@@ -343,5 +379,198 @@ describe('a select’s options, a row each (#790)', () => {
     for (const control of group.findAll('input, button')) {
       expect(control.attributes('data-testid')).toMatch(/^options-f-/)
     }
+  })
+})
+
+/** The rows alone, under a host that reloads them with a copy of what it is handed. */
+function rows(options: JfssOption[], valueType: string) {
+  const host: { wrapper?: VueWrapper; latest: JfssOption[] } = { latest: options }
+  const copy = (value: JfssOption[]) => JSON.parse(JSON.stringify(value)) as JfssOption[]
+  const reload = async (next: JfssOption[]) => {
+    host.latest = copy(next)
+    await host.wrapper?.setProps({ options: host.latest })
+  }
+
+  host.wrapper = mount(OptionRows, {
+    props: { componentId: 'f', options, valueType, disabled: false, onUpdate: reload },
+  })
+  mounted = host.wrapper
+
+  return { wrapper: host.wrapper, reload, latest: () => copy(host.latest) }
+}
+
+describe('a select’s options, the test-engineer campaign (#790)', () => {
+  it.each([
+    ['number', ' '],
+    ['number', '12abc'],
+    ['integer', ' '],
+    // The literal reading of `true` or `false` (coordinator, 2026-11-03): a
+    // trim added later is a decision, not an accident.
+    ['boolean', ' true '],
+  ] as const)(
+    'on a %s field, %j is stored as the text typed, with the message (AC5)',
+    async (type, typed) => {
+      const { wrapper, options } = harness(select([{ label: 'A', value: 'a' }], type))
+
+      await row(wrapper, 0, 'value').setValue(typed)
+
+      expect(options()[0]).toStrictEqual({ label: 'A', value: typed })
+      expect(row(wrapper, 0, 'note').text()).toContain('Stored as text')
+    },
+  )
+
+  it('never re-reads a row that is not edited: a loaded string or null on a number field has no message', () => {
+    const { wrapper } = harness(
+      select(
+        [
+          { label: 'Text', value: 'abc' },
+          { label: 'None', value: null },
+          { label: 'One', value: 1 },
+        ],
+        'number',
+      ),
+    )
+
+    expect(row(wrapper, 0, 'note').exists()).toBe(false)
+    expect([1, 2].map((index) => row(wrapper, index, 'note').text())).toEqual(['null', 'number'])
+  })
+
+  it.each([
+    ['number', '42', 'number'],
+    ['integer', '7', 'number'],
+    ['boolean', 'false', 'boolean'],
+  ] as const)(
+    'keeps the type hint under a value typed on a %s field, so 42 and "42" stay apart',
+    async (type, typed, hint) => {
+      const { wrapper } = harness(select([{ label: 'A', value: 'a' }], type))
+
+      await row(wrapper, 0, 'value').setValue(typed)
+
+      expect(row(wrapper, 0, 'note').text()).toBe(hint)
+    },
+  )
+
+  it('describes a value by a note that exists, marks text against the type invalid, and describes a plain string by none (AC9)', async () => {
+    const { wrapper } = harness(
+      select(
+        [
+          { label: 'One', value: 1 },
+          { label: 'A', value: 'a' },
+        ],
+        'number',
+      ),
+    )
+    const describedBy = (index: number) =>
+      row(wrapper, index, 'value').attributes('aria-describedby')
+
+    expect(wrapper.get(`#${describedBy(0)}`).text()).toBe('number')
+    expect(row(wrapper, 0, 'value').attributes('aria-invalid')).toBe('false')
+    expect(describedBy(1)).toBeUndefined()
+
+    await row(wrapper, 1, 'value').setValue('abc')
+
+    expect(wrapper.get(`#${describedBy(1)}`).text()).toContain('Stored as text')
+    expect(row(wrapper, 1, 'value').attributes('aria-invalid')).toBe('true')
+  })
+
+  it('keeps a row’s label input, and its focus, across the keystrokes that change the label (AC7)', async () => {
+    const { wrapper } = harness(select([{ label: 'A', value: 'a' }]), true)
+
+    await add(wrapper)
+
+    for (const index of [1, 0]) {
+      const input = row(wrapper, index, 'label').element as HTMLInputElement
+
+      input.focus()
+
+      for (const typed of ['D', 'Dr', 'Dra']) {
+        await row(wrapper, index, 'label').setValue(typed)
+
+        expect(row(wrapper, index, 'label').element, typed).toBe(input)
+        expect(document.activeElement, typed).toBe(input)
+      }
+    }
+  })
+
+  it('keeps the other row’s draft when one of two drafted rows goes, and starts a row added at a removed index clean', async () => {
+    const { wrapper, options } = harness(
+      select(
+        [
+          { label: 'A', value: 1 },
+          { label: 'B', value: 2 },
+          { label: 'C', value: 3 },
+        ],
+        'number',
+      ),
+    )
+
+    await row(wrapper, 0, 'value').setValue('1.')
+    await row(wrapper, 2, 'value').setValue('-')
+    await row(wrapper, 1, 'remove').trigger('click')
+
+    expect([shown(wrapper, 0, 'value'), shown(wrapper, 1, 'value')]).toEqual(['1.', '-'])
+    expect(row(wrapper, 1, 'note').text()).toContain('Stored as text')
+
+    await row(wrapper, 1, 'remove').trigger('click')
+    await add(wrapper)
+
+    expect(shown(wrapper, 1, 'value')).toBe('')
+    expect(row(wrapper, 1, 'note').exists()).toBe(false)
+    expect(options()).toStrictEqual([
+      { label: 'A', value: 1 },
+      { label: '', value: '' },
+    ])
+  })
+
+  it('adds an option to a select loaded with none, which JFSS allows', async () => {
+    const bare = select([])
+
+    delete bare.options
+
+    const { wrapper, options, latest } = harness(bare)
+
+    await add(wrapper)
+
+    expect(options()).toStrictEqual([{ label: '', value: '' }])
+    expect(jfssViolations({ formId: 'f', version: '2.0.1', components: [latest()] })).toEqual([])
+  })
+
+  it('keeps a draft across a reload of equal values, and gives it up for a reload with other ones, fewer rows included', async () => {
+    const loaded: JfssOption[] = [
+      { label: 'A', value: 1 },
+      { label: 'B', value: 2 },
+      { label: 'C', value: 3 },
+    ]
+    const { wrapper, reload, latest } = rows(loaded, 'number')
+    const value = (index: number) =>
+      (wrapper.get(`[data-testid="options-f-${index}-value"]`).element as HTMLInputElement).value
+
+    await wrapper.get('[data-testid="options-f-0-value"]').setValue('1.')
+    await wrapper.get('[data-testid="options-f-2-value"]').setValue('-')
+    await flushPromises()
+
+    expect(latest()).toStrictEqual([
+      { label: 'A', value: 1 },
+      { label: 'B', value: 2 },
+      { label: 'C', value: '-' },
+    ])
+
+    await reload(latest())
+
+    expect([value(0), value(2)]).toEqual(['1.', '-'])
+
+    await reload([
+      { label: 'A', value: 5 },
+      { label: 'B', value: 2 },
+    ])
+
+    expect(value(0)).toBe('5')
+    expect(wrapper.find('[data-testid="options-f-2-value"]').exists()).toBe(false)
+
+    // The third row's draft went with it: back, it shows what is stored.
+    await reload([...latest(), { label: 'C', value: '-' }])
+
+    expect(value(2)).toBe('-')
+    expect(wrapper.find('[data-testid="options-f-2-note"]').exists()).toBe(false)
   })
 })

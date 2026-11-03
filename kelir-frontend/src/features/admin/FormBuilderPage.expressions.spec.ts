@@ -89,6 +89,12 @@ import FormBuilderPage from './FormBuilderPage.vue'
  * | `restOfPath` drops the `definition.` prefix | *places …components.0.calculate on node 0 …*, every *places … on that node …*, and the AC9 cases |
  * | `placeDetails` sends a `conditional.logic` to the top list | *places … on that node …* at a conditional, and both page cases |
  *
+ * The `test-engineer` campaign for #790, 2026-11-03, reverted after:
+ *
+ * | Mutation | Reddened |
+ * |---|---|
+ * | the page's panel not keyed by the node's `id`, so one select's draft shows on the next (it **survived every other case**) | *saves options edited a row at a time, …* |
+ *
  * **Not a mutant:** the panel deriving `variables` as a new array on every
  * write. No case reddens, and none should: `JsonLogicBuilder` reads
  * `variables` for its choices and badges only, and has no watcher on it.
@@ -470,6 +476,63 @@ describe('FormBuilderPage, the properties panel’s expressions', () => {
     expect(builderIn(wrapper, 'calculate-total').vm.$).toBe(instance)
     expect(control('Calculate, operand 3: kind')).toBe(hole)
     expect(wrapper.find('[data-testid="calculate-unfinished-total"]').exists()).toBe(true)
+  })
+
+  // #790, through the page's cloning writes (test-engineer campaign, 2026-11-03).
+  // The save's read-back is a reload of equal values, and a second select's
+  // panel is its own, so no draft crosses from one select to the other.
+  it('saves options edited a row at a time, keeps a typed value across the save, and starts another select clean (#790)', async () => {
+    const choice = (id: string, options: Node[]): Node => ({
+      id,
+      role: 'data',
+      type: 'select',
+      key: id,
+      label: id,
+      validation: { type: 'number' },
+      options,
+    })
+
+    current = form(
+      definition([
+        choice('mode', [
+          { label: 'One', value: 1 },
+          { label: 'Yes', value: true },
+          { label: 'a=b', value: 'c' },
+        ]),
+        choice('other', [{ label: 'Two', value: 2 }]),
+      ]),
+    )
+
+    const wrapper = await render()
+    const value = (id: string, index: number) =>
+      wrapper.find<HTMLInputElement>(`[data-testid="options-${id}-${index}-value"]`)
+
+    await select(wrapper, 'mode')
+    await value('mode', 0).setValue('2.')
+    await settle()
+    await wrapper.find('[data-testid="options-mode-1-remove"]').trigger('click')
+    await settle()
+    await wrapper.find('[data-testid="options-mode-add"]').trigger('click')
+    await settle()
+    await wrapper.find('[data-testid="options-mode-2-label"]').setValue('x=y')
+    await value('mode', 2).setValue('3')
+    await settle()
+
+    const sent = await saved(wrapper)
+
+    expect(node(sent, 'mode').options).toStrictEqual([
+      { label: 'One', value: 2 },
+      { label: 'a=b', value: 'c' },
+      { label: 'x=y', value: 3 },
+    ])
+    expect(node(sent, 'other').options).toStrictEqual([{ label: 'Two', value: 2 }])
+    expect(jfssViolations(sent)).toEqual([])
+    expect(value('mode', 0).element.value).toBe('2.')
+
+    await select(wrapper, 'other')
+
+    expect(value('other', 0).element.value).toBe('2')
+    expect(wrapper.find('[data-testid="options-other-0-note"]').text()).toBe('number')
   })
 
   // #748, through the page's cloning writes. The copy comes back as the
