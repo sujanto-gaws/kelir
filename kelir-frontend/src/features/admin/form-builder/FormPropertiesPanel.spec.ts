@@ -207,7 +207,6 @@ const OPTIONAL: Record<string, Read> = {
 }
 
 const TEXT_FOR: Record<string, string> = {
-  options: 'First=first\nSecond',
   'rule-params': '{"pattern": "^[A-Z]+$"}',
 }
 
@@ -373,8 +372,9 @@ describe('FormPropertiesPanel', () => {
     textarea: [...DATA, ...STRING_LIMITS],
     // A string's limits on a text box alone, though these carry `string` too.
     date: DATA_NO_PLACEHOLDER,
-    select: [...DATA, 'options'],
-    radio: [...DATA_NO_PLACEHOLDER, 'options'],
+    // A row per option (#790): the default option's label and value.
+    select: [...DATA, 'options-node_1-0-label', 'options-node_1-0-value'],
+    radio: [...DATA_NO_PLACEHOLDER, 'options-node_1-0-label', 'options-node_1-0-value'],
     lookup: [...DATA, 'lookup'],
     number: [...DATA, 'minimum', 'maximum'],
     checkbox: DATA_NO_PLACEHOLDER,
@@ -418,7 +418,9 @@ describe('FormPropertiesPanel', () => {
     for (const entry of offeredEntries()) {
       const { wrapper } = harness(fresh(entry.type))
       const offered = controls(wrapper, 'input, select, textarea').map((id) =>
-        id.startsWith('unique-by-') ? id : id.slice(0, id.length - '-node_1'.length),
+        id.startsWith('unique-by-') || id.startsWith('options-')
+          ? id
+          : id.slice(0, id.length - '-node_1'.length),
       )
 
       expect(wrapper.find('[data-testid="editor-node_1"]').exists(), entry.type).toBe(true)
@@ -624,7 +626,11 @@ describe('FormPropertiesPanel', () => {
       { label: 'Option 1', value: 'option_1' },
     ])
 
-    await wrapper.find('[data-testid="options-f"]').setValue('Air=air\nSea=sea')
+    await wrapper.find('[data-testid="options-f-0-label"]').setValue('Air')
+    await wrapper.find('[data-testid="options-f-0-value"]').setValue('air')
+    await wrapper.find('[data-testid="options-f-add"]').trigger('click')
+    await wrapper.find('[data-testid="options-f-1-label"]').setValue('Sea')
+    await wrapper.find('[data-testid="options-f-1-value"]').setValue('sea')
     await wrapper.find('[data-testid="type-f"]').setValue('radio')
 
     expect((latest() as { options: unknown[] }).options).toEqual([

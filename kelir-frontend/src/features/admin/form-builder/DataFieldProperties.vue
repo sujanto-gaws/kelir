@@ -9,6 +9,7 @@ import type { JfssDataComponent, JfssValidation } from '@/types/jfss'
 import type { LookupSource } from '@/types/rad'
 
 import DataIdentityFields from './DataIdentityFields.vue'
+import OptionRows from './OptionRows.vue'
 import { PLACEHOLDER_TYPES, switchValueType, withProperty } from './propertyEdits'
 import ValidationLimitsFields from './ValidationLimitsFields.vue'
 
@@ -19,7 +20,7 @@ import ValidationLimitsFields from './ValidationLimitsFields.vue'
  * Its key, label, **description** and, where the renderer draws one, a
  * **placeholder** (**D-116**, `PLACEHOLDER_TYPES`), value type, `required`,
  * **the limits a text box or a number can use** (D-116, `offeredLimits`), and, by type, a select's or
- * radio's options and a lookup's master-data source. Kept as loaded and not
+ * radio's options, a row each (`OptionRows`, #790), and a lookup's master-data source. Kept as loaded and not
  * offered: `defaultValue`, `readOnly`, `calculateMode`, `format`, `enum`,
  * `messages`, and a placeholder on a type that draws none.
  */
@@ -66,34 +67,6 @@ const offersPlaceholder = computed(() => PLACEHOLDER_TYPES.includes(props.compon
 const hasOptions = computed(
   () => props.component.type === 'select' || props.component.type === 'radio',
 )
-
-/**
- * Options as `label=value` lines, which is the shape an author types.
- *
- * A line with no `=` is a label that is its own value, because that is what
- * somebody writing `Draft` in a box means.
- */
-const optionLines = computed({
-  get: () =>
-    (props.component.options ?? [])
-      .map((option) => `${option.label}=${String(option.value ?? '')}`)
-      .join('\n'),
-  set: (text: string) => {
-    const options = text
-      .split('\n')
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0)
-      .map((line) => {
-        const at = line.indexOf('=')
-
-        return at === -1
-          ? { label: line, value: line }
-          : { label: line.slice(0, at).trim(), value: line.slice(at + 1).trim() }
-      })
-
-    emit('update', { ...props.component, options })
-  },
-})
 </script>
 
 <template>
@@ -168,20 +141,15 @@ const optionLines = computed({
     @update:validation="setValidation"
   />
 
-  <div v-if="hasOptions" class="space-y-2 sm:col-span-2">
-    <Label :for="`options-${id}`">Options</Label>
-    <textarea
-      :id="`options-${id}`"
-      v-model="optionLines"
-      rows="3"
-      class="w-full rounded-md border bg-background p-2 font-mono text-xs"
-      :disabled="disabled"
-      :data-testid="`options-${id}`"
-    ></textarea>
-    <p class="text-xs text-muted-foreground">
-      One per line, <code>label=value</code>. A line with no <code>=</code> is its own value.
-    </p>
-  </div>
+  <OptionRows
+    v-if="hasOptions"
+    class="sm:col-span-2"
+    :component-id="id"
+    :options="component.options ?? []"
+    :value-type="component.validation.type"
+    :disabled="disabled"
+    @update="emit('update', { ...component, options: $event })"
+  />
 
   <div v-if="component.type === 'lookup'" class="space-y-2 sm:col-span-2">
     <Label :for="`lookup-${id}`">Master data source</Label>

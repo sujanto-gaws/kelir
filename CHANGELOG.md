@@ -756,6 +756,19 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A select's or radio's options are edited a row at a time, and an edit keeps
+  the options it did not touch**
+  ([#790](https://github.com/sujanto-gaws/kelir/issues/790)). The *Options* box
+  took one `label=value` line per option and rewrote every line on each edit.
+  So an edit saved every value as text, `1` as `"1"` and `true` as `"true"`,
+  and split a label holding `=`. Typing in the box was rewritten too: a new
+  line vanished, and a bare label became `label=label` at the first keystroke.
+  Each option now has a label and a value of its own, with *Add option* and
+  *Remove*, and an edit replaces only that option. A typed value is read by the
+  field's value type, a number for `number` or `integer` and `true` or `false`
+  for `boolean`, and anything else is saved as text with a note on the row. An
+  option saved as text by the old box stays as saved, and is corrected by
+  entering its value again.
 - **A logic-builder condition can no longer be saved meaning the opposite of
   what was entered** ([#748](https://github.com/sujanto-gaws/kelir/issues/748)).
   On a condition loaded as `{"!": {"var": "a"}}`, an array typed into the
