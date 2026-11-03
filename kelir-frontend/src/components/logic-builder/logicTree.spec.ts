@@ -25,6 +25,7 @@ import {
   literalNode,
   MAX_VISUAL_DEPTH,
   nodeAt,
+  opaqueNode,
   OPERATOR_LABELS,
   parseExpression,
   rebuild,
@@ -492,6 +493,97 @@ describe('representability (B1–B8)', () => {
 
     expect(JSON.stringify(serialise(replaceAt(bare, [0], renamed)))).toBe('{"!":{"var":"b"}}')
     expect(JSON.stringify(serialise(replaceAt(wrapped, [0], renamed)))).toBe('{"!":[{"var":"b"}]}')
+  })
+})
+
+// --- #748 --------------------------------------------------------------------
+
+describe('a bare not given an array operand (#748)', () => {
+  let evaluator: RuleEvaluator
+
+  beforeAll(async () => {
+    evaluator = await loadEvaluator()
+  })
+
+  /** A loaded bare not whose operand the raw box has replaced with `operand`. */
+  const edited = (operand: unknown) =>
+    replaceAt(parseExpression({ '!': { var: 'a' } }, 'conditional'), [0], opaqueNode(operand))
+
+  it('wraps [0,1], so the rule is not applied to the array, and stays bare', () => {
+    const tree = edited([0, 1])
+    const emitted = serialise(tree)
+
+    expect(JSON.stringify(emitted)).toBe('{"!":[[0,1]]}')
+    expect(tree).toMatchObject({ bare: true })
+    expect(evaluator.evaluate(emitted, {})).toBe(false)
+    // What was emitted before: the array read as arguments, so `!0`.
+    expect(evaluator.evaluate({ '!': [0, 1] }, {})).toBe(true)
+  })
+
+  it('wraps [0], whose two forms evaluate differently', () => {
+    const emitted = serialise(edited([0]))
+    const entered = evaluator.evaluate(emitted, {})
+
+    expect(JSON.stringify(emitted)).toBe('{"!":[[0]]}')
+    expect(entered).toBe(false)
+    expect(evaluator.evaluate({ '!': [0] }, {})).not.toBe(entered)
+  })
+
+  it('wraps [] too: the rule has no case for length', () => {
+    const emitted = serialise(edited([]))
+
+    expect(JSON.stringify(emitted)).toBe('{"!":[[]]}')
+    // Measured 2026-11-03 on datalogic-wasm: both forms give true, so here the form changes nothing.
+    expect(evaluator.evaluate(emitted, {})).toBe(true)
+    expect(evaluator.evaluate({ '!': [] }, {})).toBe(true)
+  })
+
+  it('wraps it in rebuild too, the other path through emit', () => {
+    expect(JSON.stringify(rebuild(edited([0, 1])))).toBe('{"!":[[0,1]]}')
+  })
+
+  const LATER_EDITS: [string, LogicNode][] = [
+    ['{"!":{"var":"b"}}', varNode('b')],
+    ['{"!":0}', literalNode(0)],
+    ['{"!":null}', literalNode(null)],
+    ['{"!":{"min":[1,2]}}', opaqueNode({ min: [1, 2] })],
+  ]
+
+  it.each(LATER_EDITS)(
+    'returns to the bare form %s when the array is replaced',
+    (json, operand) => {
+      const tree = replaceAt(edited([0, 1]), [0], operand)
+
+      expect(JSON.stringify(serialise(tree))).toBe(json)
+      expect(JSON.stringify(rebuild(tree))).toBe(json)
+    },
+  )
+
+  it('loads the wrapped form afresh as a non-bare not, and returns it by reference', () => {
+    const expr = { '!': [[0, 1]] }
+    const tree = parseExpression(expr, 'conditional')
+
+    expect(tree).toMatchObject({
+      kind: 'operator',
+      op: '!',
+      bare: false,
+      args: [{ kind: 'opaque', value: [0, 1] }],
+    })
+    expect(serialise(tree)).toBe(expr)
+  })
+
+  it.each([
+    [{ '!': { var: 'a' } }],
+    [{ '!': true }],
+    [{ '!': 0 }],
+    [{ '!': null }],
+    [{ '!': [{ var: 'a' }] }],
+    [{ '!': [true] }],
+  ])('keeps the output of a loaded %j, whose operand is no array', (expr) => {
+    const tree = parseExpression(expr, 'conditional')
+
+    expect(serialise(tree)).toBe(expr)
+    expect(JSON.stringify(rebuild(tree))).toBe(JSON.stringify(expr))
   })
 })
 

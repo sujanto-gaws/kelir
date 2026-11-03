@@ -871,6 +871,15 @@ describe('JsonLogicBuilder at its edges (campaign, 2026-10-09)', () => {
       expect(JSON.stringify(lastEmitted(wrapper))).toBe(`{"and":[{"var":"type"},${json}]}`)
     })
 
+    it('keeps an array typed as a bare not’s operand one operand (#748)', async () => {
+      const wrapper = mountBuilder({ '!': { var: 'a' } })
+
+      await byLabel(wrapper, 'Expression, operand 1: kind').setValue('json')
+      await byLabel(wrapper, 'Expression, operand 1').get('textarea').setValue('[0, 1]')
+
+      expect(JSON.stringify(lastEmitted(wrapper))).toBe('{"!":[[0,1]]}')
+    })
+
     it('is unfilled, not emitted, when its text is emptied', async () => {
       const wrapper = mountBuilder({ and: [{ var: 'type' }, { in: ['a', ['a']] }] })
 

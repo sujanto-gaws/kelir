@@ -162,7 +162,11 @@ export interface OperatorNode {
   key: number
   op: ExpressionOperator
   args: LogicNode[]
-  /** `!` parsed as `{"!": x}` rather than `{"!": [x]}`; kept so it is emitted the same way. */
+  /**
+   * `!` parsed as `{"!": x}` rather than `{"!": [x]}`; kept so a non-array operand
+   * is emitted the same way. An array operand is emitted wrapped, because JSON
+   * Logic reads an array under an operator as its argument list.
+   */
   bare: boolean
   /** The value this node was parsed from, until an edit inside it makes it stale. */
   original?: object
@@ -401,7 +405,7 @@ function emit(node: LogicNode, useOriginals: boolean): unknown {
 
       const operands = node.args.map((arg) => emit(arg, useOriginals))
 
-      return { [node.op]: node.bare ? operands[0] : operands }
+      return { [node.op]: node.bare && !Array.isArray(operands[0]) ? operands[0] : operands }
     }
   }
 }
