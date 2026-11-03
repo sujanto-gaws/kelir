@@ -1041,10 +1041,12 @@ While the major version is `0`, the public API may change in any release.
   spellings ADR-0043 §R lists. **Masking by key in a body not parsed as
   JSON** covers a `"<key>": "<string>"` pair only. **A submission refused
   while a role is deleted, or on a role that is gone** (#487 and #509),
-  leaves the document in `DRAFT`, and a numbering rule that allows gaps loses
-  the number it allocated, which *with nothing written* hid. The same
+  keeps the document's status, and on a numbering rule that allows gaps a
+  first submission loses the number it was allocated, which *with nothing
+  written* hid; a resubmission allocates none. The same
   sentences are corrected in ADR-0043 §4, architectures/03 §2.14, the User Manual
-  §11.5 and the documentation index. No behaviour changes.
+  §11.5 and the documentation index, and *with nothing written* in JWSS
+  §5.3's `OWNER_DEPARTMENT` sentence (revision R-19). No behaviour changes.
 - **A document type bound to a deprecated workflow revision can be renamed**
   ([#716](https://github.com/sujanto-gaws/kelir/issues/716)). `PUT
   /document-types/{id}` checked every binding in a sent `workflows` array, so
@@ -1756,11 +1758,12 @@ dispatcher, FR-INT-003, FR-INT-004, FR-INT-010 and FR-MDM-011 come after
   ([#510](https://github.com/sujanto-gaws/kelir/issues/510), below). No route
   cancels a task. A document submitted while a role is being deleted waits
   for the delete, then is refused as `ASSIGNMENT_UNRESOLVED` if the delete
-  went through, ~~with nothing written~~ and stays in `DRAFT`; on a numbering
-  rule that allows gaps, it loses the number it was allocated (corrected
-  2026-11-04, [#699](https://github.com/sujanto-gaws/kelir/issues/699): such
-  a rule allocates and commits the number before the submission's
-  transaction). For a role deleted before this release
+  went through, ~~with nothing written~~ and keeps its status. A first
+  submission stays in `DRAFT`, and on a numbering rule that allows gaps it
+  loses the number it was allocated (corrected 2026-11-04,
+  [#699](https://github.com/sujanto-gaws/kelir/issues/699): such a rule
+  allocates and commits the number before the submission's transaction; a
+  resubmission allocates none). For a role deleted before this release
   with tasks still open, see *Upgrade notes*
   ([#511](https://github.com/sujanto-gaws/kelir/issues/511)).
 - **A task is not raised when a decision on it names a role that is gone**
@@ -1770,9 +1773,11 @@ dispatcher, FR-INT-003, FR-INT-004, FR-INT-010 and FR-MDM-011 come after
   document already `PENDING_APPROVAL`. The transition that would raise it is
   now refused with the same code, naming the edge
   (`transitions.<state>.<action>.allowedBy.roleCode`), and ~~nothing is
-  written:~~ a submit leaves the document in `DRAFT`, and on a numbering rule
-  that allows gaps it loses the number it was allocated (corrected
-  2026-11-04, [#699](https://github.com/sujanto-gaws/kelir/issues/699)). The
+  written: a submit leaves the document in `DRAFT`~~ a first submission leaves
+  the document in `DRAFT`, and on a numbering rule that allows gaps it loses
+  the number it was allocated (corrected 2026-11-04,
+  [#699](https://github.com/sujanto-gaws/kelir/issues/699); a resubmission
+  allocates none). The
   roles an edge names
   are also held while the task is raised, so a role delete can no longer slip
   between them and strand the task. A published definition whose edge names a
