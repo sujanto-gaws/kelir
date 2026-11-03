@@ -635,5 +635,107 @@ describe('ListBuilderPage', () => {
         expect(wrapper.get('[data-testid="render-broken"]').text()).toContain(NOT_RENDERABLE)
       })
     })
+
+    /*
+     * test-engineer, row 22's gate. The cases above reach the column key's
+     * render placement only; AC2 keeps all three. The render details are
+     * `render::plan`'s own (`plan_filters`, `plan_sort`), under the code
+     * `AppError::validation` answers with.
+     */
+    describe('the other two render placements, and shown once', () => {
+      function cannotBeDrawn(path: string, rule: string, code: string, message: string) {
+        return {
+          status: 422,
+          body: errorBody('VALIDATION_ERROR', 'Validation failed', [{ path, rule, code, message }]),
+        }
+      }
+
+      const FILTER_NOT_RENDERABLE =
+        '`stage` is not something a document list can be filtered by, so this control would do nothing — the parameters are `search`, `status`, `priority`, `entityType`, `entityId`'
+      const SORT_NOT_RENDERABLE =
+        'this list declares 2 sort keys and a document list is ordered by one — the rest would be silently ignored'
+
+      it('still shows a render detail under the filter key it names', async () => {
+        current = definition({
+          filters: [{ filterKey: 'stage', label: 'Stage', filterType: 'TEXT', isDefault: false }],
+        })
+        renderResponse = cannotBeDrawn(
+          'filters.0.filterKey',
+          'filterKey',
+          'FILTER_NOT_RENDERABLE',
+          FILTER_NOT_RENDERABLE,
+        )
+        const wrapper = await render()
+
+        expect(rowText(wrapper, 'filter-0')).toContain(FILTER_NOT_RENDERABLE)
+        expect(wrapper.get('[data-testid="render-broken"]').text()).toContain(FILTER_NOT_RENDERABLE)
+        expect(list(wrapper).exists()).toBe(false)
+      })
+
+      it('still shows a render detail under the opening sort', async () => {
+        current = definition({
+          defaultSort: [
+            { key: 'title', dir: 'asc' },
+            { key: 'createdAt', dir: 'desc' },
+          ],
+        })
+        renderResponse = cannotBeDrawn(
+          'defaultSort',
+          'defaultSort',
+          'SORT_NOT_RENDERABLE',
+          SORT_NOT_RENDERABLE,
+        )
+        const wrapper = await render()
+
+        const sortBlock = wrapper.get('[data-testid="sort-key"]').element.parentElement
+
+        expect(sortBlock?.textContent).toContain(SORT_NOT_RENDERABLE)
+        expect(list(wrapper).exists()).toBe(false)
+      })
+
+      // AC6 beside a broken render panel: the panel is the render check's,
+      // and a save's refusal is not repeated in it.
+      it('says a save’s refusal once while the render panel is up', async () => {
+        renderResponse = cannotBeDrawn(
+          'filters.0.filterKey',
+          'filterKey',
+          'FILTER_NOT_RENDERABLE',
+          FILTER_NOT_RENDERABLE,
+        )
+        saveReply = refusal(COLUMN_KEY_DUPLICATE)
+        const wrapper = await render()
+
+        await save(wrapper)
+
+        expect(rowText(wrapper, 'column-1')).toContain(COLUMN_KEY_DUPLICATE[3])
+        expect(shown(wrapper, COLUMN_KEY_DUPLICATE[3])).toBe(1)
+        expect(wrapper.get('[data-testid="render-broken"]').text()).not.toContain(
+          COLUMN_KEY_DUPLICATE[3],
+        )
+      })
+    })
+
+    // test-engineer: a column's and a filter's label refused at one index,
+    // so a slot reading the other collection's path is seen.
+    it('places a column’s and a filter’s label refusal at one index, each in its own row', async () => {
+      const COLUMN_LABEL_0: Detail = [
+        'columns.0.label',
+        'required',
+        'REQUIRED',
+        'columns.0.label is required',
+      ]
+      saveReply = refusal(COLUMN_LABEL_0, FILTER_LABEL_TOO_LONG)
+      const wrapper = await render()
+
+      await save(wrapper)
+
+      expect(wrapper.get('[data-testid="column-label-0-message"]').text()).toBe(COLUMN_LABEL_0[3])
+      expect(wrapper.get('[data-testid="filter-label-0-message"]').text()).toBe(
+        FILTER_LABEL_TOO_LONG[3],
+      )
+      expect(shown(wrapper, COLUMN_LABEL_0[3])).toBe(1)
+      expect(shown(wrapper, FILTER_LABEL_TOO_LONG[3])).toBe(1)
+      expect(list(wrapper).exists()).toBe(false)
+    })
   })
 })

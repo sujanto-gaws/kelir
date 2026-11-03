@@ -394,4 +394,53 @@ describe('MenuFormDialog: where a refusal is shown (#641, #672)', () => {
       isEnabled: true,
     })
   })
+
+  // test-engineer, #641 AC11: the create body, which the case above (an
+  // edit) does not reach. Green before row 22's change as after it.
+  it('sends the same request as before when creating, the key trimmed', async () => {
+    const wrapper = open()
+
+    await wrapper.get('[data-testid="menu-key"]').setValue('  purchasing  ')
+    await wrapper.get('[data-testid="menu-label"]').setValue('Purchasing')
+    await save(wrapper)
+
+    const post = backend.requests.find((request) => request.method === 'post')
+
+    expect(post?.url).toBe('/rad/menus')
+    expect(post?.body).toEqual({
+      menuKey: 'purchasing',
+      label: 'Purchasing',
+      icon: null,
+      parentMenuId: null,
+      routePath: null,
+      requiredPermission: null,
+      sortOrder: 0,
+      isEnabled: true,
+    })
+  })
+
+  // test-engineer, #641 AC4 and AC5: `sortOrder` is an `i32` and the Order
+  // input has no slot, so a number past it, refused by `extract::detail`, is
+  // listed. A path added to PLACED without a slot would make it vanish.
+  it('lists a refusal of the order, which has no slot', async () => {
+    const ORDER_OUT_OF_RANGE: Detail = [
+      'sortOrder',
+      'type',
+      'INVALID_TYPE',
+      'Invalid value: integer `99999999999`, expected i32',
+    ]
+    reply = refusal(ORDER_OUT_OF_RANGE)
+    const wrapper = open()
+
+    await wrapper.get('[data-testid="menu-order"]').setValue('99999999999')
+    await save(wrapper)
+
+    const post = backend.requests.find((request) => request.method === 'post')
+
+    expect((post?.body as { sortOrder: number }).sortOrder).toBe(99999999999)
+    expect(listed(wrapper)).toEqual([`sortOrder: ${ORDER_OUT_OF_RANGE[3]}`])
+    expect(shown(wrapper, ORDER_OUT_OF_RANGE[3])).toBe(1)
+    expect(wrapper.find('[data-testid="menu-error"]').exists()).toBe(false)
+    expect(wrapper.emitted('saved')).toBeUndefined()
+  })
 })

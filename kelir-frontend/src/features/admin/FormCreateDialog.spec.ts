@@ -275,6 +275,39 @@ describe('FormCreateDialog: where a refusal is shown (#641)', () => {
     expect(body.title).toBe('Purchase requisition')
     expect(body.definition.formId).toBe('purchase_requisition')
   })
+
+  // test-engineer, #641 AC11: the whole body, from padded input, so a lost
+  // trim or a changed seed is seen. Green before row 22's change as after it.
+  it('sends the whole request as before, the key and title trimmed', async () => {
+    const wrapper = open()
+
+    await wrapper.get('[data-testid="form-key"]').setValue('  purchase_requisition  ')
+    await wrapper.get('[data-testid="form-title"]').setValue('  Purchase requisition  ')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    const post = backend.requests.find((request) => request.method === 'post')
+
+    expect(post?.body).toEqual({
+      formKey: 'purchase_requisition',
+      title: 'Purchase requisition',
+      definition: {
+        formId: 'purchase_requisition',
+        version: '2.0.1',
+        title: 'Purchase requisition',
+        components: [
+          {
+            id: 'field_1',
+            role: 'data',
+            type: 'textfield',
+            key: 'field_1',
+            label: 'Field 1',
+            validation: { type: 'string' },
+          },
+        ],
+      },
+    })
+  })
 })
 
 /**

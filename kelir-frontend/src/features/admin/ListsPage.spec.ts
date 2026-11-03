@@ -1,9 +1,11 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import type { AxiosResponse, InternalAxiosRequestConfig } from 'axios'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 
 import ListsPage from './ListsPage.vue'
+import { apiClient } from '@/api/client'
 import { registerSessionBridge } from '@/api/session'
 import {
   errorBody,
@@ -323,5 +325,46 @@ describe('ListsPage create form: where a refusal is shown (#641)', () => {
       filters: [],
     })
     expect(router.currentRoute.value.name).toBe('admin-list-builder')
+  })
+
+  // test-engineer, #641 AC10. The case above clears through the second
+  // refusal's own report; this holds the answer back, so it is Create itself
+  // that clears. Without it the last refusal stays beside "Creating…" until
+  // the server answers.
+  it('clears the last refusal as soon as Create is pressed again', async () => {
+    createReply = refusal(TITLE_REQUIRED, UNKNOWN_FIELD)
+    const wrapper = await render()
+
+    await create(wrapper)
+    expect(list(wrapper).exists()).toBe(true)
+
+    const fake = apiClient.defaults.adapter as (
+      config: InternalAxiosRequestConfig,
+    ) => Promise<AxiosResponse>
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+
+    apiClient.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      if (config.method === 'post') {
+        await gate
+      }
+
+      return fake(config)
+    }
+    createReply = refusal(KEY_TOO_LONG)
+
+    await wrapper.get('[data-testid="list-create-dialog"] form').trigger('submit')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="save-list"]').text()).toBe('Creating…')
+    expect(list(wrapper).exists()).toBe(false)
+    expect(shown(wrapper, TITLE_REQUIRED[3])).toBe(0)
+
+    release()
+    await flushPromises()
+
+    expect(blockOf(wrapper, 'list-key')).toContain(KEY_TOO_LONG[3])
   })
 })

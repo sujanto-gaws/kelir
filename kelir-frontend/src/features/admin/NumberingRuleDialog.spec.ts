@@ -339,4 +339,47 @@ describe('NumberingRuleDialog: where a refusal is shown (#641)', () => {
       gapPolicy: 'GAPLESS',
     })
   })
+
+  // test-engineer, #641 AC11: a padded template is trimmed and an empty
+  // padding is left out, not sent as 0. Green before row 22's change as after.
+  it('sends the template trimmed and leaves an empty padding out, as before', async () => {
+    const wrapper = await open()
+
+    await wrapper.get('[data-testid="rule-template"]').setValue('  PR-{year}-{sequence}  ')
+    await wrapper.get('[data-testid="rule-padding"]').setValue('')
+    await save(wrapper)
+
+    const put = backend.requests.find((request) => request.method === 'put')
+
+    expect(put?.body).toStrictEqual({
+      ruleTemplate: 'PR-{year}-{sequence}',
+      sequenceScope: 'YEAR',
+      gapPolicy: 'GAPLESS',
+    })
+  })
+
+  // test-engineer, #641 AC10: the clearing on opening happens before the
+  // read, so a read that then fails does not bring the last save's refusal
+  // back beside its own message.
+  it('opens again without the last refusal when the read then fails', async () => {
+    saveReply = refusal(MISSING_SEQUENCE, UNKNOWN_FIELD)
+    const wrapper = await open()
+
+    await save(wrapper)
+    expect(list(wrapper).exists()).toBe(true)
+
+    readReply = {
+      status: 403,
+      body: errorBody('FORBIDDEN', 'You do not have permission to perform this action'),
+    }
+    await wrapper.setProps({ open: false })
+    await wrapper.setProps({ open: true })
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="numbering-error"]').text()).toBe(
+      'You do not have permission to perform this action',
+    )
+    expect(list(wrapper).exists()).toBe(false)
+    expect(shown(wrapper, MISSING_SEQUENCE[3])).toBe(0)
+  })
 })
