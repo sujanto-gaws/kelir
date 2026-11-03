@@ -9,8 +9,10 @@ import {
   limitsFor,
   messageAt,
   paramsFlag,
+  readOptionValue,
   rowKeys,
   seededParams,
+  shownOptionValue,
   switchValueType,
   toggleUniqueBy,
   withProperty,
@@ -18,7 +20,8 @@ import {
 
 /**
  * The panel's edits as pure functions (#688 AC3, AC3b, AC9; #722 AC15). The
- * panel's own spec drives them through the screen; these pin the edge cases.
+ * panel's own spec drives them through the screen; these pin the edge cases,
+ * the option values' (#790) included.
  * The mutations seen to redden the #722 cases are listed in
  * `ValidationRulesSection.spec.ts`.
  */
@@ -33,6 +36,37 @@ describe('withProperty', () => {
     expect(withProperty(node, 'b', false)).toEqual({ a: 1, b: false })
     // The original is not changed.
     expect(node).toEqual({ a: 1, b: 'x' })
+  })
+})
+
+describe('an option value (#790)', () => {
+  it.each([
+    ['number', '42', 42, false],
+    ['number', ' -2.5 ', -2.5, false],
+    ['number', '1.', 1, false],
+    ['number', '-', '-', true],
+    ['number', '', '', true],
+    ['number', 'Infinity', 'Infinity', true],
+    ['integer', '7', 7, false],
+    ['integer', '1.5', '1.5', true],
+    ['boolean', 'true', true, false],
+    ['boolean', 'false', false, false],
+    ['boolean', 'True', 'True', true],
+    ['string', '42', '42', false],
+    ['string', ' a ', ' a ', false],
+    ['array', '[1]', '[1]', false],
+    ['object', '{}', '{}', false],
+  ])('reads %s %j as %j, as text against the type: %s', (type, text, value, asText) => {
+    expect(readOptionValue(text, type)).toStrictEqual({ value, asText })
+  })
+
+  it('shows a string as it is, and anything else as its JSON with its type', () => {
+    expect(shownOptionValue('1')).toStrictEqual({ text: '1' })
+    expect(shownOptionValue(1)).toStrictEqual({ text: '1', hint: 'number' })
+    expect(shownOptionValue(false)).toStrictEqual({ text: 'false', hint: 'boolean' })
+    expect(shownOptionValue(null)).toStrictEqual({ text: 'null', hint: 'null' })
+    expect(shownOptionValue({ x: 1 })).toStrictEqual({ text: '{"x":1}', hint: 'object' })
+    expect(shownOptionValue([1])).toStrictEqual({ text: '[1]', hint: 'object' })
   })
 })
 

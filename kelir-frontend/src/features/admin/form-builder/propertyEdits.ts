@@ -263,6 +263,43 @@ export const PLACEHOLDER_TYPES: readonly string[] = [
   'lookup',
 ]
 
+// --- Options (#790) --------------------------------------------------------------
+
+/**
+ * What a typed option value is stored as, read by the field's `validation.type`:
+ * a finite number for `number`, a whole one for `integer`, and `true` or
+ * `false` for `boolean`. **Anything else is stored as the text typed**, and
+ * `asText` says that text does not match the type. It is never refused.
+ * `string`, `array` and `object` store the text as typed.
+ */
+export function readOptionValue(text: string, type: string): { value: unknown; asText: boolean } {
+  const number = text.trim() === '' ? NaN : Number(text)
+
+  if (type === 'number' || type === 'integer') {
+    return Number.isFinite(number) && (type === 'number' || Number.isInteger(number))
+      ? { value: number, asText: false }
+      : { value: text, asText: true }
+  }
+
+  if (type === 'boolean') {
+    return text === 'true' || text === 'false'
+      ? { value: text === 'true', asText: false }
+      : { value: text, asText: true }
+  }
+
+  return { value: text, asText: false }
+}
+
+/**
+ * How an option's value is shown: a string as it is, and anything else as its
+ * JSON with its type as a hint, so `1` and `"1"` can be told apart.
+ */
+export function shownOptionValue(value: unknown): { text: string; hint?: string } {
+  return typeof value === 'string'
+    ? { text: value }
+    : { text: JSON.stringify(value) ?? '', hint: value === null ? 'null' : typeof value }
+}
+
 // --- Type switches (part 1's rules, moved here unchanged) ------------------------
 
 /** What a fresh node of a type carries: the builder's own defaults. */
