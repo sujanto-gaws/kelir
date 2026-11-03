@@ -766,9 +766,9 @@ While the major version is `0`, the public API may change in any release.
   Each option now has a label and a value of its own, with *Add option* and
   *Remove*, and an edit replaces only that option. A typed value is read by the
   field's value type, a number for `number` or `integer` and `true` or `false`
-  for `boolean`, and anything else is saved as text with a note on the row. An
-  option saved as text by the old box stays as saved, and is corrected by
-  entering its value again.
+  for `boolean`, and a value that does not read as its type is saved as text
+  with a note on the row. An option saved as text by the old box stays as
+  saved, and is corrected by entering its value again.
 - **A logic-builder condition can no longer be saved meaning the opposite of
   what was entered** ([#748](https://github.com/sujanto-gaws/kelir/issues/748)).
   On a condition loaded as `{"!": {"var": "a"}}`, an array typed into the
