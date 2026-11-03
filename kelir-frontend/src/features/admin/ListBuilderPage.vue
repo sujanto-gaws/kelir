@@ -4,12 +4,14 @@ import { useRoute } from 'vue-router'
 
 import { toApiError } from '@/api/client'
 import { getList, getRenderableList, updateList } from '@/api/rad'
+import FormUnplacedErrors from '@/components/FormUnplacedErrors.vue'
 import { Alert } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select } from '@/components/ui/select'
+import { useFormErrors } from '@/composables/useFormErrors'
 import { useAuthStore } from '@/stores/auth'
 import type { ValidationDetail } from '@/types/api'
 import type { ListColumn, ListDefinition, ListFilter, ListFilterType } from '@/types/rad'
@@ -131,8 +133,17 @@ const sortDir = ref('asc')
 const isLoading = ref(true)
 const isSaving = ref(false)
 const loadError = ref('')
-const saveError = ref('')
-const details = ref<ValidationDetail[]>([])
+/**
+ * Why the last save was refused (#641, #672): `formError` is shown as
+ * `save-error`, and a detail goes under its input or into the list. The render
+ * check's answer below is a separate channel and is not held here.
+ */
+const {
+  fieldErrors: saveErrors,
+  formError: saveError,
+  report: reportSave,
+  reset: resetSave,
+} = useFormErrors()
 
 /** What the server said the last time it was asked to draw this list. */
 const renderVerdict = ref<'unknown' | 'drawable' | 'unbound' | 'broken'>('unknown')
@@ -146,9 +157,34 @@ const sortableColumns = computed(() =>
     .map((column) => ({ value: column.columnKey, label: column.columnKey })),
 )
 
+/**
+ * The message under one of the three inputs a render check also names: the
+ * save's refusal first, then the render check's.
+ */
 function detailFor(path: string): string | undefined {
-  return [...details.value, ...renderDetails.value].find((detail) => detail.path === path)?.message
+  return (
+    saveErrors.value[path] ?? renderDetails.value.find((detail) => detail.path === path)?.message
+  )
 }
+
+/** The save's message for an input the render check never names. */
+function saveMessage(path: string): string {
+  return saveErrors.value[path] ?? ''
+}
+
+/**
+ * The paths a save's message is shown under, as the page is drawn now: one
+ * label and one key per row present. A detail for a row that is not there, as
+ * after one was removed, is listed rather than dropped. `status` is a closed
+ * choice, so a refusal of it is listed too.
+ */
+const placed = computed(() => [
+  'title',
+  'pageSize',
+  'defaultSort',
+  ...columns.value.flatMap((_, at) => [`columns.${at}.columnKey`, `columns.${at}.label`]),
+  ...filters.value.flatMap((_, at) => [`filters.${at}.filterKey`, `filters.${at}.label`]),
+])
 
 /** `default_sort_json` is `[{"key": …, "dir": …}]` (§5.6). */
 function readSort(value: unknown): { key: string; dir: string } {
@@ -281,8 +317,7 @@ async function save(): Promise<void> {
   }
 
   isSaving.value = true
-  saveError.value = ''
-  details.value = []
+  resetSave()
 
   try {
     const saved = await updateList(current.id, {
@@ -306,10 +341,7 @@ async function save(): Promise<void> {
     // the condition that this asks.
     await askWhetherItDraws(saved.listKey)
   } catch (failure) {
-    const failed = toApiError(failure)
-
-    saveError.value = failed.message
-    details.value = failed.details
+    reportSave(toApiError(failure))
   } finally {
     isSaving.value = false
   }
@@ -347,6 +379,12 @@ onMounted(() => {
 
       <Alert v-if="saveError" variant="destructive" data-testid="save-error">{{ saveError }}</Alert>
 
+      <FormUnplacedErrors
+        :field-errors="saveErrors"
+        :placed="placed"
+        data-testid="list-builder-unplaced-errors"
+      />
+
       <!-- **The panel §8.2.4 asked for.** Not an empty table and not silence:
            the server's own answer about whether this definition can be drawn,
            with the key it could not resolve. -->
@@ -373,7 +411,22 @@ onMounted(() => {
       <div class="grid gap-4 sm:grid-cols-3">
         <div class="space-y-2">
           <Label for="list-title">Title</Label>
-          <Input id="list-title" v-model="title" :disabled="!canUpdate" data-testid="list-title" />
+          <Input
+            id="list-title"
+            v-model="title"
+            :disabled="!canUpdate"
+            data-testid="list-title"
+            :invalid="Boolean(saveMessage('title'))"
+            :described-by="saveMessage('title') ? 'list-title-message' : undefined"
+          />
+          <p
+            v-if="saveMessage('title')"
+            id="list-title-message"
+            class="text-xs text-destructive"
+            data-testid="list-title-message"
+          >
+            {{ saveMessage('title') }}
+          </p>
         </div>
 
         <div class="space-y-2">
@@ -394,12 +447,22 @@ onMounted(() => {
             v-model="pageSize"
             :disabled="!canUpdate"
             data-testid="list-page-size"
+            :invalid="Boolean(saveMessage('pageSize'))"
+            :described-by="saveMessage('pageSize') ? 'list-page-size-message' : undefined"
           />
           <!-- Said here because an author would otherwise expect a request to
                be able to widen it; a client that could would be overruling the
                configuration it had just read. -->
           <p class="text-xs text-muted-foreground">
             The definition decides this. A request asking for a bigger page is refused by name.
+          </p>
+          <p
+            v-if="saveMessage('pageSize')"
+            id="list-page-size-message"
+            class="text-xs text-destructive"
+            data-testid="list-page-size-message"
+          >
+            {{ saveMessage('pageSize') }}
           </p>
         </div>
       </div>
@@ -435,6 +498,10 @@ onMounted(() => {
             :model-value="column.label"
             :disabled="!canUpdate"
             :data-testid="`column-label-${at}`"
+            :invalid="Boolean(saveMessage(`columns.${at}.label`))"
+            :described-by="
+              saveMessage(`columns.${at}.label`) ? `column-label-${at}-message` : undefined
+            "
             @update:model-value="patchColumn(at, { label: String($event) })"
           />
 
@@ -493,6 +560,14 @@ onMounted(() => {
           >
             {{ detailFor(`columns.${at}.columnKey`) }}
           </p>
+          <p
+            v-if="saveMessage(`columns.${at}.label`)"
+            :id="`column-label-${at}-message`"
+            class="text-xs text-destructive sm:col-span-4"
+            :data-testid="`column-label-${at}-message`"
+          >
+            {{ saveMessage(`columns.${at}.label`) }}
+          </p>
         </div>
 
         <p v-if="columns.length === 0" class="text-sm text-destructive" data-testid="no-columns">
@@ -532,6 +607,10 @@ onMounted(() => {
             :model-value="filter.label"
             :disabled="!canUpdate"
             :data-testid="`filter-label-${at}`"
+            :invalid="Boolean(saveMessage(`filters.${at}.label`))"
+            :described-by="
+              saveMessage(`filters.${at}.label`) ? `filter-label-${at}-message` : undefined
+            "
             @update:model-value="patchFilter(at, { label: String($event) })"
           />
           <Select
@@ -558,6 +637,14 @@ onMounted(() => {
             class="text-xs text-destructive sm:col-span-4"
           >
             {{ detailFor(`filters.${at}.filterKey`) }}
+          </p>
+          <p
+            v-if="saveMessage(`filters.${at}.label`)"
+            :id="`filter-label-${at}-message`"
+            class="text-xs text-destructive sm:col-span-4"
+            :data-testid="`filter-label-${at}-message`"
+          >
+            {{ saveMessage(`filters.${at}.label`) }}
           </p>
         </div>
       </div>
