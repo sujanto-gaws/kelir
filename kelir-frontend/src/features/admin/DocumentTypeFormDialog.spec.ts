@@ -1010,6 +1010,23 @@ describe('DocumentTypeFormDialog choosers', () => {
     expect(wrapper.emitted('saved')).toBeUndefined()
   })
 
+  // #641 AC12: a 422 that names no field has nothing to place or list, so its
+  // envelope's message is the one thing said, once, above the form.
+  it('says a refusal that carries no details once, above the form, with no list', async () => {
+    refusingPut(refusal())
+    const wrapper = await open(boundType(wantedFlow.id))
+    await flushPromises()
+
+    await wrapper.get('[data-testid="type-name"]').setValue('Requisition (renamed)')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="document-type-error"]').text()).toBe('Validation failed')
+    expect(wrapper.text().split('Validation failed')).toHaveLength(2)
+    expect(wrapper.find('[data-testid="document-type-unplaced-errors"]').exists()).toBe(false)
+    expect(wrapper.emitted('saved')).toBeUndefined()
+  })
+
   it('stays open when a save rebinding to a revision deprecated since it was listed is refused', async () => {
     refusingPut(
       refusal(['workflows.0.workflowDefinitionId', 'NOT_PUBLISHED', workflowNotPublished]),
