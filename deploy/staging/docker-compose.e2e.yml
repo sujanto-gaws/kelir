@@ -29,8 +29,8 @@
 #     entry. The entry is the upstream's own fixed address and not the
 #     network's range: the backend and the network's gateway (the host) are on
 #     that network too, and neither is something a test call should reach.
-#     Loopback, link-local and the metadata address stay refused; no setting
-#     opens them.
+#     Loopback, link-local and the cloud metadata addresses stay refused; no
+#     setting opens them.
 #   * `KELIR_INTEGRATION_SECRET_SYSTEM__E2E_UPSTREAM_TOKEN` — the secret, under
 #     the **system tenant's** namespace, because the flows sign in as the
 #     bootstrap administrator and a tenant reads only its own names (#618,
