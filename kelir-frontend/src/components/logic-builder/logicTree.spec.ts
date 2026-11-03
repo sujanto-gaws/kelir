@@ -13,11 +13,13 @@ import {
   addOperandAt,
   applyEdit,
   CALCULATE_TIER_OPERATORS,
+  canChangeOperator,
   changeOperatorAt,
   CONDITIONAL_TIER_OPERATORS,
   containsOpaque,
   createNode,
   familiesIn,
+  holeNode,
   IncompleteExpressionError,
   isComplete,
   isOfferedPath,
@@ -32,9 +34,11 @@ import {
   removeOperandAt,
   replaceAt,
   serialise,
+  summarise,
   varNode,
   type LogicNode,
   type LogicTier,
+  type OperatorNode,
 } from './logicTree'
 
 /**
@@ -584,6 +588,129 @@ describe('a bare not given an array operand (#748)', () => {
 
     expect(serialise(tree)).toBe(expr)
     expect(JSON.stringify(rebuild(tree))).toBe(JSON.stringify(expr))
+  })
+
+  // The test-engineer campaign, 2026-11-03: what the cases above did not reach,
+  // an array's contents, depth, the operator, the view's reading. The mutants
+  // and what reddened each are in the row's PR.
+  describe('at the gate', () => {
+    it.each([
+      ['an array of arrays', [[0, 1]], '{"!":[[[0,1]]]}'],
+      ['an array holding an empty array', [[]], '{"!":[[[]]]}'],
+      ['an array of expressions', [{ var: 'a' }], '{"!":[[{"var":"a"}]]}'],
+      ['an array of objects', [{ a: 1 }, 2], '{"!":[[{"a":1},2]]}'],
+    ])('wraps %s: the rule looks at no element', (_name, operand, json) => {
+      const tree = edited(operand)
+
+      expect(JSON.stringify(serialise(tree))).toBe(json)
+      expect(JSON.stringify(rebuild(tree))).toBe(json)
+    })
+
+    it('wraps [[]], where leaving it bare would flip the rule', () => {
+      const emitted = serialise(edited([[]]))
+
+      expect(evaluator.evaluate(emitted, {})).toBe(false)
+      // Read as arguments, the operand is `[]`, which is falsy.
+      expect(evaluator.evaluate({ '!': [[]] }, {})).toBe(true)
+    })
+
+    it('holds the wrapped array by reference, in both paths', () => {
+      const array = [0, 1]
+      const tree = edited(array)
+
+      expect((serialise(tree) as { '!': unknown[] })['!'][0]).toBe(array)
+      expect((rebuild(tree) as { '!': unknown[] })['!'][0]).toBe(array)
+    })
+
+    it.each<[string, unknown, string]>([
+      ['a bare not', { '!': { '!': { var: 'a' } } }, '{"!":{"!":[[0,1]]}}'],
+      ['a wrapped not', { '!': [{ '!': { var: 'a' } }] }, '{"!":[{"!":[[0,1]]}]}'],
+    ])('wraps at depth, and %s above it keeps its own form', (_name, not, json) => {
+      const sibling = { '===': [{ var: 'type' }, 'invoice'] }
+      const neighbour = { var: 'b' }
+      const expr = { and: [{ or: [not, sibling] }, neighbour] }
+      const tree = parseExpression(expr, 'conditional')
+      const changed = replaceAt(tree, [0, 0, 0, 0], opaqueNode([0, 1]))
+      const value = serialise(changed) as { and: [{ or: [unknown, unknown] }, unknown] }
+
+      expect(JSON.stringify(value.and[0].or[0])).toBe(json)
+      expect(value.and[0].or[1]).toBe(sibling)
+      expect(value.and[1]).toBe(neighbour)
+      expect(nodeAt(changed, [1])).toBe(nodeAt(tree, [1]))
+      expect(nodeAt(changed, [0, 1])).toBe(nodeAt(tree, [0, 1]))
+    })
+
+    it('leaves the tree passed in as it was, at every level of the path', () => {
+      const expr = { and: [{ '!': { '!': { var: 'a' } } }, { var: 'b' }] }
+      const tree = parseExpression(expr, 'conditional')
+
+      replaceAt(tree, [0, 0, 0], opaqueNode([0, 1]))
+
+      expect(nodeAt(tree, [0, 0, 0])).toEqual(expect.objectContaining({ kind: 'var', path: 'a' }))
+      expect(serialise(tree)).toBe(expr)
+      expect(JSON.stringify(rebuild(tree))).toBe(JSON.stringify(expr))
+    })
+
+    it('rebuilds every level, so the round trip is not an original returned', () => {
+      const not = { '!': { var: 'a' } }
+      const tree = parseExpression({ and: [not, { var: 'b' }] }, 'conditional')
+
+      expect((rebuild(tree) as { and: unknown[] }).and[0]).not.toBe(not)
+    })
+
+    it('keeps the array and the form through changing not to not', () => {
+      const tree = edited([0, 1])
+      const changed = changeOperatorAt(tree, [], '!')
+
+      expect(canChangeOperator(tree as OperatorNode, '!')).toBe(true)
+      expect(changed).toMatchObject({ bare: true })
+      expect(JSON.stringify(serialise(changed))).toBe('{"!":[[0,1]]}')
+    })
+
+    it.each<[string, LogicNode, string]>([
+      ['an array', opaqueNode([0, 1]), '[0,1]'],
+      ['a var', varNode('b'), '{"var":"b"}'],
+    ])('drops the bare form with the not, holding %s', (_name, operand, json) => {
+      const tree = replaceAt(edited([]), [0], operand)
+
+      expect(canChangeOperator(tree as OperatorNode, 'and')).toBe(true)
+
+      const changed = replaceAt(changeOperatorAt(tree, [], 'and'), [1], literalNode(true))
+
+      expect(changed).toMatchObject({ bare: false })
+      expect(JSON.stringify(serialise(changed))).toBe(`{"and":[${json},true]}`)
+    })
+
+    it('refuses a second operand, and the loss of the only one', () => {
+      const tree = edited([0, 1])
+
+      expect(() => addOperandAt(tree, [])).toThrow(RangeError)
+      expect(() => removeOperandAt(tree, [0])).toThrow(RangeError)
+    })
+
+    it('waits while the operand is a hole, and wraps what fills it', () => {
+      const hole = replaceAt(edited([0, 1]), [0], holeNode('json', '[0,'))
+
+      expect(isComplete(hole)).toBe(false)
+      expect(() => serialise(hole)).toThrow(IncompleteExpressionError)
+      expect(summarise(hole)).toBe('not ?')
+      expect(JSON.stringify(serialise(replaceAt(hole, [0], opaqueNode([2]))))).toBe('{"!":[[2]]}')
+    })
+
+    it('reads as not advanced, and counts as opaque, until a shown operand replaces it', () => {
+      const tree = parseExpression({ and: [{ '!': { var: 'a' } }, true] }, 'conditional')
+      const changed = replaceAt(tree, [0, 0], opaqueNode([0, 1]))
+
+      expect(summarise(edited([0, 1]))).toBe('not advanced')
+      expect(summarise(changed)).toBe('(not advanced and true)')
+      expect(containsOpaque(edited([0, 1]))).toBe(true)
+      expect(containsOpaque(changed)).toBe(true)
+
+      const shown = replaceAt(changed, [0, 0], varNode('b'))
+
+      expect(summarise(shown)).toBe('(not b and true)')
+      expect(containsOpaque(shown)).toBe(false)
+    })
   })
 })
 

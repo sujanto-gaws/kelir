@@ -880,6 +880,123 @@ describe('JsonLogicBuilder at its edges (campaign, 2026-10-09)', () => {
       expect(JSON.stringify(lastEmitted(wrapper))).toBe('{"!":[[0,1]]}')
     })
 
+    // The test-engineer campaign, 2026-11-03, on #748: routes to the operand
+    // other than the kind chooser, and what the operand does to the view.
+    describe('an array as a bare not’s operand, at the gate', () => {
+      const operand = 'Expression, operand 1'
+
+      it('is wrapped when typed over an opaque operand already held', async () => {
+        const wrapper = mountBuilder({ '!': { min: [1, 2] } })
+
+        expect(byLabel(wrapper, operand).text()).toContain('Advanced')
+
+        await byLabel(wrapper, operand).get('textarea').setValue('[1, 2]')
+
+        expect(JSON.stringify(lastEmitted(wrapper))).toBe('{"!":[[1,2]]}')
+        expect(byLabel(wrapper, operand).text()).toContain('Advanced')
+      })
+
+      it('follows the text through another array, invalid text, and a scalar', async () => {
+        const wrapper = mountBuilder({ '!': { var: 'a' } })
+
+        await byLabel(wrapper, `${operand}: kind`).setValue('json')
+
+        const box = byLabel(wrapper, operand).get('textarea')
+
+        await box.setValue('[0, 1]')
+        await box.setValue('[0]')
+        expect(JSON.stringify(lastEmitted(wrapper))).toBe('{"!":[[0]]}')
+
+        const count = emitted(wrapper).length
+
+        await box.setValue('[0, ')
+
+        expect(emitted(wrapper)).toHaveLength(count)
+        expect(isValid(wrapper)).toBe(false)
+        expect(box.attributes('aria-invalid')).toBe('true')
+        expect(byLabel(wrapper, operand).text()).toContain('Not valid JSON yet.')
+        expect((box.element as HTMLTextAreaElement).value).toBe('[0, ')
+
+        await box.setValue('[0, 2]')
+
+        expect(JSON.stringify(lastEmitted(wrapper))).toBe('{"!":[[0,2]]}')
+        expect(isValid(wrapper)).toBe(true)
+        expect(box.attributes('aria-invalid')).toBe('false')
+        expect(byLabel(wrapper, operand).text()).not.toContain('Not valid JSON yet.')
+
+        await box.setValue('5')
+
+        expect(JSON.stringify(lastEmitted(wrapper))).toBe('{"!":5}')
+        // The same box throughout: it was never remounted under the typing.
+        expect(byLabel(wrapper, operand).get('textarea').element).toBe(box.element)
+      })
+
+      it('is wrapped deep in a tree, and its ancestors and sibling stay', async () => {
+        const sibling = { '===': [{ var: 'type' }, 'invoice'] }
+        const wrapper = mountBuilder({ and: [{ '!': { '!': { var: 'a' } } }, sibling] })
+        const deep = 'Expression, operand 1, operand 1, operand 1'
+
+        await byLabel(wrapper, `${deep}: kind`).setValue('json')
+        await byLabel(wrapper, deep).get('textarea').setValue('[0, 1]')
+
+        const value = lastEmitted(wrapper) as { and: unknown[] }
+
+        expect(JSON.stringify(value.and[0])).toBe('{"!":{"!":[[0,1]]}}')
+        expect(value.and[1]).toBe(sibling)
+      })
+
+      it('reads as not advanced when collapsed', async () => {
+        const wrapper = mountBuilder({ '!': { var: 'a' } })
+
+        await byLabel(wrapper, `${operand}: kind`).setValue('json')
+        await byLabel(wrapper, operand).get('textarea').setValue('[0, 1]')
+        await byLabel(wrapper, 'Collapse Expression').trigger('click')
+
+        expect(wrapper.text()).toContain('not advanced')
+      })
+
+      it('shows the wrapped form as JSON, and comes back from it emitting nothing', async () => {
+        const wrapper = mountBuilder({ '!': { var: 'a' } })
+
+        await byLabel(wrapper, `${operand}: kind`).setValue('json')
+        await byLabel(wrapper, operand).get('textarea').setValue('[0, 1]')
+
+        const count = emitted(wrapper).length
+
+        await byLabel(wrapper, 'Edit Expression as JSON').trigger('click')
+
+        expect(JSON.parse((wrapper.get('textarea').element as HTMLTextAreaElement).value)).toEqual({
+          '!': [[0, 1]],
+        })
+
+        await byLabel(wrapper, 'Edit Expression visually').trigger('click')
+
+        expect(emitted(wrapper)).toHaveLength(count)
+        expect(byLabel(wrapper, operand).text()).toContain('Advanced')
+      })
+
+      // AC5 (a) and (b) meet here: the form follows the node, and the node is
+      // what was last read, so one edit writes two forms of one rule.
+      it('leaves the bare form on its echo, and the wrapped form once read afresh', async () => {
+        const wrapper = mountBuilder({ '!': { var: 'a' } })
+        const toVar = async () => {
+          await byLabel(wrapper, `${operand}: kind`).setValue('var')
+          await byLabel(wrapper, `${operand}: variable`).setValue('type')
+        }
+
+        await byLabel(wrapper, `${operand}: kind`).setValue('json')
+        await byLabel(wrapper, operand).get('textarea').setValue('[0, 1]')
+        await toVar()
+
+        expect(JSON.stringify(lastEmitted(wrapper))).toBe('{"!":{"var":"type"}}')
+
+        await wrapper.setProps({ modelValue: { '!': [[0, 1]] } })
+        await toVar()
+
+        expect(JSON.stringify(lastEmitted(wrapper))).toBe('{"!":[{"var":"type"}]}')
+      })
+    })
+
     it('is unfilled, not emitted, when its text is emptied', async () => {
       const wrapper = mountBuilder({ and: [{ var: 'type' }, { in: ['a', ['a']] }] })
 

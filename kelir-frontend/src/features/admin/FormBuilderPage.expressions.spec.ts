@@ -472,6 +472,51 @@ describe('FormBuilderPage, the properties panel’s expressions', () => {
     expect(wrapper.find('[data-testid="calculate-unfinished-total"]').exists()).toBe(true)
   })
 
+  // #748, through the page's cloning writes. The copy comes back as the
+  // builder's own echo, so the node stays bare and the form follows the operand.
+  it('saves an array entered as a bare not’s operand as one operand, and a var after it bare (#748)', async () => {
+    current = form(
+      definition([
+        numberField('quantity'),
+        {
+          id: 'notes',
+          role: 'data',
+          type: 'textfield',
+          key: 'notes',
+          label: 'Notes',
+          validation: { type: 'string' },
+          conditional: { action: 'show', logic: { '!': { var: 'quantity' } } },
+        },
+      ]),
+    )
+
+    const wrapper = await render()
+    const operand = '[aria-label="Conditional logic, operand 1"]'
+    const kind = '[aria-label="Conditional logic, operand 1: kind"]'
+
+    await select(wrapper, 'notes')
+    await wrapper.find(kind).setValue('json')
+    await settle()
+    await wrapper.find(`${operand} textarea`).setValue('[0, 1]')
+    await settle()
+
+    const sent = await saved(wrapper)
+
+    expect(JSON.stringify((node(sent, 'notes').conditional as Node).logic)).toBe('{"!":[[0,1]]}')
+    expect(jfssViolations(sent)).toEqual([])
+
+    await wrapper.find(kind).setValue('var')
+    await settle()
+    await wrapper.find('[aria-label="Conditional logic, operand 1: variable"]').setValue('quantity')
+    await settle()
+
+    const after = await saved(wrapper)
+
+    expect(JSON.stringify((node(after, 'notes').conditional as Node).logic)).toBe(
+      '{"!":{"var":"quantity"}}',
+    )
+  })
+
   // --- AC4: what the panel does not show saves unchanged -------------------------------
 
   it('saves a definition unchanged after every node is selected and nothing edited, a navigate button included (AC4)', async () => {

@@ -1423,6 +1423,47 @@ describe('WorkflowEditorPage', () => {
       })
     })
 
+    // #748. Undo and redo read the value afresh, so the redone node is the
+    // wrapped form it loads as: the rule is the same, and it stays wrapped.
+    it('undoes and redoes an array entered as a bare not’s operand, and saves one operand', async () => {
+      const loaded = jwss()
+
+      loaded.transitions[0].condition = { '!': { var: 'document.status' } }
+      stored = record({ definition: loaded })
+
+      const page = await render()
+      const operand = 'Transition 1 condition, operand 1'
+      const box = () => page.get(`[aria-label="${operand}"] textarea`)
+
+      await byLabel(page, `${operand}: kind`).setValue('json')
+      await box().setValue('[0, 1]')
+
+      await page.get('[data-testid="undo"]').trigger('click')
+      await settle()
+
+      expect((byLabel(page, `${operand}: variable path`).element as HTMLInputElement).value).toBe(
+        'document.status',
+      )
+
+      await page.get('[data-testid="redo"]').trigger('click')
+      await settle()
+
+      expect(JSON.parse((box().element as HTMLTextAreaElement).value)).toEqual([0, 1])
+      expect(byLabel(page, operand).text()).toContain('Advanced')
+
+      await save(page)
+
+      expect(JSON.stringify(lastWrite().definition.transitions[0].condition)).toBe('{"!":[[0,1]]}')
+
+      await byLabel(page, `${operand}: kind`).setValue('var')
+      await byLabel(page, `${operand}: variable path`).setValue('document.status')
+      await save(page)
+
+      expect(JSON.stringify(lastWrite().definition.transitions[0].condition)).toBe(
+        '{"!":[{"var":"document.status"}]}',
+      )
+    })
+
     it('keeps a condition’s unfilled operand through the undo of an edit elsewhere', async () => {
       const page = await render()
 
