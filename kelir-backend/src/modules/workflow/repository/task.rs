@@ -74,6 +74,14 @@ pub struct LockedTask {
     /// themselves, and the history row records the pair
     /// ([#184](https://github.com/sujanto-gaws/kelir/issues/184) AC4, AC5).
     pub delegated_from_user_id: Option<Uuid>,
+    /// Whether a decision closed the task: `workflow_tasks.action` is set.
+    ///
+    /// Read under the lock for `refuse_unless_open`'s message
+    /// ([#773](https://github.com/sujanto-gaws/kelir/issues/773)). A decision
+    /// closes a task `COMPLETED` with its action, and a resubmit closes the
+    /// owner's correction task `COMPLETED` with none ([`close_for_resubmit`]),
+    /// so the status alone cannot say which happened.
+    pub decided: bool,
 }
 
 pub async fn insert_task(
@@ -152,7 +160,7 @@ pub async fn lock_open_task_of_instance(
         r#"
         SELECT id, workflow_instance_id, document_id, status,
                assignee_user_id, candidate_role_id, candidate_department_id,
-               delegated_from_user_id
+               delegated_from_user_id, action IS NOT NULL AS "decided!"
         FROM workflow_tasks
         WHERE tenant_id = $1 AND workflow_instance_id = $2 AND deleted_at IS NULL
           AND status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')
@@ -173,6 +181,7 @@ pub async fn lock_open_task_of_instance(
         candidate_role_id: row.candidate_role_id,
         candidate_department_id: row.candidate_department_id,
         delegated_from_user_id: row.delegated_from_user_id,
+        decided: row.decided,
     }))
 }
 
@@ -195,7 +204,7 @@ pub async fn lock_task(
         r#"
         SELECT id, workflow_instance_id, document_id, status,
                assignee_user_id, candidate_role_id, candidate_department_id,
-               delegated_from_user_id
+               delegated_from_user_id, action IS NOT NULL AS "decided!"
         FROM workflow_tasks
         WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
         FOR UPDATE
@@ -215,6 +224,7 @@ pub async fn lock_task(
         candidate_role_id: row.candidate_role_id,
         candidate_department_id: row.candidate_department_id,
         delegated_from_user_id: row.delegated_from_user_id,
+        decided: row.decided,
     }))
 }
 

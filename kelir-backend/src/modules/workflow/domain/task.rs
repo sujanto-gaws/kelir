@@ -512,16 +512,39 @@ pub fn delegate_unavailable() -> AppError {
 /// second approver of a task somebody else has already decided has to be able to
 /// tell "you were too late" from "the server broke", because those need
 /// different things from them.
-pub fn refuse_unless_open(status: TaskStatus) -> Result<(), AppError> {
+///
+/// # `decided` is required, and the message turns on it ([#773])
+///
+/// A task closes `COMPLETED` two ways: by a decision, which writes
+/// `workflow_tasks.action`, and by its owner's resubmit, which closes the
+/// correction task with no action and no `approval_decisions` row ([#667]).
+/// The status cannot tell them apart, so the caller passes whether the locked
+/// row's `action` is set, and only a decided task is told a decision was
+/// recorded against it. A required argument rather than a default, so a new
+/// caller cannot tell a corrector about a decision nobody made.
+///
+/// [#667]: https://github.com/sujanto-gaws/kelir/issues/667
+/// [#773]: https://github.com/sujanto-gaws/kelir/issues/773
+pub fn refuse_unless_open(status: TaskStatus, decided: bool) -> Result<(), AppError> {
     if status.is_open() {
         return Ok(());
     }
 
-    Err(AppError::conflict(format!(
-        "this task is {} and a decision has already been recorded against it; \
-         recording a second one would be a signature on a decision somebody else made",
-        status.as_db()
-    )))
+    let message = if decided {
+        format!(
+            "this task is {} and a decision has already been recorded against it; \
+             recording a second one would be a signature on a decision somebody else made",
+            status.as_db()
+        )
+    } else {
+        format!(
+            "this task is {} and no longer open; \
+             it was closed without being decided, so there is nothing left on it to act on",
+            status.as_db()
+        )
+    };
+
+    Err(AppError::conflict(message))
 }
 
 /// Refuses a decision the caller is not the one to make ([#177] AC5).
@@ -702,13 +725,70 @@ mod tests {
 
     #[test]
     fn a_completed_task_cannot_be_decided_again() {
-        let error = refuse_unless_open(TaskStatus::Completed).expect_err("already decided");
+        let error = refuse_unless_open(TaskStatus::Completed, true).expect_err("already decided");
 
         let AppError::Conflict { message } = error else {
             panic!("expected a conflict, not a validation failure or a 500");
         };
 
-        assert!(message.contains("COMPLETED"), "{message}");
+        assert_eq!(
+            message,
+            "this task is COMPLETED and a decision has already been recorded against it; \
+             recording a second one would be a signature on a decision somebody else made"
+        );
+    }
+
+    /// The closure a resubmit makes ([#773] AC1, AC3): `COMPLETED` with no
+    /// action. The message names the status and claims no decision. Every
+    /// caller builds its refusal here, so this is also the branch `decide`
+    /// raises after its compare-and-swap, which no request can reach while the
+    /// lock serialises callers.
+    ///
+    /// [#773]: https://github.com/sujanto-gaws/kelir/issues/773
+    #[test]
+    fn a_task_closed_without_a_decision_is_not_told_it_has_one() {
+        let error = refuse_unless_open(TaskStatus::Completed, false).expect_err("closed");
+
+        let AppError::Conflict { message } = error else {
+            panic!("expected a conflict, not a validation failure or a 500");
+        };
+
+        assert_eq!(
+            message,
+            "this task is COMPLETED and no longer open; \
+             it was closed without being decided, so there is nothing left on it to act on"
+        );
+        assert!(!message.contains("decision"), "{message}");
+    }
+
+    #[test]
+    fn a_cancelled_task_is_refused_in_the_words_its_action_calls_for() {
+        for decided in [false, true] {
+            let Err(AppError::Conflict { message }) =
+                refuse_unless_open(TaskStatus::Cancelled, decided)
+            else {
+                panic!("expected a conflict");
+            };
+
+            assert!(
+                message.starts_with("this task is CANCELLED and "),
+                "{message}"
+            );
+            assert_eq!(message.contains("decision"), decided, "{message}");
+        }
+    }
+
+    #[test]
+    fn an_open_task_is_not_refused_whatever_its_action() {
+        for status in [
+            TaskStatus::Created,
+            TaskStatus::Assigned,
+            TaskStatus::InProgress,
+        ] {
+            for decided in [false, true] {
+                assert!(refuse_unless_open(status, decided).is_ok(), "{status:?}");
+            }
+        }
     }
 
     #[test]
