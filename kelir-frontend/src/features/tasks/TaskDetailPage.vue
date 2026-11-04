@@ -201,7 +201,7 @@ const commentEverRequired = computed(() =>
   offered.value.some((decision) => decision.requiresComment),
 )
 
-/** A task that has been decided is read, not acted on. */
+/** A task that is no longer open, decided or not, is read, not acted on. */
 const open = computed(
   () =>
     task.value !== null &&
@@ -479,8 +479,12 @@ function openDocument(): void {
       <div class="rounded-md border border-border p-4" data-testid="task-decisions">
         <h3 class="font-medium">What you are being asked</h3>
 
+        <!-- `action` is what tells a decided task from one closed with no
+             decision, such as a correction its owner's resubmit closed (#773).
+             Both are `COMPLETED`, so the status cannot. -->
         <p v-if="!open" class="mt-2 text-sm text-muted-foreground" data-testid="task-decided">
-          This task has been decided. It is here so you can see what happened.
+          {{ task.action ? 'This task has been decided.' : 'This task is no longer open.' }}
+          It is here so you can see what happened.
         </p>
 
         <template v-else>

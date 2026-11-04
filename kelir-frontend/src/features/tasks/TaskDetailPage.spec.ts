@@ -75,6 +75,9 @@ function detail(overrides: Record<string, unknown> = {}): Record<string, unknown
     taskName: 'Approve the request',
     taskType: 'APPROVAL_TASK',
     status: 'CREATED',
+    // What was decided, once something was; `null` on an open task and on one
+    // closed with no decision (#773).
+    action: null,
     priority: 'NORMAL',
     dueAt: null,
     isOverdue: false,
@@ -572,7 +575,8 @@ describe('TaskDetailPage', () => {
       status: 409,
       body: errorBody(
         'CONFLICT',
-        'this task is COMPLETED and a decision has already been recorded against it',
+        'this task is COMPLETED and a decision has already been recorded against it; ' +
+          'recording a second one would be a signature on a decision somebody else made',
       ),
     })
 
@@ -584,12 +588,54 @@ describe('TaskDetailPage', () => {
     expect(wrapper.get('[data-testid="task-problem"]').text()).toContain('already been recorded')
   })
 
+  it("shows the backend's own words when the task was closed without a decision", async () => {
+    // A resubmit closes the owner's correction task with no decision (#667),
+    // and the server says so rather than claiming one was recorded (#773).
+    onDecision = () => ({
+      status: 409,
+      body: errorBody(
+        'CONFLICT',
+        'this task is COMPLETED and no longer open; ' +
+          'it was closed without being decided, so there is nothing left on it to act on',
+      ),
+    })
+
+    const wrapper = await render()
+
+    await wrapper.get('[data-testid="decide-APPROVE"]').trigger('click')
+    await flushPromises()
+
+    const problem = wrapper.get('[data-testid="task-problem"]').text()
+    expect(problem).toContain('closed without being decided')
+    expect(problem).not.toContain('already been recorded')
+  })
+
   it('shows a decided task without offering anything to do to it', async () => {
-    current = detail({ status: 'COMPLETED', assignment: 'MINE' })
+    current = detail({ status: 'COMPLETED', assignment: 'MINE', action: 'APPROVE' })
 
     const wrapper = await render()
 
     expect(wrapper.get('[data-testid="task-decided"]').text()).toContain('has been decided')
+    expect(wrapper.find('[data-testid="decide-APPROVE"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="claim-task"]').exists()).toBe(false)
+  })
+
+  it('does not call a task closed without a decision decided', async () => {
+    // A correction task its owner's resubmit closed: `COMPLETED`, as a decided
+    // task is, and `action` is null because nobody decided it (#773).
+    current = detail({
+      taskName: 'Correct the request',
+      status: 'COMPLETED',
+      assignment: 'MINE',
+      action: null,
+      decisions: [],
+    })
+
+    const wrapper = await render()
+
+    const closed = wrapper.get('[data-testid="task-decided"]').text()
+    expect(closed).toContain('no longer open')
+    expect(closed).not.toContain('has been decided')
     expect(wrapper.find('[data-testid="decide-APPROVE"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="claim-task"]').exists()).toBe(false)
   })
