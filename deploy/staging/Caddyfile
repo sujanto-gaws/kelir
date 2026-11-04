@@ -61,8 +61,43 @@
 	# graph, keyed by source module path — for the CI step that holds decision
 	# D-10's bundle condition (`scripts/check-bundle-split.mjs`). It is build
 	# metadata rather than application content and has no business being served.
+	#
+	# **Caching (#771): a hashed file is kept for a year, everything else is
+	# revalidated.** Vite names every file under /assets/ by a hash of its
+	# content, so a URL there never changes what it answers: a new build makes
+	# new names, and a browser may keep such a file for good. The document that
+	# names them, index.html, is what must be fresh after a deploy, so it is
+	# `no-cache`: kept, but asked about before each use, which its ETag makes a
+	# 304 rather than a download. With neither header a browser guesses a
+	# freshness from Last-Modified, and #721's measurement watched Chromium
+	# refetch a lazy chunk once that guess ran out.
+	#
+	# **`file` is load-bearing.** try_files answers a missing path with
+	# index.html, so a request for a chunk an earlier deploy removed gets the
+	# document. Matched on `path /assets/*` alone, that answer would be kept for
+	# a year under the chunk's URL — the stale page this header exists to
+	# prevent. `file` asks, before the rewrite, whether the path is a file on
+	# disk, so only a real hashed file is `immutable` and the fallback is
+	# `no-cache`. The two matchers are each other's negation, so exactly one
+	# header applies to any request this handle serves.
+	#
+	# `no-cache` therefore covers index.html at `/`, at `/index.html` and under
+	# every client route, and `/version.json`, which is unhashed and changes
+	# with every build (deploy.sh reads it to tell which image is serving).
+	# Both headers are set inside this handle only, so the backend's paths
+	# above get none from Caddy and keep whatever the backend sends.
+	@hashed_asset {
+		path /assets/*
+		file
+	}
+	@not_hashed_asset not {
+		path /assets/*
+		file
+	}
 	handle {
 		root * /srv
+		header @hashed_asset Cache-Control "public, max-age=31536000, immutable"
+		header @not_hashed_asset Cache-Control "no-cache"
 		try_files {path} /index.html
 		file_server {
 			hide .vite
