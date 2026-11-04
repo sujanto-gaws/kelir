@@ -9189,6 +9189,9 @@ async fn the_decidability_check_reads_return_and_not_cancel() {
 // serialises callers, so the second reads the task closed at the first check
 // (`workflow_engine.rs`'s *concurrent returns and approvals…* says so). Its
 // message is the one the unit tests above pin, built by the same function.
+// `test-engineer` then reached it with a trigger instead of a request: *a
+// decision that loses its compare-and-swap…* goes red when that call passes
+// `!now.decided`, `true` or `false`, or is dropped (2026-11-04).
 // `lock_open_task_of_instance` reads `decided` too, and its only caller, the
 // resubmit, never asks `refuse_unless_open`.
 
@@ -9390,6 +9393,82 @@ async fn a_decision_on_a_decided_correction_is_told_it_was_decided() {
     let correction = closed_correction(&app, &token, "TI_CT_DE_DE", true).await;
 
     assert_closed_with(&app, &correction, TaskPath::Decision, CLOSED_DECIDED).await;
+}
+
+/// Makes the next decision on `task` lose its compare-and-swap: a `BEFORE
+/// UPDATE` trigger on this test's own database closes the task inside the
+/// decision's statement, with `action` or with none, and skips the decision's
+/// write. Only the outermost update of `task` to `COMPLETED` is caught, so the
+/// trigger's own write goes through.
+async fn close_under_the_decision(app: &TestApp, task: Uuid, action: Option<&str>) {
+    let action = action.map_or_else(|| "NULL".to_owned(), |action| format!("'{action}'"));
+
+    sqlx::query(&format!(
+        r#"
+        CREATE OR REPLACE FUNCTION test_close_under_the_decision() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+            IF pg_trigger_depth() = 1 AND OLD.id = '{task}' AND NEW.status = 'COMPLETED' THEN
+                UPDATE workflow_tasks
+                SET status = 'COMPLETED', action = {action}, completed_at = now()
+                WHERE id = OLD.id;
+                RETURN NULL;
+            END IF;
+            RETURN NEW;
+        END
+        $$
+        "#
+    ))
+    .execute(&app.pool)
+    .await
+    .expect("create the closing function");
+
+    for statement in [
+        "DROP TRIGGER IF EXISTS test_close_under_the_decision ON workflow_tasks",
+        "CREATE TRIGGER test_close_under_the_decision BEFORE UPDATE ON workflow_tasks \
+         FOR EACH ROW EXECUTE FUNCTION test_close_under_the_decision()",
+    ] {
+        sqlx::query(statement)
+            .execute(&app.pool)
+            .await
+            .expect("install the closing trigger");
+    }
+}
+
+/// **A decision that loses its compare-and-swap is told how the task closed**
+/// ([#773] AC3).
+///
+/// `decide` checks the task open twice: under the lock, and again after its
+/// `UPDATE` matches no row. No request reaches the second, because the row
+/// lock held from the first check to the `UPDATE` leaves nothing to lose to,
+/// so [`close_under_the_decision`] closes the task inside the decision's own
+/// statement. Once with no action, as a resubmit closes it, and once with
+/// one, as a decision does. The re-read must carry the fact to the message,
+/// and the rollback must leave the task as it was.
+///
+/// [#773]: https://github.com/sujanto-gaws/kelir/issues/773
+#[tokio::test]
+async fn a_decision_that_loses_its_compare_and_swap_is_told_how_the_task_closed() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for (code, action, message) in [
+        ("TI_CT_CAS_RS", None, CLOSED_UNDECIDED),
+        ("TI_CT_CAS_DE", Some("REJECT"), CLOSED_DECIDED),
+    ] {
+        let correction = returned_to_a_role(&app, &token, code).await;
+        claim(&app, &correction.corrector, correction.task).await;
+        close_under_the_decision(&app, correction.task, action).await;
+
+        assert_closed_with(&app, &correction, TaskPath::Decision, message).await;
+
+        assert_eq!(
+            task_holder(&app, correction.task).await.2,
+            "ASSIGNED",
+            "{code}: the refused decision's transaction was not rolled back"
+        );
+        assert_eq!(task_action(&app, correction.task).await, None, "{code}");
+    }
 }
 
 // ---------------------------------------------------------------------------
