@@ -227,6 +227,14 @@
 //! | 42 | `deploy/`'s shell scripts are not walked | *the walk reads the deployment scripts* |
 //! | 43 | An inline block does not end at its indentation | *an inline dockerfile is read from compose* |
 //! | 44 | A mount's `from=` key matched case-sensitively | *the shapes rule 3 refuses are refused* |
+//!
+//! **The `test-engineer` gate's mutants 45 and 46 survived all ten tests**,
+//! and each went red against the eleventh, added for them:
+//!
+//! | # | Probe | Reddened |
+//! |---|---|---|
+//! | 45 | A directive's key matched case-sensitively (`# SYNTAX=` unread) | *a directive is read in any case and only where it is one* |
+//! | 46 | Directives read from every comment line, not the leading block alone | *a directive is read in any case and only where it is one* |
 
 use std::collections::HashSet;
 use std::fs;
@@ -1177,6 +1185,52 @@ fn the_shapes_rule_3_refuses_are_refused() {
         assert!(
             refusals[0].contains(&format!("`{refused}`")),
             "the refusal names {refused}: {refusals:?}"
+        );
+    }
+}
+
+/// A parser directive is read as BuildKit reads one (#671): its key in any
+/// case, and only in the comment lines the file opens with. A `# syntax=`
+/// after an instruction or a blank line is a comment, not a directive, and
+/// BuildKit never fetches the image it names.
+#[test]
+fn a_directive_is_read_in_any_case_and_only_where_it_is_one() {
+    for (dockerfile, refused) in [
+        (
+            "# SYNTAX=docker/dockerfile:1\nFROM caddy:2.11.4-alpine",
+            "# syntax=docker/dockerfile:1",
+        ),
+        (
+            "# Syntax = docker/dockerfile:1\nFROM caddy:2.11.4-alpine",
+            "# syntax=docker/dockerfile:1",
+        ),
+        (
+            "# Escape=`\nFROM caddy:2.11.4-alpine",
+            "the `escape` directive",
+        ),
+    ] {
+        let refusals = dockerfile_refusals(dockerfile);
+
+        assert_eq!(
+            refusals.len(),
+            1,
+            "exactly one refusal for {dockerfile:?}: {refusals:?}"
+        );
+        assert!(
+            refusals[0].contains(refused),
+            "the refusal names {refused}: {refusals:?}"
+        );
+    }
+
+    for not_a_directive in [
+        "FROM caddy:2.11.4-alpine\n# syntax=docker/dockerfile:1",
+        "\n# syntax=docker/dockerfile:1\nFROM caddy:2.11.4-alpine",
+    ] {
+        assert_eq!(
+            dockerfile_refusals(not_a_directive),
+            Vec::<String>::new(),
+            "a `# syntax=` that is not in the leading comment block is a comment: \
+             {not_a_directive:?}"
         );
     }
 }
