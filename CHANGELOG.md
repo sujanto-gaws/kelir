@@ -766,7 +766,16 @@ While the major version is `0`, the public API may change in any release.
   it, and a `null` one is still the text `null` on both sides. The save
   already refuses a rule without its parameter, so only a form stored before
   that is affected. `flags` is read as before. Validation Rule Registry 1.7.1.
-
+- **A task closed without a decision no longer says one was recorded**
+  ([#773](https://github.com/sujanto-gaws/kelir/issues/773)). A claim, hand-off
+  or decision sent to a task that is no longer open answered 409 with *a
+  decision has already been recorded against it*, and the task screen said
+  *This task has been decided.*, even for a correction task a resubmit had
+  closed with no decision. The 409 now makes that claim only when the task
+  carries a decision, and otherwise says the task was closed without being
+  decided; the screen says the task is no longer open. Both keep the
+  `this task is COMPLETED` prefix, the status and `CONFLICT`; reassign's
+  message is unchanged.
 - **A refused save says why on four more admin forms and in the list builder**
   ([#641](https://github.com/sujanto-gaws/kelir/issues/641),
   [#672](https://github.com/sujanto-gaws/kelir/issues/672)). The new-form
