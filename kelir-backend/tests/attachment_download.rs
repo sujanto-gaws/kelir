@@ -126,6 +126,18 @@ async fn a_cleared_attachment_is_served_with_its_name_and_never_inline() {
         "attachments are never served inline: {disposition}"
     );
     assert!(disposition.contains("quotation 2026.pdf"), "{disposition}");
+    assert_eq!(
+        served.header(header::CONTENT_LENGTH),
+        Some(PDF.len().to_string())
+    );
+
+    // **Not stored, with no exception for a file** (#881). It is the likeliest
+    // answer to be sensitive, and the frontend fetches it with a bearer token
+    // into a blob, so nothing is lost by keeping it out of every cache.
+    assert_eq!(
+        served.header(header::CACHE_CONTROL).as_deref(),
+        Some("no-store")
+    );
 }
 
 // ---------------------------------------------------------------------------

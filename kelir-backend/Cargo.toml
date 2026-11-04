@@ -100,9 +100,11 @@ sqlx = { version = "0.8", default-features = false, features = [
     "json",
 ] }
 tokio = { version = "1", features = ["full"] }
-# CORS only: the browser refuses cross-origin replies from the Vite dev server
+# CORS: the browser refuses cross-origin replies from the Vite dev server
 # without it, and the frontend and API are separate origins in every environment.
-tower-http = { version = "0.6", features = ["cors"] }
+# `set-header`: `Cache-Control: no-store` on every `/api/v1` response (#881,
+# SDD §11.4). Neither feature adds a dependency.
+tower-http = { version = "0.6", features = ["cors", "set-header"] }
 tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 utoipa = { version = "5", features = ["axum_extras", "uuid", "chrono"] }
