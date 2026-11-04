@@ -1,5 +1,7 @@
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::routing::get;
 use axum::{Json, Router};
+use tower_http::set_header::SetResponseHeaderLayer;
 use utoipa::OpenApi;
 
 use crate::error::ValidationDetail;
@@ -441,11 +443,50 @@ pub fn create_router(state: AppState) -> Router {
         // (#67, decision D-18). See `health::deployment`.
         .route("/deployment", get(health::deployment))
         .route("/api/docs/openapi.json", get(openapi_document))
-        .nest("/api/v1", api_v1_router(state.clone()))
+        // **`no-store` on the nest, and on nothing above it** (#881, SDD
+        // §11.4). Every route above is exempt because it is outside the nest,
+        // and each is a decision that its answer may be cached:
+        // - `/health`, `/health/live`, `/health/ready`: a probe's answer, and
+        //   no data;
+        // - `/version`: the build, which `deploy.sh` reads;
+        // - `/deployment`: unauthenticated by D-18, and it identifies the
+        //   deployment only;
+        // - `/api/docs/openapi.json`: the public contract.
+        // A route moved into the nest gains the header. The layer is not on
+        // the root router, where it would reach all four.
+        .nest("/api/v1", without_caching(api_v1_router(state.clone())))
         // Applied last so it wraps every route, including the 404 fallback and
-        // the preflight requests the browser sends before anything else.
+        // the preflight requests the browser sends before anything else. A
+        // preflight is answered here, before the nest, so it carries no
+        // `Cache-Control`.
         .layer(cors_layer(&state.config.frontend_url))
         .with_state(state)
+}
+
+/// **`Cache-Control: no-store` on every response from `api`**, refusals
+/// included, unless the route set a `Cache-Control` of its own
+/// (`if_not_present`; no route does today). An API answer is one caller's data
+/// at one moment, and a copy outlives the session that fetched it.
+///
+/// **The nest gets its own fallback, and that is what makes the unmatched path
+/// carry the header.** A nested router with no fallback borrows the root's,
+/// and axum answers `/api/v1/nope` from there, outside every layer on the
+/// nest: the 404 would go out without `no-store`. A fallback set here sits
+/// under the layer, and answers as the root's default does, an empty 404, so
+/// the contract does not move. Matching the `/api/v1` prefix in a root-level
+/// layer would also cover it, at the price of a path list that can drift from
+/// the nest it describes; this keeps the rule the router's shape.
+fn without_caching(api: Router<AppState>) -> Router<AppState> {
+    api.fallback(api_not_found)
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        ))
+}
+
+/// axum's default fallback, inside the nest: the status and no body.
+async fn api_not_found() -> StatusCode {
+    StatusCode::NOT_FOUND
 }
 
 /// The versioned API surface. Module routers mount here as each is built.
@@ -519,7 +560,7 @@ mod tests {
     use super::*;
     use crate::config::AppConfig;
     use axum::body::{to_bytes, Body};
-    use axum::http::{Request, StatusCode};
+    use axum::http::{Method, Request, StatusCode};
     use tower::ServiceExt;
 
     fn test_state() -> AppState {
@@ -1127,5 +1168,58 @@ mod tests {
         let (status, _) = get("/api/v1/does-not-exist").await;
 
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// **A route's own `Cache-Control` stands** (#881 AC6). No route sets one
+    /// today, so the clause is pinned on a test-local route through the same
+    /// `without_caching` the nest goes through; `overriding` in its place
+    /// reddens the first assertion.
+    ///
+    /// The route is `"/"`, which `every_annotated_route_reaches_the_document`
+    /// excuses as scaffolding, and its `POST` is the control: the same path,
+    /// saying nothing of its own.
+    #[tokio::test]
+    async fn a_route_that_sets_its_own_cache_control_keeps_it() {
+        let api = without_caching(
+            Router::new().route(
+                "/",
+                axum::routing::get(|| async {
+                    ([(header::CACHE_CONTROL, "private, max-age=60")], "own")
+                })
+                .post(|| async { "plain" }),
+            ),
+        )
+        .with_state(test_state());
+
+        let cache_control = |method: Method, uri: &'static str| {
+            let api = api.clone();
+            async move {
+                let response = api
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(uri)
+                            .body(Body::empty())
+                            .expect("request builds"),
+                    )
+                    .await
+                    .expect("router responds");
+
+                response
+                    .headers()
+                    .get_all(header::CACHE_CONTROL)
+                    .iter()
+                    .map(|value| value.to_str().expect("text").to_owned())
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        assert_eq!(
+            cache_control(Method::GET, "/").await,
+            ["private, max-age=60"]
+        );
+        assert_eq!(cache_control(Method::POST, "/").await, ["no-store"]);
+        // And the fallback, which is this router's own and not the root's.
+        assert_eq!(cache_control(Method::GET, "/nope").await, ["no-store"]);
     }
 }
