@@ -173,7 +173,7 @@ pub async fn claim_task(
     )
     .await?;
 
-    refuse_unless_open(locked.status)?;
+    refuse_unless_open(locked.status, locked.decided)?;
 
     // A task offered to a role is claimable by a holder of that role and by
     // nobody else. Read from `user_roles` rather than the token's claim — see
@@ -320,7 +320,7 @@ pub async fn delegate(
     )
     .await?;
 
-    refuse_unless_open(task.status)?;
+    refuse_unless_open(task.status, task.decided)?;
     refuse_unless_held_by(user_id, task.assignee_user_id)?;
 
     // Read inside the transaction rather than before it — coding standard §2.5
@@ -944,7 +944,7 @@ pub async fn decide(
         .await?
         .ok_or_else(|| AppError::not_found("Task"))?;
 
-    refuse_unless_open(task.status)?;
+    refuse_unless_open(task.status, task.decided)?;
 
     // Both halves of the grant, for the reason `claim_task` gives one screen up
     // and `repository::task::holds_role` gives in full (#225).
@@ -981,7 +981,7 @@ pub async fn decide(
             .await?
             .ok_or_else(|| AppError::not_found("Task"))?;
 
-        refuse_unless_open(now.status)?;
+        refuse_unless_open(now.status, now.decided)?;
 
         return Err(AppError::conflict(
             "this task changed while the decision was being applied",

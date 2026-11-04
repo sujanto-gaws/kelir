@@ -9145,6 +9145,254 @@ async fn the_decidability_check_reads_return_and_not_cancel() {
 }
 
 // ---------------------------------------------------------------------------
+// #773 — a closed task's 409 says a decision was recorded only when one was
+// ---------------------------------------------------------------------------
+//
+// A claim, a hand-off or a decision sent to a task that is no longer open is
+// refused with a 409 by `refuse_unless_open`. Its message said *a decision has
+// already been recorded against it* for every closed task, and a resubmit
+// closes the correction task `COMPLETED` with no action and no
+// `approval_decisions` row (#667), so the corrector who came back to it was
+// told about a decision nobody made. The status cannot tell the two closures
+// apart, and `workflow_tasks.action` can: the lock reads it, and the message
+// follows it. The code stays `CONFLICT` and the status 409 (AC7).
+//
+// The six tests below close one correction task each, by a resubmit or by its
+// corrector's `REJECT`, and send each path to it as the corrector. A
+// reassign's 409 has its own words (`reassign_closed`), already true either
+// way and unchanged (AC4); #512's *a decided task is not reassigned* and
+// #667's *a reassign arriving during a resubmit…* pin it.
+//
+// # Seen red against `006601a`, the code before the fix, 2026-11-04
+//
+// The six tests, added to `tests/task_inbox.rs` alone, run against the
+// unchanged source:
+//
+// | Test | Result |
+// |---|---|
+// | The three *…of a resubmitted correction is not told it was decided* (AC1) | Red: each answered 409 `CONFLICT` with *this task is COMPLETED and a decision has already been recorded against it; …* |
+// | The three *…of a decided correction is told it was decided* (AC2) | Green, as they must be: they pin the wording a decided task already had, so the fix cannot drop the claim for everyone. M2 and M3 below are what turn them red |
+//
+// # Mutations, each applied alone and reverted, 2026-11-04
+//
+// | Mutation | Result |
+// |---|---|
+// | M1 `lock_task` reads `decided` as always `true` | Red: the three AC1 tests |
+// | M2 `lock_task` reads `decided` as always `false` | Red: the three AC2 tests |
+// | M3 `refuse_unless_open`'s branch inverted | Red: all six, and the domain unit tests *a completed task cannot be decided again*, *a task closed without a decision is not told it has one* and *a cancelled task is refused in the words its action calls for* |
+// | M4 the claim passes `true` | Red: *a claim of a resubmitted correction…* only |
+// | M5 the hand-off passes `true` | Red: *a hand-off of a resubmitted correction…* only |
+// | M6 the decision's locked read passes `true` | Red: *a decision on a resubmitted correction…* only |
+//
+// Not mutated, and why. `decide`'s second `refuse_unless_open`, after its
+// compare-and-swap, is out of reach of a request: the instance lock
+// serialises callers, so the second reads the task closed at the first check
+// (`workflow_engine.rs`'s *concurrent returns and approvals…* says so). Its
+// message is the one the unit tests above pin, built by the same function.
+// `lock_open_task_of_instance` reads `decided` too, and its only caller, the
+// resubmit, never asks `refuse_unless_open`.
+
+/// What a task path on a task closed without a decision is told ([#773] AC1).
+///
+/// [#773]: https://github.com/sujanto-gaws/kelir/issues/773
+const CLOSED_UNDECIDED: &str = "this task is COMPLETED and no longer open; \
+     it was closed without being decided, so there is nothing left on it to act on";
+
+/// What a task path on a decided task is told, as before [#773] (AC2).
+///
+/// [#773]: https://github.com/sujanto-gaws/kelir/issues/773
+const CLOSED_DECIDED: &str = "this task is COMPLETED and a decision has already been recorded \
+     against it; recording a second one would be a signature on a decision somebody else made";
+
+/// The three task paths `refuse_unless_open` guards.
+#[derive(Clone, Copy, Debug)]
+enum TaskPath {
+    Claim,
+    HandOff,
+    Decision,
+}
+
+impl TaskPath {
+    fn route(self, task: Uuid) -> String {
+        let verb = match self {
+            Self::Claim => "claim",
+            Self::HandOff => "delegation",
+            Self::Decision => "decision",
+        };
+
+        format!("/api/v1/workflow/tasks/{task}/{verb}")
+    }
+
+    fn body(self, colleague: Uuid) -> Value {
+        match self {
+            Self::Claim => json!({}),
+            Self::HandOff => json!({ "delegateUserId": colleague }),
+            Self::Decision => json!({ "action": "REJECT", "comment": "Not worth correcting" }),
+        }
+    }
+}
+
+/// A correction task [`returned_to_a_role`] raised and its corrector claimed,
+/// then closed: by the corrector's `REJECT` when `decided`, by the owner's
+/// resubmit when not. Asserts the closure left the task `COMPLETED`, with the
+/// action it should have and the decision rows that go with it.
+async fn closed_correction(app: &TestApp, token: &str, code: &str, decided: bool) -> Correction {
+    let correction = returned_to_a_role(app, token, code).await;
+    claim(app, &correction.corrector, correction.task).await;
+
+    let closed = if decided {
+        app.post(
+            &TaskPath::Decision.route(correction.task),
+            Some(&correction.corrector),
+            TaskPath::Decision.body(correction.colleague_id),
+        )
+        .await
+    } else {
+        resubmit(app, token, correction.document).await
+    };
+    assert_eq!(closed.status, StatusCode::OK, "{}", closed.body);
+
+    assert_eq!(
+        task_holder(app, correction.task).await.2,
+        "COMPLETED",
+        "the closure left the task open"
+    );
+    assert_eq!(
+        task_action(app, correction.task).await,
+        decided.then(|| "REJECT".to_owned())
+    );
+    assert_eq!(
+        history_and_decisions(app, correction.task).await.1,
+        i64::from(decided)
+    );
+
+    correction
+}
+
+/// Sends `path` to the closed `correction` as its corrector. Asserts the 409
+/// `CONFLICT` with exactly `message`, and that the refused path wrote no
+/// history and no decision.
+async fn assert_closed_with(app: &TestApp, correction: &Correction, path: TaskPath, message: &str) {
+    let before = history_and_decisions(app, correction.task).await;
+
+    let refused = app
+        .post(
+            &path.route(correction.task),
+            Some(&correction.corrector),
+            path.body(correction.colleague_id),
+        )
+        .await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::CONFLICT,
+        "{path:?}: {}",
+        refused.body
+    );
+    assert_eq!(
+        refused.body["error"]["code"],
+        json!("CONFLICT"),
+        "{path:?}: {}",
+        refused.body
+    );
+    assert_eq!(
+        refused.body["error"]["message"],
+        json!(message),
+        "{path:?}: {}",
+        refused.body
+    );
+    assert_eq!(
+        history_and_decisions(app, correction.task).await,
+        before,
+        "{path:?} wrote history or a decision on a closed task"
+    );
+}
+
+/// **A claim of a correction closed by a resubmit is not told a decision was
+/// recorded** ([#773] AC1).
+///
+/// [#773]: https://github.com/sujanto-gaws/kelir/issues/773
+#[tokio::test]
+async fn a_claim_of_a_resubmitted_correction_is_not_told_it_was_decided() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let correction = closed_correction(&app, &token, "TI_CT_RS_CL", false).await;
+
+    assert_closed_with(&app, &correction, TaskPath::Claim, CLOSED_UNDECIDED).await;
+}
+
+/// **A hand-off of a correction closed by a resubmit is not told a decision
+/// was recorded** ([#773] AC1).
+///
+/// [#773]: https://github.com/sujanto-gaws/kelir/issues/773
+#[tokio::test]
+async fn a_hand_off_of_a_resubmitted_correction_is_not_told_it_was_decided() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let correction = closed_correction(&app, &token, "TI_CT_RS_HO", false).await;
+
+    assert_closed_with(&app, &correction, TaskPath::HandOff, CLOSED_UNDECIDED).await;
+}
+
+/// **A decision on a correction closed by a resubmit is not told a decision
+/// was recorded** ([#773] AC1).
+///
+/// [#773]: https://github.com/sujanto-gaws/kelir/issues/773
+#[tokio::test]
+async fn a_decision_on_a_resubmitted_correction_is_not_told_it_was_decided() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let correction = closed_correction(&app, &token, "TI_CT_RS_DE", false).await;
+
+    assert_closed_with(&app, &correction, TaskPath::Decision, CLOSED_UNDECIDED).await;
+}
+
+/// **A claim of a decided correction is still told a decision was recorded**
+/// ([#773] AC2).
+///
+/// [#773]: https://github.com/sujanto-gaws/kelir/issues/773
+#[tokio::test]
+async fn a_claim_of_a_decided_correction_is_told_it_was_decided() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let correction = closed_correction(&app, &token, "TI_CT_DE_CL", true).await;
+
+    assert_closed_with(&app, &correction, TaskPath::Claim, CLOSED_DECIDED).await;
+}
+
+/// **A hand-off of a decided correction is still told a decision was
+/// recorded** ([#773] AC2).
+///
+/// [#773]: https://github.com/sujanto-gaws/kelir/issues/773
+#[tokio::test]
+async fn a_hand_off_of_a_decided_correction_is_told_it_was_decided() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let correction = closed_correction(&app, &token, "TI_CT_DE_HO", true).await;
+
+    assert_closed_with(&app, &correction, TaskPath::HandOff, CLOSED_DECIDED).await;
+}
+
+/// **A second decision on a decided correction is still told a decision was
+/// recorded** ([#773] AC2).
+///
+/// [#773]: https://github.com/sujanto-gaws/kelir/issues/773
+#[tokio::test]
+async fn a_decision_on_a_decided_correction_is_told_it_was_decided() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let correction = closed_correction(&app, &token, "TI_CT_DE_DE", true).await;
+
+    assert_closed_with(&app, &correction, TaskPath::Decision, CLOSED_DECIDED).await;
+}
+
+// ---------------------------------------------------------------------------
 // #635 — a claimed task whose department never resolves is not waiting either
 // ---------------------------------------------------------------------------
 
