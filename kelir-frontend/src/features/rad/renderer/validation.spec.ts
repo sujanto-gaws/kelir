@@ -261,6 +261,274 @@ describe('the Validation Rule Registry §3, the advanced rules', () => {
 })
 
 /**
+ * #737: a rule's parameter reads as the server reads it, on a filled value.
+ *
+ * **Each row's `server` is the server's verdict**, read from `registry_rule` in
+ * `kelir-backend/src/modules/rad/domain/validation.rs`: an absent `pattern` or
+ * `target` is `""` (`.unwrap_or_default()`), a present one is `js_string`'s,
+ * which spells `null` as `"null"`, and an absent scope key is `Null`, which no
+ * filled value equals. The renderer must give the same verdict.
+ *
+ * A save since Registry 1.6.0 refuses a missing `pattern`, `target` or `values`,
+ * so these are revisions published before it, which are still rendered.
+ */
+describe('a rule parameter reads as the server reads it (#737)', () => {
+  interface Row {
+    case: string
+    rule: string
+    params: Record<string, unknown>
+    scope?: Record<string, unknown>
+    value: string
+    server: 'accepts' | 'refuses'
+  }
+
+  const decide = ({ rule, params, scope = {}, value }: Row) =>
+    verdict(
+      field({ type: 'string' }, { rules: [{ rule, scope: 'both', params, message: 'No.' }] }),
+      value,
+      scope,
+    )
+
+  /** One case per row, named for the server's verdict, which the renderer must give. */
+  const pinServerVerdicts = (rows: Row[]) => {
+    for (const row of rows) {
+      it(`${row.rule} with ${row.case}: the server ${row.server}, and so does the renderer`, () => {
+        if (row.server === 'accepts') {
+          expect(decide(row)).toBeUndefined()
+        } else {
+          expect(decide(row)?.rule).toBe(row.rule)
+        }
+      })
+    }
+  }
+
+  // AC1, AC2 and AC5. Each `undefined`-keyed scope is the field the old
+  // `String(params.target)` read as the target.
+  pinServerVerdicts([
+    { case: 'no pattern', rule: 'regex', params: {}, value: 'FN-0142', server: 'accepts' },
+    {
+      case: 'no pattern, and flags',
+      rule: 'regex',
+      params: { flags: 'i' },
+      value: 'FN-0142',
+      server: 'accepts',
+    },
+    {
+      case: 'no target, and a field keyed undefined',
+      rule: 'matchesField',
+      params: {},
+      scope: { undefined: 'secret' },
+      value: 'secret',
+      server: 'refuses',
+    },
+    {
+      case: 'no target, and a field keyed undefined',
+      rule: 'notMatchesField',
+      params: {},
+      scope: { undefined: 'secret' },
+      value: 'secret',
+      server: 'accepts',
+    },
+    {
+      case: 'no target, and a field keyed ""',
+      rule: 'matchesField',
+      params: {},
+      scope: { '': 'secret' },
+      value: 'secret',
+      server: 'accepts',
+    },
+    {
+      case: 'no target, and a field keyed ""',
+      rule: 'notMatchesField',
+      params: {},
+      scope: { '': 'secret' },
+      value: 'secret',
+      server: 'refuses',
+    },
+    // Already aligned before #737: a missing list is an empty one on both sides.
+    { case: 'no values', rule: 'oneOf', params: {}, value: 'a', server: 'refuses' },
+    { case: 'no values', rule: 'notOneOf', params: {}, value: 'a', server: 'accepts' },
+  ])
+
+  // AC3: `null` is present, so it stays `"null"`, which is `js_string(Null)`.
+  // Reading it as `""` would split the two sides on it.
+  pinServerVerdicts([
+    {
+      case: 'a null pattern, on a value holding "null"',
+      rule: 'regex',
+      params: { pattern: null },
+      value: 'nullable',
+      server: 'accepts',
+    },
+    {
+      case: 'a null pattern, on a value without it',
+      rule: 'regex',
+      params: { pattern: null },
+      value: 'FN-0142',
+      server: 'refuses',
+    },
+    {
+      case: 'a null target, and a field keyed null',
+      rule: 'matchesField',
+      params: { target: null },
+      scope: { null: 'secret' },
+      value: 'secret',
+      server: 'accepts',
+    },
+    {
+      case: 'a null target, and a field keyed null',
+      rule: 'notMatchesField',
+      params: { target: null },
+      scope: { null: 'secret' },
+      value: 'secret',
+      server: 'refuses',
+    },
+  ])
+
+  // AC4: `flags` is read as before. `null` is `""` here and `"null"` on the
+  // server, which honours only `i`, `m` and `s`, so neither side applies a flag.
+  pinServerVerdicts([
+    {
+      case: 'null flags, on a match',
+      rule: 'regex',
+      params: { pattern: '^a', flags: null },
+      value: 'abc',
+      server: 'accepts',
+    },
+    {
+      case: 'null flags, on a match only i would give',
+      rule: 'regex',
+      params: { pattern: '^a', flags: null },
+      value: 'ABC',
+      server: 'refuses',
+    },
+  ])
+})
+
+/**
+ * The predicates beside #737's parameter reads, each against the server's
+ * verdict (`validation.rs`: `registry_rule`, `param_values`, `scope_target`,
+ * `check_validation`, `matches_format`, `compile_pattern`).
+ *
+ * Each case here is a mutation of `validation.ts` that no other case in this
+ * folder failed on, in the row 24 `test-engineer` campaign, and each verdict
+ * asserted is the server's, read from the Rust rather than run. The next
+ * block is the same campaign's, over §5's keywords.
+ */
+describe('the reads beside a rule parameter, against the server (#737)', () => {
+  const rule = (name: string, params: Record<string, unknown>): JfssAdvancedRule => ({
+    rule: name,
+    scope: 'both',
+    params,
+    message: 'No.',
+  })
+
+  const withRules = (rules: JfssAdvancedRule[]) => field({ type: 'string' }, { rules })
+
+  it('decides an empty value as the server does: regex accepts it without matching', () => {
+    // `registry_rule`'s `regex` returns `true` for `is_empty` before reading
+    // the pattern. `validateField` discards an empty field's verdicts anyway,
+    // so the rule itself is asked.
+    const upper = rule('regex', { pattern: '^[A-Z]+$' })
+
+    expect(applyRule(upper, { value: '', scope: {} })).toBeUndefined()
+    expect(applyRule(upper, { value: null, scope: {} })).toBeUndefined()
+    expect(applyRule(upper, { value: undefined, scope: {} })).toBeUndefined()
+  })
+
+  it('reports the first failing rule, as the server does', () => {
+    // `validate_field` keeps the first violation (`advanced.is_none()`).
+    const two = withRules([
+      { ...rule('oneOf', { values: ['a'] }), message: 'First.' },
+      { ...rule('notOneOf', { values: ['z'] }), message: 'Second.' },
+    ])
+
+    expect(verdict(two, 'z')).toEqual({ rule: 'oneOf', message: 'First.' })
+  })
+
+  it('reads values that are not a list as no values, as param_values does', () => {
+    // `as_array` is `None` for a string, so the list is empty on the server. A
+    // string's own `.includes` would find a substring in it instead.
+    expect(verdict(withRules([rule('oneOf', { values: 'abc' })]), 'a')?.rule).toBe('oneOf')
+    expect(verdict(withRules([rule('notOneOf', { values: 'admin' })]), 'adm')).toBeUndefined()
+  })
+
+  it('compares oneOf, notOneOf and the field rules strictly, as Value equality does', () => {
+    // `"1"` and `1` are a JSON string and a JSON number, which `==` on
+    // `serde_json::Value` tells apart.
+    expect(verdict(withRules([rule('oneOf', { values: [1] })]), '1')?.rule).toBe('oneOf')
+    expect(verdict(withRules([rule('notOneOf', { values: [1] })]), '1')).toBeUndefined()
+    expect(
+      verdict(withRules([rule('matchesField', { target: 'count' })]), '1', { count: 1 })?.rule,
+    ).toBe('matchesField')
+    expect(
+      verdict(withRules([rule('notMatchesField', { target: 'count' })]), '1', { count: 1 }),
+    ).toBeUndefined()
+  })
+
+  it('passes no u flag unless the rule asks for one, on both pattern paths', () => {
+    // `\-` is an identity escape the browser refuses under `u`, and the
+    // server's crate compiles. Without `u` both sides accept the value.
+    const dashed = '^[A-Z]{2}\\-[0-9]{4}$'
+
+    expect(verdict(withRules([rule('regex', { pattern: dashed })]), 'FN-0142')).toBeUndefined()
+    expect(verdict(field({ type: 'string', pattern: dashed }), 'FN-0142')).toBeUndefined()
+  })
+
+  it('runs the pattern keyword with no flags, as check_validation does', () => {
+    // `matches_pattern(pattern, "", text)`: `^` and `$` anchor the whole value,
+    // and `.` does not match a line break.
+    expect(verdict(field({ type: 'string', pattern: '^B$' }), 'A\nB')?.rule).toBe('pattern')
+    expect(verdict(field({ type: 'string', pattern: '^A.B$' }), 'A\nB')?.rule).toBe('pattern')
+  })
+})
+
+describe('the length, range and format keywords at their edges, against the server', () => {
+  it('accepts a length exactly at minLength and maxLength', () => {
+    expect(verdict(field({ type: 'string', minLength: 3 }), 'abc')).toBeUndefined()
+    expect(verdict(field({ type: 'string', maxLength: 3 }), 'abc')).toBeUndefined()
+  })
+
+  it('counts length in UTF-16 code units, as check_validation does', () => {
+    // `encode_utf16().count()`: one emoji is two units on both sides.
+    expect(verdict(field({ type: 'string', maxLength: 1 }), '😀')?.rule).toBe('maxLength')
+    expect(verdict(field({ type: 'string', minLength: 2 }), '😀')).toBeUndefined()
+  })
+
+  it('accepts a number exactly at minimum and maximum', () => {
+    expect(verdict(field({ type: 'number', minimum: 1 }), 1)).toBeUndefined()
+    expect(verdict(field({ type: 'number', maximum: 10 }), 10)).toBeUndefined()
+  })
+
+  it('reads the date, time and date-time spellings the server reads', () => {
+    const accepts: [JfssValidation['format'], string][] = [
+      ['date-time', '2026-08-26 09:30:00'],
+      ['time', '09:30:15'],
+      ['uuid', '3F2504E0-4F89-41D3-9A0C-0305E82C3301'],
+    ]
+    const refuses: [JfssValidation['format'], string][] = [
+      ['time', '24:00'],
+      ['date-time', '2026-08-26Tnoon'],
+      // A date-time is not a date, though it round-trips through `toISOString`.
+      ['date', '2026-08-26T00:00:00.000Z'],
+    ]
+
+    for (const [format, value] of accepts) {
+      expect(
+        verdict(field({ type: 'string', format }), value),
+        `${format} ${value}`,
+      ).toBeUndefined()
+    }
+
+    for (const [format, value] of refuses) {
+      expect(verdict(field({ type: 'string', format }), value)?.rule, `${format} ${value}`).toBe(
+        'format',
+      )
+    }
+  })
+})
+
+/**
  * #496: a pattern the browser gives up on is left to the server, and a rule is
  * not matched once a keyword has already failed. #624: unless the rule is
  * scoped to `client`, when nothing decides it.

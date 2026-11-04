@@ -183,6 +183,25 @@ function testPattern(pattern: string, flags: string, value: string): boolean | '
   }
 }
 
+/**
+ * A rule's text parameter, `pattern` or `target`, as the server reads it
+ * (#737).
+ *
+ * **Only a missing parameter is `""`.** The server reads an absent key as
+ * empty (`.unwrap_or_default()` in `validation.rs`) and every present value
+ * through `js_string`, which spells `null` as `"null"`, as `String(null)`
+ * does. So `undefined` is the one value `String(...)` spelled differently,
+ * as the text `"undefined"`, and it is the only one changed here; `?? ''`
+ * would also read `null` as `""`, and split the two sides on it instead.
+ *
+ * A definition saved since Registry 1.6.0 cannot carry a missing `pattern` or
+ * `target`, because the save refuses it. One stored before then can, and a
+ * published one is still rendered.
+ */
+function paramText(value: unknown): string {
+  return value === undefined ? '' : String(value)
+}
+
 /** The values a rule compares against, when its params carry a list. */
 function paramValues(params: Record<string, unknown>): unknown[] {
   return Array.isArray(params.values) ? params.values : []
@@ -205,14 +224,16 @@ export const VALIDATION_RULES: Readonly<Record<string, RegistryRule>> = {
   // Decided here for the immediate feedback the scope is for, and re-decided by
   // the server at #164. Neither side is trusting the other.
 
+  // A missing `target` reads the key `""`, as the server's does, and not a
+  // field that happens to be keyed `undefined` (#737, [`paramText`]).
   matchesField: {
     scope: 'both',
-    decide: ({ value, scope, params }) => value === scope[String(params.target)],
+    decide: ({ value, scope, params }) => value === scope[paramText(params.target)],
   },
 
   notMatchesField: {
     scope: 'both',
-    decide: ({ value, scope, params }) => value !== scope[String(params.target)],
+    decide: ({ value, scope, params }) => value !== scope[paramText(params.target)],
   },
 
   /**
@@ -254,6 +275,19 @@ export const VALIDATION_RULES: Readonly<Record<string, RegistryRule>> = {
    * does not throw, it keeps the tab busy, and that is not changed here.
    * **A rule scoped to `client` is left to nobody** (#624), because the server
    * skips it, and [`applyRule`] says so.
+   *
+   * **A missing `pattern` is `""`, which accepts every filled value**, as the
+   * server's does (#737, [`paramText`]). It was the text `undefined`, which
+   * refused most values the server accepted.
+   *
+   * **`flags` is read as it was**, with `null` as `""`. The server reads `null`
+   * as `"null"` and honours only `i`, `m` and `s`, so both sides apply no flag
+   * and agree. **A `flags` that is present and not a string still splits
+   * them**: `true` is `"true"` on both sides, which the server reads as no
+   * flags and this browser cannot build, so it refuses what the server
+   * accepts. That holds on a published revision, and on any definition saved
+   * before the save refuses one, which is
+   * [#735](https://github.com/sujanto-gaws/kelir/issues/735)'s and not built.
    */
   regex: {
     scope: 'both',
@@ -262,7 +296,11 @@ export const VALIDATION_RULES: Readonly<Record<string, RegistryRule>> = {
         return true
       }
 
-      const verdict = testPattern(String(params.pattern), String(params.flags ?? ''), String(value))
+      const verdict = testPattern(
+        paramText(params.pattern),
+        String(params.flags ?? ''),
+        String(value),
+      )
 
       return verdict === 'gave-up' ? { undecided: PATTERN_GAVE_UP } : verdict
     },
