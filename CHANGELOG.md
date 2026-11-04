@@ -1030,6 +1030,23 @@ While the major version is `0`, the public API may change in any release.
   minutes. They now say so, and `v0.4.0`'s entry for the reset is corrected in
   place. Tests now pin this for both kinds of reset. No behaviour changes: a
   token issued before a reset is not refused early.
+- **`[0.9.0]` no longer says more than the code in three sentences**
+  ([#699](https://github.com/sujanto-gaws/kelir/issues/699), verification
+  record 22's first finding). The `v0.9.0` tag's message cannot change, so
+  `[0.9.0]` below is corrected in place, struck and restated, as release
+  process §4 step 4 now says. **The redaction list is struck.** It named the
+  secret's encoded spellings without ADR-0043 §R's floor, so it was wrong for
+  a short value, and the claim had already been split twice, so it is not
+  narrowed a third time (sprint plan §2 (a)): the entry points at the
+  spellings ADR-0043 §R lists. **Masking by key in a body not parsed as
+  JSON** covers a `"<key>": "<string>"` pair only. **A submission refused
+  while a role is deleted, or on a role that is gone** (#487 and #509),
+  keeps the document's status, and on a numbering rule that allows gaps a
+  first submission loses the number it was allocated, which *with nothing
+  written* hid; a resubmission allocates none. The same
+  sentences are corrected in ADR-0043 §4, architectures/03 §2.14, the User Manual
+  §11.5 and the documentation index, and *with nothing written* in JWSS
+  §5.3's `OWNER_DEPARTMENT` sentence (revision R-19). No behaviour changes.
 - **A document type bound to a deprecated workflow revision can be renamed**
   ([#716](https://github.com/sujanto-gaws/kelir/issues/716)). `PUT
   /document-types/{id}` checked every binding in a sent `workflows` array, so
@@ -1408,7 +1425,9 @@ dispatcher, FR-INT-003, FR-INT-004, FR-INT-010 and FR-MDM-011 come after
     backend's environment for that tenant alone; any other `env://` name fails as
     `SECRET_NAME_NOT_PERMITTED`, and `vault://` fails as
     `SECRET_BACKEND_NOT_CONFIGURED` until a Vault client exists. **An echo
-    is redacted only in the spellings ADR-0043 §R lists**, which are below. A spelling outside the
+    is redacted only in the spellings ADR-0043 §R lists**~~, which are below~~
+    (struck 2026-11-04, [#699](https://github.com/sujanto-gaws/kelir/issues/699):
+    the list below is struck). A spelling outside the
     list, such as a double percent-encoding, is stored and shown exactly as
     the called system sent it, in the answer's preview and in the integration
     log row. No log line or audit row holds the body, and a test call writes
@@ -1421,10 +1440,18 @@ dispatcher, FR-INT-003, FR-INT-004, FR-INT-010 and FR-MDM-011 come after
     them, and redirects are not followed. Private ranges need
     `KELIR_INTEGRATION_ALLOWED_CIDRS` (see *Upgrade notes*).
   - **Every call writes one `integration_logs` row**, success or failure, with
-    masked payloads: sensitive keys are masked in JSON and in text, a body
+    masked payloads: ~~sensitive keys are masked in JSON and in text, a body
     too long to parse included, and the secret is redacted as written and in
     its base64, percent-encoded and `\u`-escaped spellings (the answer's
-    preview too). A U+0000 in a reply is stored and shown as U+FFFD, so it
+    preview too)~~ a sensitive key's value is masked at any depth in a JSON
+    body. In a body not parsed as JSON, a body too long to parse included,
+    only a `"<key>": "<string>"` pair is masked: a number, a boolean or an
+    object under a sensitive key, or a pair in single quotes, is not masked
+    by key. An echo of the secret is redacted in the row and in the answer's
+    preview as the bullet on secrets above says (corrected 2026-11-04,
+    [#699](https://github.com/sujanto-gaws/kelir/issues/699): the redaction
+    sentence is struck and not narrowed, by sprint plan §2 (a), and the
+    masking sentence said more than the code). A U+0000 in a reply is stored and shown as U+FFFD, so it
     cannot stop the row being written. It is the table's first writer, and
     the integration log above reads what it wrote
     ([#548](https://github.com/sujanto-gaws/kelir/issues/548)).
@@ -1731,7 +1758,12 @@ dispatcher, FR-INT-003, FR-INT-004, FR-INT-010 and FR-MDM-011 come after
   ([#510](https://github.com/sujanto-gaws/kelir/issues/510), below). No route
   cancels a task. A document submitted while a role is being deleted waits
   for the delete, then is refused as `ASSIGNMENT_UNRESOLVED` if the delete
-  went through, with nothing written. For a role deleted before this release
+  went through, ~~with nothing written~~ and keeps its status. A first
+  submission stays in `DRAFT`, and on a numbering rule that allows gaps it
+  loses the number it was allocated (corrected 2026-11-04,
+  [#699](https://github.com/sujanto-gaws/kelir/issues/699): such a rule
+  allocates and commits the number before the submission's transaction; a
+  resubmission allocates none). For a role deleted before this release
   with tasks still open, see *Upgrade notes*
   ([#511](https://github.com/sujanto-gaws/kelir/issues/511)).
 - **A task is not raised when a decision on it names a role that is gone**
@@ -1740,8 +1772,13 @@ dispatcher, FR-INT-003, FR-INT-004, FR-INT-010 and FR-MDM-011 come after
   be raised and then refuse that decision as `ASSIGNMENT_UNRESOLVED`, on a
   document already `PENDING_APPROVAL`. The transition that would raise it is
   now refused with the same code, naming the edge
-  (`transitions.<state>.<action>.allowedBy.roleCode`), and nothing is
-  written: a submit leaves the document in `DRAFT`. The roles an edge names
+  (`transitions.<state>.<action>.allowedBy.roleCode`), and ~~nothing is
+  written: a submit leaves the document in `DRAFT`~~ a first submission leaves
+  the document in `DRAFT`, and on a numbering rule that allows gaps it loses
+  the number it was allocated (corrected 2026-11-04,
+  [#699](https://github.com/sujanto-gaws/kelir/issues/699); a resubmission
+  allocates none). The
+  roles an edge names
   are also held while the task is raised, so a role delete can no longer slip
   between them and strand the task. A published definition whose edge names a
   role that no longer exists now refuses at submit (see *Upgrade notes*).
