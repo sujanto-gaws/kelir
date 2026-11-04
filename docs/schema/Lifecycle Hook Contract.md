@@ -98,7 +98,7 @@ Every handler receives one JSON object. Field availability varies by stage; fiel
 | `source` | `string` | Registration source of this handler: `CORE`, `DOCUMENT_TYPE`, `WORKFLOW`, `PLUGIN`. |
 | `tenantId` | `string` | — |
 | `documentId` | `string` | — |
-| `documentTypeKey` | `string` | The document type's `document_types.type_code` exactly as stored, upper-case as [DTDS](Document%20Type%20Definition%20Schema.md) §2 normalizes it (`"PURCHASE_REQUISITION"`), never DTDS §2's lower-case key (`"purchase_requisition"`) (added 2026-11-04, R-4). |
+| `documentTypeKey` | `string` | The document type's `document_types.type_code` exactly as stored, conventionally upper-case as [DTDS](Document%20Type%20Definition%20Schema.md) §2 normalizes it (`"PURCHASE_REQUISITION"`), which `POST /document-types` does not enforce ([#873](https://github.com/sujanto-gaws/kelir/issues/873)), never DTDS §2's lower-case key (`"purchase_requisition"`) (added 2026-11-04, R-4). |
 | `currentStatus` | `string` \| `null` | Platform status before the action. |
 | `targetStatus` | `string` \| `null` | Platform status after the action, when the action changes status. |
 | `actorUserId` | `string` \| `null` | `null` for system/scheduler-initiated stages (e.g. `PURGE`). |

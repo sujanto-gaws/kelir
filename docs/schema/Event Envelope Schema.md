@@ -91,7 +91,7 @@ Payloads are defined per event family as **profiles**: a minimum guaranteed fiel
 | `documentId` | `string` | — |
 | `documentRef` | `string` | `DOC-2026-000123` |
 | `documentNumber` | `string` \| `null` | `null` before numbering |
-| `documentTypeKey` | `string` | The document type's `document_types.type_code` exactly as stored, upper-case as [DTDS](Document%20Type%20Definition%20Schema.md) §2 normalizes it (`"PURCHASE_REQUISITION"`), never DTDS §2's lower-case key, so an event carries the spelling a hook is given ([LHCS](Lifecycle%20Hook%20Contract.md) §4) (added 2026-11-04, R-3). |
+| `documentTypeKey` | `string` | The document type's `document_types.type_code` exactly as stored, conventionally upper-case as [DTDS](Document%20Type%20Definition%20Schema.md) §2 normalizes it (`"PURCHASE_REQUISITION"`), which `POST /document-types` does not enforce ([#873](https://github.com/sujanto-gaws/kelir/issues/873)), never DTDS §2's lower-case key, so an event carries the spelling a hook is given ([LHCS](Lifecycle%20Hook%20Contract.md) §4) (added 2026-11-04, R-3). |
 | `status` | `string` | Platform status after the event |
 | `previousStatus` | `string` \| `null` | — |
 | `title` | `string` | — |
