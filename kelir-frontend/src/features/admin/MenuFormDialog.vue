@@ -3,12 +3,13 @@ import { computed, ref, watch } from 'vue'
 
 import { toApiError } from '@/api/client'
 import { createMenu, updateMenu } from '@/api/rad'
+import FormUnplacedErrors from '@/components/FormUnplacedErrors.vue'
 import { Alert } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select } from '@/components/ui/select'
-import type { ValidationDetail } from '@/types/api'
+import { useFormErrors } from '@/composables/useFormErrors'
 import type { MenuEntry } from '@/types/rad'
 
 /**
@@ -39,8 +40,15 @@ const sortOrder = ref('0')
 const isEnabled = ref(true)
 
 const isSaving = ref(false)
-const error = ref('')
-const details = ref<ValidationDetail[]>([])
+const { fieldErrors, formError, report, reset } = useFormErrors()
+
+/**
+ * The paths a message is shown under (#641, #672). Each is drawn in both modes:
+ * on an edit the key is disabled, not hidden, and its slot stays. `icon` and
+ * `requiredPermission` are bounded by the backend (`TOO_LONG`), so each has a
+ * slot of its own. Any other path is listed above the form.
+ */
+const PLACED = ['menuKey', 'label', 'routePath', 'parentMenuId', 'icon', 'requiredPermission']
 
 const isEditing = computed(() => props.editing !== null)
 
@@ -52,7 +60,7 @@ const parents = computed(() =>
 )
 
 function messageFor(path: string): string {
-  return details.value.find((detail) => detail.path === path)?.message ?? ''
+  return fieldErrors.value[path] ?? ''
 }
 
 watch(
@@ -62,8 +70,7 @@ watch(
       return
     }
 
-    error.value = ''
-    details.value = []
+    reset()
 
     const editing = props.editing
 
@@ -87,8 +94,7 @@ function orNull(value: string): string | null {
 
 async function save(): Promise<void> {
   isSaving.value = true
-  error.value = ''
-  details.value = []
+  reset()
 
   const body = {
     label: label.value.trim(),
@@ -109,10 +115,7 @@ async function save(): Promise<void> {
 
     emit('saved')
   } catch (failure) {
-    const failed = toApiError(failure)
-
-    error.value = failed.message
-    details.value = failed.details
+    report(toApiError(failure))
   } finally {
     isSaving.value = false
   }
@@ -133,9 +136,16 @@ async function save(): Promise<void> {
         {{ isEditing ? 'Edit navigation entry' : 'New navigation entry' }}
       </h3>
 
-      <Alert v-if="error" variant="destructive" class="mt-4" data-testid="menu-error">
-        {{ error }}
+      <Alert v-if="formError" variant="destructive" class="mt-4" data-testid="menu-error">
+        {{ formError }}
       </Alert>
+
+      <FormUnplacedErrors
+        :field-errors="fieldErrors"
+        :placed="PLACED"
+        class="mt-4"
+        data-testid="menu-unplaced-errors"
+      />
 
       <form class="mt-4 grid gap-4 sm:grid-cols-2" @submit.prevent="save">
         <div class="space-y-2">
@@ -206,8 +216,18 @@ async function save(): Promise<void> {
             v-model="icon"
             data-testid="menu-icon"
             placeholder="shopping-cart"
+            :invalid="Boolean(messageFor('icon'))"
+            :described-by="messageFor('icon') ? 'menu-icon-message' : undefined"
           />
           <p class="text-xs text-muted-foreground">A Lucide icon name.</p>
+          <p
+            v-if="messageFor('icon')"
+            id="menu-icon-message"
+            class="text-xs text-destructive"
+            data-testid="menu-icon-message"
+          >
+            {{ messageFor('icon') }}
+          </p>
         </div>
 
         <div class="space-y-2">
@@ -217,11 +237,21 @@ async function save(): Promise<void> {
             v-model="requiredPermission"
             data-testid="menu-permission"
             placeholder="document:read"
+            :invalid="Boolean(messageFor('requiredPermission'))"
+            :described-by="messageFor('requiredPermission') ? 'menu-permission-message' : undefined"
           />
           <!-- Stated plainly, because it is the thing somebody will otherwise
                assume: hiding a link does not close the screen behind it. -->
           <p class="text-xs text-muted-foreground">
             This hides the link. The screen it points at enforces its own permission.
+          </p>
+          <p
+            v-if="messageFor('requiredPermission')"
+            id="menu-permission-message"
+            class="text-xs text-destructive"
+            data-testid="menu-permission-message"
+          >
+            {{ messageFor('requiredPermission') }}
           </p>
         </div>
 

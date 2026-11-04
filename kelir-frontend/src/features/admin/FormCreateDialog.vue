@@ -3,11 +3,12 @@ import { ref, watch } from 'vue'
 
 import { toApiError } from '@/api/client'
 import { createForm } from '@/api/rad'
+import FormUnplacedErrors from '@/components/FormUnplacedErrors.vue'
 import { Alert } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import type { ValidationDetail } from '@/types/api'
+import { useFormErrors } from '@/composables/useFormErrors'
 import type { Form } from '@/types/rad'
 
 /**
@@ -30,8 +31,14 @@ const formKey = ref('')
 const title = ref('')
 
 const isSaving = ref(false)
-const error = ref('')
-const details = ref<ValidationDetail[]>([])
+const { fieldErrors, formError, report, reset } = useFormErrors()
+
+/**
+ * The paths a message is shown under (#641). A detail at any other path, such
+ * as the seeded `definition` or an unknown field, is listed above the form by
+ * `FormUnplacedErrors`, so a refused create always says why.
+ */
+const PLACED = ['formKey', 'title']
 
 watch(
   () => props.open,
@@ -39,21 +46,19 @@ watch(
     if (open) {
       formKey.value = ''
       title.value = ''
-      error.value = ''
-      details.value = []
+      reset()
     }
   },
 )
 
 /** The server's message for one field, by the S10.3 `path` it addressed. */
 function messageFor(path: string): string | undefined {
-  return details.value.find((detail) => detail.path === path)?.message
+  return fieldErrors.value[path]
 }
 
 async function save(): Promise<void> {
   isSaving.value = true
-  error.value = ''
-  details.value = []
+  reset()
 
   const key = formKey.value.trim()
 
@@ -83,10 +88,9 @@ async function save(): Promise<void> {
 
     emit('created', form)
   } catch (failure) {
-    const failed = toApiError(failure)
-
-    error.value = failed.message
-    details.value = failed.details
+    // A 422's details go under their inputs or into the list; anything else,
+    // a 409 for a taken key included, is the one message above the form.
+    report(toApiError(failure))
   } finally {
     isSaving.value = false
   }
@@ -105,9 +109,16 @@ async function save(): Promise<void> {
     <div class="w-full max-w-lg rounded-lg bg-background p-6 shadow-lg">
       <h3 class="text-lg font-semibold">New form</h3>
 
-      <Alert v-if="error" variant="destructive" class="mt-4" data-testid="form-create-error">
-        {{ error }}
+      <Alert v-if="formError" variant="destructive" class="mt-4" data-testid="form-create-error">
+        {{ formError }}
       </Alert>
+
+      <FormUnplacedErrors
+        :field-errors="fieldErrors"
+        :placed="PLACED"
+        class="mt-4"
+        data-testid="form-create-unplaced-errors"
+      />
 
       <form class="mt-4 space-y-4" @submit.prevent="save">
         <div class="space-y-2">

@@ -756,6 +756,23 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A refused save says why on four more admin forms and in the list builder**
+  ([#641](https://github.com/sujanto-gaws/kelir/issues/641),
+  [#672](https://github.com/sujanto-gaws/kelir/issues/672)). The new-form
+  dialog, the navigation-entry dialog, the numbering-rule dialog, the
+  new-list form and the list builder's save showed a 422 detail only when
+  they had an input for its path, so a detail at any other path, such as an
+  unknown field or the new-list form's seeded column, was dropped and the
+  form said only *Validation failed*. Such a detail is now listed with its
+  message at the top of the form, and a detail with an input is shown under
+  it and not listed too. The list builder now shows a refusal of the title,
+  the page size, and a column's or a filter's label under that input, and a
+  detail for a row that is not there is listed; the navigation-entry dialog
+  shows one of the icon and of the required permission under its input. Each
+  new message is named by its input (`aria-invalid`, `aria-describedby`). A
+  422 that carries details no longer also shows *Validation failed* on these
+  five; one with none, a 403, a 409 and a network failure are shown as
+  before, as one message. The list builder's render check is unchanged.
 - **A select's or radio's options are edited a row at a time, and an edit keeps
   the options it did not touch**
   ([#790](https://github.com/sujanto-gaws/kelir/issues/790)). The *Options* box

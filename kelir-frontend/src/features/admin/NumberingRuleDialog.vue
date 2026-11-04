@@ -3,12 +3,13 @@ import { ref, watch } from 'vue'
 
 import { getNumberingRule, setNumberingRule } from '@/api/document-types'
 import { toApiError } from '@/api/client'
+import FormUnplacedErrors from '@/components/FormUnplacedErrors.vue'
 import { Alert } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select } from '@/components/ui/select'
-import type { ValidationDetail } from '@/types/api'
+import { useFormErrors } from '@/composables/useFormErrors'
 import type { DocumentTypeSummary, GapPolicy, SequenceScope } from '@/types/document-type'
 
 /**
@@ -33,8 +34,7 @@ const policy = ref<GapPolicy>('GAPLESS')
 
 const isLoading = ref(false)
 const isSaving = ref(false)
-const error = ref('')
-const details = ref<ValidationDetail[]>([])
+const { fieldErrors, formError, report, reset } = useFormErrors()
 /** True once the type is known to have no rule, so the copy can say so. */
 const isNew = ref(false)
 
@@ -50,8 +50,15 @@ const POLICIES: { value: GapPolicy; label: string }[] = [
   { value: 'ALLOW_GAPS', label: 'Allow gaps — a failed submission leaves a hole' },
 ]
 
+/**
+ * The paths a message is shown under (#641). `sequenceScope` and `gapPolicy`
+ * are chosen from a closed list, so a refusal there is of a stale value and is
+ * listed above the form, as is `nextSequence`, which this dialog does not send.
+ */
+const PLACED = ['ruleTemplate', 'sequencePadding']
+
 function messageFor(path: string): string {
-  return details.value.find((detail) => detail.path === path)?.message ?? ''
+  return fieldErrors.value[path] ?? ''
 }
 
 async function load(): Promise<void> {
@@ -62,8 +69,7 @@ async function load(): Promise<void> {
   }
 
   isLoading.value = true
-  error.value = ''
-  details.value = []
+  reset()
   isNew.value = false
 
   try {
@@ -85,7 +91,8 @@ async function load(): Promise<void> {
       padding.value = '6'
       policy.value = 'GAPLESS'
     } else {
-      error.value = failed.message
+      // A failed read is about the rule, not a field: its message, as before.
+      formError.value = failed.message
     }
   } finally {
     isLoading.value = false
@@ -110,8 +117,7 @@ async function save(): Promise<void> {
   }
 
   isSaving.value = true
-  error.value = ''
-  details.value = []
+  reset()
 
   try {
     await setNumberingRule(documentType.id, {
@@ -123,10 +129,7 @@ async function save(): Promise<void> {
 
     emit('saved')
   } catch (failure) {
-    const failed = toApiError(failure)
-
-    error.value = failed.message
-    details.value = failed.details
+    report(toApiError(failure))
   } finally {
     isSaving.value = false
   }
@@ -149,9 +152,16 @@ async function save(): Promise<void> {
         This type has no numbering rule yet. Its documents cannot be submitted until it does.
       </p>
 
-      <Alert v-if="error" variant="destructive" class="mt-4" data-testid="numbering-error">
-        {{ error }}
+      <Alert v-if="formError" variant="destructive" class="mt-4" data-testid="numbering-error">
+        {{ formError }}
       </Alert>
+
+      <FormUnplacedErrors
+        :field-errors="fieldErrors"
+        :placed="PLACED"
+        class="mt-4"
+        data-testid="numbering-unplaced-errors"
+      />
 
       <p v-if="isLoading" class="mt-4 text-sm text-muted-foreground">Loading…</p>
 

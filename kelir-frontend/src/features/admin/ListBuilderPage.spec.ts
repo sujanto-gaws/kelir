@@ -4,10 +4,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 
 import ListBuilderPage from './ListBuilderPage.vue'
+import { registerSessionBridge } from '@/api/session'
 import {
   errorBody,
   installFakeBackend,
   type FakeBackendHandle,
+  type FakeReply,
   type RecordedRequest,
 } from '@/lib/testing/fake-backend'
 import { useAuthStore } from '@/stores/auth'
@@ -94,6 +96,8 @@ describe('ListBuilderPage', () => {
   let current: Record<string, unknown>
   /** What `GET /rad/lists/by-key/{key}` answers. */
   let renderResponse: { status: number; body: unknown }
+  /** What `PUT /rad/lists/{id}` answers when set; the stored definition when not. */
+  let saveReply: FakeReply | null
   let router: Router
 
   beforeEach(() => {
@@ -102,10 +106,15 @@ describe('ListBuilderPage', () => {
 
     current = definition()
     renderResponse = { status: 200, body: { success: true, data: { id: LIST_ID, columns: [] } } }
+    saveReply = null
 
     backend = installFakeBackend((request: RecordedRequest) => {
       if (request.url.includes('/by-key/')) {
         return renderResponse
+      }
+
+      if (request.method === 'put' && saveReply) {
+        return saveReply
       }
 
       return { status: 200, body: { success: true, data: current } }
@@ -117,7 +126,10 @@ describe('ListBuilderPage', () => {
     })
   })
 
-  afterEach(() => backend.restore())
+  afterEach(() => {
+    backend.restore()
+    registerSessionBridge(null)
+  })
 
   async function render(permissions: string[] = EVERY_PERMISSION): Promise<VueWrapper> {
     useAuthStore().$patch({ user: principal(permissions) })
@@ -250,5 +262,480 @@ describe('ListBuilderPage', () => {
 
     expect(wrapper.find('[data-testid="save-list"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="add-column"]').attributes('disabled')).toBeDefined()
+  })
+
+  /*
+   * #641, #672: a refused save says why, under the input it is about or in
+   * the list above the form, and never twice. The details are
+   * `rad::domain::list`'s (`bounded`, `check_page_size`, `check_columns`,
+   * `check_filters`) and `extract::detail`'s, as `validate_update_list` sends
+   * them. The render check's answer stays its own channel.
+   */
+  describe('a refused save (#641, #672)', () => {
+    type Detail = [path: string, rule: string, code: string, message: string]
+
+    function refusal(...details: Detail[]): FakeReply {
+      return {
+        status: 422,
+        body: errorBody(
+          'VALIDATION_ERROR',
+          'Validation failed',
+          details.map(([path, rule, code, message]) => ({ path, rule, code, message })),
+        ),
+      }
+    }
+
+    const TITLE_REQUIRED: Detail = ['title', 'required', 'REQUIRED', 'title is required']
+    const PAGE_SIZE_OUT_OF_RANGE: Detail = [
+      'pageSize',
+      'range',
+      'OUT_OF_RANGE',
+      'pageSize must be between 1 and 100',
+    ]
+    const COLUMN_LABEL_REQUIRED: Detail = [
+      'columns.1.label',
+      'required',
+      'REQUIRED',
+      'columns.1.label is required',
+    ]
+    const FILTER_LABEL_TOO_LONG: Detail = [
+      'filters.0.label',
+      'maxLength',
+      'TOO_LONG',
+      'filters.0.label must be at most 200 characters',
+    ]
+    const COLUMN_KEY_DUPLICATE: Detail = [
+      'columns.1.columnKey',
+      'unique',
+      'DUPLICATE',
+      '`title` appears more than once in this list',
+    ]
+    const FILTER_KEY_REQUIRED: Detail = [
+      'filters.0.filterKey',
+      'required',
+      'REQUIRED',
+      'filters.0.filterKey is required',
+    ]
+    const STATUS_UNKNOWN: Detail = [
+      'status',
+      'type',
+      'INVALID_TYPE',
+      'Unknown variant `RETIRED`, expected one of `DRAFT`, `ACTIVE`, `DEPRECATED`',
+    ]
+    const UNKNOWN_FIELD: Detail = [
+      'unknownField',
+      'unknownField',
+      'UNKNOWN_FIELD',
+      'Unknown field `unknownField`. Check the spelling and casing — the API is camelCase.',
+    ]
+
+    /** The four inputs #672 gave a slot, by test id, and the detail each shows. */
+    const NEW_SLOTS = [
+      ['title', 'list-title', TITLE_REQUIRED],
+      ['page size', 'list-page-size', PAGE_SIZE_OUT_OF_RANGE],
+      ['second column’s label', 'column-label-1', COLUMN_LABEL_REQUIRED],
+      ['first filter’s label', 'filter-label-0', FILTER_LABEL_TOO_LONG],
+    ] as const
+
+    /** Every input that can be marked, for checking that only one is. */
+    const MARKABLE = [
+      'list-title',
+      'list-page-size',
+      'column-label-0',
+      'column-label-1',
+      'filter-label-0',
+    ]
+
+    async function save(wrapper: VueWrapper): Promise<void> {
+      await wrapper.get('[data-testid="save-list"]').trigger('click')
+      await flushPromises()
+    }
+
+    function list(wrapper: VueWrapper) {
+      return wrapper.find('[data-testid="list-builder-unplaced-errors"]')
+    }
+
+    function listed(wrapper: VueWrapper): string[] {
+      return list(wrapper)
+        .findAll('li')
+        .map((item) => item.text())
+    }
+
+    function shown(wrapper: VueWrapper, message: string): number {
+      return wrapper.text().split(message).length - 1
+    }
+
+    function renderChecks(): number {
+      return backend.requests.filter((request) => request.url.includes('/by-key/')).length
+    }
+
+    /** The text of the row (`column-N`, `filter-N`) a message sits in. */
+    function rowText(wrapper: VueWrapper, testId: string): string {
+      return wrapper.get(`[data-testid="${testId}"]`).text()
+    }
+
+    it('lists a detail at a path it shows no message for, and does not take the save', async () => {
+      saveReply = refusal(UNKNOWN_FIELD)
+      const wrapper = await render()
+      const checks = renderChecks()
+
+      await save(wrapper)
+
+      expect(list(wrapper).attributes('role')).toBe('alert')
+      expect(listed(wrapper)).toEqual([`unknownField: ${UNKNOWN_FIELD[3]}`])
+      // A refused save is not followed by the render check a stored one is.
+      expect(renderChecks()).toBe(checks)
+    })
+
+    it('lists a refusal of the status, which is a closed choice', async () => {
+      saveReply = refusal(STATUS_UNKNOWN)
+      const wrapper = await render()
+
+      await save(wrapper)
+
+      expect(listed(wrapper)).toEqual([`status: ${STATUS_UNKNOWN[3]}`])
+    })
+
+    it.each(NEW_SLOTS)(
+      'places a refusal of the %s under its input, named by it',
+      async (_, testId, detail) => {
+        saveReply = refusal(detail)
+        const wrapper = await render()
+
+        await save(wrapper)
+
+        const input = wrapper.get(`[data-testid="${testId}"]`)
+        const message = wrapper.get(`[data-testid="${testId}-message"]`)
+
+        expect(message.text()).toBe(detail[3])
+        expect(input.attributes('aria-invalid')).toBe('true')
+        expect(input.attributes('aria-describedby')).toBe(message.attributes('id'))
+        expect(wrapper.find(`[id="${message.attributes('id')}"]`).element).toBe(message.element)
+        // Drawn beside the input it describes, not beside another.
+        expect(message.element.parentElement?.contains(input.element)).toBe(true)
+
+        for (const other of MARKABLE.filter((candidate) => candidate !== testId)) {
+          const control = wrapper.get(`[data-testid="${other}"]`)
+
+          expect(control.attributes('aria-invalid')).toBe('false')
+          expect(control.attributes('aria-describedby')).toBeUndefined()
+        }
+
+        expect(shown(wrapper, detail[3])).toBe(1)
+        expect(list(wrapper).exists()).toBe(false)
+        expect(wrapper.find('[data-testid="save-error"]').exists()).toBe(false)
+      },
+    )
+
+    it('shows a cleared title’s REQUIRED under the title', async () => {
+      saveReply = refusal(TITLE_REQUIRED)
+      const wrapper = await render()
+
+      await wrapper.get('[data-testid="list-title"]').setValue('   ')
+      await save(wrapper)
+
+      const put = backend.requests.find((request) => request.method === 'put')
+
+      expect((put?.body as { title: string }).title).toBe('')
+      expect(wrapper.get('[data-testid="list-title-message"]').text()).toBe('title is required')
+      expect(wrapper.get('[data-testid="list-title"]').attributes('aria-invalid')).toBe('true')
+    })
+
+    it('still places a refusal of a column’s or a filter’s key under its row', async () => {
+      saveReply = refusal(COLUMN_KEY_DUPLICATE, FILTER_KEY_REQUIRED)
+      const wrapper = await render()
+
+      await save(wrapper)
+
+      expect(rowText(wrapper, 'column-1')).toContain(COLUMN_KEY_DUPLICATE[3])
+      expect(rowText(wrapper, 'filter-0')).toContain(FILTER_KEY_REQUIRED[3])
+      expect(list(wrapper).exists()).toBe(false)
+    })
+
+    it('lists a detail for a row that is not there', async () => {
+      saveReply = refusal(
+        ['columns.2.label', 'required', 'REQUIRED', 'columns.2.label is required'],
+        ['columns.2.columnKey', 'required', 'REQUIRED', 'columns.2.columnKey is required'],
+        ['filters.1.label', 'required', 'REQUIRED', 'filters.1.label is required'],
+        ['filters.1.filterKey', 'required', 'REQUIRED', 'filters.1.filterKey is required'],
+      )
+      const wrapper = await render()
+
+      await save(wrapper)
+
+      // Two columns and one filter are drawn; index 2 and index 1 are not.
+      expect(listed(wrapper)).toEqual([
+        'columns.2.label: columns.2.label is required',
+        'columns.2.columnKey: columns.2.columnKey is required',
+        'filters.1.label: filters.1.label is required',
+        'filters.1.filterKey: filters.1.filterKey is required',
+      ])
+    })
+
+    it('places a detail for a row added since, and lists it once the row is removed', async () => {
+      saveReply = refusal([
+        'columns.2.label',
+        'required',
+        'REQUIRED',
+        'columns.2.label is required',
+      ])
+      const wrapper = await render()
+
+      await wrapper.get('[data-testid="add-column"]').trigger('click')
+      await save(wrapper)
+
+      expect(wrapper.get('[data-testid="column-label-2-message"]').text()).toBe(
+        'columns.2.label is required',
+      )
+      expect(list(wrapper).exists()).toBe(false)
+
+      await wrapper.get('[data-testid="column-remove-2"]').trigger('click')
+
+      expect(listed(wrapper)).toEqual(['columns.2.label: columns.2.label is required'])
+    })
+
+    it('shows a placed and an unplaced detail once each, each in its own place', async () => {
+      saveReply = refusal(PAGE_SIZE_OUT_OF_RANGE, UNKNOWN_FIELD)
+      const wrapper = await render()
+
+      await save(wrapper)
+
+      expect(wrapper.get('[data-testid="list-page-size-message"]').text()).toBe(
+        PAGE_SIZE_OUT_OF_RANGE[3],
+      )
+      expect(shown(wrapper, PAGE_SIZE_OUT_OF_RANGE[3])).toBe(1)
+      expect(listed(wrapper)).toEqual([`unknownField: ${UNKNOWN_FIELD[3]}`])
+    })
+
+    it('does not also say "Validation failed" when the details say why', async () => {
+      saveReply = refusal(TITLE_REQUIRED, UNKNOWN_FIELD)
+      const wrapper = await render()
+
+      await save(wrapper)
+
+      expect(wrapper.find('[data-testid="save-error"]').exists()).toBe(false)
+      expect(wrapper.text()).not.toContain('Validation failed')
+    })
+
+    it.each([
+      ['a 422 naming no field', refusal(), 'Validation failed'],
+      [
+        'a 403',
+        {
+          status: 403,
+          body: errorBody('FORBIDDEN', 'You do not have permission to perform this action'),
+        },
+        'You do not have permission to perform this action',
+      ],
+      [
+        'a 409',
+        { status: 409, body: errorBody('CONFLICT', 'list was changed by another request') },
+        'list was changed by another request',
+      ],
+      [
+        'a network failure',
+        { status: 0, networkError: true },
+        'Could not reach the server. Check your connection and try again.',
+      ],
+    ] as [string, FakeReply, string][])(
+      'shows %s as one message, and no list',
+      async (_, failure, message) => {
+        saveReply = failure
+        const wrapper = await render()
+
+        await save(wrapper)
+
+        expect(wrapper.get('[data-testid="save-error"]').text()).toBe(message)
+        expect(shown(wrapper, message)).toBe(1)
+        expect(list(wrapper).exists()).toBe(false)
+      },
+    )
+
+    it('clears the last refusal when Save is pressed again', async () => {
+      saveReply = refusal(TITLE_REQUIRED, UNKNOWN_FIELD)
+      const wrapper = await render()
+
+      await save(wrapper)
+      expect(list(wrapper).exists()).toBe(true)
+      expect(wrapper.find('[data-testid="list-title-message"]').exists()).toBe(true)
+
+      saveReply = null
+      await save(wrapper)
+
+      expect(list(wrapper).exists()).toBe(false)
+      expect(wrapper.find('[data-testid="list-title-message"]').exists()).toBe(false)
+      expect(wrapper.get('[data-testid="list-title"]').attributes('aria-invalid')).toBe('false')
+    })
+
+    it('clears the last message when Save is pressed again', async () => {
+      saveReply = { status: 403, body: errorBody('FORBIDDEN', 'Not yours to change') }
+      const wrapper = await render()
+
+      await save(wrapper)
+      expect(wrapper.find('[data-testid="save-error"]').exists()).toBe(true)
+
+      saveReply = null
+      await save(wrapper)
+
+      expect(wrapper.find('[data-testid="save-error"]').exists()).toBe(false)
+    })
+
+    /*
+     * The render check's details are their own channel: they stay in the
+     * render panel, a key's slot still reads them, and the save's refusal of
+     * the same path is the one shown under the input.
+     */
+    describe('beside the render check', () => {
+      const NOT_RENDERABLE = '`form_data.` names no field'
+
+      beforeEach(() => {
+        renderResponse = {
+          status: 422,
+          body: errorBody('VALIDATION_FAILED', 'This list cannot be drawn', [
+            {
+              path: 'columns.1.columnKey',
+              rule: 'columnKey',
+              code: 'COLUMN_NOT_RENDERABLE',
+              message: NOT_RENDERABLE,
+            },
+          ]),
+        }
+      })
+
+      it('still shows a render detail under the key it names', async () => {
+        const wrapper = await render()
+
+        expect(rowText(wrapper, 'column-1')).toContain(NOT_RENDERABLE)
+        expect(wrapper.get('[data-testid="render-broken"]').text()).toContain(NOT_RENDERABLE)
+        expect(list(wrapper).exists()).toBe(false)
+      })
+
+      it('shows the save’s refusal of a key before the render check’s', async () => {
+        saveReply = refusal(COLUMN_KEY_DUPLICATE)
+        const wrapper = await render()
+
+        await save(wrapper)
+
+        const row = rowText(wrapper, 'column-1')
+
+        expect(row).toContain(COLUMN_KEY_DUPLICATE[3])
+        expect(row).not.toContain(NOT_RENDERABLE)
+        // The panel keeps the render check's answer, which the save did not change.
+        expect(wrapper.get('[data-testid="render-broken"]').text()).toContain(NOT_RENDERABLE)
+        expect(list(wrapper).exists()).toBe(false)
+      })
+
+      it('lists no render detail, and keeps the panel, when a save is refused', async () => {
+        saveReply = refusal(UNKNOWN_FIELD)
+        const wrapper = await render()
+
+        await save(wrapper)
+
+        expect(listed(wrapper)).toEqual([`unknownField: ${UNKNOWN_FIELD[3]}`])
+        expect(wrapper.get('[data-testid="render-broken"]').text()).toContain(NOT_RENDERABLE)
+      })
+    })
+
+    /*
+     * test-engineer, row 22's gate. The cases above reach the column key's
+     * render placement only; AC2 keeps all three. The render details are
+     * `render::plan`'s own (`plan_filters`, `plan_sort`), under the code
+     * `AppError::validation` answers with.
+     */
+    describe('the other two render placements, and shown once', () => {
+      function cannotBeDrawn(path: string, rule: string, code: string, message: string) {
+        return {
+          status: 422,
+          body: errorBody('VALIDATION_ERROR', 'Validation failed', [{ path, rule, code, message }]),
+        }
+      }
+
+      const FILTER_NOT_RENDERABLE =
+        '`stage` is not something a document list can be filtered by, so this control would do nothing — the parameters are `search`, `status`, `priority`, `entityType`, `entityId`'
+      const SORT_NOT_RENDERABLE =
+        'this list declares 2 sort keys and a document list is ordered by one — the rest would be silently ignored'
+
+      it('still shows a render detail under the filter key it names', async () => {
+        current = definition({
+          filters: [{ filterKey: 'stage', label: 'Stage', filterType: 'TEXT', isDefault: false }],
+        })
+        renderResponse = cannotBeDrawn(
+          'filters.0.filterKey',
+          'filterKey',
+          'FILTER_NOT_RENDERABLE',
+          FILTER_NOT_RENDERABLE,
+        )
+        const wrapper = await render()
+
+        expect(rowText(wrapper, 'filter-0')).toContain(FILTER_NOT_RENDERABLE)
+        expect(wrapper.get('[data-testid="render-broken"]').text()).toContain(FILTER_NOT_RENDERABLE)
+        expect(list(wrapper).exists()).toBe(false)
+      })
+
+      it('still shows a render detail under the opening sort', async () => {
+        current = definition({
+          defaultSort: [
+            { key: 'title', dir: 'asc' },
+            { key: 'createdAt', dir: 'desc' },
+          ],
+        })
+        renderResponse = cannotBeDrawn(
+          'defaultSort',
+          'defaultSort',
+          'SORT_NOT_RENDERABLE',
+          SORT_NOT_RENDERABLE,
+        )
+        const wrapper = await render()
+
+        const sortBlock = wrapper.get('[data-testid="sort-key"]').element.parentElement
+
+        expect(sortBlock?.textContent).toContain(SORT_NOT_RENDERABLE)
+        expect(list(wrapper).exists()).toBe(false)
+      })
+
+      // AC6 beside a broken render panel: the panel is the render check's,
+      // and a save's refusal is not repeated in it.
+      it('says a save’s refusal once while the render panel is up', async () => {
+        renderResponse = cannotBeDrawn(
+          'filters.0.filterKey',
+          'filterKey',
+          'FILTER_NOT_RENDERABLE',
+          FILTER_NOT_RENDERABLE,
+        )
+        saveReply = refusal(COLUMN_KEY_DUPLICATE)
+        const wrapper = await render()
+
+        await save(wrapper)
+
+        expect(rowText(wrapper, 'column-1')).toContain(COLUMN_KEY_DUPLICATE[3])
+        expect(shown(wrapper, COLUMN_KEY_DUPLICATE[3])).toBe(1)
+        expect(wrapper.get('[data-testid="render-broken"]').text()).not.toContain(
+          COLUMN_KEY_DUPLICATE[3],
+        )
+      })
+    })
+
+    // test-engineer: a column's and a filter's label refused at one index,
+    // so a slot reading the other collection's path is seen.
+    it('places a column’s and a filter’s label refusal at one index, each in its own row', async () => {
+      const COLUMN_LABEL_0: Detail = [
+        'columns.0.label',
+        'required',
+        'REQUIRED',
+        'columns.0.label is required',
+      ]
+      saveReply = refusal(COLUMN_LABEL_0, FILTER_LABEL_TOO_LONG)
+      const wrapper = await render()
+
+      await save(wrapper)
+
+      expect(wrapper.get('[data-testid="column-label-0-message"]').text()).toBe(COLUMN_LABEL_0[3])
+      expect(wrapper.get('[data-testid="filter-label-0-message"]').text()).toBe(
+        FILTER_LABEL_TOO_LONG[3],
+      )
+      expect(shown(wrapper, COLUMN_LABEL_0[3])).toBe(1)
+      expect(shown(wrapper, FILTER_LABEL_TOO_LONG[3])).toBe(1)
+      expect(list(wrapper).exists()).toBe(false)
+    })
   })
 })

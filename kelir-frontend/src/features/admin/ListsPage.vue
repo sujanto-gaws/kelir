@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 
 import { toApiError } from '@/api/client'
 import { createList, deleteList, listLists } from '@/api/rad'
+import FormUnplacedErrors from '@/components/FormUnplacedErrors.vue'
 import { Alert } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -17,9 +18,9 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
+import { useFormErrors } from '@/composables/useFormErrors'
 import { usePaginatedList } from '@/composables/usePaginatedList'
 import { useAuthStore } from '@/stores/auth'
-import type { ValidationDetail } from '@/types/api'
 import type { ListSummary } from '@/types/rad'
 
 import ConfirmDialog from './ConfirmDialog.vue'
@@ -49,8 +50,19 @@ const isCreateOpen = ref(false)
 const listKey = ref('')
 const title = ref('')
 const isSaving = ref(false)
-const createError = ref('')
-const createDetails = ref<ValidationDetail[]>([])
+const {
+  fieldErrors: createFieldErrors,
+  formError: createError,
+  report: reportCreate,
+  reset: resetCreate,
+} = useFormErrors()
+
+/**
+ * The create form's paths with a message under them (#641). It sends one fixed
+ * column and no filters, so a `columns.*` or `pageSize` detail has no input
+ * here and is listed above the form, as is any unknown field.
+ */
+const CREATE_PLACED = ['listKey', 'title']
 
 const confirming = ref<ListSummary | null>(null)
 const isConfirmOpen = ref(false)
@@ -60,19 +72,17 @@ const deleteError = ref('')
 function startCreating(): void {
   listKey.value = ''
   title.value = ''
-  createError.value = ''
-  createDetails.value = []
+  resetCreate()
   isCreateOpen.value = true
 }
 
 function messageFor(path: string): string | undefined {
-  return createDetails.value.find((detail) => detail.path === path)?.message
+  return createFieldErrors.value[path]
 }
 
 async function create(): Promise<void> {
   isSaving.value = true
-  createError.value = ''
-  createDetails.value = []
+  resetCreate()
 
   try {
     const created = await createList({
@@ -90,10 +100,7 @@ async function create(): Promise<void> {
     isCreateOpen.value = false
     await router.push({ name: 'admin-list-builder', params: { id: created.id } })
   } catch (failure) {
-    const failed = toApiError(failure)
-
-    createError.value = failed.message
-    createDetails.value = failed.details
+    reportCreate(toApiError(failure))
   } finally {
     isSaving.value = false
   }
@@ -226,6 +233,13 @@ onMounted(() => {
         >
           {{ createError }}
         </Alert>
+
+        <FormUnplacedErrors
+          :field-errors="createFieldErrors"
+          :placed="CREATE_PLACED"
+          class="mt-4"
+          data-testid="list-create-unplaced-errors"
+        />
 
         <form class="mt-4 space-y-4" @submit.prevent="create">
           <div class="space-y-2">
