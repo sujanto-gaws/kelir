@@ -5,7 +5,7 @@
 import { spawnSync } from 'node:child_process'
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
@@ -17,7 +17,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
  * and until now it was seen red only by hand**, on the builds its author
  * thought to try. Here it runs against `.vite` metadata written to a scratch
  * directory — a manifest, `chunk-packages.json` and `stylesheet-packages.json`
- * shaped as the real build writes them (2026-10-10) — once clean, and once
+ * shaped as the real build writes them (2026-10-10), and since #749 the text
+ * of each CSS file and `index.html`, which the third check searches — once
+ * clean, and once
  * for each way the graph's subject can reach first load. Each case names the
  * check it expects to fail by that check's own words, so a check that stops
  * failing is seen even when another one catches the build.
@@ -53,6 +55,12 @@ interface Build {
    * chunk carries, which the icon-set check counts.
    */
   modules: Record<string, Record<string, number>>
+  /**
+   * The text of each CSS file under `dist/`, and `dist/index.html` (#749): the
+   * script searches first-load stylesheets for a subject's marker.
+   */
+  stylesheetText: Record<string, string>
+  html: string
 }
 
 const ENTRY = 'assets/index-CQaDf5LZ.js'
@@ -62,6 +70,29 @@ const DASHBOARD = 'assets/DashboardPage-Cuw3tNRG.js'
 const GRAPH = 'assets/WorkflowGraph-Jmrvbe9i.js'
 const GRAPH_CSS = 'assets/WorkflowGraph-C2GtfgTO.css'
 const VUE_FLOW_CSS = ['@vue-flow/controls', '@vue-flow/core']
+
+/** Minified rules of the shape each built stylesheet holds, 2026-11-05. */
+const TAILWIND_RULES = '.flex{display:flex}.hidden{display:none}'
+const VUE_FLOW_RULES =
+  '.vue-flow{position:relative;width:100%}.vue-flow__container{position:absolute}' +
+  '.vue-flow__controls{box-shadow:0 0 2px 1px #00000014}'
+const SCOPED_GRAPH_RULES = '[data-v-1a2b3c4d] .vue-flow__handle{opacity:0}'
+const CDN_STYLE = 'https://unpkg.com/@vue-flow/core@1.48.2/dist/style.css'
+
+/** `dist/index.html`, linking each `href` as a stylesheet, as Vite writes it. */
+function page(hrefs: string[]): string {
+  return [
+    '<!doctype html>',
+    '<html lang="en">',
+    '  <head>',
+    `    <script type="module" crossorigin src="/${ENTRY}"></script>`,
+    ...hrefs.map((href) => `    <link rel="stylesheet" crossorigin href="${href}">`),
+    '  </head>',
+    '  <body><div id="app"></div></body>',
+    '</html>',
+    '',
+  ].join('\n')
+}
 
 /** A clean build, as `npm run build` wrote it on this branch: every subject off first load. */
 function clean(): Build {
@@ -131,6 +162,12 @@ function clean(): Build {
     styled: { [ENTRY_CSS]: [], [GRAPH_CSS]: VUE_FLOW_CSS },
     // The layout's own icons on first load; the set, one per chunk, off it.
     modules: { [LAYOUT]: { '@lucide/vue': 28 }, 'assets/file-cog-Dx1.js': { '@lucide/vue': 1851 } },
+    stylesheetText: {
+      [ENTRY_CSS]: TAILWIND_RULES,
+      // Vue Flow's rules, and Kelir's own scoped ones against its classes.
+      [GRAPH_CSS]: `${VUE_FLOW_RULES}${SCOPED_GRAPH_RULES}`,
+    },
+    html: page([`/${ENTRY_CSS}`]),
   }
 }
 
@@ -160,6 +197,15 @@ describe('check-bundle-split.mjs, the workflow graph’s subject', () => {
     writeFileSync(join(vite, 'manifest.json'), JSON.stringify(build.manifest))
     writeFileSync(join(vite, 'chunk-packages.json'), JSON.stringify(build.carried))
     writeFileSync(join(vite, 'chunk-package-modules.json'), JSON.stringify(build.modules))
+
+    const dist = join(scratch, 'kelir-frontend', 'dist')
+
+    writeFileSync(join(dist, 'index.html'), build.html)
+
+    for (const [file, text] of Object.entries(build.stylesheetText)) {
+      mkdirSync(dirname(join(dist, file)), { recursive: true })
+      writeFileSync(join(dist, file), text)
+    }
 
     if (build.styled) {
       writeFileSync(join(vite, 'stylesheet-packages.json'), JSON.stringify(build.styled))
@@ -265,6 +311,7 @@ describe('check-bundle-split.mjs, the workflow graph’s subject', () => {
 
       build.manifest['src/layouts/AppLayout.vue'].css = [renamed]
       build.styled = { ...build.styled, [renamed]: ['@vue-flow/controls'] }
+      build.stylesheetText[renamed] = '.vue-flow__controls{display:flex}'
 
       const run = check(build)
 
@@ -279,6 +326,7 @@ describe('check-bundle-split.mjs, the workflow graph’s subject', () => {
 
       build.manifest['src/features/workflow-builder/WorkflowGraph.vue'].css = [renamed]
       build.styled = { [ENTRY_CSS]: [], [renamed]: VUE_FLOW_CSS }
+      build.stylesheetText = { [ENTRY_CSS]: TAILWIND_RULES, [renamed]: VUE_FLOW_RULES }
 
       const run = check(build)
 
@@ -293,6 +341,154 @@ describe('check-bundle-split.mjs, the workflow graph’s subject', () => {
       build.manifest['index.html'].assets = [GRAPH_CSS]
 
       expect(check(build).status).toBe(0)
+    })
+  })
+
+  describe('check 3, by the text of a first-load stylesheet, whatever route (#749)', () => {
+    it('fails Vue Flow’s rules inlined into the entry’s CSS by a CSS `@import`, which the map never sees', () => {
+      const build = clean()
+
+      // What `@import '@vue-flow/core/dist/style.css'` in main.css built,
+      // 2026-11-05: the rules in index-*.css, and the map's entry for it empty.
+      build.stylesheetText[ENTRY_CSS] = `${VUE_FLOW_RULES}${TAILWIND_RULES}`
+
+      const run = check(build)
+
+      expect(build.styled![ENTRY_CSS]).toEqual([])
+      expect(run.output).toContain(CHECK_3)
+      expect(run.output).toContain(`    ${ENTRY_CSS}`)
+      expect(run.output).not.toContain(CHECK_1)
+      expect(run.output).not.toContain(CHECK_2)
+      expect(run.status).toBe(1)
+    })
+
+    it('fails them in a stylesheet only `index.html` links, as a file copied from `public/` is', () => {
+      const build = clean()
+
+      build.stylesheetText['vendor/vue-flow.css'] = VUE_FLOW_RULES
+      build.html = page([`/${ENTRY_CSS}`, '/vendor/vue-flow.css'])
+
+      const run = check(build)
+
+      expect(run.output).toContain(CHECK_3)
+      expect(run.output).toContain('    vendor/vue-flow.css')
+      expect(run.status).toBe(1)
+    })
+
+    it('fails them in a file a first-load stylesheet `@import`s, followed through the build', () => {
+      const build = clean()
+
+      build.stylesheetText[ENTRY_CSS] = `@import url("./vendor-1a2b.css");${TAILWIND_RULES}`
+      build.stylesheetText['assets/vendor-1a2b.css'] = `@import"/deeper.css";`
+      build.stylesheetText['deeper.css'] = VUE_FLOW_RULES
+
+      const run = check(build)
+
+      expect(run.output).toContain(CHECK_3)
+      expect(run.output).toContain('    deeper.css')
+      expect(run.output).not.toContain(`    ${ENTRY_CSS}\n`)
+      expect(run.status).toBe(1)
+    })
+
+    it.each([
+      ['an `@import` the build left as written', 'import'],
+      ['a `<link>` in index.html', 'link'],
+    ])(
+      'fails a CDN stylesheet of a guarded package named by %s, whose text it cannot read',
+      (_, route) => {
+        const build = clean()
+
+        if (route === 'import') {
+          build.stylesheetText[ENTRY_CSS] = `@import"${CDN_STYLE}";${TAILWIND_RULES}`
+        } else {
+          build.html = page([`/${ENTRY_CSS}`, CDN_STYLE])
+        }
+
+        const run = check(build)
+
+        expect(run.output).toContain(CHECK_3)
+        expect(run.output).toContain(`    ${CDN_STYLE} (named by `)
+        expect(run.status).toBe(1)
+      },
+    )
+
+    it('passes a CDN stylesheet that names no guarded package, which it does not read', () => {
+      const build = clean()
+
+      build.stylesheetText[ENTRY_CSS] =
+        `@import url(https://fonts.googleapis.com/css2?family=Inter);${TAILWIND_RULES}`
+
+      expect(check(build).status).toBe(0)
+    })
+
+    it('passes the graph’s lazy stylesheet carrying the marker, Kelir’s scoped rules with it', () => {
+      const run = check(clean())
+
+      expect(run.output).toContain(
+        `✓ ${GRAPH_SUBJECT} is off the first-load path — 1 split chunk(s), 0 payload asset(s), ` +
+          '1 stylesheet(s); `.vue-flow__` in none of 1 first-load stylesheet(s)',
+      )
+      expect(run.status).toBe(0)
+    })
+
+    it('fails a first-load stylesheet the manifest names and the build lacks, rather than skipping it', () => {
+      const build = clean()
+
+      delete build.stylesheetText[ENTRY_CSS]
+
+      const run = check(build)
+
+      expect(run.output).toContain(`dist/${ENTRY_CSS} is not readable (ENOENT)`)
+      expect(run.output).toContain('the build is stale or partial')
+      expect(run.status).toBe(1)
+    })
+  })
+
+  describe('a marker must be found, and a subject that ships CSS must have one (#749)', () => {
+    it('fails a marker in none of the stylesheets the map credits to the subject', () => {
+      const build = clean()
+
+      // The library renamed its classes, and only rules that are not its own
+      // remain: the marker would then be searched for on first load in vain.
+      build.stylesheetText[GRAPH_CSS] = '.vf__container{position:absolute}'
+
+      const run = check(build)
+
+      expect(run.output).toContain(
+        `${GRAPH_SUBJECT}'s stylesheet marker \`.vue-flow__\` is in none of the stylesheets`,
+      )
+      expect(run.output).toContain(`    ${GRAPH_CSS}`)
+      expect(run.status).toBe(1)
+    })
+
+    it('does not count the marker in a stylesheet the map does not credit to the subject', () => {
+      const build = clean()
+
+      // Off first load and carrying the marker, but not one of the graph's.
+      build.stylesheetText[GRAPH_CSS] = '.vf__container{position:absolute}'
+      build.stylesheetText['assets/other-9z.css'] = VUE_FLOW_RULES
+
+      const run = check(build)
+
+      expect(run.output).toContain('is in none of the stylesheets that')
+      expect(run.status).toBe(1)
+    })
+
+    it('fails a subject whose package now ships a stylesheet and that names no marker', () => {
+      const build = clean()
+      const builderCss = 'assets/FormBuilderPage-Ab12.css'
+
+      build.manifest['src/features/admin/FormBuilderPage.vue'].css = [builderCss]
+      build.styled = { ...build.styled, [builderCss]: ['vue-draggable-plus'] }
+      build.stylesheetText[builderCss] = '.sortable-ghost{opacity:.5}'
+
+      const run = check(build)
+
+      expect(run.output).toContain(
+        "the form builder's drag-and-drop library ships a stylesheet now, and its subject names no stylesheetMarker",
+      )
+      expect(run.output).toContain(`    ${builderCss}`)
+      expect(run.status).toBe(1)
     })
   })
 
