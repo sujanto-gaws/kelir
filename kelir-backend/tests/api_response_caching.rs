@@ -31,6 +31,7 @@
 //! | The layer removed | every test here but [`EXEMPT`]'s, 6 of 7, and `attachment_download`'s happy path; the walk's 149 `/api/v1` cells |
 //! | The layer on the root router | [`EXEMPT`]'s test, on all six routes, `/version` among them; the walk's five operational cells |
 //! | The layer on the nest, with no fallback of its own | `an_unmatched_api_path_is_not_stored`: `/api/v1/nope answered 404 Not Found with Cache-Control []`; and `an_unmatched_path_below_any_module_answers_as_the_nest_does`, on all 97 templates |
+//! | No `/api/v1/` route beside the nest (the first two commits of #881) | `an_unmatched_api_path_is_not_stored` alone, on its two `/api/v1/` rows, with and without a token: `answered 404 Not Found with 0 body bytes and Cache-Control []`. `/api/v1` with no slash already carried the header, from the nest's fallback, and is pinned anyway |
 //! | `overriding` for `if_not_present` | `router::tests::a_route_that_sets_its_own_cache_control_keeps_it` |
 //! | A `.fallback` on the integration module's router, answering 404 `"module"` | `an_unmatched_path_below_any_module_answers_as_the_nest_does` alone, on the 11 integration templates: the header held, the answer did not |
 
@@ -228,18 +229,45 @@ async fn an_unmatched_api_path_is_not_stored() {
     let app = TestApp::spawn().await;
     let token = app.administrator_token().await;
 
+    // Every row is asked before anything is asserted, so a failure names all
+    // of them and not the first.
+    let mut failures = Vec::new();
     for (uri, token) in [
         ("/api/v1/nope", Some(token.as_str())),
         ("/api/v1/nope", None),
         ("/api/v1/documents/not/a/route", Some(token.as_str())),
+        // The prefix itself, with and without its slash: neither the nest's
+        // fallback nor its `{*rest}` matches an empty tail, so each needs a
+        // route of its own inside the nest.
+        ("/api/v1", Some(token.as_str())),
+        ("/api/v1/", Some(token.as_str())),
+        ("/api/v1/", None),
     ] {
         let unmatched = answer(&app, Method::GET, uri, token, None).await;
+        let cache_control: Vec<_> = unmatched
+            .headers
+            .get_all(header::CACHE_CONTROL)
+            .iter()
+            .map(|value| value.to_str().unwrap_or("<not text>").to_owned())
+            .collect();
 
-        assert_eq!(unmatched.status, StatusCode::NOT_FOUND, "{uri}");
-        // The answer it gave before the layer: no envelope, no body (AC8).
-        assert!(unmatched.bytes.is_empty(), "{uri}: {:?}", unmatched.bytes);
-        assert_no_store(&unmatched, uri);
+        // The answer it gave before the layer: a 404, no envelope, no body
+        // (AC8), and now `no-store`.
+        if unmatched.status != StatusCode::NOT_FOUND
+            || !unmatched.bytes.is_empty()
+            || cache_control != [NO_STORE]
+        {
+            failures.push(format!(
+                "{uri} (token: {}) answered {} with {} body bytes and Cache-Control \
+                 {cache_control:?}; expected an empty 404 with [\"no-store\"]",
+                token.is_some(),
+                unmatched.status,
+                unmatched.bytes.len()
+            ));
+        }
     }
+
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// **Below every documented operation, the nest's own 404**: no module router

@@ -1,7 +1,8 @@
+use axum::handler::HandlerWithoutStateExt;
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::routing::get;
 use axum::{Json, Router};
-use tower_http::set_header::SetResponseHeaderLayer;
+use tower_http::set_header::{SetResponseHeader, SetResponseHeaderLayer};
 use utoipa::OpenApi;
 
 use crate::error::ValidationDetail;
@@ -455,6 +456,24 @@ pub fn create_router(state: AppState) -> Router {
         // A route moved into the nest gains the header. The layer is not on
         // the root router, where it would reach all four.
         .nest("/api/v1", without_caching(api_v1_router(state.clone())))
+        // **The one path the nest cannot answer: its own prefix with a
+        // trailing slash.** axum maps a nested `"/"` to `/api/v1` and the
+        // nest's fallback to `/api/v1` and `/api/v1/{*rest}`, and `{*rest}`
+        // needs at least one character, so `/api/v1/` would fall to the root's
+        // default 404 without `no-store`. It gets the nest's empty 404 under
+        // the same layer, for every method. A `route_service` and not a
+        // `.route`, because it is the nest's fallback by another door and not
+        // an operation: the scans that hold every `.route` to the OpenAPI
+        // document (`every_annotated_route_reaches_the_document`,
+        // `no_token_walk`) have nothing to document here.
+        .route_service(
+            "/api/v1/",
+            SetResponseHeader::if_not_present(
+                api_not_found.into_service(),
+                header::CACHE_CONTROL,
+                NO_STORE,
+            ),
+        )
         // Applied last so it wraps every route, including the 404 fallback and
         // the preflight requests the browser sends before anything else. A
         // preflight is answered here, before the nest, so it carries no
@@ -480,9 +499,12 @@ fn without_caching(api: Router<AppState>) -> Router<AppState> {
     api.fallback(api_not_found)
         .layer(SetResponseHeaderLayer::if_not_present(
             header::CACHE_CONTROL,
-            HeaderValue::from_static("no-store"),
+            NO_STORE,
         ))
 }
+
+/// The one value, shared by the nest and by `/api/v1/` beside it.
+const NO_STORE: HeaderValue = HeaderValue::from_static("no-store");
 
 /// axum's default fallback, inside the nest: the status and no body.
 async fn api_not_found() -> StatusCode {
