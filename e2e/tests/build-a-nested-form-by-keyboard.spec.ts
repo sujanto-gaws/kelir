@@ -19,7 +19,8 @@ import { tabTo } from '../support/keyboard'
  *
  * 1. adds a panel from the palette, and titles it;
  * 2. adds a text field into the panel, from the panel's own *Add component*;
- * 3. adds columns to the form, and a text field into its first column;
+ * 3. adds columns to the form, and a text field into its first column, and
+ *    checks on the canvas that the field is in that column and not the second;
  * 4. moves that field into the panel with *Move to…*;
  * 5. removes the field the form was created with;
  * 6. saves.
@@ -33,6 +34,14 @@ import { tabTo } from '../support/keyboard'
  * node to the form's root instead of the chosen list, the flow fails at step
  * 4, where the live region says *Moved Text field “Column field” to the
  * form.* Green again on the image rebuilt without it.
+ *
+ * **And against a builder that adds to the wrong column** (#750, 2026-11-04,
+ * the same way, and green again on the image built before the break): with
+ * `useFormBuilder`'s `add` sending an add aimed at column 1 to column 2, the
+ * flow fails at step 3, where `component-field_3` is not in the region
+ * *Column 1 of Columns*. The live region still says column 1, since it names
+ * the list the button was for. The flow as it was before that check passed
+ * against the same image, because step 4 moves the field away.
  *
  * # A pointer drag, attempted
  *
@@ -156,6 +165,19 @@ test('an administrator nests a form by keyboard alone, and the server stores the
 
   await tabTo(page, page.getByTestId('label-field_3'), { limit: 80 })
   await retype(page, 'Column field')
+
+  // **The field is in column 1, and not in column 2** (#750). Step 4 moves it
+  // to the panel, so this is the one place a field added to the wrong list
+  // shows: focus and the announcement follow the node and the button pressed,
+  // not the list the node landed in. Each column is a region named for its
+  // slot, and holds that slot's list.
+  const columns = page.getByTestId('component-columns_1')
+  const column = (slot: number): Locator =>
+    columns.getByRole('region', { name: `Column ${slot} of Columns`, exact: true })
+
+  await expect(column(1).getByTestId('component-field_3')).toBeVisible()
+  await expect(column(2).getByTestId('component-field_3')).toHaveCount(0)
+  await expect(column(2)).toContainText('Nothing here yet.')
 
   // --- 4. Move to… the panel ----------------------------------------------------
   await tabTo(page, button(page, 'Move Text field “Column field” to…'), {

@@ -76,6 +76,31 @@ import { tabTo } from '../support/keyboard'
  * the typed expression, the preview computes it and enforces the typed
  * pattern, and the save reads both back.
  *
+ * # The third test: a data grid's row reads its own row (#733)
+ *
+ * #732 offers a row's fields the row's keys (AC6, `expressionScope.ts`), and
+ * the server evaluates each row against its own object (`rad::domain::engine`,
+ * JFSS §4.3.1). jsdom proves the variable lists, and only a browser proves that
+ * what the builder writes for a row is what the row's scope reads:
+ *
+ * 1. Two top-level fields, `reference` and `budget`, and a data grid `lines`
+ *    of two rows.
+ * 2. A row field `line_total` whose `calculate`, `qty × price`, is built from
+ *    the variables offered: the row's keys, and no top-level one.
+ * 3. A row field `bulk_reason`, shown when its row's `qty` is above 10.
+ * 4. A row field `budget_note` whose condition reads the top-level `budget`,
+ *    typed as JSON because it is not offered. The builder badges it, which is
+ *    #732's only signal that it is always false at runtime.
+ * 5. Save and Publish, and 6. the stored definition read back.
+ * 7. A document: 12 × 5 and 3 × 7 show 60 and 21, `bulk_reason` shows in the
+ *    row of 12 and not the row of 3, and `budget_note` shows in neither, with
+ *    `budget` at 5000. **The save is rewritten in flight**, each row's total
+ *    claimed as 0 and a value smuggled into each hidden field, so the server's
+ *    answer proves its row scope: it stores 60 and 21, keeps `bulk_reason` in
+ *    the row of 12, and leaves the smuggled values out. A server evaluating a
+ *    row against the form would store neither total, drop that `bulk_reason`,
+ *    and keep `budget_note`.
+ *
  * # No drag (AC15)
  *
  * Nothing here is dragged. Every node is added from the palette, which adds to
@@ -114,6 +139,19 @@ import { tabTo } from '../support/keyboard'
  *   (the `watch` in `RuleParamsBox.vue` with its echo check removed). The
  *   second test fails where the box is emptied: it holds `{}`, with the caret
  *   at 2.
+ *
+ * The third test, 2026-11-04 (#733), each break on its own image, and green
+ * again on the image built before them. The first two tests passed against the
+ * first break, which is the gap #733 named:
+ *
+ * - **A builder that offers the top level inside a row** (`scopeListOf` in
+ *   `expressionScope.ts` never switching to a row template). The third test
+ *   fails in step 2: `line_total`'s first operand offers *Reference*, *Budget*
+ *   and *Lines*, not *Quantity* and *Price*.
+ * - **A renderer that calculates a row against the form** (`applyCalculations`
+ *   in `useFormEvaluation.ts` walking a row's template with the form's values).
+ *   The third test fails in step 7: the first row's `line_total` stays empty
+ *   for 12 × 5.
  */
 
 const suffix = runSuffix()
@@ -763,4 +801,262 @@ test('the raw JSON boxes keep the caret and the text under every key', async ({ 
     rules: [{ rule: 'regex', params: { pattern: '^[A-Z]+$' } }],
   })
   expect(stored.components[2]).toMatchObject({ id: 'field_2', calculate: { '+': [10, 5, 2] } })
+})
+
+/** What the row's expressions are built to, as the server must store them. */
+const ROW_CALCULATE = { '*': [{ var: 'qty' }, { var: 'price' }] }
+const ROW_CONDITION = { '>': [{ var: 'qty' }, 10] }
+/** A row field's condition on a top-level key: typed, since it is not offered. */
+const TOP_LEVEL_CONDITION = { '>': [{ var: 'budget' }, 0] }
+
+/** The document save, which the third test rewrites in flight. */
+const DOCUMENT_URL = /\/api\/v1\/documents\/[0-9a-f-]{36}$/
+
+test("a data grid's row calculates and shows its fields from its own row", async ({ page }) => {
+  await signIn(page)
+
+  const formKey = `e2e_rows_${suffix}`.toLowerCase()
+  const formTitle = `Grid rows ${suffix}`
+  const formId = await createForm(page, formKey, formTitle)
+
+  // --- 1. Two top-level fields, and a grid of two rows -------------------------
+  //
+  // `reference` is at the root and is not a container, so the palette adds to
+  // the form until the grid is selected; then it adds to the grid's row.
+  await name(page, 'field_1', 'reference', 'Reference')
+  await addFromPalette(page, 'number', 'field_2')
+  await name(page, 'field_2', 'budget', 'Budget')
+
+  await addFromPalette(page, 'datagrid', 'field_3')
+  await name(page, 'field_3', 'lines', 'Lines')
+  await page.getByTestId('default-items-field_3').fill('2')
+
+  await addFromPalette(page, 'number', 'field_4')
+  await name(page, 'field_4', 'qty', 'Quantity')
+  await addFromPalette(page, 'number', 'field_5')
+  await name(page, 'field_5', 'price', 'Price')
+  await addFromPalette(page, 'number', 'field_6')
+  await name(page, 'field_6', 'line_total', 'Line total')
+
+  const gridCard = page.getByTestId('component-field_3')
+
+  for (const id of ['field_4', 'field_5', 'field_6']) {
+    await expect(gridCard.getByTestId(`component-${id}`)).toBeVisible()
+  }
+
+  // --- 2. `line_total` calculates `qty × price`, from the row's keys --------------
+  //
+  // **The variables offered are the row's, and only the row's** (#732's AC6):
+  // a row is evaluated against its own object, so `reference`, `budget` and
+  // `lines` are not offered here, and nor is `line_total` itself. A builder
+  // that offered the top level inside a row fails on this list.
+  await control(page, 'Calculate: kind').selectOption('arithmetic')
+  await control(page, 'Calculate: operator').selectOption('*')
+  await control(page, 'Calculate, operand 1: kind').selectOption('var')
+
+  const factor = control(page, 'Calculate, operand 1: variable')
+
+  await expect(factor.locator('option')).toHaveText([
+    'Choose a variable',
+    'Quantity — qty (number)',
+    'Price — price (number)',
+  ])
+  await factor.selectOption('qty')
+  await control(page, 'Calculate, operand 2: kind').selectOption('var')
+  await control(page, 'Calculate, operand 2: variable').selectOption('price')
+  await expect(page.getByTestId('calculate-unfinished-field_6')).toHaveCount(0)
+
+  // --- 3. `bulk_reason`, shown in a row whose own `qty` is above 10 ---------------
+  //
+  // With a row field selected, the palette still adds to the row.
+  await addFromPalette(page, 'textfield', 'field_7')
+  await name(page, 'field_7', 'bulk_reason', 'Bulk reason')
+  await expect(gridCard.getByTestId('component-field_7')).toBeVisible()
+
+  await control(page, 'Conditional logic: kind').selectOption('comparison')
+  await control(page, 'Conditional logic: operator').selectOption('>')
+  await control(page, 'Conditional logic, operand 1: kind').selectOption('var')
+
+  const subject = control(page, 'Conditional logic, operand 1: variable')
+
+  // A `conditional` may read its own field, and it is still the row's keys only.
+  await expect(subject.locator('option')).toHaveText([
+    'Choose a variable',
+    'Quantity — qty (number)',
+    'Price — price (number)',
+    'Line total — line_total (number)',
+    'Bulk reason — bulk_reason (string)',
+  ])
+  await subject.selectOption('qty')
+  await control(page, 'Conditional logic, operand 2: kind').selectOption('number')
+  await control(page, 'Conditional logic, operand 2: number').fill('10')
+  await expect(page.getByTestId('conditional-unfinished-field_7')).toHaveCount(0)
+
+  // --- 4. `budget_note`, whose condition reads the top-level `budget` -------------
+  //
+  // **#732's one signal for a row field reading outside its row**, which is
+  // always false at runtime: the key is not offered, so it is typed as JSON,
+  // and the visual builder draws it with a badge while the field is selected.
+  await addFromPalette(page, 'textfield', 'field_8')
+  await name(page, 'field_8', 'budget_note', 'Budget note')
+  await expect(gridCard.getByTestId('component-field_8')).toBeVisible()
+
+  await page.getByRole('button', { name: 'Edit Conditional logic as JSON', exact: true }).click()
+  await control(page, 'Conditional logic (JSON)').fill(JSON.stringify(TOP_LEVEL_CONDITION))
+  await page.getByRole('button', { name: 'Edit Conditional logic visually', exact: true }).click()
+
+  await expect(control(page, 'Conditional logic, operand 1: variable')).toHaveValue('budget')
+  await expect(page.getByTestId('conditional-field_8')).toContainText(
+    'Not in the offered variables',
+  )
+
+  // And `bulk_reason`'s condition, which reads its own row, carries no badge.
+  await page.getByTestId('select-field_7').click()
+  await expect(control(page, 'Conditional logic, operand 1: variable')).toHaveValue('qty')
+  await expect(page.getByTestId('conditional-field_7')).not.toContainText(
+    'Not in the offered variables',
+  )
+
+  // --- 5. A submit button at the root, then Save and Publish ----------------------
+  await page.getByTestId('select-field_2').click()
+  await addFromPalette(page, 'button', 'button_1')
+  await page.getByTestId('button-label-button_1').fill('Submit requisition')
+
+  await page.getByTestId('save-definition').click()
+  await expect(page.getByTestId('save-error')).toHaveCount(0)
+  await expect(page.getByTestId('save-confirmed')).toBeVisible()
+
+  await page.getByTestId('publish-form').click()
+  await expect(page.getByTestId('published-notice')).toBeVisible()
+
+  // --- 6. Stored as built: the expressions sit in the row template ----------------
+  const stored = await storedDefinition(formId)
+  const lines = stored.components[2]
+  const row = lines?.components ?? []
+
+  expect(stored.components.map((node) => node.id)).toEqual([
+    'field_1',
+    'field_2',
+    'field_3',
+    'button_1',
+  ])
+  expect(lines).toMatchObject({ id: 'field_3', key: 'lines', type: 'datagrid', defaultItems: 2 })
+  expect(row.map((node) => node.key)).toEqual([
+    'qty',
+    'price',
+    'line_total',
+    'bulk_reason',
+    'budget_note',
+  ])
+  expect(row[2]?.calculate).toEqual(ROW_CALCULATE)
+  expect(row[3]?.conditional).toEqual({ action: 'show', logic: ROW_CONDITION })
+  expect(row[4]?.conditional).toEqual({ action: 'show', logic: TOP_LEVEL_CONDITION })
+
+  // --- 7. A document: each row computes and shows from its own values --------------
+  const type = await createDocumentType(
+    session,
+    { id: formId, formKey, title: formTitle },
+    `Grid rows requisition ${suffix}`,
+  )
+
+  await page.goto('/documents/new')
+  await chooseDocumentType(page, type.typeCode)
+  await page.getByTestId('new-document-title').fill(`Chairs and desks ${suffix}`)
+  await page.getByTestId('create-document').click()
+
+  await expect(page).toHaveURL(/\/documents\/[0-9a-f-]{36}$/)
+  await expect(page.getByTestId('document-status')).toHaveText('Draft')
+
+  const cell = (index: number, id: string): Locator => page.locator(`#jfss-row-${index}-${id}`)
+
+  await expect(cell(0, 'field_4')).toBeVisible()
+  await expect(cell(1, 'field_4')).toBeVisible()
+  await expect(cell(2, 'field_4')).toHaveCount(0)
+
+  await page.locator('#jfss-field_1').fill('REQ-000733')
+  await page.locator('#jfss-field_2').fill('5000')
+
+  // Twelve chairs at 5, and three desks at 7: a product per row.
+  await cell(0, 'field_4').fill('12')
+  await cell(0, 'field_5').fill('5')
+  await cell(1, 'field_4').fill('3')
+  await cell(1, 'field_5').fill('7')
+  await expect(cell(0, 'field_6')).toHaveValue('60')
+  await expect(cell(1, 'field_6')).toHaveValue('21')
+
+  // **`bulk_reason` follows its own row's `qty`**: shown in the row of 12, and
+  // not in the row of 3. A row reading another row's `qty`, or the top level's
+  // (which has none), would show it in both rows or in neither.
+  await expect(cell(0, 'field_7')).toBeVisible()
+  await expect(cell(1, 'field_7')).toHaveCount(0)
+
+  // **`budget_note` is never drawn**, though `budget` is 5000: a row has no
+  // `budget`. The badge in step 4 is the only place that is said.
+  await expect(cell(0, 'field_8')).toHaveCount(0)
+  await expect(cell(1, 'field_8')).toHaveCount(0)
+
+  await cell(0, 'field_7').fill('Twelve, for the new floor.')
+
+  // **The server's row scope reads what the builder wrote.** The save before
+  // the submit is rewritten in flight, as `a-form-is-submitted.spec.ts` does
+  // with a submission: each row's total is claimed as 0, and a value is
+  // smuggled into each field its row's condition hides. The server's answer
+  // is the rows as stored.
+  let storedRows: Record<string, unknown>[] | undefined
+
+  await page.route(DOCUMENT_URL, async (route) => {
+    if (route.request().method() !== 'PUT') {
+      await route.continue()
+
+      return
+    }
+
+    const body = route.request().postDataJSON() as { formData: Record<string, unknown> }
+    const rows = (body.formData.lines as Record<string, unknown>[] | undefined) ?? []
+
+    body.formData.lines = rows.map((line) => ({
+      ...line,
+      line_total: 0,
+      bulk_reason: line.bulk_reason ?? 'smuggled into a row whose qty is 3',
+      budget_note: 'smuggled into a row that has no budget',
+    }))
+
+    const response = await route.fetch({ postData: JSON.stringify(body) })
+    const answered = (await response.json()) as {
+      data?: { formData?: { lines?: Record<string, unknown>[] } }
+    }
+
+    storedRows = answered.data?.formData?.lines
+
+    await route.fulfill({ response })
+  })
+
+  await page.getByRole('button', { name: 'Submit requisition' }).click()
+  await expect(page.getByTestId('document-status')).toHaveText('Submitted')
+
+  expect(storedRows, 'the server answered the save with its rows').toHaveLength(2)
+
+  const [first, second] = storedRows as Record<string, unknown>[]
+
+  expect(first).toMatchObject({
+    qty: 12,
+    price: 5,
+    line_total: 60,
+    bulk_reason: 'Twelve, for the new floor.',
+  })
+  expect(second).toMatchObject({ qty: 3, price: 7, line_total: 21 })
+  // Each hidden field's value is left out of its row (S10.2): `bulk_reason`
+  // in the row of 3, and `budget_note` in both.
+  expect(second.bulk_reason).toBeUndefined()
+  expect(first.budget_note).toBeUndefined()
+  expect(second.budget_note).toBeUndefined()
+
+  // And the document, read again, draws the rows the server stored.
+  await page.unroute(DOCUMENT_URL)
+  await page.reload()
+  await expect(page.getByTestId('document-status')).toHaveText('Submitted')
+  await expect(cell(0, 'field_6')).toHaveValue('60')
+  await expect(cell(1, 'field_6')).toHaveValue('21')
+  await expect(cell(0, 'field_7')).toHaveValue('Twelve, for the new floor.')
+  await expect(cell(1, 'field_7')).toHaveCount(0)
 })
