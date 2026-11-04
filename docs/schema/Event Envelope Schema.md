@@ -2,7 +2,7 @@
 **Version:** 1.0.0
 **Status:** Draft Standard
 **Target Stack:** Rust (Outbox Worker / Webhook Dispatcher), External Consumers, Plugin Runtimes
-**Last updated:** 2026-10-08
+**Last updated:** 2026-11-04
 
 ---
 
@@ -91,7 +91,7 @@ Payloads are defined per event family as **profiles**: a minimum guaranteed fiel
 | `documentId` | `string` | — |
 | `documentRef` | `string` | `DOC-2026-000123` |
 | `documentNumber` | `string` \| `null` | `null` before numbering |
-| `documentTypeKey` | `string` | — |
+| `documentTypeKey` | `string` | The document type's `document_types.type_code` exactly as stored, upper-case as [DTDS](Document%20Type%20Definition%20Schema.md) §2 normalizes it (`"PURCHASE_REQUISITION"`), never DTDS §2's lower-case key, so an event carries the spelling a hook is given ([LHCS](Lifecycle%20Hook%20Contract.md) §4) (added 2026-11-04, R-3). |
 | `status` | `string` | Platform status after the event |
 | `previousStatus` | `string` \| `null` | — |
 | `title` | `string` | — |
@@ -187,7 +187,7 @@ Consumer obligations:
     "documentId": "3f2b8a10-4d5e-7f80-9a1b-c2d3e4f50617",
     "documentRef": "DOC-2026-000123",
     "documentNumber": "PR-2026-000123",
-    "documentTypeKey": "purchase_requisition",
+    "documentTypeKey": "PURCHASE_REQUISITION",
     "status": "APPROVED",
     "previousStatus": "PENDING_APPROVAL",
     "title": "Purchase Laptop for Finance Team",
@@ -198,6 +198,8 @@ Consumer obligations:
 ```
 
 (`decision` and `decisionLevel` are producer additions on top of the `Document.*` profile — legal under §4.3.)
+
+*The block above read `"documentTypeKey": "purchase_requisition"` until 2026-11-04 (R-3): DTDS §2's key, which §4.1 says a payload never carries.*
 
 ---
 
@@ -221,6 +223,7 @@ This specification is a **`Draft Standard`** ([naming convention](../standards/0
 | :--- | :--- | :--- |
 | **R-1** | 2026-09-24 | **§3.1 names the first event type Kelir writes, `Workflow.Transitioned`, with its payload** — [#519](https://github.com/sujanto-gaws/kelir/issues/519), [ADR-0041](../architectures/adr/0041.%20Every%20Workflow%20Transition%20Writes%20an%20Outbox%20Event,%20and%20After-Hooks%20Are%20Its%20First%20Consumer.md). **No change to the shape**: the envelope, the profiles and the meta-schema are untouched. The name was already in the catalogue §3 points at (architectures/01 §12.3), §3 already permits new types without a specification change, `fromState` and `toState` are producer additions on the `Workflow.*` profile, legal under §4.3, and `action` is the profile's own field. **§5.1 is read, not amended**: while the outbox has one consumer, an `outbox_events` row is the event plus the state of its in-process dispatch, and `DEAD_LETTER` marks the dispatch as exhausted while keeping the envelope ([Database Schema](../design/02.%20Database%20Schema.md) §12.8). |
 | **R-2** | 2026-10-08 | **§2's `correlationId` row no longer says `document_hook_executions` carries it**: the table has no such column ([Database Schema](../design/02.%20Database%20Schema.md) §6.12), which ADR-0041 §3 records against its revisit trigger in §6. `integration_logs` does carry one. The row also says what Kelir's one producer writes: `Workflow.Transitioned` sets `correlationId` to the instance's id, the value the before-chain hands its handlers. Found by the `v0.9.0` schema gate. **No change to the shape**: the envelope and the meta-schema are untouched. |
+| **R-3** | 2026-11-04 | **§4.1's `Document.*` profile says which spelling `documentTypeKey` carries, the stored `document_types.type_code`, and §7's example spells it so** — [#768](https://github.com/sujanto-gaws/kelir/issues/768). Found by the `schema-guardian` gate on Sprint 24 row 14 ([#706](https://github.com/sujanto-gaws/kelir/issues/706) with [#755](https://github.com/sujanto-gaws/kelir/issues/755)). **No change to the shape**: the envelope, the profiles and the meta-schema are untouched. The profile gave the field no spelling, and the example showed [DTDS](Document%20Type%20Definition%20Schema.md) §2's key, `"purchase_requisition"`; it now reads `"PURCHASE_REQUISITION"`, with a dated note. **No event Kelir sends changes**: the one type it writes, `Workflow.Transitioned` (§3.1), carries no `documentTypeKey`, and no `Document.*` event is written to the outbox, so the sentence binds the first producer that writes one to the spelling a hook is given ([LHCS](Lifecycle%20Hook%20Contract.md) §4, R-4) and a workflow condition reads ([JWSS](JSON%20Workflow%20Schema.md) §6.1, R-17). |
 
 ---
 
