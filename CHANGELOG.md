@@ -222,6 +222,12 @@ While the major version is `0`, the public API may change in any release.
   old order until a revision is written; a clone of it is refused at its
   publish, and a rewritten path is a dependency edge, so that revision can
   compute in a new order. No migration, and JFSS's meta-schema is untouched.
+- **A client or proxy that cached `/api/v1` GETs now refetches them**
+  ([#881](https://github.com/sujanto-gaws/kelir/issues/881)). Every `/api/v1`
+  response is `Cache-Control: no-store`, so nothing keeps a copy to answer the
+  next request from. No in-tree client relies on caching an API response: the
+  frontend reads `/auth/me` fresh on every load, and fetches a download into a
+  blob. The operational routes are unchanged.
 
 ### Added
 
@@ -770,6 +776,18 @@ While the major version is `0`, the public API may change in any release.
   reads `/`, one hashed file and one missing one. The Caddyfile comes from the
   deploy directory and not the image, so a rollback to an older image is
   served with the headers too.
+- **No `/api/v1` response may be stored by a browser or a proxy**
+  ([#881](https://github.com/sujanto-gaws/kelir/issues/881), construction
+  plan 21 row 45). The backend sent no `Cache-Control`, so nothing stopped a
+  browser writing a profile, a document, a token or a downloaded file to its
+  disk cache, or keeping it for back and forward navigation, past the
+  sign-out that should have ended it. Every response from
+  the `/api/v1` nest now carries `Cache-Control: no-store`, authenticated or
+  not, refusals included, and so does the 404 for an unmatched `/api/v1/…`
+  path. `/health*`, `/version`, `/deployment` and `/api/docs/openapi.json` are
+  exempt and unchanged. A route's own `Cache-Control` would stand; none sets
+  one. No status, body, error code or OpenAPI schema changes (System Design
+  Document §11.4).
 - **A form rule with no `pattern` or `target` decides in the browser as on the
   server** ([#737](https://github.com/sujanto-gaws/kelir/issues/737),
   construction plan 21 row 24, renderer half). The form renderer read a
