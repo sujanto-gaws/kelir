@@ -79,14 +79,18 @@ const VUE_FLOW_RULES =
 const SCOPED_GRAPH_RULES = '[data-v-1a2b3c4d] .vue-flow__handle{opacity:0}'
 const CDN_STYLE = 'https://unpkg.com/@vue-flow/core@1.48.2/dist/style.css'
 
-/** `dist/index.html`, linking each `href` as a stylesheet, as Vite writes it. */
-function page(hrefs: string[]): string {
+/**
+ * `dist/index.html`, linking each `href` as a stylesheet, as Vite writes it,
+ * with any further `head` markup after the links.
+ */
+function page(hrefs: string[], head: string[] = []): string {
   return [
     '<!doctype html>',
     '<html lang="en">',
     '  <head>',
     `    <script type="module" crossorigin src="/${ENTRY}"></script>`,
     ...hrefs.map((href) => `    <link rel="stylesheet" crossorigin href="${href}">`),
+    ...head.map((markup) => `    ${markup}`),
     '  </head>',
     '  <body><div id="app"></div></body>',
     '</html>',
@@ -419,6 +423,93 @@ describe('check-bundle-split.mjs, the workflow graph’s subject', () => {
         `@import url(https://fonts.googleapis.com/css2?family=Inter);${TAILWIND_RULES}`
 
       expect(check(build).status).toBe(0)
+    })
+
+    it('fails them in a `<style>` element of index.html, which Vite leaves as written (F7)', () => {
+      const build = clean()
+
+      build.html = page(
+        [`/${ENTRY_CSS}`],
+        ['<style>', '  .vue-flow__pane { cursor: grab; }', '</style>'],
+      )
+
+      const run = check(build)
+
+      expect(run.output).toContain(CHECK_3)
+      expect(run.output).toContain('    index.html <style> 1 — ')
+      expect(run.output).toContain('.vue-flow__pane')
+      expect(run.status).toBe(1)
+    })
+
+    it.each([
+      ['a CDN URL', CDN_STYLE, `    ${CDN_STYLE} (named by index.html, not in the build)`],
+      ['a file of the build', '/vendor/vue-flow.css', '    vendor/vue-flow.css — '],
+    ])(
+      'fails a style preload of %s, which first load fetches whether or not its onload runs (F9)',
+      (_, href, listed) => {
+        const build = clean()
+
+        build.stylesheetText['vendor/vue-flow.css'] = VUE_FLOW_RULES
+        build.html = page(
+          [`/${ENTRY_CSS}`],
+          [`<link rel="preload" as="style" href="${href}" onload="this.rel='stylesheet'">`],
+        )
+
+        const run = check(build)
+
+        expect(run.output).toContain(CHECK_3)
+        expect(run.output).toContain(listed)
+        expect(run.status).toBe(1)
+      },
+    )
+
+    it('passes a preload that is not a stylesheet, and an attribute that only ends in `rel`', () => {
+      const build = clean()
+
+      build.stylesheetText['vendor/vue-flow.css'] = VUE_FLOW_RULES
+      build.html = page(
+        [`/${ENTRY_CSS}`],
+        [
+          '<link rel="preload" as="font" href="/vendor/vue-flow.css" crossorigin>',
+          '<link data-rel="stylesheet" rel="icon" href="/vendor/vue-flow.css">',
+        ],
+      )
+
+      expect(check(build).status).toBe(0)
+    })
+
+    it('says a marker found by text may be a Tailwind utility a lazy component asked for (F6)', () => {
+      const build = clean()
+
+      // What an arbitrary variant naming `.vue-flow__edge-path` in
+      // WorkflowGraph.vue makes Tailwind write into the entry's CSS. The class
+      // is assembled from parts, never written whole in a source file:
+      // Tailwind scans this file too, and a whole one here put the rule on the
+      // real build's first load (seen 2026-11-05).
+      const variant = ['[&_', '.vue-flow__edge-path]', ':stroke-primary'].join('')
+      const escaped = variant.replace(/[[\]&.:]/g, (character) => `\\${character}`)
+      build.stylesheetText[ENTRY_CSS] =
+        `${TAILWIND_RULES}.${escaped} .vue-flow__edge-path{stroke:var(--color-primary)}`
+
+      const run = check(build)
+
+      expect(run.output).toContain(CHECK_3)
+      expect(run.output).toContain(`    ${ENTRY_CSS} — …`)
+      expect(run.output).toContain('a utility class Tailwind wrote for a lazy component')
+      expect(run.output).toContain("move it into the component's scoped <style>")
+      expect(run.status).toBe(1)
+    })
+
+    it('does not name the Tailwind cause when only the map found the stylesheet', () => {
+      const build = clean()
+
+      build.styled = { [ENTRY_CSS]: ['@vue-flow/core'], [GRAPH_CSS]: VUE_FLOW_CSS }
+
+      const run = check(build)
+
+      expect(run.output).toContain(CHECK_3)
+      expect(run.output).not.toContain('a utility class Tailwind wrote')
+      expect(run.status).toBe(1)
     })
 
     it('passes the graph’s lazy stylesheet carrying the marker, Kelir’s scoped rules with it', () => {

@@ -84,10 +84,16 @@
  * it. That holds by any route: a module import, a CSS `@import`, the rules
  * pasted in.
  *
- * *First-load stylesheets* are every first-load chunk's `css`, every
- * `<link rel="stylesheet">` in `dist/index.html` (a file copied from `public/`
- * is linked only there), and every `@import` left in one of those that points
- * at a file of the build, followed. **An `@import` or `<link>` the build does
+ * *First-load stylesheets* are every first-load chunk's `css`; every
+ * stylesheet `<link>` in `dist/index.html` (a file copied from `public/` is
+ * linked only there), which is one whose `rel` lists `stylesheet`, or
+ * `preload` with `as="style"`; the text of every `<style>` element there,
+ * which Vite leaves as written; and every `@import` left in any of those that
+ * points at a file of the build, followed. A style preload counts although
+ * only its `onload="this.rel='stylesheet'"` applies it: the preload fetches
+ * the payload on first load whether or not a script runs, and the payload is
+ * what the decision keeps off it (both found by row 21's `test-engineer`
+ * gate, 2026-11-05). **An `@import` or `<link>` the build does
  * not hold**, such as a CDN URL, which survives the build as written, fails
  * when it names one of a subject's packages, since its text is not there to
  * search. One that names none is not read. A first-load stylesheet the build
@@ -109,10 +115,17 @@
  * **What the marker cannot tell** is whose rules it found: a rule Kelir writes
  * itself against `.vue-flow__node` in a first-load stylesheet fails too, which
  * is a right place to fail, since it styles a component first load never
- * draws. Rules carried in JavaScript, as `?inline` and `?raw` imports carry
- * them, are the first two checks' (ADR-0046 §5). **Not read**: CSS text pasted
- * into a JavaScript string by hand, and a stylesheet a script adds at run
- * time.
+ * draws. **So is a Tailwind utility a lazy component's markup asks for**:
+ * Tailwind scans every source file into the entry's CSS, so an arbitrary
+ * variant such as `[&_.vue-flow__edge-path]:stroke-primary` in
+ * `WorkflowGraph.vue` writes a `.vue-flow__` rule onto first load, and the
+ * check fails on Kelir's rule, not Vue Flow's stylesheet. It is not weakened
+ * for that: the failure quotes the text around the marker and names this
+ * cause, and the fix is the component's scoped `<style>`. Rules carried in
+ * JavaScript, as `?inline` and `?raw` imports carry them, are the first two
+ * checks' (ADR-0046 §5). **Not read**: CSS text pasted into a JavaScript
+ * string by hand, and a stylesheet a script adds at run time without a
+ * `<link>` in the document.
  *
  * # What *first load* is, and why the walk starts at three chunks
  *
@@ -300,7 +313,7 @@ const firstLoadStylesheets = new Set([...reached].flatMap((key) => manifest[key]
 //
 // The map above records what a *module* imported. The text is read too, from
 // every stylesheet first load fetches: the chunks' `css`, the document's
-// `<link rel="stylesheet">`s, and the `@import`s left in either.
+// stylesheet `<link>`s and `<style>` elements, and the `@import`s left in any.
 
 /** A built file's text, by its path under `dist/`. A file the build names and lacks is a stale build. */
 function readDist(file) {
@@ -331,17 +344,63 @@ function inBuild(reference, from) {
   return existsSync(join(distDir, path)) ? path : null
 }
 
-const STYLESHEET_LINK = /<link\b[^>]*>/gi
 const CSS_IMPORT = /@import\s*(?:url\(\s*)?(['"]?)([^'")\s;]+)\1/gi
+const LINK = /<link\b[^>]*>/gi
+const STYLE_ELEMENT = /<style\b[^>]*>([\s\S]*?)<\/style\s*>/gi
+
+/** One attribute of a tag, unquoted, or `undefined`. */
+function attribute(tag, name) {
+  const match = new RegExp(`\\s${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'>]+))`, 'i').exec(tag)
+
+  return match?.slice(1).find((value) => value !== undefined)
+}
+
+/**
+ * Whether a `<link>` fetches a stylesheet on first load: `rel` lists
+ * `stylesheet`, or `preload` with `as="style"`, which a page turns into one
+ * with `onload="this.rel='stylesheet'"`, the usual way to load CSS without
+ * blocking. A preload whose script never runs still fetches the payload.
+ */
+function linksStylesheet(link) {
+  const rel = (attribute(link, 'rel') ?? '').toLowerCase().split(/\s+/)
+
+  return (
+    rel.includes('stylesheet') ||
+    (rel.includes('preload') && attribute(link, 'as')?.toLowerCase() === 'style')
+  )
+}
+
+/** Up to 40 characters either side of the first `marker` in `text`, on one line. */
+function around(text, marker) {
+  const at = text.indexOf(marker)
+
+  return `…${text.slice(Math.max(0, at - 40), at + marker.length + 40).replace(/\s+/g, ' ')}…`
+}
 
 const firstLoadCss = new Map()
 const unreadReferences = []
 const cssQueue = [...firstLoadStylesheets]
+const html = readDist('index.html')
 
-for (const link of readDist('index.html').match(STYLESHEET_LINK) ?? []) {
-  const href = /\bhref\s*=\s*["']?([^"'\s>]+)/i.exec(link)?.[1]
+/** Record one first-load stylesheet's text, and queue or note the `@import`s left in it. */
+function readStylesheet(name, text, base) {
+  firstLoadCss.set(name, text)
 
-  if (!/\brel\s*=\s*["']?stylesheet\b/i.test(link) || href === undefined) {
+  for (const [, , reference] of text.matchAll(CSS_IMPORT)) {
+    const path = inBuild(reference, base)
+
+    if (path === null) {
+      unreadReferences.push({ reference, from: name })
+    } else {
+      cssQueue.push(path)
+    }
+  }
+}
+
+for (const link of html.match(LINK) ?? []) {
+  const href = attribute(link, 'href')
+
+  if (href === undefined || !linksStylesheet(link)) {
     continue
   }
 
@@ -354,24 +413,17 @@ for (const link of readDist('index.html').match(STYLESHEET_LINK) ?? []) {
   }
 }
 
+// A `<style>` element in the document is a first-load stylesheet with no file
+// of its own, and Vite leaves it in `dist/index.html` as written.
+for (const [index, [, text]] of [...html.matchAll(STYLE_ELEMENT)].entries()) {
+  readStylesheet(`index.html <style> ${index + 1}`, text, 'index.html')
+}
+
 while (cssQueue.length > 0) {
   const file = cssQueue.shift()
 
-  if (firstLoadCss.has(file)) {
-    continue
-  }
-
-  const text = readDist(file)
-  firstLoadCss.set(file, text)
-
-  for (const [, , reference] of text.matchAll(CSS_IMPORT)) {
-    const path = inBuild(reference, file)
-
-    if (path === null) {
-      unreadReferences.push({ reference, from: file })
-    } else {
-      cssQueue.push(path)
-    }
+  if (!firstLoadCss.has(file)) {
+    readStylesheet(file, readDist(file), file)
   }
 }
 
@@ -466,30 +518,39 @@ for (const subject of SUBJECTS) {
     )
   }
 
-  // By the map, by the marker in a first-load stylesheet's text, and by a
-  // first-load `@import` or `<link>` the build does not hold that names a
-  // package of the subject, whose text cannot be searched.
-  const marked = [...firstLoadCss.keys()].filter(
-    (file) => marker !== undefined && firstLoadCss.get(file).includes(marker),
-  )
+  // By the map, by a first-load `@import` or `<link>` the build does not hold
+  // that names a package of the subject, whose text cannot be searched, and
+  // by the marker in a first-load stylesheet's text.
   const unread = unreadReferences
     .filter(({ reference }) => subject.packages.some((name) => reference.includes(name)))
     .map(({ reference, from }) => `${reference} (named by ${from}, not in the build)`)
-  const eager = [
-    ...new Set([
-      ...payload.filter((file) => firstLoadAssets.has(file)),
-      ...stylesheets.filter((file) => firstLoadStylesheets.has(file)),
-      ...marked,
-      ...unread,
-    ]),
+  const byMap = [
+    ...payload.filter((file) => firstLoadAssets.has(file)),
+    ...stylesheets.filter((file) => firstLoadStylesheets.has(file)),
+    ...unread,
   ]
+  const byMarker = [...firstLoadCss.keys()].filter(
+    (file) =>
+      marker !== undefined && !byMap.includes(file) && firstLoadCss.get(file).includes(marker),
+  )
 
-  if (eager.length > 0) {
+  if (byMap.length + byMarker.length > 0) {
     die(
       `${subject.name}'s payload is attached to a first-load chunk, so it is fetched\n` +
         '  before any route decides it needs it:\n\n' +
-        eager.map((file) => `    ${file}`).join('\n') +
+        [...byMap, ...byMarker.map((file) => `${file} — ${around(firstLoadCss.get(file), marker)}`)]
+          .map((line) => `    ${line}`)
+          .join('\n') +
         '\n\n' +
+        (byMarker.length === 0
+          ? ''
+          : `  Where a line quotes \`${marker}\`, the marker was found in a first-load stylesheet's\n` +
+            '  text, not by what a module imported. It may be the library\'s stylesheet by a CSS\n' +
+            '  `@import`, or a utility class Tailwind wrote for a lazy component: Tailwind\n' +
+            '  scans every source file into the entry\'s CSS, so an arbitrary variant such as\n' +
+            `  \`[&_${marker}edge-path]:stroke-primary\` in WorkflowGraph.vue lands on first load.\n` +
+            "  That rule is Kelir's, not the library's, and it still styles a component first\n" +
+            "  load never draws: move it into the component's scoped <style>.\n\n") +
         subject.howToFix,
     )
   }
