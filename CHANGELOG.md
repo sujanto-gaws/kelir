@@ -774,7 +774,7 @@ While the major version is `0`, the public API may change in any release.
   closed with no decision. The 409 now makes that claim only when the task
   carries a decision, and otherwise says the task was closed without being
   decided; the screen says the task is no longer open. Both keep the
-  `this task is <STATUS>` prefix, the status and `CONFLICT`; reassign's
+  `this task is <STATUS>` prefix, the 409 and `CONFLICT`; reassign's
   message is unchanged.
 - **A refused save says why on four more admin forms and in the list builder**
   ([#641](https://github.com/sujanto-gaws/kelir/issues/641),
