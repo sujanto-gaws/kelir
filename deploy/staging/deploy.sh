@@ -100,6 +100,71 @@ version_precedes() {
     return 1
 }
 
+# The `Cache-Control` a GET answers with, or nothing when it sends none. Fails
+# when the URL does not answer 2xx. The header name is matched in any case,
+# because HTTP/2 sends it in lower case.
+#
+# The body is fetched and cut off here rather than sent to `-o /dev/null`:
+# Git Bash rewrites that path for `curl.exe` only while path conversion is on,
+# and `MSYS_NO_PATHCONV=1`, often exported for Docker's sake, turns it off.
+cache_control_of() {
+    local response headers
+
+    response="$(curl -fsS --max-time 5 -i "$1")" || return 1
+    headers="${response%%$'\r\n\r\n'*}"
+    printf '%s\n' "${headers}" | tr -d '\r' \
+        | sed -n 's/^[Cc][Aa][Cc][Hh][Ee]-[Cc][Oo][Nn][Tt][Rr][Oo][Ll]:[[:space:]]*//p'
+}
+
+# **The bundle's caching** (#771), read from the address the stack answers on.
+# A function so that it can be run on its own against any address, which is
+# how it was seen to fail against a Caddyfile without the rules.
+#
+# Three answers, each the one the Caddyfile's comments explain:
+#
+#   /                    `no-cache`: the document, asked about on every use so
+#                        a deploy reaches the browser at once
+#   a hashed file        `immutable` for a year: the first `/assets/` file the
+#                        document names, so the check needs no file list
+#   a missing file       `no-cache`: try_files answers it with the document,
+#                        which must not be kept a year under a chunk's name
+#
+# The third is the one a simpler rule gets wrong. `path /assets/*` alone marks
+# the fallback immutable too, and a browser that asks for a chunk an earlier
+# deploy removed then keeps the old page under that URL for a year.
+check_bundle_caching() {
+    local base="$1" index_body index_cache asset asset_cache absent absent_cache
+    local asset_pattern='(/assets/[A-Za-z0-9._-]+)'
+
+    printf '  %-16s ' "/"
+    index_body="$(curl -fsS --max-time 5 "${base}/")" \
+        || die "/ could not be fetched from ${base} — the frontend is not answering"
+    index_cache="$(cache_control_of "${base}/")" \
+        || die "/ could not be fetched from ${base} — the frontend is not answering"
+    printf 'Cache-Control: %s\n' "${index_cache:-(none)}"
+    [[ "${index_cache}" == "no-cache" ]] \
+        || die "/ answered Cache-Control: ${index_cache:-(none)}, expected no-cache — the Caddyfile does not carry #771's rules, and a browser may keep a stale index.html after a deploy"
+
+    [[ "${index_body}" =~ ${asset_pattern} ]] \
+        || die "/ names no file under /assets/, so there is no hashed file to read the header from — this is not a Vite bundle"
+    asset="${BASH_REMATCH[1]}"
+
+    printf '  %-16s ' "${asset}"
+    asset_cache="$(cache_control_of "${base}${asset}")" \
+        || die "${asset}, named by /, could not be fetched from ${base}"
+    printf 'Cache-Control: %s\n' "${asset_cache:-(none)}"
+    [[ "${asset_cache}" == *immutable* && "${asset_cache}" == *max-age=31536000* ]] \
+        || die "${asset} answered Cache-Control: ${asset_cache:-(none)}, expected public, max-age=31536000, immutable — the Caddyfile does not carry #771's rules, or the file is missing and the single-page fallback answered"
+
+    absent="/assets/kelir-smoke-absent-${RANDOM}.js"
+    printf '  %-16s ' "${absent}"
+    absent_cache="$(cache_control_of "${base}${absent}")" \
+        || die "${absent} could not be fetched from ${base}; the single-page fallback should have answered it"
+    printf 'Cache-Control: %s\n' "${absent_cache:-(none)}"
+    [[ "${absent_cache}" == "no-cache" ]] \
+        || die "${absent}, which does not exist, answered Cache-Control: ${absent_cache:-(none)}, expected no-cache — the single-page fallback would be kept under a missing chunk's URL; the immutable rule must match only a file that exists"
+}
+
 [[ -f "${COMPOSE_FILE}" ]] || die "compose file not found: ${COMPOSE_FILE}"
 [[ -f "${KELIR_APP_DIR}/.env" ]] || die "${KELIR_APP_DIR}/.env not found — copy .env.staging.example and fill it in"
 
@@ -515,6 +580,20 @@ else
     # serving under a newer version's name.
     die "/version.json carries no version, and ${VERSION} is not older than ${frontend_version_json_since}, whose bundle emits one — answered ${frontend_status} ${frontend_type}, which is the single-page fallback; an older frontend image is serving"
 fi
+
+# **The bundle's caching** (#771; `check_bundle_caching` above says what is
+# read and why).
+#
+# **No version floor, unlike `/version.json` above.** That check reads a file
+# the image carries, so an image from before the file cannot pass it. These
+# rules are not in the image: the frontend image adds only the built site to
+# Caddy's, and the compose file mounts `./Caddyfile` from this directory over
+# the base image's default one. So the rules arrive with this script, and an
+# image from before #771 — a rollback target included — is served with them.
+# What the check needs from the image is a document naming a file under
+# `/assets/`, and every Kelir bundle has been Vite's, which names them there
+# by hash.
+check_bundle_caching "${KELIR_PUBLIC_URL}"
 
 # The harness command, as this stack needs it (#593). With an overlay layered,
 # one flow needs the upstream's token; without one, that flow has nothing to

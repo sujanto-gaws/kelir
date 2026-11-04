@@ -756,6 +756,20 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A deployed bundle's hashed files are kept for a year, and its document is
+  asked about on every load**
+  ([#771](https://github.com/sujanto-gaws/kelir/issues/771)). The Caddyfile
+  sent no `Cache-Control`, so a browser guessed each file's freshness, and
+  Chromium refetched a lazy chunk once its guess ran out. A file under
+  `/assets/`, which Vite names by its content's hash, now answers
+  `public, max-age=31536000, immutable`. Everything else the single-page app
+  serves answers `no-cache`: `index.html` at `/` and under every client route,
+  `/version.json`, and a missing `/assets/` path, which the fallback answers
+  with `index.html` and which must not be kept a year under a removed chunk's
+  name. Caddy sets nothing on the backend's paths. `deploy.sh`'s smoke test
+  reads `/`, one hashed file and one missing one. The Caddyfile comes from the
+  deploy directory and not the image, so a rollback to an older image is
+  served with the headers too.
 - **A form rule with no `pattern` or `target` decides in the browser as on the
   server** ([#737](https://github.com/sujanto-gaws/kelir/issues/737),
   construction plan 21 row 24, renderer half). The form renderer read a

@@ -584,10 +584,12 @@ test('an administrator builds a workflow in the editor, and a document is approv
  * (ADR-0046); that open is logged as a warm-up and is not a timed size. Each
  * size is then a fresh page load with the tab closed, smallest to largest.
  *
- * **A fresh load does not keep the chunk warm by itself.** The release stack
- * serves the bundle with no `Cache-Control` (#771), so Chromium holds the
- * chunk only as long as its heuristic freshness lasts, and then asks for it
- * again on the click. So the warm-up records which files the click fetched,
+ * **A fresh load did not keep the chunk warm by itself.** The release stack
+ * served the bundle with no `Cache-Control` until #771, so Chromium held the
+ * chunk only as long as its heuristic freshness lasted, and then asked for it
+ * again on the click. The stack now marks a hashed file immutable for a year;
+ * the preload below is kept, so the timed window does not depend on what the
+ * browser's cache holds. The warm-up records which files the click fetched,
  * and each **timed** load is given them before its click: the scripts as
  * `modulepreload`, which puts them in the page's module map where the click's
  * `import()` finds them, and the stylesheet as a stylesheet. The test then
