@@ -261,6 +261,151 @@ describe('the Validation Rule Registry §3, the advanced rules', () => {
 })
 
 /**
+ * #737: a rule's parameter reads as the server reads it, on a filled value.
+ *
+ * **Each row's `server` is the server's verdict**, read from `registry_rule` in
+ * `kelir-backend/src/modules/rad/domain/validation.rs`: an absent `pattern` or
+ * `target` is `""` (`.unwrap_or_default()`), a present one is `js_string`'s,
+ * which spells `null` as `"null"`, and an absent scope key is `Null`, which no
+ * filled value equals. The renderer must give the same verdict.
+ *
+ * A save since Registry 1.6.0 refuses a missing `pattern`, `target` or `values`,
+ * so these are revisions published before it, which are still rendered.
+ */
+describe('a rule parameter reads as the server reads it (#737)', () => {
+  interface Row {
+    case: string
+    rule: string
+    params: Record<string, unknown>
+    scope?: Record<string, unknown>
+    value: string
+    server: 'accepts' | 'refuses'
+  }
+
+  const decide = ({ rule, params, scope = {}, value }: Row) =>
+    verdict(
+      field({ type: 'string' }, { rules: [{ rule, scope: 'both', params, message: 'No.' }] }),
+      value,
+      scope,
+    )
+
+  /** One case per row, named for the server's verdict, which the renderer must give. */
+  const pinServerVerdicts = (rows: Row[]) => {
+    for (const row of rows) {
+      it(`${row.rule} with ${row.case}: the server ${row.server}, and so does the renderer`, () => {
+        if (row.server === 'accepts') {
+          expect(decide(row)).toBeUndefined()
+        } else {
+          expect(decide(row)?.rule).toBe(row.rule)
+        }
+      })
+    }
+  }
+
+  // AC1, AC2 and AC5. Each `undefined`-keyed scope is the field the old
+  // `String(params.target)` read as the target.
+  pinServerVerdicts([
+    { case: 'no pattern', rule: 'regex', params: {}, value: 'FN-0142', server: 'accepts' },
+    {
+      case: 'no pattern, and flags',
+      rule: 'regex',
+      params: { flags: 'i' },
+      value: 'FN-0142',
+      server: 'accepts',
+    },
+    {
+      case: 'no target, and a field keyed undefined',
+      rule: 'matchesField',
+      params: {},
+      scope: { undefined: 'secret' },
+      value: 'secret',
+      server: 'refuses',
+    },
+    {
+      case: 'no target, and a field keyed undefined',
+      rule: 'notMatchesField',
+      params: {},
+      scope: { undefined: 'secret' },
+      value: 'secret',
+      server: 'accepts',
+    },
+    {
+      case: 'no target, and a field keyed ""',
+      rule: 'matchesField',
+      params: {},
+      scope: { '': 'secret' },
+      value: 'secret',
+      server: 'accepts',
+    },
+    {
+      case: 'no target, and a field keyed ""',
+      rule: 'notMatchesField',
+      params: {},
+      scope: { '': 'secret' },
+      value: 'secret',
+      server: 'refuses',
+    },
+    // Already aligned before #737: a missing list is an empty one on both sides.
+    { case: 'no values', rule: 'oneOf', params: {}, value: 'a', server: 'refuses' },
+    { case: 'no values', rule: 'notOneOf', params: {}, value: 'a', server: 'accepts' },
+  ])
+
+  // AC3: `null` is present, so it stays `"null"`, which is `js_string(Null)`.
+  // Reading it as `""` would split the two sides on it.
+  pinServerVerdicts([
+    {
+      case: 'a null pattern, on a value holding "null"',
+      rule: 'regex',
+      params: { pattern: null },
+      value: 'nullable',
+      server: 'accepts',
+    },
+    {
+      case: 'a null pattern, on a value without it',
+      rule: 'regex',
+      params: { pattern: null },
+      value: 'FN-0142',
+      server: 'refuses',
+    },
+    {
+      case: 'a null target, and a field keyed null',
+      rule: 'matchesField',
+      params: { target: null },
+      scope: { null: 'secret' },
+      value: 'secret',
+      server: 'accepts',
+    },
+    {
+      case: 'a null target, and a field keyed null',
+      rule: 'notMatchesField',
+      params: { target: null },
+      scope: { null: 'secret' },
+      value: 'secret',
+      server: 'refuses',
+    },
+  ])
+
+  // AC4: `flags` is read as before. `null` is `""` here and `"null"` on the
+  // server, which honours only `i`, `m` and `s`, so neither side applies a flag.
+  pinServerVerdicts([
+    {
+      case: 'null flags, on a match',
+      rule: 'regex',
+      params: { pattern: '^a', flags: null },
+      value: 'abc',
+      server: 'accepts',
+    },
+    {
+      case: 'null flags, on a match only i would give',
+      rule: 'regex',
+      params: { pattern: '^a', flags: null },
+      value: 'ABC',
+      server: 'refuses',
+    },
+  ])
+})
+
+/**
  * #496: a pattern the browser gives up on is left to the server, and a rule is
  * not matched once a keyword has already failed. #624: unless the rule is
  * scoped to `client`, when nothing decides it.

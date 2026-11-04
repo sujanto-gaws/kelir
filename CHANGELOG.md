@@ -756,6 +756,17 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A form rule with no `pattern` or `target` decides in the browser as on the
+  server** ([#737](https://github.com/sujanto-gaws/kelir/issues/737),
+  construction plan 21 row 24, renderer half). The form renderer read a
+  missing parameter as the text `undefined`: a `regex` rule with no `pattern`
+  refused most values the server accepted, and a `matchesField` or
+  `notMatchesField` rule with no `target` compared the value with a field
+  keyed `undefined`. A missing one is now read as empty, as the server reads
+  it, and a `null` one is still the text `null` on both sides. The save
+  already refuses a rule without its parameter, so only a form stored before
+  that is affected. `flags` is read as before. Validation Rule Registry 1.7.1.
+
 - **A refused save says why on four more admin forms and in the list builder**
   ([#641](https://github.com/sujanto-gaws/kelir/issues/641),
   [#672](https://github.com/sujanto-gaws/kelir/issues/672)). The new-form
