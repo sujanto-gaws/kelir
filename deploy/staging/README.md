@@ -30,7 +30,7 @@ Chromium refetch the lazy *Graph* chunk once the guess ran out.
 | `/`, `/index.html` and every client route, such as `/login` | `no-cache` | The document is the one file that names the hashes, so it has to be fresh after a deploy. `no-cache` keeps it and asks before each use; its ETag makes that a `304` |
 | A path under `/assets/` that does not exist | `no-cache` | `try_files` answers it with `index.html`. Kept a year under a removed chunk's URL, that answer would be the stale page the header exists to prevent, so the immutable rule asks Caddy's `file` matcher whether the file is on disk |
 | `/version.json` | `no-cache` | Unhashed, and different in every build; `deploy.sh` reads it to tell which image is serving |
-| `/api/*`, `/health`, `/health/*`, `/version` | none from Caddy | Both headers are set inside the single-page app's `handle` only, so the backend's answers pass through as the backend sends them. It sends none today |
+| `/api/*`, `/health`, `/health/*`, `/version` | none from Caddy | Both headers are set inside the single-page app's `handle` only, so the backend's answers pass through as the backend sends them. It sends `no-store` on every `/api/v1` response and none on the rest ([SDD](../../docs/design/01.%20System%20Design%20Document.md) §11.4, [#881](https://github.com/sujanto-gaws/kelir/issues/881)) |
 
 **`deploy.sh`'s smoke test reads three of these**: `/`, the first `/assets/`
 file `/` names, and a made-up path under `/assets/`, which must not answer

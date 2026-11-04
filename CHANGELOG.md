@@ -781,10 +781,10 @@ While the major version is `0`, the public API may change in any release.
   plan 21 row 45). The backend sent no `Cache-Control`, so nothing stopped a
   browser writing a profile, a document, a token or a downloaded file to its
   disk cache, or keeping it for back and forward navigation, past the
-  sign-out that should have ended it. Every response from
-  the `/api/v1` nest now carries `Cache-Control: no-store`, authenticated or
-  not, refusals included, and so does the 404 for an unmatched `/api/v1/…`
-  path. `/health*`, `/version`, `/deployment` and `/api/docs/openapi.json` are
+  sign-out that should have ended it. Every response from the `/api/v1` nest
+  now carries `Cache-Control: no-store`, authenticated or not, refusals
+  included, and so does the 404 for an unmatched `/api/v1/…` path.
+  `/health*`, `/version`, `/deployment` and `/api/docs/openapi.json` are
   exempt and unchanged. A route's own `Cache-Control` would stand; none sets
   one. No status, body, error code or OpenAPI schema changes (System Design
   Document §11.4).
