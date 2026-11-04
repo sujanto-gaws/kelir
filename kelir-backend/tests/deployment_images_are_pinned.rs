@@ -151,8 +151,9 @@
 //! `RELEASE.latest`, and the `_` separator are sent; a byte-order mark hid the
 //! first `FROM` and is stripped; `Dockerfile.dockerignore` was read as a
 //! Dockerfile and is not; an `escape` directive could hide a `FROM` and is
-//! refused. The three limits above are what it left as limits. Probes 16–23
-//! re-ran the eight survivors against the fixes, and each went red:
+//! refused. The first three limits above are what it left as limits; the
+//! fourth, the stage index, came with #671. Probes 16–23 re-ran the eight
+//! survivors against the fixes, and each went red:
 //!
 //! | # | Probe | Reddened |
 //! |---|---|---|
@@ -189,7 +190,7 @@
 //! | `RUN --mount=…,from=<image>` | **Read**, rule 3 | Every `from=` option of every `--mount=` flag, the same way; its key in any case |
 //! | `# syntax=<image>` | **Read**, rule 3 | It names the frontend BuildKit parses the file with, so `docker/dockerfile:1` follows every 1.x release as `caddy:2` follows Caddy's. *The shapes rule 3 accepts* accepted it until now (where it sat after a blank line, which is no directive) |
 //! | `Dockerfile-prod`, `*.containerfile`, `Containerfile.*` | **Read**, by name | `is_dockerfile`'s patterns, above |
-//! | Compose's `dockerfile_inline:` | **Read**, rule 3 | In every YAML file rules 1 and 2 read: a block scalar to the end of its indentation, a one-line value with `\n` as a line break |
+//! | Compose's `dockerfile_inline:` | **Read**, rule 3 | In every YAML file rules 1 and 2 read, the key plain or quoted and anywhere on a line that is not a comment, so in a flow mapping too: a block scalar to the end of its indentation, a one-line value as compose reads it, with `\n` as a line break. Not read: a quoted value folded over several lines, past its first; a value through a YAML alias (`*name`) fails the *no FROM* guard instead |
 //! | A floating tag in a `docker run` line | **Read**, rule 1 | A workflow's `run:` was always read as YAML; `deploy/`'s shell scripts are walked too now |
 //! | An **untagged** image in a `docker run` line | **Not read** | Finding the image word means knowing which of `docker run`'s options take a value, and the tree's scripts name their images through variables (`"${POSTGRES_IMAGE}"`, `"${mc_image}"`) set elsewhere or by the operator. Rule 1 still refuses a floating word anywhere on the line |
 //! | A Dockerfile under any other name (`build/prod.df`) | **Not read** | `docker build -f` and compose's `dockerfile:` key accept any file, and reading them means resolving `-f` arguments through shell variables and `dockerfile:` through its `context:`. A name outside the patterns is a reviewer's line |
@@ -235,6 +236,18 @@
 //! |---|---|---|
 //! | 45 | A directive's key matched case-sensitively (`# SYNTAX=` unread) | *a directive is read in any case and only where it is one* |
 //! | 46 | Directives read from every comment line, not the leading block alone | *a directive is read in any case and only where it is one* |
+//!
+//! **The gate's shapes N7 and N8 passed all eleven tests**, a flow mapping
+//! and a quoted key, and are read since. Probes 47 and 48 passed the eleven
+//! before and went red after; 49–51 change this file:
+//!
+//! | # | Probe | Reddened |
+//! |---|---|---|
+//! | 47 | `build: { context: ., dockerfile_inline: "FROM caddy:2-alpine" }` in the development compose | *every dockerfile from names a pinned image*: `docker-compose.yml:3` |
+//! | 48 | `"dockerfile_inline": \|` there, `FROM caddy:2-alpine` | the same: `docker-compose.yml:6` |
+//! | 49 | The key read only at a line's start, unquoted | *an inline dockerfile is read in every form* |
+//! | 50 | The quoted keys not looked for | *an inline dockerfile is read in every form* |
+//! | 51 | A single-quoted value ends at any quote, `''` included | *an inline dockerfile is read in every form* |
 
 use std::collections::HashSet;
 use std::fs;
@@ -747,21 +760,22 @@ fn dockerfile_refusals_at(source: &str, offset: usize) -> Vec<String> {
 }
 
 /// Every `dockerfile_inline:` in a compose file (#671), as `(offset, body)`:
-/// the body's first line is line `offset + 1` of the file. A block scalar
-/// (`|`, `>`) runs while its lines are blank or indented past the key; any
-/// other value is one line, unquoted, with `\n` read as a line break and its
-/// lines numbered on from the key's, so a refusal past its first names a line
-/// after the key.
+/// the body's first line is line `offset + 1` of the file. The key is found
+/// plain or quoted (`"dockerfile_inline":`), and anywhere on a line that is
+/// not a comment, so a flow mapping (`build: { dockerfile_inline: "…" }`) is
+/// read too (both found by row 21's `test-engineer` gate). A block scalar
+/// (`|`, `>`) runs while its lines are blank or indented past the key's line;
+/// any other value is one line, its lines numbered on from the key's, so a
+/// refusal past its first names a line after the key.
 fn inline_dockerfiles(source: &str) -> Vec<(usize, String)> {
     let lines: Vec<&str> = source.lines().collect();
     let indent = |line: &str| line.len() - line.trim_start().len();
     let mut found = Vec::new();
 
     for (index, line) in lines.iter().enumerate() {
-        let Some(value) = line.trim_start().strip_prefix("dockerfile_inline:") else {
+        let Some(value) = inline_value(line) else {
             continue;
         };
-        let value = value.trim();
 
         if value.starts_with('|') || value.starts_with('>') {
             let body: Vec<&str> = lines[index + 1..]
@@ -772,13 +786,86 @@ fn inline_dockerfiles(source: &str) -> Vec<(usize, String)> {
 
             found.push((index + 1, body.join("\n")));
         } else {
-            let unquoted = value.trim_matches(|quote| quote == '"' || quote == '\'');
-
-            found.push((index, unquoted.replace("\\n", "\n")));
+            found.push((index, one_line_scalar(value)));
         }
     }
 
     found
+}
+
+/// The text after a `dockerfile_inline` key's colon, trimmed, if the line has
+/// one outside a comment.
+fn inline_value(line: &str) -> Option<&str> {
+    if line.trim_start().starts_with('#') {
+        return None;
+    }
+
+    [
+        "\"dockerfile_inline\"",
+        "'dockerfile_inline'",
+        "dockerfile_inline",
+    ]
+    .iter()
+    .find_map(|key| {
+        let rest = line[line.find(key)? + key.len()..].trim_start();
+
+        rest.strip_prefix(':').map(str::trim)
+    })
+}
+
+/// A one-line YAML scalar as compose reads it. A double-quoted one ends at its
+/// closing quote, with `\n` a line break; a single-quoted one at its closing
+/// quote; a plain one at a comment, or at the `,` or `}` that ends it inside a
+/// flow mapping. In the last two a literal `\n` is read as a line break too,
+/// which BuildKit would not do, and which can only find more to refuse.
+fn one_line_scalar(value: &str) -> String {
+    if let Some(quoted) = value.strip_prefix('"') {
+        let mut text = String::new();
+        let mut characters = quoted.chars();
+
+        while let Some(character) = characters.next() {
+            match character {
+                '"' => break,
+                '\\' => match characters.next() {
+                    Some('n') => text.push('\n'),
+                    Some(escaped) => text.push(escaped),
+                    None => {}
+                },
+                _ => text.push(character),
+            }
+        }
+
+        return text;
+    }
+
+    let text = match value.strip_prefix('\'') {
+        // `''` is a quote inside a single-quoted scalar; one alone ends it.
+        Some(quoted) => {
+            let mut text = String::new();
+            let mut characters = quoted.chars().peekable();
+
+            while let Some(character) = characters.next() {
+                if character == '\'' && characters.next_if_eq(&'\'').is_none() {
+                    break;
+                }
+                text.push(character);
+            }
+
+            text
+        }
+        None => {
+            let plain = value.split(" #").next().unwrap_or_default();
+
+            plain
+                .split([',', '}'])
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        }
+    };
+
+    text.replace("\\n", "\n")
 }
 
 /// The walk is only worth its assertions if it reaches the files a release is
@@ -1063,6 +1150,58 @@ fn an_inline_dockerfile_is_read_from_compose() {
         "a one-line value is read with its \\n as a line break, its lines numbered on from \
          its key: {refusals:?}"
     );
+}
+
+/// A `dockerfile_inline:` is read in each form compose accepts (#671): the
+/// `test-engineer` gate's flow mapping (N7) and quoted key (N8) passed every
+/// test until they were read.
+#[test]
+fn an_inline_dockerfile_is_read_in_every_form() {
+    for (compose, line) in [
+        // N7: a flow mapping.
+        (
+            "services:\n  probe:\n    build: { context: ., dockerfile_inline: \"FROM caddy:2-alpine\" }\n",
+            3,
+        ),
+        // N8: a quoted key, double and single.
+        (
+            "services:\n  probe:\n    build:\n      \"dockerfile_inline\": |\n        FROM caddy:2-alpine\n",
+            5,
+        ),
+        (
+            "services:\n  probe:\n    build:\n      'dockerfile_inline': |-\n        FROM caddy:2-alpine\n",
+            5,
+        ),
+        // One-line values: plain with a comment, plain ending a flow mapping,
+        // and single-quoted with a `''` before the FROM it carries.
+        (
+            "    build:\n      dockerfile_inline: FROM caddy:2-alpine # the floating one\n",
+            2,
+        ),
+        ("    build: {dockerfile_inline: FROM caddy:2-alpine}\n", 1),
+        (
+            "    build:\n      dockerfile_inline: 'RUN echo ''x''\\nFROM caddy:2-alpine'\n",
+            3,
+        ),
+    ] {
+        let inline = inline_dockerfiles(compose);
+        assert_eq!(inline.len(), 1, "one inline Dockerfile in {compose:?}: {inline:?}");
+
+        let (offset, body) = &inline[0];
+        let refusals = dockerfile_refusals_at(body, *offset);
+        assert_eq!(
+            refusals.len(),
+            1,
+            "exactly one refusal for {compose:?}: {refusals:?}"
+        );
+        assert!(
+            refusals[0].starts_with(&format!("{line} — `FROM caddy:2-alpine`")),
+            "the refusal names line {line} and the image: {refusals:?}"
+        );
+    }
+
+    // A comment naming the key is not a Dockerfile.
+    assert!(inline_dockerfiles("    # dockerfile_inline: is read too\n").is_empty());
 }
 
 /// Each shape rule 3 exists to refuse, sent on its own, with the instruction
