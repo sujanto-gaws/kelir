@@ -28,10 +28,11 @@
 //!
 //! | Mutation | Reddened |
 //! |---|---|
-//! | The layer removed | every test here but [`EXEMPT`]'s, 5 of 6, and `attachment_download`'s happy path; the walk's 149 `/api/v1` cells |
+//! | The layer removed | every test here but [`EXEMPT`]'s, 6 of 7, and `attachment_download`'s happy path; the walk's 149 `/api/v1` cells |
 //! | The layer on the root router | [`EXEMPT`]'s test, on all six routes, `/version` among them; the walk's five operational cells |
-//! | The layer on the nest, with no fallback of its own | `an_unmatched_api_path_is_not_stored` alone: `/api/v1/nope answered 404 Not Found with Cache-Control []` |
+//! | The layer on the nest, with no fallback of its own | `an_unmatched_api_path_is_not_stored`: `/api/v1/nope answered 404 Not Found with Cache-Control []`; and `an_unmatched_path_below_any_module_answers_as_the_nest_does`, on all 97 templates |
 //! | `overriding` for `if_not_present` | `router::tests::a_route_that_sets_its_own_cache_control_keeps_it` |
+//! | A `.fallback` on the integration module's router, answering 404 `"module"` | `an_unmatched_path_below_any_module_answers_as_the_nest_does` alone, on the 11 integration templates: the header held, the answer did not |
 
 mod common;
 
@@ -239,6 +240,54 @@ async fn an_unmatched_api_path_is_not_stored() {
         assert!(unmatched.bytes.is_empty(), "{uri}: {:?}", unmatched.bytes);
         assert_no_store(&unmatched, uri);
     }
+}
+
+/// **Below every documented operation, the nest's own 404**: no module router
+/// answers an unmatched path of its own, so a `.fallback` added to one, which
+/// would sit under the layer and keep `no-store` but change the answer, is
+/// seen here (AC8). Five extra segments, because no route has that many
+/// captures in a row; the templates are the document's, so a module mounted
+/// tomorrow is walked tomorrow.
+#[tokio::test]
+async fn an_unmatched_path_below_any_module_answers_as_the_nest_does() {
+    let app = TestApp::spawn().await;
+    let document = serde_json::to_value(ApiDoc::openapi()).expect("the document serialises");
+    let paths = document["paths"]
+        .as_object()
+        .expect("the document has paths");
+
+    let mut failures = Vec::new();
+    let mut walked = 0;
+    for template in paths.keys().filter(|path| path.starts_with("/api/v1/")) {
+        let mut path = template.clone();
+        while let Some(start) = path.find('{') {
+            let end = start + path[start..].find('}').expect("a closed capture");
+            path.replace_range(start..=end, &Uuid::now_v7().to_string());
+        }
+        path.push_str("/nope/nope/nope/nope/nope");
+
+        let response = answer(&app, Method::GET, &path, None, None).await;
+        let cache_control = response.header(header::CACHE_CONTROL);
+        let content_type = response.header(header::CONTENT_TYPE);
+
+        walked += 1;
+        if response.status != StatusCode::NOT_FOUND
+            || !response.bytes.is_empty()
+            || content_type.is_some()
+            || cache_control.as_deref() != Some(NO_STORE)
+        {
+            failures.push(format!(
+                "GET {template}/nope/… answered {} with Content-Type {content_type:?}, \
+                 Cache-Control {cache_control:?} and a body of {} bytes: {:?}",
+                response.status,
+                response.bytes.len(),
+                String::from_utf8_lossy(&response.bytes)
+            ));
+        }
+    }
+
+    assert!(walked > 50, "the walk reached only {walked} templates");
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// **Every documented operation, with no token**, whatever it answers: the
