@@ -2312,9 +2312,14 @@ mod tests {
     }
 
     /// **The first failing rule is the one reported**, as the renderer's spec
-    /// claims, and an empty value is not judged by `regex`.
+    /// claims.
+    ///
+    /// The spec's other row in that block, *an empty value is not judged by
+    /// `regex`*, has no server-side counterpart that can fail: `validate_field`
+    /// discards every rule's verdict on an empty value, so the rule's own
+    /// early return is unobservable here (the row 24 campaign's M12).
     #[test]
-    fn the_first_failing_rule_is_reported_and_an_empty_value_is_not_matched() {
+    fn the_first_failing_rule_is_reported() {
         let two = json!({
             "id": "f", "role": "data", "type": "textfield", "key": "f", "label": "F",
             "validation": {"type": "string"},
@@ -2328,14 +2333,5 @@ mod tests {
             .expect("z is refused");
         assert_eq!(violation.rule, "oneOf");
         assert_eq!(violation.message, "First.");
-
-        let upper = json!({
-            "id": "f", "role": "data", "type": "textfield", "key": "f", "label": "F",
-            "validation": {"type": "string"},
-            "rules": [{"rule": "regex", "scope": "both", "params": {"pattern": "^[A-Z]+$"}, "message": "No."}],
-        });
-        for empty in [json!(""), json!(null)] {
-            assert_eq!(verdict(&upper, empty.clone()), None, "{empty}");
-        }
     }
 }
