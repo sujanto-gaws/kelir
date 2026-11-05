@@ -201,7 +201,7 @@
 //!   or nobody, or an `OWNER` on a document whose creator is unrecorded,
 //!   deleted or another tenant's. These edges name no role, so **nothing finds
 //!   it**: neither the stranded task query nor the Roles screen's list, which
-//!   reads a claimed task only through an edge naming the role (filed apart).
+//!   reads a claimed task only through an edge naming the role ([#893]).
 //!   A reassign is refused as `TARGET_CANNOT_DECIDE`, as for the second kind.
 //!   The remedy is the data where data can reach: restoring the user by SQL,
 //!   clearing `users.deleted_at`, since no route restores one, or setting the
@@ -217,6 +217,7 @@
 //! [#530]: https://github.com/sujanto-gaws/kelir/issues/530
 //! [#635]: https://github.com/sujanto-gaws/kelir/issues/635
 //! [#762]: https://github.com/sujanto-gaws/kelir/issues/762
+//! [#893]: https://github.com/sujanto-gaws/kelir/issues/893
 //!
 //! # This lives in `workflow` and is called from `task_inbox`
 //!
