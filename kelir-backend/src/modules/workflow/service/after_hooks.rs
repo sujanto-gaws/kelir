@@ -187,7 +187,7 @@ pub async fn deliver(
 /// `event` borrows for the payload's own lifetime, which it need not: with
 /// its own, #759's mutant `Some(event.to)` is refused by the borrow checker
 /// instead of being run, and the test that should go red under it is never
-/// asked.
+/// asked. Keep it.
 ///
 /// [#759]: https://github.com/sujanto-gaws/kelir/issues/759
 fn after_invocation<'a>(
