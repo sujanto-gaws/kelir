@@ -762,6 +762,24 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A claimed task whose user or owner never resolves is no longer *waiting
+  for you*** ([#762](https://github.com/sujanto-gaws/kelir/issues/762),
+  construction plan 21 row 23). #530 and #635 judged a decision edge's role
+  and department, and counted every `USER` and `OWNER` edge as resolving. A
+  task whose decision edges were all `allowedBy` a `USER` naming a deleted
+  user, another tenant's or nobody, or with a `userId` that is not a uuid, or
+  `OWNER` on a document with no live creator, had every decision refused as
+  `ASSIGNMENT_UNRESOLVED`, and once claimed it stayed on its holder's inbox,
+  its count, both dashboard cards and its page. It is now left off them as
+  #530's tasks are, and its page answers 404; an unclaimed one is unchanged.
+  A `userId` resolves exactly when the engine's parse takes it, so a spelling
+  only PostgreSQL accepts, or one with a space, hides the task, and none of
+  them makes the inbox answer 500. A user who is `INACTIVE` or `LOCKED` and
+  not deleted still resolves. A reassign is refused for every target, so the
+  remedy is the data: restore the user, or set the document's creator, by
+  SQL (Installation and Deployment §9). A `userId` that is not a user id has
+  no remedy, and nothing yet finds such a task (filed apart). No migration,
+  and no schema change.
 - **A deployed bundle's hashed files are kept for a year, and its document is
   asked about on every load**
   ([#771](https://github.com/sujanto-gaws/kelir/issues/771)). The Caddyfile
