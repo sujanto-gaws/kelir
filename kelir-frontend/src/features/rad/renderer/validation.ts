@@ -285,9 +285,9 @@ export const VALIDATION_RULES: Readonly<Record<string, RegistryRule>> = {
    * and agree. **A `flags` that is present and not a string still splits
    * them**: `true` is `"true"` on both sides, which the server reads as no
    * flags and this browser cannot build, so it refuses what the server
-   * accepts. That holds on a published revision, and on any definition saved
-   * before the save refuses one, which is
-   * [#735](https://github.com/sujanto-gaws/kelir/issues/735)'s and not built.
+   * accepts. That holds only on a definition stored before the save refused
+   * one ([#735](https://github.com/sujanto-gaws/kelir/issues/735), Registry
+   * 1.8.0), a published revision included; no save writes one now.
    */
   regex: {
     scope: 'both',

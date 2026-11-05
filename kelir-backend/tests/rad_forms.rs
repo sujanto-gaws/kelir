@@ -2891,3 +2891,436 @@ async fn a_published_revision_with_the_shape_works_and_its_next_revision_is_refu
     );
     backtracking_refusal_at(&published.body, path, "regex", REPEATED_QUANTIFIER);
 }
+
+// -- A `regex` rule's `flags` (#735) and an empty keyword pattern (#736) ------
+//
+// Criteria: construction plan 21 row 24, on #735. The server half: AC8–AC13.
+
+/// The five non-string shapes a `flags` can take, each refused (#735 AC8).
+fn non_string_flags() -> [(&'static str, Value); 5] {
+    [
+        ("null", json!(null)),
+        ("boolean", json!(true)),
+        ("number", json!(5)),
+        ("array", json!(["i"])),
+        ("object", json!({"i": true})),
+    ]
+}
+
+const FLAGS_PATH: &str = "definition.components.0.rules.0.params.flags";
+const KEYWORD_PATH: &str = "definition.components.0.validation.pattern";
+
+/// `definition_holding(form_id, …)` with one `regex` rule on `code`, its
+/// pattern digits only and its `flags` as given.
+fn definition_with_flags(form_id: &str, flags: Value) -> Value {
+    let mut field = text_field("^[0-9]+$", "regex", "both");
+    field["rules"][0]["params"]["flags"] = flags;
+    definition_holding(form_id, field)
+}
+
+/// `definition_holding(form_id, …)` with `code`'s keyword pattern as given.
+fn definition_with_keyword(form_id: &str, pattern: &str) -> Value {
+    definition_holding(form_id, text_field(pattern, "keyword", "both"))
+}
+
+/// The one detail at `path`, which must be `code` for `rule` — and nothing
+/// else in the answer, so a refusal said twice or beside a pattern refusal is
+/// red (#735 AC9, #736 AC10).
+fn only_refusal(body: &Value, path: &str, code: &str, rule: &str) {
+    refusal_at(body, path, code, rule);
+    let details = body["error"]["details"].as_array().expect("details");
+    assert_eq!(details.len(), 1, "one detail in all; body {body}");
+}
+
+/// **#735 AC8 and AC13, at create, update and publish.** Each non-string
+/// `flags` is `RULE_PARAM_INVALID` at its own path, and nothing else. Publish
+/// re-checks the stored draft (D-67), and a refused publish leaves a draft.
+#[tokio::test]
+async fn a_non_string_flags_is_refused_at_create_update_and_publish() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for (kind, flags) in non_string_flags() {
+        let key = format!("flags-{kind}");
+
+        let created = app
+            .send(
+                Method::POST,
+                "/api/v1/rad/forms",
+                Some(&token),
+                Some(json!({
+                    "formKey": key,
+                    "title": "Flags",
+                    "definition": definition_with_flags(&key, flags.clone()),
+                })),
+            )
+            .await;
+        assert_eq!(
+            created.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "create, {kind}: body {}",
+            created.body
+        );
+        only_refusal(&created.body, FLAGS_PATH, "RULE_PARAM_INVALID", "regex");
+
+        let id =
+            id_of(&create_form(&app, &token, &key, definition_with_keyword(&key, "^a$")).await);
+        let updated = app
+            .send(
+                Method::PUT,
+                &format!("/api/v1/rad/forms/{id}"),
+                Some(&token),
+                Some(json!({ "definition": definition_with_flags(&key, flags.clone()) })),
+            )
+            .await;
+        assert_eq!(
+            updated.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "update, {kind}: body {}",
+            updated.body
+        );
+        only_refusal(&updated.body, FLAGS_PATH, "RULE_PARAM_INVALID", "regex");
+
+        store_behind_the_api(&app, id, &definition_with_flags(&key, flags.clone())).await;
+        let published = app
+            .send(
+                Method::POST,
+                &format!("/api/v1/rad/forms/{id}/publish"),
+                Some(&token),
+                None,
+            )
+            .await;
+        assert_eq!(
+            published.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "publish, {kind}: body {}",
+            published.body
+        );
+        only_refusal(&published.body, FLAGS_PATH, "RULE_PARAM_INVALID", "regex");
+
+        let status: String = sqlx::query_scalar("SELECT status FROM rad_forms WHERE id = $1")
+            .bind(id)
+            .fetch_one(&app.pool)
+            .await
+            .expect("the form is queryable");
+        assert_eq!(status, "DRAFT", "{kind}: a refused publish leaves a draft");
+    }
+}
+
+/// **#735 AC9, the second subject**: an absent `flags` and `""` store and
+/// publish, as does a string of the letters the server reads.
+#[tokio::test]
+async fn an_absent_or_string_flags_stores_and_publishes() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for (name, definition) in [
+        (
+            "flags-absent",
+            definition_holding("flags-absent", text_field("^[0-9]+$", "regex", "both")),
+        ),
+        (
+            "flags-empty",
+            definition_with_flags("flags-empty", json!("")),
+        ),
+        (
+            "flags-ims",
+            definition_with_flags("flags-ims", json!("ims")),
+        ),
+    ] {
+        let id = id_of(&create_form(&app, &token, name, definition).await);
+        let published = app
+            .send(
+                Method::POST,
+                &format!("/api/v1/rad/forms/{id}/publish"),
+                Some(&token),
+                None,
+            )
+            .await;
+        assert_eq!(
+            published.status,
+            StatusCode::OK,
+            "{name}: body {}",
+            published.body
+        );
+    }
+}
+
+/// **#736 AC10 and AC13, at create, update and publish.** An empty keyword
+/// pattern is `RULE_PARAM_MISSING` at the keyword's path, once.
+#[tokio::test]
+async fn an_empty_keyword_pattern_is_refused_at_create_update_and_publish() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let key = "keyword-empty";
+
+    let created = app
+        .send(
+            Method::POST,
+            "/api/v1/rad/forms",
+            Some(&token),
+            Some(json!({
+                "formKey": key,
+                "title": "Keyword",
+                "definition": definition_with_keyword(key, ""),
+            })),
+        )
+        .await;
+    assert_eq!(
+        created.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "create: body {}",
+        created.body
+    );
+    only_refusal(&created.body, KEYWORD_PATH, "RULE_PARAM_MISSING", "pattern");
+
+    let id = id_of(&create_form(&app, &token, key, definition_with_keyword(key, "^a$")).await);
+    let updated = app
+        .send(
+            Method::PUT,
+            &format!("/api/v1/rad/forms/{id}"),
+            Some(&token),
+            Some(json!({ "definition": definition_with_keyword(key, "") })),
+        )
+        .await;
+    assert_eq!(
+        updated.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "update: body {}",
+        updated.body
+    );
+    only_refusal(&updated.body, KEYWORD_PATH, "RULE_PARAM_MISSING", "pattern");
+
+    store_behind_the_api(&app, id, &definition_with_keyword(key, "")).await;
+    let published = app
+        .send(
+            Method::POST,
+            &format!("/api/v1/rad/forms/{id}/publish"),
+            Some(&token),
+            None,
+        )
+        .await;
+    assert_eq!(
+        published.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "publish: body {}",
+        published.body
+    );
+    only_refusal(
+        &published.body,
+        KEYWORD_PATH,
+        "RULE_PARAM_MISSING",
+        "pattern",
+    );
+
+    let status: String = sqlx::query_scalar("SELECT status FROM rad_forms WHERE id = $1")
+        .bind(id)
+        .fetch_one(&app.pool)
+        .await
+        .expect("the form is queryable");
+    assert_eq!(status, "DRAFT", "a refused publish leaves a draft");
+}
+
+/// A document of a new type bound to `form`, created with `code` and
+/// submitted; the two statuses are returned.
+async fn submit_code(
+    app: &TestApp,
+    token: &str,
+    type_id: Uuid,
+    code: &str,
+) -> (StatusCode, Option<StatusCode>, Value) {
+    let draft = app
+        .send(
+            Method::POST,
+            "/api/v1/documents",
+            Some(token),
+            Some(json!({"documentTypeId": type_id, "title": code, "formData": {"code": code}})),
+        )
+        .await;
+    if draft.status != StatusCode::CREATED {
+        return (draft.status, None, draft.body);
+    }
+
+    let document = id_of(&draft.body["data"]);
+    let submitted = app
+        .send(
+            Method::POST,
+            &format!("/api/v1/documents/{document}/submission"),
+            Some(token),
+            None,
+        )
+        .await;
+    (draft.status, Some(submitted.status), submitted.body)
+}
+
+/// A document type named `type_code`, bound to `form`, with a numbering rule.
+async fn type_bound_to(app: &TestApp, token: &str, form: Uuid, type_code: &str) -> Uuid {
+    let created = app
+        .send(
+            Method::POST,
+            "/api/v1/document-types",
+            Some(token),
+            Some(json!({"typeCode": type_code, "name": type_code, "formId": form})),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "body {}", created.body);
+    let type_id = id_of(&created.body["data"]);
+
+    let rule = app
+        .send(
+            Method::PUT,
+            &format!("/api/v1/document-types/{type_id}/numbering-rule"),
+            Some(token),
+            Some(json!({
+                "ruleTemplate": format!("{type_code}-{{year}}-{{sequence}}"),
+                "sequenceScope": "YEAR",
+                "gapPolicy": "GAPLESS",
+            })),
+        )
+        .await;
+    assert_eq!(rule.status, StatusCode::OK, "body {}", rule.body);
+    type_id
+}
+
+/// **#735 and #736 AC11: a published revision of either shape is unchanged.**
+/// It is read back as stored and still takes documents as submit read it
+/// before: `flags: true` is the flags `"true"`, so the digits pattern still
+/// refuses letters, and an empty keyword accepts every value. Its next
+/// revision carrying the shape is refused, and a copy meets the refusal at
+/// publish.
+///
+/// **Green on `main` by design** for the reads and the documents; the
+/// revision carrying the shape and the copy's publish are the halves that
+/// change.
+#[tokio::test]
+async fn a_published_revision_of_either_shape_works_and_its_next_revision_is_refused() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let cases = [
+        (
+            "flags-live",
+            "FLAGSLIVE",
+            definition_with_flags("flags-live", json!(true)),
+            FLAGS_PATH,
+            "RULE_PARAM_INVALID",
+            "regex",
+            // Letters are still refused: `"true"` holds none of `i`, `m`, `s`.
+            Some(StatusCode::UNPROCESSABLE_ENTITY),
+        ),
+        (
+            "keyword-live",
+            "KEYWORDLIVE",
+            definition_with_keyword("keyword-live", ""),
+            KEYWORD_PATH,
+            "RULE_PARAM_MISSING",
+            "pattern",
+            // An empty pattern matches everything, as before.
+            None,
+        ),
+    ];
+
+    for (key, type_code, shape, path, code, rule, letters_refused) in cases {
+        let corrected = definition_holding(key, text_field("^[0-9]+$", "regex", "both"));
+        let form = id_of(&create_form(&app, &token, key, corrected.clone()).await);
+        let published = app
+            .send(
+                Method::POST,
+                &format!("/api/v1/rad/forms/{form}/publish"),
+                Some(&token),
+                None,
+            )
+            .await;
+        assert_eq!(
+            published.status,
+            StatusCode::OK,
+            "{key}: body {}",
+            published.body
+        );
+        store_behind_the_api(&app, form, &shape).await;
+
+        let read = app
+            .send(
+                Method::GET,
+                &format!("/api/v1/rad/forms/{form}"),
+                Some(&token),
+                None,
+            )
+            .await;
+        assert_eq!(read.status, StatusCode::OK, "{key}: body {}", read.body);
+        assert_eq!(read.body["data"]["definition"], shape, "{key}");
+
+        let type_id = type_bound_to(&app, &token, form, type_code).await;
+
+        let (created, submitted, body) = submit_code(&app, &token, type_id, "123").await;
+        assert_eq!(created, StatusCode::CREATED, "{key}, digits: body {body}");
+        assert_eq!(
+            submitted,
+            Some(StatusCode::OK),
+            "{key}, digits: body {body}"
+        );
+        assert_eq!(body["data"]["status"], "SUBMITTED", "{key}");
+
+        let (created, submitted, body) = submit_code(&app, &token, type_id, "abc").await;
+        match letters_refused {
+            Some(refused) => assert_eq!(created, refused, "{key}, letters: body {body}"),
+            None => {
+                assert_eq!(created, StatusCode::CREATED, "{key}, letters: body {body}");
+                assert_eq!(
+                    submitted,
+                    Some(StatusCode::OK),
+                    "{key}, letters: body {body}"
+                );
+            }
+        }
+
+        let revisions = format!("/api/v1/rad/forms/{form}/revisions");
+        let carrying = app
+            .send(
+                Method::POST,
+                &revisions,
+                Some(&token),
+                Some(json!({ "definition": shape })),
+            )
+            .await;
+        assert_eq!(
+            carrying.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{key}: body {}",
+            carrying.body
+        );
+        only_refusal(&carrying.body, path, code, rule);
+
+        let copied = app
+            .send(
+                Method::POST,
+                &revisions,
+                Some(&token),
+                Some(json!({ "title": "Copied" })),
+            )
+            .await;
+        assert_eq!(
+            copied.status,
+            StatusCode::CREATED,
+            "{key}: body {}",
+            copied.body
+        );
+        let copy = id_of(&copied.body["data"]);
+
+        let republished = app
+            .send(
+                Method::POST,
+                &format!("/api/v1/rad/forms/{copy}/publish"),
+                Some(&token),
+                None,
+            )
+            .await;
+        assert_eq!(
+            republished.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{key}: the copy is checked where it would go live; body {}",
+            republished.body
+        );
+        only_refusal(&republished.body, path, code, rule);
+    }
+}
