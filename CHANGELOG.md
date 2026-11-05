@@ -768,8 +768,8 @@ While the major version is `0`, the public API may change in any release.
   and department, and counted every `USER` and `OWNER` edge as resolving. A
   task whose decision edges were all `allowedBy` a `USER` naming a deleted
   user, another tenant's or nobody, or with a `userId` that is not a uuid, or
-  `OWNER` on a document with no live creator, had every decision refused as
-  `ASSIGNMENT_UNRESOLVED`, and once claimed it stayed on its holder's inbox,
+  `allowedBy` `OWNER` on a document with no live creator, had every decision
+  refused as `ASSIGNMENT_UNRESOLVED`, and once claimed it stayed on its holder's inbox,
   its count, both dashboard cards and its page. It is now left off them as
   #530's tasks are, and its page answers 404; an unclaimed one is unchanged.
   A `userId` resolves exactly when the engine's parse takes it, so a spelling

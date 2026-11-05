@@ -94,10 +94,9 @@
 //! user of the tenant ([#762]), when it is `ROLE` and a live role in the tenant
 //! has its `roleCode`, or when it is `DEPARTMENT_ROLE`, a live role has its
 //! `roleCode`, and its `departmentScope` resolves. An open task claimed by the
-//! caller is hidden when the state has at
-//! least one decision edge and none of them resolves. Matching by **code** is
-//! `direct`'s own match, so a live role that took a deleted one's code resolves
-//! the edge here as it does there.
+//! caller is hidden when the state has at least one decision edge and none of
+//! them resolves. Matching by **code** is `direct`'s own match, so a live role
+//! that took a deleted one's code resolves the edge here as it does there.
 //!
 //! **A `departmentScope` resolves as `assignment::normalize` and `direct` read
 //! it** ([#635]). It is read at each query, as the engine reads it at each
