@@ -10957,6 +10957,13 @@ async fn a_task_with_only_unresolvable_department_edges_cannot_be_reassigned() {
 // tasks stayed on its holder's inbox and through the gate while the engine
 // refused it. Every pinned engine answer held. The unclaimed-arm test was
 // green while the task was offered and red once it was claimed.
+//
+// Two rows came from the test engineer's mutants of the fixed clause, each of
+// which survived the oracle until its row was added. *A letter that is not
+// hex* was red against `06d9f31` too (22 rows), and against a pattern whose
+// class takes any letter the inbox answered 500. *Department unresolvable,
+// with a live user's id* is green against `06d9f31`, whose clause read no
+// `userId`, and was red against a clause that read `userId` on every edge.
 
 /// The role every #762 task is offered to, and the one the mixed rows' live
 /// `ROLE` edge names. Every #762 holder holds it.
@@ -11135,10 +11142,15 @@ async fn delete_user_through_the_api(app: &TestApp, token: &str, user: Uuid) {
 /// * **Accepted by the crate:** hyphenated in either case, 32 hex digits,
 ///   braced, and `urn:uuid:` in lowercase.
 /// * **Refused by the crate:** a space either side, a trailing newline, a
-///   truncated id, and the spellings only PostgreSQL's `uuid` input takes:
-///   hyphens after every four digits, braces around 32 digits, an uppercase
-///   `URN:UUID:`, and a `urn:uuid:` before 32 digits or braces. A plain
-///   `::uuid` cast would raise on the first four and resolve the next two.
+///   truncated id, a letter that is not a hex digit, and the spellings only
+///   PostgreSQL's `uuid` input takes: hyphens after every four digits, braces
+///   around 32 digits, an uppercase `URN:UUID:`, and a `urn:uuid:` before 32
+///   digits or braces. A plain `::uuid` cast would raise on the first five and
+///   resolve the next two.
+///
+/// A `userId` on an edge that is not `USER` is ignored, as `normalize`
+/// ignores it, so it does not rescue a `DEPARTMENT_ROLE` edge that does not
+/// resolve.
 ///
 /// **The controls** are a live holder named in every accepted spelling, an
 /// `INACTIVE` holder named in every accepted spelling, a `LOCKED` one, an
@@ -11442,6 +11454,15 @@ async fn the_inbox_and_the_engine_agree_on_which_user_and_owner_edges_resolve() 
             same(user_rule(&hyphenated[..35])),
             Unresolved,
         ),
+        // A uuid's length and hyphens with a letter that is not a hex digit.
+        // The pattern must refuse it: a cast past a looser class raises.
+        add(
+            "user id, a letter that is not hex",
+            &token,
+            ACTIVE,
+            same(user_rule(&format!("{}g", &hyphenated[..35]))),
+            Unresolved,
+        ),
         // PostgreSQL's spellings, which the crate refuses.
         add(
             "user id, hyphens every four",
@@ -11536,6 +11557,21 @@ async fn the_inbox_and_the_engine_agree_on_which_user_and_owner_edges_resolve() 
             &token,
             ACTIVE,
             (user_garbage.clone(), department_never.clone()),
+            Unresolved,
+        ),
+        // A `userId` is read on a `USER` edge only: `normalize` ignores it on
+        // any other, so it cannot rescue an edge whose department never
+        // resolves.
+        add(
+            "department unresolvable, with a live user's id",
+            &token,
+            ACTIVE,
+            same(json!({
+                "assigneeType": "DEPARTMENT_ROLE",
+                "roleCode": PERSON_EDGE_QUEUE,
+                "departmentScope": "TI-762-NEVER",
+                "userId": hyphenated,
+            })),
             Unresolved,
         ),
     ];
