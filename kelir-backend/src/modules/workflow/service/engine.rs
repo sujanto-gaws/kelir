@@ -1204,7 +1204,9 @@ async fn publish_transition(
 /// **A guard's `targetStatus` is `target`'s `mapsToDocumentStatus`**, the
 /// platform status LHCS §4 asks for, and not `chosen.to`, which is a state
 /// code ([#679]). It is what `after_hooks` gives an after-hook on the same
-/// transition, so a guard and an after-hook read one value for it. `target`
+/// transition, so a guard and an after-hook read one value for it, and
+/// `after_hooks`' `a_guard_and_an_after_hook_read_one_transition` holds the
+/// two payload builders to it ([#759]). `target`
 /// is the state [`advance_automatically`] has already resolved and moves to,
 /// so the guard is judged against the move that is made, and the value is
 /// given even when it equals `currentStatus`, as the after-chain gives it.
@@ -1212,10 +1214,11 @@ async fn publish_transition(
 /// **Its `documentTypeKey` is the type's stored `type_code`** ([#755]),
 /// read from the evaluation's `document.documentTypeKey`. `after_hooks` gives
 /// an after-hook the same value from `hook_subject`, so the two chains read
-/// one key here too.
+/// one key here too; the same test pins it.
 ///
 /// [#679]: https://github.com/sujanto-gaws/kelir/issues/679
 /// [#755]: https://github.com/sujanto-gaws/kelir/issues/755
+/// [#759]: https://github.com/sujanto-gaws/kelir/issues/759
 #[allow(
     clippy::too_many_arguments,
     reason = "the payload's own fields, assembled where they are known"
@@ -1263,42 +1266,18 @@ async fn run_transition_guards(
     let metadata = hook::repository::metadata_of(transaction, tenant_id, document_id).await?;
     let transition_ref =
         hook::service::transition_ref(&graph.workflow_key, graph.revision, &from.code, &chosen.to);
-    let context = hook::service::workflow_context(
-        &graph.workflow_key,
-        graph.revision,
-        instance_id,
-        &from.code,
-        &from.code,
-        &chosen.to,
-        TransitionAction::Auto.as_db(),
-    );
-
-    let mut invocation = hook::Invocation {
-        hook_name: hook::BEFORE_WORKFLOW_TRANSITION,
-        stage: hook::Stage::Transition,
-        // Overwritten per entry by the runner; the chain here is one source.
-        source: hook::Source::Workflow,
+    let mut invocation = guard_invocation(
         tenant_id,
         document_id,
-        // **The type's stored `type_code`** (#755): `document.documentTypeKey`,
-        // which `document_facts` builds from the value `hook_subject` gives the
-        // after-chain, so a guard and an after-hook read one key. It read
-        // `typeCode`, which nothing set, and every guard was given `""`.
-        document_type_key: evaluation
-            .document
-            .get("documentTypeKey")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-        current_status: evaluation.document.get("status").and_then(Value::as_str),
-        target_status: Some(target.maps_to_document_status.as_str()),
-        actor_user_id: actor,
-        form_data: evaluation.form_data.clone(),
+        graph,
+        instance_id,
+        from,
+        chosen,
+        target,
+        actor,
+        evaluation,
         metadata,
-        workflow_context: context,
-        subject: Value::Null,
-        config: json!({}),
-        correlation_id: instance_id,
-    };
+    );
 
     let outcome = hook::service::run_before_chain(
         transaction,
@@ -1326,6 +1305,69 @@ async fn run_transition_guards(
     }
 
     Ok(())
+}
+
+/// The LHCS §4 payload [`run_transition_guards`] hands each guard.
+///
+/// **Pure** ([#759]), so its fields are pinned by unit tests rather than only
+/// through a guard that reports what it was given:
+/// `a_guards_target_status_and_type_key_are_the_transitions` in this file,
+/// and `a_guard_and_an_after_hook_read_one_transition` in `after_hooks`, which
+/// holds the two chains to one value for each field they share.
+///
+/// [#759]: https://github.com/sujanto-gaws/kelir/issues/759
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the payload's own fields, assembled where they are known"
+)]
+pub(super) fn guard_invocation<'a>(
+    tenant_id: Uuid,
+    document_id: Uuid,
+    graph: &Graph,
+    instance_id: Uuid,
+    from: &State,
+    chosen: &super::super::domain::Transition,
+    target: &'a State,
+    actor: Option<Uuid>,
+    evaluation: &'a EvaluationContext,
+    metadata: Value,
+) -> hook::Invocation<'a> {
+    let context = hook::service::workflow_context(
+        &graph.workflow_key,
+        graph.revision,
+        instance_id,
+        &from.code,
+        &from.code,
+        &chosen.to,
+        TransitionAction::Auto.as_db(),
+    );
+
+    hook::Invocation {
+        hook_name: hook::BEFORE_WORKFLOW_TRANSITION,
+        stage: hook::Stage::Transition,
+        // Overwritten per entry by the runner; the chain here is one source.
+        source: hook::Source::Workflow,
+        tenant_id,
+        document_id,
+        // **The type's stored `type_code`** (#755): `document.documentTypeKey`,
+        // which `document_facts` builds from the value `hook_subject` gives the
+        // after-chain, so a guard and an after-hook read one key. It read
+        // `typeCode`, which nothing set, and every guard was given `""`.
+        document_type_key: evaluation
+            .document
+            .get("documentTypeKey")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        current_status: evaluation.document.get("status").and_then(Value::as_str),
+        target_status: Some(target.maps_to_document_status.as_str()),
+        actor_user_id: actor,
+        form_data: evaluation.form_data.clone(),
+        metadata,
+        workflow_context: context,
+        subject: Value::Null,
+        config: json!({}),
+        correlation_id: instance_id,
+    }
 }
 
 /// Enters a state: its task, if it declares one that a person performs, and the
@@ -1951,6 +1993,143 @@ mod tests {
             variables: json!({}),
             actor,
         }
+    }
+
+    /// **#759 AC5, the unit twin of #679's and #755's integration tests**: a
+    /// guard's `targetStatus` is the target state's `mapsToDocumentStatus`,
+    /// not its code, and its `documentTypeKey` is the evaluation's stored
+    /// type key, not `""`.
+    #[test]
+    fn a_guards_target_status_and_type_key_are_the_transitions() {
+        let graph = Graph::parse(
+            &json!({
+                "workflowKey": "requisition",
+                "initialState": "SUBMITTED",
+                "states": [
+                    { "code": "SUBMITTED", "name": "Submitted",
+                      "mapsToDocumentStatus": "PENDING_APPROVAL" },
+                    { "code": "DONE", "name": "Done",
+                      "mapsToDocumentStatus": "COMPLETED", "isFinal": true }
+                ],
+                "transitions": [
+                    { "from": "SUBMITTED", "to": "DONE", "action": "AUTO" }
+                ]
+            }),
+            2,
+        );
+        let evaluation = context(actor_facts(None, &[], None));
+        let invocation = guard_invocation(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            &graph,
+            Uuid::now_v7(),
+            graph.state("SUBMITTED").expect("the source state"),
+            &graph.transitions[0],
+            graph.state("DONE").expect("the target state"),
+            None,
+            &evaluation,
+            json!({}),
+        );
+        let payload = invocation.as_json();
+
+        assert_eq!(payload["targetStatus"], json!("COMPLETED"));
+        assert_eq!(payload["documentTypeKey"], json!("PURCHASE_REQUISITION"));
+        assert_eq!(
+            payload["workflowContext"]["transition"],
+            json!({ "from": "SUBMITTED", "to": "DONE", "action": "AUTO" })
+        );
+    }
+
+    /// **#759 campaign**: every field of a guard's payload, each from its own
+    /// source. The document's `IN_REVIEW` differs from both states and both
+    /// their statuses, and the actor is a person, so a field read from the
+    /// wrong source cannot land on the right value. Before this test, a guard
+    /// given the target as its `state`, no actor, no `currentStatus`, no
+    /// metadata, the after-chain's `hookName` or the document's id as its
+    /// `correlationId` went red nowhere.
+    #[test]
+    fn every_field_of_the_guard_payload_is_read_from_its_source() {
+        let graph = Graph::parse(
+            &json!({
+                "workflowKey": "requisition",
+                "initialState": "SUBMITTED",
+                "states": [
+                    { "code": "SUBMITTED", "name": "Submitted",
+                      "mapsToDocumentStatus": "PENDING_APPROVAL" },
+                    { "code": "DONE", "name": "Done",
+                      "mapsToDocumentStatus": "COMPLETED", "isFinal": true }
+                ],
+                "transitions": [
+                    { "from": "SUBMITTED", "to": "DONE", "action": "AUTO" }
+                ]
+            }),
+            2,
+        );
+        let tenant = Uuid::now_v7();
+        let document = Uuid::now_v7();
+        let instance = Uuid::now_v7();
+        let person = Uuid::now_v7();
+        let metadata = json!({ "costCentre": "CC-17" });
+        let evaluation = EvaluationContext {
+            document: document_facts(
+                DocumentStatus::InReview,
+                Uuid::nil(),
+                "PURCHASE_REQUISITION",
+                None,
+            ),
+            form_data: json!({ "amount": 45_000_000 }),
+            variables: json!({}),
+            actor: actor_facts(Some(person), &[], None),
+        };
+        let mut payload = guard_invocation(
+            tenant,
+            document,
+            &graph,
+            instance,
+            graph.state("SUBMITTED").expect("the source state"),
+            &graph.transitions[0],
+            graph.state("DONE").expect("the target state"),
+            Some(person),
+            &evaluation,
+            metadata.clone(),
+        )
+        .as_json();
+
+        assert!(
+            payload
+                .as_object_mut()
+                .expect("an object")
+                .remove("invokedAt")
+                .is_some(),
+            "LHCS §4 gives every payload `invokedAt`"
+        );
+        assert_eq!(
+            payload,
+            json!({
+                "hookName": "before_workflow_transition",
+                "stage": "TRANSITION",
+                "source": hook::Source::Workflow.as_db(),
+                "tenantId": tenant,
+                "documentId": document,
+                "documentTypeKey": "PURCHASE_REQUISITION",
+                "currentStatus": "IN_REVIEW",
+                "targetStatus": "COMPLETED",
+                "actorUserId": person,
+                "formData": { "amount": 45_000_000 },
+                "metadata": metadata,
+                "workflowContext": {
+                    "workflowKey": "requisition",
+                    "workflowRevision": 2,
+                    "instanceId": instance,
+                    "state": "SUBMITTED",
+                    "transition": { "from": "SUBMITTED", "to": "DONE", "action": "AUTO" },
+                    "taskId": null,
+                },
+                "subject": null,
+                "config": {},
+                "correlationId": instance,
+            })
+        );
     }
 
     /// **#706 AC4**: no actor is a null user with no roles and no department.

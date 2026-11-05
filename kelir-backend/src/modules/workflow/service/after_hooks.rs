@@ -25,7 +25,11 @@
 //! not carry form data (EES §4.2), and a snapshot beside it would be a second
 //! copy of it. `targetStatus` is the status the transition projected — the
 //! `mapsToDocumentStatus` of the state it reached, in the pinned revision —
-//! because that belongs to the transition rather than to the document.
+//! because that belongs to the transition rather than to the document. The
+//! payload is built by [`after_invocation`], and
+//! `the_target_status_is_the_reached_states_document_status` pins that value
+//! ([#759]); `a_guard_and_an_after_hook_read_one_transition` pins that a guard
+//! on the same transition reads the same one ([#679]).
 //!
 //! # Nothing to deliver to is a delivery
 //!
@@ -34,6 +38,8 @@
 //! with nothing run. None of them is something a retry could change.
 //!
 //! [#519]: https://github.com/sujanto-gaws/kelir/issues/519
+//! [#679]: https://github.com/sujanto-gaws/kelir/issues/679
+//! [#759]: https://github.com/sujanto-gaws/kelir/issues/759
 
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -151,36 +157,7 @@ pub async fn deliver(
     let metadata = hook::repository::metadata_of(transaction, tenant_id, event.document_id).await?;
     let transition_ref =
         hook::service::transition_ref(&graph.workflow_key, graph.revision, event.from, event.to);
-    let context = hook::service::workflow_context(
-        &graph.workflow_key,
-        graph.revision,
-        instance.id,
-        &instance.current_state,
-        event.from,
-        event.to,
-        event.action,
-    );
-
-    let mut invocation = hook::Invocation {
-        hook_name: hook::AFTER_WORKFLOW_TRANSITION,
-        stage: hook::Stage::Transition,
-        // Overwritten per entry by the runner.
-        source: hook::Source::Workflow,
-        tenant_id,
-        document_id: event.document_id,
-        document_type_key: &subject.document_type_key,
-        current_status: Some(&subject.status),
-        target_status: graph
-            .state(event.to)
-            .map(|state| state.maps_to_document_status.as_str()),
-        actor_user_id: event.actor_user_id,
-        form_data: subject.form_data.clone(),
-        metadata,
-        workflow_context: context,
-        subject: Value::Null,
-        config: json!({}),
-        correlation_id: event.correlation_id.unwrap_or(instance.id),
-    };
+    let mut invocation = after_invocation(tenant_id, &event, &graph, &instance, &subject, metadata);
 
     let outcome = hook::service::run_after_chain(
         transaction,
@@ -195,6 +172,59 @@ pub async fn deliver(
         Ok(Delivery::Delivered)
     } else {
         Ok(Delivery::Retry(outcome.failures.join("; ")))
+    }
+}
+
+/// The LHCS §4 payload the after-chain hands each entry.
+///
+/// **Pure, and every choice of field is made here** ([#759]): which of
+/// `event.to`, `event.from` and `instance.current_state` a field reads is
+/// decided inside this function rather than at its call site, so the unit
+/// tests below pin it. No core handler is after-capable and also reports what
+/// it was given, so before this was a function a wrong `targetStatus` was
+/// observable to no test.
+///
+/// `event` borrows for the payload's own lifetime, which it need not: with
+/// its own, #759's mutant `Some(event.to)` is refused by the borrow checker
+/// instead of being run, and the test that should go red under it is never
+/// asked.
+///
+/// [#759]: https://github.com/sujanto-gaws/kelir/issues/759
+fn after_invocation<'a>(
+    tenant_id: Uuid,
+    event: &Transitioned<'a>,
+    graph: &'a Graph,
+    instance: &instance_repo::InstanceRow,
+    subject: &'a hook::repository::HookSubject,
+    metadata: Value,
+) -> hook::Invocation<'a> {
+    hook::Invocation {
+        hook_name: hook::AFTER_WORKFLOW_TRANSITION,
+        stage: hook::Stage::Transition,
+        // Overwritten per entry by the runner.
+        source: hook::Source::Workflow,
+        tenant_id,
+        document_id: event.document_id,
+        document_type_key: &subject.document_type_key,
+        current_status: Some(&subject.status),
+        target_status: graph
+            .state(event.to)
+            .map(|state| state.maps_to_document_status.as_str()),
+        actor_user_id: event.actor_user_id,
+        form_data: subject.form_data.clone(),
+        metadata,
+        workflow_context: hook::service::workflow_context(
+            &graph.workflow_key,
+            graph.revision,
+            instance.id,
+            &instance.current_state,
+            event.from,
+            event.to,
+            event.action,
+        ),
+        subject: Value::Null,
+        config: json!({}),
+        correlation_id: event.correlation_id.unwrap_or(instance.id),
     }
 }
 
@@ -237,5 +267,289 @@ mod tests {
             Transitioned::read(&automatic).expect("reads").actor_user_id,
             None
         );
+    }
+
+    // ── The payload (#759) ────────────────────────────────────────────────
+    //
+    // One fixture in which every value a field could be read from differs
+    // from every other: the reached state's code (`DONE`) from its
+    // `mapsToDocumentStatus` (`COMPLETED`), `event.from` from `event.to`, the
+    // instance's `current_state` (`FILED`, since it has moved on, LHCS §5.2)
+    // from both, and the document's `status` (`IN_REVIEW`) from each of those
+    // states' document statuses. A field read from the wrong source cannot
+    // land on the right value by coincidence.
+
+    const TYPE_KEY: &str = "Expense-Claim";
+
+    struct Fixture {
+        tenant: Uuid,
+        document: Uuid,
+        type_id: Uuid,
+        graph: Graph,
+        instance: instance_repo::InstanceRow,
+        subject: hook::repository::HookSubject,
+    }
+
+    fn fixture() -> Fixture {
+        let graph = Graph::parse(
+            &json!({
+                "workflowKey": "expense_claim",
+                "initialState": "SUBMITTED",
+                "states": [
+                    { "code": "SUBMITTED", "name": "Submitted",
+                      "mapsToDocumentStatus": "PENDING_APPROVAL" },
+                    { "code": "DONE", "name": "Done",
+                      "mapsToDocumentStatus": "COMPLETED", "isFinal": true },
+                    { "code": "FILED", "name": "Filed",
+                      "mapsToDocumentStatus": "ARCHIVED", "isFinal": true }
+                ],
+                "transitions": [
+                    { "from": "SUBMITTED", "to": "DONE", "action": "AUTO" }
+                ]
+            }),
+            7,
+        );
+        let document = Uuid::now_v7();
+        let type_id = Uuid::now_v7();
+
+        Fixture {
+            tenant: Uuid::now_v7(),
+            document,
+            type_id,
+            instance: instance_repo::InstanceRow {
+                id: Uuid::now_v7(),
+                instance_ref: "WF-2026-000001".to_owned(),
+                document_id: document,
+                workflow_definition_id: Uuid::now_v7(),
+                workflow_key: graph.workflow_key.clone(),
+                workflow_name: "Expense claim".to_owned(),
+                definition_version: graph.revision,
+                status: "RUNNING".to_owned(),
+                current_state: "FILED".to_owned(),
+                outcome: None,
+                business_key: None,
+                started_by: None,
+                started_at: chrono::Utc::now(),
+                completed_at: None,
+            },
+            graph,
+            subject: hook::repository::HookSubject {
+                status: "IN_REVIEW".to_owned(),
+                form_data: json!({ "amount": 1_250_000 }),
+                document_type_id: type_id,
+                document_type_key: TYPE_KEY.to_owned(),
+            },
+        }
+    }
+
+    fn event(
+        fixture: &Fixture,
+        actor_user_id: Option<Uuid>,
+        correlation_id: Option<Uuid>,
+    ) -> Transitioned<'static> {
+        Transitioned {
+            instance_id: fixture.instance.id,
+            document_id: fixture.document,
+            from: "SUBMITTED",
+            to: "DONE",
+            action: "AUTO",
+            actor_user_id,
+            correlation_id,
+        }
+    }
+
+    /// The payload as a handler receives it, less `invokedAt`, which is the
+    /// clock's.
+    fn payload(invocation: &hook::Invocation<'_>) -> Value {
+        let mut payload = invocation.as_json();
+        let invoked_at = payload
+            .as_object_mut()
+            .expect("an object")
+            .remove("invokedAt");
+
+        assert!(
+            invoked_at.is_some(),
+            "LHCS §4 gives every payload `invokedAt`"
+        );
+        payload
+    }
+
+    /// **#759 AC3: `targetStatus` is the reached state's
+    /// `mapsToDocumentStatus`**, `COMPLETED`, and not the state code `DONE`
+    /// (#759's own mutant), the source state's `PENDING_APPROVAL`, or `null`.
+    ///
+    /// Before #759 the `event.to` mutant survived every test in the suite
+    /// (`tests/workflow_system_tasks.rs`' mutation table), because no core
+    /// handler both runs after a transition and reports what it was given.
+    #[test]
+    fn the_target_status_is_the_reached_states_document_status() {
+        let fixture = fixture();
+        let event = event(&fixture, None, None);
+        let invocation = after_invocation(
+            fixture.tenant,
+            &event,
+            &fixture.graph,
+            &fixture.instance,
+            &fixture.subject,
+            json!({}),
+        );
+
+        assert_eq!(payload(&invocation)["targetStatus"], json!("COMPLETED"));
+    }
+
+    /// **#759 AC4**: every other field, from its own source, for a person's
+    /// step with its own correlation id.
+    #[test]
+    fn every_field_of_the_after_payload_is_read_from_its_source() {
+        let fixture = fixture();
+        let person = Uuid::now_v7();
+        let correlation = Uuid::now_v7();
+        let metadata = json!({ "costCentre": "CC-17" });
+        let event = event(&fixture, Some(person), Some(correlation));
+        let invocation = after_invocation(
+            fixture.tenant,
+            &event,
+            &fixture.graph,
+            &fixture.instance,
+            &fixture.subject,
+            metadata.clone(),
+        );
+
+        assert_eq!(
+            payload(&invocation),
+            json!({
+                "hookName": "after_workflow_transition",
+                "stage": "TRANSITION",
+                "source": hook::Source::Workflow.as_db(),
+                "tenantId": fixture.tenant,
+                "documentId": fixture.document,
+                "documentTypeKey": TYPE_KEY,
+                "currentStatus": "IN_REVIEW",
+                "targetStatus": "COMPLETED",
+                "actorUserId": person,
+                "formData": { "amount": 1_250_000 },
+                "metadata": metadata,
+                "workflowContext": {
+                    "workflowKey": "expense_claim",
+                    "workflowRevision": 7,
+                    "instanceId": fixture.instance.id,
+                    "state": "FILED",
+                    "transition": { "from": "SUBMITTED", "to": "DONE", "action": "AUTO" },
+                    "taskId": null,
+                },
+                "subject": null,
+                "config": {},
+                "correlationId": correlation,
+            })
+        );
+    }
+
+    /// **#759 AC4**: the engine's own step gives no actor, and an envelope
+    /// without a correlation id is correlated by the instance.
+    #[test]
+    fn an_automatic_step_has_no_actor_and_is_correlated_by_its_instance() {
+        let fixture = fixture();
+        let event = event(&fixture, None, None);
+        let invocation = after_invocation(
+            fixture.tenant,
+            &event,
+            &fixture.graph,
+            &fixture.instance,
+            &fixture.subject,
+            json!({}),
+        );
+        let payload = payload(&invocation);
+
+        assert_eq!(payload["actorUserId"], Value::Null);
+        assert_eq!(payload["correlationId"], json!(fixture.instance.id));
+    }
+
+    /// **#759 campaign**: a person's decision carries its own action in
+    /// `workflowContext.transition`. Every other test here is `AUTO`, so an
+    /// action read as the constant `"AUTO"` passed them all.
+    #[test]
+    fn a_decided_step_carries_its_own_action() {
+        let fixture = fixture();
+        let decided = Transitioned {
+            action: "APPROVE",
+            ..event(&fixture, Some(Uuid::now_v7()), None)
+        };
+        let invocation = after_invocation(
+            fixture.tenant,
+            &decided,
+            &fixture.graph,
+            &fixture.instance,
+            &fixture.subject,
+            json!({}),
+        );
+
+        assert_eq!(
+            payload(&invocation)["workflowContext"]["transition"],
+            json!({ "from": "SUBMITTED", "to": "DONE", "action": "APPROVE" })
+        );
+    }
+
+    /// **#759 AC6, and #679's agreement at unit level**: for one `AUTO`
+    /// transition in one graph and document, a guard and an after-hook read
+    /// one value for every field that belongs to the transition.
+    ///
+    /// `currentStatus`, `formData`, `metadata`, `workflowContext.state` and
+    /// `correlationId` are not compared, and that is deliberate: LHCS §5.2
+    /// has an after-hook read them at delivery, when the document and the
+    /// instance may have moved on, so the two chains are allowed to differ on
+    /// them.
+    #[test]
+    fn a_guard_and_an_after_hook_read_one_transition() {
+        use super::super::engine::{document_facts, guard_invocation, EvaluationContext};
+        use crate::modules::document::domain::DocumentStatus;
+
+        let fixture = fixture();
+        let graph = &fixture.graph;
+        let evaluation = EvaluationContext {
+            document: document_facts(DocumentStatus::Submitted, fixture.type_id, TYPE_KEY, None),
+            form_data: fixture.subject.form_data.clone(),
+            variables: json!({}),
+            actor: json!({ "userId": null, "roles": [], "departmentId": null }),
+        };
+        let guard = payload(&guard_invocation(
+            fixture.tenant,
+            fixture.document,
+            graph,
+            fixture.instance.id,
+            graph.state("SUBMITTED").expect("the source state"),
+            &graph.transitions[0],
+            graph.state("DONE").expect("the target state"),
+            None,
+            &evaluation,
+            json!({}),
+        ));
+        let event = event(&fixture, None, None);
+        let after = payload(&after_invocation(
+            fixture.tenant,
+            &event,
+            graph,
+            &fixture.instance,
+            &fixture.subject,
+            json!({}),
+        ));
+
+        for key in ["targetStatus", "documentTypeKey", "stage", "actorUserId"] {
+            assert_eq!(guard[key], after[key], "`{key}`");
+        }
+        for key in [
+            "workflowKey",
+            "workflowRevision",
+            "instanceId",
+            "transition",
+        ] {
+            assert_eq!(
+                guard["workflowContext"][key], after["workflowContext"][key],
+                "`workflowContext.{key}`"
+            );
+        }
+        // Equal and wrong would pass the loops above; the values are the
+        // transition's.
+        assert_eq!(after["targetStatus"], json!("COMPLETED"));
+        assert_eq!(after["documentTypeKey"], json!(TYPE_KEY));
     }
 }
