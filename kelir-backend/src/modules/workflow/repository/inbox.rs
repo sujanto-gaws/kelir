@@ -215,9 +215,10 @@
 //!
 //! **The unclaimed arm is unchanged.** An unclaimed task with such edges is
 //! still offered to its role's holders, and the first to claim it then loses
-//! sight of it (filed apart).
+//! sight of it ([#761]).
 //!
 //! [#530]: https://github.com/sujanto-gaws/kelir/issues/530
+//! [#761]: https://github.com/sujanto-gaws/kelir/issues/761
 //! [#635]: https://github.com/sujanto-gaws/kelir/issues/635
 //! [#762]: https://github.com/sujanto-gaws/kelir/issues/762
 //! [#893]: https://github.com/sujanto-gaws/kelir/issues/893

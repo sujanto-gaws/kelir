@@ -778,7 +778,7 @@ While the major version is `0`, the public API may change in any release.
   not deleted still resolves. A reassign is refused for every target, so the
   remedy is the data: restore the user, or set the document's creator, by
   SQL (Installation and Deployment §9). A `userId` that is not a user id has
-  no remedy, and nothing yet finds such a task
+  no remedy. Nothing yet finds any of these tasks
   ([#893](https://github.com/sujanto-gaws/kelir/issues/893)). No migration,
   and no schema change.
 - **A deployed bundle's hashed files are kept for a year, and its document is
