@@ -89,13 +89,14 @@
 //! **Whether its decision is certain to be refused.** Only **decision edges**
 //! count: those out of the instance's current state whose action is `APPROVE`,
 //! `REJECT` or `RETURN`, the three `DecisionAction` can fire. An edge
-//! **resolves** when its `allowedBy` is `USER` or `OWNER`, when it is `ROLE` and
-//! a live role in the tenant has its `roleCode`, or when it is
-//! `DEPARTMENT_ROLE`, a live role has its `roleCode`, and its `departmentScope`
-//! resolves. An open task claimed by the caller is hidden when the state has at
-//! least one decision edge and none of them resolves. Matching by **code** is
-//! `direct`'s own match, so a live role that took a deleted one's code resolves
-//! the edge here as it does there.
+//! **resolves** when its `allowedBy` is `USER` and its `userId` names a live
+//! user of the tenant, when it is `OWNER` and the document's creator is a live
+//! user of the tenant ([#762]), when it is `ROLE` and a live role in the tenant
+//! has its `roleCode`, or when it is `DEPARTMENT_ROLE`, a live role has its
+//! `roleCode`, and its `departmentScope` resolves. An open task claimed by the
+//! caller is hidden when the state has at least one decision edge and none of
+//! them resolves. Matching by **code** is `direct`'s own match, so a live role
+//! that took a deleted one's code resolves the edge here as it does there.
 //!
 //! **A `departmentScope` resolves as `assignment::normalize` and `direct` read
 //! it** ([#635]). It is read at each query, as the engine reads it at each
@@ -116,6 +117,36 @@
 //! The two reserved words are matched before any code, as `normalize` matches
 //! them, so a department coded `OWNER_DEPARTMENT` does not rescue an owner with
 //! none. A scope on a `ROLE` edge is ignored, as `normalize` ignores it.
+//!
+//! **A `USER` or `OWNER` edge resolves as `normalize` and `direct` read it**
+//! ([#762]). Until then the clause counted every such edge as resolving, and a
+//! task whose every decision edge named a person the engine refuses stayed on
+//! its holder's inbox.
+//!
+//! * **`USER`** resolves when `userId` is a JSON string, is a uuid as
+//!   `normalize` parses it, with the `uuid` crate's `FromStr`, and names a
+//!   user of the task's tenant with `deleted_at IS NULL`, which is `direct`'s
+//!   whole check. The string comes first because the rule's reader takes
+//!   `userId` only as a string and reads a number as no `userId` at all,
+//!   while `->>` would hand the clause a number's digits, and 32 of them are
+//!   a uuid the pattern accepts. The crate takes 32
+//!   hexadecimal digits, or a hyphenated uuid alone, in braces or after a
+//!   lowercase `urn:uuid:`, with the digits in either case, and nothing else.
+//!   So the clause matches exactly those spellings first and casts only what
+//!   matched. **A plain `::uuid` cast is wrong twice**: it raises on anything
+//!   else, which would take the inbox, its count, the gate and both dashboard
+//!   widgets down with one bad definition, and it takes spellings the crate
+//!   refuses, such as a hyphen after every four digits or braces around 32
+//!   digits, which would keep a task the engine refuses. JWSS asks only that a
+//!   `userId` be a string, so any of them can be published. `users.status` is
+//!   not read, as `direct` does not read it, so an `INACTIVE` or `LOCKED` user
+//!   resolves.
+//! * **`OWNER`** resolves when `documents.created_by` names a user of the
+//!   task's tenant with `deleted_at IS NULL`: `normalize` refuses a document
+//!   with no creator, and `direct` checks the creator as it checks a `USER`.
+//!   **This is the opposite of `OWNER_DEPARTMENT`'s reading** above, which
+//!   follows a deleted creator to their department because
+//!   `owner_department_of` does.
 //!
 //! The list of kinds is positive, and it is complete. `MANAGER_OF_OWNER` and
 //! `EXPRESSION` are refused when a definition is saved (**D-37**,
@@ -140,15 +171,17 @@
 //! **It errs toward visible, and it is not the engine.** It judges every
 //! decision edge out of the state, but a decision takes one: the edge its
 //! action and `condition` choose. So it does not re-derive `condition_json`.
-//! It checks the role and the department, and nothing else `direct` checks. A
-//! `USER` edge naming a deleted user, and an `OWNER` edge on a document with no
-//! creator, refuse at the decision and still count as resolving here (filed
-//! apart). Each keeps a task on the inbox that the engine would refuse, and
-//! neither hides one the engine would accept. It applies to open tasks only,
+//! It asks whether an edge resolves to somebody, and not whether that somebody
+//! is the caller, which `permits` asks next: an edge naming another live user
+//! keeps the task, and its decision answers 403. Since [#762] it checks every
+//! liveness `direct` checks: the role, the department, the user and the
+//! owner. So it can keep a task on the inbox that the engine would refuse, by
+//! a condition or by who is asking, and it hides none the engine would
+//! accept. It applies to open tasks only,
 //! because a finished task is a record of what was done, and its instance's
 //! later edges say nothing about it.
 //!
-//! **A hidden task is not lost**, and it is one of two kinds.
+//! **A hidden task is not lost**, and it is one of three kinds.
 //!
 //! * **Its edges name a deleted role.** This is residue from a role deleted
 //!   before **D-89**'s refusal shipped. An administrator finds it with the
@@ -166,6 +199,19 @@
 //!   department brings the task back. Restoring a department is SQL, since
 //!   no route restores one, and so is setting the requested department,
 //!   because a submitted document is not editable.
+//! * **Its edges name a person who does not resolve** ([#762]): a `USER`
+//!   whose `userId` is not a uuid, or names a deleted user, another tenant's
+//!   or nobody, or an `OWNER` on a document whose creator is unrecorded,
+//!   deleted or another tenant's. These edges name no role, so **nothing finds
+//!   it**: neither the stranded task query nor the Roles screen's list, which
+//!   reads a claimed task only through an edge naming the role ([#893]).
+//!   A reassign is refused as `TARGET_CANNOT_DECIDE`, as for the second kind.
+//!   The remedy is the data where data can reach: restoring the user by SQL,
+//!   clearing `users.deleted_at`, since no route restores one, or setting the
+//!   document's `created_by` to a live user by SQL. A `userId` that is not a
+//!   uuid, or names another tenant's user or nobody, has no remedy: the
+//!   instance stays on its revision, a published revision is not edited, and
+//!   nothing cancels a task.
 //!
 //! **The unclaimed arm is unchanged.** An unclaimed task with such edges is
 //! still offered to its role's holders, and the first to claim it then loses
@@ -173,6 +219,8 @@
 //!
 //! [#530]: https://github.com/sujanto-gaws/kelir/issues/530
 //! [#635]: https://github.com/sujanto-gaws/kelir/issues/635
+//! [#762]: https://github.com/sujanto-gaws/kelir/issues/762
+//! [#893]: https://github.com/sujanto-gaws/kelir/issues/893
 //!
 //! # This lives in `workflow` and is called from `task_inbox`
 //!
@@ -392,7 +440,8 @@ pub struct InboxPage {
     pub matching: Option<i64>,
 }
 
-/// **#530's claimed-task clause, with #635's department test, written once.**
+/// **#530's claimed-task clause, with #635's department test and #762's
+/// person test, written once.**
 ///
 /// Each of [`list_for_caller`], [`count_for_caller`] and [`is_visible_to`] is
 /// written as `with_claimed_clause!(kind, head, tail, args…)`, and this splices
@@ -416,7 +465,7 @@ macro_rules! with_claimed_clause {
             $head
                 + r#"
           -- A claimed task nobody can decide is not waiting for its holder
-          -- (#530, #635). Written once, here, and spliced into
+          -- (#530, #635, #762). Written once, here, and spliced into
           -- `list_for_caller`, `count_for_caller` and `is_visible_to`. It is
           -- not `count_open_tasks_needing_role`'s clause, which asks whether
           -- *some* edge names a role: this asks whether *no* decision edge
@@ -436,7 +485,36 @@ macro_rules! with_claimed_clause {
                             AND tr.workflow_definition_id = i.workflow_definition_id
                             AND tr.from_state = i.current_state
                             AND tr.action IN ('APPROVE', 'REJECT', 'RETURN')
-                            AND (tr.allowed_by_json->>'assigneeType' IN ('USER', 'OWNER')
+                            -- A user, as `normalize` parses `userId` and
+                            -- `direct` reads the user (#762): a JSON string,
+                            -- since the engine reads any other JSON type as
+                            -- no `userId` while `->>` would give a number's
+                            -- digits; then the `uuid` crate's spellings, and
+                            -- only those; then a live user of the tenant,
+                            -- whatever their `status`. The CASE keeps the cast
+                            -- from anything refused before it, so no `userId`
+                            -- makes this raise.
+                            AND ((tr.allowed_by_json->>'assigneeType' = 'USER'
+                                  AND CASE
+                                        WHEN jsonb_typeof(tr.allowed_by_json->'userId') = 'string'
+                                             AND tr.allowed_by_json->>'userId'
+                                             ~ '^([0-9a-fA-F]{32}|(urn:uuid:)?[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}|[{][0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}[}])$'
+                                        THEN EXISTS (
+                                                 SELECT 1 FROM users u
+                                                 WHERE u.tenant_id = t.tenant_id
+                                                   AND u.id = replace(tr.allowed_by_json->>'userId',
+                                                                      'urn:uuid:', '')::uuid
+                                                   AND u.deleted_at IS NULL)
+                                        ELSE false
+                                      END)
+                                 -- The owner is the creator, read as a user is.
+                                 -- Not OWNER_DEPARTMENT's reading below, which
+                                 -- ignores the creator's `deleted_at`.
+                                 OR (tr.allowed_by_json->>'assigneeType' = 'OWNER'
+                                     AND EXISTS (SELECT 1 FROM users u
+                                                 WHERE u.tenant_id = t.tenant_id
+                                                   AND u.id = d.created_by
+                                                   AND u.deleted_at IS NULL))
                                  OR (tr.allowed_by_json->>'assigneeType'
                                          IN ('ROLE', 'DEPARTMENT_ROLE')
                                      AND EXISTS (SELECT 1 FROM roles live

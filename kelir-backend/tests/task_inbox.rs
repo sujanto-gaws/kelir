@@ -10944,3 +10944,849 @@ async fn a_task_with_only_unresolvable_department_edges_cannot_be_reassigned() {
         "a refused reassign moved the task"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #762 — a claimed task whose USER or OWNER edges never resolve is not waiting
+// ---------------------------------------------------------------------------
+
+// # Seen to fail (coding standard §2.9)
+//
+// At `06d9f31`, before the fix, on 2026-11-05, the oracle below was red on
+// all 21 rows whose expected answer is `Unresolved`, and on no other: the
+// clause counted any `USER` or `OWNER` edge as resolving, so each of those
+// tasks stayed on its holder's inbox and through the gate while the engine
+// refused it. Every pinned engine answer held. The unclaimed-arm test was
+// green while the task was offered and red once it was claimed.
+//
+// Two rows came from the test engineer's mutants of the fixed clause, each of
+// which survived the oracle until its row was added. *A letter that is not
+// hex* was red against `06d9f31` too (22 rows), and against a pattern whose
+// class takes any letter the inbox answered 500. *Department unresolvable,
+// with a live user's id* is green against `06d9f31`, whose clause read no
+// `userId`, and was red against a clause that read `userId` on every edge.
+//
+// A third came from the campaign's probe of `82d7197`'s clause. *A JSON number
+// of a live user's digits* was red against it, and against `06d9f31` too: the
+// clause read `->>`, which gives a number's digits, and 32 decimal digits are
+// a uuid the pattern takes, while the engine reads a number as no `userId`.
+// The clause now requires a JSON string first.
+
+/// The role every #762 task is offered to, and the one the mixed rows' live
+/// `ROLE` edge names. Every #762 holder holds it.
+const PERSON_EDGE_QUEUE: &str = "TI-762-QUEUE";
+
+/// The oracle's row whose `userId` is a JSON number, set by SQL after the
+/// raise, and the 32 decimal digits it holds: a live user's id, unhyphenated.
+const NUMBER_ROW: &str = "user id, a JSON number of a live user's digits";
+const ALL_DIGITS: &str = "76212345678901234567890123456789";
+
+/// A `USER` rule naming `user_id`, spelled exactly as given.
+fn user_rule(user_id: &str) -> Value {
+    json!({ "assigneeType": "USER", "userId": user_id })
+}
+
+/// What the engine answers a decision on one of the oracle's tasks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EdgeAnswer {
+    /// 200: an edge resolved to the caller, and the task was decided.
+    Decided,
+    /// 403: an edge resolved, to somebody other than the caller. The clause is
+    /// not per-actor, so the task stays.
+    Forbidden,
+    /// 422 `ASSIGNMENT_UNRESOLVED` on every decision edge.
+    Unresolved,
+}
+
+/// What a decision answered, in the oracle's three words. Anything else is a
+/// failure of the harness, not a disagreement.
+fn answer_of(response: &common::TestResponse, context: &str) -> EdgeAnswer {
+    match response.status {
+        StatusCode::OK => EdgeAnswer::Decided,
+        StatusCode::FORBIDDEN => EdgeAnswer::Forbidden,
+        StatusCode::UNPROCESSABLE_ENTITY
+            if response.body.to_string().contains("ASSIGNMENT_UNRESOLVED") =>
+        {
+            EdgeAnswer::Unresolved
+        }
+        other => panic!("{context}: a decision answered {other}: {}", response.body),
+    }
+}
+
+/// `APPROVE`, then `REJECT` if `APPROVE` was refused as unresolved: what the
+/// engine answers for the first decision edge that resolves, or `Unresolved`
+/// when neither does. A 422 changes nothing, so the second decision is asked
+/// of the same task in the same state.
+async fn engine_answer(app: &TestApp, token: &str, task: Uuid, context: &str) -> EdgeAnswer {
+    for action in ["APPROVE", "REJECT"] {
+        let answered = answer_of(
+            &decision(app, token, task, action).await,
+            &format!("{context}, {action}"),
+        );
+        if answered != EdgeAnswer::Unresolved {
+            return answered;
+        }
+    }
+    EdgeAnswer::Unresolved
+}
+
+/// Rewrites, by SQL, the `userId` of both decision edges of `task`'s published
+/// definition and of its projection. `None` removes the key; `Some(json)` sets
+/// it to that JSON text, given as text so a number keeps all its digits. JWSS
+/// requires a `USER` rule's `userId` to be a string, so none of these is
+/// publishable, and the engine reads each as `""`.
+async fn set_edge_user_ids(app: &TestApp, task: Uuid, user_id: Option<&str>) {
+    let definition: Uuid = sqlx::query_scalar(
+        "SELECT i.workflow_definition_id FROM workflow_tasks t
+           JOIN workflow_instances i ON i.id = t.workflow_instance_id
+          WHERE t.id = $1",
+    )
+    .bind(task)
+    .fetch_one(&app.pool)
+    .await
+    .expect("the task's definition");
+
+    let (rewritten, projected) = match user_id {
+        None => (
+            sqlx::query(
+                "UPDATE workflow_definitions
+                    SET definition_json = definition_json
+                        #- '{transitions,0,allowedBy,userId}'
+                        #- '{transitions,1,allowedBy,userId}'
+                  WHERE id = $1",
+            )
+            .bind(definition)
+            .execute(&app.pool)
+            .await,
+            sqlx::query(
+                "UPDATE workflow_transitions SET allowed_by_json = allowed_by_json - 'userId'
+                  WHERE workflow_definition_id = $1 AND action IN ('APPROVE', 'REJECT')",
+            )
+            .bind(definition)
+            .execute(&app.pool)
+            .await,
+        ),
+        Some(value) => (
+            sqlx::query(
+                "UPDATE workflow_definitions
+                    SET definition_json = jsonb_set(
+                            jsonb_set(definition_json, '{transitions,0,allowedBy,userId}',
+                                      ($2::text)::jsonb),
+                            '{transitions,1,allowedBy,userId}', ($2::text)::jsonb)
+                  WHERE id = $1",
+            )
+            .bind(definition)
+            .bind(value)
+            .execute(&app.pool)
+            .await,
+            sqlx::query(
+                "UPDATE workflow_transitions
+                    SET allowed_by_json = jsonb_set(allowed_by_json, '{userId}', ($2::text)::jsonb)
+                  WHERE workflow_definition_id = $1 AND action IN ('APPROVE', 'REJECT')",
+            )
+            .bind(definition)
+            .bind(value)
+            .execute(&app.pool)
+            .await,
+        ),
+    };
+    let rewritten = rewritten.expect("rewrite the definition's userId");
+    assert_eq!(rewritten.rows_affected(), 1, "the definition was not found");
+    let projected = projected.expect("rewrite the projection's userId");
+    assert_eq!(projected.rows_affected(), 2, "the projection has two edges");
+}
+
+/// Sets the creator of `task`'s document by SQL, as the #635 oracle does.
+async fn set_creator(app: &TestApp, task: Uuid, creator: Option<Uuid>) {
+    let updated = sqlx::query(
+        "UPDATE documents SET created_by = $1
+          WHERE id = (SELECT document_id FROM workflow_tasks WHERE id = $2)",
+    )
+    .bind(creator)
+    .bind(task)
+    .execute(&app.pool)
+    .await
+    .expect("change the document's creator");
+    assert_eq!(
+        updated.rows_affected(),
+        1,
+        "the task's document was not found"
+    );
+}
+
+async fn set_user_status(app: &TestApp, user: Uuid, status: &str) {
+    sqlx::query("UPDATE users SET status = $1 WHERE id = $2")
+        .bind(status)
+        .bind(user)
+        .execute(&app.pool)
+        .await
+        .expect("set the user's status");
+}
+
+async fn delete_user_through_the_api(app: &TestApp, token: &str, user: Uuid) {
+    let deleted = app
+        .delete(&format!("/api/v1/identity/users/{user}"), Some(token))
+        .await;
+    assert!(
+        deleted.status.is_success(),
+        "the API refused to delete the user: {}",
+        deleted.body
+    );
+}
+
+/// **The inbox and the engine agree on which `USER` and `OWNER` edges
+/// resolve** ([#762]).
+///
+/// One task per case, claimed by the case's holder and late. For each, its
+/// presence on the holder's open inbox, through the detail gate and on the
+/// task's page is compared with what the engine answers its decisions:
+/// `APPROVE`, then `REJECT` if `APPROVE` was refused as unresolved. On the
+/// inbox **if and only if** some decision edge is not refused as
+/// `ASSIGNMENT_UNRESOLVED`. The expected answer is pinned per case too, so the
+/// two cannot agree by both being wrong, and each holder's counts are read
+/// against their lists on the inbox and the dashboard, so no surface answers
+/// 500 for a `userId` that is not a uuid.
+///
+/// **What the engine does.** A `USER` edge's `userId` is parsed by the `uuid`
+/// crate, and the user must exist in the tenant with `deleted_at IS NULL`;
+/// `users.status` is not read. An `OWNER` edge is `documents.created_by`, which
+/// must be non-null and pass the same check. Each accepted spelling below is
+/// confirmed by a 200, and each refused one by a 422:
+///
+/// * **Accepted by the crate:** hyphenated in either case, 32 hex digits,
+///   braced, and `urn:uuid:` in lowercase.
+/// * **Refused by the crate:** a space either side, a trailing newline, a
+///   truncated id, a letter that is not a hex digit, and the spellings only
+///   PostgreSQL's `uuid` input takes: hyphens after every four digits, braces
+///   around 32 digits, an uppercase `URN:UUID:`, and a `urn:uuid:` before 32
+///   digits or braces. A plain `::uuid` cast would raise on the first five and
+///   resolve the next two.
+///
+/// A `userId` that is not a JSON string is no `userId` to the engine, whose
+/// rule reader takes only a string: a JSON number whose 32 decimal digits
+/// spell a live user's id does not resolve, though `->>` reads those digits
+/// as a uuid the pattern accepts.
+///
+/// A `userId` on an edge that is not `USER` is ignored, as `normalize`
+/// ignores it, so it does not rescue a `DEPARTMENT_ROLE` edge that does not
+/// resolve.
+///
+/// **The controls** are a live holder named in every accepted spelling, an
+/// `INACTIVE` holder named in every accepted spelling, a `LOCKED` one, an
+/// owner who submits and decides with their own token, and one `INACTIVE`, so
+/// the oracle cannot go green by hiding everything. A live user or owner who
+/// is not the caller resolves and answers 403, and the task stays: the clause
+/// asks whether anybody can decide, not whether the caller can.
+///
+/// **The mixed rows**: an unresolvable `USER` or `OWNER` edge beside a live
+/// `ROLE` edge keeps the task, and decision edges that are all unresolvable,
+/// of any two kinds, hide it.
+///
+/// [#762]: https://github.com/sujanto-gaws/kelir/issues/762
+#[tokio::test]
+async fn the_inbox_and_the_engine_agree_on_which_user_and_owner_edges_resolve() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let queue = bare_role(&app, PERSON_EDGE_QUEUE).await;
+    let holders = [
+        waiting_holder(
+            &app,
+            "TI-762-ACTIVE",
+            "ti.762.active",
+            &[queue, fixtures::ADMIN_ROLE_ID],
+        )
+        .await,
+        waiting_holder(
+            &app,
+            "TI-762-ASLEEP",
+            "ti.762.asleep",
+            &[queue, fixtures::ADMIN_ROLE_ID],
+        )
+        .await,
+        waiting_holder(&app, "TI-762-LOCKED", "ti.762.locked", &[queue]).await,
+    ];
+    const ACTIVE: usize = 0;
+    const ASLEEP: usize = 1;
+    const LOCKED: usize = 2;
+    let (active_id, active) = (holders[ACTIVE].0, holders[ACTIVE].1.as_str());
+    let (asleep_id, asleep) = (holders[ASLEEP].0, holders[ASLEEP].1.as_str());
+    let locked_id = holders[LOCKED].0;
+
+    let bystander = fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "ti.762.bystander",
+        "ti.762.bystander@example.test",
+        common::ADMIN_PASSWORD,
+        &[],
+    )
+    .await;
+    let gone_user = fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "ti.762.gone",
+        "ti.762.gone@example.test",
+        common::ADMIN_PASSWORD,
+        &[],
+    )
+    .await;
+    let (gone_creator_id, gone_creator) = placed_owner(&app, "ti.762.gone.creator", None).await;
+    let elsewhere = fixtures::create_tenant(&app.pool, "TNT-762-OR", "Another tenant").await;
+    let foreigner = fixtures::create_user(
+        &app.pool,
+        elsewhere,
+        "ti.762.foreigner",
+        "ti.762.foreigner@example.test",
+        common::ADMIN_PASSWORD,
+        &[],
+    )
+    .await;
+    let missing = Uuid::now_v7();
+    // A live user whose id is 32 decimal digits, which a JSON number can spell.
+    // Created with no grants, so nothing else refers to the id it is given.
+    let numeric = fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "ti.762.numeric",
+        "ti.762.numeric@example.test",
+        common::ADMIN_PASSWORD,
+        &[],
+    )
+    .await;
+    sqlx::query("UPDATE users SET id = $1 WHERE id = $2")
+        .bind(Uuid::parse_str(ALL_DIGITS).expect("32 digits are a uuid"))
+        .bind(numeric)
+        .execute(&app.pool)
+        .await
+        .expect("give the user an all-digit id");
+
+    let hyphenated = active_id.hyphenated().to_string();
+    let simple = active_id.simple().to_string();
+    let every_four = simple
+        .as_bytes()
+        .chunks(4)
+        .map(|chunk| std::str::from_utf8(chunk).expect("ascii"))
+        .collect::<Vec<_>>()
+        .join("-");
+
+    let role_live = json!(format!("ROLE:{PERSON_EDGE_QUEUE}"));
+    let user_garbage = user_rule("not-a-uuid");
+    let department_never = json!({
+        "assigneeType": "DEPARTMENT_ROLE",
+        "roleCode": PERSON_EDGE_QUEUE,
+        "departmentScope": "TI-762-NEVER",
+    });
+
+    use EdgeAnswer::{Decided, Forbidden, Unresolved};
+
+    /// The case, the token that drafts and submits the document, the holder
+    /// who claims and decides it, the `APPROVE` and `REJECT` rules, and what
+    /// the engine answers.
+    type Case<'a> = (&'a str, &'a str, usize, Value, Value, EdgeAnswer);
+    fn add<'a>(
+        name: &'a str,
+        owner: &'a str,
+        holder: usize,
+        (approve, reject): (Value, Value),
+        answer: EdgeAnswer,
+    ) -> Case<'a> {
+        (name, owner, holder, approve, reject, answer)
+    }
+    fn same(rule: Value) -> (Value, Value) {
+        (rule.clone(), rule)
+    }
+    let owner_rule = || json!("OWNER");
+    let cases: Vec<Case> = vec![
+        // The spellings the crate accepts, naming the live holder. The first is
+        // the control #530's tests already pass.
+        add(
+            "user, hyphenated",
+            &token,
+            ACTIVE,
+            same(user_rule(&hyphenated)),
+            Decided,
+        ),
+        add(
+            "user, uppercase",
+            &token,
+            ACTIVE,
+            same(user_rule(&hyphenated.to_uppercase())),
+            Decided,
+        ),
+        add(
+            "user, simple",
+            &token,
+            ACTIVE,
+            same(user_rule(&simple)),
+            Decided,
+        ),
+        add(
+            "user, simple uppercase",
+            &token,
+            ACTIVE,
+            same(user_rule(&simple.to_uppercase())),
+            Decided,
+        ),
+        add(
+            "user, braced",
+            &token,
+            ACTIVE,
+            same(user_rule(&active_id.braced().to_string())),
+            Decided,
+        ),
+        add(
+            "user, braced uppercase",
+            &token,
+            ACTIVE,
+            same(user_rule(&active_id.braced().to_string().to_uppercase())),
+            Decided,
+        ),
+        add(
+            "user, urn",
+            &token,
+            ACTIVE,
+            same(user_rule(&active_id.urn().to_string())),
+            Decided,
+        ),
+        add(
+            "user, urn with uppercase digits",
+            &token,
+            ACTIVE,
+            same(user_rule(&format!(
+                "urn:uuid:{}",
+                hyphenated.to_uppercase()
+            ))),
+            Decided,
+        ),
+        // The same spellings, naming a holder who is INACTIVE but not deleted.
+        add(
+            "inactive user, hyphenated",
+            &token,
+            ASLEEP,
+            same(user_rule(&asleep_id.hyphenated().to_string())),
+            Decided,
+        ),
+        add(
+            "inactive user, uppercase",
+            &token,
+            ASLEEP,
+            same(user_rule(
+                &asleep_id.hyphenated().to_string().to_uppercase(),
+            )),
+            Decided,
+        ),
+        add(
+            "inactive user, simple",
+            &token,
+            ASLEEP,
+            same(user_rule(&asleep_id.simple().to_string())),
+            Decided,
+        ),
+        add(
+            "inactive user, braced",
+            &token,
+            ASLEEP,
+            same(user_rule(&asleep_id.braced().to_string())),
+            Decided,
+        ),
+        add(
+            "inactive user, urn",
+            &token,
+            ASLEEP,
+            same(user_rule(&asleep_id.urn().to_string())),
+            Decided,
+        ),
+        add(
+            "locked user",
+            &token,
+            LOCKED,
+            same(user_rule(&locked_id.to_string())),
+            Decided,
+        ),
+        add(
+            "user, somebody else",
+            &token,
+            ACTIVE,
+            same(user_rule(&bystander.to_string())),
+            Forbidden,
+        ),
+        // The people the engine refuses.
+        add(
+            "user deleted",
+            &token,
+            ACTIVE,
+            same(user_rule(&gone_user.to_string())),
+            Unresolved,
+        ),
+        add(
+            "user of another tenant",
+            &token,
+            ACTIVE,
+            same(user_rule(&foreigner.to_string())),
+            Unresolved,
+        ),
+        add(
+            "user missing",
+            &token,
+            ACTIVE,
+            same(user_rule(&missing.to_string())),
+            Unresolved,
+        ),
+        // The values the engine refuses. The two set by SQL are rewritten below.
+        add(
+            "user id absent",
+            &token,
+            ACTIVE,
+            same(user_rule(&hyphenated)),
+            Unresolved,
+        ),
+        add(
+            "user id null",
+            &token,
+            ACTIVE,
+            same(user_rule(&hyphenated)),
+            Unresolved,
+        ),
+        // A JSON number whose digits spell a live user's id. `->>` reads it
+        // as those digits, which the 32-digit spelling matches; the engine
+        // reads a number as no `userId` at all.
+        add(
+            NUMBER_ROW,
+            &token,
+            ACTIVE,
+            same(user_rule(&hyphenated)),
+            Unresolved,
+        ),
+        add(
+            "user id empty",
+            &token,
+            ACTIVE,
+            same(user_rule("")),
+            Unresolved,
+        ),
+        add(
+            "user id not a uuid",
+            &token,
+            ACTIVE,
+            same(user_garbage.clone()),
+            Unresolved,
+        ),
+        add(
+            "user id, space before",
+            &token,
+            ACTIVE,
+            same(user_rule(&format!(" {hyphenated}"))),
+            Unresolved,
+        ),
+        add(
+            "user id, space after",
+            &token,
+            ACTIVE,
+            same(user_rule(&format!("{hyphenated} "))),
+            Unresolved,
+        ),
+        add(
+            "user id, newline after",
+            &token,
+            ACTIVE,
+            same(user_rule(&format!("{hyphenated}\n"))),
+            Unresolved,
+        ),
+        add(
+            "user id truncated",
+            &token,
+            ACTIVE,
+            same(user_rule(&hyphenated[..35])),
+            Unresolved,
+        ),
+        // A uuid's length and hyphens with a letter that is not a hex digit.
+        // The pattern must refuse it: a cast past a looser class raises.
+        add(
+            "user id, a letter that is not hex",
+            &token,
+            ACTIVE,
+            same(user_rule(&format!("{}g", &hyphenated[..35]))),
+            Unresolved,
+        ),
+        // PostgreSQL's spellings, which the crate refuses.
+        add(
+            "user id, hyphens every four",
+            &token,
+            ACTIVE,
+            same(user_rule(&every_four)),
+            Unresolved,
+        ),
+        add(
+            "user id, braced simple",
+            &token,
+            ACTIVE,
+            same(user_rule(&format!("{{{simple}}}"))),
+            Unresolved,
+        ),
+        add(
+            "user id, uppercase URN",
+            &token,
+            ACTIVE,
+            same(user_rule(&format!("URN:UUID:{hyphenated}"))),
+            Unresolved,
+        ),
+        add(
+            "user id, urn simple",
+            &token,
+            ACTIVE,
+            same(user_rule(&format!("urn:uuid:{simple}"))),
+            Unresolved,
+        ),
+        add(
+            "user id, urn braced",
+            &token,
+            ACTIVE,
+            same(user_rule(&format!("urn:uuid:{}", active_id.braced()))),
+            Unresolved,
+        ),
+        // The owner. The live owner submits and decides with their own token.
+        add("owner live", active, ACTIVE, same(owner_rule()), Decided),
+        add(
+            "owner inactive",
+            asleep,
+            ASLEEP,
+            same(owner_rule()),
+            Decided,
+        ),
+        add(
+            "owner, somebody else",
+            &token,
+            ACTIVE,
+            same(owner_rule()),
+            Forbidden,
+        ),
+        add("owner none", &token, ACTIVE, same(owner_rule()), Unresolved),
+        add(
+            "owner deleted",
+            &gone_creator,
+            ACTIVE,
+            same(owner_rule()),
+            Unresolved,
+        ),
+        add(
+            "owner of another tenant",
+            &token,
+            ACTIVE,
+            same(owner_rule()),
+            Unresolved,
+        ),
+        // Mixed edges: any decision edge that resolves keeps the task.
+        add(
+            "user unresolvable beside a live role",
+            &token,
+            ACTIVE,
+            (user_garbage.clone(), role_live.clone()),
+            Decided,
+        ),
+        add(
+            "owner unresolvable beside a live role",
+            &token,
+            ACTIVE,
+            (owner_rule(), role_live.clone()),
+            Decided,
+        ),
+        add(
+            "user and owner both unresolvable",
+            &token,
+            ACTIVE,
+            (user_rule(&gone_user.to_string()), owner_rule()),
+            Unresolved,
+        ),
+        add(
+            "user and department both unresolvable",
+            &token,
+            ACTIVE,
+            (user_garbage.clone(), department_never.clone()),
+            Unresolved,
+        ),
+        // A `userId` is read on a `USER` edge only: `normalize` ignores it on
+        // any other, so it cannot rescue an edge whose department never
+        // resolves.
+        add(
+            "department unresolvable, with a live user's id",
+            &token,
+            ACTIVE,
+            same(json!({
+                "assigneeType": "DEPARTMENT_ROLE",
+                "roleCode": PERSON_EDGE_QUEUE,
+                "departmentScope": "TI-762-NEVER",
+                "userId": hyphenated,
+            })),
+            Unresolved,
+        ),
+    ];
+
+    let mut tasks = Vec::new();
+    for (index, (case, owner, holder, approve, reject, answer)) in cases.iter().enumerate() {
+        let key = format!("ti_762_or_{index}");
+        let task = owned_late_claim(
+            &app,
+            &token,
+            owner,
+            &holders[*holder].1,
+            &key,
+            two_edge_workflow(&key, PERSON_EDGE_QUEUE, approve.clone(), reject.clone()),
+            None,
+        )
+        .await;
+        tasks.push((*case, *holder, task, *answer));
+    }
+
+    // The states no publish or submit reaches, made after the raise.
+    let task_of = |name: &str| {
+        tasks
+            .iter()
+            .find(|(case, ..)| *case == name)
+            .map(|(_, _, task, _)| *task)
+            .expect("the case")
+    };
+    delete_user_through_the_api(&app, &token, gone_user).await;
+    delete_user_through_the_api(&app, &token, gone_creator_id).await;
+    set_edge_user_ids(&app, task_of("user id absent"), None).await;
+    set_edge_user_ids(&app, task_of("user id null"), Some("null")).await;
+    set_edge_user_ids(&app, task_of(NUMBER_ROW), Some(ALL_DIGITS)).await;
+    for name in [
+        "owner none",
+        "owner unresolvable beside a live role",
+        "user and owner both unresolvable",
+    ] {
+        set_creator(&app, task_of(name), None).await;
+    }
+    set_creator(&app, task_of("owner of another tenant"), Some(foreigner)).await;
+    set_user_status(&app, asleep_id, "INACTIVE").await;
+    set_user_status(&app, locked_id, "LOCKED").await;
+
+    // Every holder's lists, each count against its rows. No surface may
+    // answer anything but 200, whatever an edge's `userId` says.
+    let mut listed = Vec::new();
+    for (_, holder) in &holders {
+        let mut pages = Vec::new();
+        for scope in ["open", "overdue"] {
+            let page = inbox_of(&app, holder, &format!("scope={scope}&pageSize=100")).await;
+            assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+            let ids = ids_in(&page.body["data"]);
+            assert_eq!(
+                page.body["meta"]["total"],
+                json!(ids.len()),
+                "{}",
+                page.body
+            );
+            pages.push(ids);
+        }
+        assert_eq!(pages[0], pages[1], "every task is late, so open is overdue");
+
+        let summary = app.get("/api/v1/dashboard/summary", Some(holder)).await;
+        assert_eq!(summary.status, StatusCode::OK, "{}", summary.body);
+        for count in ["tasksWaiting", "tasksOverdue"] {
+            assert_eq!(
+                summary.body["data"][count],
+                json!(pages[0].len()),
+                "{count}: {}",
+                summary.body
+            );
+        }
+        listed.push(pages.swap_remove(0));
+    }
+
+    let mut disagreements = Vec::new();
+    for (case, holder, task, expected) in tasks {
+        let (holder_id, token) = (holders[holder].0, holders[holder].1.as_str());
+        let on_the_inbox = listed[holder].contains(&task);
+        let through_the_gate = is_visible_to(&app, holder_id, task).await;
+        let page = app.get(&format!("{TASKS}/{task}"), Some(token)).await;
+        let page_opens = match page.status {
+            StatusCode::OK => true,
+            StatusCode::NOT_FOUND => false,
+            other => panic!("{case}: the task's page answered {other}: {}", page.body),
+        };
+
+        let answered = engine_answer(&app, token, task, case).await;
+        let resolves = answered != EdgeAnswer::Unresolved;
+
+        if on_the_inbox != resolves {
+            disagreements.push(format!(
+                "{case}: on the inbox {on_the_inbox}, the engine answered {answered:?}"
+            ));
+        }
+        if through_the_gate != on_the_inbox || page_opens != on_the_inbox {
+            disagreements.push(format!(
+                "{case}: the gate says {through_the_gate}, the page {page_opens}, \
+                 the inbox {on_the_inbox}"
+            ));
+        }
+        if answered != expected {
+            disagreements.push(format!(
+                "{case}: expected {expected:?}, the engine answered {answered:?}"
+            ));
+        }
+    }
+
+    assert!(
+        disagreements.is_empty(),
+        "the inbox and the engine disagree:\n{}",
+        disagreements.join("\n")
+    );
+}
+
+/// **An unclaimed task with unresolvable `USER` edges is still offered**
+/// ([#762]). The unclaimed arm is #507's, judged by the offered role, and
+/// this row does not change it (#761). Both candidates see the task on every
+/// surface and through the gate, and the first claims it, which is when it
+/// leaves.
+///
+/// [#762]: https://github.com/sujanto-gaws/kelir/issues/762
+#[tokio::test]
+async fn an_unclaimed_task_with_unresolvable_user_edges_is_still_offered() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let queue = bare_role(&app, PERSON_EDGE_QUEUE).await;
+    let first = waiting_holder(&app, "TI-762-UN-1", "ti.762.first", &[queue]).await;
+    let second = waiting_holder(&app, "TI-762-UN-2", "ti.762.second", &[queue]).await;
+
+    let workflow = publish_workflow_definition(
+        &app,
+        &token,
+        "ti_762_unclaimed",
+        two_edge_workflow(
+            "ti_762_unclaimed",
+            PERSON_EDGE_QUEUE,
+            user_rule("not-a-uuid"),
+            user_rule(&Uuid::now_v7().to_string()),
+        ),
+    )
+    .await;
+    let type_id = document_type(&app, &token, "TI_762_UNCLAIMED", workflow).await;
+    let document = submitted_document(&app, &token, type_id, "ti_762_unclaimed").await;
+    let task = open_task_of(&app, document).await;
+    sqlx::query("UPDATE workflow_tasks SET due_at = now() - interval '1 day' WHERE id = $1")
+        .bind(task)
+        .execute(&app.pool)
+        .await
+        .expect("date the task a day late");
+
+    for (id, candidate) in [&first, &second] {
+        surfaces_of(&app, candidate)
+            .await
+            .assert_all(&[task], "an unclaimed task offered to the role");
+        assert!(is_visible_to(&app, *id, task).await);
+        let page = app.get(&format!("{TASKS}/{task}"), Some(candidate)).await;
+        assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+    }
+
+    claim(&app, &first.1, task).await;
+    assert_waiting(
+        &app,
+        first.0,
+        &first.1,
+        &[],
+        &[task],
+        "claimed, with no edge that resolves",
+    )
+    .await;
+}
