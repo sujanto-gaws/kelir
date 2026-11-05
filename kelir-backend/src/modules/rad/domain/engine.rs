@@ -147,11 +147,16 @@ pub(crate) const PATTERN_BACKTRACKING_SHAPE: &str = "PATTERN_BACKTRACKING_SHAPE"
 /// [#722]: https://github.com/sujanto-gaws/kelir/issues/722
 pub(crate) const RULE_PARAM_MISSING: &str = "RULE_PARAM_MISSING";
 
-/// The S10.3 `code` a required parameter of the wrong JSON type carries, and a
-/// `target` that names the rule's own key.
+/// The S10.3 `code` a required parameter of the wrong JSON type carries, a
+/// `target` that names the rule's own key, and a `regex` rule's `flags` that
+/// are present and not a string.
 ///
 /// The second is the same defect in another spelling: a rule comparing a value
-/// with itself always holds or never does, whatever was typed.
+/// with itself always holds or never does, whatever was typed. The third is a
+/// parameter the three readers cannot agree on ([#735]): submit reads `true` as
+/// the flags `"true"` and the browser throws on them.
+///
+/// [#735]: https://github.com/sujanto-gaws/kelir/issues/735
 pub(crate) const RULE_PARAM_INVALID: &str = "RULE_PARAM_INVALID";
 
 /// The S10.3 `code` a `target` naming no data field in the rule's scope
@@ -1102,7 +1107,49 @@ fn check_rule_params(
             }
             Some(_) => {}
         }
+
+        if name == "regex" {
+            check_regex_flags(entry, index, params, details);
+        }
     }
+}
+
+/// A `regex` rule's optional `flags`, which must be a string when present
+/// ([#735]).
+///
+/// **Refused rather than read, because no reading gives one verdict.** Submit
+/// reads a non-string as its JavaScript string (`js_string`), so `true` is the
+/// flags `"true"`, of which `compile_pattern` honours none; the browser's
+/// `new RegExp(pattern, "true")` throws on the letters and refuses. Saving it
+/// would store a rule the server and the browser decide differently. An absent
+/// `flags` and `""` are no flags on every side, and store.
+///
+/// [#735]: https://github.com/sujanto-gaws/kelir/issues/735
+fn check_regex_flags(
+    entry: &Entry<'_>,
+    index: usize,
+    params: &serde_json::Map<String, Value>,
+    details: &mut Vec<ValidationDetail>,
+) {
+    let Some(flags) = params.get("flags") else {
+        return;
+    };
+    if flags.is_string() {
+        return;
+    }
+
+    let key = entry.key;
+    details.push(ValidationDetail::new(
+        format!("{}.rules.{index}.params.flags", entry.path),
+        "regex",
+        RULE_PARAM_INVALID,
+        format!(
+            "`{key}`'s `regex` rule has `flags` that are {} rather than a string, which the \
+             server and the browser would read differently at submit; give a string of the \
+             letters `i`, `m` and `s`, or leave `flags` out",
+            json_kind(flags)
+        ),
+    ));
 }
 
 /// A JSON value's type, as a message names it.
@@ -1126,11 +1173,23 @@ fn json_kind(value: &Value) -> &'static str {
 ///
 /// **The `regex` rule's `flags` are read, because they change what compiles.**
 /// A pattern is built here exactly as it will be built at submit, which is what
-/// makes this check a promise rather than an approximation.
+/// makes this check a promise rather than an approximation. **That holds for a
+/// string `flags` only**: one present and not a string is
+/// [`check_regex_flags`]'s refusal, and its pattern is not judged here under
+/// flags nobody can read the same way ([#735]).
+///
+/// **An empty `validation.pattern` is refused** ([#736]). It compiles, and an
+/// empty expression matches every value, so the keyword would accept anything
+/// at submit. It is `RULE_PARAM_MISSING`, the code an empty `regex` rule
+/// pattern carries, and is not judged as a pattern too. A non-string keyword
+/// is the meta-schema's, which types it.
 ///
 /// **A rule's `scope` is not read.** The server skips a `client`-scoped rule at
 /// submit, and the browser still runs it, so a shape the browser backtracks on
 /// is refused there too ([#604](https://github.com/sujanto-gaws/kelir/issues/604)).
+///
+/// [#735]: https://github.com/sujanto-gaws/kelir/issues/735
+/// [#736]: https://github.com/sujanto-gaws/kelir/issues/736
 fn check_patterns(entry: &Entry<'_>, details: &mut Vec<ValidationDetail>) {
     if let Some(pattern) = entry
         .component
@@ -1138,14 +1197,27 @@ fn check_patterns(entry: &Entry<'_>, details: &mut Vec<ValidationDetail>) {
         .and_then(|validation| validation.get("pattern"))
         .and_then(Value::as_str)
     {
-        refuse(
-            pattern,
-            "",
-            format!("{}.validation.pattern", entry.path),
-            "pattern",
-            entry.key,
-            details,
-        );
+        if pattern.is_empty() {
+            let key = entry.key;
+            details.push(ValidationDetail::new(
+                format!("{}.validation.pattern", entry.path),
+                "pattern",
+                RULE_PARAM_MISSING,
+                format!(
+                    "`{key}`'s `validation.pattern` is empty, so at submit it accepts every \
+                     value; give a pattern, or leave the keyword out"
+                ),
+            ));
+        } else {
+            refuse(
+                pattern,
+                "",
+                format!("{}.validation.pattern", entry.path),
+                "pattern",
+                entry.key,
+                details,
+            );
+        }
     }
 
     let rules = entry
@@ -1173,10 +1245,14 @@ fn check_patterns(entry: &Entry<'_>, details: &mut Vec<ValidationDetail>) {
             continue;
         };
 
-        let flags = params
-            .and_then(|params| params.get("flags"))
-            .and_then(Value::as_str)
-            .unwrap_or_default();
+        let flags = match params.and_then(|params| params.get("flags")) {
+            None => "",
+            Some(Value::String(flags)) => flags.as_str(),
+            // [`check_regex_flags`]'s refusal, and the only one: a pattern
+            // judged under flags read as none would be judged under flags
+            // neither submit nor the browser uses.
+            Some(_) => continue,
+        };
 
         refuse(
             pattern,
@@ -2956,6 +3032,137 @@ mod tests {
         let details = definition_errors(&definition(vec![component]));
 
         assert_eq!(codes(&details), [RULE_PARAM_MISSING]);
+    }
+
+    // -- A `regex` rule's `flags` ([#735]) and the keyword pattern ([#736]) --
+    //
+    // [#735]: https://github.com/sujanto-gaws/kelir/issues/735
+    // [#736]: https://github.com/sujanto-gaws/kelir/issues/736
+
+    /// **#735 AC8: each non-string `flags` is refused once, at its own path.**
+    /// The pattern is one `check_patterns` would refuse under any string
+    /// flags, so a pattern refusal beside the `flags` one would show the
+    /// pattern judged under flags nobody can read (AC9).
+    #[test]
+    fn a_non_string_flags_is_refused_once_and_its_pattern_is_not_judged() {
+        for flags in [
+            json!(null),
+            json!(true),
+            json!(5),
+            json!(["i"]),
+            json!({"i": true}),
+        ] {
+            let component = with_rule(
+                plain("code"),
+                "regex",
+                json!({"pattern": "^(a+)+$", "flags": flags}),
+            );
+
+            let details = definition_errors(&definition(vec![component]));
+
+            assert_eq!(
+                codes(&details),
+                [RULE_PARAM_INVALID],
+                "{flags}: {details:?}"
+            );
+            assert_eq!(
+                details[0].path, "definition.components.0.rules.0.params.flags",
+                "{flags}"
+            );
+            assert_eq!(details[0].rule, "regex");
+            let message = &details[0].message;
+            assert!(message.contains("`code`"), "{flags}: {message}");
+            assert!(message.contains(json_kind(&flags)), "{flags}: {message}");
+        }
+    }
+
+    /// **#735 AC9, the second subject**: an absent `flags` and `""` store,
+    /// and a string `flags` is still read where it changes the verdict.
+    #[test]
+    fn an_absent_or_string_flags_stores_and_is_still_read() {
+        for params in [
+            json!({"pattern": "^[0-9]+$"}),
+            json!({"pattern": "^[0-9]+$", "flags": ""}),
+            json!({"pattern": "^[0-9]+$", "flags": "ims"}),
+        ] {
+            let component = with_rule(plain("code"), "regex", params.clone());
+            let details = definition_errors(&definition(vec![component]));
+            assert!(details.is_empty(), "{params}: {details:?}");
+        }
+
+        let backtracking = with_rule(
+            plain("code"),
+            "regex",
+            json!({"pattern": "^(a+)+$", "flags": "i"}),
+        );
+        let details = definition_errors(&definition(vec![backtracking]));
+        assert_eq!(codes(&details), [PATTERN_BACKTRACKING_SHAPE]);
+        assert_eq!(
+            details[0].path,
+            "definition.components.0.rules.0.params.pattern"
+        );
+    }
+
+    /// **#735: a missing pattern and a non-string `flags` are two defects**,
+    /// each at its own path, and neither hides the other.
+    #[test]
+    fn a_missing_pattern_and_a_non_string_flags_are_both_reported() {
+        let component = with_rule(plain("code"), "regex", json!({"flags": true}));
+
+        let details = definition_errors(&definition(vec![component]));
+
+        assert_eq!(codes(&details), [RULE_PARAM_MISSING, RULE_PARAM_INVALID]);
+        assert_eq!(
+            details[0].path,
+            "definition.components.0.rules.0.params.pattern"
+        );
+        assert_eq!(
+            details[1].path,
+            "definition.components.0.rules.0.params.flags"
+        );
+    }
+
+    /// **#736 AC10: an empty keyword pattern is refused once**, as
+    /// `RULE_PARAM_MISSING` at the keyword's path, in every place a component
+    /// can stand.
+    #[test]
+    fn an_empty_keyword_pattern_is_refused_once() {
+        let mut empty = plain("code");
+        empty["validation"]["pattern"] = json!("");
+        let mut row = plain("line");
+        row["validation"]["pattern"] = json!("");
+
+        let details = definition_errors(&definition(vec![empty, datagrid("lines", vec![row])]));
+
+        assert_eq!(codes(&details), [RULE_PARAM_MISSING, RULE_PARAM_MISSING]);
+        assert_eq!(
+            details[0].path,
+            "definition.components.0.validation.pattern"
+        );
+        assert_eq!(
+            details[1].path,
+            "definition.components.1.components.0.validation.pattern"
+        );
+        assert_eq!(details[0].rule, "pattern");
+        assert!(
+            details[0].message.contains("accepts every value"),
+            "{}",
+            details[0].message
+        );
+    }
+
+    /// **#736 AC10, the second subject**: no keyword, and a filled one, store;
+    /// a filled one is still judged as before.
+    #[test]
+    fn a_missing_or_filled_keyword_pattern_is_judged_as_before() {
+        let mut filled = plain("code");
+        filled["validation"]["pattern"] = json!("^[0-9]+$");
+        assert!(definition_errors(&definition(vec![plain("none"), filled])).is_empty());
+
+        let mut backtracking = plain("code");
+        backtracking["validation"]["pattern"] = json!("^(a+)+$");
+        let details = definition_errors(&definition(vec![backtracking]));
+        assert_eq!(codes(&details), [PATTERN_BACKTRACKING_SHAPE]);
     }
 
     fn datagrid(key: &str, rows: Vec<Value>) -> Value {

@@ -2043,4 +2043,295 @@ mod tests {
         assert_eq!(js_string(&json!(true)), "true");
         assert_eq!(js_string(&json!([1, 2])), "1,2");
     }
+
+    // -- The Polyglot Contract's parity, this side ([#735]) -----------------
+    //
+    // [#735]: https://github.com/sujanto-gaws/kelir/issues/735
+
+    /// One row of the renderer's #737 specs: a rule, its `params`, the record
+    /// it reads, the value, and the verdict both sides must give.
+    struct ParityRow {
+        case: &'static str,
+        rule: &'static str,
+        params: Value,
+        scope: Value,
+        value: Value,
+        accepts: bool,
+    }
+
+    fn row(
+        case: &'static str,
+        rule: &'static str,
+        params: Value,
+        scope: Value,
+        value: Value,
+        accepts: bool,
+    ) -> ParityRow {
+        ParityRow {
+            case,
+            rule,
+            params,
+            scope,
+            value,
+            accepts,
+        }
+    }
+
+    /// **The verdicts the renderer's specs claim for this side, run here**
+    /// (#735's server half, from the renderer half's gate, #876).
+    ///
+    /// Each row is one in `kelir-frontend/src/features/rad/renderer/validation.spec.ts`:
+    /// the *a rule parameter reads as the server reads it (#737)* block, and
+    /// the rule rows of the block beside it. Those verdicts were read from this
+    /// file, not run, so a change to `registry_rule`, `param_values` or
+    /// `scope_target` turned no spec red. This table is that check on this
+    /// side: a row changed here is a row to change there.
+    #[test]
+    fn the_rule_reads_the_renderer_specs_claim_are_this_sides_verdicts() {
+        let rows = [
+            // AC1, AC2 and AC5: a missing parameter.
+            row(
+                "no pattern",
+                "regex",
+                json!({}),
+                json!({}),
+                json!("FN-0142"),
+                true,
+            ),
+            row(
+                "no pattern, and flags",
+                "regex",
+                json!({"flags": "i"}),
+                json!({}),
+                json!("FN-0142"),
+                true,
+            ),
+            row(
+                "no target, and a field keyed undefined",
+                "matchesField",
+                json!({}),
+                json!({"undefined": "secret"}),
+                json!("secret"),
+                false,
+            ),
+            row(
+                "no target, and a field keyed undefined",
+                "notMatchesField",
+                json!({}),
+                json!({"undefined": "secret"}),
+                json!("secret"),
+                true,
+            ),
+            row(
+                "no target, and a field keyed \"\"",
+                "matchesField",
+                json!({}),
+                json!({"": "secret"}),
+                json!("secret"),
+                true,
+            ),
+            row(
+                "no target, and a field keyed \"\"",
+                "notMatchesField",
+                json!({}),
+                json!({"": "secret"}),
+                json!("secret"),
+                false,
+            ),
+            row(
+                "no values",
+                "oneOf",
+                json!({}),
+                json!({}),
+                json!("a"),
+                false,
+            ),
+            row(
+                "no values",
+                "notOneOf",
+                json!({}),
+                json!({}),
+                json!("a"),
+                true,
+            ),
+            // AC3: a present `null` is `"null"`.
+            row(
+                "a null pattern, on a value holding \"null\"",
+                "regex",
+                json!({"pattern": null}),
+                json!({}),
+                json!("nullable"),
+                true,
+            ),
+            row(
+                "a null pattern, on a value without it",
+                "regex",
+                json!({"pattern": null}),
+                json!({}),
+                json!("FN-0142"),
+                false,
+            ),
+            row(
+                "a null target, and a field keyed null",
+                "matchesField",
+                json!({"target": null}),
+                json!({"null": "secret"}),
+                json!("secret"),
+                true,
+            ),
+            row(
+                "a null target, and a field keyed null",
+                "notMatchesField",
+                json!({"target": null}),
+                json!({"null": "secret"}),
+                json!("secret"),
+                false,
+            ),
+            // AC4: a `null` flags applies no flag on either side.
+            row(
+                "null flags, on a match",
+                "regex",
+                json!({"pattern": "^a", "flags": null}),
+                json!({}),
+                json!("abc"),
+                true,
+            ),
+            row(
+                "null flags, on a match only i would give",
+                "regex",
+                json!({"pattern": "^a", "flags": null}),
+                json!({}),
+                json!("ABC"),
+                false,
+            ),
+            // The block beside: values that are not a list are no values.
+            row(
+                "values that are a string",
+                "oneOf",
+                json!({"values": "abc"}),
+                json!({}),
+                json!("a"),
+                false,
+            ),
+            row(
+                "values that are a string",
+                "notOneOf",
+                json!({"values": "admin"}),
+                json!({}),
+                json!("adm"),
+                true,
+            ),
+            // Strict comparison: `"1"` is not `1`.
+            row(
+                "a number in values",
+                "oneOf",
+                json!({"values": [1]}),
+                json!({}),
+                json!("1"),
+                false,
+            ),
+            row(
+                "a number in values",
+                "notOneOf",
+                json!({"values": [1]}),
+                json!({}),
+                json!("1"),
+                true,
+            ),
+            row(
+                "a number in the target field",
+                "matchesField",
+                json!({"target": "count"}),
+                json!({"count": 1}),
+                json!("1"),
+                false,
+            ),
+            row(
+                "a number in the target field",
+                "notMatchesField",
+                json!({"target": "count"}),
+                json!({"count": 1}),
+                json!("1"),
+                true,
+            ),
+            // No `u` unless asked: `\-` compiles and matches.
+            row(
+                "an escaped dash and no flags",
+                "regex",
+                json!({"pattern": r"^[A-Z]{2}\-[0-9]{4}$"}),
+                json!({}),
+                json!("FN-0142"),
+                true,
+            ),
+        ];
+
+        for ParityRow {
+            case,
+            rule,
+            params,
+            scope,
+            value,
+            accepts,
+        } in rows
+        {
+            let component = json!({
+                "id": "f", "role": "data", "type": "textfield", "key": "f", "label": "F",
+                "validation": {"type": "string"},
+                "rules": [{"rule": rule, "scope": "both", "params": params, "message": "No."}],
+            });
+            let scope = scope.as_object().expect("a record").clone();
+
+            let decided = validate_field(&component, &value, &scope)
+                .violation
+                .map(|violation| violation.rule);
+
+            let expected = (!accepts).then(|| rule.to_owned());
+            assert_eq!(decided, expected, "{rule} with {case}");
+        }
+    }
+
+    /// **The keyword rows of the same block**: §5's `pattern` runs with no
+    /// flags, so `^` and `$` anchor the whole value and `.` does not cross a
+    /// line break; and `\-` compiles there too.
+    #[test]
+    fn the_keyword_pattern_reads_the_renderer_specs_claim_are_this_sides_verdicts() {
+        let keyword = |pattern: &str| field(json!({"type": "string", "pattern": pattern}));
+
+        assert_eq!(
+            verdict(&keyword("^B$"), json!("A\nB")),
+            Some("pattern".to_owned())
+        );
+        assert_eq!(
+            verdict(&keyword("^A.B$"), json!("A\nB")),
+            Some("pattern".to_owned())
+        );
+        assert_eq!(
+            verdict(&keyword(r"^[A-Z]{2}\-[0-9]{4}$"), json!("FN-0142")),
+            None
+        );
+    }
+
+    /// **The first failing rule is the one reported**, as the renderer's spec
+    /// claims.
+    ///
+    /// The spec's other row in that block, *an empty value is not judged by
+    /// `regex`*, has no server-side counterpart that can fail: `validate_field`
+    /// discards every rule's verdict on an empty value, so the rule's own
+    /// early return is unobservable here (the row 24 campaign's M12).
+    #[test]
+    fn the_first_failing_rule_is_reported() {
+        let two = json!({
+            "id": "f", "role": "data", "type": "textfield", "key": "f", "label": "F",
+            "validation": {"type": "string"},
+            "rules": [
+                {"rule": "oneOf", "scope": "both", "params": {"values": ["a"]}, "message": "First."},
+                {"rule": "notOneOf", "scope": "both", "params": {"values": ["z"]}, "message": "Second."},
+            ],
+        });
+        let violation = validate_field(&two, &json!("z"), &Map::new())
+            .violation
+            .expect("z is refused");
+        assert_eq!(violation.rule, "oneOf");
+        assert_eq!(violation.message, "First.");
+    }
 }

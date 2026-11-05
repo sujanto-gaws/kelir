@@ -671,6 +671,22 @@ While the major version is `0`, the public API may change in any release.
   it. The Validation Rule Registry (1.6.0) marks each rule's required
   parameter, and JFSS takes erratum E-4.
 
+- **A `regex` rule's non-string `flags` and an empty `validation.pattern` are
+  refused at save and publish**
+  ([#735](https://github.com/sujanto-gaws/kelir/issues/735),
+  [#736](https://github.com/sujanto-gaws/kelir/issues/736), construction plan
+  21 row 24, server half). A `flags` of `true`, a number, a list, an object or
+  `null` was checked at save as no flags and built at submit as its text, and
+  the browser could not build most of them, so the two sides could decide a value
+  differently. An empty keyword pattern was stored and accepted every value.
+  Creating, updating and publishing a form now answer 422: `RULE_PARAM_INVALID`
+  at `definition.components.N.rules.M.params.flags`, with the rule's pattern
+  not also judged, and `RULE_PARAM_MISSING` at
+  `definition.components.N.validation.pattern`. An absent `flags`, `""`, and a
+  keyword left out still save. **Revisions already published are not
+  re-checked, and submit is unchanged.** Validation Rule Registry 1.8.0; JFSS
+  takes erratum E-6.
+
 - **Publishing a workflow definition refuses a `departmentScope` on a `ROLE`
   rule** ([#613](https://github.com/sujanto-gaws/kelir/issues/613),
   **D-114**). A `ROLE` rule in a task's `assignment` or a transition's
