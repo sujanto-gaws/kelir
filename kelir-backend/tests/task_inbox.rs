@@ -10964,10 +10964,21 @@ async fn a_task_with_only_unresolvable_department_edges_cannot_be_reassigned() {
 // class takes any letter the inbox answered 500. *Department unresolvable,
 // with a live user's id* is green against `06d9f31`, whose clause read no
 // `userId`, and was red against a clause that read `userId` on every edge.
+//
+// A third came from the campaign's probe of `82d7197`'s clause. *A JSON number
+// of a live user's digits* was red against it, and against `06d9f31` too: the
+// clause read `->>`, which gives a number's digits, and 32 decimal digits are
+// a uuid the pattern takes, while the engine reads a number as no `userId`.
+// The clause now requires a JSON string first.
 
 /// The role every #762 task is offered to, and the one the mixed rows' live
 /// `ROLE` edge names. Every #762 holder holds it.
 const PERSON_EDGE_QUEUE: &str = "TI-762-QUEUE";
+
+/// The oracle's row whose `userId` is a JSON number, set by SQL after the
+/// raise, and the 32 decimal digits it holds: a live user's id, unhyphenated.
+const NUMBER_ROW: &str = "user id, a JSON number of a live user's digits";
+const ALL_DIGITS: &str = "76212345678901234567890123456789";
 
 /// A `USER` rule naming `user_id`, spelled exactly as given.
 fn user_rule(user_id: &str) -> Value {
@@ -11019,10 +11030,11 @@ async fn engine_answer(app: &TestApp, token: &str, task: Uuid, context: &str) ->
 }
 
 /// Rewrites, by SQL, the `userId` of both decision edges of `task`'s published
-/// definition and of its projection. `None` removes the key; `Some(null)` sets
-/// it to JSON `null`. JWSS requires a `USER` rule's `userId` to be a string,
-/// so neither is publishable, and both are read by the engine as `""`.
-async fn set_edge_user_ids(app: &TestApp, task: Uuid, user_id: Option<Value>) {
+/// definition and of its projection. `None` removes the key; `Some(json)` sets
+/// it to that JSON text, given as text so a number keeps all its digits. JWSS
+/// requires a `USER` rule's `userId` to be a string, so none of these is
+/// publishable, and the engine reads each as `""`.
+async fn set_edge_user_ids(app: &TestApp, task: Uuid, user_id: Option<&str>) {
     let definition: Uuid = sqlx::query_scalar(
         "SELECT i.workflow_definition_id FROM workflow_tasks t
            JOIN workflow_instances i ON i.id = t.workflow_instance_id
@@ -11057,21 +11069,22 @@ async fn set_edge_user_ids(app: &TestApp, task: Uuid, user_id: Option<Value>) {
             sqlx::query(
                 "UPDATE workflow_definitions
                     SET definition_json = jsonb_set(
-                            jsonb_set(definition_json, '{transitions,0,allowedBy,userId}', $2),
-                            '{transitions,1,allowedBy,userId}', $2)
+                            jsonb_set(definition_json, '{transitions,0,allowedBy,userId}',
+                                      ($2::text)::jsonb),
+                            '{transitions,1,allowedBy,userId}', ($2::text)::jsonb)
                   WHERE id = $1",
             )
             .bind(definition)
-            .bind(&value)
+            .bind(value)
             .execute(&app.pool)
             .await,
             sqlx::query(
                 "UPDATE workflow_transitions
-                    SET allowed_by_json = jsonb_set(allowed_by_json, '{userId}', $2)
+                    SET allowed_by_json = jsonb_set(allowed_by_json, '{userId}', ($2::text)::jsonb)
                   WHERE workflow_definition_id = $1 AND action IN ('APPROVE', 'REJECT')",
             )
             .bind(definition)
-            .bind(&value)
+            .bind(value)
             .execute(&app.pool)
             .await,
         ),
@@ -11147,6 +11160,11 @@ async fn delete_user_through_the_api(app: &TestApp, token: &str, user: Uuid) {
 ///   around 32 digits, an uppercase `URN:UUID:`, and a `urn:uuid:` before 32
 ///   digits or braces. A plain `::uuid` cast would raise on the first five and
 ///   resolve the next two.
+///
+/// A `userId` that is not a JSON string is no `userId` to the engine, whose
+/// rule reader takes only a string: a JSON number whose 32 decimal digits
+/// spell a live user's id does not resolve, though `->>` reads those digits
+/// as a uuid the pattern accepts.
 ///
 /// A `userId` on an edge that is not `USER` is ignored, as `normalize`
 /// ignores it, so it does not rescue a `DEPARTMENT_ROLE` edge that does not
@@ -11224,6 +11242,23 @@ async fn the_inbox_and_the_engine_agree_on_which_user_and_owner_edges_resolve() 
     )
     .await;
     let missing = Uuid::now_v7();
+    // A live user whose id is 32 decimal digits, which a JSON number can spell.
+    // Created with no grants, so nothing else refers to the id it is given.
+    let numeric = fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "ti.762.numeric",
+        "ti.762.numeric@example.test",
+        common::ADMIN_PASSWORD,
+        &[],
+    )
+    .await;
+    sqlx::query("UPDATE users SET id = $1 WHERE id = $2")
+        .bind(Uuid::parse_str(ALL_DIGITS).expect("32 digits are a uuid"))
+        .bind(numeric)
+        .execute(&app.pool)
+        .await
+        .expect("give the user an all-digit id");
 
     let hyphenated = active_id.hyphenated().to_string();
     let simple = active_id.simple().to_string();
@@ -11407,6 +11442,16 @@ async fn the_inbox_and_the_engine_agree_on_which_user_and_owner_edges_resolve() 
         ),
         add(
             "user id null",
+            &token,
+            ACTIVE,
+            same(user_rule(&hyphenated)),
+            Unresolved,
+        ),
+        // A JSON number whose digits spell a live user's id. `->>` reads it
+        // as those digits, which the 32-digit spelling matches; the engine
+        // reads a number as no `userId` at all.
+        add(
+            NUMBER_ROW,
             &token,
             ACTIVE,
             same(user_rule(&hyphenated)),
@@ -11603,7 +11648,8 @@ async fn the_inbox_and_the_engine_agree_on_which_user_and_owner_edges_resolve() 
     delete_user_through_the_api(&app, &token, gone_user).await;
     delete_user_through_the_api(&app, &token, gone_creator_id).await;
     set_edge_user_ids(&app, task_of("user id absent"), None).await;
-    set_edge_user_ids(&app, task_of("user id null"), Some(Value::Null)).await;
+    set_edge_user_ids(&app, task_of("user id null"), Some("null")).await;
+    set_edge_user_ids(&app, task_of(NUMBER_ROW), Some(ALL_DIGITS)).await;
     for name in [
         "owner none",
         "owner unresolvable beside a live role",

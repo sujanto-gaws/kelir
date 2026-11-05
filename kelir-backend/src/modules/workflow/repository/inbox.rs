@@ -124,9 +124,13 @@
 //! task whose every decision edge named a person the engine refuses stayed on
 //! its holder's inbox.
 //!
-//! * **`USER`** resolves when `userId` is a uuid as `normalize` parses it, with
-//!   the `uuid` crate's `FromStr`, and names a user of the task's tenant with
-//!   `deleted_at IS NULL`, which is `direct`'s whole check. The crate takes 32
+//! * **`USER`** resolves when `userId` is a JSON string, is a uuid as
+//!   `normalize` parses it, with the `uuid` crate's `FromStr`, and names a
+//!   user of the task's tenant with `deleted_at IS NULL`, which is `direct`'s
+//!   whole check. The string comes first because the rule's reader takes
+//!   `userId` only as a string and reads a number as no `userId` at all,
+//!   while `->>` would hand the clause a number's digits, and 32 of them are
+//!   a uuid the pattern accepts. The crate takes 32
 //!   hexadecimal digits, or a hyphenated uuid alone, in braces or after a
 //!   lowercase `urn:uuid:`, with the digits in either case, and nothing else.
 //!   So the clause matches exactly those spellings first and casts only what
@@ -483,14 +487,18 @@ macro_rules! with_claimed_clause {
                             AND tr.from_state = i.current_state
                             AND tr.action IN ('APPROVE', 'REJECT', 'RETURN')
                             -- A user, as `normalize` parses `userId` and
-                            -- `direct` reads the user (#762): the `uuid`
-                            -- crate's spellings, and only those, then a live
-                            -- user of the tenant, whatever their `status`. The
-                            -- CASE keeps the cast from anything the pattern
-                            -- refused, so no `userId` makes this raise.
+                            -- `direct` reads the user (#762): a JSON string,
+                            -- since the engine reads any other JSON type as
+                            -- no `userId` while `->>` would give a number's
+                            -- digits; then the `uuid` crate's spellings, and
+                            -- only those; then a live user of the tenant,
+                            -- whatever their `status`. The CASE keeps the cast
+                            -- from anything refused before it, so no `userId`
+                            -- makes this raise.
                             AND ((tr.allowed_by_json->>'assigneeType' = 'USER'
                                   AND CASE
-                                        WHEN tr.allowed_by_json->>'userId'
+                                        WHEN jsonb_typeof(tr.allowed_by_json->'userId') = 'string'
+                                             AND tr.allowed_by_json->>'userId'
                                              ~ '^([0-9a-fA-F]{32}|(urn:uuid:)?[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}|[{][0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}[}])$'
                                         THEN EXISTS (
                                                  SELECT 1 FROM users u
