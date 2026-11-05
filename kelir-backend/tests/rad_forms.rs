@@ -3324,3 +3324,203 @@ async fn a_published_revision_of_either_shape_works_and_its_next_revision_is_ref
         only_refusal(&republished.body, path, code, rule);
     }
 }
+
+// -- The row 24 server-half `test-engineer` campaign (#735, #736) -------------
+
+/// A `regex` rule on digits, in `scope`, with `flags` as given.
+fn regex_rule(scope: &str, flags: Value) -> Value {
+    json!({
+        "rule": "regex", "scope": scope,
+        "params": {"pattern": "^[0-9]+$", "flags": flags}, "message": "No.",
+    })
+}
+
+/// `field` under another `key` (and `id`), so one definition can hold several.
+fn keyed_as(mut field: Value, key: &str) -> Value {
+    field["id"] = json!(key);
+    field["key"] = json!(key);
+    field
+}
+
+/// **#735 AC8: the refusal reads neither the rule's `scope` nor its place.** A
+/// `client`-scoped rule still runs in the browser, which throws on the flags,
+/// and a `server`-scoped one is read by `js_string` at submit; AC8 refuses any
+/// `regex` rule's non-string `flags`. Each detail names its own rule's index,
+/// behind a rule that is not a `regex`.
+///
+/// **Seen red, 2026-11-05**, each mutant alone: `check_regex_flags` called only
+/// for a rule whose `scope` is `"both"` (no detail at all, `201`); and its path
+/// written with `rules.0` for `rules.{index}` (both details at `rules.0`).
+/// Every other test of the refusal uses one `both`-scoped rule at index 0, and
+/// stayed green under both.
+#[tokio::test]
+async fn a_non_string_flags_is_refused_in_either_scope_at_its_own_rule_index() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let mut field = text_field("^[0-9]+$", "regex", "both");
+    field["rules"] = json!([
+        {"rule": "oneOf", "scope": "both", "params": {"values": ["1"]}, "message": "No."},
+        regex_rule("client", json!(true)),
+        regex_rule("server", json!(5)),
+    ]);
+    let response = post_form(
+        &app,
+        &token,
+        "flags-scoped",
+        definition_holding("flags-scoped", field),
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "body {}",
+        response.body
+    );
+    for index in [1, 2] {
+        refusal_at(
+            &response.body,
+            &format!("definition.components.0.rules.{index}.params.flags"),
+            "RULE_PARAM_INVALID",
+            "regex",
+        );
+    }
+    let details = response.body["error"]["details"]
+        .as_array()
+        .expect("details");
+    assert_eq!(
+        details.len(),
+        2,
+        "two details in all; body {}",
+        response.body
+    );
+}
+
+/// **#735 AC8 and #736 AC10, wherever a component can stand, in one answer.**
+/// A `flags` in a fieldset and in a tab, an empty keyword in a column, and both
+/// defects on one data grid row field: five details, each once at its own
+/// path, none of them a pattern refusal beside it.
+///
+/// **Seen red, 2026-11-05**: the empty-keyword branch of `check_patterns`
+/// disabled (`if false && pattern.is_empty()`) leaves three details, with none
+/// at the column's or the row's `validation.pattern`.
+#[tokio::test]
+async fn both_defects_inside_layouts_and_a_row_are_each_reported_once_in_one_answer() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let flagged = |key: &str, flags: Value| {
+        let mut field = keyed_as(text_field("^[0-9]+$", "regex", "both"), key);
+        field["rules"][0]["params"]["flags"] = flags;
+        field
+    };
+    let mut row = keyed_as(text_field("", "keyword", "both"), "line");
+    row["rules"] = json!([regex_rule("both", json!(["i"]))]);
+
+    let definition = json!({
+        "formId": "flags-everywhere", "version": "2.0.1", "title": "Everywhere",
+        "components": [
+            {"id": "panel", "role": "layout", "type": "fieldset",
+             "components": [flagged("in_panel", json!(true))]},
+            {"id": "cols", "role": "layout", "type": "columns",
+             "columns": [{"components": [
+                 keyed_as(text_field("", "keyword", "both"), "in_column"),
+             ]}]},
+            {"id": "tabs", "role": "layout", "type": "tabs",
+             "tabs": [{"title": "One", "components": [flagged("in_tab", json!(null))]}]},
+            in_a_row(row),
+        ],
+    });
+    let response = post_form(&app, &token, "flags-everywhere", definition).await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "body {}",
+        response.body
+    );
+    for (path, code, rule) in [
+        (
+            "definition.components.0.components.0.rules.0.params.flags",
+            "RULE_PARAM_INVALID",
+            "regex",
+        ),
+        (
+            "definition.components.1.columns.0.components.0.validation.pattern",
+            "RULE_PARAM_MISSING",
+            "pattern",
+        ),
+        (
+            "definition.components.2.tabs.0.components.0.rules.0.params.flags",
+            "RULE_PARAM_INVALID",
+            "regex",
+        ),
+        (
+            "definition.components.3.components.0.rules.0.params.flags",
+            "RULE_PARAM_INVALID",
+            "regex",
+        ),
+        (
+            "definition.components.3.components.0.validation.pattern",
+            "RULE_PARAM_MISSING",
+            "pattern",
+        ),
+    ] {
+        refusal_at(&response.body, path, code, rule);
+    }
+    let details = response.body["error"]["details"]
+        .as_array()
+        .expect("details");
+    assert_eq!(
+        details.len(),
+        5,
+        "five details in all; body {}",
+        response.body
+    );
+}
+
+/// **#735 AC11: a published revision's non-string `flags` is still read as
+/// before**, as its JavaScript string. `["i"]` is `"i"` to `js_string` and to
+/// the browser's `String(...)`, so the rule is case-insensitive on both sides
+/// and `ABC` passes a lowercase pattern at create and submit.
+///
+/// The AC11 test above pins `flags: true`, which reads as no flags whether
+/// submit reads it as `"true"` or as `""`; this one tells the two apart.
+///
+/// **Seen red, 2026-11-05**: `registry_rule`'s `regex` reading `flags` through
+/// `Value::as_str` (a non-string as `""`) refuses `ABC` with a `422` at create.
+#[tokio::test]
+async fn a_published_revision_reads_a_list_flags_as_its_javascript_string() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let key = "flags-list-live";
+
+    let corrected = definition_holding(key, text_field("^[a-z]+$", "regex", "both"));
+    let form = id_of(&create_form(&app, &token, key, corrected).await);
+    let published = app
+        .send(
+            Method::POST,
+            &format!("/api/v1/rad/forms/{form}/publish"),
+            Some(&token),
+            None,
+        )
+        .await;
+    assert_eq!(published.status, StatusCode::OK, "body {}", published.body);
+
+    let mut code = text_field("^[a-z]+$", "regex", "both");
+    code["rules"][0]["params"]["flags"] = json!(["i"]);
+    store_behind_the_api(&app, form, &definition_holding(key, code)).await;
+    let type_id = type_bound_to(&app, &token, form, "FLAGSLIST").await;
+
+    let (created, submitted, body) = submit_code(&app, &token, type_id, "ABC").await;
+    assert_eq!(created, StatusCode::CREATED, "upper case: body {body}");
+    assert_eq!(submitted, Some(StatusCode::OK), "upper case: body {body}");
+
+    let (created, _, body) = submit_code(&app, &token, type_id, "123").await;
+    assert_eq!(
+        created,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "digits: body {body}"
+    );
+}
