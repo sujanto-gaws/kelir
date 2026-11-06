@@ -196,7 +196,7 @@ async fn get_department(
     responses(
         (status = 201, description = "Created", body = Department),
         (status = 409, description = "That departmentId is already in use"),
-        (status = 422, description = "Validation failed, or a reference names something that does not exist. A departmentId of OWNER_DEPARTMENT or REQUESTED_DEPARTMENT, JWSS 5.1's departmentScope words, is refused with a RESERVED_DEPARTMENT_CODE detail on departmentId (#767)")
+        (status = 422, description = "Validation failed, or a reference names something that does not exist. A departmentId of OWNER_DEPARTMENT or REQUESTED_DEPARTMENT, JWSS §5.1's departmentScope words, is refused with a RESERVED_DEPARTMENT_CODE detail on departmentId (#767)")
     ),
     security(("bearer" = []))
 )]

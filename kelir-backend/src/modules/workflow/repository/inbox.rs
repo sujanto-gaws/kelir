@@ -119,7 +119,7 @@
 //! none. The API refuses such a code since [#767], and the order still matters
 //! for a row written before it. The clause spells the words as SQL literals,
 //! which a query string must; they are `jwss::RESERVED_DEPARTMENT_SCOPES`, the
-//! list `normalize` matches and the refusal reads. A scope on a `ROLE` edge is
+//! words `normalize` matches and the list the refusal reads. A scope on a `ROLE` edge is
 //! ignored, as `normalize` ignores it.
 //!
 //! **A `USER` or `OWNER` edge resolves as `normalize` and `direct` read it**

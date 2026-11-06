@@ -14,8 +14,8 @@ While the major version is `0`, the public API may change in any release.
 - **A department already coded `OWNER_DEPARTMENT` or `REQUESTED_DEPARTMENT` is
   left as it is** ([#767](https://github.com/sujanto-gaws/kelir/issues/767)).
   Creation now refuses such a code, but a department created before the
-  upgrade keeps it. It still works through its id, for its users and party
-  roles, and still cannot be named by a workflow's `departmentScope`, as
+  upgrade keeps it. It still works through its id, for its users and
+  employee profiles, and still cannot be named by a workflow's `departmentScope`, as
   before. This query lists every such department:
 
   ```sql
@@ -25,8 +25,11 @@ While the major version is `0`, the public API may change in any release.
   ```
 
   A department's code cannot be changed, so the remedy is a new department
-  with another code, its users and party roles moved to it, and the old one
-  deleted, which is refused while anything still points at it.
+  with another code, the old one's sub-departments, users and employee
+  profiles moved to it, and the old one deleted. The delete is refused while
+  any of those three still points at it. It does not count documents, open
+  tasks or department-scoped role grants that name the old department, which
+  keep naming it.
 - **Tenants that already share integration secret names are not repaired**
   ([#655](https://github.com/sujanto-gaws/kelir/issues/655), decision
   **D-102** B). Creation now refuses such a code, but two live tenants created
@@ -610,7 +613,8 @@ While the major version is `0`, the public API may change in any release.
   is `OWNER_DEPARTMENT` or `REQUESTED_DEPARTMENT`, JWSS §5.1's
   `departmentScope` words. The check is made on the trimmed code, as it is
   stored, and is case-sensitive, so `owner_department` is still an ordinary
-  code; it comes before the 409 for a code already in use. Until now such a
+  code; it comes before the 409 `CONFLICT` for a code a live department
+  already holds. Until now such a
   department was created and no scope could name it: a workflow's resolver and
   the inbox read the words as scopes before any code. JWSS takes R-20, which
   changes no shape. See *Upgrade notes* for a department already so coded.
