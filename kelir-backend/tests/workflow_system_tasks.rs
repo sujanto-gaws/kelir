@@ -825,7 +825,7 @@ async fn an_automatic_edge_is_chosen_by_its_condition() {
 // | `null` when the target's status is the source state's | *unchanged* only |
 // | `null` when the target's status is `currentStatus` | *unchanged*, and *several* on the conditioned edge. **AC2 stays green**: its `currentStatus` is `IN_REVIEW` |
 // | the status of the graph's first final state | AC2, *several*, *chain*, *unchanged*. AC1 and AC3 stay green: their target is that state |
-// | `after_hooks`' `targetStatus` given as the state code `event.to` | **nothing: `outbox` 23 of 23, `workflow_engine` 69 of 69, this file 28 of 28.** No after-capable handler reads its payload (`core:continue_always` is the only one), so no test can see the after-chain's value. AC4's agreement is held by the code comment alone |
+// | `after_hooks`' `targetStatus` given as the state code `event.to` | ~~**nothing: `outbox` 23 of 23, `workflow_engine` 69 of 69, this file 28 of 28.** No after-capable handler reads its payload (`core:continue_always` is the only one), so no test can see the after-chain's value. AC4's agreement is held by the code comment alone~~ `after_hooks`' unit tests `the_target_status_is_the_reached_states_document_status`, `every_field_of_the_after_payload_is_read_from_its_source` and `a_guard_and_an_after_hook_read_one_transition`, which go red under it, reading the payload `after_invocation` builds (#759). This file's integration tests still cannot see it (struck and restated 2026-11-05) |
 
 /// A guard that refuses with `code` when `condition` holds against the LHCS §4
 /// payload.
