@@ -11,6 +11,22 @@ While the major version is `0`, the public API may change in any release.
 
 ### Upgrade notes
 
+- **A department already coded `OWNER_DEPARTMENT` or `REQUESTED_DEPARTMENT` is
+  left as it is** ([#767](https://github.com/sujanto-gaws/kelir/issues/767)).
+  Creation now refuses such a code, but a department created before the
+  upgrade keeps it. It still works through its id, for its users and party
+  roles, and still cannot be named by a workflow's `departmentScope`, as
+  before. This query lists every such department:
+
+  ```sql
+  SELECT tenant_id, id, department_code FROM departments
+  WHERE department_code IN ('OWNER_DEPARTMENT', 'REQUESTED_DEPARTMENT')
+    AND deleted_at IS NULL;
+  ```
+
+  A department's code cannot be changed, so the remedy is a new department
+  with another code, its users and party roles moved to it, and the old one
+  deleted, which is refused while anything still points at it.
 - **Tenants that already share integration secret names are not repaired**
   ([#655](https://github.com/sujanto-gaws/kelir/issues/655), decision
   **D-102** B). Creation now refuses such a code, but two live tenants created
@@ -587,6 +603,17 @@ While the major version is `0`, the public API may change in any release.
   first: with `GONE` deleted and `GONE__X` live, creating `GONE` again is the
   422. Until now such a tenant was created,
   and the names the two shared answered `SECRET_NAME_NOT_PERMITTED` for both.
+- **Creating a department refuses a code that is a workflow scope word**
+  ([#767](https://github.com/sujanto-gaws/kelir/issues/767)).
+  `POST /api/v1/organization/departments` answers 422 `VALIDATION_ERROR` with
+  a detail on `departmentId`, coded `RESERVED_DEPARTMENT_CODE`, when the code
+  is `OWNER_DEPARTMENT` or `REQUESTED_DEPARTMENT`, JWSS §5.1's
+  `departmentScope` words. The check is made on the trimmed code, as it is
+  stored, and is case-sensitive, so `owner_department` is still an ordinary
+  code; it comes before the 409 for a code already in use. Until now such a
+  department was created and no scope could name it: a workflow's resolver and
+  the inbox read the words as scopes before any code. JWSS takes R-20, which
+  changes no shape. See *Upgrade notes* for a department already so coded.
 
 - **The SRS names the builder pair** ([#685](https://github.com/sujanto-gaws/kelir/issues/685)).
   FR-RAD-013 (`Should`): a form definition is authored from the browser, with nested containers

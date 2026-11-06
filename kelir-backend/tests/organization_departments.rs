@@ -504,3 +504,242 @@ async fn an_update_records_what_changed() {
         "the status was re-sent at its current value, so it did not move; got {new_value}"
     );
 }
+
+// ── A department code is not a scope word (#767) ────────────────────────────
+
+async fn departments_coded(app: &TestApp, code: &str) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM departments WHERE tenant_id = $1 AND department_code = $2",
+    )
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .bind(code)
+    .fetch_one(&app.pool)
+    .await
+    .expect("count the departments")
+}
+
+async fn audit_rows(app: &TestApp) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM audit_events")
+        .fetch_one(&app.pool)
+        .await
+        .expect("count the audit rows")
+}
+
+/// **#767 AC1–AC3**: a department coded with one of JWSS §5.1's
+/// `departmentScope` words is a named 422, padded or not, and nothing is
+/// written: no department and no audit row.
+///
+/// `normalize` and the inbox clause read the two words as scopes before any
+/// code lookup, so such a department could be created and never named.
+#[tokio::test]
+async fn a_scope_word_is_refused_as_a_department_code_and_nothing_is_written() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for code in [
+        "OWNER_DEPARTMENT",
+        "REQUESTED_DEPARTMENT",
+        "  OWNER_DEPARTMENT ",
+    ] {
+        let word = code.trim();
+        let audited = audit_rows(&app).await;
+        let refused = create(
+            &app,
+            &token,
+            json!({ "departmentId": code, "name": "Scoped" }),
+        )
+        .await;
+
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{code:?}: {}",
+            refused.body
+        );
+        assert_eq!(refused.body["error"]["code"], "VALIDATION_ERROR");
+        assert_eq!(
+            refused.body["error"]["details"],
+            json!([{
+                "path": "departmentId",
+                "rule": "reserved",
+                "code": "RESERVED_DEPARTMENT_CODE",
+                "message": format!(
+                    "departmentId {word} is a workflow departmentScope word, which is read \
+                     as a scope and never as a department code, so no workflow could name \
+                     this department. Choose another code"
+                ),
+            }]),
+            "{code:?}"
+        );
+        assert_eq!(departments_coded(&app, word).await, 0, "{code:?}: no row");
+        assert_eq!(audit_rows(&app).await, audited, "{code:?}: no audit row");
+    }
+}
+
+/// **#767 AC2**: the refusal is case-sensitive, because a scope is matched as
+/// written. A lowercase code is an ordinary department a scope can name, and
+/// reads back as it was given.
+#[tokio::test]
+async fn a_lowercase_scope_word_is_an_ordinary_department_code() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let id = department(&app, &token, "owner_department", None).await;
+    let read = app
+        .send(
+            Method::GET,
+            &format!("/api/v1/organization/departments/{id}"),
+            Some(&token),
+            None,
+        )
+        .await;
+
+    assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+    assert_eq!(read.body["data"]["departmentCode"], "owner_department");
+}
+
+/// **#767 AC3**: the refusal comes before the unique index. With a row of
+/// that code already stored (written before #767, so seeded here), a second
+/// create is the 422 that says why, not a 409 that says only "taken".
+#[tokio::test]
+async fn a_scope_word_is_refused_before_the_duplicate_code_conflict() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    sqlx::query(
+        "INSERT INTO departments (id, tenant_id, department_code, name)
+         VALUES ($1, $2, 'REQUESTED_DEPARTMENT', 'Written before #767')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .execute(&app.pool)
+    .await
+    .expect("seed a department coded before the refusal");
+
+    let again = create(
+        &app,
+        &token,
+        json!({ "departmentId": "REQUESTED_DEPARTMENT", "name": "Again" }),
+    )
+    .await;
+
+    assert_eq!(
+        again.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        again.body
+    );
+    assert_eq!(
+        again.body["error"]["details"][0]["code"],
+        "RESERVED_DEPARTMENT_CODE"
+    );
+    assert_eq!(departments_coded(&app, "REQUESTED_DEPARTMENT").await, 1);
+}
+
+/// **#767 AC5**: a department's code cannot be changed, so it cannot be
+/// renamed to a scope word either. An update naming `departmentId` is refused
+/// as an unknown field, and the code stays as it was.
+#[tokio::test]
+async fn an_update_cannot_change_a_department_code() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let id = department(&app, &token, "DEPT-FIXED", None).await;
+
+    for code in ["OWNER_DEPARTMENT", "DEPT-OTHER"] {
+        let refused = app
+            .send(
+                Method::PUT,
+                &format!("/api/v1/organization/departments/{id}"),
+                Some(&token),
+                Some(json!({ "departmentId": code })),
+            )
+            .await;
+
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{code:?}: {}",
+            refused.body
+        );
+        assert_eq!(refused.body["error"]["details"][0]["path"], "departmentId");
+        assert_eq!(refused.body["error"]["details"][0]["code"], "UNKNOWN_FIELD");
+    }
+
+    let read = app
+        .send(
+            Method::GET,
+            &format!("/api/v1/organization/departments/{id}"),
+            Some(&token),
+            None,
+        )
+        .await;
+
+    assert_eq!(read.body["data"]["departmentCode"], "DEPT-FIXED");
+}
+
+/// **#767 AC3**: the refusal is made in `validate_create`, before the parent
+/// and the manager are resolved. With neither existing, the 422 still carries
+/// only the reserved-code detail, not a "no such parent" or "no such manager".
+#[tokio::test]
+async fn a_scope_word_is_refused_before_the_references_are_resolved() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let refused = create(
+        &app,
+        &token,
+        json!({
+            "departmentId": "OWNER_DEPARTMENT",
+            "name": "Scoped",
+            "parentDepartmentId": "DEPT-NOWHERE",
+            "managerPartyId": "PTY-NOWHERE"
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+    let details = refused.body["error"]["details"]
+        .as_array()
+        .expect("details");
+    assert_eq!(details.len(), 1, "{}", refused.body);
+    assert_eq!(details[0]["code"], "RESERVED_DEPARTMENT_CODE");
+    assert_eq!(departments_coded(&app, "OWNER_DEPARTMENT").await, 0);
+}
+
+/// **#767 AC4**: only `departmentId` is checked. A department coded
+/// `OWNER_DEPARTMENT` before #767 (so seeded here) is still a parent like any
+/// other.
+#[tokio::test]
+async fn a_department_coded_before_the_refusal_is_still_a_parent() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    sqlx::query(
+        "INSERT INTO departments (id, tenant_id, department_code, name)
+         VALUES ($1, $2, 'OWNER_DEPARTMENT', 'Written before #767')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .execute(&app.pool)
+    .await
+    .expect("seed a department coded before the refusal");
+
+    let id = department(&app, &token, "DEPT-UNDER-LEGACY", Some("OWNER_DEPARTMENT")).await;
+    let read = app
+        .send(
+            Method::GET,
+            &format!("/api/v1/organization/departments/{id}"),
+            Some(&token),
+            None,
+        )
+        .await;
+
+    assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+    assert_eq!(read.body["data"]["parentDepartmentId"], "OWNER_DEPARTMENT");
+}

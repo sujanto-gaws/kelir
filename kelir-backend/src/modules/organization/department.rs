@@ -22,6 +22,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::error::{AppError, ValidationDetail};
+use crate::modules::workflow::domain::jwss::RESERVED_DEPARTMENT_SCOPES;
 use crate::utils::serde::present_or_absent;
 
 /// Longest `departmentCode` §3.4 holds — `department_code VARCHAR(64)`.
@@ -145,6 +146,40 @@ fn bounded(
     }
 }
 
+/// Refuses a department code that is one of JWSS §5.1's `departmentScope`
+/// words ([#767]).
+///
+/// `normalize` and the inbox clause read `OWNER_DEPARTMENT` and
+/// `REQUESTED_DEPARTMENT` as scopes **before** any code lookup, so a department
+/// coded with one could be created and never named by a workflow: an edge meant
+/// for it resolves as the scope instead. Refused, as D-102 refuses a tenant code
+/// the secret resolver could never serve, rather than documented as a trap.
+///
+/// **Compared on the trimmed code**, because the trimmed code is what is
+/// stored, and **case-sensitively**, because a scope is matched as written:
+/// `owner_department` is an ordinary code a scope can name, and stays allowed.
+/// Collected with the other details, not returned early. A row written before
+/// this check is left as it is (the CHANGELOG's upgrade note says how to find
+/// one).
+///
+/// [#767]: https://github.com/sujanto-gaws/kelir/issues/767
+fn refuse_reserved_code(code: &str, details: &mut Vec<ValidationDetail>) {
+    let code = code.trim();
+
+    if RESERVED_DEPARTMENT_SCOPES.contains(&code) {
+        details.push(ValidationDetail::new(
+            "departmentId",
+            "reserved",
+            "RESERVED_DEPARTMENT_CODE",
+            format!(
+                "departmentId {code} is a workflow departmentScope word, which is read as a \
+                 scope and never as a department code, so no workflow could name this \
+                 department. Choose another code"
+            ),
+        ));
+    }
+}
+
 pub fn validate_create(request: &CreateDepartmentRequest) -> Result<(), AppError> {
     let mut details = Vec::new();
 
@@ -155,6 +190,7 @@ pub fn validate_create(request: &CreateDepartmentRequest) -> Result<(), AppError
         true,
         &mut details,
     );
+    refuse_reserved_code(&request.department_id, &mut details);
     bounded(&request.name, "name", MAX_NAME_LENGTH, true, &mut details);
 
     // A department cannot be created under itself, because it does not exist
@@ -248,6 +284,104 @@ mod tests {
         assert!(details(validate_create(&request).expect_err("refused"))
             .iter()
             .any(|detail| detail.code == "CYCLE"));
+    }
+
+    fn reserved(request: &CreateDepartmentRequest) -> Vec<ValidationDetail> {
+        match validate_create(request) {
+            Ok(()) => Vec::new(),
+            Err(error) => details(error)
+                .into_iter()
+                .filter(|detail| detail.code == "RESERVED_DEPARTMENT_CODE")
+                .collect(),
+        }
+    }
+
+    /// **#767 AC1, AC2**: both of JWSS §5.1's scope words are refused as a
+    /// department code, padded or not, on `departmentId` with rule `reserved`.
+    #[test]
+    fn a_scope_word_is_refused_as_a_department_code() {
+        for code in [
+            "OWNER_DEPARTMENT",
+            "REQUESTED_DEPARTMENT",
+            "  OWNER_DEPARTMENT ",
+        ] {
+            let mut request = create();
+            request.department_id = code.to_owned();
+            let refused = reserved(&request);
+
+            assert_eq!(refused.len(), 1, "{code:?} is refused once");
+            assert_eq!(refused[0].path, "departmentId", "{code:?}");
+            assert_eq!(refused[0].rule, "reserved", "{code:?}");
+            assert!(
+                refused[0].message.contains(code.trim()),
+                "{code:?}: the message names the word, trimmed: {}",
+                refused[0].message
+            );
+        }
+    }
+
+    /// **#767 AC2**: the comparison is case-sensitive and exact, because a
+    /// scope is matched as written: each of these is a code a scope can name.
+    #[test]
+    fn a_code_that_only_resembles_a_scope_word_is_allowed() {
+        for code in ["owner_department", "Owner_Department", "OWNER_DEPARTMENTS"] {
+            let mut request = create();
+            request.department_id = code.to_owned();
+
+            assert!(
+                validate_create(&request).is_ok(),
+                "{code:?} is an ordinary department code"
+            );
+        }
+    }
+
+    /// **#767 AC3**: the refusal is collected with the other details rather
+    /// than returned early, so a blank name is reported beside it.
+    #[test]
+    fn a_scope_word_is_reported_beside_the_other_defects() {
+        let mut request = create();
+        request.department_id = "REQUESTED_DEPARTMENT".to_owned();
+        request.name = " ".to_owned();
+
+        let details = details(validate_create(&request).expect_err("refused"));
+        let codes: Vec<(&str, &str)> = details
+            .iter()
+            .map(|detail| (detail.path.as_str(), detail.code.as_str()))
+            .collect();
+
+        assert_eq!(
+            codes,
+            [
+                ("departmentId", "RESERVED_DEPARTMENT_CODE"),
+                ("name", "REQUIRED")
+            ]
+        );
+    }
+
+    /// **#767 AC4**: only the code is checked. A department may be *named*
+    /// with a scope word.
+    #[test]
+    fn a_department_may_be_named_with_a_scope_word() {
+        let mut request = create();
+        request.name = "OWNER_DEPARTMENT".to_owned();
+
+        assert!(validate_create(&request).is_ok());
+    }
+
+    /// **#767 AC6**: the list the refusal reads is exactly §5.1's two words,
+    /// the two `normalize` matches.
+    #[test]
+    fn the_reserved_list_is_the_two_scope_words() {
+        use crate::modules::workflow::domain::jwss::{
+            OWNER_DEPARTMENT_SCOPE, REQUESTED_DEPARTMENT_SCOPE,
+        };
+
+        assert_eq!(OWNER_DEPARTMENT_SCOPE, "OWNER_DEPARTMENT");
+        assert_eq!(REQUESTED_DEPARTMENT_SCOPE, "REQUESTED_DEPARTMENT");
+        assert_eq!(
+            RESERVED_DEPARTMENT_SCOPES,
+            ["REQUESTED_DEPARTMENT", "OWNER_DEPARTMENT"]
+        );
     }
 
     #[test]

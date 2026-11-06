@@ -116,7 +116,11 @@
 //!
 //! The two reserved words are matched before any code, as `normalize` matches
 //! them, so a department coded `OWNER_DEPARTMENT` does not rescue an owner with
-//! none. A scope on a `ROLE` edge is ignored, as `normalize` ignores it.
+//! none. The API refuses such a code since [#767], and the order still matters
+//! for a row written before it. The clause spells the words as SQL literals,
+//! which a query string must; they are `jwss::RESERVED_DEPARTMENT_SCOPES`, the
+//! list `normalize` matches and the refusal reads. A scope on a `ROLE` edge is
+//! ignored, as `normalize` ignores it.
 //!
 //! **A `USER` or `OWNER` edge resolves as `normalize` and `direct` read it**
 //! ([#762]). Until then the clause counted every such edge as resolving, and a
@@ -221,6 +225,7 @@
 //! [#761]: https://github.com/sujanto-gaws/kelir/issues/761
 //! [#635]: https://github.com/sujanto-gaws/kelir/issues/635
 //! [#762]: https://github.com/sujanto-gaws/kelir/issues/762
+//! [#767]: https://github.com/sujanto-gaws/kelir/issues/767
 //! [#893]: https://github.com/sujanto-gaws/kelir/issues/893
 //!
 //! # This lives in `workflow` and is called from `task_inbox`

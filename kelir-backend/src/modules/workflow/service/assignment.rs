@@ -93,6 +93,7 @@
 use sqlx::PgExecutor;
 use uuid::Uuid;
 
+use super::super::domain::jwss::{OWNER_DEPARTMENT_SCOPE, REQUESTED_DEPARTMENT_SCOPE};
 use super::super::domain::{AssigneeType, AssignmentRule, ReassignTarget};
 use super::super::repository::task as task_repo;
 use crate::error::{AppError, ValidationDetail};
@@ -654,7 +655,7 @@ fn normalize(
 
             let department = match scope {
                 None => DepartmentScope::None,
-                Some("REQUESTED_DEPARTMENT") => {
+                Some(REQUESTED_DEPARTMENT_SCOPE) => {
                     DepartmentScope::Id(context.requested_department_id.ok_or_else(|| {
                         unresolvable(
                             question,
@@ -666,7 +667,7 @@ fn normalize(
                         )
                     })?)
                 }
-                Some("OWNER_DEPARTMENT") => match context.owner_department {
+                Some(OWNER_DEPARTMENT_SCOPE) => match context.owner_department {
                     OwnerDepartment::Live(id) => DepartmentScope::Id(id),
                     OwnerDepartment::Unset => {
                         return Err(unresolvable(
@@ -694,7 +695,10 @@ fn normalize(
                 // Anything else is a department **code**, per JWSS §5.1. Looked
                 // up rather than guessed at: a code that names nothing is
                 // refused below rather than silently widening the task to the
-                // whole role.
+                // whole role. The two words above are matched first, so a
+                // department coded with one is never reached here; the API
+                // refuses such a code since #767 (`RESERVED_DEPARTMENT_SCOPES`),
+                // and the order still matters for a row written before it.
                 Some(code) => DepartmentScope::Code(code.to_owned()),
             };
 
