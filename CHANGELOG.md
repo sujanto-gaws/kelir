@@ -31,7 +31,8 @@ While the major version is `0`, the public API may change in any release.
   the new department, and the old one deleted. The delete is refused while
   any of those three still points at it. It does not count documents, open
   tasks or role grants that name the old department, and they keep naming it:
-  a document's requested department then resolves to the deleted one
+  a `REQUESTED_DEPARTMENT` scope on a document requested for the deleted one
+  then no longer resolves, and its submit, resubmit or decision is refused
   ([#763](https://github.com/sujanto-gaws/kelir/issues/763)), so move it when
   no document of that department is in flight.
 - **Tenants that already share integration secret names are not repaired**
@@ -622,6 +623,27 @@ While the major version is `0`, the public API may change in any release.
   name it: a workflow's resolver and the inbox read the words as scopes before
   any code. JWSS takes R-20, which changes no shape. See *Upgrade notes* for a
   department already so coded.
+- **A requested department must be a live department of the tenant**
+  ([#763](https://github.com/sujanto-gaws/kelir/issues/763), construction plan
+  21 row 29). A `DEPARTMENT_ROLE` rule scoped to `REQUESTED_DEPARTMENT` now
+  resolves only when the document's `requested_for_department_id` names a
+  department of the document's tenant that is not deleted, as
+  `OWNER_DEPARTMENT` already did (**D-99**). An `INACTIVE` department still
+  resolves. Until now the id was taken as it was, so a requested department
+  deleted since the draft, or another tenant's, which the column's foreign key
+  admits, routed the task and passed the edge. Now a submit or resubmit whose
+  task is scoped to it answers 422 `VALIDATION_ERROR` with a detail coded
+  `ASSIGNMENT_UNRESOLVED` at the assignment's `departmentScope`, whose message
+  names the department, and writes nothing; a decision through an edge scoped
+  to it is refused the same way at the edge's `departmentScope`, and the
+  document keeps its status. A reassign of a task whose only decision edges
+  are scoped to it answers `TARGET_CANNOT_DECIDE` for every target, and once
+  claimed such a task leaves its holder's inbox, its count, both dashboard
+  cards and its page, as #635's tasks do. A task already raised keeps the
+  department it stored, and its claim is unchanged; that a department delete
+  counts no document or task naming it is
+  [#902](https://github.com/sujanto-gaws/kelir/issues/902). JWSS takes R-21,
+  which changes no shape. No migration.
 
 - **The SRS names the builder pair** ([#685](https://github.com/sujanto-gaws/kelir/issues/685)).
   FR-RAD-013 (`Should`): a form definition is authored from the browser, with nested containers

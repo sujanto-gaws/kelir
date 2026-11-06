@@ -655,8 +655,10 @@ fn normalize(
 
             let department = match scope {
                 None => DepartmentScope::None,
-                Some(REQUESTED_DEPARTMENT_SCOPE) => {
-                    DepartmentScope::Id(context.requested_department_id.ok_or_else(|| {
+                // The id only: whether it is a live department of this tenant
+                // is `direct`'s question, asked there for both words (#763).
+                Some(REQUESTED_DEPARTMENT_SCOPE) => DepartmentScope::Id(
+                    context.requested_department_id.ok_or_else(|| {
                         unresolvable(
                             question,
                             path,
@@ -665,10 +667,11 @@ fn normalize(
                              REQUESTED_DEPARTMENT resolves to nothing"
                                 .to_owned(),
                         )
-                    })?)
-                }
+                    })?,
+                    ScopeWord::Requested,
+                ),
                 Some(OWNER_DEPARTMENT_SCOPE) => match context.owner_department {
-                    OwnerDepartment::Live(id) => DepartmentScope::Id(id),
+                    OwnerDepartment::Live(id) => DepartmentScope::Id(id, ScopeWord::Owner),
                     OwnerDepartment::Unset => {
                         return Err(unresolvable(
                             question,
@@ -684,11 +687,7 @@ fn normalize(
                             question,
                             path,
                             "departmentScope",
-                            format!(
-                                "the document's creator belongs to department {id}, which \
-                                 is not a live department in this tenant, so \
-                                 OWNER_DEPARTMENT resolves to nothing"
-                            ),
+                            ScopeWord::Owner.not_live(id),
                         ))
                     }
                 },
@@ -781,7 +780,34 @@ async fn direct(
 
             let department_id = match department {
                 None | Some(DepartmentScope::None) => None,
-                Some(DepartmentScope::Id(id)) => Some(id),
+                // A department the document names by id must be one this
+                // tenant holds live, as a code's must (#763). The column has
+                // no tenant key, so its foreign key admits another tenant's
+                // department, and a soft delete leaves the key alone. `status`
+                // is not read: an `INACTIVE` department still resolves, as
+                // `owner_department_of` lets it. Asked here, once, so
+                // `resolve`, `permits`, `names_role` and `reassign_to` all
+                // ask it; `OWNER_DEPARTMENT`'s id was read live already and
+                // passes again.
+                //
+                // **No lock**, unlike the role's `FOR KEY SHARE` above: a
+                // department deleted between this read and the commit still
+                // leaves a task naming it. That race, and a task already
+                // raised on a department deleted since, are the delete
+                // side's, #902.
+                Some(DepartmentScope::Id(id, word)) => Some(
+                    sqlx::query_scalar!(
+                        r#"
+                        SELECT id FROM departments
+                        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+                        "#,
+                        tenant_id,
+                        id
+                    )
+                    .fetch_optional(&mut **transaction)
+                    .await?
+                    .ok_or_else(|| refuse("departmentScope", word.not_live(id)))?,
+                ),
                 Some(DepartmentScope::Code(code)) => Some(
                     sqlx::query_scalar!(
                         r#"
@@ -820,8 +846,37 @@ enum Principal {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DepartmentScope {
     None,
-    Id(Uuid),
+    /// A department the document names by id, and the word that named it.
+    Id(Uuid, ScopeWord),
     Code(String),
+}
+
+/// Which of JWSS §5.1's two scope words named a department by id, so that a
+/// department that is not live is refused in that word's terms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScopeWord {
+    /// `REQUESTED_DEPARTMENT`: `documents.requested_for_department_id`.
+    Requested,
+    /// `OWNER_DEPARTMENT`: the creator's `users.department_id`.
+    Owner,
+}
+
+impl ScopeWord {
+    /// The refusal of `id`, which this tenant does not hold live: deleted,
+    /// or another tenant's. One sentence for both words, in
+    /// `OwnerDepartment::Gone`'s shape.
+    fn not_live(self, id: Uuid) -> String {
+        match self {
+            Self::Requested => format!(
+                "the document is requested for department {id}, which is not a live \
+                 department in this tenant, so REQUESTED_DEPARTMENT resolves to nothing"
+            ),
+            Self::Owner => format!(
+                "the document's creator belongs to department {id}, which is not a live \
+                 department in this tenant, so OWNER_DEPARTMENT resolves to nothing"
+            ),
+        }
+    }
 }
 
 /// Which of the two questions a rule is being asked, which is what its refusal
@@ -950,7 +1005,7 @@ mod tests {
             principal,
             Principal::Role {
                 role_code: "FINANCE".to_owned(),
-                department: Some(DepartmentScope::Id(owner)),
+                department: Some(DepartmentScope::Id(owner, ScopeWord::Owner)),
             }
         );
     }
@@ -1130,9 +1185,56 @@ mod tests {
             Principal::Role {
                 role_code: "FINANCE".to_owned(),
                 department: Some(DepartmentScope::Id(
-                    context.requested_department_id.expect("set")
+                    context.requested_department_id.expect("set"),
+                    ScopeWord::Requested,
                 )),
             }
+        );
+    }
+
+    /// **A department that is not live is refused in its word's terms**
+    /// ([#763]). `direct` asks whether the id is live; the sentence names the
+    /// id and the word, in the shape `OwnerDepartment::Gone` already had, so
+    /// an administrator can tell which column to fix.
+    ///
+    /// [#763]: https://github.com/sujanto-gaws/kelir/issues/763
+    #[test]
+    fn a_department_named_by_id_that_is_not_live_is_refused_in_its_words_terms() {
+        let id = Uuid::now_v7();
+
+        assert_eq!(
+            ScopeWord::Requested.not_live(id),
+            format!(
+                "the document is requested for department {id}, which is not a live \
+                 department in this tenant, so REQUESTED_DEPARTMENT resolves to nothing"
+            )
+        );
+        assert_eq!(
+            ScopeWord::Owner.not_live(id),
+            format!(
+                "the document's creator belongs to department {id}, which is not a live \
+                 department in this tenant, so OWNER_DEPARTMENT resolves to nothing"
+            )
+        );
+
+        let context = AssignmentContext {
+            owner_department: OwnerDepartment::Gone(id),
+            ..context()
+        };
+        let (code, path, message) = refusal(
+            normalize(
+                &owner_department_rule(),
+                context,
+                "task.assignment",
+                Question::Assignee,
+            )
+            .expect_err("refused"),
+        );
+        assert_eq!(code, "ASSIGNMENT_UNRESOLVED");
+        assert_eq!(path, "task.assignment.departmentScope");
+        assert!(
+            message.starts_with(&ScopeWord::Owner.not_live(id)),
+            "{message}"
         );
     }
 

@@ -104,9 +104,11 @@
 //! snapshots the task's own assignment and never an edge's.
 //!
 //! * **No scope** resolves.
-//! * **`REQUESTED_DEPARTMENT`** resolves when the document names a requested
-//!   department. A deleted one still resolves, because `normalize` does not
-//!   check it (filed apart).
+//! * **`REQUESTED_DEPARTMENT`** resolves when the document's
+//!   `requested_for_department_id` is a live department of the task's tenant,
+//!   as `direct` reads it ([#763]). A deleted department, or another tenant's,
+//!   which the column's foreign key admits, does not. The department's
+//!   `status` is not read, so an `INACTIVE` one resolves.
 //! * **`OWNER_DEPARTMENT`** resolves when the creator's `users.department_id`
 //!   is a live department of the task's tenant. Neither the department's
 //!   `status` nor the creator's `deleted_at` is read, as `owner_department_of`
@@ -200,7 +202,9 @@
 //!   no target could decide it either, so the remedy is data. Placing the
 //!   owner in a department, restoring a deleted one, creating a live
 //!   department with the code an edge names, or setting the requested
-//!   department brings the task back. Restoring a department is SQL, since
+//!   department to a live one of the tenant brings the task back. A deleted
+//!   requested department is reachable too: the department delete counts no
+//!   document naming it, which is [#902]'s. Restoring a department is SQL, since
 //!   no route restores one, and so is setting the requested department,
 //!   because a submitted document is not editable.
 //! * **Its edges name a person who does not resolve** ([#762]): a `USER`
@@ -225,8 +229,10 @@
 //! [#761]: https://github.com/sujanto-gaws/kelir/issues/761
 //! [#635]: https://github.com/sujanto-gaws/kelir/issues/635
 //! [#762]: https://github.com/sujanto-gaws/kelir/issues/762
+//! [#763]: https://github.com/sujanto-gaws/kelir/issues/763
 //! [#767]: https://github.com/sujanto-gaws/kelir/issues/767
 //! [#893]: https://github.com/sujanto-gaws/kelir/issues/893
+//! [#902]: https://github.com/sujanto-gaws/kelir/issues/902
 //!
 //! # This lives in `workflow` and is called from `task_inbox`
 //!
@@ -471,7 +477,7 @@ macro_rules! with_claimed_clause {
             $head
                 + r#"
           -- A claimed task nobody can decide is not waiting for its holder
-          -- (#530, #635, #762). Written once, here, and spliced into
+          -- (#530, #635, #762, #763). Written once, here, and spliced into
           -- `list_for_caller`, `count_for_caller` and `is_visible_to`. It is
           -- not `count_open_tasks_needing_role`'s clause, which asks whether
           -- *some* edge names a role: this asks whether *no* decision edge
@@ -540,7 +546,14 @@ macro_rules! with_claimed_clause {
                                                     THEN true
                                                WHEN tr.allowed_by_json->>'departmentScope'
                                                         = 'REQUESTED_DEPARTMENT'
-                                                    THEN d.requested_for_department_id IS NOT NULL
+                                                    -- A live department of the
+                                                    -- task's tenant, as
+                                                    -- `direct` reads it (#763).
+                                                    THEN EXISTS (
+                                                        SELECT 1 FROM departments dep
+                                                        WHERE dep.id = d.requested_for_department_id
+                                                          AND dep.tenant_id = t.tenant_id
+                                                          AND dep.deleted_at IS NULL)
                                                WHEN tr.allowed_by_json->>'departmentScope'
                                                         = 'OWNER_DEPARTMENT'
                                                     THEN EXISTS (

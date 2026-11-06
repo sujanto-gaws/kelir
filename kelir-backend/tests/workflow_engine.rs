@@ -5814,3 +5814,282 @@ async fn an_index_into_the_actors_roles_reads_them_in_code_order() {
         "an approver holding no WF-AA-FIRST matched"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #763 — a requested department must be a live department of the tenant
+// ---------------------------------------------------------------------------
+//
+// The product owner's answer of 2026-11-06 (option A): `REQUESTED_DEPARTMENT`
+// resolves as `OWNER_DEPARTMENT` does (**D-99**). `direct` asks, once, for a
+// department of this tenant with that id and `deleted_at IS NULL`, so a
+// deleted one and another tenant's are refused as `ASSIGNMENT_UNRESOLVED`,
+// and an `INACTIVE` one still resolves. Each test below holds an `INACTIVE`
+// control beside the refused case.
+//
+// **Seen red, 2026-11-06**, against `7fa2ae2`, whose `direct` took the id as
+// it was: every submit, resubmit and decision below that is refused here was
+// a 200 there.
+
+/// The scope under test, as a `DEPARTMENT_ROLE` rule on the approver role.
+fn requested_department_rule() -> Value {
+    json!({
+        "assigneeType": "DEPARTMENT_ROLE",
+        "roleCode": APPROVER_ROLE,
+        "departmentScope": "REQUESTED_DEPARTMENT",
+    })
+}
+
+/// Sets a draft's `requested_for_department_id` by SQL, which reaches a
+/// department the API would not offer: another tenant's.
+async fn request_for(app: &TestApp, document: Uuid, department: Uuid) {
+    let updated =
+        sqlx::query("UPDATE documents SET requested_for_department_id = $1 WHERE id = $2")
+            .bind(department)
+            .bind(document)
+            .execute(&app.pool)
+            .await
+            .expect("set the requested department");
+    assert_eq!(updated.rows_affected(), 1, "the document was not found");
+}
+
+async fn deactivate_department(app: &TestApp, department: Uuid) {
+    sqlx::query("UPDATE departments SET status = 'INACTIVE' WHERE id = $1")
+        .bind(department)
+        .execute(&app.pool)
+        .await
+        .expect("deactivate the department");
+}
+
+async fn delete_department(app: &TestApp, department: Uuid) {
+    sqlx::query("UPDATE departments SET deleted_at = now() WHERE id = $1")
+        .bind(department)
+        .execute(&app.pool)
+        .await
+        .expect("delete the department");
+}
+
+/// The refusal's first sentence for a requested department that is not live.
+fn requested_not_live(department: Uuid) -> String {
+    format!(
+        "the document is requested for department {department}, which is not a live \
+         department in this tenant, so REQUESTED_DEPARTMENT resolves to nothing. "
+    )
+}
+
+/// **A requested department that is deleted refuses the submit, naming it, and
+/// an `INACTIVE` one routes** ([#763] criteria 1, 3 and 5).
+///
+/// [#763]: https://github.com/sujanto-gaws/kelir/issues/763
+#[tokio::test]
+async fn a_deleted_requested_department_refuses_the_submit_and_an_inactive_one_routes() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let gone = department(&app, "RD-GONE", "Closed").await;
+    let asleep = department(&app, "RD-ASLEEP", "Wound down").await;
+    delete_department(&app, gone).await;
+    deactivate_department(&app, asleep).await;
+
+    let mut definition = role_workflow("wf_rd_submit");
+    definition["states"][0]["task"]["assignment"] = requested_department_rule();
+    let workflow = publish_workflow(&app, &token, definition).await;
+    let type_id = document_type(&app, &token, "PR_RD_SUBMIT", Some(workflow)).await;
+
+    let refused = draft(&app, &token, type_id).await;
+    request_for(&app, refused, gone).await;
+    let message = refused_submit(&app, &token, refused).await;
+    assert!(message.starts_with(&requested_not_live(gone)), "{message}");
+
+    let routed = draft(&app, &token, type_id).await;
+    request_for(&app, routed, asleep).await;
+    let submitted = submit(&app, &token, routed).await;
+    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+    let task = open_task_of(&app, routed).await;
+    assert_eq!(candidate_department(&app, task).await, Some(asleep));
+}
+
+/// **Another tenant's department, written by SQL, refuses the submit as a
+/// deleted one does** ([#763] criterion 4). `documents` has no tenant key on
+/// the column, so its foreign key admits the department; `direct` does not.
+///
+/// [#763]: https://github.com/sujanto-gaws/kelir/issues/763
+#[tokio::test]
+async fn a_requested_department_is_read_in_this_tenant_only() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let other_tenant = fixtures::create_tenant(&app.pool, "RD-OTHER", "Other").await;
+    let foreign = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO departments (id, tenant_id, department_code, name)
+         VALUES ($1, $2, 'RD-FOREIGN', 'Foreign')",
+    )
+    .bind(foreign)
+    .bind(other_tenant)
+    .execute(&app.pool)
+    .await
+    .expect("another tenant's department");
+
+    let mut definition = role_workflow("wf_rd_abroad");
+    definition["states"][0]["task"]["assignment"] = requested_department_rule();
+    let id = owned_draft(&app, &token, &token, definition, "PR_RD_ABROAD").await;
+    request_for(&app, id, foreign).await;
+
+    let message = refused_submit(&app, &token, id).await;
+    assert!(
+        message.starts_with(&requested_not_live(foreign)),
+        "{message}"
+    );
+}
+
+/// **A resubmit whose requested department was deleted since the submit is
+/// refused, and the document stays returned** ([#763] criterion 3).
+///
+/// [#763]: https://github.com/sujanto-gaws/kelir/issues/763
+#[tokio::test]
+async fn a_resubmit_whose_requested_department_was_deleted_is_refused() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let gone = department(&app, "RD-RS-GONE", "Closed").await;
+    let asleep = department(&app, "RD-RS-ASLEEP", "Wound down").await;
+    let (_, returner) = holder_in(&app, "rd.rs.holder", None, &[]).await;
+
+    let mut definition = returnable_workflow("wf_rd_rs");
+    definition["states"][0]["task"]["assignment"] = requested_department_rule();
+    let workflow = publish_workflow(&app, &token, definition).await;
+    let type_id = document_type(&app, &token, "PR_RD_RS", Some(workflow)).await;
+
+    let mut returned = Vec::new();
+    for department in [gone, asleep] {
+        let id = draft(&app, &token, type_id).await;
+        request_for(&app, id, department).await;
+        assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+        let task = open_task_of(&app, id).await;
+        let sent_back = app
+            .post(
+                &format!("/api/v1/workflow/tasks/{task}/decision"),
+                Some(&returner),
+                json!({ "action": "RETURN", "comment": "Name the cost centre." }),
+            )
+            .await;
+        assert_eq!(sent_back.status, StatusCode::OK, "{}", sent_back.body);
+        returned.push(id);
+    }
+    delete_department(&app, gone).await;
+    deactivate_department(&app, asleep).await;
+
+    let tasks = "SELECT count(*) FROM workflow_tasks WHERE document_id = $1";
+    let tasks_before = count_rows(&app, tasks, returned[0]).await;
+    let refused = submit(&app, &token, returned[0]).await;
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+    let detail = &refused.body["error"]["details"][0];
+    assert_eq!(detail["code"], "ASSIGNMENT_UNRESOLVED", "{detail}");
+    assert_eq!(
+        detail["path"], "states.MANAGER_APPROVAL.task.assignment.departmentScope",
+        "{detail}"
+    );
+    assert!(
+        detail["message"]
+            .as_str()
+            .expect("a message")
+            .starts_with(&requested_not_live(gone)),
+        "{detail}"
+    );
+    assert_eq!(stored_status(&app, returned[0]).await, "RETURNED");
+    let (_, state, _) = instance_of(&app, returned[0]).await.expect("the instance");
+    assert_eq!(state, "RETURNED");
+    assert_eq!(
+        count_rows(&app, tasks, returned[0]).await,
+        tasks_before,
+        "a refused resubmit raised a task"
+    );
+
+    let resubmitted = submit(&app, &token, returned[1]).await;
+    assert_eq!(resubmitted.status, StatusCode::OK, "{}", resubmitted.body);
+    let task = open_task_of(&app, returned[1]).await;
+    assert_eq!(candidate_department(&app, task).await, Some(asleep));
+}
+
+/// **A decision through a requested department deleted since the raise is
+/// refused, and nothing is written; the task keeps the department it was
+/// raised with, and its claim is unchanged** ([#763] criteria 3 and 8).
+///
+/// The task is offered to the role in the requested department, and both
+/// edges are scoped to it. After the delete, the department's own holder
+/// still claims the task, because the claim reads the task's stored
+/// `candidate_department_id`, which no delete rewrites ([#902]'s). The
+/// decision reads the edge live and is refused. The control's department is
+/// `INACTIVE`, and an unscoped holder decides it.
+///
+/// [#763]: https://github.com/sujanto-gaws/kelir/issues/763
+/// [#902]: https://github.com/sujanto-gaws/kelir/issues/902
+#[tokio::test]
+async fn a_decision_through_a_deleted_requested_department_is_refused_and_writes_nothing() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let gone = department(&app, "RD-DEC-GONE", "Closed").await;
+    let asleep = department(&app, "RD-DEC-ASLEEP", "Wound down").await;
+    let (_, insider) = holder_in(&app, "rd.dec.insider", Some(gone), &[]).await;
+    let (_, anywhere) = holder_in(&app, "rd.dec.any", None, &[]).await;
+
+    let mut definition = role_workflow("wf_rd_dec");
+    definition["states"][0]["task"]["assignment"] = requested_department_rule();
+    definition["transitions"][0]["allowedBy"] = requested_department_rule();
+    definition["transitions"][1]["allowedBy"] = requested_department_rule();
+    let workflow = publish_workflow(&app, &token, definition).await;
+    let type_id = document_type(&app, &token, "PR_RD_DEC", Some(workflow)).await;
+
+    let closed = draft(&app, &token, type_id).await;
+    let control = draft(&app, &token, type_id).await;
+    request_for(&app, closed, gone).await;
+    request_for(&app, control, asleep).await;
+    for id in [closed, control] {
+        assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+    }
+    delete_department(&app, gone).await;
+    deactivate_department(&app, asleep).await;
+
+    let task = open_task_of(&app, closed).await;
+    assert_eq!(candidate_department(&app, task).await, Some(gone));
+    let claimed = claim(&app, &insider, task).await;
+    assert_eq!(claimed.status, StatusCode::OK, "{}", claimed.body);
+
+    let history = "SELECT count(*) FROM workflow_history WHERE document_id = $1";
+    let history_before = count_rows(&app, history, closed).await;
+    let outbox_before = outbox_events(&app).await;
+    for action in ["APPROVE", "REJECT"] {
+        let message = refused_decision(
+            &app,
+            &insider,
+            closed,
+            action,
+            &format!("transitions.MANAGER_APPROVAL.{action}.allowedBy.departmentScope"),
+        )
+        .await;
+        assert!(message.starts_with(&requested_not_live(gone)), "{message}");
+    }
+    assert_eq!(open_task_of(&app, closed).await, task);
+    assert_eq!(candidate_department(&app, task).await, Some(gone));
+    assert_eq!(
+        count_rows(&app, history, closed).await,
+        history_before,
+        "a refused decision wrote history"
+    );
+    assert_eq!(
+        outbox_events(&app).await,
+        outbox_before,
+        "a refused decision wrote an outbox event"
+    );
+
+    let task = open_task_of(&app, control).await;
+    let decided = decide(&app, &anywhere, task, "APPROVE").await;
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+    assert_eq!(stored_status(&app, control).await, "COMPLETED");
+}
