@@ -68,7 +68,7 @@
 //!
 //! # A task nobody can decide is not waiting either, claimed or not
 //!
-//! That clause covers the **unclaimed** arm only. A claimed task reaches its
+//! The first clause covers the **unclaimed** arm only. A claimed task reaches its
 //! assignee through `assignee_user_id` whatever became of any role, and
 //! [#530] found one still waiting on every surface while its decision refused
 //! as `ASSIGNMENT_UNRESOLVED`. So each copy of the rule carries a second

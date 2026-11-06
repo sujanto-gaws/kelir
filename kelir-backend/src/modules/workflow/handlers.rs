@@ -270,7 +270,12 @@ async fn get_instance(
         (status = 200, description = "Claimed, and now assigned to the caller", body = WorkflowTask),
         (status = 403, description = "Missing workflow:task:execute, or the caller does not hold the candidate role"),
         (status = 404, description = "No such task"),
-        (status = 409, description = "Somebody else claimed it, or it is no longer open")
+        (status = 409, description = "Somebody else claimed it, or it is no longer open"),
+        (status = 422, description = "Nobody can decide the task: every decision edge out of its state \
+                                      names a role, department or person that does not resolve \
+                                      (ASSIGNMENT_UNRESOLVED, #761). Checked before the claim is taken, \
+                                      so a task already claimed that has become undecidable answers \
+                                      this rather than 409")
     ),
     security(("bearer" = []))
 )]
