@@ -207,8 +207,10 @@ pub async fn claim_task(
     // A task nobody can decide is not offered, and not claimed either (#761,
     // the product owner's option A). Asked with the inbox's own clause, through
     // `with_claimed_clause!`, under the instance lock taken above, so the
-    // claim and the inbox cannot disagree about one task. Nothing is written:
-    // the transaction is dropped and rolls back.
+    // claim and the inbox agree about one task as of the claim. The lock does
+    // not order against a delete of the user, role or department an edge
+    // names, which takes no instance lock. Nothing is written: the
+    // transaction is dropped and rolls back.
     if !inbox_repo::can_be_decided(&mut *transaction, tenant_id, id).await? {
         return Err(claim_undecidable());
     }

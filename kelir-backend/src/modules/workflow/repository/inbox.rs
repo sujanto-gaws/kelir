@@ -104,8 +104,9 @@
 //! has its `roleCode`, or when it is `DEPARTMENT_ROLE`, a live role has its
 //! `roleCode`, and its `departmentScope` resolves. An open task, claimed or
 //! not, is hidden from every caller when the state has at least one decision
-//! edge and none of them resolves ([#761]). Matching by **code** is `direct`'s own match, so a live role
-//! that took a deleted one's code resolves the edge here as it does there.
+//! edge and none of them resolves ([#761]). Matching by **code** is
+//! `direct`'s own match, so a live role that took a deleted one's code
+//! resolves the edge here as it does there.
 //!
 //! **A `departmentScope` resolves as `assignment::normalize` and `direct` read
 //! it** ([#635]). It is read at each query, as the engine reads it at each
@@ -904,7 +905,11 @@ pub async fn is_visible_to(
 ///
 /// The claim's check. `service::task::claim_task` asks it under the instance
 /// lock and refuses a task this answers `false` for, so a claim and the inbox
-/// read the same SQL and cannot disagree about a task. **Not a Rust copy of
+/// read the same SQL and agree about a task as of the claim. The lock orders
+/// the claim against the task's own transitions, not against a delete of the
+/// user, role or department an edge names, which takes no instance lock: a
+/// claim and such a delete that commit together can still leave a claimed
+/// task nobody can decide. **Not a Rust copy of
 /// the clause**, which is what #761's product owner asked the claim not to be:
 /// the text is `with_claimed_clause!`'s, as in the three statements above.
 ///

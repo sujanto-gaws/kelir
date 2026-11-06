@@ -9599,7 +9599,7 @@ async fn a_decision_that_loses_its_compare_and_swap_is_told_how_the_task_closed(
 //
 // ## #761 — an unclaimed task nobody can decide is not offered (2026-11-06)
 //
-// Against `36a8055`'s `src/`, before the fix, these were red: the flipped
+// Against `594c07b`'s `src/` (#905 on `main`), before the fix, these were red: the flipped
 // `USER` test and its department twin, and the flipped #530 unclaimed-arm
 // test (each still listed the task on both candidates' surfaces), the #762
 // oracle (its four unclaimed `Unresolved` rows, one per edge kind, were on the

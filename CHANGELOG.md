@@ -11,6 +11,15 @@ While the major version is `0`, the public API may change in any release.
 
 ### Upgrade notes
 
+- **Unclaimed tasks nobody can decide leave their inboxes at the upgrade**
+  ([#761](https://github.com/sujanto-gaws/kelir/issues/761)). An open task
+  that no one has claimed, whose state has `APPROVE`, `REJECT` or `RETURN`
+  edges none of which resolves, is no longer offered to its role's holders,
+  and a claim of it answers 422 `ASSIGNMENT_UNRESOLVED`. Tasks in that state
+  before the upgrade vanish from inboxes, counts and dashboard cards at once.
+  Each is still listed on the Roles page's open-tasks list under the role it
+  is offered to; Installation and Deployment §9 gives the remedy for each kind
+  of edge.
 - **A department already coded `OWNER_DEPARTMENT` or `REQUESTED_DEPARTMENT` is
   left as it is** ([#767](https://github.com/sujanto-gaws/kelir/issues/767)).
   Creation now refuses such a code, but a department created before the
