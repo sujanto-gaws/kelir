@@ -10726,6 +10726,109 @@ async fn a_requested_department_of_another_tenant_does_not_resolve_and_spares_th
     assert_decided(&app, &holder, control, "APPROVE").await;
 }
 
+/// **A reassign of a task whose requested department is another tenant's is
+/// refused, and pointing the document at a live department of its own tenant
+/// brings the task back** ([#763] criteria 3, 4 and 6).
+///
+/// Added by the `test-engineer` campaign. Criterion 4 asks for another
+/// tenant's department to be refused *the same way* as a deleted one, and
+/// criterion 3's way includes a reassign refused as `TARGET_CANNOT_DECIDE`.
+/// The two-tenant test above does not reassign, so a `names_role` that
+/// skipped `direct`'s department check reddened only AC10's deleted case.
+/// Here a user target, measured by `permits`, and a role target, measured by
+/// `names_role`, are each refused on the foreign department, and the task
+/// keeps its holder.
+///
+/// The second half is the remedy the `inbox.rs` header states: the requested
+/// department set to a live one of the tenant, and a deleted one restored,
+/// each by SQL, since no route does either for a submitted document. Both
+/// tasks come back to every surface and are approved, so the clause and
+/// `direct` read the department at each call and cache nothing.
+///
+/// **Seen red**, 2026-11-06, against `7fa2ae2`'s `assignment.rs` and
+/// `inbox.rs` (both tasks were still listed), and against `names_role`
+/// skipping the check for a `REQUESTED_DEPARTMENT` id (the role target was
+/// accepted).
+///
+/// [#763]: https://github.com/sujanto-gaws/kelir/issues/763
+#[tokio::test]
+async fn a_requested_department_abroad_refuses_a_reassign_and_a_live_one_brings_the_task_back() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let edge = bare_role(&app, DEPT_EDGE_ROLE).await;
+    let (holder_id, holder) =
+        department_holder(&app, "TI-763-RA-DASH", "ti.763.ra.holder", edge).await;
+    let (target_id, _) = department_holder(&app, "TI-763-RA-TGT", "ti.763.ra.target", edge).await;
+    let home = department(&app, "TI-763-RA-HOME").await;
+    let gone = department(&app, "TI-763-RA-GONE").await;
+    let elsewhere = fixtures::create_tenant(&app.pool, "TNT-763-RA", "Elsewhere").await;
+    let foreign = department_in(&app, elsewhere, "TI-763-RA-FOREIGN").await;
+
+    let abroad = owned_late_claim(
+        &app,
+        &token,
+        &token,
+        &holder,
+        "ti_763_ra_abroad",
+        department_scoped("ti_763_ra_abroad", Some("REQUESTED_DEPARTMENT")),
+        Some(home),
+    )
+    .await;
+    let closed = owned_late_claim(
+        &app,
+        &token,
+        &token,
+        &holder,
+        "ti_763_ra_closed",
+        department_scoped("ti_763_ra_closed", Some("REQUESTED_DEPARTMENT")),
+        Some(gone),
+    )
+    .await;
+    set_requested_department(&app, abroad, Some(foreign)).await;
+    soft_delete_department(&app, gone).await;
+
+    assert_waiting(
+        &app,
+        holder_id,
+        &holder,
+        &[],
+        &[abroad, closed],
+        "a requested department abroad, and one deleted",
+    )
+    .await;
+
+    let before = task_holder(&app, abroad).await;
+    let to_user = reassign(&app, &token, abroad, json!({ "userId": target_id })).await;
+    cannot_decide(&to_user, "userId");
+    let to_role = reassign(&app, &token, abroad, json!({ "roleCode": DEPT_EDGE_ROLE })).await;
+    cannot_decide(&to_role, "roleCode");
+    assert_eq!(
+        task_holder(&app, abroad).await,
+        before,
+        "a refused reassign moved the task"
+    );
+
+    set_requested_department(&app, abroad, Some(home)).await;
+    sqlx::query("UPDATE departments SET deleted_at = NULL WHERE id = $1")
+        .bind(gone)
+        .execute(&app.pool)
+        .await
+        .expect("restore the department");
+
+    assert_waiting(
+        &app,
+        holder_id,
+        &holder,
+        &[abroad, closed],
+        &[],
+        "the requested department pointed home, and the deleted one restored",
+    )
+    .await;
+    assert_decided(&app, &holder, abroad, "APPROVE").await;
+    assert_decided(&app, &holder, closed, "APPROVE").await;
+}
+
 /// **The inbox and the engine agree on which department edges resolve**
 /// ([#635] AC11).
 ///
