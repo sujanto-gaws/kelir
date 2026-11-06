@@ -3333,7 +3333,9 @@ async fn claim(app: &TestApp, token: &str, task: Uuid) {
 /// task claimed while an edge resolved, whose role, department or user was
 /// deleted since, and every task claimed before #761 shipped. So the claim is
 /// written as `repository::task::claim` writes it, the assignee and
-/// `ASSIGNED`, and any other refusal fails the test. The strict [`claim`] is
+/// `ASSIGNED`, and any other refusal fails the test. So does a refusal of a
+/// task the inbox still offers the claimant: the fallback is taken only when
+/// the gate agrees that nobody can decide the task. The strict [`claim`] is
 /// for the tests that mean a claim the API takes.
 ///
 /// [#761]: https://github.com/sujanto-gaws/kelir/issues/761
@@ -3363,6 +3365,17 @@ async fn claim_or_place(app: &TestApp, token: &str, task: Uuid) {
 
     let me = app.get("/api/v1/auth/me", Some(token)).await;
     assert_eq!(me.status, StatusCode::OK, "{}", me.body);
+
+    // The fallback is for a task the inbox hides too. Without this, a claim
+    // that refused a task somebody can decide would be placed by SQL and the
+    // test would pass: under `claim_task`'s check inverted, 22 of the 24 tests
+    // that reach this helper stayed green (test-engineer, #761).
+    assert!(
+        !is_visible_to(app, id_of(me.data()), task).await,
+        "the claim was refused as ASSIGNMENT_UNRESOLVED, but the inbox offers the task: {}",
+        claimed.body
+    );
+
     let placed = sqlx::query(
         "UPDATE workflow_tasks SET assignee_user_id = $2, status = 'ASSIGNED',
                 updated_by = $2, updated_at = now()
@@ -12655,4 +12668,257 @@ async fn an_unclaimed_task_some_edge_decides_or_with_no_decision_edge_is_claimab
     surfaces_of(&app, &corrector.1)
         .await
         .assert_all(&[correction], "claimed, with no decision edge");
+}
+
+/// What a claim writes, read straight from the tables: the task's assignee,
+/// status and `updated_at`, its history rows, the document's workflow history
+/// rows, the task's audit events, and every outbox event.
+type ClaimFootprint = (Option<Uuid>, String, String, i64, i64, i64, i64);
+
+async fn claim_footprint(app: &TestApp, task: Uuid) -> ClaimFootprint {
+    sqlx::query_as(
+        "SELECT t.assignee_user_id, t.status, t.updated_at::text,
+                (SELECT COUNT(*) FROM workflow_task_history h WHERE h.task_id = t.id),
+                (SELECT COUNT(*) FROM workflow_history w WHERE w.document_id = t.document_id),
+                (SELECT COUNT(*) FROM audit_events a WHERE a.object_id = t.id),
+                (SELECT COUNT(*) FROM outbox_events)
+           FROM workflow_tasks t WHERE t.id = $1",
+    )
+    .bind(task)
+    .fetch_one(&app.pool)
+    .await
+    .expect("read what a claim writes")
+}
+
+/// **A claim of a task nobody can decide is refused after the role check,
+/// writes nothing, and is taken once the edges' data is restored** ([#761]
+/// criteria 4 and 5).
+///
+/// * A caller with `workflow:task:execute` who does not hold the offered role
+///   answers 403, not 422. The role check comes first, so a stranger learns
+///   nothing about the edges.
+/// * The holder's claim answers 422 `VALIDATION_ERROR` with one detail,
+///   `allowedBy` and `ASSIGNMENT_UNRESOLVED`, and writes nothing: the task's
+///   assignee, status and `updated_at`, its history, the document's workflow
+///   history, the audit trail and the outbox are as they were.
+/// * The edges' role is restored by SQL, as no route restores one. At the
+///   next read the task is offered again, and the same holder's claim is
+///   taken and writes the history row and audit event the refusal did not.
+///
+/// [#761]: https://github.com/sujanto-gaws/kelir/issues/761
+#[tokio::test]
+async fn an_undecidable_claim_writes_nothing_and_is_taken_once_restored() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let queue = bare_role(&app, PERSON_EDGE_QUEUE).await;
+    let edge = bare_role(&app, "TI-761-RESTORED").await;
+    let holder = waiting_holder(&app, "TI-761-RST-H", "ti.761.rst.holder", &[queue]).await;
+    let stranger = waiting_holder(&app, "TI-761-RST-S", "ti.761.rst.stranger", &[]).await;
+
+    let task = owned_late_offer(
+        &app,
+        &token,
+        &token,
+        "ti_761_restored",
+        two_edge_workflow(
+            "ti_761_restored",
+            PERSON_EDGE_QUEUE,
+            json!("ROLE:TI-761-RESTORED"),
+            json!("ROLE:TI-761-RESTORED"),
+        ),
+        None,
+    )
+    .await;
+    surfaces_of(&app, &holder.1)
+        .await
+        .assert_all(&[task], "unclaimed, with a live edge role");
+
+    soft_delete_role(&app, edge).await;
+    surfaces_of(&app, &holder.1)
+        .await
+        .assert_all(&[], "unclaimed, with the edge role deleted");
+    let before = claim_footprint(&app, task).await;
+    assert_eq!((before.0, before.1.as_str()), (None, "CREATED"));
+
+    let path = format!("/api/v1/workflow/tasks/{task}/claim");
+    let forbidden = app.post(&path, Some(&stranger.1), json!({})).await;
+    assert_eq!(
+        forbidden.status,
+        StatusCode::FORBIDDEN,
+        "a caller without the role is refused before the edges are read: {}",
+        forbidden.body
+    );
+    assert_eq!(claim_footprint(&app, task).await, before);
+
+    let refused = app.post(&path, Some(&holder.1), json!({})).await;
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+    assert_eq!(
+        refused.body["error"]["code"], "VALIDATION_ERROR",
+        "{}",
+        refused.body
+    );
+    assert_eq!(
+        detail_paths_and_codes(&refused),
+        vec![("allowedBy".to_owned(), "ASSIGNMENT_UNRESOLVED".to_owned())],
+        "{}",
+        refused.body
+    );
+    let message = refused.body["error"]["details"][0]["message"]
+        .as_str()
+        .expect("a message");
+    assert!(message.contains("not claimed"), "{}", refused.body);
+    assert_eq!(
+        claim_footprint(&app, task).await,
+        before,
+        "a refused claim wrote something"
+    );
+
+    sqlx::query("UPDATE roles SET deleted_at = NULL WHERE id = $1")
+        .bind(edge)
+        .execute(&app.pool)
+        .await
+        .expect("restore the edge role");
+
+    surfaces_of(&app, &holder.1)
+        .await
+        .assert_all(&[task], "unclaimed, with the edge role restored");
+    claim(&app, &holder.1, task).await;
+
+    let after = claim_footprint(&app, task).await;
+    assert_eq!(
+        (after.0, after.1.as_str(), after.3, after.5),
+        (Some(holder.0), "ASSIGNED", before.3 + 1, before.5 + 1),
+        "the claim taken once the role is restored, with its history and audit"
+    );
+    surfaces_of(&app, &holder.1)
+        .await
+        .assert_all(&[task], "claimed, with the edge role restored");
+}
+
+/// **A claim reads its edges under the instance lock** ([#761] criterion 4).
+///
+/// The test takes the task's instance `FOR UPDATE` and, in the same
+/// transaction, soft-deletes the only role the task's edges name. The claim
+/// is seen blocked on the instance, the test commits, and the claim answers
+/// 422 `ASSIGNMENT_UNRESOLVED` and writes nothing: it read the edges once the
+/// lock was granted. A check made before the lock would have read the role
+/// live, as the delete was not yet committed, and taken the task.
+///
+/// [#761]: https://github.com/sujanto-gaws/kelir/issues/761
+#[tokio::test]
+async fn a_claim_reads_its_edges_under_the_instance_lock() {
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    let app = Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+
+    let queue = bare_role(&app, PERSON_EDGE_QUEUE).await;
+    let edge = bare_role(&app, "TI-761-LOCKED").await;
+    let (_, holder) = waiting_holder(&app, "TI-761-LCK-H", "ti.761.lck.holder", &[queue]).await;
+
+    let task = owned_late_offer(
+        &app,
+        &token,
+        &token,
+        "ti_761_locked",
+        two_edge_workflow(
+            "ti_761_locked",
+            PERSON_EDGE_QUEUE,
+            json!("ROLE:TI-761-LOCKED"),
+            json!("ROLE:TI-761-LOCKED"),
+        ),
+        None,
+    )
+    .await;
+    surfaces_of(&app, &holder)
+        .await
+        .assert_all(&[task], "unclaimed, with a live edge role");
+    let before = claim_footprint(&app, task).await;
+
+    let instance: Uuid =
+        sqlx::query_scalar("SELECT workflow_instance_id FROM workflow_tasks WHERE id = $1")
+            .bind(task)
+            .fetch_one(&app.pool)
+            .await
+            .expect("read the task's instance");
+    let mut holding = app.pool.begin().await.expect("a transaction");
+    let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holding)
+        .await
+        .expect("the holder's backend");
+    sqlx::query("SELECT id FROM workflow_instances WHERE id = $1 FOR UPDATE")
+        .bind(instance)
+        .execute(&mut *holding)
+        .await
+        .expect("hold the instance");
+    sqlx::query("UPDATE roles SET deleted_at = now() WHERE id = $1")
+        .bind(edge)
+        .execute(&mut *holding)
+        .await
+        .expect("delete the edge role, uncommitted");
+
+    let sent = {
+        let app = Arc::clone(&app);
+        tokio::spawn(async move {
+            app.post(
+                &format!("/api/v1/workflow/tasks/{task}/claim"),
+                Some(&holder),
+                json!({}),
+            )
+            .await
+        })
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let waited_in = loop {
+        if let Some(statement) = statement_blocked_by(&app, blocker).await {
+            break statement;
+        }
+        if sent.is_finished() {
+            let answered = sent.await.expect("the route did not panic");
+            panic!(
+                "the claim did not wait for the instance: {} {}",
+                answered.status, answered.body
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the claim was never seen waiting on the instance"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert!(
+        locks_the_instance(&waited_in),
+        "the claim waited somewhere other than the instance lock: {waited_in}"
+    );
+    holding
+        .commit()
+        .await
+        .expect("commit the delete, releasing the instance");
+
+    let answered = sent.await.expect("the route did not panic");
+    assert_eq!(
+        (
+            answered.status,
+            answered.body["error"]["details"][0]["code"].as_str()
+        ),
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Some("ASSIGNMENT_UNRESOLVED")
+        ),
+        "the claim read the edges before the instance lock: {}",
+        answered.body
+    );
+    assert_eq!(
+        claim_footprint(&app, task).await,
+        before,
+        "a refused claim wrote something"
+    );
 }
